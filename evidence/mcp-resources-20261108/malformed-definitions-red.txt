@@ -1,0 +1,7 @@
+Command: go test -count=1 -timeout=30s -run ^TestMCPSchemaResources(DeadlineCancelsUpstream|RejectMalformedDefinitions)$ ./internal/hub
+Exit: 1
+--- FAIL: TestMCPSchemaResourcesRejectMalformedDefinitions (0.10s)
+    mcp_schema_resources_test.go:433: malformed definitions were silently dropped from a full schema: status=complete complete=true
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-hub/internal/hub	0.302s
+FAIL

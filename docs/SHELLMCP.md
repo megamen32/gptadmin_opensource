@@ -1,0 +1,170 @@
+# ShellMCP
+
+> **Deployment roles (2026-11-26).** Standalone ShellMCP is the executor-only installation for a managed machine. A full Node embeds the same executor and owns its local lifecycle. A separate local Hub service plus a standalone ShellMCP service is the historical full layout. See [deployment and update acceptance](TOPOLOGY_ROADMAP.md) and [unified Node architecture](UNIFIED_NODE_ARCHITECTURE.md).
+
+ShellMCP is the agent that runs on each target machine. It registers with the
+hub, executes commands locally, and returns real output.
+
+## What it does
+
+- **Registers** with the Hub via a managed device connection
+- **Executes** shell commands, file operations, systemd actions
+- **Returns** real stdout/stderr (the hub truncates long output to save tokens)
+- **Runs** in user-mode by default (no sudo), system-mode when needed
+- **Works** on Linux, macOS, Windows
+
+## Implementations
+
+| Impl | Status | Location | When to use |
+|------|--------|----------|-------------|
+| Go (`go-shellmcp/`) | **Primary (only)** | `go-shellmcp/` | New deployments — faster, single binary |
+
+> **Note.** Legacy Python implementations (`client/shellmcp*.py`) have been
+> removed from the source tree. All installations now use the `shellmcp-go` binary.
+
+## Install a managed executor
+
+A fresh full installation starts one unified Node. Choose the executor role to run only ShellMCP. The Unix installer accepts `GPTADMIN_INSTALL_ROLE=executor`; its CLI accepts the same role and the URL of the managing Hub. The Windows installer accepts `-Role executor`.
+
+```sh
+gptadmin setup --user --silent --role executor --hub-url https://hub.example
+```
+
+Pair the device through the authorized Hub connection. Verify its identity, run a permitted operation on that computer and read the result through the normal client. For a host that also accepts clients or routes requests, use the [unified Node package](NODE_PUBLIC_AUTOUPDATE.md).
+
+### Safely update ShellMCP on macOS (Apple silicon or Intel)
+
+The tagged release pipeline publishes a separate client archive for each Mac
+architecture: `gptadmin-macos-arm64-client.tar.gz` for M1/M-series and
+`gptadmin-macos-x64-client.tar.gz` for Intel. Releases below build 1074 do not
+contain the current stdin/script support. The public release workflow verifies both
+archives are valid Mach-O executables for their named architecture and checks
+the package version, release matrix, and SHA-256 before publication.
+
+These Go executables do not have an Apple Developer ID signature or Apple
+notarization. Go may add an ad hoc signature. A checksum establishes that a
+download matches the release metadata; it is not an Apple signature or an
+independent proof of publisher identity. macOS security policy may block an
+unnotarized executable; follow the device owner's policy before installation.
+
+For an existing installation, first select the matching architecture and a
+published `vN` release whose build is at least 1074. Download and check the
+asset before starting the update:
+
+```bash
+read -r -p 'Published v-build (1074 or newer): ' BUILD
+[[ "$BUILD" =~ ^[0-9]+$ && "$BUILD" -ge 1074 ]] || { echo 'Build must be numeric and at least 1074' >&2; exit 1; }
+ARCH=arm64                         # M1/M-series; use x64 for Intel
+BASE="https://github.com/megamen32/gptadmin_opensource/releases/download/v${BUILD}"
+ASSET="gptadmin-macos-${ARCH}-client.tar.gz"
+curl -fSLo "$ASSET" "$BASE/$ASSET"
+curl -fSLo gptadmin-checksums.txt "$BASE/gptadmin-checksums.txt"
+curl -fSLo gptadmin-release-matrix.json "$BASE/gptadmin-release-matrix.json"
+python3 - "$BUILD" "$ARCH" "$ASSET" <<'PY'
+import hashlib, json, pathlib, sys
+build, arch, name = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+matrix = json.loads(pathlib.Path('gptadmin-release-matrix.json').read_text())
+artifact = next((item for item in matrix['artifacts'] if item['file'] == name), None)
+package = pathlib.Path(name)
+checksum_lines = [line.split() for line in pathlib.Path('gptadmin-checksums.txt').read_text().splitlines()]
+checksums = [parts[0] for parts in checksum_lines if len(parts) == 2 and parts[1].lstrip('*') in (name, 'build/' + name)]
+assert matrix['build_version'] == build and build >= 1074
+assert artifact and artifact['platform'] == 'macos' and artifact['arch'] == arch and artifact['edition'] == 'client'
+assert checksums == [artifact['sha256']]
+assert artifact['sha256'] == hashlib.sha256(package.read_bytes()).hexdigest()
+assert artifact['size'] == package.stat().st_size
+print(f"verified {name}: build {build}, {artifact['arch']}, SHA-256 and size match")
+PY
+tar -tzf "$ASSET"
+tar -xOf "$ASSET" ./README.txt
+```
+
+Proceed only if every download and verification command succeeded. Confirm the
+README says the selected build and architecture, then let GPTAdmin
+perform its transactional ShellMCP-only update. It validates the published
+release matrix digest and size, keeps the existing installation identity and
+credentials, and restarts the existing service:
+
+```bash
+gptadmin update --user --no-hub --shellmcp --pkg-shellmcp "$BASE/$ASSET"
+gptadmin status
+```
+
+For a system-mode installation, run the same update with `sudo gptadmin` and
+`--system` in place of `--user`. Never set `GPTADMIN_UPDATE_SKIP_MANIFEST` for
+this update. Use the matching `vN` release and checksum file from the same
+release; the changing `latest` URL is not a version pin.
+
+The public build and publication procedure, including the Node alignment hold,
+is in [Public CI](./PUBLIC_CI.md). A `node-v...` release is a separate Linux
+Node channel and does not supply these `vN` macOS client assets.
+
+## Running manually
+
+For a manual agent-only setup, run `gptadmin setup --no-hub --shellmcp` and
+complete the Hub connection page when prompted. Do not copy a service
+credential into a terminal or chat.
+
+## Environment variables
+
+| Var | Required | Default | Purpose |
+|-----|----------|---------|---------|
+| `HUB_URL` | yes | — | Hub URL to register with |
+| `SHELLMCP_NAME` | no | hostname | Agent name shown in the hub |
+| `SHELLMCP_LISTEN` | no | 25901 | Local listen port |
+| `EXEC_TIMEOUT` | no | 120 | Max command execution time (seconds) |
+| `LOG_LIMIT_B` | no | 65536 | Max inline stdout/stderr tail returned by this ShellMCP agent before the full stream is spooled to disk (bytes) |
+
+For a bundled Hub + ShellMCP installation, the installer normalizes the internal `HUB_URL` to `http://127.0.0.1:<HUB_PORT>` and `QUEUE_URL` to the matching local `/queue`. This keeps same-host polling pinned to the primary Hub even while public ingress fails over. `HUB_PUBLIC_URL`, `PUBLIC_ORIGIN`, and `MCP_RESOURCE` remain the external identity. Agent-only installs preserve their remote `HUB_URL`.
+
+`LOG_LIMIT_B` is per ShellMCP agent. It controls the local `/exec` result tail and does not replace hub/client response budgets; the hub may still apply different response budgets for ChatGPT Actions, Claude, or other MCP clients.
+
+## Operations exposed
+
+One installed ShellMCP transport is projected by the Hub as two logical MCP targets when the agent build supports the paired-file contract:
+
+- `shell:<host>` — command execution and child-MCP management (`shell_exec`, `mcp_manage`, `mcp_tools`, `mcp_call`).
+- `file:<host>` — typed filesystem operations (`system_inspect`, `file_editor`, `file_checkpoint`, legacy `file_backup`).
+
+`file_editor` performs atomic text edits and returns fresh `N:hhhh` line IDs/context on successful edits and recoverable stale/no-match failures. `file_checkpoint` stores explicit durable restore points in a content-addressed store; restore first creates a safety checkpoint of the live state. A checkpoint is a meaningful rollback boundary, not an automatic pre-edit backup.
+
+On a system installation the ShellMCP runtime may run privileged so `file:<host>` can edit root-owned configuration while preserving owner/group/mode. Ordinary `shell_exec` still defaults to the configured `SHELLMCP_DEFAULT_USER`; root shell execution remains explicit.
+
+GrepMesh is provisioned as a companion capability by default when the package contains a native GrepMesh binary. Use `--no-grepmesh` (or `GPTADMIN_SETUP_GREPMESH=0` for unattended bootstrap) to opt out. Existing operator-managed GrepMesh definitions are preserved. On systemd hosts the bundled companion uses its own `gptadmin-grepmesh-mcp.service`; an operator-owned `grepmesh-mcp.service` is not overwritten or managed.
+
+### S21 network device target
+
+The rooted S21 is exposed as the dedicated child target
+`mcp:shell:roomhacker-server-100:S21NetworkAgentDevice`. It uses Android Remote
+Control MCP on phone loopback behind a persistent SSH forward; it does not use
+the ADB-backed Callstack `agent-device` Android provider.
+
+On server-100, install or reconcile the target with:
+
+```bash
+sudo ./deploy/android-s21-network-mcp.sh apply
+sudo ./deploy/android-s21-network-mcp.sh status
+```
+
+The installer reads the existing root-managed bearer environment file, writes
+only an environment-file reference into systemd, registers one idempotent child
+definition, and preserves the previous Hub MCP configuration for rollback.
+
+```bash
+sudo ./deploy/android-s21-network-mcp.sh rollback
+```
+
+## Security
+
+- The agent accepts only its managed device connection
+- User installs run as the installing user. System installs may run the transport as root to provide the paired privileged file boundary; `shell_exec` still drops to `SHELLMCP_DEFAULT_USER` unless root is explicitly requested
+- IP allowlist and command allowlist can be configured
+- Secrets are masked in logs
+
+See [Security](./SECURITY_DOCS.md).
+
+## See also
+
+- [Hub](./HUB.md) — what the agent talks to
+- [Install Paths](./INSTALL_PATHS.md) — where it lives on each OS
+- [Configuration](./CONFIGURATION.md) — full env-var reference

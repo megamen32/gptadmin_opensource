@@ -1,0 +1,985 @@
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import App from "./App";
+
+const endpoint = "/admin/api/instruction-sets/default";
+const initialContent = "Проверяй состояние Hub перед изменениями.";
+const updatedContent = `${initialContent}\nРаботай в режиме проверки.`;
+const initialFixture = {
+  id: "default",
+  content: initialContent,
+  version: "go-100",
+  updated_at: "2026-07-17T08:00:00Z",
+};
+const updatedFixture = {
+  id: "default",
+  content: updatedContent,
+  version: "go-101",
+  updated_at: "2026-07-17T08:05:00Z",
+};
+
+type MockOptions = {
+  expectedPutContent?: string;
+  initialUpdatedAt?: string | null;
+  omitInitialUpdatedAt?: boolean;
+  putStatus?: number;
+};
+
+function mockInstructionFetch(options: MockOptions = {}) {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    expect(input).toBe(endpoint);
+    expect(init?.credentials).toBe("same-origin");
+    expect(new Headers(init?.headers).get("Accept")).toBe("application/json");
+
+    if (init?.method === "PUT") {
+      expect(options.expectedPutContent).toBeDefined();
+      expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+      expect(new Headers(init.headers).get("If-Match")).toBe('"go-100"');
+      expect(init.body).toBe(JSON.stringify({ content: options.expectedPutContent }));
+
+      if (options.putStatus === 412) {
+        return new Response(JSON.stringify({ detail: "instruction set version does not match" }), {
+          status: 412,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ ...updatedFixture, content: options.expectedPutContent }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ETag: '"go-101"' },
+      });
+    }
+
+    expect(init?.method).toBeUndefined();
+    const initialUpdatedAt = options.initialUpdatedAt === undefined ? initialFixture.updated_at : options.initialUpdatedAt;
+    const responseFixture = options.omitInitialUpdatedAt
+      ? { id: initialFixture.id, content: initialFixture.content, version: initialFixture.version }
+      : { ...initialFixture, updated_at: initialUpdatedAt };
+    return new Response(JSON.stringify(responseFixture), {
+      status: 200,
+      headers: { "Content-Type": "application/json", ETag: '"go-100"' },
+    });
+  });
+}
+
+beforeEach(() => { window.history.replaceState(null, "", "#instructions"); });
+
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "#instructions");
+  vi.restoreAllMocks();
+});
+
+describe("Profiles / Instructions", () => {
+  it("uses the exact Go contract and keeps the PUT response as the draft", async () => {
+    const fetchMock = mockInstructionFetch({ expectedPutContent: updatedContent });
+    render(<App />);
+
+    const editor = await screen.findByDisplayValue(initialContent);
+    fireEvent.change(editor, { target: { value: updatedContent } });
+    await userEvent.click(screen.getByRole("button", { name: "Опубликовать" }));
+
+    await waitFor(() => expect(screen.getByText("Опубликовано только что")).toBeInTheDocument());
+    expect(screen.getByRole("textbox")).toHaveValue(updatedContent);
+    expect(fetchMock).toHaveBeenCalledWith("/actions/instructions.md");
+    const putCalls = fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
+    expect(putCalls).toHaveLength(1);
+  });
+
+  it("shows a warning and blocks content above 16 KiB", async () => {
+    mockInstructionFetch();
+    render(<App />);
+
+    const editor = await screen.findByRole("textbox");
+    fireEvent.change(editor, { target: { value: "x".repeat(16_385) } });
+
+    expect(screen.getByText(/Превышен лимит 16 KiB/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Опубликовать" })).toBeDisabled();
+  });
+
+  it("offers reload when the optimistic concurrency check is stale", async () => {
+    const staleDraft = `${initialContent}\nИзменение.`;
+    mockInstructionFetch({ expectedPutContent: staleDraft, putStatus: 412 });
+    render(<App />);
+
+    const editor = await screen.findByDisplayValue(initialContent);
+    fireEvent.change(editor, { target: { value: staleDraft } });
+    await userEvent.click(screen.getByRole("button", { name: "Опубликовать" }));
+
+    expect(await screen.findByText(/Инструкции изменились на сервере/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue(staleDraft);
+    expect(screen.getByRole("button", { name: "Загрузить актуальную версию" })).toBeInTheDocument();
+  });
+
+  it("labels built-in instructions without inventing a 1970 update time", async () => {
+    mockInstructionFetch({ omitInitialUpdatedAt: true });
+    render(<App />);
+
+    expect(await screen.findByText("Встроенная версия")).toBeInTheDocument();
+    expect(screen.queryByText(/1970/)).not.toBeInTheDocument();
+  });
+
+  it("keeps unified navigation keyboard accessible", async () => {
+    mockInstructionFetch();
+    render(<App />);
+    await screen.findByRole("textbox");
+    expect(screen.getByRole("link", { name: "Настройки" })).toHaveClass("active");
+    expect(screen.getByRole("link", { name: "Обзор" })).toHaveAttribute("href", "#overview");
+    expect(screen.getByRole("link", { name: "Серверы" })).toHaveAttribute("href", "#agents");
+    expect(screen.getByRole("link", { name: "Активность" })).toHaveAttribute("href", "#activity");
+    expect(screen.getByRole("link", { name: "Доступ" })).toHaveAttribute("href", "#clients");
+    expect(screen.getByRole("link", { name: "Автоматизация" })).toHaveAttribute("href", "#webhooks");
+    expect(screen.queryByRole("link", { name: "Журнал" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Для администратора" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("link", { name: "CloudOS (дополнительно)" })).toHaveAttribute("href", "/cloudos/");
+  });
+
+  it("opens the proxy route from the App router and loads its persisted/runtime state", async () => {
+    window.history.replaceState(null, "", "#proxyroute");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input) !== "/admin/api/proxy-route") throw new Error(`Unexpected request ${String(input)}`);
+      return new Response(JSON.stringify({
+        profile: {
+          schema: "gptadmin.proxy-route/v1",
+          id: "vusa-server44-de-http",
+          consumer: "vusa",
+          exit: "server-44-de-http",
+          listener: { bind_address: "127.0.0.1", port: 24836 },
+          ssh_identity_ref: "ssh-config:vusa",
+          desired_state: "disabled",
+        },
+        runtime: {
+          profile_saved: true,
+          service_state: "inactive",
+          listener_state: "closed",
+          last_probe: { state: "unknown", checked_at: null, direct_exit_ip: null, proxy_exit_ip: null, server44_path_verified: null, server44_path_reason: "ssh_readback_unavailable" },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Прокси через сервер 44" })).toBeInTheDocument();
+    expect(await screen.findByText("Сохранён")).toBeInTheDocument();
+    expect(await screen.findByText("ssh_readback_unavailable")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/proxy-route", expect.objectContaining({ credentials: "same-origin" }));
+  });
+});
+
+const profileFixture = {
+  id: "ops",
+  name: "Операционный профиль",
+  access_mode: "readonly",
+  allowed_targets: ["hub"],
+  allowed_tools: ["discover"],
+  workspace_refs: [{
+    machine_id: "machine-a",
+    workspace_path: "/srv/ops",
+    startup_document: "AGENTS.md",
+    shell_target: "shell:machine-a",
+  }],
+  version: 7,
+  updated_at: "2026-07-17T08:00:00Z",
+};
+
+type ProfileFetchOptions = {
+  profiles?: unknown[];
+  profile?: unknown;
+  putStatus?: number;
+  putErrorDetail?: string;
+  failList?: boolean;
+};
+
+function mockProfileFetch(options: ProfileFetchOptions = {}) {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    expect(init?.credentials).toBe("same-origin");
+    expect(new Headers(init?.headers).get("Accept")).toBe("application/json");
+
+    if (path === endpoint) {
+      return new Response(JSON.stringify(initialFixture), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ETag: '"go-100"' },
+      });
+    }
+    if (path === "/admin/api/access-profiles" && !init?.method) {
+      if (options.failList) return new Response(JSON.stringify({ detail: "offline" }), { status: 503 });
+      return new Response(JSON.stringify({ profiles: options.profiles ?? [profileFixture] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (path === "/admin/api/access-profiles/ops" && !init?.method) {
+      return new Response(JSON.stringify(options.profile ?? profileFixture), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ETag: '"7"' },
+      });
+    }
+    if (path.startsWith("/admin/api/access-profiles/") && init?.method === "PUT") {
+      const creating = path !== "/admin/api/access-profiles/ops";
+      expect(new Headers(init.headers).get("If-Match")).toBe(creating ? "*" : '"7"');
+      if (options.putStatus) return new Response(JSON.stringify({ detail: options.putErrorDetail ?? "stale" }), { status: options.putStatus });
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...profileFixture, ...body, version: 8 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ETag: '"8"' },
+      });
+    }
+    throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
+  });
+  return fetchMock;
+}
+
+describe("Profiles", () => {
+  it("lists, selects, and updates a profile with its ETag", async () => {
+    const fetchMock = mockProfileFetch();
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    expect(await screen.findByRole("button", { name: /Операционный профиль/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("Режим доступа")).toHaveValue("readonly");
+    expect(screen.getByLabelText("Рабочее пространство 1: путь")).toHaveValue("/srv/ops");
+
+    const name = screen.getByLabelText("Название профиля");
+    await userEvent.clear(name);
+    await userEvent.type(name, "Операционный профиль v2");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    expect(await screen.findByText("Профиль сохранён")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/access-profiles/ops", expect.objectContaining({ method: "PUT" }));
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody).not.toHaveProperty("read_roots");
+    expect(putBody).not.toHaveProperty("write_roots");
+    expect(screen.getByLabelText("Название профиля")).toHaveValue("Операционный профиль v2");
+  });
+
+  it("preserves an active one-sided folder ACL when another profile field changes", async () => {
+    const profileWithAcl = { ...profileFixture, read_roots: ["/srv/shared/read"] };
+    const fetchMock = mockProfileFetch({ profile: profileWithAcl, profiles: [profileWithAcl] });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+
+    expect(await screen.findByLabelText("Ограничить доступ к папкам")).toBeChecked();
+    expect(screen.getByLabelText("Папки для чтения")).toHaveValue("/srv/shared/read");
+    expect(screen.getByLabelText("Папки для записи")).toHaveValue("");
+    await userEvent.clear(screen.getByLabelText("Название профиля"));
+    await userEvent.type(screen.getByLabelText("Название профиля"), "Обновлённый ACL");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    await screen.findByText("Профиль сохранён");
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody.read_roots).toEqual(["/srv/shared/read"]);
+    expect(putBody).not.toHaveProperty("write_roots");
+  });
+
+  it("omits both root lists when folder restriction is explicitly disabled", async () => {
+    const profileWithAcl = { ...profileFixture, read_roots: ["/srv/read"], write_roots: ["/srv/write"] };
+    const fetchMock = mockProfileFetch({ profile: profileWithAcl, profiles: [profileWithAcl] });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    await screen.findByLabelText("Папки для чтения");
+    await userEvent.click(screen.getByLabelText("Ограничить доступ к папкам"));
+    await userEvent.clear(screen.getByLabelText("Название профиля"));
+    await userEvent.type(screen.getByLabelText("Название профиля"), "Без файлового ограничения");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    await screen.findByText("Профиль сохранён");
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody).not.toHaveProperty("read_roots");
+    expect(putBody).not.toHaveProperty("write_roots");
+  });
+
+  it("creates a profile and supports workspace refs", async () => {
+    mockProfileFetch({ profiles: [] });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    expect(await screen.findByText("Профилей пока нет")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Создать профиль" }));
+    expect(screen.getByLabelText("Название профиля")).toHaveValue("");
+    await userEvent.type(screen.getByLabelText("Название профиля"), "Новый профиль");
+    await userEvent.click(screen.getByRole("button", { name: "Добавить рабочее пространство" }));
+    expect(screen.getByLabelText("Рабочее пространство 2: путь")).toBeInTheDocument();
+    expect(screen.getByLabelText("Рабочее пространство 1: shell target")).toBeRequired();
+  });
+
+  it("marks an optimistic-concurrency conflict as stale and offers reload", async () => {
+    mockProfileFetch({ putStatus: 412 });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    const name = await screen.findByLabelText("Название профиля");
+    await userEvent.clear(name);
+    await userEvent.type(name, "Конфликтующая версия");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    expect(await screen.findByText(/Профиль устарел/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Загрузить актуальную версию" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить профиль" })).toBeDisabled();
+  });
+
+  it("keeps the edited profile visible and reports the server validation after a failed save", async () => {
+    const fetchMock = mockProfileFetch({ profiles: [], putStatus: 400, putErrorDetail: "workspace_refs.shell_target must not be empty" });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Создать профиль" }));
+
+    await userEvent.type(screen.getByLabelText("Идентификатор профиля"), "qa23-folderwrite-fix-20261023");
+    await userEvent.type(screen.getByLabelText("Название профиля"), "QA23 folder write save reproduction");
+    await userEvent.type(screen.getByLabelText("Разрешённые цели"), "file:roomhacker-server-100");
+    await userEvent.type(screen.getByLabelText("Разрешённые инструменты"), "file_editor");
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: machine id"), { target: { value: "roomhacker-server-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a" } });
+    await userEvent.click(screen.getByRole("button", { name: "Добавить рабочее пространство" }));
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: machine id"), { target: { value: "roomhacker-server-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Создать профиль" }).closest("form")!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("workspace_refs.shell_target must not be empty");
+    expect(screen.queryByText("Не удалось загрузить профиль")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Название профиля")).toHaveValue("QA23 folder write save reproduction");
+    expect(screen.getByRole("button", { name: "Создать профиль" })).toBeEnabled();
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
+    expect(JSON.parse(String(putCall?.[1]?.body)).workspace_refs).toEqual([
+      {
+        machine_id: "roomhacker-server-100",
+        workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a",
+        startup_document: "AGENTS.md",
+        shell_target: "",
+      },
+      {
+        machine_id: "roomhacker-server-100",
+        workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b",
+        startup_document: "AGENTS.md",
+        shell_target: "",
+      },
+    ]);
+  });
+
+  it("exposes an error state and retry without hiding navigation", async () => {
+    mockProfileFetch({ failList: true });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить профили");
+    expect(screen.getByRole("button", { name: "Повторить" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "Настройки" })).toBeInTheDocument();
+  });
+});
+
+describe("Clients / Auth", () => {
+  it("keeps a stored client token out of ordinary views until the operator explicitly reveals it", async () => {
+    window.history.replaceState(null, "", "#clients");
+    const tokenValue = "stored-token-fixture";
+    const clients = [
+      { id: "jwt-existing", client_id: "qa-client", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+    ];
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/mcp/tokens/jwt-existing/value") return new Response(JSON.stringify({ token_id: "jwt-existing", client_id: "qa-client", access_token: tokenValue }), { status: 200, headers: { "Content-Type": "application/json" } });
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    try {
+      render(<App />);
+      expect(await screen.findByRole("heading", { name: "Клиенты" })).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(tokenValue);
+      expect(screen.getByRole("button", { name: "Показать сохранённый токен" })).toBeEnabled();
+
+      await userEvent.click(screen.getByRole("link", { name: "Подключение" }));
+      expect(await screen.findByRole("heading", { name: "Авторизация" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Выданный токен подключения")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("link", { name: "Клиенты" }));
+      await screen.findByRole("heading", { name: "Клиенты" });
+      await userEvent.click(screen.getByRole("button", { name: "Показать сохранённый токен" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(tokenValue);
+      await userEvent.click(screen.getByRole("button", { name: "Скопировать bearer" }));
+      expect(writeText).toHaveBeenCalledWith(tokenValue);
+
+      await userEvent.click(screen.getByRole("link", { name: "Подключение" }));
+      expect(await screen.findByLabelText("Выданный токен подключения")).toHaveValue(tokenValue);
+      expect(fetchMock).toHaveBeenCalledWith("/admin/api/mcp/tokens/jwt-existing/value", expect.objectContaining({ credentials: "same-origin" }));
+    } finally {
+      if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("retains an issued bearer when navigating between clients and connections", async () => {
+    window.history.replaceState(null, "", "#clients");
+    const clients = [
+      { id: "jwt-1", client_id: "codex", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: "ops", scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+      { id: "oauth-1", client_id: "oauth-app", token_kind: "oauth", status: "active", access_mode: null, profile_id: null, scope: "mcp", redirect_uris: ["https://client.example/callback"], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+      { id: "legacy-1", client_id: "legacy", token_kind: "legacy_ctl", status: "active", access_mode: null, profile_id: null, scope: null, redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+    ];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [profileFixture] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/mcp/issue-token" && init?.method === "POST") return new Response(JSON.stringify({ token_id: "jwt-new", access_token: "bearer-once", token_type: "Bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Клиенты" })).toBeInTheDocument();
+    expect(screen.getByText("codex")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выбрать oauth-app" })).toBeInTheDocument();
+    expect(screen.getByText("legacy")).toBeInTheDocument();
+    expect(screen.queryByText("client-secret")).not.toBeInTheDocument();
+    expect(screen.queryByText("bearer-once")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("bearer-once");
+    expect(screen.getByRole("button", { name: "Скопировать bearer" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/mcp/issue-token", expect.objectContaining({ method: "POST" }));
+
+    await userEvent.click(screen.getByRole("link", { name: "Подключение" }));
+    expect(await screen.findByRole("heading", { name: "Авторизация" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("bearer-once")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("link", { name: "Клиенты" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("bearer-once");
+  });
+
+  it("binds and unbinds the selected profile, rotates and revokes managed tokens, and gates unsupported actions", async () => {
+    window.history.replaceState(null, "", "#clients");
+    const clients = [
+      { id: "jwt-1", client_id: "codex", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+      { id: "oauth-1", client_id: "oauth-app", token_kind: "oauth", status: "active", access_mode: null, profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+    ];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [profileFixture] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/client-bindings/jwt-1" && init?.method === "PUT") return new Response(JSON.stringify({ client_id: "jwt-1", profile_id: "ops" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/client-bindings/jwt-1" && init?.method === "DELETE") return new Response(JSON.stringify({ ok: true, unbound: true, client_id: "jwt-1" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/mcp/tokens/jwt-1/rotate" && init?.method === "POST") return new Response(JSON.stringify({ token_id: "jwt-2", access_token: "rotated-once", token_type: "Bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/clients/jwt-1" && init?.method === "DELETE") return new Response(JSON.stringify({ ok: true, revoked: true, token_id: "jwt-1" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Клиенты" })).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Профиль для выбранного клиента"), "ops");
+    await userEvent.click(screen.getByRole("button", { name: "Привязать профиль" }));
+    expect(await screen.findByText("Профиль привязан")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Снять привязку" }));
+    expect(await screen.findByText("Профиль отвязан")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ротировать токен" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("rotated-once");
+    await userEvent.click(screen.getByRole("button", { name: "Отозвать токен" }));
+    expect(await screen.findByText("Managed token отозван")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Выбрать oauth-app" }));
+    expect(screen.getByRole("button", { name: "Ротировать токен" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отозвать токен" })).toBeDisabled();
+    expect(screen.getByText(/OAuth сам обновляет свои токены/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/client-bindings/jwt-1", expect.objectContaining({ method: "PUT" }));
+  });
+});
+
+const webhookRouteFixture = {
+  id: "repair-100",
+  kind: "shell",
+  target: "shell:roomhacker-server-100",
+  auth_mode: "hmac",
+  callback_configured: false,
+};
+
+function webhookResponse(value: unknown, status = 200): Response {
+  return new Response(status === 204 ? null : JSON.stringify(value), {
+    status,
+    headers: status === 204 ? undefined : { "Content-Type": "application/json" },
+  });
+}
+
+describe("Вебхуки и агенты", () => {
+  it("lists secret-safe route summaries and retries a failed load", async () => {
+    window.history.replaceState(null, "", "#webhooks");
+    let routeAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/webhook-routes") {
+        routeAttempts += 1;
+        if (routeAttempts === 1) return webhookResponse({ detail: "offline" }, 503);
+        return webhookResponse({ routes: [{ ...webhookRouteFixture, hmac_secret: "must-never-render", token: "must-never-render-either" }] });
+      }
+      if (path === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить маршруты");
+    await userEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("repair-100")).toBeInTheDocument();
+    expect(screen.getByText("shell:roomhacker-server-100")).toBeInTheDocument();
+    expect(screen.queryByText("must-never-render")).not.toBeInTheDocument();
+    expect(screen.queryByText("must-never-render-either")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/webhook-routes", expect.objectContaining({ credentials: "same-origin" }));
+  });
+
+  it("creates a route with a write-only secret and clears it after success", async () => {
+    window.history.replaceState(null, "", "#webhooks");
+    let createdBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input) === "/webhook-routes" && !init?.method) return webhookResponse({ routes: [] });
+      if (String(input) === "/webhook-routes" && init?.method === "POST") {
+        createdBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return webhookResponse(webhookRouteFixture, 201);
+      }
+      if (String(input) === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
+      throw new Error(`Unexpected request: ${String(input)} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByText("Автоматизаций пока нет")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Создать автоматизацию" }));
+    await userEvent.type(screen.getByLabelText("Короткое имя"), "repair-100");
+    await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "write-only-secret");
+    await userEvent.selectOptions(screen.getByLabelText("Что сделать"), "shell");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:roomhacker-server-100");
+    await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
+    await userEvent.type(screen.getByLabelText("Рабочий каталог"), "/opt/notify");
+    await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
+
+    expect(await screen.findByText("Маршрут создан")).toBeInTheDocument();
+    expect(screen.getByLabelText("Секрет для входящего запроса")).toHaveValue("");
+    expect(screen.queryByText("write-only-secret")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/webhook-routes", expect.objectContaining({ method: "POST" }));
+    expect(createdBody).toEqual(expect.objectContaining({
+      id: "repair-100",
+      hmac_secret: "write-only-secret",
+      signature_version: "v2",
+      action: expect.objectContaining({
+        kind: "shell",
+        target: "shell:roomhacker-server-100",
+        command: "fixed-helper repair_100",
+        cwd: "/opt/notify",
+      }),
+    }));
+  });
+
+  it("builds ordered MCP steps from visual action cards", async () => {
+    window.history.replaceState(null, "", "#webhooks");
+    let createdBody: Record<string, unknown> | null = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input) === "/webhook-routes" && !init?.method) return webhookResponse({ routes: [] });
+      if (String(input) === "/webhook-routes" && init?.method === "POST") {
+        createdBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return webhookResponse({ ...webhookRouteFixture, action_count: 2 }, 201);
+      }
+      if (String(input) === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
+      throw new Error(`Unexpected request: ${String(input)} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    await screen.findByText("Автоматизаций пока нет");
+    await userEvent.click(screen.getByRole("button", { name: "Создать автоматизацию" }));
+    await userEvent.type(screen.getByLabelText("Короткое имя"), "ordered-100");
+    await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "ordered-secret");
+    await userEvent.clear(screen.getByLabelText("Где выполнить"));
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "mcp:shell:roomhacker-server-100:Notify");
+    await userEvent.type(screen.getByLabelText("Инструмент"), "send_message");
+    await userEvent.click(screen.getByRole("button", { name: "+ Добавить шаг" }));
+    await userEvent.type(screen.getByLabelText("Пауза перед шагом, секунд"), "30");
+    const targets = screen.getAllByLabelText("Где выполнить");
+    await userEvent.type(targets[1], "mcp:shell:roomhacker-server-100:AgentHerder");
+    const tools = screen.getAllByLabelText("Инструмент");
+    await userEvent.type(tools[1], "new_or_resume");
+    await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
+
+    expect(await screen.findByText("Маршрут создан")).toBeInTheDocument();
+    expect(createdBody).toEqual(expect.objectContaining({
+      id: "ordered-100",
+      actions: [
+        expect.objectContaining({ target: "mcp:shell:roomhacker-server-100:Notify", tool: "send_message" }),
+        expect.objectContaining({ target: "mcp:shell:roomhacker-server-100:AgentHerder", tool: "new_or_resume", delay_seconds: 30 }),
+      ],
+    }));
+  });
+
+  it("replaces a selected route and requires explicit confirmation before delete", async () => {
+    window.history.replaceState(null, "", "#webhooks");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path === "/webhook-routes" && !init?.method) return webhookResponse({ routes: [webhookRouteFixture] });
+      if (path === "/webhook-routes/repair-100" && init?.method === "PUT") return webhookResponse({ ...webhookRouteFixture, target: "shell:roomhacker-server-100-v2" });
+      if (path === "/webhook-routes/repair-100" && init?.method === "DELETE") return webhookResponse(null, 204);
+      if (path === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
+    });
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Изменить repair-100" }));
+    await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "replacement-secret");
+    await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
+    await userEvent.clear(screen.getByLabelText("Где выполнить"));
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:roomhacker-server-100-v2");
+    await userEvent.click(screen.getByRole("button", { name: "Заменить маршрут" }));
+    expect(await screen.findByText("Маршрут заменён")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/webhook-routes/repair-100", expect.objectContaining({ method: "PUT" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Удалить маршрут" }));
+    expect(screen.getByRole("alertdialog", { name: "Удалить маршрут repair-100?" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Подтвердить удаление" }));
+    expect(await screen.findByText("Маршрут удалён")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/webhook-routes/repair-100", expect.objectContaining({ method: "DELETE" }));
+  });
+
+  it("inspects one job by ID without rendering secret response fields", async () => {
+    window.history.replaceState(null, "", "#webhooks");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/webhook-routes") return webhookResponse({ routes: [] });
+      if (path === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
+      if (path === "/admin/api/webhook-jobs/job-42") return webhookResponse({
+        job_id: "job-42",
+        route_id: "repair-100",
+        status: "completed",
+        created_at: "2026-08-02T06:00:00Z",
+        completed_at: "2026-08-02T06:00:08Z",
+        result: { session_id: "session-7", hmac_secret: "must-never-render", nested: { metadata: { access_token: "also-secret" } } },
+      });
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    render(<App />);
+    await screen.findByText("Автоматизаций пока нет");
+    await userEvent.click(screen.getByText("Открыть запуск по ID"));
+    await userEvent.type(screen.getByLabelText("ID запуска"), "job-42");
+    await userEvent.click(screen.getByRole("button", { name: "Открыть" }));
+
+    expect(await screen.findByText("Готово")).toBeInTheDocument();
+    expect(screen.getByText("session-7")).toBeInTheDocument();
+    const jobResult = screen.getByText("session-7").closest(".job-result");
+    expect(jobResult).not.toHaveTextContent("must-never-render");
+    expect(jobResult).not.toHaveTextContent("also-secret");
+  });
+});
+
+it("allows issuing the first token when the client inventory is empty", async () => {
+  window.history.replaceState(null, "", "#clients");
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients: [] }), { status: 200 });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200 });
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "Клиентов пока нет" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Выпустить токен" })).toBeEnabled();
+});
+
+it("offers the token issue action up front and explains how to use the result", async () => {
+  window.history.replaceState(null, "", "#clients");
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/mcp/issue-token" && init?.method === "POST") {
+      return new Response(JSON.stringify({ token_id: "jwt-new", client_id: "managed-client", access_token: "fake-bearer-value", token_type: "Bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<App />);
+
+  // entry point is visible before the admin touches the inventory at all
+  expect(await screen.findByRole("button", { name: "Новый клиент" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Новый клиент: выпустить токен" })).toBeInTheDocument();
+
+  // the form explains the granted scopes and the paste target
+  expect(screen.getByText("gptadmin.read gptadmin.inspect")).toBeInTheDocument();
+  expect(screen.getByText("mcp.json")).toBeInTheDocument();
+
+  await userEvent.selectOptions(screen.getByDisplayValue("Только чтение"), "full");
+  expect(screen.getByText("gptadmin.read gptadmin.exec")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  // issued value is shown once, as a paste-ready Authorization header
+  expect(await screen.findByRole("alert")).toHaveTextContent("fake-bearer-value");
+  expect(screen.getByText("Authorization: Bearer fake-bearer-value")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Скопировать Authorization" })).toBeInTheDocument();
+  // never leaks into the inventory rows
+  expect(document.querySelector(".client-list")?.textContent ?? "").not.toContain("fake-bearer-value");
+});
+
+// Сутки и дата: точность до секунды здесь не нужна и делает тест нестабильным.
+function dayStamp(date: Date): string {
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function clientsAndProfilesFetch(
+  clients: unknown[],
+  token: Record<string, unknown> | null,
+): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/mcp/issue-token" && init?.method === "POST" && token) {
+      return new Response(JSON.stringify(token), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+}
+
+// issue-token не возвращает scope и метку истечения, поэтому UI выводит их сам:
+// scopes из access_mode, срок — из запрошенного TTL с честной пометкой «ожидаемый».
+it("states what the issued token actually grants: scopes, access mode and expected expiry", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-granted",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    role: "client",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  // scopes выведены из access_mode, а не выдуманы: read-only не должен выглядеть полным
+  expect(callout).toHaveTextContent("gptadmin.read gptadmin.inspect");
+  expect(callout).not.toHaveTextContent("gptadmin.read gptadmin.exec");
+  expect(callout).toHaveTextContent("Режим доступа");
+  expect(callout).toHaveTextContent("Только чтение");
+  // срока в ответе нет, поэтому он помечен как ожидаемый, а не как подтверждённый
+  expect(callout).toHaveTextContent("Ожидаемое истечение");
+  expect(callout).toHaveTextContent(dayStamp(new Date(Date.now() + 7 * 86_400_000)));
+});
+
+it("follows the full access mode into the granted scopes", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-full",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "full",
+    token_type: "Bearer",
+    expires_in: 30 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.selectOptions(screen.getByDisplayValue("Только чтение"), "full");
+  fireEvent.change(screen.getByLabelText("Срок действия, дней"), { target: { value: "30" } });
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  expect(callout).toHaveTextContent("gptadmin.read gptadmin.exec");
+  expect(callout).toHaveTextContent("Полный доступ");
+  expect(callout).toHaveTextContent(dayStamp(new Date(Date.now() + 30 * 86_400_000)));
+});
+
+it("hands out a copy-ready mcp.json with the Hub url from the issue response", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-config",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  // адрес Hub показан на экране выпуска, а не спрятан в другой вкладке
+  expect(callout).toHaveTextContent("Адрес Hub");
+  expect(callout).toHaveTextContent("https://hub.example/mcp");
+  // цельный серверный блок, который можно вставить в mcp.json как есть
+  const config = JSON.parse(Array.from(callout.querySelectorAll("code")).pop()?.textContent ?? "{}");
+  expect(config).toEqual({
+    mcpServers: {
+      gptadmin: {
+        type: "http",
+        url: "https://hub.example/mcp",
+        headers: { Authorization: "Bearer fake-bearer-value" },
+      },
+    },
+  });
+  expect(screen.getByRole("button", { name: "Скопировать mcp.json" })).toBeInTheDocument();
+});
+
+it("falls back to the panel origin when the issue response omits mcp_url", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-no-url",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  const config = JSON.parse(Array.from(callout.querySelectorAll("code")).pop()?.textContent ?? "{}");
+  expect(config.mcpServers.gptadmin.url).toBe(`${window.location.origin}/mcp`);
+});
+
+it("carries access mode and expiry on the client card so a token is identifiable later", async () => {
+  window.history.replaceState(null, "", "#clients");
+  const expiresAt = Math.floor(Date.now() / 1000) + 9 * 86_400;
+  clientsAndProfilesFetch([
+    { id: "jwt-1", client_id: "codex", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: expiresAt, revoked_at: null },
+  ], null);
+  render(<App />);
+
+  const card = (await screen.findByText("codex")).closest(".client-row");
+  expect(card).toHaveTextContent("Режим доступа");
+  expect(card).toHaveTextContent("Только чтение");
+  expect(card).toHaveTextContent("Истекает");
+  expect(card).toHaveTextContent(new Date(expiresAt * 1000).toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }));
+});
+
+it("keeps the issued token next to the form and lets the form be dismissed", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-near",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  // форма закрывается без выпуска токена и возвращается по кнопке
+  await userEvent.click(await screen.findByRole("button", { name: "Отмена" }));
+  expect(screen.queryByRole("button", { name: "Выпустить токен" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Показать форму" }));
+  expect(screen.getByRole("button", { name: "Выпустить токен" })).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+  const callout = await screen.findByRole("alert");
+  // результат — сосед формы, а не блок в начале страницы над списком клиентов
+  const formSection = screen.getByRole("heading", { name: "Новый клиент: выпустить токен" }).closest("section");
+  expect(formSection).not.toBeNull();
+  const followsForm = formSection ? formSection.compareDocumentPosition(callout) & Node.DOCUMENT_POSITION_FOLLOWING : 0;
+  expect(followsForm).toBeTruthy();
+  expect(callout.parentElement).toBe(formSection?.parentElement);
+});
+
+it("does not erase a new profile draft when the initial list arrives late", async () => {
+  window.history.replaceState(null, "", "#profiles");
+  let finish!: (value: Response) => void;
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", { name: "Новый профиль" }));
+  await userEvent.type(screen.getByLabelText("Название профиля"), "Keep this draft");
+  finish(new Response(JSON.stringify({ profiles: [] }), { status: 200 }));
+  await waitFor(() => expect(screen.getByLabelText("Название профиля")).toHaveValue("Keep this draft"));
+});
+
+it("selects the stable OAuth connection from a link and edits no refresh record", async () => {
+  const id = "gptadmin-741d3194016e5b84199e3b12936e6aa9";
+  window.history.replaceState(null, "", `#clients?connection=${id}`);
+  const registration = { id, client_id: id, token_kind: "oauth", role: "client", status: "registered", redirect_uris: ["https://chatgpt.com/connector_platform/oauth/callback"] };
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients: [
+      ...Array.from({ length: 11 }, (_, index) => ({ id: `refresh-${index}`, client_id: id, token_kind: "oauth_refresh", revoked_at: 123, role: "admin" })), registration,
+    ] }), { status: 200 });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200 });
+    if (path === `/admin/api/client-roles/${id}` && init?.method === "PUT") {
+      expect(JSON.parse(String(init.body))).toEqual({ role: "admin" });
+      return new Response(JSON.stringify({ ok: true, id, role: "admin" }), { status: 200 });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<App />);
+  await screen.findByText("История OAuth: 11 записей");
+  expect(document.querySelectorAll("[data-connection-id]")).toHaveLength(1);
+  expect(document.querySelector("[data-connection-id].selected")).toHaveAttribute("data-connection-id", id);
+  expect(screen.getByLabelText("Роль выбранного подключения")).toHaveValue("client");
+  await userEvent.selectOptions(screen.getByLabelText("Роль выбранного подключения"), "admin");
+  await userEvent.click(screen.getByRole("button", { name: "Сохранить роль" }));
+  expect(fetchMock).toHaveBeenCalledWith(`/admin/api/client-roles/${id}`, expect.objectContaining({ method: "PUT" }));
+
+
+
+});
+
+it("opens a recent webhook job directly and shows its full details", async () => {
+  window.history.replaceState(null, "", "#webhooks");
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = String(input);
+    if (path === "/webhook-routes") return webhookResponse({ routes: [] });
+    if (path === "/admin/api/webhook-jobs") return webhookResponse({
+      jobs: [{
+        job_id: "job-readability-1",
+        route_id: "notify-health-diagnosis",
+        status: "failed",
+        created_at: "2026-10-23T12:00:05Z",
+        error: "webhook shell action exited with code 1",
+      }],
+      latest_by_route: {},
+    });
+    if (path === "/admin/api/webhook-jobs/job-readability-1") return webhookResponse({
+      job_id: "job-readability-1",
+      route_id: "notify-health-diagnosis",
+      status: "failed",
+      created_at: "2026-10-23T12:00:05Z",
+      error: "webhook shell action exited with code 1",
+    });
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  render(<App />);
+  const recentJob = await screen.findByRole("button", {
+    name: /Ошибка notify-health-diagnosis/,
+  });
+  expect(recentJob.querySelector("time")).toHaveAttribute("datetime", "2026-10-23T12:00:05Z");
+  expect(recentJob).toHaveTextContent(/\d{2}:\d{2}:\d{2}/);
+  expect(recentJob).toHaveTextContent("webhook shell action exited with code 1");
+  await userEvent.click(recentJob);
+
+  expect(await screen.findByText("job-readability-1")).toBeInTheDocument();
+  const jobResult = screen.getByText("job-readability-1").closest(".job-result");
+  expect(jobResult).toHaveTextContent("webhook shell action exited with code 1");
+  expect(fetchMock).toHaveBeenCalledWith(
+    "/admin/api/webhook-jobs/job-readability-1",
+    expect.objectContaining({ credentials: "same-origin" }),
+  );
+});

@@ -1,0 +1,14 @@
+services:
+  shellmcp-e2e:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/docker/shellmcp-e2e.Dockerfile
+    environment:
+      INSTALL_SCRIPT: /work/deploy/install.sh
+      HUB_PUBLIC_URL: https://hub-public.example.test
+      GPTADMIN_DOWNLOAD_QUIET: "1"
+    volumes:
+      - shellmcp-e2e-out:/e2e/out
+
+volumes:
+  shellmcp-e2e-out:

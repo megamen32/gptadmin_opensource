@@ -1,0 +1,1649 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/audit"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/job"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/output"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/sshexec"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
+)
+
+var BuildVersion = "3"
+var GitCommit = "go-shellmcp"
+
+type Config struct {
+	// Embedded executors are updated only with their containing node binary.
+	DisableSelfUpdate        bool
+	Addr                     string
+	Token                    string
+	LogLimit                 int64
+	ExecTimeout              int
+	SpillDir                 string
+	Name                     string
+	BaseURL                  string
+	HubURL                   string
+	HubDNSServer             string
+	HubResolveTo             string
+	IdentityDir              string
+	HeartbeatEnabled         bool
+	HeartbeatInterval        time.Duration
+	QueueEnabled             bool
+	QueueTimeout             int
+	Mode                     string
+	OutboxDir                string
+	DefaultUser              string
+	DefaultHome              string
+	DefaultCwd               string
+	InspectRoots             []string
+	HubPublicKeyFile         string
+	HubPublicKey             string
+	AuditLog                 string
+	StorageLimitBytes        int64
+	NonceTTL                 time.Duration
+	PreserveFileMetadata     bool
+	PreserveMetadataMaxFiles int
+
+	// ShutdownGrace bounds how long a planned stop waits for already-running
+	// commands to finish before cancelling them (GPTADMIN_SHUTDOWN_GRACE_SECS;
+	// 0 keeps the legacy immediate-cancel behavior). The primary writer sets
+	// it so a socket-activated blue/green swap completes in-flight tasks
+	// instead of returning cancelled receipts to clients.
+	ShutdownGrace     time.Duration
+	MCPConfig         string
+	PollInterval      time.Duration
+	QueueRetry        time.Duration
+	SpoolRetention    time.Duration
+	OutboxBackoffBase time.Duration
+	OutboxBackoffCap  time.Duration
+	SSHHost           string
+	SSHPort           int
+	SSHUser           string
+	SSHPassword       string
+	SSHKeyPath        string
+}
+
+func FromEnv() Config {
+	port := env("SHELL_PORT", env("SHELLMCP_PORT", env("PORT", "25900")))
+	host := env("SHELL_HOST", env("SHELLMCP_HOST", ""))
+	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", strconv.FormatInt(output.DefaultInlineTailBytes, 10)), 10, 64)
+	timeout, _ := strconv.Atoi(env("EXEC_TIMEOUT", "300"))
+	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", env("SHELL_SPILL_DIR", env("SHELLMCP_SPILL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))))
+	name := env("SHELL_NAME", env("SHELLMCP_NAME", ""))
+	baseURL := env("SHELL_URL", env("SHELLMCP_URL", "http://127.0.0.1:"+port))
+	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "30"))
+	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
+	mode := env("SHELLMCP_MODE", env("SHELL_MODE", ""))
+	queueDefault := "1"
+	if mode == "webhook" {
+		queueDefault = "0"
+	}
+	queueEnabled := truthy(env("SHELLMCP_QUEUE", env("SHELL_QUEUE", queueDefault)))
+	if mode == "" {
+		if queueEnabled {
+			mode = "long_poll"
+		} else {
+			mode = "webhook"
+		}
+	}
+	outbox := env("SHELL_OUTBOX_DIR", env("SHELLMCP_OUTBOX_DIR", filepath.Join(spill, "outbox")))
+	defaultUser := env("SHELL_DEFAULT_USER", env("SHELLMCP_DEFAULT_USER", ""))
+	defaultHome := env("SHELL_DEFAULT_HOME", env("SHELLMCP_DEFAULT_HOME", ""))
+	defaultCwd := env("SHELL_DEFAULT_CWD", env("SHELLMCP_DEFAULT_CWD", defaultHome))
+	inspectRoots := appendUniquePath(splitPathList(env("SHELLMCP_INSPECT_ROOTS", defaultCwd)), spill)
+	auditLogPath := env("SHELLMCP_AUDIT_LOG", "")
+	nonceTTL := parseSecondsEnvWithDefault("SHELLMCP_NONCE_TTL_S", 300)
+	preserve := truthy(env("SHELLMCP_PRESERVE_FILE_METADATA", ""))
+	preserveMax := parseIntEnv("SHELLMCP_PRESERVE_METADATA_MAX_FILES", 1000)
+	mcpConfig := env("SHELLMCP_MCP_CONFIG", env("GPTADMIN_MCP_CONFIG", env("GPTADMIN_MCP_AGENTS_DIR", "")))
+	pollInterval := parseSecondsEnvWithDefault("POLL_INTERVAL_S", 5)
+	queueRetry := parseSecondsEnvWithDefault("SHELLMCP_QUEUE_RETRY_S", 5)
+	spoolRetention := parseSecondsEnvWithDefault("SHELLMCP_SPOOL_RETENTION_S", 72*3600)
+	outboxBase := parseSecondsEnvWithDefault("SHELLMCP_OUTBOX_BACKOFF_BASE_S", 5)
+	outboxCap := parseSecondsEnvWithDefault("SHELLMCP_OUTBOX_BACKOFF_CAP_S", 600)
+	sshHost := env("SSH_HOST", "")
+	sshPort := 22
+	if raw := strings.TrimSpace(os.Getenv("SSH_PORT")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			sshPort = n
+		}
+	}
+	sshUser := env("SSH_USER", "")
+	sshPassword := os.Getenv("SSH_PASSWORD")
+	sshKeyPath := os.Getenv("SSH_KEY_PATH")
+	if sshKeyPath == "" {
+		sshKeyPath = os.Getenv("SSH_KEY")
+	}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), HubDNSServer: env("SHELLMCP_HUB_DNS_SERVER", ""), HubResolveTo: env("SHELLMCP_HUB_RESOLVE_TO", ""), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: queueEnabled, QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, InspectRoots: inspectRoots, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, QueueRetry: queueRetry, SpoolRetention: spoolRetention, OutboxBackoffBase: outboxBase, OutboxBackoffCap: outboxCap, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath, ShutdownGrace: parseSecondsEnvWithDefault("GPTADMIN_SHUTDOWN_GRACE_SECS", 0)}
+}
+
+func appendUniquePath(paths []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return paths
+	}
+	clean := filepath.Clean(value)
+	for _, existing := range paths {
+		if filepath.Clean(strings.TrimSpace(existing)) == clean {
+			return paths
+		}
+	}
+	return append(paths, value)
+}
+
+func splitPathList(value string) []string {
+	parts := strings.Split(value, string(os.PathListSeparator))
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+func normalizeHeartbeatInterval(seconds int) time.Duration {
+	if seconds <= 0 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func truthy(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func parseBuildVersion(v string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+func parseSecondsEnvWithDefault(name string, fallbackSec int) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	return time.Duration(n) * time.Second
+}
+
+func parseIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// firstToken returns the first whitespace-delimited token of s, or s
+// itself when there is no whitespace. Used to redact arbitrary shell
+// command strings to a searchable prefix in audit logs without leaking
+// arguments that may contain secrets.
+func firstToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func normalizeTraceID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return ""
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' && char != '.' {
+			return ""
+		}
+	}
+	return value
+}
+
+type Server struct {
+	displayHostname string
+	transfers       binaryTransfers
+	// The five Hub-updated queue/spool/backoff fields are guarded by
+	// callbackMu; all other configuration stays immutable after New.
+	cfg                   Config
+	jobs                  *job.Manager
+	identity              *security.Identity
+	hub                   *hub.Client
+	auditLog              *audit.Logger
+	nonces                *security.NonceCache
+	supervisor            *supervisor.Manager
+	preserveMeta          bool
+	preserveMax           int
+	sshClient             *sshexec.Client
+	childMCP              *mcpclient.Client
+	connectionInstance    string
+	storageLimit          atomic.Int64
+	storageProtectedBytes atomic.Int64
+	storageOverflowBytes  atomic.Int64
+	storageEffectiveLimit atomic.Int64
+	mcpHealth             atomic.Value // map[string]map[string]any
+	healthBusy            atomic.Bool
+	healthMu              sync.Mutex
+	healthCancel          context.CancelFunc
+	healthWG              sync.WaitGroup
+	healthClosed          bool
+	callbackMu            sync.Mutex
+	callbackWG            sync.WaitGroup
+	callbackClosed        bool
+	queueDraining         bool
+	queueDrainPending     bool
+	queuePollsInFlight    int
+	callbackCancels       map[string]context.CancelFunc
+	pendingClaim          *pendingDispatchClaim
+	callbackCancelled     map[string]bool
+	queuePollCount        atomic.Int64
+	queuePollErrors       atomic.Int64
+	queuePollLatencyMS    atomic.Int64
+	outboxRetryFailures   atomic.Int64
+	outboxDelivered       atomic.Int64
+	outboxSending         sync.Map // job IDs with a receipt POST in progress
+	selfRepairBusy        atomic.Bool
+	selfRepairPolicySeen  atomic.Bool
+	selfRepairDesired     atomic.Int64
+	selfRepairLastAttempt atomic.Int64
+	selfRepairState       atomic.Value // string
+}
+
+func New(cfg Config) *Server {
+	if cfg.OutboxDir == "" && cfg.SpillDir != "" {
+		cfg.OutboxDir = filepath.Join(cfg.SpillDir, "outbox")
+	}
+	if cfg.AuditLog == "" && cfg.IdentityDir != "" {
+		cfg.AuditLog = filepath.Join(cfg.IdentityDir, "execution-audit.jsonl")
+	}
+	displayHostname := cfg.Name
+	if displayHostname == "" {
+		displayHostname, _ = os.Hostname()
+	}
+	var instanceBytes [32]byte
+	connectionInstance := ""
+	if _, err := rand.Read(instanceBytes[:]); err == nil {
+		connectionInstance = hex.EncodeToString(instanceBytes[:])
+	}
+	var ident *security.Identity
+	if cfg.IdentityDir != "" {
+		if id, err := security.LoadIdentity(cfg.IdentityDir, cfg.Name); err == nil {
+			ident = id
+		} else {
+			log.Printf("identity disabled: %v", err)
+		}
+	}
+	// Keep every queue, callback and ACL check on the address persisted with
+	// this key. A changed hostname/config label must not create another queue.
+	if ident != nil && ident.Name != "" {
+		cfg.Name = ident.Name
+	}
+	if cfg.Name == "" {
+		if ident != nil && ident.Name != "" {
+			cfg.Name = ident.Name
+		} else if h, err := os.Hostname(); err == nil {
+			cfg.Name = h
+		}
+	}
+	var hc *hub.Client
+	if cfg.HubURL != "" {
+		hc = hub.New(cfg.HubURL, ident, cfg.Token, cfg.HubDNSServer, cfg.HubResolveTo)
+		hc.RestoreQuorumRoutes(cfg.IdentityDir)
+	}
+
+	var auditLog *audit.Logger
+	var auditErr error
+	if cfg.StorageLimitBytes > 0 {
+		auditLog, auditErr = audit.NewWithLimit(cfg.AuditLog, cfg.StorageLimitBytes)
+	} else {
+		auditLog, auditErr = audit.New(cfg.AuditLog)
+	}
+	if auditErr != nil {
+		log.Printf("audit logger disabled: %v", auditErr)
+	}
+	if cfg.AuditLog != "" {
+		auditLog.Preserve()
+	}
+
+	nonces := security.NewNonceCache(cfg.NonceTTL)
+
+	var agents []supervisor.Agent
+	if cfg.MCPConfig != "" {
+		var loadErr error
+		agents, loadErr = supervisor.LoadAgents(cfg.MCPConfig)
+		if loadErr != nil {
+			log.Printf("supervisor: load agents failed: %v", loadErr)
+		}
+	}
+	mgr := supervisor.NewPersistent(agents, cfg.MCPConfig)
+
+	maxFiles := cfg.PreserveMetadataMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 1000
+	}
+
+	var sshClient *sshexec.Client
+	if strings.TrimSpace(cfg.SSHHost) != "" && strings.TrimSpace(cfg.SSHUser) != "" {
+		sshCfg := sshexec.Config{
+			Host:     cfg.SSHHost,
+			Port:     cfg.SSHPort,
+			User:     cfg.SSHUser,
+			Password: cfg.SSHPassword,
+			KeyPath:  cfg.SSHKeyPath,
+			Timeout:  parseSecondsEnvWithDefault("SSH_TIMEOUT_S", 300),
+		}
+		if sshCfg.Port == 0 {
+			sshCfg.Port = 22
+		}
+		client, sshErr := sshexec.New(sshCfg)
+		if sshErr != nil {
+			log.Printf("ssh client disabled: %v", sshErr)
+		} else {
+			sshClient = client
+			log.Printf("ssh client connected host=%s:%d user=%s", cfg.SSHHost, sshCfg.Port, cfg.SSHUser)
+		}
+	}
+
+	childMCP := mcpclient.New()
+	childMCP.SetAgentValidator(func(candidate supervisor.Agent) bool {
+		current, err := mgr.Agent(candidate.Ref)
+		return err == nil && current.Enabled && reflect.DeepEqual(current, candidate)
+	})
+
+	server := &Server{
+		cfg:                cfg,
+		displayHostname:    displayHostname,
+		jobs:               job.New(cfg.LogLimit),
+		identity:           ident,
+		hub:                hc,
+		auditLog:           auditLog,
+		nonces:             nonces,
+		supervisor:         mgr,
+		preserveMeta:       cfg.PreserveFileMetadata,
+		preserveMax:        maxFiles,
+		sshClient:          sshClient,
+		childMCP:           childMCP,
+		connectionInstance: connectionInstance,
+		callbackCancels:    map[string]context.CancelFunc{},
+		callbackCancelled:  map[string]bool{},
+	}
+	server.mcpHealth.Store(map[string]map[string]any{})
+	if auditLog != nil {
+		auditLog.SetAfterWrite(func() {
+			protected := map[string]bool{}
+			if cfg.AuditLog != "" {
+				protected[cfg.AuditLog] = true
+			}
+			_ = server.enforceStorage(protected)
+		})
+	}
+	server.storageLimit.Store(cfg.StorageLimitBytes)
+	return server
+}
+
+func (s *Server) storageRoots() []string {
+	roots := make([]string, 0, 4)
+	for _, root := range []string{s.cfg.SpillDir, s.cfg.OutboxDir, s.cfg.AuditLog} {
+		if strings.TrimSpace(root) != "" {
+			roots = append(roots, root)
+		}
+	}
+	if s.cfg.DefaultHome != "" || os.Getenv("SHELLMCP_FILE_BACKUP_ROOT") != "" || os.Getenv("GPTADMIN_FILE_BACKUP_ROOT") != "" {
+		roots = append(roots, s.fileBackupRoot())
+	}
+	if s.cfg.DefaultHome != "" || os.Getenv("SHELLMCP_FILE_CHECKPOINT_ROOT") != "" || os.Getenv("GPTADMIN_FILE_CHECKPOINT_ROOT") != "" {
+		roots = append(roots, s.fileCheckpointRoot())
+	}
+	return roots
+}
+
+// Spills may be referenced by a pending receipt or a delivered receipt still in
+// Hub history. Without a reference index neither age nor budget proves them disposable.
+func (s *Server) enforceStorage(protected map[string]bool) error {
+	keep := make(map[string]bool, len(protected)+3)
+	for path, yes := range protected {
+		keep[path] = yes
+	}
+	for _, path := range []string{s.cfg.SpillDir, s.cfg.OutboxDir, s.cfg.AuditLog} {
+		if strings.TrimSpace(path) != "" {
+			keep[path] = true
+		}
+	}
+	var result storagebudget.Result
+	var err error
+	if limit := s.storageLimit.Load(); limit > 0 {
+		result, err = storagebudget.EnforceRootsLimit(s.storageRoots(), limit, keep)
+	} else {
+		result, err = storagebudget.EnforceRoots(s.storageRoots(), keep)
+	}
+	if err == nil {
+		s.storageProtectedBytes.Store(result.ProtectedBytes)
+		s.storageEffectiveLimit.Store(result.LimitBytes)
+		previous := s.storageOverflowBytes.Swap(result.OverBudgetBytes)
+		if result.OverBudgetBytes > 0 && previous != result.OverBudgetBytes {
+			log.Printf("storage mandatory data retained: protected_bytes=%d remaining_bytes=%d limit_bytes=%d over_budget_bytes=%d", result.ProtectedBytes, result.RemainingBytes, result.LimitBytes, result.OverBudgetBytes)
+		}
+	}
+	return err
+}
+
+// Close releases server resources and active child MCP protocol sessions.
+// Safe to call multiple times and idempotent w.r.t. nil resources.
+func (s *Server) Close() error {
+	s.closeBinaryTransfers()
+	var closeErr error
+	s.healthMu.Lock()
+	s.healthClosed = true
+	if s.healthCancel != nil {
+		s.healthCancel()
+	}
+	s.healthMu.Unlock()
+	s.healthWG.Wait()
+	if s.auditLog != nil {
+		closeErr = s.auditLog.Close()
+	}
+	if s.childMCP != nil {
+		s.childMCP.CloseAll()
+	}
+	// The supervisor owns MCP child processes independently of active client
+	// sessions. Stop them explicitly so a service restart cannot hang until
+	// systemd/launchd escalates the parent process timeout.
+	if s.supervisor != nil {
+		if err := s.supervisor.KillAll(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	if s.sshClient != nil {
+		if err := s.sshClient.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/version", s.version)
+	mux.HandleFunc("/system/info", s.authed(s.systemInfo))
+	mux.HandleFunc("/system/health", s.authed(s.health))
+	mux.HandleFunc("/metrics", s.authed(s.metrics))
+	mux.HandleFunc("/capabilities", s.authed(s.capabilities))
+	mux.HandleFunc("/mcp", s.authed(s.mcpHTTP))
+	mux.HandleFunc("/exec", s.authed(s.exec))
+	mux.HandleFunc("/exec/live", s.authed(s.execLive))
+	mux.HandleFunc("/exec/stream", s.authed(s.execStream))
+	mux.HandleFunc("/exec/callback", s.authed(s.execCallback))
+	mux.HandleFunc("/jobs", s.authed(s.jobsList))
+	mux.HandleFunc("/jobs/", s.authed(s.jobGet))
+	mux.HandleFunc("/file", s.authed(s.fileGet))
+	mux.HandleFunc("/capabilities/mcp/", s.authed(s.supervisorHandler))
+	return mux
+}
+
+func (s *Server) ListenAndServe() error { return s.ListenAndServeContext(context.Background()) }
+
+func (s *Server) ListenAndServeContext(ctx context.Context) error {
+	if s.cfg.HeartbeatEnabled {
+		go s.heartbeatLoop(ctx)
+	}
+	// Direct callback receivers also need to resume receipts after a restart.
+	outboxCtx, cancelOutbox := context.WithCancel(ctx)
+	outboxDone := make(chan struct{})
+	go func() { defer close(outboxDone); s.outboxLoop(outboxCtx) }()
+	defer func() { cancelOutbox(); <-outboxDone }()
+	if !s.needsLocalListener() {
+		go s.queueLoop(ctx)
+	}
+	s.startUpdateLoop(ctx)
+	if s.cfg.QueueEnabled {
+		log.Printf("shellmcp-go polling mode name=%s heartbeat=%v queue=%v (no local listener)", s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
+		<-ctx.Done()
+		return nil
+	}
+	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+	log.Printf("shellmcp-go listening addr=%s name=%s heartbeat=%v queue=%v", s.cfg.Addr, s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+// needsLocalListener reports whether this transport accepts inbound HTTP.
+// Queue agents operate through outbound Hub polling only.
+func (s *Server) needsLocalListener() bool {
+	return !s.cfg.QueueEnabled
+}
+
+func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if s.authorized(r, body) {
+			next(w, r)
+			return
+		}
+		s.auditLog.Event(audit.AuthFail, map[string]any{
+			"path":   r.URL.Path,
+			"method": r.Method,
+			"reason": "auth_reject",
+		})
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+	}
+}
+
+func (s *Server) authorized(r *http.Request, body []byte) bool {
+	if s.cfg.Token != "" && r.Header.Get("Authorization") == "Bearer "+s.cfg.Token {
+		return true
+	}
+	if r.Header.Get("X-GPTAdmin-Signature") == "" {
+		return false
+	}
+	pub := s.cfg.HubPublicKey
+	if pub == "" && s.cfg.HubPublicKeyFile != "" {
+		if loaded, err := security.LoadPublicKey(s.cfg.HubPublicKeyFile); err == nil {
+			pub = loaded
+		}
+	}
+	if err := security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute); err != nil {
+		return false
+	}
+	// Signature is valid: additionally enforce nonce replay protection.
+	nonce := r.Header.Get("X-GPTAdmin-Nonce")
+	if nonce != "" {
+		if s.nonces == nil || !s.nonces.CheckAndRemember(nonce) {
+			s.auditLog.Event(audit.AuthFail, map[string]any{
+				"path":   r.URL.Path,
+				"method": r.Method,
+				"reason": "nonce_replay",
+			})
+			return false
+		}
+	}
+	s.auditLog.Event(audit.AuthOK, map[string]any{
+		"path":   r.URL.Path,
+		"method": r.Method,
+	})
+	return true
+}
+func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "ready", "features": []string{"exec", "exec_live", "jobs", "file", "file_editor", "file_checkpoint", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_transport_http", "mcp_transport_stdio"}})
+}
+func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
+}
+
+type shellStorageStats struct {
+	StorageBytes        int64
+	SpoolBytes          int64
+	OutboxDepth         int
+	OutboxRetryAttempts int
+}
+
+func (s *Server) storageStats() shellStorageStats {
+	stats := shellStorageStats{}
+	spillAbs, _ := filepath.Abs(s.cfg.SpillDir)
+	outboxAbs, _ := filepath.Abs(s.cfg.OutboxDir)
+	seen := map[string]bool{}
+	for _, root := range s.storageRoots() {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		base := root
+		if info, err := os.Stat(root); err == nil && !info.IsDir() {
+			base = filepath.Dir(root)
+		}
+		_ = filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			abs, e := filepath.Abs(path)
+			if e != nil || seen[abs] {
+				return nil
+			}
+			seen[abs] = true
+			info, e := d.Info()
+			if e != nil {
+				return nil
+			}
+			stats.StorageBytes += info.Size()
+			if spillAbs != "" && (abs == spillAbs || strings.HasPrefix(abs, spillAbs+string(os.PathSeparator))) {
+				stats.SpoolBytes += info.Size()
+			}
+			if outboxAbs != "" && strings.HasPrefix(abs, outboxAbs+string(os.PathSeparator)) && strings.HasSuffix(abs, ".json") {
+				stats.OutboxDepth++
+				attempts, _, _ := outboxSchedule(abs)
+				stats.OutboxRetryAttempts += attempts
+			}
+			return nil
+		})
+	}
+	return stats
+}
+
+func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	stats := s.storageStats()
+	limit := s.storageLimit.Load()
+	writeJSON(w, 200, map[string]any{
+		"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "jobs": len(s.jobs.List()),
+		"queue_enabled": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "heartbeat": s.cfg.HeartbeatEnabled, "audit_enabled": s.cfg.AuditLog != "",
+		"storage_limited": limit > 0, "storage_limit_bytes": limit, "storage_bytes": stats.StorageBytes, "spool_bytes": stats.SpoolBytes,
+		"storage_protected_bytes": s.storageProtectedBytes.Load(), "storage_over_budget_bytes": s.storageOverflowBytes.Load(), "storage_effective_limit_bytes": s.storageEffectiveLimit.Load(),
+		"outbox_depth": stats.OutboxDepth, "outbox_retry_attempts": stats.OutboxRetryAttempts,
+		"queue_poll_count": s.queuePollCount.Load(), "queue_poll_errors": s.queuePollErrors.Load(), "queue_poll_latency_ms": s.queuePollLatencyMS.Load(),
+		"outbox_retry_failures": s.outboxRetryFailures.Load(), "outbox_delivered": s.outboxDelivered.Load(),
+	})
+}
+func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"shell":           true,
+		"system":          true,
+		"tasks":           true,
+		"logs":            true,
+		"file_editor":     true,
+		"file_checkpoint": true,
+		"file_backup":     true,
+		"go_shellmcp":     true,
+		"real_mcp":        true,
+		"mcp_transports":  []string{"stdio", "streamable-http"},
+		"build_version":   parseBuildVersion(BuildVersion),
+		"git_commit":      GitCommit,
+		"mcp_agents":      s.mcpAgentsForCapabilities(),
+	})
+}
+
+func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Request, bool) {
+	var req shell.Request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return req, false
+	}
+	if err := shell.ValidateCommandSpec(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return req, false
+	}
+	s.applyDefaults(&req)
+	req.TraceID = normalizeTraceID(req.TraceID)
+	return req, true
+}
+func (s *Server) applyDefaults(req *shell.Request) {
+	if req.Timeout == 0 {
+		req.Timeout = s.cfg.ExecTimeout
+	}
+	if req.SpillDir == "" {
+		req.SpillDir = s.cfg.SpillDir
+	}
+	if req.DefaultUser == "" {
+		req.DefaultUser = s.cfg.DefaultUser
+	}
+	if req.DefaultCwd == "" {
+		req.DefaultCwd = s.cfg.DefaultCwd
+	}
+}
+
+// runShell dispatches a synchronous exec to the configured backend.
+// When SSH is configured (s.sshClient != nil) the request is composed
+// via sshexec.ComposeCmd and run on the remote host; otherwise the
+// existing local shell.Run path is used. Both branches produce the
+// same shell.Result so the JSON response shape is unchanged.
+func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
+	defer func() { _ = s.enforceStorage(nil) }()
+	if s.sshClient != nil && (req.Argv != nil || req.Stdin != "") {
+		return shell.Result{ReturnCode: -1, Error: "native argv and stdin are not supported by the SSH backend; no shell fallback"}
+	}
+	if err := shell.ImplicitRootExecutionError(req); err != nil {
+		return shell.Result{ReturnCode: -1, Error: err.Error()}
+	}
+	if s.sshClient == nil {
+		var err error
+		req, err = s.prepareExecutionAudit(ctx, req)
+		if err != nil {
+			return shell.Result{ReturnCode: -1, Error: err.Error()}
+		}
+		return shell.Run(ctx, req, s.cfg.LogLimit)
+	}
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	user, _ := shell.TargetRunUser(req)
+	composed := sshexec.ComposeCmdForUser(req.Cmd, req.Cwd, req.Env, user, s.cfg.SSHUser)
+	sshRes, _ := s.sshClient.Run(runCtx, composed, timeout)
+	return sshexecResultToShell(sshRes, req, timeout, user)
+}
+
+// runShellStream is the streaming analogue of runShell. The emit
+// callback receives shell.Event values with the same shape the local
+// shell.RunLive path emits (stdout/stderr "chunk" events + final
+// "exit") so the SSE / NDJSON response shape is unchanged.
+func (s *Server) runShellStream(ctx context.Context, req shell.Request, emit func(shell.Event)) shell.Result {
+	defer func() { _ = s.enforceStorage(nil) }()
+	if s.sshClient != nil && (req.Argv != nil || req.Stdin != "") {
+		return shell.Result{ReturnCode: -1, Error: "native argv and stdin are not supported by the SSH backend; no shell fallback"}
+	}
+	if err := shell.ImplicitRootExecutionError(req); err != nil {
+		return shell.Result{ReturnCode: -1, Error: err.Error()}
+	}
+	if s.sshClient == nil {
+		var err error
+		req, err = s.prepareExecutionAudit(ctx, req)
+		if err != nil {
+			return shell.Result{ReturnCode: -1, Error: err.Error()}
+		}
+		return shell.RunLive(ctx, req, s.cfg.LogLimit, emit)
+	}
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	user, _ := shell.TargetRunUser(req)
+	composed := sshexec.ComposeCmdForUser(req.Cmd, req.Cwd, req.Env, user, s.cfg.SSHUser)
+	var last shell.Result
+	s.sshClient.RunStream(runCtx, composed, timeout, func(e map[string]any) {
+		t, _ := e["type"].(string)
+		switch t {
+		case "stdout":
+			if data, ok := e["data"].(string); ok {
+				emit(shell.Event{Type: "chunk", Stream: "stdout", Data: data})
+			}
+		case "stderr":
+			if data, ok := e["data"].(string); ok {
+				emit(shell.Event{Type: "chunk", Stream: "stderr", Data: data})
+			}
+		case "exit":
+			rc, _ := e["code"].(int)
+			errStr, _ := e["error"].(string)
+			timedOut, _ := e["timed_out"].(bool)
+			last = shell.Result{
+				ReturnCode: rc,
+				Error:      errStr,
+				TimedOut:   timedOut,
+			}
+		}
+	})
+	return last
+}
+
+// sshexecResultToShell maps the SSH result into a shell.Result so the
+// JSON wire format is identical to the local-exec path. Fields that
+// have no meaningful remote equivalent (Spilled / StdoutPath / Files)
+// stay empty.
+func sshexecResultToShell(r sshexec.Result, req shell.Request, timeout time.Duration, runAsUser string) shell.Result {
+	cwd := req.Cwd
+	if cwd == "" {
+		cwd = req.DefaultCwd
+	}
+	_ = timeout
+	return shell.Result{
+		ReturnCode: r.ReturnCode,
+		Stdout:     r.Stdout,
+		Stderr:     r.Stderr,
+		Error:      r.Error,
+		TimedOut:   r.TimedOut,
+		Cwd:        cwd,
+		RunAsUser:  runAsUser,
+	}
+}
+
+func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	req, ok := s.decodeExec(w, r)
+	if !ok {
+		return
+	}
+	cmdField := safeExecutionLabel(req)
+	commandHash := executionCommandHash(req)
+	startFields := map[string]any{
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+	}
+	s.auditLog.Event(audit.ExecStart, startFields)
+	if req.Background {
+		var auditErr error
+		req, auditErr = s.prepareExecutionAudit(r.Context(), req)
+		if auditErr != nil {
+			writeJSON(w, 500, map[string]any{"error": auditErr.Error()})
+			return
+		}
+		j := s.jobs.Start(req)
+		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID})
+		return
+	}
+
+	// Best-effort metadata snapshot for sync (non-background) runs when the
+	// caller enabled the feature and supplied a cwd.
+	var snapshot *shell.Snapshot
+	if s.preserveMeta && req.Cwd != "" {
+		snap, err := shell.SnapshotDir(req.Cwd, s.preserveMax)
+		if err == nil && snap != nil {
+			snapshot = snap
+		}
+	}
+	restore := func() (restored, failed int) {
+		if snapshot == nil {
+			return 0, 0
+		}
+		return snapshot.Restore()
+	}
+
+	startTime := time.Now()
+	res := s.runShell(context.Background(), req)
+	restored, failed := restore()
+	elapsedMS := time.Since(startTime).Milliseconds()
+	status := 200
+	if res.Error != "" && res.ReturnCode == -1 {
+		status = 500
+	}
+	endFields := map[string]any{
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     false,
+		"return_code":    res.ReturnCode,
+		"elapsed_ms":     elapsedMS,
+		"restored":       restored,
+		"failed_files":   failed,
+	}
+	if res.Error != "" {
+		endFields["error"] = "execution_error"
+	}
+	s.auditLog.Event(audit.ExecEnd, endFields)
+	writeJSON(w, status, res)
+}
+func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		shell.Request
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	req := body.Request
+	s.applyDefaults(&req)
+	req.TraceID = normalizeTraceID(req.TraceID)
+	jobID := body.JobID
+	if jobID == "" {
+		var auditErr error
+		req, auditErr = s.prepareExecutionAudit(r.Context(), req)
+		if auditErr != nil {
+			writeJSON(w, 500, map[string]any{"error": auditErr.Error()})
+			return
+		}
+		j := s.jobs.Start(req)
+		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID, "delivery": "local_job"})
+		return
+	}
+	duplicate, err := s.startCallbackJob(jobID, req, false)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errStaleDispatch) || errors.Is(err, errInvalidDispatch) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]any{"error": "executor dispatch refused"})
+		return
+	}
+	status := "running"
+	if duplicate {
+		status = "already_accepted"
+	}
+	writeJSON(w, 202, map[string]any{"ok": true, "status": status, "job_id": jobID, "delivery": "hub_queue_result"})
+}
+func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	req, ok := s.decodeExec(w, r)
+	if !ok {
+		return
+	}
+	cmdField := safeExecutionLabel(req)
+	commandHash := executionCommandHash(req)
+	s.auditLog.Event(audit.ExecStart, map[string]any{
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"transport":      "ndjson",
+	})
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	startTime := time.Now()
+	emit := func(e shell.Event) {
+		b, _ := json.Marshal(e)
+		_, _ = w.Write(b)
+		_, _ = w.Write([]byte("\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	res := s.runShellStream(r.Context(), req, emit)
+	elapsedMS := time.Since(startTime).Milliseconds()
+	endFields := map[string]any{
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"return_code":    res.ReturnCode,
+		"elapsed_ms":     elapsedMS,
+		"transport":      "ndjson",
+	}
+	if res.Error != "" {
+		endFields["error"] = "execution_error"
+	}
+	s.auditLog.Event(audit.ExecEnd, endFields)
+}
+func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"jobs": s.jobs.List()})
+}
+func (s *Server) jobGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	id := filepath.Base(r.URL.Path)
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeJSON(w, 404, map[string]any{"error": fmt.Sprintf("job %s not found", id)})
+		return
+	}
+	writeJSON(w, 200, j)
+}
+func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		writeJSON(w, 400, map[string]any{"error": "missing path"})
+		return
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	root, _ := filepath.Abs(s.cfg.SpillDir)
+	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		writeJSON(w, 403, map[string]any{"error": "path outside spool dir"})
+		return
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	if err := rejectSymlinksBelowRoot(root, abs); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil || (rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel))) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	http.ServeFile(w, r, abs)
+}
+
+// rejectSymlinksBelowRoot permits a platform-owned symlink prefix in root but
+// rejects a caller-controlled symlink anywhere below it.
+func rejectSymlinksBelowRoot(root, path string) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return fmt.Errorf("resolve path relative to spill root: %w", err)
+	}
+	if rel == "." {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path outside spill root: %s", path)
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symbolic link below root: %s", path)
+		}
+	}
+	return nil
+}
+
+func (s *Server) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		s.sendHeartbeat(ctx)
+		s.startLazyMCPHealthRefresh(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) startLazyMCPHealthRefresh(ctx context.Context) {
+	if !s.healthBusy.CompareAndSwap(false, true) {
+		return
+	}
+	refreshCtx, cancel := context.WithCancel(ctx)
+	s.healthMu.Lock()
+	if s.healthClosed {
+		s.healthMu.Unlock()
+		cancel()
+		s.healthBusy.Store(false)
+		return
+	}
+	s.healthCancel = cancel
+	s.healthWG.Add(1)
+	s.healthMu.Unlock()
+	go func() {
+		defer func() {
+			cancel()
+			s.healthMu.Lock()
+			s.healthCancel = nil
+			s.healthMu.Unlock()
+			s.healthWG.Done()
+			s.healthBusy.Store(false)
+		}()
+		s.refreshMCPHealth(refreshCtx)
+	}()
+}
+
+func (s *Server) refreshMCPHealth(ctx context.Context) {
+	if s.supervisor == nil || s.childMCP == nil {
+		return
+	}
+	updated := map[string]map[string]any{}
+	for _, agent := range s.supervisor.Agents() {
+		if !agent.Enabled {
+			updated[agent.Ref] = map[string]any{
+				"process":  map[string]any{"state": "disabled", "pid": nil, "started_at": nil, "exited_at": nil, "exit_code": nil},
+				"protocol": map[string]any{"state": "disabled", "last_checked_at": nil, "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
+			}
+			continue
+		}
+		before := s.childMCP.Status(agent.Ref)
+		if agent.Transport == "stdio" && !before.Running {
+			processState := "stopped"
+			if !before.ExitedAt.IsZero() {
+				processState = "exited"
+			}
+			updated[agent.Ref] = map[string]any{
+				"process": map[string]any{
+					"state":      processState,
+					"pid":        nil,
+					"started_at": nullableTime(before.StartedAt),
+					"exited_at":  nullableTime(before.ExitedAt),
+					"exit_code":  exitCode(before),
+				},
+				"protocol": map[string]any{"state": "unknown", "last_checked_at": time.Now().UTC().Format(time.RFC3339Nano), "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
+			}
+			continue
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		tools, err := s.childMCP.ListTools(checkCtx, agent)
+		cancel()
+		status := s.childMCP.Status(agent.Ref)
+		processState := "stopped"
+		if agent.Transport != "stdio" {
+			processState = "remote"
+		} else if status.Running {
+			processState = "running"
+		} else if !status.ExitedAt.IsZero() {
+			processState = "exited"
+		}
+		protocol := map[string]any{
+			"state":             "ready",
+			"last_checked_at":   time.Now().UTC().Format(time.RFC3339Nano),
+			"last_handshake_at": time.Now().UTC().Format(time.RFC3339Nano),
+			"tools_count":       nil,
+			"last_error":        nil,
+		}
+		if err != nil {
+			protocol["state"] = "failed"
+			protocol["last_handshake_at"] = nil
+			protocol["last_error"] = "health check failed"
+		} else {
+			protocol["tools_count"] = len(tools)
+			protocol["catalog_digest"] = mcpCatalogDigest(tools)
+		}
+		updated[agent.Ref] = map[string]any{
+			"process": map[string]any{
+				"state":      processState,
+				"pid":        nullableInt(status.PID),
+				"started_at": nullableTime(status.StartedAt),
+				"exited_at":  nullableTime(status.ExitedAt),
+				"exit_code":  exitCode(status),
+			},
+			"protocol": protocol,
+		}
+	}
+	if previous, ok := s.mcpHealth.Load().(map[string]map[string]any); ok {
+		for ref, health := range updated {
+			protocol, _ := health["protocol"].(map[string]any)
+			prior, _ := previous[ref]["protocol"].(map[string]any)
+			if protocol != nil && protocol["catalog_digest"] == nil && prior != nil {
+				protocol["catalog_digest"] = prior["catalog_digest"]
+			}
+		}
+	}
+	s.mcpHealth.Store(updated)
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func nullableInt(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func exitCode(status mcpclient.RuntimeStatus) any {
+	if status.ExitedAt.IsZero() {
+		return nil
+	}
+	return status.ExitCode
+}
+
+func unknownMCPHealth() map[string]any {
+	return map[string]any{
+		"process":  map[string]any{"state": "unknown", "pid": nil, "started_at": nil, "exited_at": nil, "exit_code": nil},
+		"protocol": map[string]any{"state": "unknown", "last_checked_at": nil, "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
+	}
+}
+func (s *Server) sendHeartbeat(ctx context.Context) {
+	if s.hub == nil {
+		return
+	}
+	beat := s.newBeat()
+	beatCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	resp, body, err := s.hub.Heartbeat(beatCtx, beat)
+	if err != nil {
+		log.Printf("heartbeat best-effort failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("heartbeat best-effort HTTP %d: %s", resp.StatusCode, string(body))
+		return
+	}
+	var payload struct {
+		RuntimeSettings map[string]any `json:"runtime_settings"`
+	}
+	if json.Unmarshal(body, &payload) == nil {
+		s.applyHubRuntimeSettings(payload.RuntimeSettings)
+	}
+}
+
+func (s *Server) newBeat() hub.Beat {
+	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, parseBuildVersion(BuildVersion))
+	beat.Hostname = s.displayHostname
+	beat.GitCommit = GitCommit
+	beat.DefaultUser = s.cfg.DefaultUser
+	beat.DefaultHome = s.cfg.DefaultHome
+	beat.DefaultCwd = s.cfg.DefaultCwd
+	beat.MCPAgents = s.mcpAgentsForCapabilities()
+	stats := s.storageStats()
+	beat.SpoolBytes = stats.SpoolBytes
+	beat.StorageBytes = stats.StorageBytes
+	beat.OutboxDepth = stats.OutboxDepth
+	beat.OutboxRetryAttempts = stats.OutboxRetryAttempts
+	beat.QueuePollCount = s.queuePollCount.Load()
+	beat.QueuePollErrors = s.queuePollErrors.Load()
+	beat.QueuePollLatencyMS = s.queuePollLatencyMS.Load()
+	beat.OutboxRetryFailures = s.outboxRetryFailures.Load()
+	beat.OutboxDelivered = s.outboxDelivered.Load()
+	beat.SelfRepairDesired = int(s.selfRepairDesired.Load())
+	if v := s.selfRepairState.Load(); v != nil {
+		beat.SelfRepairState, _ = v.(string)
+	}
+	return beat
+}
+
+func (s *Server) queueLoop(ctx context.Context) {
+	if s.hub == nil {
+		return
+	}
+	for {
+		if !s.beginQueuePoll() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		pollStarted := time.Now()
+		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.queueTimeout())
+		s.queuePollCount.Add(1)
+		s.queuePollLatencyMS.Store(time.Since(pollStarted).Milliseconds())
+		if err != nil {
+			s.queuePollErrors.Add(1)
+		}
+		if err == nil {
+			s.applyHubRuntimeSettings(q.RuntimeSettings)
+			s.cleanupSpoolByAge()
+		}
+		if err != nil {
+			s.endQueuePoll()
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("queue poll failed: %v", err)
+			retry := time.NewTimer(s.queueRetry())
+			select {
+			case <-ctx.Done():
+				retry.Stop()
+				return
+			case <-retry.C:
+			}
+			continue
+		}
+		if ok {
+			if q.ToolName == "__gptadmin_cancel_task" {
+				taskID, _ := q.Arguments["task_id"].(string)
+				s.cancelCallbackJob(taskID)
+				s.endQueuePoll()
+				continue
+			}
+			err = s.startPolledJob(ctx, q)
+			if err != nil {
+				log.Printf("executor dispatch admission failed: %v", err)
+			}
+		}
+		s.endQueuePoll()
+	}
+}
+
+func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
+	runAsUser, _ := q.Arguments["run_as_user"].(string)
+	if runAsUser == "" {
+		runAsUser, _ = q.Arguments["user"].(string)
+	}
+	req := shell.Request{ReceiptRedaction: q.ReceiptRedaction, Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
+	if source, ok := q.Arguments["stdin"].(string); ok {
+		req.Stdin = source
+	}
+	if raw, exists := q.Arguments["argv"]; exists {
+		// Present but malformed argv is represented as a non-nil empty list
+		// so the executor rejects it. Never silently execute q.Cmd instead.
+		req.Argv = []string{}
+		switch items := raw.(type) {
+		case []string:
+			req.Argv = append(req.Argv, items...)
+		case []any:
+			for _, item := range items {
+				value, ok := item.(string)
+				if !ok {
+					req.Argv = []string{}
+					break
+				}
+				req.Argv = append(req.Argv, value)
+			}
+		}
+	}
+	return req
+}
+
+func (s *Server) startPolledJob(ctx context.Context, q hub.QueueJob) error {
+	var run func(context.Context)
+	if q.ToolName != "" && q.ToolName != "shell_exec" {
+		run = func(ctx context.Context) {
+			ctx = withExecutionTask(ctx, q.ID, q.TraceID, q.ExecutionOrigin)
+			s.runCallbackTool(ctx, q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
+		}
+	} else {
+		req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
+		s.applyDefaults(&req)
+		run = s.shellCallback(q.ID, req, q.ExecutionOrigin)
+	}
+	_, err := s.startBoundCallback(q.ID, true, run)
+	if errors.Is(err, errDispatchBusy) {
+		return s.finishPolledAdmission(ctx, q.ID, run)
+	}
+	return err
+}
+
+func (s *Server) runCallbackTool(runCtx context.Context, jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
+	traceID = normalizeTraceID(traceID)
+	var result map[string]any
+	var err error
+	if queueACL != nil {
+		if queueACL.Version != 1 || queueACL.JobID != jobID || queueACL.Tool != name || !filesystemACLTargetsExecutor(queueACL.Target, s.cfg.Name) || queueACL.ProfileID == "" || queueACL.ProfileVersion < 1 {
+			err = errors.New("invalid filesystem ACL queue binding")
+		} else {
+			encoded, encodeErr := json.Marshal(args)
+			if encodeErr != nil {
+				err = encodeErr
+			} else {
+				digest := sha256.Sum256(encoded)
+				argsDigest := hex.EncodeToString(digest[:])
+				if argsDigest != queueACL.ArgumentsSHA256 {
+					err = errors.New("filesystem ACL arguments do not match queue job")
+				} else if s.hub == nil {
+					err = errors.New("filesystem ACL verifier is unavailable")
+				} else {
+					var current hub.FilesystemACL
+					current, err = s.hub.CheckFilesystemACL(runCtx, s.cfg.Name, hub.FilesystemACLCheck{ID: jobID, ToolName: name, ArgumentsSHA256: argsDigest})
+					if err == nil && !sameFilesystemACL(queueACL, &current) {
+						err = errors.New("filesystem ACL policy changed before operation start")
+					}
+					if err == nil {
+						runCtx = withFilesystemACL(runCtx, &current)
+					}
+				}
+			}
+		}
+	}
+	if err == nil {
+		result, err = s.callMCPTool(runCtx, name, args)
+	}
+	payload := hub.TaskResult{ID: jobID, TraceID: traceID, TraceParent: traceParent, Result: result}
+	if err != nil {
+		payload.Result = map[string]any{"error": err.Error()}
+	}
+	status := "completed"
+	if err != nil {
+		status = "failed"
+	}
+	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "tool": name, "trace_id": traceID, "traceparent": traceParent, "status": status})
+	s.deliverCallbackResult(payload)
+}
+
+func (s *Server) cancelCallbackJob(jobID string) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+	s.callbackMu.Lock()
+	cancel := s.callbackCancels[jobID]
+	if cancel == nil {
+		s.callbackCancelled[jobID] = true
+	}
+	s.callbackMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "status": "cancel_requested"})
+}
+
+func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool, origin ...map[string]any) (bool, error) {
+	return s.startBoundCallback(jobID, acceptedPoll, s.shellCallback(jobID, req, origin...))
+}
+
+func (s *Server) shellCallback(jobID string, req shell.Request, origin ...map[string]any) func(context.Context) {
+	return func(ctx context.Context) {
+		s.runCallbackJob(withExecutionTask(ctx, jobID, req.TraceID, origin...), jobID, req)
+	}
+}
+
+func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.Request) {
+	req.TraceID = normalizeTraceID(req.TraceID)
+	runCtx = withExecutionTask(runCtx, jobID, req.TraceID)
+	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
+	res := s.runShell(runCtx, req)
+	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})
+	out := hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res}
+	if p := req.ReceiptRedaction; p != nil {
+		out.Result = nil
+		filtered, err := p.Result(res, req.Env)
+		if err != nil {
+			out.Error = map[string]any{"code": "receipt_redaction_unavailable", "message": "output withheld"}
+		} else {
+			out.Result = filtered
+		}
+		out.RedactionVersion = receiptredaction.Version
+	}
+	s.deliverCallbackResult(out)
+}
+
+// Outbox retry tuning. Mirrors the Python shellmcp exponential-backoff
+// hint so a flapping hub cannot cause a tight retry loop.
+
+func (s *Server) queueTimeout() int {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	return s.cfg.QueueTimeout
+}
+
+func (s *Server) queueRetry() time.Duration {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	if s.cfg.QueueRetry > 0 {
+		return s.cfg.QueueRetry
+	}
+	return 5 * time.Second
+}
+func (s *Server) computeOutboxBackoff(attempts int) time.Duration {
+	s.callbackMu.Lock()
+	base, cap := s.cfg.OutboxBackoffBase, s.cfg.OutboxBackoffCap
+	s.callbackMu.Unlock()
+	if base <= 0 {
+		base = 5 * time.Second
+	}
+	if cap < base {
+		cap = 10 * time.Minute
+	}
+	return computeOutboxBackoffWith(base, cap, attempts)
+}
+func (s *Server) applyHubRuntimeSettings(v map[string]any) {
+	if len(v) == 0 {
+		return
+	}
+	// Publish one coherent update. Reuse the executor's short state lock,
+	// releasing it before cleanup, self-repair or any network operation.
+	s.callbackMu.Lock()
+	if n := intAny(v["queue_long_poll_seconds"]); n >= 5 && n <= 120 {
+		s.cfg.QueueTimeout = n
+	}
+	if n := intAny(v["queue_retry_seconds"]); n >= 1 && n <= 300 {
+		s.cfg.QueueRetry = time.Duration(n) * time.Second
+	}
+	if n := intAny(v["spool_retention_hours"]); n >= 1 && n <= 2160 {
+		s.cfg.SpoolRetention = time.Duration(n) * time.Hour
+	}
+	if n := intAny(v["outbox_backoff_base_seconds"]); n >= 1 && n <= 600 {
+		s.cfg.OutboxBackoffBase = time.Duration(n) * time.Second
+	}
+	if n := intAny(v["outbox_backoff_cap_seconds"]); n >= 1 && n <= 3600 {
+		s.cfg.OutboxBackoffCap = time.Duration(n) * time.Second
+	}
+	if s.cfg.OutboxBackoffCap < s.cfg.OutboxBackoffBase {
+		s.cfg.OutboxBackoffCap = s.cfg.OutboxBackoffBase
+	}
+	s.callbackMu.Unlock()
+	if n := intAny(v["storage_max_mb"]); n >= 0 && n <= 10240 {
+		s.storageLimit.Store(int64(n) << 20)
+		_ = s.enforceStorage(nil)
+	}
+	if enabled, ok := v["self_repair_enabled"].(bool); ok {
+		s.selfRepairPolicySeen.Store(true)
+		if enabled {
+			desired := intAny(v["desired_build_version"])
+			repo, _ := v["release_repo"].(string)
+			s.triggerGitHubSelfRepair(desired, repo)
+		}
+	}
+}
+func intAny(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case json.Number:
+		n, _ := strconv.Atoi(string(x))
+		return n
+	}
+	return 0
+}
+func (s *Server) cleanupSpoolByAge() {
+	// Age is not proof of receipt delivery or expiry. Retain all spills until a
+	// reference-aware reclamation policy exists; still reclaim disposable roots.
+	_ = s.enforceStorage(nil)
+}
+
+// Atomic replacement keeps the previous pending payload intact if retry metadata
+// cannot be written (e.g. disk full). Only a successful acknowledgement removes it.
+func writeOutboxFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".outbox-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncReceiptDirectory(filepath.Dir(path))
+}
+
+// computeOutboxBackoff returns the wait time for the given attempt number
+// using a 5s base doubling each retry, capped at 10m, for parity with the
+// Python shellmcp outbox behavior.
+const (
+	outboxBackoffBase = 5 * time.Second
+	outboxBackoffCap  = 10 * time.Minute
+)
+
+func computeOutboxBackoff(attempts int) time.Duration {
+	return computeOutboxBackoffWith(outboxBackoffBase, outboxBackoffCap, attempts)
+}
+
+func computeOutboxBackoffWith(base, cap time.Duration, attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	// Cap attempts to avoid overflow when shifting.
+	const maxAttempts = 30
+	if attempts > maxAttempts {
+		attempts = maxAttempts
+	}
+	wait := base * (1 << attempts)
+	if wait > cap || wait < 0 {
+		wait = cap
+	}
+	return wait
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}

@@ -1,0 +1,226 @@
+{
+  "schema": "gptadmin.grepmesh-browser-acceptance/v1",
+  "kind": "real-isolated-http-mcp",
+  "node_source_commit": "10d9145c65af981192af32458d4b38883ef76011",
+  "node_sha256": "818094f0197e88ee70da41b65f4cde4e55444e2d1077ebc23fb36a4442b2b088",
+  "grepmesh_sha256": "4f723320dda327285f1cfdc2a8a66e9bb827efb0f41337ac14bb5ef36ba31aca",
+  "sso_sha256": "c46ec428a1e2ed0f6852fedef52fb05b083eb2dcf7807ec71be4e5363c27429f",
+  "sso_access_control_sha256": "b301e357e71a0e56442d500af98f60640111bd8b36011b132e02ec2404f2aac1",
+  "native_runner_task_id": "516df23f8ab50580f0180aa5cd7decae",
+  "native_runner_return_code": 0,
+  "original_summary_sha256": "545eb610601d294e8b208a7175a54079b2a0909a0ecda9d2627bace2319bbe8f",
+  "finished_utc": "2026-11-08T02:47:56Z",
+  "principals": {
+    "count": 2,
+    "admin": false
+  },
+  "profiles": {
+    "access_mode": "readonly",
+    "targets": "hub and exact registered GrepMesh child only",
+    "shell_grants": false
+  },
+  "ok": true,
+  "check_count": 39,
+  "checks": [
+    {
+      "check": "exact live SSO native functions provision two isolated nonadmin accounts",
+      "ok": true
+    },
+    {
+      "check": "native profiles and managed-token IDs survive Node restart",
+      "ok": true
+    },
+    {
+      "check": "Hub rejects no SSO cookie",
+      "ok": true,
+      "http": 401
+    },
+    {
+      "check": "Hub rejects forged identity without cookie",
+      "ok": true,
+      "http": 401
+    },
+    {
+      "check": "Console rejects anonymous search",
+      "ok": true,
+      "http": 401
+    },
+    {
+      "check": "Exact live SSO rejects an unassigned site",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "two verified SSO principals use distinct native profiles",
+      "ok": true
+    },
+    {
+      "check": "Console rejects wrong Origin",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects absent Origin",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects client filesystem_acl",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects client _meta",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects client origin_host",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects client hop_count",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Console rejects client request_id",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "principal A real search and SSE confined to own root",
+      "ok": true,
+      "events": 2
+    },
+    {
+      "check": "principal A preview match",
+      "ok": true
+    },
+    {
+      "check": "principal A preview document",
+      "ok": true
+    },
+    {
+      "check": "principal B real search and SSE confined to own root",
+      "ok": true,
+      "events": 2
+    },
+    {
+      "check": "principal B preview document",
+      "ok": true
+    },
+    {
+      "check": "principal B cannot use principal A /api/search/status:",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "principal B cannot use principal A /api/search/events:",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "principal B cannot use principal A /api/preview:match",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "principal B cannot use principal A /api/preview:document",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Forged identity cannot use principal A cached preview",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "live profile narrowing changes fresh authorization fingerprint",
+      "ok": true
+    },
+    {
+      "check": "Narrowed principal A cannot read old /api/search/status:",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Narrowed principal A cannot read old /api/search/events:",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Narrowed principal A cannot read old /api/preview:match",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Narrowed principal A cannot read old /api/preview:document",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "SSO confirms principal B site grant removed",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Hub rechecks current SSO site permission",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Forged forwarded host cannot bypass removed site grant",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Removed site grant blocks cached preview",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "native SSO site grant restored without new login",
+      "ok": true
+    },
+    {
+      "check": "Revoked principal B binding cannot resolve a session",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Revoked principal B cannot read old /api/search/status",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Revoked principal B cannot read old /api/search/events",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "Revoked principal B cannot read old /api/preview",
+      "ok": true,
+      "http": 403
+    },
+    {
+      "check": "real Node and GrepMesh HTTP acceptance complete",
+      "ok": true
+    }
+  ],
+  "production_touched": false,
+  "processes_stopped": true,
+  "private_state_removed": true,
+  "cleanup_errors": [],
+  "source_integration": {
+    "origin_main_commit": "f1f36a5b53ee6ef91ae76e7b30ddc9471644d2d8",
+    "tests": [
+      "TestCodeModeStringBytesKeepsCSI",
+      "TestCodeModeStringBytesFallback"
+    ],
+    "return_code": 0,
+    "skipped": false
+  },
+  "scope": "Real isolated HTTP/SSO/Node/GrepMesh acceptance. Production installation acceptance is separate."
+}

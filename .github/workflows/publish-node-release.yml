@@ -1,0 +1,238 @@
+name: Publish verified Node and full release
+'on':
+  workflow_run:
+    workflows: ['Public Product CI']
+    types:
+    - requested
+    - completed
+permissions:
+  contents: write
+  actions: read
+jobs:
+  build-test-publish:
+    if: >-
+      ((github.event.action == 'requested' && github.event.workflow_run.run_attempt == 1) ||
+      (github.event.action == 'completed' && github.event.workflow_run.run_attempt > 1 &&
+      github.event.workflow_run.conclusion == 'success')) &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.name == 'Public Product CI' &&
+      github.event.workflow_run.repository.id == github.repository_id &&
+      github.event.workflow_run.head_repository.id == github.repository_id &&
+      github.event.workflow_run.repository.full_name == github.repository
+    concurrency:
+      group: gptadmin-public-full-release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GOMAXPROCS: '2'
+      GOFLAGS: -p=2
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      CI_REPOSITORY_ID: ${{ github.repository_id }}
+    steps:
+    - name: Checkout the exact public source for read-only preparation
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+        fetch-depth: 0
+    - name: Require that the tested source is still public main
+      id: current
+      env:
+        SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      run: |
+        set -euo pipefail
+        git fetch --no-tags origin main
+        if [[ "$(git rev-parse FETCH_HEAD)" == "$SOURCE_SHA" ]]; then
+          echo 'current=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'current=false' >> "$GITHUB_OUTPUT"
+        fi
+    - name: Check for an unpublished Node version
+      id: scope
+      if: steps.current.outputs.current == 'true'
+      env:
+        SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      run: |
+        set -euo pipefail
+        version="$(tr -d '[:space:]' < VERSION)"
+        if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+          echo "VERSION '$version' is not a plain integer" >&2
+          exit 1
+        fi
+        private_source="$(python3 - <<'PY'
+        import re, subprocess
+        message = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True)
+        lines = [line.strip() for line in message.splitlines() if line.strip()]
+        trailers = [line for line in lines if line.startswith('Source-Commit:')]
+        if len(trailers) != 1 or not lines or lines[-1] != trailers[0]:
+            raise SystemExit('expected exactly one final Source-Commit trailer')
+        match = re.fullmatch(r'Source-Commit: ([0-9a-f]{40})', trailers[0])
+        if not match:
+            raise SystemExit('invalid Source-Commit trailer')
+        print(match.group(1))
+        PY
+        )"
+        echo "private_source=$private_source" >> "$GITHUB_OUTPUT"
+        prefix="node-v${version}-"
+        release_tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')"
+        published=false
+        while IFS= read -r tag; do
+          if [[ "$tag" == "${prefix}"* ]]; then
+            published=true
+            break
+          fi
+        done <<< "$release_tags"
+
+        paths="$(git diff-tree --no-commit-id --name-only -r "$SOURCE_SHA")"
+        source_changed=false
+        while IFS= read -r path; do
+          case "$path" in
+            VERSION|cli.py|go-hub/*|go-shellmcp/*|scripts/gptadmin_node_*.py|tools/build_node.py)
+              source_changed=true
+              break
+              ;;
+          esac
+        done <<< "$paths"
+
+        if [[ "$published" == 'true' && "$source_changed" == 'true' ]]; then
+          if python3 - <<'PY'
+        import os
+        from pathlib import Path
+        from tools.wait_ci_release import Identity, verify_completed_release
+        identity = Identity(os.environ['GITHUB_REPOSITORY'], int(os.environ['CI_REPOSITORY_ID']),
+                            os.environ['SOURCE_SHA'], int(os.environ['CI_RUN_ID']),
+                            int(os.environ['CI_RUN_ATTEMPT']))
+        verify_completed_release(identity, int(Path('VERSION').read_text().strip()))
+        PY
+          then
+            echo "Version $version is already fully published for this exact source; skipping the repeated event."
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Node package source changed after version $version was released; bump VERSION." >&2
+          exit 1
+        fi
+        changed=false
+        if [[ "$published" == 'false' || "$source_changed" == 'true' ]]; then
+          changed=true
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "published=$published" >> "$GITHUB_OUTPUT"
+        echo "changed=$changed" >> "$GITHUB_OUTPUT"
+    - name: Wait for all immutable artifacts from the exact CI attempt
+      id: artifacts
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      run: |
+        python3 tools/wait_ci_release.py artifacts \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT" \
+          --github-output "$GITHUB_OUTPUT"
+    - name: Download exact Node packages tested by Public Product CI
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        artifact-ids: ${{ steps.artifacts.outputs.node_ids }}
+        path: .tmp/node-packages
+        merge-multiple: true
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ github.token }}
+    - name: Verify complete package set against the tested source
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      env:
+        SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      run: |
+        python3 - <<'PY'
+        import os
+        from pathlib import Path
+        from tools.publish_node_release import verify_package
+        directory = Path('.tmp/node-packages')
+        expected = set()
+        for platform in ('linux', 'darwin'):
+            for arch in ('amd64', 'arm64'):
+                name = f'gptadmin-node-{platform}-{arch}.tar.gz'
+                expected.update((name, name + '.sha256'))
+                manifest = verify_package(directory / name, arch, os.environ['SOURCE_SHA'], platform)
+                if manifest['build_version'] != int(Path('VERSION').read_text().strip()):
+                    raise SystemExit('CI package version differs from the tested source')
+        if {p.name for p in directory.iterdir()} != expected:
+            raise SystemExit('CI artifacts must contain exactly four packages and their checksums')
+        PY
+    - name: Preflight the Darwin archives with the publisher and macOS installer
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      env:
+        SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      run: |
+        set -euo pipefail
+        tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq \
+          '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^node-v[1-9][0-9]*-[0-9a-f]{12}$"))')"
+        previous="$(sort -V <<< "$tags" | tail -n 1)"
+        args=()
+        if [[ -n "$previous" ]]; then
+          [[ "$previous" =~ ^node-v[1-9][0-9]*-([0-9a-f]{12})$ ]]
+          commit="$(git rev-parse "refs/tags/$previous^{commit}")"
+          [[ "$commit" == "${BASH_REMATCH[1]}"* ]]
+          prior="$RUNNER_TEMP/gptadmin-previous-macos-installer.py"
+          git show "$commit:scripts/gptadmin_node_macos_manage.py" > "$prior"
+          args+=(--previous-installer "$prior")
+        fi
+        python3 tests/e2e/node/darwin_package.py .tmp/node-packages "$SOURCE_SHA" "${args[@]}"
+    - name: Download complete release shards from the same exact CI attempt
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        artifact-ids: ${{ steps.artifacts.outputs.full_ids }}
+        path: .tmp/release-shards
+        merge-multiple: false
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ github.token }}
+    - name: Require all product and lifecycle gates before creating any release tag
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      run: |
+        set -euo pipefail
+        python3 tools/wait_ci_release.py success \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT"
+        python3 - "$SOURCE_SHA" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" <<'PY'
+        import sys
+        from tools.publish_full_release import verify_ci_release_artifacts
+        verify_ci_release_artifacts('megamen32/gptadmin_opensource', sys.argv[1],
+                                    int(sys.argv[2]), int(sys.argv[3]))
+        PY
+    - name: Verify all release artifacts after the exact CI lifecycle gate
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+        version="$(tr -d '[:space:]' < VERSION)"
+        git tag -f "v$version" "$SOURCE_SHA"
+        python3 tools/merge_release_shards.py --shards-dir .tmp/release-shards --output build --source "$SOURCE_SHA" --version "$version"
+        python3 tools/verify_release_manifest.py verify --root "$GITHUB_WORKSPACE" --manifest "$GITHUB_WORKSPACE/build/manifest.json"
+        python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
+    - name: Publish immutable Node release for this public source commit
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      env:
+        SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      run: |
+        set -euo pipefail
+        python3 tools/wait_ci_release.py success \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT" \
+          --timeout-seconds 30
+        python3 tools/publish_node_release.py --directory .tmp/node-packages --source "$SOURCE_SHA" --repository megamen32/gptadmin_opensource
+    - name: Publish the verified full release without changing latest
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      env:
+        PRIVATE_SOURCE: ${{ steps.scope.outputs.private_source }}
+      run: |
+        set -euo pipefail
+        python3 tools/publish_full_release.py \
+          --directory build --node-directory .tmp/node-packages \
+          --source "$SOURCE_SHA" --private-source "$PRIVATE_SOURCE" \
+          --version "$(tr -d '[:space:]' < VERSION)" --ci-run "$CI_RUN_ID" \
+          --ci-artifact-attempt "$CI_RUN_ATTEMPT"

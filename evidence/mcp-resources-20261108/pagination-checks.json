@@ -1,0 +1,65 @@
+{
+  "bug": "M18-CHILD-SCHEMA-PAGES",
+  "recorded_utc": "2026-11-08T21:00:00.861506+00:00",
+  "base_revision": "e94c6cef899af446d8e43fd51935ba09d4887be1",
+  "branch": "lhc/schema-pagination-worker-20261108",
+  "go_version": "go version go1.26.4 linux/amd64",
+  "runs": [
+    {
+      "phase": "RED",
+      "command": [
+        "go",
+        "test",
+        "./internal/mcpclient",
+        "./internal/server",
+        "-run",
+        "^(TestListToolsPagination|TestChildToolsCompleteness)",
+        "-count=1",
+        "-timeout=120s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 1,
+      "wall_seconds": 1.818,
+      "base_revision": "e94c6cef899af446d8e43fd51935ba09d4887be1"
+    },
+    {
+      "phase": "GREEN",
+      "command": [
+        "go",
+        "test",
+        "./internal/mcpclient",
+        "./internal/server",
+        "-run",
+        "^(TestListToolsPagination|TestChildToolsCompleteness)",
+        "-count=1",
+        "-timeout=120s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 0,
+      "wall_seconds": 1.668
+    },
+    {
+      "phase": "RELATED",
+      "command": [
+        "go",
+        "test",
+        "./internal/mcpclient",
+        "./internal/server",
+        "-count=1",
+        "-timeout=180s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 0,
+      "wall_seconds": 4.025
+    }
+  ],
+  "source_sha256": {
+    "go-shellmcp/internal/mcpclient/client.go": "2c9f0d5126dfaeb87d3a36d7962ebd0dc65df485be45ba49af46855d57fd83b5",
+    "go-shellmcp/internal/mcpclient/scoped.go": "b9d0547b8ee789ba3fb0aba7848985e34c79dc58eb6937717aa4004068f92a44",
+    "go-shellmcp/internal/mcpclient/pagination.go": "9946adfe1d9a216b706bee2c2ed66154943410eb51caec967c4316b64ffc1d39",
+    "go-shellmcp/internal/mcpclient/pagination_test.go": "33b636abb6a5f84c05c1657487245571d1a0053e72a40c79c4d8a2fb5fe9ed96",
+    "go-shellmcp/internal/server/mcp.go": "4c6e6b591338288be411175ea4cbb98b0ce562c175c96167fcf1267a5c6721c5",
+    "go-shellmcp/internal/server/mcp_schema_pagination_test.go": "45561137c1ac7c0ba1e300374a71e8c26acfe3c2fac7b28dbb932eee16f7bf00"
+  },
+  "test_scope": "local HTTP MCP fixtures; affected mcpclient and server packages; no live installed-runtime acceptance"
+}

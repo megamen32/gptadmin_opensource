@@ -1,0 +1,15 @@
+services:
+  quorum-e2e:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/node/Dockerfile.quorum
+      additional_contexts:
+        failover_runner: service:failover-e2e
+    init: true
+    network_mode: none
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      node0.test: 127.0.0.1
+      node1.test: 127.0.0.1
+      node2.test: 127.0.0.1

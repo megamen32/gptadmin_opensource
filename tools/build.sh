@@ -1,0 +1,1004 @@
+#!/usr/bin/env bash
+# GPTAdmin target-based builder.
+# Default target is `all` for backward compatibility.
+
+set -Eeuo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_DIR"
+
+# The portable Node package has no legacy UI/build-version mutation dependency.
+# Its build tree and all temporary artifacts stay under the project .tmp root.
+if [[ "${1:-}" == node ]]; then
+  shift
+  exec python3 tools/build_node.py "$@"
+fi
+
+export PS4='+ [${EPOCHREALTIME}] ${BASH_SOURCE##*/}:${LINENO}: '
+set -x
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+export PYTHONUTF8=1
+
+ART_DIR="build"
+CACHE_DIR=".buildcache"
+VERSION_FILE="VERSION"
+LOG="$ART_DIR/build.log"
+SHELLMCP_RT_LOG="$ART_DIR/shellmcp_runtime.log"
+HUB_RT_LOG="$ART_DIR/hub_runtime.log"
+FORCE="${FORCE:-0}"
+CLEAN="${CLEAN:-0}"
+REBUILD_ON_REQ_CHANGE="${REBUILD_ON_REQ_CHANGE:-0}"
+SKIP_TESTS="${SKIP_TESTS:-0}"
+TAGGED_RELEASE="${TAGGED_RELEASE:-0}"
+RELEASE_TAG="${RELEASE_TAG:-}"
+RELEASE_COMMIT="${RELEASE_COMMIT:-}"
+GPTADMIN_BUILD_PLATFORMS="${GPTADMIN_BUILD_PLATFORMS:-default}"
+# These receipts live only for this invocation. Old packaged binaries are never trusted.
+BUILT_HUB_PLATFORMS=" "
+BUILT_SHELLMCP_PLATFORMS=" "
+
+usage() {
+  cat <<'EOF'
+Usage: tools/build.sh [target...]
+
+Targets:
+  all        Build Linux hub+shellmcp, CLI, source payloads, platform bundles,
+             component tarballs, Windows/Android shellmcp packages, and smoke-test Linux bins.
+  release    Build only the 16 verified public release bundles (tagged release required)
+  release-platform --platform <goos_goarch>
+             Build one tagged platform: its full/client bundles and partial matrix
+  cli        Package GPTAdmin CLI only: build/gptadmin-cli.tar.gz
+  hub        Build/package GPTAdmin hub: build/gptadmin-hub.tar.gz
+  node       Build portable Linux Node packages in .tmp/node-packages (see --help)
+  shellmcp   Build/package Linux ShellMCP: build/gptadmin-shellmcp.tar.gz
+  macos-client Build only the two macOS ShellMCP client release bundles
+  platform   Package install convenience bundles: build/gptadmin-<os>-<arch>.tar.gz
+  windows    Cross-build Windows hub + ShellMCP and public/gptadmin-win.zip
+  android    Cross-build Android/Termux ShellMCP and build/gptadmin-android-arm64.tar.gz
+  network-tunnel Build the isolated Network Tunnel relay, ticket issuer and edge binaries
+  smoke      Smoke-test existing Linux hub+shellmcp binaries
+  clean      Remove build/ and .buildcache before selected targets
+  help       Show this help
+
+Env:
+  FORCE=1 CLEAN=1 SKIP_TESTS=1 REBUILD_ON_REQ_CHANGE=1
+  TAGGED_RELEASE=1 RELEASE_TAG=vN RELEASE_COMMIT=<full-commit-sha>
+  GPTADMIN_BUILD_PLATFORMS=native (local candidate only; full release matrix is unchanged)
+  GPTADMIN_GREPMESH_SOURCE=1 (explicit local GrepMesh development build)
+  GPTADMIN_HUB_DARWIN_ARM64=/path/gptadmin_hub GPTADMIN_HUB_DARWIN_AMD64=/path/gptadmin_hub
+  ANDROID_ARM64_CC=/path/to/ndk/bin/aarch64-linux-android24-clang (or place it on PATH)
+EOF
+}
+
+# A platform shard is an explicit tagged target, never an ambient matrix override.
+RELEASE_BUILD_PAIR=""
+if [[ "${1:-}" == release-platform ]]; then
+  [[ "$#" == 3 && "${2:-}" == --platform ]] || {
+    echo "ERROR: use release-platform --platform <goos_goarch>" >&2; exit 2;
+  }
+  case "$3" in
+    linux_amd64|linux_arm64|darwin_amd64|darwin_arm64|windows_amd64|windows_arm64|android_amd64|android_arm64)
+      RELEASE_BUILD_PAIR="$3" ;;
+    *) echo "ERROR: unsupported release platform pair: $3" >&2; exit 2 ;;
+  esac
+  set -- release-platform
+fi
+
+TARGETS=("${@:-all}")
+for t in "${TARGETS[@]}"; do
+  case "$t" in
+    help|-h|--help) usage; exit 0 ;;
+    clean) CLEAN=1 ;;
+    release|release-platform)
+      [[ "$TAGGED_RELEASE" == "1" && "${#TARGETS[@]}" == 1 ]] || {
+        echo "ERROR: $t requires TAGGED_RELEASE=1 and a single target" >&2; exit 2;
+      }
+      ;;
+  esac
+done
+
+want() {
+  local q="$1" t
+  for t in "${TARGETS[@]}"; do
+    [[ "$t" == "$q" || "$t" == all ]] && return 0
+  done
+  return 1
+}
+want_any() {
+  local q
+  for q in "$@"; do want "$q" && return 0; done
+  return 1
+}
+
+case "$GPTADMIN_BUILD_PLATFORMS" in
+  default) ;;
+  native)
+    for t in "${TARGETS[@]}"; do
+      case "$t" in hub|shellmcp|cli|smoke|clean) ;;
+        *) echo "ERROR: native scope is only for local hub/shellmcp candidates" >&2; exit 2 ;;
+      esac
+    done
+    [[ "$TAGGED_RELEASE" != "1" ]] || { echo "ERROR: tagged releases require the full platform scope" >&2; exit 2; }
+    [[ "$(uname -s)" == Linux ]] || { echo "ERROR: native candidate scope currently requires Linux" >&2; exit 2; }
+    case "$(uname -m)" in x86_64|amd64) NATIVE_BUILD_PAIR=linux_amd64 ;;
+      aarch64|arm64) NATIVE_BUILD_PAIR=linux_arm64 ;;
+      *) echo "ERROR: unsupported native candidate architecture" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "ERROR: GPTADMIN_BUILD_PLATFORMS must be default or native" >&2; exit 2 ;;
+esac
+
+if [[ "$CLEAN" == "1" ]]; then
+  rm -rf "$ART_DIR" "$CACHE_DIR"
+fi
+mkdir -p "$ART_DIR/cli" "$CACHE_DIR"
+: > "$LOG"
+exec > >(tee -a "$LOG") 2>&1
+
+SHELLMCP_PID=""
+HUB_PID=""
+cleanup() {
+  set +e
+  echo "== cleanup ==" | tee -a "$LOG"
+  [[ -n "${SHELLMCP_PID:-}" ]] && kill "$SHELLMCP_PID" 2>/dev/null || true
+  [[ -n "${HUB_PID:-}" ]] && kill "$HUB_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+err_report() {
+  local exit_code=$?
+  local cmd="${BASH_COMMAND:-unknown}"
+  echo
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "BUILD FAILED (exit=$exit_code)"
+  echo "Last command: $cmd"
+  echo "File: ${BASH_SOURCE[1]:-?}  Line: ${BASH_LINENO[0]:-?}  Func: ${FUNCNAME[1]:-main}"
+  echo "---- tail of $LOG ----------------------------------------------------"
+  tail -n 200 "$LOG" || true
+  echo "---------------------------------------------------------------------"
+  [[ -f "$SHELLMCP_RT_LOG" ]] && { echo "--- shellmcp_runtime.log (tail) ---"; tail -n 120 "$SHELLMCP_RT_LOG"; }
+  [[ -f "$HUB_RT_LOG" ]] && { echo "--- hub_runtime.log (tail) ---"; tail -n 120 "$HUB_RT_LOG"; }
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  exit "$exit_code"
+}
+trap err_report ERR
+
+step(){ echo; echo "===== $* ====="; }
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing command: $1"; exit 127; }; }
+
+step "Check tooling"
+need python3; need tar; need grep; need sed; need awk; need sha256sum
+want_any hub shellmcp all smoke release release-platform && need curl
+want_any windows android macos-client release release-platform && need go
+want network-tunnel && need go
+want_any windows release && need zip
+[[ "$RELEASE_BUILD_PAIR" == windows_* ]] && need zip
+want_any all hub platform release release-platform && need npm
+
+write_build_info() {
+  GO_SHELLMCP_LDFLAGS=(-trimpath -buildvcs=false -ldflags "-s -w -X github.com/megamen32/gptadmin/go-shellmcp/internal/server.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-shellmcp/internal/server.GitCommit=$GIT_COMMIT")
+  GO_HUB_LDFLAGS=(-trimpath -buildvcs=false -ldflags "-s -w -X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$GIT_COMMIT")
+  mkdir -p client
+  cat > client/gptadmin_build_info.py <<PYINFO
+# Auto-generated by tools/build.sh. Safe to overwrite.
+BUILD_VERSION = ${BUILD_VERSION}
+BUILD_TS = "${BUILD_TS}"
+GIT_COMMIT = "${GIT_COMMIT}"
+
+def build_info(component: str) -> dict:
+    return {
+        "component": component,
+        "build_version": BUILD_VERSION,
+        "build_ts": BUILD_TS,
+        "git_commit": GIT_COMMIT,
+    }
+PYINFO
+  cp client/gptadmin_build_info.py gptadmin_build_info.py
+  echo "Build version: $BUILD_VERSION ts=$BUILD_TS git=$GIT_COMMIT"
+}
+
+build_version() {
+  step "Bump build version"
+  old_version="0"
+  [[ -f "$VERSION_FILE" ]] && old_version="$(tr -dc '0-9' < "$VERSION_FILE" || true)"
+  [[ -n "$old_version" ]] || old_version="0"
+  BUILD_VERSION="$((old_version + 1))"
+  printf '%s\n' "$BUILD_VERSION" > "$VERSION_FILE"
+  BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  write_build_info
+}
+
+prepare_tagged_release_archive_scope() {
+  local -a stale_build_archives=() generated_public_archives=()
+  while IFS= read -r -d '' archive; do
+    stale_build_archives+=("$archive")
+  # Only the top-level build directory belongs to this release pipeline.
+  # Nested build trees can be owned by separate add-ons and must not be
+  # removed (or make this release fail) during tagged-release preflight.
+  done < <(find "$ART_DIR" -maxdepth 1 -type f \( -name 'gptadmin*.tar.gz' -o -name 'gptadmin*.zip' \) -print0)
+  if [[ -d "$REPO_DIR/public" ]]; then
+    while IFS= read -r -d '' archive; do
+      generated_public_archives+=("$archive")
+    done < <(find "$REPO_DIR/public" -type f \( -name 'gptadmin*.tar.gz' -o -name 'gptadmin*.zip' \) -print0)
+  fi
+  if ((${#generated_public_archives[@]} > 0)); then
+    rm -f -- "${generated_public_archives[@]}" "$ART_DIR/manifest.json" "$ART_DIR/gptadmin-sbom.spdx.json"
+  fi
+  if ((${#stale_build_archives[@]} == 0)); then
+    return
+  fi
+  rm -f -- "${stale_build_archives[@]}" "$ART_DIR/manifest.json" "$ART_DIR/gptadmin-sbom.spdx.json"
+  echo "ERROR: tagged build rejected pre-existing release archives; removed stale release outputs" >&2
+  exit 2
+}
+
+build_tagged_release_version() {
+  step "Use tagged release version"
+  [[ -f "$VERSION_FILE" ]] || { echo "ERROR: missing $VERSION_FILE" >&2; exit 2; }
+  BUILD_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE" || true)"
+  [[ "$BUILD_VERSION" =~ ^[0-9]+$ ]] || { echo "ERROR: VERSION must contain a plain integer" >&2; exit 2; }
+  [[ "$RELEASE_TAG" == "v$BUILD_VERSION" ]] || {
+    echo "ERROR: RELEASE_TAG must equal v$BUILD_VERSION" >&2
+    exit 2
+  }
+  tag_ref="refs/tags/$RELEASE_TAG"
+  tag_commit="$(git rev-parse --verify "${tag_ref}^{commit}" 2>/dev/null || true)"
+  head_commit="$(git rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$tag_commit" ]] || {
+    echo "ERROR: RELEASE_TAG $RELEASE_TAG does not resolve to HEAD: missing $tag_ref" >&2
+    exit 2
+  }
+  [[ "$tag_commit" == "$head_commit" ]] || {
+    echo "ERROR: RELEASE_TAG $RELEASE_TAG does not resolve to HEAD" >&2
+    exit 2
+  }
+  [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "ERROR: RELEASE_COMMIT must be a full lowercase commit SHA" >&2
+    exit 2
+  }
+  [[ "$RELEASE_COMMIT" == "$head_commit" ]] || {
+    echo "ERROR: RELEASE_COMMIT must equal HEAD" >&2
+    exit 2
+  }
+  prepare_tagged_release_archive_scope
+  BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  GIT_COMMIT="$RELEASE_COMMIT"
+  write_build_info
+}
+
+ensure_build_info() {
+  if [[ ! -f client/gptadmin_build_info.py || ! -f gptadmin_build_info.py ]]; then
+    build_version
+  else
+    BUILD_VERSION="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'BUILD_VERSION\s*=\s*(\d+)', p.read_text()) if p.exists() else None
+print(m.group(1) if m else '0')
+PY
+)"
+    BUILD_TS="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'BUILD_TS\s*=\s*"([^"]+)"', p.read_text()) if p.exists() else None
+print(m.group(1) if m else 'unknown')
+PY
+)"
+    GIT_COMMIT="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'GIT_COMMIT\s*=\s*"([^"]+)"', p.read_text()) if p.exists() else None
+print(m.group(1) if m else 'unknown')
+PY
+)"
+  fi
+}
+
+# Build-info changes affect hub/shellmcp binaries, so any real build bumps once.
+if [[ " ${TARGETS[*]} " == *" macos-client "* && "$TAGGED_RELEASE" != "1" ]]; then
+  echo "ERROR: macos-client requires an exact tagged release source; VERSION will not be bumped" >&2
+  exit 2
+fi
+if want_any all release release-platform cli hub shellmcp macos-client platform windows android network-tunnel; then
+  if [[ "$TAGGED_RELEASE" == "1" ]]; then
+    build_tagged_release_version
+  else
+    build_version
+  fi
+else
+  ensure_build_info
+fi
+
+build_cli() {
+  step "Build CLI payload"
+  mkdir -p "$ART_DIR/cli"
+  cp -f cli.py "$ART_DIR/cli/cli.py"
+  cp -f cli.py "$ART_DIR/cli/gptadmin.py"
+  mkdir -p "$ART_DIR/cli/scripts"
+  cp -f scripts/gptadmin_node_manage.py scripts/gptadmin_node_probe.py scripts/gptadmin_node_autoupdate.py "$ART_DIR/cli/scripts/"
+  chmod 755 "$ART_DIR/cli/gptadmin.py"
+  (cd "$ART_DIR" && tar -czf gptadmin-cli.tar.gz.tmp.$$ cli && mv -f gptadmin-cli.tar.gz.tmp.$$ gptadmin-cli.tar.gz)
+  echo "built: $ART_DIR/gptadmin-cli.tar.gz"
+}
+
+build_admin_ui() {
+  step "Build React admin UI"
+  if [[ "${GPTADMIN_ADMIN_UI_DEPS_READY:-0}" == "1" ]]; then
+    (cd admin-ui && npm run build -- --base=/admin/)
+  else
+    (cd admin-ui && npm ci --prefer-offline --no-audit --no-fund && npm run build -- --base=/admin/)
+  fi
+  [[ -s admin-ui/dist/index.html ]] || { echo "ERROR: missing admin-ui/dist/index.html"; exit 1; }
+  grep -q '/admin/assets/' admin-ui/dist/index.html || {
+    echo "ERROR: React admin UI was built without the /admin/ asset base" >&2
+    exit 1
+  }
+}
+
+fingerprint() {
+  local files=()
+  for f in "$@"; do [[ -f "$f" ]] && files+=("$f"); done
+  [[ ${#files[@]} -eq 0 ]] && { echo "0"; return; }
+  sha256sum "${files[@]}" 2>/dev/null | sort -k2 | sha256sum | awk '{print $1}'
+}
+changed() {
+  local cache="$1" newfp="$2" oldfp=""
+  [[ -f "$cache" ]] && oldfp="$(cat "$cache" 2>/dev/null || true)"
+  [[ "$newfp" != "$oldfp" ]]
+}
+save_fp() { echo "$2" > "$1"; }
+
+# ShellMCP is now Go-only (go-shellmcp). SHELLMCP_DIST points at the cross-built
+# linux/amd64 binary built by build_go_shellmcp_cross_platforms.
+SHELLMCP_DIST="$ART_DIR/go-shellmcp/${NATIVE_BUILD_PAIR:-linux_amd64}/shellmcp-go"
+HUB_DIST="$ART_DIR/gptadmin_hub/dist/gptadmin_hub"
+
+build_unix_node() {
+  local goos="$1" goarch="$2" destination="$3" component flags="-s -w"
+  for component in go-hub/internal/hub go-shellmcp/internal/server; do
+    flags+=" -X github.com/megamen32/gptadmin/$component.BuildVersion=$BUILD_VERSION"
+    flags+=" -X github.com/megamen32/gptadmin/$component.GitCommit=$GIT_COMMIT"
+  done
+  (cd go-hub && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -buildvcs=false \
+    -ldflags "$flags" -o "$destination" ./cmd/gptadmin-node)
+}
+
+build_hub_linux() {
+  step "Go build: gptadmin_hub Linux"
+  local pair="${NATIVE_BUILD_PAIR:-linux_amd64}"
+  mkdir -p "$ART_DIR/gptadmin_hub/dist" "$ART_DIR/gptadmin_hub/$pair"
+  if [[ "$BUILT_HUB_PLATFORMS" != *" $pair "* ]]; then
+    (cd go-hub && CGO_ENABLED=0 GOOS=linux GOARCH="${pair#linux_}" go build "${GO_HUB_LDFLAGS[@]}" \
+      -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" ./cmd/gptadmin-hub)
+    BUILT_HUB_PLATFORMS+="$pair "
+  fi
+  cp -f "$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" "$HUB_DIST"
+  chmod 755 "$HUB_DIST"
+}
+
+# Cross-build the two Go binaries for every published operating-system and
+# architecture pair. CGO is disabled, so no host-specific toolchain is needed.
+build_hub_cross_platforms() {
+  step "Cross-build Go hub platform binaries"
+  pushd go-hub > /dev/null
+  export CGO_ENABLED=0
+  local pairs=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64)
+  [[ "${1:-}" == matrix ]] && pairs+=(windows_amd64 windows_arm64 android_amd64 android_arm64)
+  [[ "${1:-}" == windows ]] && pairs=(windows_amd64)
+  [[ "${1:-}" == release-platform ]] && pairs=("$RELEASE_BUILD_PAIR")
+  [[ "$GPTADMIN_BUILD_PLATFORMS" == native ]] && pairs=("$NATIVE_BUILD_PAIR")
+  for pair in "${pairs[@]}"; do
+    if [[ "$BUILT_HUB_PLATFORMS" == *" $pair "* ]]; then
+      echo "hub already built in this invocation: $pair"
+      continue
+    fi
+    local goos="${pair%%_*}" goarch="${pair##*_}"
+    mkdir -p "../$ART_DIR/gptadmin_hub/$pair"
+    if [[ "$pair" == android_amd64 ]]; then
+      [[ -n "${ANDROID_X86_64_CC:-}" ]] || { echo "ERROR: Android x64 requires ANDROID_X86_64_CC from the Android NDK" >&2; exit 1; }
+      CGO_ENABLED=1 CC="$ANDROID_X86_64_CC" GOOS=$goos GOARCH=$goarch go build "${GO_HUB_LDFLAGS[@]}" \
+        -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" ./cmd/gptadmin-hub
+    else
+      GOOS=$goos GOARCH=$goarch go build "${GO_HUB_LDFLAGS[@]}" \
+        -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" ./cmd/gptadmin-hub
+    fi
+    if [[ "$goos" == windows ]]; then
+      local node_flags="-s -w" package
+      for package in go-hub/internal/hub go-shellmcp/internal/server; do
+        node_flags+=" -X github.com/megamen32/gptadmin/$package.BuildVersion=$BUILD_VERSION"
+        node_flags+=" -X github.com/megamen32/gptadmin/$package.GitCommit=$GIT_COMMIT"
+      done
+      GOOS="$goos" GOARCH="$goarch" go build -trimpath -buildvcs=false -ldflags "$node_flags" \
+        -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin-node.exe" ./cmd/gptadmin-node
+    fi
+    BUILT_HUB_PLATFORMS+="$pair "
+    echo "hub cross-build: $pair/gptadmin_hub"
+  done
+  popd > /dev/null
+}
+
+normalize_arch() {
+  case "${1,,}" in x86_64|amd64) echo amd64 ;; arm64|aarch64) echo arm64 ;; *) echo "${1,,}" ;; esac
+}
+copy_hub_platform_binary() {
+  local src="$1" tag="$2" exe_name="${3:-gptadmin_hub}"
+  [[ -n "$src" && -x "$src" ]] || return 0
+  mkdir -p "$ART_DIR/gptadmin_hub/$tag"
+  local dst="$ART_DIR/gptadmin_hub/$tag/$exe_name"
+  # A cross-build for this target is authoritative. Fallback binaries may be
+  # older prebuilt artifacts and must never overwrite the current source build.
+  if [[ -x "$dst" ]]; then
+    echo "hub platform binary: $tag/$exe_name (destination already built)"
+    return 0
+  fi
+  # Cross-build already places the binary in its destination; copying a file
+  # onto itself makes `cp` fail ("один и тот же файл") under errexit. Skip.
+  if [[ "$src" -ef "$dst" ]]; then
+    echo "hub platform binary: $tag/$exe_name (already in place)"
+    return 0
+  fi
+  cp -f "$src" "$dst"
+  chmod 755 "$dst"
+  echo "hub platform binary: $tag/$exe_name <= $src"
+}
+package_hub_platform_binaries() {
+  step "Package platform hub binaries"
+  # Prefer the cross-built binaries (always present after build_hub_cross_platforms).
+  local tag
+  for tag in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+    copy_hub_platform_binary "$ART_DIR/gptadmin_hub/$tag/gptadmin_hub" "$tag" gptadmin_hub
+  done
+  # Legacy fallbacks (env vars / prebuilt dir) — honored only if the
+  # cross-build was skipped or a tag is still missing.
+  [[ -x "$HUB_DIST" ]] && copy_hub_platform_binary "$HUB_DIST" "linux_$(normalize_arch "$(uname -m)")" "gptadmin_hub"
+  copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_ARM64:-}" darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_AMD64:-}" darwin_amd64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_ARM64:-}" darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_AMD64:-}" darwin_amd64 gptadmin_hub
+  copy_hub_platform_binary prebuilt/gptadmin_hub/darwin_arm64/gptadmin_hub darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary prebuilt/gptadmin_hub/darwin_amd64/gptadmin_hub darwin_amd64 gptadmin_hub
+}
+
+copy_support_payloads() {
+  # Remove artifacts left by pre-Go releases; Python relay code is test/migration-only.
+  rm -rf "$ART_DIR/agents"
+  step "Copy source payloads"
+  rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
+  mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
+  cp -a go-hub "$ART_DIR/hub_source/go-hub"
+  # The unified-node entrypoint imports the executor through a local Go module
+  # replacement. Keep source-only installations buildable from this payload.
+  cp -a go-shellmcp "$ART_DIR/hub_source/go-shellmcp"
+  find "$ART_DIR/hub_source/go-hub" -name '*.bak.*' -delete
+  cp -a client/. "$ART_DIR/client/"
+  find "$ART_DIR/hub_source" "$ART_DIR/client" \( -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' \) -print0 | xargs -0 -r rm -rf
+}
+
+copy_admin_static_payloads() {
+  [[ -s admin-ui/dist/index.html ]] || { echo "ERROR: admin-ui/dist is not built"; exit 1; }
+  rm -rf "$ART_DIR/public"
+  mkdir -p "$ART_DIR/public"
+  cp -a public/. "$ART_DIR/public/"
+
+  # CloudOS is an optional add-on.  Keep a locally installed/staged desktop
+  # out of every normal hub and platform package.
+  rm -rf "$ART_DIR/public/cloudos-ui"
+  rm -rf "$ART_DIR/public/admin" "$ART_DIR/public/admin-legacy"
+  cp -a public/admin "$ART_DIR/public/admin-legacy"
+  cp -a admin-ui/dist "$ART_DIR/public/admin"
+  echo "packaged lightweight admin at $ART_DIR/public/admin; CloudOS is a separate add-on"
+}
+
+archive_component_cli() { build_cli; }
+archive_component_hub() {
+  step "Archive: gptadmin-hub.tar.gz"
+  (cd "$ART_DIR" && tar -czf gptadmin-hub.tar.gz.tmp.$$ gptadmin_hub hub_source cli public && mv -f gptadmin-hub.tar.gz.tmp.$$ gptadmin-hub.tar.gz)
+  echo "built: $ART_DIR/gptadmin-hub.tar.gz"
+}
+build_grepmesh_native() {
+  step "Bundle independently released GrepMesh companion"
+  local os arch tag src out
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(normalize_arch "$(uname -m)")"
+  case "$os" in
+    linux|darwin) tag="${os}_${arch}" ;;
+    *) echo "WARN: GrepMesh bundle unsupported on build host $os/$arch; skipping"; return 0 ;;
+  esac
+  out="$ART_DIR/grepmesh/$tag"
+  if [[ "${GPTADMIN_GREPMESH_SOURCE:-0}" == "1" ]]; then
+    command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo is required for the explicit source build" >&2; return 127; }
+    (cd grepmesh && cargo build --release --locked)
+    src="grepmesh/target/release/grepmesh-mcp"
+    [[ -x "$src" ]] || { echo "ERROR: GrepMesh build produced no $src" >&2; return 1; }
+    rm -rf "$out"
+    mkdir -p "$out"
+    cp -a "$src" "$out/grepmesh-mcp"
+  else
+    python3 tools/fetch_grepmesh.py --platform "$tag" --output "$out" \
+      --cache "$CACHE_DIR/grepmesh" --verify-native
+  fi
+  chmod 755 "$out/grepmesh-mcp"
+  file "$out/grepmesh-mcp"
+}
+
+archive_component_shellmcp() {
+  step "Archive: gptadmin-shellmcp.tar.gz"
+  build_go_shellmcp_cross_platforms
+  build_grepmesh_native
+  local payload=(shellmcp go-shellmcp cli client)
+  [[ -d "$ART_DIR/grepmesh" ]] && payload+=(grepmesh)
+  (cd "$ART_DIR" && tar -czf gptadmin-shellmcp.tar.gz.tmp.$$ "${payload[@]}" && mv -f gptadmin-shellmcp.tar.gz.tmp.$$ gptadmin-shellmcp.tar.gz)
+  sha256sum "$ART_DIR/gptadmin-shellmcp.tar.gz" > "$ART_DIR/gptadmin-shellmcp.sha256"
+  python3 - <<PY
+import json, pathlib
+sha = pathlib.Path('$ART_DIR/gptadmin-shellmcp.sha256').read_text().split()[0]
+pathlib.Path('$ART_DIR/gptadmin-shellmcp.json').write_text(json.dumps({
+  'component': 'shellmcp', 'build_version': int('$BUILD_VERSION'), 'build_ts': '$BUILD_TS',
+  'git_commit': '$GIT_COMMIT', 'platform': 'linux', 'arch': 'x86_64',
+  'artifact_type': 'binary-runtime+source',
+  'runtime_payload': ['go-shellmcp/linux_amd64/shellmcp-go', 'grepmesh/<native-platform>/grepmesh-mcp (when bundled)', 'cli', 'client'],
+  'source_payload': ['client/gptadmin_security.py', 'client/gptadmin_build_info.py'],
+  'sha256': sha, 'url': '/gptadmin-shellmcp.tar.gz'
+}, ensure_ascii=False, indent=2) + '\n')
+PY
+  echo "built: $ART_DIR/gptadmin-shellmcp.tar.gz"
+}
+archive_all() {
+  step "Archive: gptadmin.tar.gz"
+  local payload=(shellmcp gptadmin_hub cli hub_source client public)
+  [[ -d "$ART_DIR/grepmesh" ]] && payload+=(grepmesh)
+  (cd "$ART_DIR" && tar -czf gptadmin.tar.gz.tmp.$$ "${payload[@]}" && mv -f gptadmin.tar.gz.tmp.$$ gptadmin.tar.gz)
+  echo "built: $ART_DIR/gptadmin.tar.gz"
+}
+
+make_platform_archive() {
+  local platform="$1"
+  local arch="$2"
+  local hub_tag="$3"
+  local out="gptadmin-${platform}-${arch}.tar.gz"
+  local tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/gptadmin_hub"
+  if [[ -d "$ART_DIR/gptadmin_hub/$hub_tag" ]]; then
+    mkdir -p "$tmp/gptadmin_hub/$hub_tag"
+    cp -a "$ART_DIR/gptadmin_hub/$hub_tag/." "$tmp/gptadmin_hub/$hub_tag/"
+  else
+    echo "WARN: skip $out: missing $ART_DIR/gptadmin_hub/$hub_tag"
+    rm -rf "$tmp"; return 0
+  fi
+  for d in cli hub_source client public; do [[ -d "$ART_DIR/$d" ]] && cp -a "$ART_DIR/$d" "$tmp/"; done
+  if [[ -d "$ART_DIR/go-shellmcp/${platform}_${arch}" ]]; then
+    mkdir -p "$tmp/go-shellmcp/${platform}_${arch}" "$tmp/shellmcp/${platform}_${arch}"
+    cp -a "$ART_DIR/go-shellmcp/${platform}_${arch}/." "$tmp/go-shellmcp/${platform}_${arch}/"
+    cp -a "$ART_DIR/go-shellmcp/${platform}_${arch}/." "$tmp/shellmcp/${platform}_${arch}/"
+  fi
+  if [[ "$platform" == linux && -d "$ART_DIR/shellmcp" ]]; then cp -a "$ART_DIR/shellmcp" "$tmp/"; fi
+  if [[ -x "$ART_DIR/grepmesh/$hub_tag/grepmesh-mcp" ]]; then
+    mkdir -p "$tmp/grepmesh/$hub_tag"
+    cp -a "$ART_DIR/grepmesh/$hub_tag/." "$tmp/grepmesh/$hub_tag/"
+  fi
+  tar -C "$tmp" -czf "$ART_DIR/$out.tmp.$$" .
+  mv -f "$ART_DIR/$out.tmp.$$" "$ART_DIR/$out"
+  rm -rf "$tmp"
+  echo "built: $ART_DIR/$out"
+}
+archive_platforms() {
+  step "Archive: platform-specific tarballs"
+  make_platform_archive linux amd64 linux_amd64
+  make_platform_archive linux arm64 linux_arm64
+  make_platform_archive darwin arm64 darwin_arm64
+  make_platform_archive darwin amd64 darwin_amd64
+}
+
+build_android_arm64_client() {
+  local cc=${ANDROID_ARM64_CC:-aarch64-linux-android24-clang}
+  if [[ -z "${ANDROID_ARM64_CC:-}" && -n "${ANDROID_X86_64_CC:-}" ]]; then
+    cc="$(dirname "$ANDROID_X86_64_CC")/aarch64-linux-android24-clang"
+  fi
+  command -v "$cc" >/dev/null || {
+    echo "ERROR: set ANDROID_ARM64_CC to the Android NDK compiler for ARM64" >&2
+    return 1
+  }
+  # Android supplies DNS through Bionic. A pure Go resolver tries localhost.
+  CGO_ENABLED=1 CC="$cc" GOOS=android GOARCH=arm64 go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "$1" ./cmd/shellmcp-go
+}
+
+build_go_shellmcp_cross_platforms() {
+  step "Cross-build Go ShellMCP platform binaries"
+  pushd go-shellmcp > /dev/null
+  export CGO_ENABLED=0
+  local pair goos goarch
+  local pairs=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64)
+  [[ "${1:-}" == macos ]] && pairs=(darwin_amd64 darwin_arm64)
+  [[ "${1:-}" == matrix ]] && pairs+=(windows_amd64 windows_arm64 android_amd64 android_arm64)
+  [[ "${1:-}" == windows ]] && pairs=(windows_amd64)
+  [[ "${1:-}" == android-arm64 ]] && pairs=(android_arm64)
+  [[ "${1:-}" == release-platform ]] && pairs=("$RELEASE_BUILD_PAIR")
+  [[ "$GPTADMIN_BUILD_PLATFORMS" == native ]] && pairs=("$NATIVE_BUILD_PAIR")
+  for pair in "${pairs[@]}"; do
+    if [[ "$BUILT_SHELLMCP_PLATFORMS" == *" $pair "* ]]; then
+      echo "ShellMCP already built in this invocation: $pair"
+      continue
+    fi
+    goos="${pair%%_*}"; goarch="${pair##*_}"
+    mkdir -p "../$ART_DIR/go-shellmcp/$pair"
+    if [[ "$pair" == android_arm64 ]]; then
+      build_android_arm64_client "../$ART_DIR/go-shellmcp/$pair/shellmcp-go"
+    elif [[ "$pair" == android_amd64 ]]; then
+      [[ -n "${ANDROID_X86_64_CC:-}" ]] || { echo "ERROR: Android x64 requires ANDROID_X86_64_CC from the Android NDK" >&2; exit 1; }
+      CGO_ENABLED=1 CC="$ANDROID_X86_64_CC" GOOS="$goos" GOARCH="$goarch" go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/$pair/shellmcp-go" ./cmd/shellmcp-go
+    else
+      GOOS="$goos" GOARCH="$goarch" go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/$pair/shellmcp-go" ./cmd/shellmcp-go
+    fi
+    BUILT_SHELLMCP_PLATFORMS+="$pair "
+  done
+  popd > /dev/null
+  chmod 755 "$ART_DIR/go-shellmcp"/*/shellmcp-go
+  cp -a "$ART_DIR/go-shellmcp/." "$ART_DIR/shellmcp/"
+  find "$ART_DIR/go-shellmcp" "$ART_DIR/shellmcp" -maxdepth 2 -type f -name shellmcp-go -exec file {} \;
+}
+
+build_windows_shellmcp() {
+  step "Cross-build Windows Node, hub, and ShellMCP"
+  mkdir -p "$ART_DIR/windows" public
+  build_hub_cross_platforms windows
+  build_go_shellmcp_cross_platforms windows
+  cp -f "$ART_DIR/gptadmin_hub/windows_amd64/gptadmin-node.exe" "$ART_DIR/windows/gptadmin-node.exe"
+  cp -f "$ART_DIR/gptadmin_hub/windows_amd64/gptadmin_hub" "$ART_DIR/windows/gptadmin-hub.exe"
+  cp -f "$ART_DIR/go-shellmcp/windows_amd64/shellmcp-go" "$ART_DIR/windows/shellmcp.exe"
+  ls -lh "$ART_DIR/windows/gptadmin-node.exe" "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe"
+  file "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe" || true
+  step "Archive: gptadmin-win.zip"
+  rm -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
+  # A bare Windows install starts the unified Node with the local admin UI.
+  local win_payload="$ART_DIR/windows-payload"
+  rm -rf "$win_payload"
+  mkdir -p "$win_payload"
+  cp -a "$ART_DIR/windows/." "$win_payload/"
+  cp -a public/admin "$win_payload/admin"
+  cp -f public/openapi.yaml "$win_payload/openapi.yaml"
+  cp -f public/custom-gpt-instructions.md "$win_payload/custom-gpt-instructions.md"
+  (cd "$win_payload" && zip -q -9 -r "../gptadmin-win.zip" gptadmin-node.exe gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md)
+  cp -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
+  cp -f deploy/install_win.ps1 public/install_win.ps1
+  unzip -l public/gptadmin-win.zip
+  sha256sum public/gptadmin-win.zip > public/gptadmin-win.zip.sha256
+  emit_release_bundle windows x64 client
+  cp -f "$ART_DIR/gptadmin-windows-x64-client.zip" public/
+  sha256sum public/gptadmin-windows-x64-client.zip > public/gptadmin-windows-x64-client.zip.sha256
+  if [[ -d "$ART_DIR/public" ]]; then
+    cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 \
+      public/gptadmin-windows-x64-client.zip public/gptadmin-windows-x64-client.zip.sha256 \
+      public/install_win.ps1 "$ART_DIR/public/"
+  fi
+  echo "built: public/gptadmin-win.zip"
+}
+
+build_android_shellmcp() {
+  step "Cross-build Android/Termux ShellMCP"
+  mkdir -p "$ART_DIR/android-arm64/bin"
+  build_go_shellmcp_cross_platforms android-arm64
+  cp -f "$ART_DIR/go-shellmcp/android_arm64/shellmcp-go" "$ART_DIR/android-arm64/bin/shellmcp"
+  chmod 755 "$ART_DIR/android-arm64/bin/shellmcp"
+  cp -f deploy/install_android.sh "$ART_DIR/android-arm64/install_android.sh"
+  chmod 755 "$ART_DIR/android-arm64/install_android.sh"
+  cat > "$ART_DIR/android-arm64/README.android.md" <<EOF
+# GPTAdmin ShellMCP for Android / Termux
+
+This package contains only the ShellMCP reliable transport for Android.
+It is intended to run in Termux in long-poll mode; the GPTAdmin hub stays on your server.
+
+Install:
+
+    curl -fsSL https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install_android.sh | bash
+
+Optional Shizuku/rish privilege mode:
+
+    # Default is auto. Export rish/rish_shizuku.dex from Shizuku into Termux
+    # and restart ShellMCP; explicit root/sudo shell_exec requests will use rish.
+    curl -fsSL https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install_android.sh | bash
+
+Modes:
+
+- auto: normal Termux shell_exec; root/sudo requests use rish when available.
+- none: normal Termux shell_exec only.
+- shizuku: force explicit root/sudo shell_exec requests through rish.
+- shizuku-all: every shell_exec runs through rish.
+
+EOF
+  file "$ART_DIR/android-arm64/bin/shellmcp" || true
+  (cd "$ART_DIR/android-arm64" && tar -czf "../gptadmin-android-arm64.tar.gz.tmp.$$" bin install_android.sh README.android.md)
+  mv -f "$ART_DIR/gptadmin-android-arm64.tar.gz.tmp.$$" "$ART_DIR/gptadmin-android-arm64.tar.gz"
+  sha256sum "$ART_DIR/gptadmin-android-arm64.tar.gz" > "$ART_DIR/gptadmin-android-arm64.sha256"
+  printf '%s\n' "$BUILD_VERSION" > "$ART_DIR/gptadmin-android-arm64.version"
+  echo "built: $ART_DIR/gptadmin-android-arm64.tar.gz"
+}
+
+# Public releases publish these 16 concise bundles. Legacy component archives
+# remain available in build/ for compatibility, but are not user-facing assets.
+emit_release_bundle() {
+  local platform="$1" arch="$2" edition="$3"
+  local goos goarch extension tmp out hub shell suffix=""
+  case "$platform" in
+    windows) goos=windows; extension=zip; suffix=.exe ;;
+    macos) goos=darwin; extension=tar.gz ;;
+    ubuntu) goos=linux; extension=tar.gz ;;
+    android) goos=android; extension=tar.gz ;;
+    *) echo "ERROR: unsupported release platform: $platform" >&2; exit 1 ;;
+  esac
+  case "$arch" in x64) goarch=amd64 ;; arm64) goarch=arm64 ;; *) echo "ERROR: unsupported release architecture: $arch" >&2; exit 1 ;; esac
+  hub="$ART_DIR/gptadmin_hub/${goos}_${goarch}/gptadmin_hub"
+  shell="$ART_DIR/go-shellmcp/${goos}_${goarch}/shellmcp-go"
+  [[ -x "$shell" ]] || { echo "ERROR: missing ShellMCP for $platform/$arch" >&2; exit 1; }
+  [[ "$edition" == client || "$edition" == full ]] || { echo "ERROR: unsupported release edition: $edition" >&2; exit 1; }
+  if [[ "$edition" == full ]]; then [[ -x "$hub" ]] || { echo "ERROR: missing hub for $platform/$arch" >&2; exit 1; }; fi
+  out="$ART_DIR/gptadmin-${platform}-${arch}-${edition}.${extension}"
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  cp -f "$shell" "$tmp/bin/shellmcp$suffix"
+  # Native Ubuntu x64 releases carry the GrepMesh companion next to ShellMCP.
+  # The installer enables it by default unless --no-grepmesh is requested.
+  if [[ "$platform" == ubuntu && "$arch" == x64 ]]; then
+    local grepmesh="$ART_DIR/grepmesh/linux_amd64/grepmesh-mcp"
+    [[ -x "$grepmesh" ]] || { echo "ERROR: missing bundled GrepMesh for $platform/$arch" >&2; exit 1; }
+    cp -f "$grepmesh" "$tmp/bin/grepmesh-mcp"
+    # Independent GrepMesh releases include ripgrep and optional runtime libraries.
+    for companion in rg lib licenses onnxruntime-manifest.txt grepmesh-release.json; do
+      [[ ! -e "$(dirname "$grepmesh")/$companion" ]] || cp -a "$(dirname "$grepmesh")/$companion" "$tmp/bin/"
+    done
+  fi
+  if [[ "$edition" == full ]]; then
+    cp -f "$hub" "$tmp/bin/gptadmin-hub$suffix"
+    if [[ "$goos" == linux || "$goos" == darwin ]]; then
+      build_unix_node "$goos" "$goarch" "$tmp/bin/gptadmin-node"
+    elif [[ "$platform" == windows ]]; then
+      cp -f "$ART_DIR/gptadmin_hub/windows_$goarch/gptadmin-node.exe" "$tmp/bin/gptadmin-node.exe"
+    fi
+    mkdir -p "$tmp/cli"
+    cp -f cli.py "$tmp/cli/gptadmin.py"
+    mkdir -p "$tmp/cli/scripts"
+    cp -f scripts/gptadmin_node_manage.py scripts/gptadmin_node_probe.py scripts/gptadmin_node_autoupdate.py "$tmp/cli/scripts/"
+    if [[ "$goos" == darwin ]]; then
+      cp -f scripts/gptadmin_node_macos_manage.py scripts/gptadmin_node_macos_autoupdate.py "$tmp/cli/scripts/"
+    fi
+    chmod 0755 "$tmp/cli/gptadmin.py"
+    [[ -d "$ART_DIR/public" ]] || { echo "ERROR: missing public payload for $platform/$arch full release" >&2; exit 1; }
+    cp -a "$ART_DIR/public" "$tmp/public"
+    [[ -f "$tmp/public/openapi.yaml" ]] || { echo "ERROR: full release public payload has no openapi.yaml" >&2; exit 1; }
+  fi
+  printf 'GPTAdmin %s for %s/%s (%s)\n' "$BUILD_VERSION" "$platform" "$arch" "$edition" > "$tmp/README.txt"
+  if [[ "$extension" == zip ]]; then
+    if [[ "$edition" == full ]]; then (cd "$tmp" && zip -q -9 -r "$REPO_DIR/$out.tmp.$$" README.txt bin cli public); else (cd "$tmp" && zip -q -9 "$REPO_DIR/$out.tmp.$$" README.txt bin/*); fi
+  else
+    tar -C "$tmp" -czf "$out.tmp.$$" .
+  fi
+  mv -f "$out.tmp.$$" "$out"
+  rm -rf "$tmp"
+  echo "built: $out"
+}
+
+build_user_release_matrix() {
+  step "Package user-facing release matrix"
+  emit_release_bundle "windows" "x64" "full"
+  emit_release_bundle "windows" "x64" "client"
+  emit_release_bundle "windows" "arm64" "full"
+  emit_release_bundle "windows" "arm64" "client"
+  emit_release_bundle "macos" "x64" "full"
+  emit_release_bundle "macos" "x64" "client"
+  emit_release_bundle "macos" "arm64" "full"
+  emit_release_bundle "macos" "arm64" "client"
+  emit_release_bundle "ubuntu" "x64" "full"
+  emit_release_bundle "ubuntu" "x64" "client"
+  emit_release_bundle "ubuntu" "arm64" "full"
+  emit_release_bundle "ubuntu" "arm64" "client"
+  emit_release_bundle "android" "x64" "full"
+  emit_release_bundle "android" "x64" "client"
+  emit_release_bundle "android" "arm64" "full"
+  emit_release_bundle "android" "arm64" "client"
+  write_user_release_matrix
+}
+
+write_user_release_matrix() {
+  (
+    for file in "$ART_DIR"/gptadmin-{windows,macos,ubuntu,android}-{x64,arm64}-{full,client}.{zip,tar.gz}; do
+      if [[ -f "$file" ]]; then sha256sum "$file"; fi
+    done | sort -k2 > "$ART_DIR/gptadmin-checksums.txt"
+  )
+  python3 - "$ART_DIR" "$BUILD_VERSION" "$GIT_COMMIT" "$RELEASE_BUILD_PAIR" <<'PY'
+import hashlib, json, pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+build_version = int(sys.argv[2])
+git_commit = sys.argv[3]
+entries = []
+for path in sorted(root.glob("gptadmin-*-*-*.*")):
+    match = re.fullmatch(r"gptadmin-(windows|macos|ubuntu|android)-(x64|arm64)-(full|client)\.(zip|tar\.gz)", path.name)
+    if match:
+        entries.append({"platform": match.group(1), "arch": match.group(2), "edition": match.group(3), "file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size})
+matrix = {"schema": "gptadmin.release-matrix/v2", "build_version": build_version, "git_commit": git_commit, "artifacts": entries}
+if sys.argv[4]:
+    matrix["build_platform"] = sys.argv[4]
+(root / "gptadmin-release-matrix.json").write_text(json.dumps(matrix, indent=2) + "\n")
+PY
+}
+
+wait_for_http() {
+  local url="$1" timeout="${2:-20}"; shift 2 || true
+  local attempt
+  for ((attempt=1; attempt<=timeout; attempt++)); do
+    if curl -sS "$url" "$@" -o /dev/null; then echo "HTTP OK: $url (attempt $attempt/$timeout)"; return 0; fi
+    sleep 1
+  done
+  echo "Timeout waiting for $url"; return 1
+}
+wait_for_listen_port() {
+  local port="$1" timeout="${2:-20}" line attempt
+  for ((attempt=1; attempt<=timeout; attempt++)); do
+    line="$(ss -ltn "( sport = :$port )" 2>/dev/null | sed -n '2p' || true)"
+    [[ -n "$line" ]] && { echo "LISTEN OK: :$port (attempt $attempt/$timeout)"; return 0; }
+    sleep 1
+  done
+  echo "Timeout waiting for port :$port to listen"; return 1
+}
+is_port_busy() {
+  local port="$1" line out
+  if command -v ss >/dev/null 2>&1; then line="$(ss -ltn "( sport = :$port )" 2>/dev/null | sed -n '2p' || true)"; [[ -n "$line" ]];
+  elif command -v lsof >/dev/null 2>&1; then out="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"; [[ -n "$out" ]];
+  else return 1; fi
+}
+pick_port_plus1() {
+  local base="$1" port
+  for ((port=base; port<base+50; port++)); do if ! is_port_busy "$port"; then echo "$port"; return 0; fi; done
+  echo "ERROR: no free port in range $base..$((base+49))" >&2; exit 1
+}
+smoke_linux() {
+  if [[ "$SKIP_TESTS" == 1 ]]; then echo "Skip smoke tests (SKIP_TESTS=1)"; return 0; fi
+  [[ -x "$SHELLMCP_DIST" ]] || { echo "Missing $SHELLMCP_DIST"; exit 1; }
+  [[ -x "$HUB_DIST" ]] || { echo "Missing $HUB_DIST"; exit 1; }
+  step "Smoke test: shellmcp"
+  : > "$SHELLMCP_RT_LOG"
+  SHELLMCP_PORT="$(pick_port_plus1 25900)"
+  SHELLMCP_TOKEN=testtoken HUB_URL='http://127.0.0.1:1' SHELLMCP_MODE=long_poll SHELLMCP_QUEUE=1 SHELLMCP_HEARTBEAT=0 PORT="$SHELLMCP_PORT" SHELL_PORT="$SHELLMCP_PORT" SHELLMCP_PORT="$SHELLMCP_PORT" "$SHELLMCP_DIST" >"$SHELLMCP_RT_LOG" 2>&1 &
+  SHELLMCP_PID=$!
+  sleep 2
+  kill -0 "$SHELLMCP_PID"
+  if is_port_busy "$SHELLMCP_PORT"; then
+    echo "ERROR: queue-mode ShellMCP unexpectedly opened :$SHELLMCP_PORT" >&2
+    kill "$SHELLMCP_PID" || true
+    exit 1
+  fi
+  kill "$SHELLMCP_PID" || true; SHELLMCP_PID=""
+  step "Smoke test: gptadmin_hub"
+  : > "$HUB_RT_LOG"
+  HUB_PORT="$(pick_port_plus1 9001)"
+  CTL_TOKEN=ctltest HUB_PORT="$HUB_PORT" "$HUB_DIST" >"$HUB_RT_LOG" 2>&1 &
+  HUB_PID=$!
+  wait_for_listen_port "$HUB_PORT" 25
+  wait_for_http "http://127.0.0.1:${HUB_PORT}/version" 10
+  curl -sS -f "http://127.0.0.1:${HUB_PORT}/version" | grep -q build_version
+  curl -sS -f "http://127.0.0.1:${HUB_PORT}/servers" -H "Authorization: Bearer ctltest" >/dev/null
+  kill "$HUB_PID" || true; HUB_PID=""
+}
+
+build_network_tunnel() {
+  step "Build Network Tunnel vertical slice"
+  local linux_dist="$ART_DIR/network-tunnel/linux_amd64"
+  local android_dist="$ART_DIR/network-tunnel/android_arm64"
+  local windows_dist="$ART_DIR/network-tunnel/windows_amd64"
+  mkdir -p "$linux_dist" "$android_dist" "$windows_dist"
+  (cd go-proxyrelay && go build -trimpath -o "../$linux_dist/gptadmin-network-tunnel-relay" ./cmd/proxyrelay)
+  (cd go-proxyrelay && go build -trimpath -o "../$linux_dist/gptadmin-network-tunnel-ticket" ./cmd/networkticket)
+  (cd go-shellmcp && go build -trimpath -o "../$linux_dist/gptadmin-network-tunnel-proxy" ./cmd/networkproxy)
+  (cd go-shellmcp && go build -trimpath -o "../$linux_dist/gptadmin-network-tunnel-agent" ./cmd/networkproxy-agent)
+  (cd go-shellmcp && GOOS=android GOARCH=arm64 go build -trimpath -o "../$android_dist/gptadmin-network-tunnel-proxy" ./cmd/networkproxy)
+  (cd go-shellmcp && GOOS=android GOARCH=arm64 go build -trimpath -o "../$android_dist/gptadmin-network-tunnel-agent" ./cmd/networkproxy-agent)
+  (cd go-proxyrelay && GOOS=windows GOARCH=amd64 go build -trimpath -o "../$windows_dist/gptadmin-network-tunnel-relay.exe" ./cmd/proxyrelay)
+  (cd go-proxyrelay && GOOS=windows GOARCH=amd64 go build -trimpath -o "../$windows_dist/gptadmin-network-tunnel-ticket.exe" ./cmd/networkticket)
+  (cd go-shellmcp && GOOS=windows GOARCH=amd64 go build -trimpath -o "../$windows_dist/gptadmin-network-tunnel-proxy.exe" ./cmd/networkproxy)
+  (cd go-shellmcp && GOOS=windows GOARCH=amd64 go build -trimpath -o "../$windows_dist/gptadmin-network-tunnel-agent.exe" ./cmd/networkproxy-agent)
+  cp docs/NETWORK_PROXY.md "$linux_dist/NETWORK_PROXY.md"
+  cp docs/NETWORK_PROXY.md "$android_dist/NETWORK_PROXY.md"
+  cp docs/NETWORK_PROXY.md "$windows_dist/NETWORK_PROXY.md"
+  (cd "$ART_DIR" && tar -czf gptadmin-network-tunnel.tar.gz.tmp.$$ "network-tunnel" && mv -f gptadmin-network-tunnel.tar.gz.tmp.$$ gptadmin-network-tunnel.tar.gz)
+  sha256sum "$ART_DIR/gptadmin-network-tunnel.tar.gz" > "$ART_DIR/gptadmin-network-tunnel.sha256"
+  echo "built: $ART_DIR/gptadmin-network-tunnel.tar.gz"
+}
+
+# Dependency expansion.
+if want all; then
+  build_cli
+  build_admin_ui
+  build_hub_linux
+  build_hub_cross_platforms
+  package_hub_platform_binaries
+  copy_support_payloads
+  copy_admin_static_payloads
+  build_windows_shellmcp
+  archive_component_cli
+  archive_component_hub
+  archive_component_shellmcp
+  archive_all
+  archive_platforms
+  build_android_shellmcp
+  build_hub_cross_platforms matrix
+  build_go_shellmcp_cross_platforms matrix
+  build_user_release_matrix
+  build_network_tunnel
+  smoke_linux
+elif want release; then
+  # The public release publishes this exact matrix. Legacy component archives
+  # and the separately shipped Node/Network Tunnel are built by their own targets.
+  build_admin_ui
+  build_hub_cross_platforms matrix
+  build_hub_linux
+  build_go_shellmcp_cross_platforms matrix
+  build_grepmesh_native
+  copy_admin_static_payloads
+  build_user_release_matrix
+  smoke_linux
+elif want release-platform; then
+  build_admin_ui
+  build_hub_cross_platforms release-platform
+  build_go_shellmcp_cross_platforms release-platform
+  if [[ "$RELEASE_BUILD_PAIR" == linux_amd64 ]]; then
+    build_hub_linux
+    build_grepmesh_native
+  fi
+  copy_admin_static_payloads
+  case "${RELEASE_BUILD_PAIR%%_*}" in
+    linux) release_platform=ubuntu ;;
+    darwin) release_platform=macos ;;
+    windows) release_platform=windows ;;
+    android) release_platform=android ;;
+  esac
+  case "${RELEASE_BUILD_PAIR##*_}" in
+    amd64) release_arch=x64 ;;
+    arm64) release_arch=arm64 ;;
+  esac
+  emit_release_bundle "$release_platform" "$release_arch" full
+  emit_release_bundle "$release_platform" "$release_arch" client
+  write_user_release_matrix
+  if [[ "$RELEASE_BUILD_PAIR" == linux_amd64 ]]; then smoke_linux; fi
+else
+  want cli && build_cli
+  if want shellmcp; then build_cli; copy_support_payloads; archive_component_shellmcp; fi
+  if want macos-client; then
+    build_go_shellmcp_cross_platforms macos
+    emit_release_bundle macos x64 client
+    emit_release_bundle macos arm64 client
+    write_user_release_matrix
+    python3 tools/verify_macos_release.py --build-dir "$ART_DIR" --minimum-build 1074
+  fi
+  if want hub; then build_cli; build_admin_ui; build_hub_linux; build_hub_cross_platforms; package_hub_platform_binaries; copy_support_payloads; copy_admin_static_payloads; archive_component_hub; fi
+  if want platform; then build_cli; build_admin_ui; build_hub_cross_platforms; package_hub_platform_binaries; build_grepmesh_native; copy_support_payloads; copy_admin_static_payloads; archive_platforms; fi
+  want windows && build_windows_shellmcp
+  want android && build_android_shellmcp
+  want network-tunnel && build_network_tunnel
+  want smoke && smoke_linux
+fi
+
+if want_any all release release-platform cli hub shellmcp macos-client platform windows android network-tunnel; then
+  step "Generate and verify release provenance manifest"
+  python3 tools/generate_sbom.py \
+    --root "$REPO_DIR" \
+    --output "$ART_DIR/gptadmin-sbom.spdx.json" \
+    --build-version "$BUILD_VERSION" \
+    --build-ts "$BUILD_TS" \
+    --git-commit "$GIT_COMMIT"
+  python3 tools/verify_release_manifest.py generate \
+    --root "$REPO_DIR" \
+    --manifest "$ART_DIR/manifest.json" \
+    --build-version "$BUILD_VERSION" \
+    --build-ts "$BUILD_TS" \
+    --git-commit "$GIT_COMMIT"
+  python3 tools/verify_release_manifest.py verify \
+    --root "$REPO_DIR" \
+    --manifest "$ART_DIR/manifest.json"
+fi
+
+step "DONE: Artifacts stored in $ART_DIR"
+echo "Targets: ${TARGETS[*]}"
+echo "Main log: $LOG"
+echo "Runtime logs: $SHELLMCP_RT_LOG, $HUB_RT_LOG"
+echo "Cache dir: $CACHE_DIR (delete with CLEAN=1)"
+ls -lh "$ART_DIR"/gptadmin*.tar.gz "$ART_DIR"/gptadmin*.zip public/gptadmin-win.zip 2>/dev/null || true

@@ -1,0 +1,10 @@
+--- FAIL: TestChildToolsRejectsInvalidNamesBeforeAllowlist (0.01s)
+    --- FAIL: TestChildToolsRejectsInvalidNamesBeforeAllowlist/missing (0.00s)
+        mcp_schema_name_test.go:66: malformed tool was hidden by allowlist and returned as complete: result=map[content:[map[text:Child MCP tools type:text]] resultType:complete structuredContent:map[ref:invalid-name schema_complete:true schema_completeness:complete tools:[map[inputSchema:map[type:object] name:allowed]]]] error=<nil>
+    --- FAIL: TestChildToolsRejectsInvalidNamesBeforeAllowlist/blank (0.00s)
+        mcp_schema_name_test.go:66: malformed tool was hidden by allowlist and returned as complete: result=map[content:[map[text:Child MCP tools type:text]] resultType:complete structuredContent:map[ref:invalid-name schema_complete:true schema_completeness:complete tools:[map[inputSchema:map[type:object] name:allowed]]]] error=<nil>
+    --- FAIL: TestChildToolsRejectsInvalidNamesBeforeAllowlist/non_string (0.01s)
+        mcp_schema_name_test.go:66: malformed tool was hidden by allowlist and returned as complete: result=map[content:[map[text:Child MCP tools type:text]] resultType:complete structuredContent:map[ref:invalid-name schema_complete:true schema_completeness:complete tools:[map[inputSchema:map[type:object] name:allowed]]]] error=<nil>
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-shellmcp/internal/server	0.025s
+FAIL

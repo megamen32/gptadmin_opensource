@@ -1,0 +1,20 @@
+[Unit]
+Description=GPTAdmin ShellMCP Network Tunnel offer agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+EnvironmentFile=/etc/gptadmin/networkproxy-agent.env
+ExecStart=/usr/local/bin/networkproxy-agent -mode pull -offers-url ${OFFERS_URL} -offer-token-file ${OFFER_TOKEN_FILE} -hub-public-key-file ${HUB_PUBLIC_KEY_FILE} -agent-id ${AGENT_ID}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/gptadmin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=GPTAdmin WANB self-repair health check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gptadmin-wanb-health
+TimeoutStartSec=30

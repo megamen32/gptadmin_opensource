@@ -1,0 +1,8 @@
+[Unit]
+Description=GPTAdmin FRP client watchdog
+After=network-online.target gptadmin-tunnel-frpc.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gptadmin-frp-watchdog --unit gptadmin-tunnel-frpc.service --expected-processes 3 --process-pattern "/opt/gptadmin/bin/frpc -c"

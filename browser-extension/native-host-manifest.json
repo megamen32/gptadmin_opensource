@@ -1,0 +1,7 @@
+{
+  "name": "com.gptadmin.cloudos.nativehost",
+  "description": "GPTAdmin Cloud OS Native Host",
+  "path": "/usr/local/bin/gptadmin-cloudos-nativehost",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://*/"]
+}
