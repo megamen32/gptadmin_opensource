@@ -1,0 +1,360 @@
+package hub
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
+)
+
+type Client struct {
+	BaseURL  string
+	HTTP     *http.Client
+	Identity *security.Identity
+	Token    string
+}
+
+func New(base string, id *security.Identity, token, dnsServer, resolveTo string) *Client {
+	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: newHTTPClient(dnsServer, resolveTo)}
+}
+
+func newHTTPClient(dnsServer, resolveTo string) *http.Client {
+	client := &http.Client{Timeout: 90 * time.Second}
+	dnsServer = strings.TrimSpace(dnsServer)
+	resolveTo = strings.TrimSpace(resolveTo)
+	if resolveTo != "" && net.ParseIP(resolveTo) == nil {
+		resolveTo = ""
+	}
+	if dnsServer == "" && resolveTo == "" {
+		return client
+	}
+
+	resolver := net.DefaultResolver
+	if dnsServer != "" {
+		host, _, err := net.SplitHostPort(dnsServer)
+		if err != nil {
+			host = dnsServer
+			dnsServer = net.JoinHostPort(dnsServer, "53")
+		}
+		if net.ParseIP(host) == nil {
+			return client
+		}
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "udp", dnsServer)
+			},
+		}
+	}
+
+	dialer := &net.Dialer{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if roots := configuredRootCAs(); roots != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		if resolveTo != "" {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolveTo, port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		resolved, err := resolver.LookupHost(ctx, host)
+		if err != nil {
+			if lastErr == nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("preferred Hub route %s failed: %v; DNS lookup for %q: %w", resolveTo, lastErr, host, err)
+		}
+		for _, ip := range resolved {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("configured DNS server returned no addresses for %q", host)
+	}
+	client.Transport = transport
+	return client
+}
+
+// configuredRootCAs keeps user-installed CA bundles effective for the Go
+// client on macOS, where crypto/x509 may otherwise rely only on the system
+// keychain. This is needed for locally reissued Hub certificates and remains
+// additive to the platform roots.
+func configuredRootCAs() *x509.CertPool {
+	path := strings.TrimSpace(os.Getenv("SSL_CERT_FILE"))
+	if path == "" {
+		return nil
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil || !roots.AppendCertsFromPEM(pemBytes) {
+		return roots
+	}
+	return roots
+}
+
+type Beat struct {
+	Name                string           `json:"name"`
+	ServerID            string           `json:"server_id"`
+	PublicKey           string           `json:"public_key"`
+	Fingerprint         string           `json:"fingerprint"`
+	BaseURL             string           `json:"base_url"`
+	Cores               int              `json:"cores"`
+	MemMB               int64            `json:"mem_mb"`
+	Time                int64            `json:"time"`
+	Mode                string           `json:"mode"`
+	TransportRole       string           `json:"transport_role"`
+	Backend             string           `json:"backend"`
+	OS                  string           `json:"os"`
+	BuildVersion        int              `json:"build_version"`
+	GitCommit           string           `json:"git_commit"`
+	DefaultUser         string           `json:"default_user,omitempty"`
+	DefaultHome         string           `json:"default_home,omitempty"`
+	DefaultCwd          string           `json:"default_cwd,omitempty"`
+	MCPAgents           []map[string]any `json:"mcp_agents,omitempty"`
+	SpoolBytes          int64            `json:"spool_bytes,omitempty"`
+	StorageBytes        int64            `json:"storage_bytes,omitempty"`
+	OutboxDepth         int              `json:"outbox_depth,omitempty"`
+	OutboxRetryAttempts int              `json:"outbox_retry_attempts,omitempty"`
+	QueuePollCount      int64            `json:"queue_poll_count,omitempty"`
+	QueuePollErrors     int64            `json:"queue_poll_errors,omitempty"`
+	QueuePollLatencyMS  int64            `json:"queue_poll_latency_ms,omitempty"`
+	OutboxRetryFailures int64            `json:"outbox_retry_failures,omitempty"`
+	OutboxDelivered     int64            `json:"outbox_delivered,omitempty"`
+	SelfRepairDesired   int              `json:"self_repair_desired,omitempty"`
+	SelfRepairState     string           `json:"self_repair_state,omitempty"`
+}
+
+type QueueJob struct {
+	ID              string            `json:"id"`
+	TraceID         string            `json:"trace_id,omitempty"`
+	TraceParent     string            `json:"traceparent,omitempty"`
+	ToolName        string            `json:"tool_name,omitempty"`
+	Arguments       map[string]any    `json:"arguments,omitempty"`
+	Cmd             string            `json:"cmd,omitempty"`
+	Cwd             string            `json:"cwd,omitempty"`
+	Timeout         int               `json:"timeout,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	RuntimeSettings map[string]any    `json:"runtime_settings,omitempty"`
+}
+
+type TaskResult struct {
+	ID          string `json:"id"`
+	TraceID     string `json:"trace_id,omitempty"`
+	TraceParent string `json:"traceparent,omitempty"`
+	Result      any    `json:"result"`
+}
+
+func (c *Client) Heartbeat(ctx context.Context, beat Beat) (*http.Response, []byte, error) {
+	return c.doJSON(ctx, http.MethodPost, "/heartbeat", beat)
+}
+func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJob, bool, error) {
+	name := beat.Name
+	p := "/queue/" + url.PathEscape(name)
+	q := url.Values{}
+	if timeout > 0 {
+		q.Set("timeout", fmt.Sprintf("%d", timeout))
+	}
+	if beat.ServerID != "" {
+		q.Set("server_id", beat.ServerID)
+	}
+	if beat.PublicKey != "" {
+		q.Set("public_key", beat.PublicKey)
+	}
+	if beat.Fingerprint != "" {
+		q.Set("fingerprint", beat.Fingerprint)
+	}
+	if beat.BaseURL != "" {
+		q.Set("base_url", beat.BaseURL)
+	}
+	if beat.Mode != "" {
+		q.Set("mode", beat.Mode)
+	}
+	if beat.TransportRole != "" {
+		q.Set("transport_role", beat.TransportRole)
+	}
+	if beat.Backend != "" {
+		q.Set("backend", beat.Backend)
+	}
+	if beat.OS != "" {
+		q.Set("os", beat.OS)
+	}
+	if beat.Cores > 0 {
+		q.Set("cores", fmt.Sprintf("%d", beat.Cores))
+	}
+	if beat.MemMB > 0 {
+		q.Set("mem_mb", fmt.Sprintf("%d", beat.MemMB))
+	}
+	if beat.BuildVersion > 0 {
+		q.Set("build_version", fmt.Sprintf("%d", beat.BuildVersion))
+	}
+	if beat.GitCommit != "" {
+		q.Set("git_commit", beat.GitCommit)
+	}
+	if beat.DefaultUser != "" {
+		q.Set("default_user", beat.DefaultUser)
+	}
+	if beat.DefaultHome != "" {
+		q.Set("default_home", beat.DefaultHome)
+	}
+	if beat.DefaultCwd != "" {
+		q.Set("default_cwd", beat.DefaultCwd)
+	}
+	if beat.SpoolBytes > 0 {
+		q.Set("spool_bytes", fmt.Sprintf("%d", beat.SpoolBytes))
+	}
+	if beat.StorageBytes > 0 {
+		q.Set("storage_bytes", fmt.Sprintf("%d", beat.StorageBytes))
+	}
+	if beat.OutboxDepth > 0 {
+		q.Set("outbox_depth", fmt.Sprintf("%d", beat.OutboxDepth))
+	}
+	if beat.OutboxRetryAttempts > 0 {
+		q.Set("outbox_retry_attempts", fmt.Sprintf("%d", beat.OutboxRetryAttempts))
+	}
+	if beat.QueuePollCount > 0 {
+		q.Set("queue_poll_count", fmt.Sprintf("%d", beat.QueuePollCount))
+	}
+	if beat.QueuePollErrors > 0 {
+		q.Set("queue_poll_errors", fmt.Sprintf("%d", beat.QueuePollErrors))
+	}
+	if beat.QueuePollLatencyMS > 0 {
+		q.Set("queue_poll_latency_ms", fmt.Sprintf("%d", beat.QueuePollLatencyMS))
+	}
+	if beat.OutboxRetryFailures > 0 {
+		q.Set("outbox_retry_failures", fmt.Sprintf("%d", beat.OutboxRetryFailures))
+	}
+	if beat.OutboxDelivered > 0 {
+		q.Set("outbox_delivered", fmt.Sprintf("%d", beat.OutboxDelivered))
+	}
+	if beat.SelfRepairDesired > 0 {
+		q.Set("self_repair_desired", fmt.Sprintf("%d", beat.SelfRepairDesired))
+	}
+	if beat.SelfRepairState != "" {
+		q.Set("self_repair_state", beat.SelfRepairState)
+	}
+	if enc := q.Encode(); enc != "" {
+		p += "?" + enc
+	}
+	resp, body, err := c.do(ctx, http.MethodGet, p, nil)
+	if err != nil {
+		return QueueJob{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return QueueJob{}, false, fmt.Errorf("queue poll HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	if len(bytes.TrimSpace(body)) == 0 || string(bytes.TrimSpace(body)) == "{}" {
+		return QueueJob{}, false, nil
+	}
+	var job QueueJob
+	if err := json.Unmarshal(body, &job); err != nil {
+		return QueueJob{}, false, err
+	}
+	return job, job.ID != "" && (job.Cmd != "" || job.ToolName != ""), nil
+}
+
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("result HTTP %d: %s", e.StatusCode, e.Body) }
+
+func (c *Client) PostResult(ctx context.Context, name string, res TaskResult) error {
+	p := "/queue/" + url.PathEscape(name) + "/result"
+	resp, body, err := c.doJSON(ctx, http.MethodPost, p, res)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	return nil
+}
+
+func NewBeat(id *security.Identity, baseURL, mode string, build int) Beat {
+	info := system.Get()
+	name := info.Host
+	if id != nil && id.Name != "" {
+		name = id.Name
+	}
+	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, GitCommit: "go-shellmcp"}
+	if id != nil {
+		b.ServerID = id.ServerID
+		b.PublicKey = id.PublicKey
+		b.Fingerprint = id.Fingerprint
+	}
+	return b
+}
+
+func (c *Client) doJSON(ctx context.Context, method, p string, payload any) (*http.Response, []byte, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c.do(ctx, method, p, b)
+}
+func (c *Client) do(ctx context.Context, method, p string, body []byte) (*http.Response, []byte, error) {
+	u, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	u.Path = path.Clean("/" + strings.TrimLeft(p, "/"))
+	if strings.Contains(p, "?") {
+		parts := strings.SplitN(p, "?", 2)
+		u.Path = path.Clean("/" + strings.TrimLeft(parts[0], "/"))
+		u.RawQuery = parts[1]
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.Identity != nil {
+		for k, v := range c.Identity.Sign(method, u.EscapedPath(), body) {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, b, nil
+}

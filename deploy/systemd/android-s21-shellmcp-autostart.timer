@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry GPTAdmin S21 ShellMCP reconciliation after boot or USB reconnect
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=android-s21-shellmcp-autostart.service
+
+[Install]
+WantedBy=timers.target

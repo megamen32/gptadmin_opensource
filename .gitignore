@@ -1,0 +1,93 @@
+# --- Python ---
+/.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# --- Node ---
+node_modules/
+package-lock.json.bak*
+
+# --- Build artifacts ---
+build/
+.build/
+.build-v*/
+*.spec
+.buildcache/
+
+# --- Runtime data & config ---
+config/
+logs/
+trash/
+logs_config.json
+*.log
+*.db
+router_cookies.json
+
+# --- Backup files ---
+*.bak*
+requirements.txt.bak*
+services/main_package/client.bak.*/
+
+# --- Apps (separate projects) ---
+apps/
+
+# --- Private deploy configs ---
+deploy/nginx/became.bezrabotnyi.com.conf
+deploy/systemd/
+
+# --- Tunnels & tokens ---
+ngrok_url.txt
+.cloudflared/
+# Local mac tunnel matrix secrets
+scripts/check_mac_tunnel_matrix.env
+
+# --- AI assistant settings (private) ---
+.claude/
+.fast-agent/
+.serena/
+.juggler/
+.playwright-cli/
+graphify-out/
+
+# --- Private infrastructure prompts ---
+public/gptadmin_instructions_under_8000.md
+public/gptadmin_infrastructure_mcp_instructions.md
+
+# --- Archives belong in releases, not the repo ---
+*.tar.gz
+*.zip
+
+# --- Misc scratch ---
+.tmp/
+.tmp-*/
+1.html
+.gitpublic/replace
+.gitpublic/scan
+*.db-shm
+*.db-wal
+private/Cloud/.juggler/
+
+# --- Local LHC runtime state and snapshots ---
+/.agents/shared-session/
+/.agents/tasks/
+/.last-human-commit.prev-*/
+!deploy/systemd/
+deploy/systemd/*
+!deploy/systemd/gptadmin-failover-controller.service
+!deploy/systemd/gptadmin-failover-controller.timer
+!deploy/systemd/gptadmin-frp-watchdog.service
+!deploy/systemd/gptadmin-frp-watchdog.timer
+!deploy/systemd/gptadmin-handover@.service
+!deploy/systemd/gptadmin-hub-standby.service
+!deploy/systemd/gptadmin-hub-primary-ha.conf
+!deploy/systemd/gptadmin-hub-standby-self-repair.conf
+!deploy/systemd/gptadmin-hub-standby-invariants.conf
+!deploy/systemd/gptadmin-tunnel-frpc-ha.conf
+!deploy/systemd/gptadmin-wanb-health.service
+!deploy/systemd/gptadmin-wanb-health.timer
+!deploy/systemd/gptadmin-auto-update-disabled.conf
+!deploy/systemd/gptadmin-hub.service
+.playwright-mcp/

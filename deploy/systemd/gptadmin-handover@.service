@@ -1,0 +1,9 @@
+[Unit]
+Description=GPTAdmin asynchronous Hub handover (%i)
+After=network-online.target nginx.service gptadmin-hub-standby.service
+Wants=network-online.target nginx.service gptadmin-hub-standby.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gptadmin-handover %i
+TimeoutStartSec=120

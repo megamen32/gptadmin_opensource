@@ -1,0 +1,114 @@
+# Getting Started
+
+Install GPT‑Админ, connect your AI, run your first command — in a few minutes.
+
+## 1. Install the hub
+
+On the machine that will run the hub (your PC, a VPS, or a server):
+
+```bash
+# Linux / macOS — auto-detects user/system mode
+curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell, no Administrator needed)
+iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
+```
+
+The installer creates the Hub, starts a Tunnel when needed, and prints one
+**Hub URL**. Keep that URL: it is the place you will connect from.
+
+> No domain needed: choose the auto-tunnel option (FRP or Cloudflare) and you
+> get a public URL. See [Tunnels](./TUNNELS_DOCS.md).
+
+## 2. Install an agent on a target machine
+
+On each server you want to manage:
+
+```bash
+curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install.sh | bash
+```
+
+Pick "agent only" when prompted. The agent registers with your hub automatically.
+
+## 3. Connect your AI
+
+If the client already speaks MCP, register the Hub once:
+
+```bash
+gptadmin connect-mcp
+```
+
+For other clients, pick an adapter:
+
+- **Claude Desktop / other MCP clients** → [MCP client setup](./ADAPTERS.md#1-mcp-client)
+- **DeepSeek / Qwen / Alice / GigaChat** (free web chats) → [Browser extension](./ADAPTERS.md#2-browser-extension)
+- **ChatGPT Custom GPT / Open WebUI** → [OpenAI Action](./ADAPTERS.md#3-openai-action)
+
+## 4. Run your first command
+
+Ask your AI in plain language:
+
+- «покажи статус nginx на server-01»
+- «поставь docker на vps-prod»
+- «почему openchamber отдаёт 503? посмотри логи»
+- «запусти codex чтобы пофиксить баг в этом репо»
+
+The AI calls the hub, the hub routes to the agent, the agent runs the command
+and returns real output. The AI reads it and reports back.
+
+If you are wiring a Custom GPT, import the generated schema URL from the
+Actions section in [Adapters](./ADAPTERS.md#3-openai-action), then choose
+Bearer or OAuth there. Never paste internal service secrets into the GPT.
+
+## Show connection URLs
+
+After setup, print the current public hub URL, tunnel mode, MCP endpoints and Custom GPT Action schemas:
+
+```bash
+sudo gptadmin urls
+```
+
+Useful variants:
+
+```bash
+sudo gptadmin urls --all   # include every registered MCP server
+sudo gptadmin urls --json  # machine-readable output
+```
+
+## Next steps
+
+- [Architecture](./ARCHITECTURE.md) — understand how it fits together
+- [Configuration](./CONFIGURATION.md) — tune env vars, auth, OAuth
+- [Security](./SECURITY_DOCS.md) — production hardening
+- [Web panel](./HUB.md#web-panel-admin) — manage from the browser
+
+Optional extras:
+
+- [MCP Proxy Relay](./MCP_PROXY_RELAY.md)
+- [Webhooks](./WEBHOOKS.md)
+
+## Troubleshooting
+
+**The agent doesn't show up in `/admin`**
+- Check `HUB_URL` is set and reachable from the agent
+- Re-run the agent connection step from the Hub connection page
+- Look at the agent logs: `journalctl --user -u shellmcp -n 50`
+
+**`/mcp` returns 401**
+- Complete the OAuth connection from the Hub URL; `/mcp` accepts scoped MCP
+  connections, not copied service credentials. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
+- If this connection predates Hub refresh support, reconnect once to obtain an
+  `offline_access` refresh credential. Existing sessions cannot receive one
+  retroactively.
+
+**Browser extension buttons don't appear**
+- Refresh the page
+- Make sure Tampermonkey/Userscripts has the script enabled
+- On some sites, auto-insert fails — the prompt is in your clipboard, paste manually
+
+**Custom GPT action test fails**
+- Verify the Hub URL in `servers.url` matches your hub
+- Re-open the Hub connection page and complete the OAuth authorization for the
+  Custom GPT client

@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "ShellMCP Exit Proxy",
+  "version": "0.1.0",
+  "description": "Select a ShellMCP exit node for the local GPTAdmin HTTP proxy.",
+  "permissions": ["proxy", "storage"],
+  "host_permissions": ["http://127.0.0.1:3127/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "ShellMCP Exit Proxy", "default_popup": "popup.html"}
+}

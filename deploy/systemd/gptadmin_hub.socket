@@ -1,0 +1,10 @@
+[Unit]
+Description=Hub Proxy socket (holds port 9001 across service restarts)
+
+[Socket]
+ListenStream=9001
+NoDelay=true
+ReusePort=true
+
+[Install]
+WantedBy=sockets.target

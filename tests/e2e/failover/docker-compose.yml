@@ -1,0 +1,6 @@
+services:
+  failover-e2e:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/failover/Dockerfile
+    init: true

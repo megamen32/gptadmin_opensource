@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically maintain S21 ShellMCP outbound polling
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=300s
+AccuracySec=20s
+Persistent=true
+Unit=android-s21-gptadmin-bridge.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gptadmin": {
+      "type": "http",
+      "url": "https://became.bezrabotnyi.com/mcp"
+    }
+  }
+}

@@ -1,0 +1,826 @@
+openapi: 3.1.0
+info:
+  title: GPTAdmin MCP Relay
+  version: "1.0.0"
+  description: |
+    Compact control API: discover → schema → execute. Poll job when background=true.
+
+    Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
+    The hub itself is exposed as target "hub" for registry and approval tools.
+
+    Network Tunnel v1 exposes bounded control operations only. Raw proxy streams, offers and
+    SOCKS/HTTP data endpoints remain separate; see docs/NETWORK_PROXY.md and
+    docs/NETWORK_PROXY_THREAT_MODEL.md.
+servers:
+  - url: https://your-hub.example
+security:
+  - bearerAuth: []
+paths:
+  /connect.json:
+    get:
+      operationId: connectionManifest
+      summary: Discover the canonical Hub connection contract
+      description: Public, secret-free manifest for deriving MCP and OAuth client setup from one Hub URL.
+      security: []
+      responses:
+        "200":
+          description: Canonical Hub URL and named client choices
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionManifest"
+  /mcp-relay/servers:
+    get:
+      operationId: discover
+      summary: Discover targets
+      description: List compact MCP targets. Add detail=full only when metadata is needed.
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: Opt in to transport, capabilities and metadata.
+          schema:
+            type: string
+            enum: [full]
+      responses:
+        "200":
+          description: Available MCP servers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+  /mcp-relay/tools:
+    post:
+      operationId: schema
+      summary: Get target schema
+      description: List tools for one target from discover. Never use target="default".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SchemaRequest"
+      responses:
+        "200":
+          description: Tool list response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+  /mcp-relay/call:
+    post:
+      operationId: execute
+      summary: Execute one tool
+      description: Execute one tool on one selected target. Use schema first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteRequest"
+      responses:
+        "200":
+          description: Tool call response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "403":
+          description: The JWT is read-only and the selected tool can modify state or execute commands.
+        "428":
+          description: A write-capable call is waiting for one administrator approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequired"
+        "429":
+          description: The bounded-autonomous profile has exhausted its write budget for the current window.
+  /mcp-relay/job/{job_id}:
+    get:
+      operationId: job
+      summary: Get job
+      description: Read a background job by id.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job id returned by execute.
+          schema:
+            type: string
+        - name: detail
+          in: query
+          required: false
+          description: Response detail level; compact is the default and full adds transport diagnostics.
+          schema:
+            type: string
+            enum: [compact, full]
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: MCP job status and optional result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+  /webhooks/v1/{route}:
+    post:
+      operationId: webhookIngress
+      summary: Accept one authenticated webhook event
+      description: The route configuration selects the MCP or Shell action; the event cannot select a target or callback URL.
+      security:
+        - webhookToken: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json: {}
+      responses:
+        "202":
+          description: Accepted webhook job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+  /webhook-jobs/{job_id}:
+    get:
+      operationId: webhookJob
+      summary: Read an authenticated webhook job
+      security:
+        - webhookToken: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookJob"
+  /admin/api/webhook-jobs/{job_id}:
+    get:
+      operationId: getAdminWebhookJob
+      summary: Read one webhook job with operator authentication
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookJob"
+  /webhook-routes:
+    get:
+      operationId: listWebhookRoutes
+      summary: List webhook route metadata
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Route metadata without secrets
+    post:
+      operationId: createWebhookRoute
+      summary: Create an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "201":
+          description: Created route metadata without secrets
+  /webhook-routes/{route}:
+    put:
+      operationId: replaceWebhookRoute
+      summary: Replace an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "200":
+          description: Updated route metadata without secrets
+    delete:
+      operationId: deleteWebhookRoute
+      summary: Delete an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Route deleted
+  /proxy-control/v1/request:
+    post:
+      operationId: networkProxyRequest
+      summary: Request a bounded Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile_id, policy]
+              properties:
+                profile_id:
+                  type: string
+                policy:
+                  $ref: "#/components/schemas/NetworkProxyPolicy"
+      responses:
+        "201":
+          description: Pending capability
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capability]
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/approve:
+    post:
+      operationId: networkProxyApprove
+      summary: Approve a pending Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id:
+                  type: string
+      responses:
+        "200":
+          description: Active capability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/issue:
+    post:
+      operationId: networkProxyIssue
+      summary: Issue one client and one agent stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id, target]
+              properties:
+                capability_id:
+                  type: string
+                target:
+                  type: string
+                  description: IP address and port permitted by the capability
+      responses:
+        "200":
+          description: Short-lived role-bound grants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client_grant:
+                    $ref: "#/components/schemas/ProxyStreamGrant"
+                  agent_grant:
+                    $ref: "#/components/schemas/ProxyStreamGrant"
+  /proxy-control/v1/open:
+    post:
+      operationId: networkProxyOpen
+      summary: Consume a one-time stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, role]
+              properties:
+                token:
+                  type: string
+                role:
+                  type: string
+                  enum: [client, agent]
+      responses:
+        "200":
+          description: Consumed grant metadata without the bearer token
+  /proxy-control/v1/status:
+    get:
+      operationId: networkProxyStatus
+      summary: Read Network Tunnel capability state
+      parameters:
+        - name: capability_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Capability state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/revoke:
+    post:
+      operationId: networkProxyRevoke
+      summary: Revoke and drain a Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id:
+                  type: string
+      responses:
+        "200":
+          description: Draining capability
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    webhookToken:
+      type: http
+      scheme: bearer
+  schemas:
+    EmptyObject:
+      type: object
+      properties: {}
+    ConnectionManifest:
+      type: object
+      additionalProperties: false
+      required: [hub_url, mcp_endpoint, oauth_authorization_server, clients]
+      properties:
+        hub_url:
+          type: string
+          format: uri
+        mcp_endpoint:
+          type: string
+          format: uri
+        oauth_authorization_server:
+          type: string
+          format: uri
+        oauth_protected_resource:
+          type: string
+          format: uri
+        actions_openapi:
+          type: string
+          format: uri
+        clients:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionClient"
+    ConnectionClient:
+      type: object
+      additionalProperties: false
+      required: [id, label, method, endpoint]
+      properties:
+        id:
+          type: string
+          enum: [codex, claude, chatgpt, custom]
+        label:
+          type: string
+        method:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+    ApprovalRequired:
+      type: object
+      additionalProperties: false
+      required: [status, approval_id, expires_at, target, tool]
+      properties:
+        status:
+          type: string
+          enum: [approval_required]
+        approval_id:
+          type: string
+          description: Opaque one-time approval handle; never a copy of the request arguments.
+        expires_at:
+          type: string
+          format: date-time
+        target:
+          type: string
+        tool:
+          type: string
+        message:
+          type: string
+    BoundedAutonomousLimit:
+      type: object
+      additionalProperties: false
+      required: [status, retry_at, limit, window]
+      properties:
+        status:
+          type: string
+          enum: [bounded_autonomous_limit]
+        retry_at:
+          type: string
+          format: date-time
+        limit:
+          type: integer
+          minimum: 1
+        window:
+          type: string
+        message:
+          type: string
+    NetworkProxyPolicy:
+      type: object
+      additionalProperties: false
+      required: [scope, agent_id, mode, target_cidrs, target_ports, max_streams, max_bytes, lease]
+      properties:
+        scope:
+          type: string
+          enum: [lan, internet_egress]
+        agent_id:
+          type: string
+        mode:
+          type: string
+          enum: [webhook, pull, auto]
+        target_cidrs:
+          type: array
+          items:
+            type: string
+        target_ports:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+        max_streams:
+          type: integer
+          minimum: 1
+        max_bytes:
+          type: integer
+          minimum: 1
+        lease:
+          type: integer
+          minimum: 1
+          description: Lease duration in nanoseconds in the Go JSON contract
+    WebhookRoute:
+      type: object
+      additionalProperties: false
+      required: [id, action]
+      properties:
+        id:
+          type: string
+        token:
+          type: string
+          writeOnly: true
+        hmac_secret:
+          type: string
+          writeOnly: true
+        signature_version:
+          type: string
+          enum: [v1, v2]
+        max_skew_seconds:
+          type: integer
+          minimum: 1
+        action:
+          type: object
+          additionalProperties: false
+          required: [kind, target]
+          properties:
+            kind:
+              type: string
+              enum: [mcp, prompt, shell]
+            target:
+              type: string
+            approval_mode:
+              type: string
+              enum: [ask_before_write, bounded_autonomous]
+            tool:
+              type: string
+            arguments:
+              type: object
+              additionalProperties: true
+            prompt:
+              type: string
+            prompt_arg:
+              type: string
+            command:
+              type: string
+            cwd:
+              type: string
+        callback:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:
+              type: string
+            token:
+              type: string
+              writeOnly: true
+            hmac_secret:
+              type: string
+              writeOnly: true
+    WebhookAccepted:
+      type: object
+      required: [route_id, job_id, status]
+      properties:
+        route_id:
+          type: string
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted]
+        duplicate:
+          type: boolean
+    WebhookJob:
+      type: object
+      required: [job_id, route_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+        route_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted, running, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        result:
+          type: object
+        error:
+          type: string
+    NetworkProxyCapability:
+      type: object
+      additionalProperties: false
+      required: [capability_id, profile_id, policy, state, requested_at, streams_issued]
+      properties:
+        capability_id:
+          type: string
+        profile_id:
+          type: string
+        policy:
+          $ref: "#/components/schemas/NetworkProxyPolicy"
+        state:
+          type: string
+          enum: [pending, active, expired, draining, revoked]
+        requested_at:
+          type: string
+          format: date-time
+        approved_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        streams_issued:
+          type: integer
+          minimum: 0
+    ProxyStreamGrant:
+      type: object
+      additionalProperties: false
+      required: [capability_id, stream_id, agent_id, target, role, token, expires_at]
+      properties:
+        capability_id:
+          type: string
+        stream_id:
+          type: string
+        agent_id:
+          type: string
+        target:
+          type: string
+        role:
+          type: string
+          enum: [client, agent]
+        token:
+          type: string
+          writeOnly: true
+        expires_at:
+          type: string
+          format: date-time
+    DiscoverResponse:
+      type: object
+      additionalProperties: false
+      required: [servers]
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServer"
+    McpServer:
+      type: object
+      additionalProperties: true
+      required: [server_id, name, kind, status]
+      properties:
+        server_id:
+          type: string
+          description: Target id to use in schema and execute.
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [real_mcp, virtual_shell, virtual_hub, hub]
+        transport:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [online, offline, stale]
+        last_seen:
+          type: number
+          nullable: true
+        capabilities:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+          additionalProperties: true
+    SchemaRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: Target id from discover. Never use "default".
+        timeout:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 35
+          default: 30
+        background:
+          type: boolean
+          default: false
+    ExecuteRequest:
+      type: object
+      additionalProperties: true
+      required: [target, tool]
+      properties:
+        target:
+          type: string
+          description: Target id from discover. Never use "default".
+        tool:
+          type: string
+          description: Tool name from schema.
+        tool_name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+        args:
+          type: object
+          additionalProperties: true
+          default: {}
+        cmd:
+          type: string
+          nullable: true
+        query:
+          type: string
+          nullable: true
+        cwd:
+          type: string
+          nullable: true
+        timeout:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 86400
+          description: Tool execution timeout in seconds when the selected tool supports it. This does not control the Actions HTTP wait; long calls return a job_id/task_id after the bounded synchronous wait window.
+        background:
+          type: boolean
+          default: false
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Reuse only for the same operation.
+    Result:
+      type: object
+      additionalProperties: true
+      required: [server_id, status]
+      properties:
+        server_id:
+          type: string
+        status:
+          type: string
+          enum: [completed, running, failed, running_or_unknown]
+        response:
+          type: object
+          nullable: true
+          additionalProperties: true
+        background:
+          type: boolean
+        job_id:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+        error:
+          type: object
+          nullable: true
+          additionalProperties: true
+    Job:
+      type: object
+      additionalProperties: true
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, orphaned, running_or_unknown]
+        server_id:
+          type: string
+          nullable: true
+        response:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: object
+          nullable: true
+          additionalProperties: true
+        acked:
+          type: boolean
+          default: false
+    McpError:
+      type: object
+      additionalProperties: true
+      properties:
+        message:
+          type: string
+          nullable: true
+        code:
+          type: string
+          nullable: true

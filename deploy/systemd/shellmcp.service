@@ -1,0 +1,16 @@
+[Unit]
+Description=GPTAdmin ShellMCP Go transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/gptadmin
+EnvironmentFile=-/etc/gptadmin/gptadmin.env
+ExecStart=/opt/gptadmin/bin/shellmcp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,683 @@
+package server
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	inspecthost "github.com/megamen32/gptadmin/go-shellmcp/internal/inspect"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
+)
+
+const mcpProtocolVersion = "2026-07-28"
+
+// MCPTransportRequested reports whether the process should run the real MCP
+// protocol over stdio instead of the legacy HTTP shellmcp transport.  HTTP mode
+// still exposes the same MCP protocol at /mcp; this selector only chooses the
+// process transport used by local launchers such as generic stdio MCP relays.
+func MCPTransportRequested(args []string, envValue string) bool {
+	v := strings.ToLower(strings.TrimSpace(envValue))
+	if v == "stdio" || v == "mcp-stdio" || v == "real-mcp-stdio" {
+		return true
+	}
+	for _, arg := range args {
+		a := strings.ToLower(strings.TrimSpace(arg))
+		if a == "stdio" || a == "mcp-stdio" || a == "--mcp-stdio" || a == "--transport=stdio" || a == "--mcp-transport=stdio" {
+			return true
+		}
+	}
+	return false
+}
+
+type mcpRequest struct {
+	JSONRPC string          `json:"jsonrpc,omitempty"`
+	ID      any             `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type toolCallParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+type resourceReadParams struct {
+	URI string `json:"uri"`
+}
+
+func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
+	switch r.Method {
+	case http.MethodPost:
+		s.mcpHTTPPost(w, r)
+	case http.MethodGet:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "server-initiated SSE stream is not available"})
+	case http.MethodOptions:
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
+}
+
+func (s *Server) mcpHTTPPost(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "empty MCP JSON-RPC body"})
+		return
+	}
+	if trimmed[0] == '[' {
+		var raw []json.RawMessage
+		if err := json.Unmarshal(trimmed, &raw); err != nil {
+			writeJSON(w, http.StatusBadRequest, mcpError(nil, -32700, err.Error()))
+			return
+		}
+		responses := make([]any, 0, len(raw))
+		for _, item := range raw {
+			resp, reply := s.handleMCPJSON(r.Context(), item)
+			if reply {
+				responses = append(responses, resp)
+			}
+		}
+		if len(responses) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeJSON(w, http.StatusOK, responses)
+		return
+	}
+	resp, reply := s.handleMCPJSON(r.Context(), trimmed)
+	if !reply {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func parseSmallTimeout(raw string, def, max int) int {
+	if strings.TrimSpace(raw) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return def
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func (s *Server) handleMCPJSON(ctx context.Context, raw json.RawMessage) (any, bool) {
+	var req mcpRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return mcpError(nil, -32700, err.Error()), true
+	}
+	return s.handleMCPRequest(ctx, req)
+}
+
+func (s *Server) handleMCPRequest(ctx context.Context, req mcpRequest) (any, bool) {
+	id := req.ID
+	if strings.TrimSpace(req.Method) == "" {
+		return mcpError(id, -32600, "missing JSON-RPC method"), true
+	}
+	isNotification := req.ID == nil
+	switch req.Method {
+	case "server/discover":
+		return mcpResponse(id, mcpCacheable(map[string]any{
+			"supportedVersions": []string{mcpProtocolVersion},
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"subscribe": false, "listChanged": false},
+			},
+			"serverInfo": map[string]any{"name": "shellmcp-go", "version": fmt.Sprintf("build-%d", parseBuildVersion(BuildVersion))},
+		}, 30000, "public")), !isNotification
+	case "initialize":
+		// Legacy compatibility shim. MCP 2026-07-28 is stateless and no longer
+		// requires initialize/initialized, but older clients can still connect.
+		return mcpResponse(id, map[string]any{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"subscribe": false, "listChanged": false},
+			},
+			"serverInfo": map[string]any{"name": "shellmcp-go", "version": fmt.Sprintf("build-%d", parseBuildVersion(BuildVersion))},
+		}), !isNotification
+	case "notifications/initialized", "notifications/cancelled":
+		return nil, false
+	case "tools/list":
+		return mcpResponse(id, mcpCacheable(map[string]any{"tools": s.mcpTools()}, 30000, "private")), !isNotification
+	case "tools/call":
+		var params toolCallParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return mcpError(id, -32602, err.Error()), !isNotification
+		}
+		result, err := s.callMCPTool(ctx, params.Name, params.Arguments)
+		if err != nil {
+			return mcpError(id, -32000, err.Error()), !isNotification
+		}
+		return mcpResponse(id, result), !isNotification
+	case "resources/list":
+		return mcpResponse(id, mcpCacheable(map[string]any{"resources": s.mcpResources()}, 30000, "private")), !isNotification
+	case "resources/read":
+		var params resourceReadParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return mcpError(id, -32602, err.Error()), !isNotification
+		}
+		contents, err := s.readMCPResource(params.URI)
+		if err != nil {
+			return mcpError(id, -32004, err.Error()), !isNotification
+		}
+		return mcpResponse(id, mcpCacheable(map[string]any{"contents": contents}, 5000, "private")), !isNotification
+	default:
+		return mcpError(id, -32601, "method not found: "+req.Method), !isNotification
+	}
+}
+
+func mcpResponse(id any, result any) map[string]any {
+	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+}
+
+func mcpError(id any, code int, message string) map[string]any {
+	return map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}}
+}
+
+func mcpText(text string, structured any) map[string]any {
+	return map[string]any{
+		"resultType":        "complete",
+		"content":           []map[string]any{{"type": "text", "text": text}},
+		"structuredContent": structured,
+	}
+}
+
+func mcpCacheable(payload map[string]any, ttlMs int, scope string) map[string]any {
+	out := make(map[string]any, len(payload)+3)
+	for key, value := range payload {
+		out[key] = value
+	}
+	out["resultType"] = "complete"
+	out["ttlMs"] = ttlMs
+	out["cacheScope"] = scope
+	return out
+}
+
+func (s *Server) mcpTools() []map[string]any {
+	return []map[string]any{
+		{
+			"name":        "mcp_manage",
+			"description": "Manage child MCP definitions on this selected ShellMCP host. Use list/status/config to inspect; upsert/remove/enable/disable/restart to change or run them. GPTAdmin Hub only routes the call and does not start the child elsewhere. To manage another machine, select that machine's ShellMCP target. A remote URL is reached from this host; no SSH tunnel is implied.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}},
+					"ref":    map[string]any{"type": []string{"string", "null"}},
+					"config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
+				},
+				"required":             []string{"action"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "mcp_tools",
+			"description": "Run MCP tools/list for one configured child MCP on this host. This checks the child's protocol/tools, not just whether its process exists. Use the ref returned by mcp_manage list or status.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"ref": map[string]any{"type": "string"}},
+				"required":   []string{"ref"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "mcp_call",
+			"description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child. A remote endpoint is reached from this host and no SSH tunnel is implied.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ref":       map[string]any{"type": "string"},
+					"name":      map[string]any{"type": "string"},
+					"arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
+				},
+				"required": []string{"ref", "name"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "system_inspect",
+			"description": "Read bounded, automatically redacted host diagnostics without executing a command. Supports read_file and list_directory on Linux, macOS, Windows and Android.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":    map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}},
+					"path":      map[string]any{"type": "string"},
+					"max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576},
+					"offset":    map[string]any{"type": []string{"integer", "null"}, "minimum": 0},
+				},
+				"required": []string{"action", "path"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "file_editor",
+			"description": "View and edit text files without shell/sed. view returns current N:hhhh line ids; str_replace changes exact text (or a unique whitespace-equivalent match); on no/multiple match it returns current candidate text with fresh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects all changes if any id is stale; successful edits return a compact diff with fresh ids for the next edit. create creates a new file; delete removes one file. Line ids are N:hhhh and come from editor results (and compatible readers).",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":      map[string]any{"type": "string", "enum": []string{"view", "create", "str_replace", "batch_edit", "delete"}},
+					"path":        map[string]any{"type": "string"},
+					"content":     map[string]any{"type": []string{"string", "null"}, "description": "create content; for batch_edit content lives on each operation"},
+					"old_text":    map[string]any{"type": []string{"string", "null"}, "description": "str_replace: raw current file text, without line-id prefixes"},
+					"new_text":    map[string]any{"type": []string{"string", "null"}, "description": "str_replace replacement text"},
+					"replace_all": map[string]any{"type": "boolean", "default": false},
+					"start_line":  map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "view: first line, default 1"},
+					"end_line":    map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "view: inclusive last line, default start+199"},
+					"max_bytes":   map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144, "description": "view response byte cap, default 65536"},
+					"operations": map[string]any{
+						"type": []string{"array", "null"}, "maxItems": 50,
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"action":  map[string]any{"type": "string", "enum": []string{"replace", "insert"}},
+								"start":   map[string]any{"description": "replace: N:hhhh line id; insert: N:hhhh anchor, 0=file start, -1=file end"},
+								"end":     map[string]any{"description": "optional inclusive N:hhhh end id for replace"},
+								"content": map[string]any{"type": "string"},
+							},
+							"required": []string{"action", "start", "content"}, "additionalProperties": false,
+						},
+					},
+				},
+				"required": []string{"action", "path"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "shell_exec",
+			"description": "Execute a shell command on this ShellMCP host; use background=true for local async jobs.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cmd":         map[string]any{"type": "string"},
+					"cwd":         map[string]any{"type": []string{"string", "null"}},
+					"timeout":     map[string]any{"type": []string{"integer", "null"}},
+					"env":         map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
+					"background":  map[string]any{"type": "boolean", "default": false},
+					"run_as_user": map[string]any{"type": []string{"string", "null"}},
+				},
+				"required":             []string{"cmd"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "file_checkpoint",
+			"description": "Explicit durable filesystem checkpoints, separate from normal editing. create snapshots one or more files/directories into a SHA-256 content-addressed gzip store (unchanged content is deduplicated). diff compares a checkpoint to live files. restore is destructive but first automatically saves the current state as a restore-safety checkpoint and returns its id, so the restore itself is reversible. list/delete/cleanup/gc manage history. Do NOT create a checkpoint before every file_editor call; create one at meaningful boundaries such as before a refactor, migration, deploy, or config change.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":        map[string]any{"type": "string", "enum": []string{"create", "list", "diff", "restore", "delete", "cleanup", "gc"}, "default": "create"},
+					"path":          map[string]any{"type": []string{"string", "null"}, "description": "Single path shorthand for create"},
+					"paths":         map[string]any{"type": []string{"array", "null"}, "items": map[string]any{"type": "string"}, "description": "Files or directory roots to checkpoint"},
+					"checkpoint_id": map[string]any{"type": []string{"string", "null"}, "description": "Required for diff/restore/delete"},
+					"name":          map[string]any{"type": []string{"string", "null"}, "description": "Human-readable unique name for a manual checkpoint"},
+					"ttl_days":      map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "default": 30},
+					"limit":         map[string]any{"type": []string{"integer", "null"}, "minimum": 1},
+					"max_age_days":  map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "description": "cleanup: additionally remove checkpoints this old or older"},
+				},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "file_backup",
+			"description": "Legacy compatibility backup tool for older clients. Prefer file_editor for normal text changes and file_checkpoint for explicit durable restore points at meaningful boundaries; do not create a backup before every edit.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":       map[string]any{"type": "string", "enum": []string{"backup", "list", "cleanup", "restore"}, "default": "backup"},
+					"path":         map[string]any{"type": []string{"string", "null"}},
+					"backup_id":    map[string]any{"type": []string{"string", "null"}},
+					"ttl_days":     map[string]any{"type": []string{"integer", "null"}, "default": 30},
+					"label":        map[string]any{"type": []string{"string", "null"}},
+					"use_sudo":     map[string]any{"type": "boolean", "default": false},
+					"overwrite":    map[string]any{"type": "boolean", "default": false},
+					"limit":        map[string]any{"type": []string{"integer", "null"}},
+					"max_age_days": map[string]any{"type": []string{"integer", "null"}},
+				},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "tasks",
+			"description": "List or read background shell_exec jobs kept by this ShellMCP process.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task_id": map[string]any{"type": []string{"string", "null"}},
+				},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "system_info",
+			"description": "Return OS, CPU, memory, hostname and ShellMCP capability/transport metadata for this host.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		},
+	}
+}
+
+func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
+	switch name {
+	case "mcp_manage":
+		return s.mcpManage(args)
+	case "mcp_tools":
+		return s.mcpChildTools(ctx, args)
+	case "mcp_call":
+		return s.mcpChildCall(ctx, args)
+	case "shell_exec":
+		return s.mcpShellExec(ctx, args)
+	case "system_inspect":
+		return s.mcpSystemInspect(args)
+	case "file_editor":
+		return s.mcpFileEditor(args)
+	case "file_checkpoint":
+		return s.mcpFileCheckpoint(args)
+	case "file_backup":
+		return s.mcpFileBackup(args)
+	case "tasks":
+		return s.mcpTasks(args)
+	case "system_info":
+		info := system.Get()
+		payload := map[string]any{
+			"system":              info,
+			"capability_registry": s.mcpCapabilityRegistry(),
+		}
+		return mcpText(fmt.Sprintf("system info for %s", info.Host), payload), nil
+	default:
+		return nil, fmt.Errorf("unknown tool %s", name)
+	}
+}
+
+func (s *Server) mcpSystemInspect(args map[string]any) (map[string]any, error) {
+	var req inspecthost.Request
+	b, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &req); err != nil {
+		return nil, err
+	}
+	req.AllowedRoots = append([]string(nil), s.cfg.InspectRoots...)
+	result, err := inspecthost.Run(req)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Read-only system inspection completed.", map[string]any{"server": s.cfg.Name, "inspection": result}), nil
+}
+
+func (s *Server) mcpManage(args map[string]any) (map[string]any, error) {
+	action, _ := args["action"].(string)
+	ref, _ := args["ref"].(string)
+	if action == "list" {
+		return mcpText("MCP supervisors", map[string]any{"agents": s.mcpAgentsForCapabilities()}), nil
+	}
+	if action == "upsert" {
+		config, ok := args["config"].(map[string]any)
+		if !ok {
+			return nil, errors.New("mcp_manage upsert requires config")
+		}
+		data, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("encode MCP config: %w", err)
+		}
+		var agent supervisor.Agent
+		if err := json.Unmarshal(data, &agent); err != nil {
+			return nil, fmt.Errorf("decode MCP config: %w", err)
+		}
+		if err := s.supervisor.Upsert(agent); err != nil {
+			return nil, err
+		}
+		if err := s.childMCP.Close(agent.Ref); err != nil {
+			return nil, err
+		}
+		return mcpText("MCP definition saved", map[string]any{"action": action, "ref": agent.Ref}), nil
+	}
+	if ref == "" {
+		return nil, errors.New("mcp_manage requires ref for action " + action)
+	}
+	var err error
+	switch action {
+	case "enable":
+		err = s.setMCPEnabled(ref, true)
+	case "disable":
+		err = s.setMCPEnabled(ref, false)
+	case "restart":
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		if agent.Transport != "stdio" {
+			return nil, fmt.Errorf("mcp_manage restart only applies to stdio servers, got %s", agent.Transport)
+		}
+		restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err = s.childMCP.Restart(restartCtx, agent)
+	case "remove":
+		err = s.supervisor.Remove(ref)
+		if err == nil {
+			err = s.childMCP.Close(ref)
+		}
+	case "status":
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		status := s.childMCP.Status(ref)
+		return mcpText("MCP status", map[string]any{"agent": agent, "status": status}), nil
+	case "config":
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		return mcpText("MCP config", map[string]any{"agent": agent}), nil
+	default:
+		return nil, fmt.Errorf("unknown mcp_manage action %s", action)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("MCP action completed", map[string]any{"action": action, "ref": ref}), nil
+}
+
+func (s *Server) setMCPEnabled(ref string, enabled bool) error {
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return err
+	}
+	if err := s.supervisor.SetEnabled(ref, enabled); err != nil {
+		return err
+	}
+	if !enabled && agent.Transport == "stdio" {
+		return s.childMCP.Close(ref)
+	}
+	return nil
+}
+
+func (s *Server) mcpShellExec(ctx context.Context, args map[string]any) (map[string]any, error) {
+	var req shell.Request
+	b, _ := json.Marshal(args)
+	if err := json.Unmarshal(b, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Cmd) == "" {
+		return nil, errors.New("shell_exec requires cmd")
+	}
+	s.applyDefaults(&req)
+	if req.Background {
+		j := s.jobs.Start(req)
+		payload := map[string]any{"status": "running", "job_id": j.ID, "server": s.cfg.Name, "started_at": j.StartedAt}
+		return mcpText("Shell command continues in background.", payload), nil
+	}
+	res := shell.Run(ctx, req, s.cfg.LogLimit)
+	payload := map[string]any{"server": s.cfg.Name, "result": res}
+	return mcpText("shell_exec completed", payload), nil
+}
+
+func (s *Server) mcpTasks(args map[string]any) (map[string]any, error) {
+	tid, _ := args["task_id"].(string)
+	if tid != "" {
+		j, ok := s.jobs.Get(tid)
+		if !ok {
+			return mcpText("Task not found: "+tid, map[string]any{"task_id": tid, "status": "not_found"}), nil
+		}
+		return mcpText(fmt.Sprintf("Task %s: %s", tid, j.State), j), nil
+	}
+	jobs := s.jobs.List()
+	return mcpText(fmt.Sprintf("%d task(s)", len(jobs)), map[string]any{"count": len(jobs), "tasks": jobs}), nil
+}
+
+func (s *Server) mcpCapabilityRegistry() map[string]any {
+	mode := s.cfg.Mode
+	if mode == "" {
+		mode = "webhook"
+	}
+	return map[string]any{
+		"ok":              true,
+		"schema_version":  2,
+		"host":            s.cfg.Name,
+		"capability_role": "real_mcp_server",
+		"protocol":        map[string]any{"name": "mcp", "version": mcpProtocolVersion},
+		"transport_layer": map[string]any{
+			"name":                       "shellmcp",
+			"mode":                       mode,
+			"http_path":                  "/mcp",
+			"stdio":                      true,
+			"poll_mode":                  strings.Contains(strings.ToLower(mode), "poll") || s.cfg.QueueEnabled,
+			"streamable_http_compatible": true,
+		},
+		"tools": s.mcpTools(),
+	}
+}
+
+func (s *Server) mcpResources() []map[string]any {
+	return []map[string]any{
+		{"uri": "shellmcp://system/info", "name": "System info", "mimeType": "application/json"},
+		{"uri": "shellmcp://system/health", "name": "ShellMCP health", "mimeType": "application/json"},
+		{"uri": "shellmcp://jobs", "name": "ShellMCP jobs", "mimeType": "application/json"},
+		{"uri": "shellmcp://capabilities", "name": "ShellMCP MCP capability registry", "mimeType": "application/json"},
+	}
+}
+
+func (s *Server) readMCPResource(uri string) ([]map[string]any, error) {
+	var payload any
+	switch uri {
+	case "shellmcp://system/info":
+		payload = system.Get()
+	case "shellmcp://system/health":
+		payload = map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd}
+	case "shellmcp://jobs":
+		payload = map[string]any{"count": len(s.jobs.List()), "jobs": s.jobs.List()}
+	case "shellmcp://capabilities":
+		payload = s.mcpCapabilityRegistry()
+	default:
+		return nil, fmt.Errorf("unknown resource URI %s", uri)
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	return []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}, nil
+}
+
+// ServeMCPStdio runs the real MCP protocol over newline-delimited JSON stdio.
+// The generic GPTAdmin relay can select stdio_format=ndjson for this transport;
+// HTTP users get the same protocol through POST /mcp plus GET /mcp polling.
+func (s *Server) ServeMCPStdio(ctx context.Context, in io.Reader, out io.Writer) error {
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	enc := json.NewEncoder(out)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		resp, reply := s.handleMCPJSON(ctx, append([]byte(nil), line...))
+		if !reply {
+			continue
+		}
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func childToolAllowed(agent supervisor.Agent, name string) bool {
+	if len(agent.ToolAllowlist) == 0 {
+		return true
+	}
+	for _, allowed := range agent.ToolAllowlist {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+func filterChildTools(agent supervisor.Agent, tools []map[string]any) []map[string]any {
+	if len(agent.ToolAllowlist) == 0 {
+		return tools
+	}
+	out := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if childToolAllowed(agent, name) {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func (s *Server) mcpChildTools(ctx context.Context, args map[string]any) (map[string]any, error) {
+	ref, _ := args["ref"].(string)
+	if strings.TrimSpace(ref) == "" {
+		return nil, errors.New("mcp_tools requires ref")
+	}
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := s.childMCP.ListTools(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	tools = filterChildTools(agent, tools)
+	return mcpText("Child MCP tools", map[string]any{"ref": ref, "tools": tools}), nil
+}
+
+func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[string]any, error) {
+	ref, _ := args["ref"].(string)
+	name, _ := args["name"].(string)
+	if strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
+		return nil, errors.New("mcp_call requires ref and name")
+	}
+	arguments, _ := args["arguments"].(map[string]any)
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return nil, err
+	}
+	if !childToolAllowed(agent, name) {
+		return nil, fmt.Errorf("mcp child %q tool %q is not allowed by tool_allowlist", ref, name)
+	}
+	result, err := s.childMCP.CallTool(ctx, agent, name, arguments)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Child MCP tool completed", map[string]any{"ref": ref, "name": name, "result": result}), nil
+}

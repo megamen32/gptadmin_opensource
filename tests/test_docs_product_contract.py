@@ -1,0 +1,161 @@
+"""Contract checks for canonical product documentation and local links."""
+
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DOC_SOURCES = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+LINK_RE = re.compile(r"\]\(([^)]+)\)")
+
+
+def test_documentation_map_names_one_canonical_page_per_supported_surface() -> None:
+    """Every supported path needs a maintained entry point and changelog link."""
+
+    document = (ROOT / "docs" / "DOCUMENTATION_MAP.md").read_text(encoding="utf-8").lower()
+    for required in (
+        "getting started",
+        "mcp clients",
+        "browser extension",
+        "chatgpt custom gpt",
+        "profiles",
+        "network proxy",
+        "observability",
+        "security",
+        "deployment blueprints",
+        "live acceptance",
+        "canary acceptance",
+        "changelog.md",
+    ):
+        assert required in document, f"documentation map is missing {required!r}"
+
+
+def test_local_markdown_links_resolve() -> None:
+    """Docs CI must catch links that point at files removed from the repository."""
+
+    broken: list[str] = []
+    for source in DOC_SOURCES:
+        for target in LINK_RE.findall(source.read_text(encoding="utf-8")):
+            target = target.strip().strip("<>").split("#", 1)[0].split("?", 1)[0]
+            if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            candidate = (source.parent / target).resolve()
+            if not candidate.exists():
+                broken.append(f"{source.relative_to(ROOT)} -> {target}")
+    assert not broken, "broken local documentation links:\n" + "\n".join(broken)
+
+
+def test_release_workflow_runs_docs_contract() -> None:
+    """The release workflow must execute the docs contract, not only build artifacts."""
+
+    workflow = (ROOT / ".github" / "workflows" / "build-and-sync.yml").read_text(encoding="utf-8")
+    assert "name: Docs product contract" in workflow
+    assert "uv run pytest tests/test_docs_product_contract.py tests/test_feedback_loop_contract.py -q" in workflow
+    assert "name: Docs-as-code contract" in workflow
+    assert "uv run pytest tests/test_site_docs.py tests/test_openapi_artifact.py tests/test_docs_product_contract.py tests/test_public_mirror.py tests/test_install_scripts.py -q" in workflow
+
+
+def test_integration_control_contract_matches_current_hub_scope() -> None:
+    """Integration docs must not downgrade implemented discover/schema/execute flow."""
+
+    document = (ROOT / "docs" / "INTEGRATION_CONTROL_CONTRACT.md").read_text(encoding="utf-8").lower()
+    assert "current hub implementation" in document
+    assert "discover -> schema -> execute" in document
+    assert "schema version/digest" in document
+    assert "no implementation is being claimed" not in document
+
+
+def test_canonical_docs_include_executable_verification_snippets() -> None:
+    """Supported contract pages must expose the command that verifies them."""
+    required_snippets = {
+        "INTEGRATION_CONTROL_CONTRACT.md": "TestMCPIntegrationDiscoverSchemaExecuteConformance",
+        "CAPABILITY_CATALOG.md": "tests/test_mcp_catalog.py",
+        "OBSERVABILITY.md": "TestOTLPExporter",
+        "EXTENSION_SDK.md": "tests/fixtures/mcp-extension-example.json",
+        "BACKUP_RESTORE.md": "gptadmin backup verify",
+        "LIVE_ACCEPTANCE.md": "tests/e2e/live_acceptance.py",
+        "CANARY_ACCEPTANCE.md": "tests/e2e/canary_acceptance.py",
+    }
+    for filename, snippet in required_snippets.items():
+        document = (ROOT / "docs" / filename).read_text(encoding="utf-8")
+        assert "```" in document, f"{filename} has no executable snippet fence"
+        assert snippet in document, f"{filename} is missing verification command {snippet!r}"
+
+
+def test_openai_action_quickstart_stays_simple_and_oauth_first() -> None:
+    """The Custom GPT quickstart must stay compact and avoid proxy/webhook drift."""
+
+    document = (ROOT / "docs" / "INTEGRATIONS.md").read_text(encoding="utf-8")
+    quickstart = document.split("### Optional virtual MCP capabilities", 1)[0]
+    compact = " ".join(quickstart.split())
+
+    for required in (
+        "## 1. OpenAI Action (Custom GPT)",
+        "Import OpenAPI by URL",
+        "Authentication",
+        "OAuth Authorization Code + PKCE is the recommended path.",
+        "The default `/actions/openapi.yaml` intentionally contains one Bearer security scheme and only `discover → schema → execute → job`.",
+    ):
+        assert required in compact, f"Custom GPT quickstart is missing {required!r}"
+
+    for forbidden in (
+        "/server/network-proxy/mcp",
+        "/server/webhooks/mcp",
+    ):
+        assert forbidden not in compact, f"Custom GPT quickstart drifted into {forbidden!r}"
+
+
+def test_proxy_and_webhook_surfaces_remain_disabled_by_default_and_separate() -> None:
+    """Proxy/webhook support must remain opt-in with separate isolated surfaces."""
+
+    integrations = (ROOT / "docs" / "INTEGRATIONS.md").read_text(encoding="utf-8")
+    webhooks = (ROOT / "docs" / "WEBHOOKS.md").read_text(encoding="utf-8")
+
+    optional_section = " ".join(integrations.split("### Optional virtual MCP capabilities", 1)[1].split())
+    for required in (
+        "`network-proxy` and `webhooks` are disabled by default.",
+        "/server/network-proxy/mcp",
+        "/server/network-proxy/actions/openapi.yaml",
+        "/server/webhooks/mcp",
+        "/server/webhooks/actions/openapi.yaml",
+    ):
+        assert required in optional_section, f"Optional capability section is missing {required!r}"
+
+    compact_webhooks = " ".join(webhooks.split())
+    assert "default `approval_mode` is `ask_before_write`" in compact_webhooks
+    assert "rejected with an approval-required result and no job is queued until an explicit workflow is added." in compact_webhooks
+    assert 'approval_mode: "bounded_autonomous"' in compact_webhooks
+
+
+def test_custom_gpt_prompt_selects_actions_not_native_mcp() -> None:
+    """Custom GPT instructions must not route an Actions client to /mcp."""
+    prompt = (ROOT / "GPTADMIN_PROMPT.md").read_text(encoding="utf-8")
+    compact = " ".join(prompt.split())
+    assert "uses the OpenAI Actions facade" in compact
+    assert "Do **not** call or probe `/mcp` from this Custom GPT" in compact
+    assert "401" in compact
+    assert "operations `discover`, `schema`, `execute` and `job`" in compact
+
+
+def test_public_custom_gpt_instructions_stay_in_sync_with_prompt_source() -> None:
+    """The hub serves public/custom-gpt-instructions.md; it must match the prompt source."""
+    assert (ROOT / "public" / "custom-gpt-instructions.md").read_text(
+        encoding="utf-8"
+    ) == (ROOT / "GPTADMIN_PROMPT.md").read_text(encoding="utf-8")
+
+
+def test_reality_first_acceptance_policy_is_canonical() -> None:
+    """Project policy must not regress to mocks/fakes as release evidence."""
+
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").lower()
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").lower()
+    philosophy = (ROOT / "docs" / "PHILOSOPHY.md").read_text(encoding="utf-8").lower()
+    philosophy_compact = " ".join(philosophy.split())
+
+    assert "## reality-first testing" in agents
+    assert "acceptance and release gates must fail closed" in agents
+    assert "## testing policy: reality first" in contributing
+    assert "unit-test tools only" in contributing
+    assert "do not silently replace it with a fake" in contributing
+    assert "## reality is the acceptance boundary" in philosophy
+    assert "a fake is never a fallback definition of done" in philosophy_compact

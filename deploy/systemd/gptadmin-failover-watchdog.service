@@ -1,0 +1,9 @@
+[Unit]
+Description=GPTAdmin failover watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/gptadmin/failover-watchdog.env
+ExecStart=/usr/local/bin/gptadmin-failover-watchdog --check-once

@@ -1,0 +1,491 @@
+package shell
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
+)
+
+const DefaultLimitBytes int64 = 8192
+const DefaultSpillThresholdBytes int64 = 1024 * 1024
+const DefaultTimeout = 300 * time.Second
+
+type Request struct {
+	Cmd         string            `json:"cmd"`
+	TraceID     string            `json:"trace_id,omitempty"`
+	TraceParent string            `json:"traceparent,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	Timeout     int               `json:"timeout,omitempty"`
+	SpillDir    string            `json:"spill_dir,omitempty"`
+	Background  bool              `json:"background,omitempty"`
+	RunAsUser   string            `json:"run_as_user,omitempty"`
+	User        string            `json:"user,omitempty"`
+	DefaultUser string            `json:"-"`
+	DefaultCwd  string            `json:"-"`
+}
+
+type Result struct {
+	ReturnCode  int      `json:"returncode"`
+	Stdout      string   `json:"stdout"`
+	Stderr      string   `json:"stderr"`
+	Error       string   `json:"error,omitempty"`
+	TimedOut    bool     `json:"timed_out,omitempty"`
+	DurationMS  int64    `json:"duration_ms"`
+	Cwd         string   `json:"cwd_effective,omitempty"`
+	RunAsUser   string   `json:"run_as_user,omitempty"`
+	Spilled     bool     `json:"_spilled,omitempty"`
+	StdoutPath  string   `json:"stdout_path,omitempty"`
+	StderrPath  string   `json:"stderr_path,omitempty"`
+	StdoutBytes int64    `json:"stdout_bytes,omitempty"`
+	StderrBytes int64    `json:"stderr_bytes,omitempty"`
+	Files       []string `json:"files,omitempty"`
+}
+
+type Event struct {
+	Type       string `json:"type"`
+	Stream     string `json:"stream,omitempty"`
+	Data       string `json:"data,omitempty"`
+	ReturnCode int    `json:"returncode,omitempty"`
+	Error      string `json:"error,omitempty"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
+	Seq        int64  `json:"seq,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
+}
+
+func Run(ctx context.Context, req Request, limitBytes int64) Result {
+	res, _ := runInternal(ctx, req, limitBytes, nil)
+	return res
+}
+
+func RunLive(ctx context.Context, req Request, limitBytes int64, emit func(Event)) Result {
+	res, _ := runInternal(ctx, req, limitBytes, emit)
+	return res
+}
+
+func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(Event)) (Result, error) {
+	// TODO: wire SnapshotDir/Restore here (see fsmeta.go). Snapshot cwd's
+	// file metadata before cmd.Start() and Restore() in a defer so metadata
+	// is repaired on every exit path (success, error, timeout).
+	started := time.Now()
+	if limitBytes <= 0 {
+		limitBytes = DefaultLimitBytes
+	}
+	if req.Cmd == "" {
+		return Result{ReturnCode: -1, Error: "empty cmd", DurationMS: time.Since(started).Milliseconds()}, errors.New("empty cmd")
+	}
+	if err := validateEnvironment(req.Env); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	}
+	timeout := DefaultTimeout
+	if req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := ImplicitRootExecutionError(req); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	}
+
+	cmd, runAsUser := buildCommand(ctx, req)
+	if req.Cwd != "" {
+		cmd.Dir = req.Cwd
+	} else if req.DefaultCwd != "" {
+		cmd.Dir = req.DefaultCwd
+	}
+	env := os.Environ()
+	for k, v := range req.Env {
+		env = append(env, k+"="+v)
+	}
+	cmd.Env = env
+	setProcessGroup(cmd)
+
+	spillDir := req.SpillDir
+	if spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "shellmcp-go-spool")
+	}
+	spoolID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+	stdoutPath := filepath.Join(spillDir, spoolID+".stdout")
+	stderrPath := filepath.Join(spillDir, spoolID+".stderr")
+	stdout, err := newCapture(limitBytes, stdoutPath, emit, "stdout")
+	if err != nil {
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
+	}
+	defer stdout.Close()
+	stderr, err := newCapture(limitBytes, stderrPath, emit, "stderr")
+	if err != nil {
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
+	}
+	defer stderr.Close()
+
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
+	}
+
+	// exec.CommandContext terminates only the immediate process. Watch the
+	// context separately and kill the whole process group immediately so a
+	// child holding stdout/stderr cannot keep Wait blocked or survive cancel.
+	processDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessGroup(cmd)
+		case <-processDone:
+		}
+	}()
+	waitErr := cmd.Wait()
+	close(processDone)
+	if ctx.Err() != nil {
+		killProcessGroup(cmd)
+	}
+
+	rc := 0
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			rc = exitErr.ExitCode()
+		} else {
+			rc = -1
+		}
+	}
+	cwd := cmd.Dir
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	} else if abs, err := filepath.Abs(cwd); err == nil {
+		cwd = abs
+	}
+	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), StdoutBytes: stdout.Total(), StderrBytes: stderr.Total(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd, RunAsUser: runAsUser}
+	stdoutSpilled := stdout.Spilled()
+	stderrSpilled := stderr.Spilled()
+	_ = stdout.Close()
+	_ = stderr.Close()
+	if !stdoutSpilled {
+		_ = os.Remove(stdout.Path())
+	}
+	if !stderrSpilled {
+		_ = os.Remove(stderr.Path())
+	}
+	files := make([]string, 0, 2)
+	if stdoutSpilled {
+		res.Spilled = true
+		res.StdoutPath = stdout.Path()
+		files = append(files, stdout.Path())
+	}
+	if stderrSpilled {
+		res.Spilled = true
+		res.StderrPath = stderr.Path()
+		files = append(files, stderr.Path())
+	}
+	res.Files = files
+	protected := make(map[string]bool, len(files))
+	for _, path := range files {
+		protected[path] = true
+	}
+	_, _ = storagebudget.Enforce(spillDir, protected)
+	if ctx.Err() == context.DeadlineExceeded {
+		res.Error = "timeout"
+		res.TimedOut = true
+		if res.ReturnCode == 0 {
+			res.ReturnCode = -1
+		}
+	} else if ctx.Err() == context.Canceled {
+		res.Error = "cancelled"
+		if res.ReturnCode == 0 {
+			res.ReturnCode = -1
+		}
+	} else if waitErr != nil && rc == -1 {
+		res.Error = waitErr.Error()
+	}
+	if emit != nil {
+		b, _ := json.Marshal(res)
+		emit(Event{Type: "exit", ReturnCode: res.ReturnCode, Error: res.Error, TimedOut: res.TimedOut, Data: string(b)})
+	}
+	return res, nil
+}
+
+type capture struct {
+	limit int64
+	buf   bytes.Buffer
+	path  string
+	file  *os.File
+	total int64
+	seq   int64
+	emit  func(Event)
+	name  string
+	mu    sync.Mutex
+}
+
+func newCapture(limit int64, path string, emit func(Event), name string) (*capture, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &capture{limit: limit, path: path, file: f, emit: emit, name: name}, nil
+}
+
+func (c *capture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := len(p)
+	_, err := c.file.Write(p)
+	c.total += int64(n)
+	if c.limit > 0 {
+		if int64(len(p)) >= c.limit {
+			c.buf.Reset()
+			c.buf.Write(p[int64(len(p))-c.limit:])
+		} else {
+			c.buf.Write(p)
+			over := int64(c.buf.Len()) - c.limit
+			if over > 0 {
+				b := c.buf.Bytes()
+				kept := append([]byte(nil), b[over:]...)
+				c.buf.Reset()
+				c.buf.Write(kept)
+			}
+		}
+	}
+	if c.emit != nil && n > 0 {
+		c.seq++
+		c.emit(Event{Type: "chunk", Stream: c.name, Data: string(p), Seq: c.seq, Offset: c.total})
+	}
+	return n, err
+}
+
+func (c *capture) Tail() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+func (c *capture) Path() string { return c.path }
+func (c *capture) Total() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
+}
+func (c *capture) Spilled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total > c.limit
+}
+func (c *capture) Close() error {
+	if c.file != nil {
+		return c.file.Close()
+	}
+	return nil
+}
+
+var sudoTokenRE = regexp.MustCompile(`(^|[^A-Za-z0-9_./-])sudo([^A-Za-z0-9_-]|$)`)
+
+func commandMentionsSudo(cmd string) bool {
+	return sudoTokenRE.MatchString(cmd)
+}
+
+func targetRunUser(req Request) (string, bool) {
+	if req.RunAsUser != "" {
+		return req.RunAsUser, true
+	}
+	if req.User != "" {
+		return req.User, true
+	}
+	if req.DefaultUser != "" && !commandMentionsSudo(req.Cmd) {
+		return req.DefaultUser, false
+	}
+	return "", false
+}
+
+func ImplicitRootExecutionError(req Request) error {
+	// A system service is often launched as root so it can serve privileged
+	// maintenance requests. Ordinary commands must not silently inherit that
+	// identity and leave root-owned files in a user's workspace.
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 && req.DefaultUser == "" && req.RunAsUser == "" && req.User == "" && !commandMentionsSudo(req.Cmd) {
+		return errors.New("root shellmcp requires SHELLMCP_DEFAULT_USER for ordinary commands; use run_as_user=root or sudo explicitly for privileged commands")
+	}
+	return nil
+}
+
+func TargetRunUser(req Request) (string, bool) { return targetRunUser(req) }
+
+func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
+	user, explicit := targetRunUser(req)
+	if useAndroidShizuku(req, user, explicit) {
+		return exec.CommandContext(ctx, shizukuRishPath(req), "-c", stripLeadingSudo(req.Cmd)), "shizuku"
+	}
+	if runtime.GOOS != "windows" && user != "" && user != "root" && (explicit || os.Geteuid() == 0) {
+		arguments := []string{"-H"}
+		environmentNames := make([]string, 0, len(req.Env))
+		for name := range req.Env {
+			environmentNames = append(environmentNames, name)
+		}
+		sort.Strings(environmentNames)
+		if len(environmentNames) > 0 {
+			arguments = append(arguments, "--preserve-env="+strings.Join(environmentNames, ","))
+		}
+		arguments = append(arguments, "-u", user, "--", shellName(), shellArg(), req.Cmd)
+		return exec.CommandContext(ctx, "sudo", arguments...), user
+	}
+	return exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd), ""
+}
+
+func validateEnvironment(environment map[string]string) error {
+	for name, value := range environment {
+		if name == "" || !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_') {
+			return fmt.Errorf("invalid environment variable name %q", name)
+		}
+		for index := 1; index < len(name); index++ {
+			character := name[index]
+			if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+				return fmt.Errorf("invalid environment variable name %q", name)
+			}
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("environment variable %q contains a null byte", name)
+		}
+	}
+	return nil
+}
+
+func envFromReq(req Request, key string) string {
+	if req.Env != nil {
+		if v, ok := req.Env[key]; ok {
+			return v
+		}
+	}
+	return os.Getenv(key)
+}
+
+func androidPrivilegeMode(req Request) string {
+	mode := strings.ToLower(strings.TrimSpace(envFromReq(req, "SHELLMCP_ANDROID_PRIVILEGE")))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(envFromReq(req, "SHELLMCP_PRIVILEGE_MODE")))
+	}
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "1", "true", "yes", "on", "rish":
+		return "shizuku"
+	}
+	return mode
+}
+
+func shizukuRishPath(req Request) string {
+	if p := strings.TrimSpace(envFromReq(req, "SHELLMCP_SHIZUKU_RISH")); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(envFromReq(req, "SHIZUKU_RISH")); p != "" {
+		return p
+	}
+	return "rish"
+}
+
+func useAndroidShizuku(req Request, user string, explicit bool) bool {
+	if runtime.GOOS != "android" {
+		return false
+	}
+	wantPrivileged := (explicit && (user == "root" || user == "shizuku")) || commandMentionsSudo(req.Cmd)
+	mode := androidPrivilegeMode(req)
+	switch mode {
+	case "auto":
+		return wantPrivileged && shizukuRishAvailable(req)
+	case "auto-all":
+		return shizukuRishAvailable(req)
+	case "shizuku-all", "rish-all", "all":
+		return true
+	case "shizuku", "rish":
+		return wantPrivileged
+	default:
+		return false
+	}
+}
+
+func shizukuRishAvailable(req Request) bool {
+	path := shizukuRishPath(req)
+	if strings.Contains(path, string(os.PathSeparator)) {
+		st, err := os.Stat(path)
+		return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
+	}
+	_, err := exec.LookPath(path)
+	return err == nil
+}
+
+func stripLeadingSudo(cmd string) string {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "sudo" {
+		return "true"
+	}
+	if !strings.HasPrefix(trimmed, "sudo ") {
+		return cmd
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 || fields[0] != "sudo" {
+		return cmd
+	}
+	i := 1
+	for i < len(fields) {
+		switch fields[i] {
+		case "-n", "-E", "-H", "-S", "--":
+			i++
+			continue
+		}
+		if strings.HasPrefix(fields[i], "-") {
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(fields) {
+		return "true"
+	}
+	return strings.Join(fields[i:], " ")
+}
+
+func shellName() string {
+	return shellNameForGOOS(runtime.GOOS)
+}
+
+func shellNameForGOOS(goos string) string {
+	if goos == "windows" {
+		return "cmd"
+	}
+	if goos == "android" {
+		if sh := strings.TrimSpace(os.Getenv("SHELL")); sh != "" {
+			return sh
+		}
+		if prefix := strings.TrimSpace(os.Getenv("PREFIX")); prefix != "" {
+			candidate := filepath.Join(prefix, "bin", "bash")
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate
+			}
+		}
+		return "/system/bin/sh"
+	}
+	return "/bin/bash"
+}
+func shellArg() string {
+	if runtime.GOOS == "windows" {
+		return "/C"
+	}
+	return "-c"
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=GPTAdmin WANB self-repair loop
+
+[Timer]
+OnBootSec=30s
+OnCalendar=*-*-* *:*:00
+AccuracySec=2s
+Persistent=true
+Unit=gptadmin-wanb-health.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /e2e/out
+printf '[journalctl] %s\n' "$*" >>/e2e/out/journalctl.log
+echo 'mocked journal output'

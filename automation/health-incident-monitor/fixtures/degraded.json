@@ -1,0 +1,20 @@
+{
+  "host_id": "server-100",
+  "source_id": "server-100:fixture:degraded",
+  "observed_at": 1723186800.0,
+  "cpu": {"percent": 97.5, "threshold": 90.0},
+  "ram": {"percent": 61.2, "threshold": 90.0},
+  "disk": {"percent": 52.0, "threshold": 90.0},
+  "services": [
+    {"name": "gptadmin.service", "failed": true, "description": "gptadmin service failed"}
+  ],
+  "logs": [
+    {
+      "path": "/var/log/gptadmin/incident.log",
+      "keyword": "panic",
+      "level": "error",
+      "line": "panic: raw secret token xyz",
+      "redacted_summary": "error log matched configured keyword"
+    }
+  ]
+}

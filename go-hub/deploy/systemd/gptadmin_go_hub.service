@@ -1,0 +1,18 @@
+[Unit]
+Description=GPTAdmin Hub rewritten in Go
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/gptadmin
+ExecStart=/home/admin/gptadmin/go-hub/bin/gptadmin-hub
+Environment=GPTADMIN_ROOT=/home/admin/gptadmin
+Environment=GPTADMIN_HUB_PORT=9001
+# Set CTL_TOKEN and MCP_RELAY_AGENT_TOKEN in /etc/gptadmin/go-hub.env
+EnvironmentFile=-/etc/gptadmin/go-hub.env
+Restart=always
+RestartSec=5
+User=admin
+
+[Install]
+WantedBy=multi-user.target

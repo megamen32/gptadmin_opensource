@@ -1,0 +1,9697 @@
+package hub
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/megamen32/gptadmin/go-hub/internal/cloudos"
+)
+
+var BuildVersion = "go-dev"
+var GitCommit = "worktree"
+
+const defaultJWTKeyID = "gptadmin-hs256-v1"
+
+const mcpProtocolVersion = "2026-07-28"
+
+const defaultManagedMCPTokenTTLDays = 5 * 365
+
+const configuredMCPBearerTokenKind = "configured_opaque_migration"
+
+// legacyCtlTokenDeadline is the fixed end of the one-week migration window.
+// After this instant only AdminPassword sessions and scoped OAuth JWTs may
+// authenticate human/MCP requests.
+var legacyCtlTokenDeadline = time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)
+
+type Config struct {
+	Addr            string
+	ConfigDir       string
+	PublicDir       string
+	ArtifactDir     string
+	CtlToken        string
+	RelayAgentToken string
+	ShellToken      string
+	DefaultTimeout  time.Duration
+	PollMaxTimeout  time.Duration
+	// ActionSyncWait bounds how long the HTTP Actions facade waits for a
+	// queued shell/child MCP operation before returning a durable job handle.
+	// Tool/command timeout remains an independent argument.
+	ActionSyncWait time.Duration
+	// SchemaContractValidation makes schema version/digest admission an explicit
+	// opt-in. It stays false by default so relay calls never depend on metadata.
+	SchemaContractValidation bool
+	OutputDir                string
+	PublicOrigin             string
+	MCPResource              string
+	// LegacyPublicOrigins is an explicit migration allowlist for previously
+	// issued OAuth/JWT origins/resources. It never enables wildcard matching.
+	LegacyPublicOrigins      []string
+	AdminPassword            string
+	OAuthClientSecret        string
+	OAuthKeyID               string
+	EnvFile                  string
+	OAuthPermissiveRedirects bool
+	OAuthPermissiveResources bool
+	// RelaxAuthChecks is an emergency compatibility switch. It preserves
+	// cryptographic token verification and key lookup while temporarily
+	// skipping claim/expiry/PKCE checks during ingress auth-state recovery.
+	RelaxAuthChecks bool
+	// DebugLowSecurity is an explicitly enabled developer aid. It enables the
+	// existing compatibility auth mode and lets a signed ShellMCP enrollment
+	// complete without a click.
+	DebugLowSecurity           bool
+	AuthLogSecrets             bool
+	AuthRateLimit              int
+	BridgeKey                  string
+	LegacyCtlTokenDeadline     time.Time
+	Now                        func() time.Time
+	RegistryStateFile          string
+	FailoverConfigFile         string
+	FailoverStateFile          string
+	FailoverReclaimCommandFile string
+	StartupInstructionsFile    string
+	StartupInstructions        string
+	InstructionSetsStateFile   string
+	VirtualMCPStateFile        string
+	NetworkProxyStateFile      string
+	NetworkProxyRelayKeyFile   string
+	NetworkProxyRelayRevokeURL string
+	NetworkProxyRelayURL       string
+	WebhookConfigFile          string
+	WebhookStateFile           string
+	AuditStateFile             string
+	SecurityStateFile          string
+	TelemetryStateFile         string
+	TelemetryOTLPEndpoint      string
+	SecretStoreDir             string
+	SecretStoreKeyFile         string
+	SecretIngressStateFile     string
+	SecretIngressTTL           time.Duration
+	WebhookRoutes              []WebhookRoute
+	ExistingMCPBearers         map[string]string
+}
+
+func FromEnv() Config {
+	port := env("GPTADMIN_HUB_PORT", env("HUB_PORT", env("PORT", "9001")))
+	// Keep the installer/legacy HUB_BIND input while failing closed to the
+	// loopback interface when no explicit deployment host is configured. Public
+	// HAOS/failover deployments set HUB_HOST explicitly at their boundary.
+	host := env("GPTADMIN_HUB_HOST", env("HUB_HOST", env("HUB_BIND", "127.0.0.1")))
+	root := env("GPTADMIN_ROOT", ".")
+	cfgDir := env("GPTADMIN_CONFIG_DIR", filepath.Join(root, "config"))
+	defTimeout := secondsEnv("MCP_RELAY_DEFAULT_TIMEOUT", 30)
+	pollTimeout := secondsEnv("MCP_RELAY_POLL_MAX_TIMEOUT", 55)
+	actionSyncWaitMS := positiveIntEnv("GPTADMIN_ACTION_SYNC_WAIT_MS", 2000)
+	secretTTL := secondsEnv("GPTADMIN_SECRET_INGRESS_TTL", 15*60)
+	if secretTTL < 60 || secretTTL > 3600 {
+		secretTTL = 15 * 60
+	}
+	cfg := Config{
+		Addr:                       host + ":" + port,
+		ConfigDir:                  cfgDir,
+		PublicDir:                  env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
+		ArtifactDir:                env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
+		CtlToken:                   env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
+		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
+		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
+		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
+		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
+		ActionSyncWait:             time.Duration(actionSyncWaitMS) * time.Millisecond,
+		SchemaContractValidation:   truthyString(env("GPTADMIN_SCHEMA_CONTRACT_VALIDATION", "0")),
+		OutputDir:                  env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
+		PublicOrigin:               normalizePublicURL(env("PUBLIC_ORIGIN", "")),
+		MCPResource:                normalizePublicURL(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", ""))),
+		LegacyPublicOrigins:        parsePublicURLList(env("GPTADMIN_LEGACY_PUBLIC_ORIGINS", "")),
+		AdminPassword:              env("ADMIN_PASSWORD", ""),
+		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", ""),
+		OAuthKeyID:                 env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
+		EnvFile:                    env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
+		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
+		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
+		RelaxAuthChecks:            truthyString(env("GPTADMIN_RELAX_AUTH_CHECKS", "0")),
+		AuthLogSecrets:             truthyString(env("AUTH_LOG_SECRETS", "0")),
+		AuthRateLimit:              positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
+		BridgeKey:                  env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
+		LegacyCtlTokenDeadline:     time.Time{},
+		Now:                        time.Now,
+		RegistryStateFile:          env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
+		FailoverConfigFile:         env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
+		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
+		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
+		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
+		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
+		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
+		VirtualMCPStateFile:        env("GPTADMIN_VIRTUAL_MCP_STATE_FILE", filepath.Join(cfgDir, virtualMCPStateFilename)),
+		NetworkProxyStateFile:      env("GPTADMIN_NETWORK_PROXY_STATE_FILE", filepath.Join(cfgDir, "network_proxy_state.json")),
+		NetworkProxyRelayKeyFile:   env("GPTADMIN_NETWORK_PROXY_RELAY_KEY_FILE", ""),
+		NetworkProxyRelayRevokeURL: strings.TrimRight(env("GPTADMIN_NETWORK_PROXY_RELAY_REVOKE_URL", ""), "/"),
+		NetworkProxyRelayURL:       strings.TrimRight(env("GPTADMIN_NETWORK_PROXY_RELAY_URL", ""), "/"),
+		WebhookConfigFile:          env("GPTADMIN_WEBHOOK_CONFIG_FILE", filepath.Join(cfgDir, "webhooks.json")),
+		WebhookStateFile:           env("GPTADMIN_WEBHOOK_STATE_FILE", filepath.Join(cfgDir, "webhook_state.json")),
+		AuditStateFile:             env("GPTADMIN_AUDIT_STATE_FILE", filepath.Join(cfgDir, "audit.jsonl")),
+		SecurityStateFile:          env("GPTADMIN_SECURITY_STATE_FILE", filepath.Join(cfgDir, securityStateFilename)),
+		TelemetryStateFile:         env("GPTADMIN_TELEMETRY_STATE_FILE", filepath.Join(cfgDir, telemetryStateFilename)),
+		TelemetryOTLPEndpoint:      env("GPTADMIN_OTLP_ENDPOINT", ""),
+		SecretStoreDir:             env("GPTADMIN_SECRET_STORE_DIR", filepath.Join(cfgDir, "secrets")),
+		SecretStoreKeyFile:         env("GPTADMIN_SECRET_STORE_KEY_FILE", filepath.Join(cfgDir, "secret-store.key")),
+		SecretIngressStateFile:     env("GPTADMIN_SECRET_INGRESS_STATE_FILE", filepath.Join(cfgDir, "secrets", "requests.json")),
+		SecretIngressTTL:           time.Duration(secretTTL) * time.Second,
+		ExistingMCPBearers:         configuredMCPBearerEnv(),
+	}
+	cfg.DebugLowSecurity = truthyString(env("DEBUG_VERIFY_WORK_LOW_SECURITY_MODE", "0"))
+	normalizeDebugVerifyWorkLowSecurityMode(&cfg)
+	return cfg
+}
+
+func normalizeDebugVerifyWorkLowSecurityMode(cfg *Config) {
+	if !cfg.DebugLowSecurity {
+		return
+	}
+	// This is deliberately an alias for the tested compatibility path: unknown
+	// keys and invalid signatures remain rejected, while claims, expiry and PKCE
+	// checks are relaxed for the developer flow.
+	cfg.RelaxAuthChecks = true
+	cfg.OAuthPermissiveRedirects = true
+	cfg.OAuthPermissiveResources = true
+}
+
+func configuredMCPBearerEnv() map[string]string {
+	values := map[string]string{}
+	for _, pair := range os.Environ() {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok || !strings.HasPrefix(name, "GPTADMIN_") || !strings.HasSuffix(name, "_MCP_BEARER") {
+			continue
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			values[name] = value
+		}
+	}
+	return values
+}
+
+func env(k, d string) string {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		return v
+	}
+	return d
+}
+
+func secondsEnv(k string, d int) int {
+	v, err := strconv.Atoi(env(k, ""))
+	if err != nil || v <= 0 {
+		return d
+	}
+	return v
+}
+
+func positiveIntEnv(k string, d int) int {
+	v, err := strconv.Atoi(env(k, ""))
+	if err != nil || v <= 0 {
+		return d
+	}
+	return v
+}
+
+func truthyString(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func (s *Server) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Server) legacyCtlTokenAllowed() bool { return true }
+
+func (s *Server) markLegacyCtlToken(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	if !s.cfg.LegacyCtlTokenDeadline.IsZero() {
+		w.Header().Set("Sunset", s.cfg.LegacyCtlTokenDeadline.UTC().Format(http.TimeFormat))
+	}
+}
+
+type Agent struct {
+	AgentID      string         `json:"agent_id"`
+	Name         string         `json:"name"`
+	Kind         string         `json:"kind"`
+	Transport    string         `json:"transport"`
+	Status       string         `json:"status"`
+	LastSeen     float64        `json:"last_seen"`
+	RegisteredAt float64        `json:"registered_at,omitempty"`
+	FirstSeen    float64        `json:"first_seen,omitempty"`
+	OfflineSince float64        `json:"offline_since,omitempty"`
+	StaleSince   float64        `json:"stale_since,omitempty"`
+	Capabilities []string       `json:"capabilities"`
+	Meta         map[string]any `json:"meta,omitempty"`
+}
+
+const defaultStaleMCPRetentionDays = 30
+
+type hubSettingDefinition struct {
+	Key             string   `json:"key"`
+	Type            string   `json:"type"`
+	Category        string   `json:"category"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Default         any      `json:"default"`
+	Minimum         *int     `json:"minimum,omitempty"`
+	Maximum         *int     `json:"maximum,omitempty"`
+	Unit            string   `json:"unit,omitempty"`
+	Options         []string `json:"options,omitempty"`
+	RestartRequired bool     `json:"restart_required"`
+	Secret          bool     `json:"secret"`
+	Advanced        bool     `json:"advanced"`
+	Dangerous       bool     `json:"dangerous"`
+	ReadOnly        bool     `json:"read_only"`
+	Order           int      `json:"order"`
+	VisibleWhen     any      `json:"visible_when,omitempty"`
+}
+
+type hubSettings struct {
+	Values map[string]any `json:"values"`
+}
+
+type settingsRevision struct {
+	Revision int64          `json:"revision"`
+	Time     string         `json:"time"`
+	Actor    string         `json:"actor"`
+	Source   string         `json:"source"`
+	Changes  map[string]any `json:"changes"`
+	Values   map[string]any `json:"values"`
+}
+
+type agentCleanupPolicy struct {
+	Protected     bool `json:"protected"`
+	NeverDelete   bool `json:"never_delete"`
+	RetentionDays int  `json:"retention_days,omitempty"`
+}
+
+type agentTombstone struct {
+	AgentID      string             `json:"agent_id"`
+	Name         string             `json:"name"`
+	Kind         string             `json:"kind"`
+	LastSeen     float64            `json:"last_seen"`
+	DeletedAt    float64            `json:"deleted_at"`
+	DeleteReason string             `json:"delete_reason"`
+	Policy       agentCleanupPolicy `json:"policy"`
+}
+
+func intPtr(v int) *int { return &v }
+
+var hubSettingRegistry = []hubSettingDefinition{
+	{Key: "tool_output_verbose", Type: "boolean", Category: "transport", Title: "Подробные ответы инструментов", Description: "Включать служебные поля и полные обёртки execute/job. По умолчанию выключено; detail=full или compact меняет формат одного ответа без повторного выполнения.", Default: false, RestartRequired: false, Advanced: true, Order: 50},
+	{Key: "mcp_auto_cleanup_enabled", Type: "boolean", Category: "mcp_registry", Title: "Автоочистка stale MCP", Description: "Автоматически удалять stale non-shell MCP по retention policy.", Default: true, RestartRequired: false, Order: 5},
+	{Key: "stale_mcp_retention_days", Type: "integer", Category: "mcp_registry", Title: "Удаление stale MCP", Description: "Удалять stale non-shell MCP из registry после указанного срока.", Default: defaultStaleMCPRetentionDays, Minimum: intPtr(1), Maximum: intPtr(3650), Unit: "days", RestartRequired: false, Order: 10},
+	{Key: "mcp_offline_after_seconds", Type: "integer", Category: "agent_lifecycle", Title: "Порог offline", Description: "Считать агент offline, если Hub не видел poll/heartbeat дольше этого времени.", Default: 90, Minimum: intPtr(15), Maximum: intPtr(86400), Unit: "seconds", RestartRequired: false, Order: 10},
+	{Key: "mcp_stale_after_seconds", Type: "integer", Category: "agent_lifecycle", Title: "Порог stale", Description: "Переводить offline агент в stale после этого возраста last_seen. Должен быть не меньше offline threshold.", Default: 3600, Minimum: intPtr(60), Maximum: intPtr(2592000), Unit: "seconds", RestartRequired: false, Order: 20},
+	{Key: "completed_job_retention_hours", Type: "integer", Category: "jobs", Title: "Хранение завершённых jobs", Description: "Сколько часов сохранять завершённые shell/MCP jobs в persisted task state.", Default: 24, Minimum: intPtr(1), Maximum: intPtr(720), Unit: "hours", RestartRequired: false, Order: 10},
+	{Key: "orphan_shell_job_min_age_seconds", Type: "integer", Category: "jobs", Title: "Минимальный возраст orphan shell job", Description: "Running shell job переводится в failed только после max(этого порога, requested timeout + 300 секунд).", Default: 900, Minimum: intPtr(300), Maximum: intPtr(86400), Unit: "seconds", RestartRequired: false, Order: 20},
+	{Key: "audit_max_events", Type: "integer", Category: "audit", Title: "Audit events в памяти", Description: "Максимальное число последних audit events, удерживаемых Hub в памяти.", Default: 500, Minimum: intPtr(100), Maximum: intPtr(50000), Unit: "events", RestartRequired: false, Advanced: true, Order: 10},
+	{Key: "shell_queue_long_poll_seconds", Type: "integer", Category: "transport", Title: "Shell queue long-poll", Description: "Рекомендуемый long-poll timeout для ShellMCP. Hub также ограничивает queue poll этим значением.", Default: 55, Minimum: intPtr(5), Maximum: intPtr(120), Unit: "seconds", RestartRequired: false, Order: 10},
+	{Key: "shell_queue_retry_seconds", Type: "integer", Category: "transport", Title: "Retry после ошибки poll", Description: "Пауза ShellMCP после ошибки long-poll до следующей попытки.", Default: 5, Minimum: intPtr(1), Maximum: intPtr(300), Unit: "seconds", RestartRequired: false, Order: 20},
+	{Key: "shell_spool_retention_hours", Type: "integer", Category: "storage", Title: "Хранение spool/output", Description: "Удалять ShellMCP spool/output файлы старше этого возраста.", Default: 72, Minimum: intPtr(1), Maximum: intPtr(2160), Unit: "hours", RestartRequired: false, Order: 10},
+	{Key: "shell_storage_max_mb", Type: "integer", Category: "storage", Title: "Максимум ShellMCP storage", Description: "Общий лимит spool/outbox/audit/backups. 0 = автоматически min(5% filesystem, 500 MB).", Default: 0, Minimum: intPtr(0), Maximum: intPtr(10240), Unit: "MB", RestartRequired: false, Advanced: true, Order: 20},
+	{Key: "shell_outbox_backoff_base_seconds", Type: "integer", Category: "transport", Title: "Outbox backoff base", Description: "Базовая задержка экспоненциального retry отправки результатов ShellMCP.", Default: 5, Minimum: intPtr(1), Maximum: intPtr(600), Unit: "seconds", RestartRequired: false, Advanced: true, Order: 30},
+	{Key: "shell_outbox_backoff_cap_seconds", Type: "integer", Category: "transport", Title: "Outbox backoff cap", Description: "Максимальная задержка retry outbox ShellMCP.", Default: 600, Minimum: intPtr(1), Maximum: intPtr(3600), Unit: "seconds", RestartRequired: false, Advanced: true, Order: 40},
+	{Key: "fleet_auto_update_enabled", Type: "boolean", Category: "self_repair", Title: "Fleet self-repair", Description: "Разрешить ShellMCP автоматически выравниваться до desired GitHub release через Hub policy.", Default: true, RestartRequired: false, Order: 10},
+	{Key: "fleet_desired_build_version", Type: "integer", Category: "self_repair", Title: "Desired fleet build", Description: "Желаемый build_version ShellMCP. 0 = текущая release-версия Hub.", Default: 0, Minimum: intPtr(0), Maximum: intPtr(1000000000), Unit: "build", RestartRequired: false, Advanced: true, Order: 20},
+}
+
+func defaultHubSettings() hubSettings {
+	values := map[string]any{}
+	for _, def := range hubSettingRegistry {
+		values[def.Key] = def.Default
+	}
+	return hubSettings{Values: values}
+}
+
+type persistentRegistryState struct {
+	SavedAt          float64                       `json:"saved_at"`
+	BuildVersion     string                        `json:"build_version,omitempty"`
+	GitCommit        string                        `json:"git_commit,omitempty"`
+	Agents           map[string]Agent              `json:"agents"`
+	RelayCredentials map[string]string             `json:"relay_credentials,omitempty"`
+	RelayEnrollments map[string]relayEnrollment    `json:"relay_enrollments,omitempty"`
+	Settings         hubSettings                   `json:"settings"`
+	SettingsRevision int64                         `json:"settings_revision,omitempty"`
+	SettingsHistory  []settingsRevision            `json:"settings_history,omitempty"`
+	AgentPolicies    map[string]agentCleanupPolicy `json:"agent_policies,omitempty"`
+	Tombstones       []agentTombstone              `json:"tombstones,omitempty"`
+}
+
+type relayEnrollment struct {
+	AgentID     string `json:"agent_id"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+	Challenge   string `json:"challenge"`
+}
+
+type relayJob struct {
+	RequestKey   string         `json:"request_key,omitempty"`
+	Revision     int64          `json:"-"`
+	OwnerID      string         `json:"owner_id,omitempty"`
+	ID           string         `json:"id"`
+	AgentID      string         `json:"agent_id,omitempty"`
+	TraceID      string         `json:"trace_id,omitempty"`
+	TraceParent  string         `json:"traceparent,omitempty"`
+	Method       string         `json:"method"`
+	Params       map[string]any `json:"params,omitempty"`
+	CreatedAt    float64        `json:"created_at"`
+	StartedAt    float64        `json:"started_at,omitempty"`
+	DoneAt       float64        `json:"completed_at,omitempty"`
+	Status       string         `json:"status"`
+	Result       map[string]any `json:"result,omitempty"`
+	Error        any            `json:"error,omitempty"`
+	ParentTaskID string         `json:"parent_task_id,omitempty"`
+}
+
+type shellControl struct {
+	TaskID string
+}
+
+type shellJob struct {
+	RequestKey        string         `json:"request_key,omitempty"`
+	Revision          int64          `json:"-"`
+	OwnerID           string         `json:"owner_id,omitempty"`
+	ID                string         `json:"id"`
+	Server            string         `json:"server,omitempty"`
+	TraceID           string         `json:"trace_id,omitempty"`
+	TraceParent       string         `json:"traceparent,omitempty"`
+	ToolName          string         `json:"tool_name,omitempty"`
+	Arguments         map[string]any `json:"arguments,omitempty"`
+	Cmd               string         `json:"cmd,omitempty"`
+	Cwd               string         `json:"cwd,omitempty"`
+	Timeout           int            `json:"timeout,omitempty"`
+	Env               map[string]any `json:"env,omitempty"`
+	SecretValues      []string       `json:"-"`
+	CreatedAt         float64        `json:"created_at"`
+	StartedAt         float64        `json:"started_at,omitempty"`
+	DoneAt            float64        `json:"completed_at,omitempty"`
+	Status            string         `json:"status"`
+	Result            any            `json:"result,omitempty"`
+	Error             any            `json:"error,omitempty"`
+	ApprovalID        string         `json:"approval_id,omitempty"`
+	ApprovalActor     string         `json:"-"`
+	ApprovalProfileID string         `json:"-"`
+	ParentTaskID      string         `json:"parent_task_id,omitempty"`
+}
+
+type auditEvent struct {
+	Time   string         `json:"time"`
+	Name   string         `json:"name"`
+	Fields map[string]any `json:"fields,omitempty"`
+}
+
+type approvalRequest struct {
+	ID              string    `json:"approval_id"`
+	ProfileID       string    `json:"profile_id"`
+	Actor           string    `json:"actor"`
+	Target          string    `json:"target"`
+	Tool            string    `json:"tool"`
+	ArgumentsDigest string    `json:"arguments_digest"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	Status          string    `json:"status"`
+}
+
+type autonomousBudget struct {
+	WindowStart time.Time
+	Count       int
+}
+
+const (
+	autonomousCallLimit  = 32
+	autonomousWindowSize = 5 * time.Minute
+)
+
+type oauthCode struct {
+	Created     time.Time
+	Challenge   string
+	ClientID    string
+	RedirectURI string
+	Resource    string
+	Scope       string
+	State       string
+}
+
+// managedMCPToken is safe to marshal as inventory. TokenValue is serialized
+// only by the private on-disk state envelope and the explicit owner read API.
+type managedMCPToken struct {
+	TokenValue   string   `json:"-"`
+	Role         string   `json:"role,omitempty"`
+	ID           string   `json:"id"`
+	ClientID     string   `json:"client_id"`
+	TokenDigest  string   `json:"token_digest,omitempty"`
+	TokenKind    string   `json:"token_kind,omitempty"`
+	Issuer       string   `json:"issuer,omitempty"`
+	Audience     string   `json:"audience,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	RedirectURIs []string `json:"redirect_uris,omitempty"`
+	Scope        string   `json:"scope"`
+	AccessMode   string   `json:"access_mode,omitempty"`
+	ProfileID    string   `json:"profile_id,omitempty"`
+	IssuedAt     int64    `json:"issued_at"`
+	CreatedAt    int64    `json:"created_at,omitempty"`
+	ExpiresAt    int64    `json:"expires_at"`
+	RevokedAt    int64    `json:"revoked_at,omitempty"`
+}
+
+type managedMCPTokenState struct {
+	Tokens map[string]managedMCPToken `json:"tokens"`
+}
+
+type authRateWindow struct {
+	Started time.Time
+	Count   int
+}
+
+type idempotencyEntry struct {
+	Key         string
+	Fingerprint string
+	CreatedAt   time.Time
+	Done        chan struct{}
+	JobID       string
+	Response    map[string]any
+	Status      int
+}
+
+type Server struct {
+	managedMCPPersisted   map[string]managedMCPToken
+	oauthClientsPersisted map[string]oauthClientMetadata
+	cfg                   Config
+
+	mu                sync.Mutex
+	authRateMu        sync.Mutex
+	cond              *sync.Cond
+	agents            map[string]*Agent
+	relayCredentials  map[string]string // SHA-256 digests keyed by agent_id; never retain raw credentials.
+	relayEnrollments  map[string]relayEnrollment
+	relayQueues       map[string][]string
+	relayJobs         map[string]*relayJob
+	shellQueues       map[string][]string
+	shellControls     map[string][]shellControl
+	shellJobs         map[string]*shellJob
+	taskOwner         *taskOwner
+	taskRuntimeClosed bool
+	taskRuntimeStop   chan struct{}
+	idempotency       map[string]*idempotencyEntry
+	oauthCodes        map[string]oauthCode
+	managedMCP        map[string]managedMCPToken
+	oauthClients      map[string]oauthClientMetadata
+	accessProfiles    map[string]AccessProfile
+	approvals         map[string]*approvalRequest
+	autonomous        map[string]*autonomousBudget
+	security          securitySettings
+	securityPath      string
+	webauthnState     webAuthnState
+	webauthnPath      string
+	webauthnSessions  map[string]webAuthnSession
+	telemetry         telemetryState
+	telemetryPath     string
+	telemetryExporter *telemetryExporter
+	secretStore       *SecretStore
+	secretStoreErr    error
+	audit             []auditEvent
+	authRate          map[string]authRateWindow
+	failover          FailoverConfig
+
+	updateStatePath     string
+	updateLockPath      string
+	updateLauncher      *UpdateLauncher
+	networkProxy        *NetworkProxyController
+	cloudOSRegistry     *cloudos.Registry
+	cloudOSTunnel       cloudos.TunnelManager
+	networkProxyOffers  *networkProxyOfferBroker
+	webhookRoutes       map[string]WebhookRoute
+	webhookJobs         map[string]*webhookJob
+	webhookDeliveries   map[string]*webhookDelivery
+	webhookStateWriteMu sync.Mutex
+
+	instructionMu      sync.RWMutex
+	instructionWriteMu sync.Mutex
+	instructionSet     InstructionSet
+	instructionSetsMu  sync.RWMutex
+	instructionSets    map[string]InstructionSet
+	virtualMCP         map[string]bool
+	settings           hubSettings
+	settingsRevision   int64
+	settingsHistory    []settingsRevision
+	agentPolicies      map[string]agentCleanupPolicy
+	tombstones         []agentTombstone
+}
+
+func New(cfg Config) *Server {
+	// Direct Config construction must use the same issuer/resource wire
+	// contract as FromEnv and the CLI token issuer.
+	cfg.PublicOrigin = normalizePublicURL(cfg.PublicOrigin)
+	cfg.MCPResource = normalizePublicURL(cfg.MCPResource)
+	cfg.LegacyPublicOrigins = normalizePublicURLList(cfg.LegacyPublicOrigins)
+	if cfg.ActionSyncWait <= 0 {
+		cfg.ActionSyncWait = 2 * time.Second
+	}
+	if cfg.ActionSyncWait > 10*time.Second {
+		cfg.ActionSyncWait = 10 * time.Second
+	}
+	normalizeDebugVerifyWorkLowSecurityMode(&cfg)
+	if cfg.AuthRateLimit <= 0 {
+		cfg.AuthRateLimit = 60
+	}
+	webhookRoutes := append([]WebhookRoute(nil), cfg.WebhookRoutes...)
+	if loadedRoutes, err := loadWebhookRoutes(cfg.WebhookConfigFile); err != nil {
+		log.Printf("webhook config load failed path=%s err=%v", cfg.WebhookConfigFile, err)
+	} else {
+		webhookRoutes = append(webhookRoutes, loadedRoutes...)
+	}
+	if err := validateWebhookRoutes(webhookRoutes); err != nil {
+		log.Printf("webhook config rejected path=%s err=%v", cfg.WebhookConfigFile, err)
+		webhookRoutes = nil
+	}
+	securityPath := cfg.SecurityStateFile
+	if securityPath == "" && cfg.ConfigDir != "" {
+		securityPath = filepath.Join(cfg.ConfigDir, securityStateFilename)
+	}
+	securityKey := firstNonEmpty(cfg.AdminPassword, cfg.OAuthClientSecret, cfg.CtlToken, "gptadmin-security-state")
+	security, err := loadSecuritySettings(securityPath, securityKey)
+	if err != nil {
+		log.Printf("security settings load failed path=%s err=%v", securityPath, err)
+		security = defaultSecuritySettings()
+	}
+	telemetryPath := cfg.TelemetryStateFile
+	if telemetryPath == "" && cfg.ConfigDir != "" {
+		telemetryPath = filepath.Join(cfg.ConfigDir, telemetryStateFilename)
+	}
+	telemetry, err := loadTelemetryState(telemetryPath)
+	if err != nil {
+		log.Printf("telemetry state load failed path=%s err=%v", telemetryPath, err)
+		telemetry = defaultTelemetryState()
+	}
+	telemetryExporter, err := newTelemetryExporter(cfg.TelemetryOTLPEndpoint)
+	if err != nil {
+		log.Printf("OTLP telemetry disabled: %v", err)
+	}
+	webauthnPath := ""
+	if cfg.ConfigDir != "" {
+		webauthnPath = filepath.Join(cfg.ConfigDir, webAuthnStateFilename)
+	}
+	webauthnState, err := loadWebAuthnState(webauthnPath)
+	if err != nil {
+		log.Printf("webauthn state load failed path=%s err=%v", webauthnPath, err)
+		webauthnState = defaultWebAuthnState()
+	}
+	s := &Server{
+		taskRuntimeStop:   make(chan struct{}),
+		cfg:               cfg,
+		agents:            map[string]*Agent{},
+		relayCredentials:  map[string]string{},
+		relayEnrollments:  map[string]relayEnrollment{},
+		relayQueues:       map[string][]string{},
+		relayJobs:         map[string]*relayJob{},
+		shellQueues:       map[string][]string{},
+		shellControls:     map[string][]shellControl{},
+		shellJobs:         map[string]*shellJob{},
+		idempotency:       map[string]*idempotencyEntry{},
+		oauthCodes:        map[string]oauthCode{},
+		managedMCP:        map[string]managedMCPToken{},
+		oauthClients:      map[string]oauthClientMetadata{},
+		accessProfiles:    map[string]AccessProfile{},
+		approvals:         map[string]*approvalRequest{},
+		autonomous:        map[string]*autonomousBudget{},
+		security:          security,
+		securityPath:      securityPath,
+		webauthnState:     webauthnState,
+		webauthnPath:      webauthnPath,
+		webauthnSessions:  map[string]webAuthnSession{},
+		telemetry:         telemetry,
+		telemetryPath:     telemetryPath,
+		telemetryExporter: telemetryExporter,
+		audit:             []auditEvent{},
+		authRate:          map[string]authRateWindow{},
+		webhookRoutes:     webhookRouteMap(webhookRoutes),
+		webhookJobs:       map[string]*webhookJob{},
+		webhookDeliveries: map[string]*webhookDelivery{},
+		instructionSets:   map[string]InstructionSet{},
+		virtualMCP:        map[string]bool{},
+		cloudOSRegistry:   cloudos.NewRegistry(),
+		cloudOSTunnel:     &cloudos.NoopTunnelManager{},
+		settings:          defaultHubSettings(),
+		settingsHistory:   []settingsRevision{},
+		agentPolicies:     map[string]agentCleanupPolicy{},
+		tombstones:        []agentTombstone{},
+	}
+	s.cloudOSRegistry.Register(&cloudos.Computer{
+		ID:           "server-100",
+		Name:         "server-100",
+		OS:           "linux",
+		Capabilities: []string{"status"},
+		Status:       "online",
+	})
+	if cfg.ConfigDir != "" || cfg.SecretStoreDir != "" || cfg.SecretStoreKeyFile != "" || cfg.SecretIngressStateFile != "" {
+		if cfg.SecretStoreDir == "" {
+			cfg.SecretStoreDir = filepath.Join(cfg.ConfigDir, "secrets")
+		}
+		if cfg.SecretStoreKeyFile == "" {
+			cfg.SecretStoreKeyFile = filepath.Join(cfg.ConfigDir, "secret-store.key")
+		}
+		if cfg.SecretIngressStateFile == "" {
+			cfg.SecretIngressStateFile = filepath.Join(cfg.SecretStoreDir, "requests.json")
+		}
+		if cfg.SecretIngressTTL <= 0 {
+			cfg.SecretIngressTTL = 15 * time.Minute
+		}
+		s.cfg = cfg
+		secretStore, secretStoreErr := NewSecretStoreWithStateFile(cfg.ConfigDir, cfg.SecretStoreDir, cfg.SecretStoreKeyFile, cfg.SecretIngressStateFile, cfg.Now)
+		s.secretStore = secretStore
+		s.secretStoreErr = secretStoreErr
+		if secretStoreErr != nil {
+			log.Printf("secret ingress store unavailable: %v", secretStoreErr)
+		}
+	}
+	s.cond = sync.NewCond(&s.mu)
+	networkProxyStatePath := cfg.NetworkProxyStateFile
+	if networkProxyStatePath == "" && cfg.ConfigDir != "" {
+		networkProxyStatePath = filepath.Join(cfg.ConfigDir, "network_proxy_state.json")
+	}
+	networkProxy, err := NewNetworkProxyController(networkProxyStatePath, cfg.Now, nil)
+	if err != nil {
+		log.Printf("network proxy state load failed path=%s err=%v", networkProxyStatePath, err)
+		networkProxy = newUnavailableNetworkProxyController(cfg.Now, err)
+	}
+	s.networkProxy = networkProxy
+	if cfg.NetworkProxyRelayKeyFile != "" {
+		key, keyErr := os.ReadFile(cfg.NetworkProxyRelayKeyFile)
+		key = []byte(strings.TrimRight(string(key), " \t\r\n"))
+		if keyErr != nil {
+			log.Printf("network proxy relay key load failed path=%s err=%v", cfg.NetworkProxyRelayKeyFile, keyErr)
+		} else if len(key) < 32 {
+			log.Printf("network proxy relay key rejected path=%s: key must contain at least 32 bytes", cfg.NetworkProxyRelayKeyFile)
+		} else {
+			networkProxy.SetRelayKey(key)
+			if cfg.NetworkProxyRelayURL != "" && cfg.RelayAgentToken != "" {
+				s.networkProxyOffers = newNetworkProxyOfferBroker(key, cfg.NetworkProxyRelayURL)
+			}
+			if cfg.NetworkProxyRelayRevokeURL != "" {
+				relayKey := append([]byte(nil), key...)
+				relayURL := cfg.NetworkProxyRelayRevokeURL
+				networkProxy.SetOnRevoke(func(capabilityID string) {
+					go s.sendNetworkProxyRelayRevoke(relayURL, relayKey, capabilityID)
+				})
+			}
+		}
+	}
+	s.instructionSet = newInstructionSet(cfg)
+	if err := s.loadInstructionSetsState(); err != nil {
+		log.Printf("instruction sets state load failed path=%s err=%v", s.instructionSetsStatePath(), err)
+	}
+	if err := s.loadVirtualMCPState(); err != nil {
+		log.Printf("virtual MCP state load failed path=%s err=%v", s.virtualMCPStatePath(), err)
+	}
+	if err := s.loadRegistryState(); err != nil {
+		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
+	}
+	if s.settingsRevision == 0 {
+		s.recordSettingsRevisionLocked("system", "bootstrap", map[string]any{})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			log.Printf("registry baseline revision save failed: %v", err)
+		}
+	}
+	if err := s.loadTaskState(); err != nil {
+		log.Printf("task state load failed path=%s err=%v", s.taskStatePath(), err)
+	}
+	if err := s.loadManagedMCPState(); err != nil {
+		log.Printf("MCP token state load failed path=%s err=%v", s.managedMCPStatePath(), err)
+	}
+	if err := s.reconcileExistingMCPBearers(); err != nil {
+		log.Printf("configured MCP bearer migration state failed path=%s err=%v", s.managedMCPStatePath(), err)
+	}
+	if err := s.loadOAuthClientsState(); err != nil {
+		log.Printf("OAuth client state load failed path=%s err=%v", s.oauthClientsStatePath(), err)
+	}
+	if err := s.loadAccessProfilesState(); err != nil {
+		log.Printf("access profile state load failed path=%s err=%v", s.accessProfilesStatePath(), err)
+	}
+	if err := s.loadWebhookState(); err != nil {
+		log.Printf("webhook state load failed path=%s err=%v", s.webhookStatePath(), err)
+	}
+	if err := s.loadAuditState(); err != nil {
+		log.Printf("audit state load failed path=%s err=%v", s.auditStatePath(), err)
+	}
+	s.failover = s.loadFailoverConfig()
+	home := os.Getenv("GPTADMIN_HOME")
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		home = userHome + "/.gptadmin"
+	}
+	s.updateStatePath = home + "/update_state.json"
+	s.updateLockPath = home + "/update.lock"
+	s.updateLauncher = DefaultUpdateLauncher()
+	return s
+}
+
+func (s *Server) sendNetworkProxyRelayRevoke(relayURL string, key []byte, capabilityID string) {
+	ticket, err := signNetworkProxyRevocation(key, capabilityID, time.Now().UTC().Add(30*time.Second))
+	if err != nil {
+		log.Printf("network proxy relay revoke ticket failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	body, err := json.Marshal(map[string]string{"ticket": ticket})
+	if err != nil {
+		return
+	}
+	request, err := http.NewRequest(http.MethodPost, relayURL+"/v1/control/revoke", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("network proxy relay revoke request failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		log.Printf("network proxy relay revoke delivery failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		log.Printf("network proxy relay revoke rejected capability=%s status=%d", capabilityID, response.StatusCode)
+	}
+}
+
+func (s *Server) managedMCPStatePath() string {
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "mcp_tokens_state.json")
+}
+
+func configuredMCPBearerID(name string) string {
+	return "configured-mcp-" + strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+}
+
+func configuredMCPBearerDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Server) reconcileExistingMCPBearers() error {
+	if len(s.cfg.ExistingMCPBearers) == 0 {
+		return nil
+	}
+	now := s.now()
+	changed := false
+	s.mu.Lock()
+	for name, token := range s.cfg.ExistingMCPBearers {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		id := configuredMCPBearerID(name)
+		digest := configuredMCPBearerDigest(token)
+		record, exists := s.managedMCP[id]
+		if exists && record.TokenKind == configuredMCPBearerTokenKind && record.TokenDigest == digest {
+			continue
+		}
+		s.managedMCP[id] = managedMCPToken{
+			ID:          id,
+			Role:        record.Role,
+			ProfileID:   record.ProfileID,
+			ClientID:    name,
+			TokenDigest: digest,
+			TokenKind:   configuredMCPBearerTokenKind,
+			Status:      "migration",
+			Scope:       "gptadmin.read gptadmin.exec",
+			AccessMode:  accessModeFull,
+			IssuedAt:    now.Unix(),
+			CreatedAt:   now.Unix(),
+			ExpiresAt:   now.AddDate(5, 0, 0).Unix(),
+		}
+		changed = true
+	}
+	if !changed {
+		s.mu.Unlock()
+		return nil
+	}
+	err := s.saveManagedMCPStateLocked()
+	s.mu.Unlock()
+	return err
+}
+
+func (s *Server) existingMCPBearerClaims(token string) (map[string]any, bool) {
+	digest := configuredMCPBearerDigest(token)
+	now := s.now().Unix()
+	lifecycle := s.effectiveBearerSecurityProfile().EnforceTokenLifecycle
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshManagedMCPStateLocked(); err != nil {
+		return nil, false
+	}
+	for _, record := range s.managedMCP {
+		if record.TokenKind != configuredMCPBearerTokenKind || record.RevokedAt != 0 || (lifecycle && record.ExpiresAt > 0 && record.ExpiresAt <= now) {
+			continue
+		}
+		if hmac.Equal([]byte(record.TokenDigest), []byte(digest)) {
+			return map[string]any{
+				"sub":         "configured-mcp-bearer",
+				"scope":       record.Scope,
+				"access_mode": record.AccessMode,
+				"client_id":   record.ClientID,
+				"jti":         record.ID,
+			}, true
+		}
+	}
+	return nil, false
+}
+
+func (s *Server) registryStatePath() string {
+	if s.cfg.RegistryStateFile != "" {
+		return s.cfg.RegistryStateFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "registry_state.json")
+}
+
+func (s *Server) loadRegistryState() error {
+	path := s.registryStatePath()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var state persistentRegistryState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return err
+	}
+	for key, value := range state.Settings.Values {
+		if _, err := validateHubSettingValue(key, value); err == nil {
+			s.settings.Values[key] = value
+		}
+	}
+	s.settingsRevision = state.SettingsRevision
+	s.settingsHistory = append([]settingsRevision(nil), state.SettingsHistory...)
+	if state.AgentPolicies != nil {
+		s.agentPolicies = state.AgentPolicies
+	}
+	s.tombstones = append([]agentTombstone(nil), state.Tombstones...)
+	loaded := 0
+	for id, digest := range state.RelayCredentials {
+		if id != "" && digest != "" {
+			s.relayCredentials[id] = digest
+		}
+	}
+	for id, enrollment := range state.RelayEnrollments {
+		if id != "" && enrollment.AgentID == id && enrollment.PublicKey != "" && enrollment.Challenge != "" {
+			s.relayEnrollments[id] = enrollment
+		}
+	}
+	for id, agent := range state.Agents {
+		policy := s.agentPolicies[id]
+		retentionDays := s.hubSettingIntLocked("stale_mcp_retention_days")
+		if policy.RetentionDays > 0 {
+			retentionDays = policy.RetentionDays
+		}
+		agentCutoff := s.now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
+		if agent.Kind != "virtual_shell" && !policy.Protected && !policy.NeverDelete && agent.LastSeen > 0 && agent.LastSeen < float64(agentCutoff) {
+			delete(s.relayCredentials, id)
+			delete(s.relayEnrollments, id)
+			continue
+		}
+		if id == "" {
+			id = agent.AgentID
+		}
+		if id == "" || id == "hub" {
+			continue
+		}
+		agent.AgentID = id
+		if agent.RegisteredAt <= 0 {
+			agent.RegisteredAt = agent.LastSeen
+		}
+		if agent.FirstSeen <= 0 {
+			agent.FirstSeen = agent.LastSeen
+		}
+		if agent.Status == "" || agent.Status == "online" || agent.Status == "running" || agent.Status == "offline" || agent.Status == "stale" {
+			agent.Status = s.agentLifecycleStatusLocked(agent.LastSeen)
+			switch agent.Status {
+			case "online":
+				agent.OfflineSince = 0
+				agent.StaleSince = 0
+			case "offline":
+				if agent.OfflineSince <= 0 {
+					agent.OfflineSince = agent.LastSeen + float64(s.hubSettingIntLocked("mcp_offline_after_seconds"))
+				}
+			case "stale":
+				if agent.OfflineSince <= 0 {
+					agent.OfflineSince = agent.LastSeen + float64(s.hubSettingIntLocked("mcp_offline_after_seconds"))
+				}
+				if agent.StaleSince <= 0 {
+					agent.StaleSince = agent.LastSeen + float64(s.hubSettingIntLocked("mcp_stale_after_seconds"))
+				}
+			}
+		}
+		if agent.Meta == nil {
+			agent.Meta = map[string]any{}
+		}
+		agent.Meta["restored_from_state"] = true
+		agent.Meta["state_file"] = path
+		cp := agent
+		s.agents[id] = &cp
+		loaded++
+	}
+	if loaded > 0 {
+		log.Printf("registry state loaded path=%s agents=%d saved_at=%.0f", path, loaded, state.SavedAt)
+	}
+	return nil
+}
+
+func (s *Server) saveRegistryStateLocked() error {
+	path := s.registryStatePath()
+	if path == "" {
+		return nil
+	}
+	state := persistentRegistryState{
+		SavedAt:          nowFloat(),
+		BuildVersion:     BuildVersion,
+		GitCommit:        GitCommit,
+		Agents:           map[string]Agent{},
+		RelayCredentials: map[string]string{},
+		RelayEnrollments: map[string]relayEnrollment{},
+		Settings:         s.settings,
+		SettingsRevision: s.settingsRevision,
+		SettingsHistory:  append([]settingsRevision(nil), s.settingsHistory...),
+		AgentPolicies:    map[string]agentCleanupPolicy{},
+		Tombstones:       append([]agentTombstone(nil), s.tombstones...),
+	}
+	for id, agent := range s.agents {
+		if id == "" || agent == nil || id == "hub" {
+			continue
+		}
+		cp := *agent
+		cp.Meta = cloneMap(cp.Meta)
+		delete(cp.Meta, "public_mcp_endpoint")
+		delete(cp.Meta, "public_mcp_path")
+		delete(cp.Meta, "public_mcp_slug")
+		delete(cp.Meta, "public_mcp_auth")
+		delete(cp.Meta, "exposed_by_default")
+		delete(cp.Meta, "restored_from_state")
+		delete(cp.Meta, "state_file")
+		state.Agents[id] = cp
+	}
+	for id, digest := range s.relayCredentials {
+		if id != "" && digest != "" {
+			state.RelayCredentials[id] = digest
+		}
+	}
+	for id, enrollment := range s.relayEnrollments {
+		if id != "" && enrollment.AgentID == id {
+			state.RelayEnrollments[id] = enrollment
+		}
+	}
+	for id, policy := range s.agentPolicies {
+		if id != "" {
+			state.AgentPolicies[id] = policy
+		}
+	}
+	return withStateFileLock(path, func() error {
+		if err := mergeRegistryAgentsFromDisk(path, &state); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return err
+		}
+		b, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return err
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+			return err
+		}
+		if err := os.Chmod(tmp, 0o600); err != nil {
+			return err
+		}
+		return os.Rename(tmp, path)
+	})
+}
+
+func (s *Server) prepareAgentLocked(agent *Agent) {
+	if agent == nil {
+		return
+	}
+	now := agent.LastSeen
+	if now <= 0 {
+		now = nowFloat()
+		agent.LastSeen = now
+	}
+	if old := s.agents[agent.AgentID]; old != nil {
+		agent.RegisteredAt = old.RegisteredAt
+		agent.FirstSeen = old.FirstSeen
+		if agent.RegisteredAt <= 0 {
+			agent.RegisteredAt = old.LastSeen
+		}
+		if agent.FirstSeen <= 0 {
+			agent.FirstSeen = old.LastSeen
+		}
+	} else {
+		if agent.RegisteredAt <= 0 {
+			agent.RegisteredAt = now
+		}
+		if agent.FirstSeen <= 0 {
+			agent.FirstSeen = now
+		}
+	}
+	if agent.Status == "online" || agent.Status == "awaiting_approval" {
+		agent.OfflineSince = 0
+		agent.StaleSince = 0
+	}
+}
+
+func (s *Server) markAgentOnlineLocked(agent *Agent, now float64) {
+	if agent == nil {
+		return
+	}
+	if agent.RegisteredAt <= 0 {
+		agent.RegisteredAt = now
+	}
+	if agent.FirstSeen <= 0 {
+		agent.FirstSeen = now
+	}
+	agent.LastSeen = now
+	agent.Status = "online"
+	agent.OfflineSince = 0
+	agent.StaleSince = 0
+}
+
+func (s *Server) agentLifecycleStatusLocked(lastSeen float64) string {
+	if lastSeen <= 0 {
+		return "stale"
+	}
+	age := s.now().Unix() - int64(lastSeen)
+	if age >= int64(s.hubSettingIntLocked("mcp_stale_after_seconds")) {
+		return "stale"
+	}
+	if age >= int64(s.hubSettingIntLocked("mcp_offline_after_seconds")) {
+		return "offline"
+	}
+	return "online"
+}
+
+func (s *Server) refreshAgentLifecycleLocked() int {
+	changed := 0
+	for _, agent := range s.agents {
+		if agent == nil || agent.AgentID == "hub" || agent.Kind == "virtual_mcp" || agent.Status == "awaiting_approval" || agent.Status == "failed" {
+			continue
+		}
+		next := s.agentLifecycleStatusLocked(agent.LastSeen)
+		if agent.Status != next {
+			now := nowFloat()
+			switch next {
+			case "online":
+				agent.OfflineSince = 0
+				agent.StaleSince = 0
+			case "offline":
+				if agent.OfflineSince <= 0 {
+					agent.OfflineSince = now
+				}
+				agent.StaleSince = 0
+			case "stale":
+				if agent.OfflineSince <= 0 {
+					agent.OfflineSince = agent.LastSeen + float64(s.hubSettingIntLocked("mcp_offline_after_seconds"))
+				}
+				if agent.StaleSince <= 0 {
+					agent.StaleSince = now
+				}
+			}
+			agent.Status = next
+			changed++
+		}
+	}
+	return changed
+}
+
+func (s *Server) cleanupCandidatesLocked() []map[string]any {
+	globalDays := s.hubSettingIntLocked("stale_mcp_retention_days")
+	items := []map[string]any{}
+	for id, agent := range s.agents {
+		if id == "" || id == "hub" || agent == nil || agent.Kind == "virtual_shell" || agent.Status != "stale" || agent.LastSeen <= 0 {
+			continue
+		}
+		policy := s.agentPolicies[id]
+		days := globalDays
+		if policy.RetentionDays > 0 {
+			days = policy.RetentionDays
+		}
+		ageDays := int(s.now().Sub(time.Unix(int64(agent.LastSeen), 0)).Hours() / 24)
+		eligible := ageDays >= days && !policy.Protected && !policy.NeverDelete
+		reason := "retention_not_reached"
+		switch {
+		case policy.Protected:
+			reason = "protected"
+		case policy.NeverDelete:
+			reason = "never_delete"
+		case eligible:
+			reason = "retention_expired"
+		}
+		items = append(items, map[string]any{"agent_id": id, "name": agent.Name, "kind": agent.Kind, "status": agent.Status, "last_seen": agent.LastSeen, "age_days": ageDays, "retention_days": days, "eligible": eligible, "reason": reason, "policy": policy})
+	}
+	sort.Slice(items, func(i, j int) bool { return firstString(items[i], "agent_id") < firstString(items[j], "agent_id") })
+	return items
+}
+
+func (s *Server) deleteStaleAgentLocked(id, reason string) bool {
+	agent := s.agents[id]
+	if agent == nil {
+		return false
+	}
+	policy := s.agentPolicies[id]
+	s.tombstones = append(s.tombstones, agentTombstone{AgentID: id, Name: agent.Name, Kind: agent.Kind, LastSeen: agent.LastSeen, DeletedAt: nowFloat(), DeleteReason: reason, Policy: policy})
+	if len(s.tombstones) > 1000 {
+		s.tombstones = s.tombstones[len(s.tombstones)-1000:]
+	}
+	delete(s.agents, id)
+	delete(s.relayCredentials, id)
+	delete(s.relayEnrollments, id)
+	delete(s.relayQueues, id)
+	delete(s.agentPolicies, id)
+	return true
+}
+
+func (s *Server) cleanupStaleMCPAgentsLocked() []string {
+	if !s.hubSettingBoolLocked("mcp_auto_cleanup_enabled") {
+		return []string{}
+	}
+	removed := []string{}
+	for _, item := range s.cleanupCandidatesLocked() {
+		if item["eligible"] == true {
+			id := firstString(item, "agent_id")
+			if s.deleteStaleAgentLocked(id, "retention_expired") {
+				removed = append(removed, id)
+			}
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
+func hubSettingDefinitionFor(key string) (hubSettingDefinition, bool) {
+	for _, def := range hubSettingRegistry {
+		if def.Key == key {
+			return def, true
+		}
+	}
+	return hubSettingDefinition{}, false
+}
+
+func validateHubSettingValue(key string, value any) (any, error) {
+	def, ok := hubSettingDefinitionFor(key)
+	if !ok {
+		return nil, fmt.Errorf("unknown hub setting %q", key)
+	}
+	switch def.Type {
+	case "boolean":
+		v, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("%s must be boolean", key)
+		}
+		return v, nil
+	case "integer":
+		v := intFromAny(value)
+		if def.Minimum != nil && v < *def.Minimum {
+			return nil, fmt.Errorf("%s must be >= %d", key, *def.Minimum)
+		}
+		if def.Maximum != nil && v > *def.Maximum {
+			return nil, fmt.Errorf("%s must be <= %d", key, *def.Maximum)
+		}
+		return v, nil
+	default:
+		return nil, fmt.Errorf("unsupported hub setting type %q", def.Type)
+	}
+}
+
+func (s *Server) hubSettingIntLocked(key string) int {
+	if value, ok := s.settings.Values[key]; ok {
+		if v, err := validateHubSettingValue(key, value); err == nil {
+			return v.(int)
+		}
+	}
+	def, _ := hubSettingDefinitionFor(key)
+	return intFromAny(def.Default)
+}
+
+func (s *Server) hubSettingBoolLocked(key string) bool {
+	if value, ok := s.settings.Values[key]; ok {
+		if v, err := validateHubSettingValue(key, value); err == nil {
+			return v.(bool)
+		}
+	}
+	def, _ := hubSettingDefinitionFor(key)
+	v, _ := def.Default.(bool)
+	return v
+}
+
+func (s *Server) hubSettingsLocked() map[string]any {
+	out := map[string]any{}
+	for _, def := range hubSettingRegistry {
+		if value, ok := s.settings.Values[def.Key]; ok {
+			out[def.Key] = value
+		} else {
+			out[def.Key] = def.Default
+		}
+	}
+	return out
+}
+
+func hubSettingsSchema() map[string]any {
+	defs := make([]hubSettingDefinition, len(hubSettingRegistry))
+	copy(defs, hubSettingRegistry)
+	return map[string]any{"version": 1, "settings": defs}
+}
+
+func (s *Server) settingsRevisionValuesLocked() map[string]any {
+	values := s.hubSettingsLocked()
+	for _, def := range hubSettingRegistry {
+		if def.Secret {
+			delete(values, def.Key)
+		}
+	}
+	return values
+}
+
+func (s *Server) recordSettingsRevisionLocked(actor, source string, changes map[string]any) settingsRevision {
+	s.settingsRevision++
+	rev := settingsRevision{Revision: s.settingsRevision, Time: s.now().Format(time.RFC3339), Actor: actor, Source: source, Changes: cloneMap(changes), Values: s.settingsRevisionValuesLocked()}
+	s.settingsHistory = append(s.settingsHistory, rev)
+	if len(s.settingsHistory) > 200 {
+		s.settingsHistory = s.settingsHistory[len(s.settingsHistory)-200:]
+	}
+	return rev
+}
+
+func (s *Server) rollbackSettingsLocked(revision int64, actor, source string) (settingsRevision, error) {
+	var target *settingsRevision
+	for i := range s.settingsHistory {
+		if s.settingsHistory[i].Revision == revision {
+			cp := s.settingsHistory[i]
+			target = &cp
+			break
+		}
+	}
+	if target == nil {
+		return settingsRevision{}, fmt.Errorf("settings revision %d not found", revision)
+	}
+	previous := cloneMap(s.settings.Values)
+	for key, value := range target.Values {
+		if _, err := validateHubSettingValue(key, value); err == nil {
+			s.settings.Values[key] = value
+		}
+	}
+	changes := map[string]any{}
+	for key, newv := range s.settings.Values {
+		if fmt.Sprint(previous[key]) != fmt.Sprint(newv) {
+			changes[key] = map[string]any{"old": previous[key], "new": newv}
+		}
+	}
+	return s.recordSettingsRevisionLocked(actor, source, changes), nil
+}
+
+func (s *Server) applyHubSettingsLocked(updates map[string]any) (map[string]any, error) {
+	if len(updates) == 0 {
+		return nil, fmt.Errorf("no settings supplied")
+	}
+	changed := map[string]any{}
+	previous := cloneMap(s.settings.Values)
+	for key, raw := range updates {
+		value, err := validateHubSettingValue(key, raw)
+		if err != nil {
+			return nil, err
+		}
+		if old, ok := s.settings.Values[key]; !ok || fmt.Sprint(old) != fmt.Sprint(value) {
+			changed[key] = map[string]any{"old": old, "new": value}
+			s.settings.Values[key] = value
+		}
+	}
+	if s.hubSettingIntLocked("mcp_stale_after_seconds") < s.hubSettingIntLocked("mcp_offline_after_seconds") {
+		s.settings.Values = previous
+		return nil, fmt.Errorf("mcp_stale_after_seconds must be >= mcp_offline_after_seconds")
+	}
+	if s.hubSettingIntLocked("shell_outbox_backoff_cap_seconds") < s.hubSettingIntLocked("shell_outbox_backoff_base_seconds") {
+		s.settings.Values = previous
+		return nil, fmt.Errorf("shell_outbox_backoff_cap_seconds must be >= shell_outbox_backoff_base_seconds")
+	}
+	return changed, nil
+}
+
+func (s *Server) registryCleanupLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	lastCleanup := time.Time{}
+	for {
+		s.mu.Lock()
+		changed := s.refreshAgentLifecycleLocked()
+		expiredJobs, taskErr := s.maintainTaskStateLocked()
+		if taskErr != nil {
+			log.Printf("task maintenance commit failed: %v", taskErr)
+		}
+		removed := []string{}
+		if lastCleanup.IsZero() || s.now().Sub(lastCleanup) >= time.Hour {
+			removed = s.cleanupStaleMCPAgentsLocked()
+			lastCleanup = s.now()
+		}
+		if len(removed) > 0 {
+			s.addAuditLocked("stale_mcp_auto_cleanup", map[string]any{"removed": removed, "retention_days": s.hubSettingIntLocked("stale_mcp_retention_days")})
+		}
+		if len(expiredJobs) > 0 {
+			s.addAuditLocked("orphan_shell_jobs_expired", map[string]any{"job_ids": expiredJobs, "count": len(expiredJobs)})
+		}
+		if changed > 0 || len(removed) > 0 {
+			if err := s.saveRegistryStateLocked(); err != nil {
+				log.Printf("registry lifecycle save failed: %v", err)
+			}
+		}
+		s.mu.Unlock()
+		select {
+		case <-ticker.C:
+		case <-s.taskRuntimeStop:
+			return
+		}
+	}
+}
+
+func (s *Server) ListenAndServe() error {
+	defer s.Close()
+	if s.secretStoreErr != nil {
+		return fmt.Errorf("secret ingress store unavailable: %w", s.secretStoreErr)
+	}
+	if err := os.MkdirAll(s.cfg.OutputDir, 0o750); err != nil {
+		log.Printf("output dir unavailable: %v", err)
+	}
+	log.Printf("gptadmin go hub listening addr=%s config_dir=%s public_dir=%s", s.cfg.Addr, s.cfg.ConfigDir, s.cfg.PublicDir)
+	go s.registryCleanupLoop()
+	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	return srv.ListenAndServe()
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/version", s.version)
+	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/metrics", s.hubMetrics)
+	cloudos.RegisterRoutes(mux, s.cloudOSRegistry, s.cloudOSTunnel)
+	mux.HandleFunc("/api/v1/cloud-os/shell/computers", s.cloudOSShellComputers)
+	mux.HandleFunc("/api/v1/cloud-os/shell/exec", s.cloudOSShellExec)
+	mux.HandleFunc("/api/v1/cloud-os/shell/inspect", s.cloudOSShellInspect)
+	mux.HandleFunc("/api/v1/cloud-os/browser/connectors", s.cloudOSBrowserConnectors)
+	mux.HandleFunc("/api/v1/cloud-os/browser/tabs", s.cloudOSBrowserTabs)
+	mux.HandleFunc("/actions/openapi.yaml", s.actionsOpenAPI)
+	mux.HandleFunc("/actions/instructions.md", s.actionsInstructions)
+	mux.HandleFunc("/artifacts/shellmcp.json", s.requireArtifact(s.shellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/shellmcp.tar.gz", s.requireArtifact(s.shellmcpArtifactDownload))
+	mux.HandleFunc("/artifacts/shellmcp-android-arm64.json", s.requireArtifact(s.androidShellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/shellmcp-android-arm64.bin", s.requireArtifact(s.androidShellmcpArtifactDownload))
+	// Legacy rootd artifact aliases: old services still point ROOTD_UPDATE_MANIFEST_URL here.
+	mux.HandleFunc("/artifacts/rootd.json", s.requireArtifact(s.shellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/rootd.tar.gz", s.requireArtifact(s.shellmcpArtifactDownload))
+	mux.HandleFunc("/heartbeat", s.requireShell(s.heartbeat))
+	mux.HandleFunc("/servers", s.requireCtl(s.serversList))
+	mux.HandleFunc("/bulk/exec", s.requireCtl(s.bulkExec))
+	mux.HandleFunc("/queue/", s.requireShell(s.queue))
+	mux.HandleFunc("/tasks/", s.requireCtl(s.tasksEndpoint))
+	mux.HandleFunc("/mcp-relay/register", s.mcpRelayRegister)
+	mux.HandleFunc("/mcp-relay/poll/", s.mcpRelayPoll)
+	mux.HandleFunc("/mcp-relay/result/", s.mcpRelayResult)
+	mux.HandleFunc("/mcp-relay/servers", s.requireCtl(s.mcpRelayServers))
+	mux.HandleFunc("/mcp-relay/grepmesh", s.requireCtl(s.mcpRelayGrepMeshTopology))
+	mux.HandleFunc("/mcp-relay/list_mcp_servers", s.requireCtl(s.mcpRelayServers))
+	// Legacy aliases kept for old clients only. Do not expose in OpenAPI.
+	mux.HandleFunc("/mcp-relay/agents", s.requireCtl(s.mcpRelayAgents))
+	mux.HandleFunc("/mcp-relay/list_mcp_agents", s.requireCtl(s.mcpRelayAgents))
+	mux.HandleFunc("/mcp-relay/list_mcp_tools", s.requireCtl(s.mcpRelayTools))
+	mux.HandleFunc("/mcp-relay/tools", s.requireCtl(s.mcpRelayTools))
+	mux.HandleFunc("/mcp-relay/call_mcp_tool", s.requireCtl(s.mcpRelayCall))
+	mux.HandleFunc("/mcp-relay/call", s.requireCtl(s.mcpRelayCall))
+	mux.HandleFunc("/mcp-relay/shell_exec", s.requireCtl(s.mcpRelayShellExec))
+	mux.HandleFunc("/mcp-relay/get_mcp_job/", s.requireCtl(s.mcpRelayJob))
+	mux.HandleFunc("/mcp-relay/job/", s.requireCtl(s.mcpRelayJob))
+	mux.HandleFunc("/webhooks/v1/", s.webhookEndpoint)
+	mux.HandleFunc("/webhook-jobs/", s.webhookJobEndpoint)
+	mux.HandleFunc("/webhook-routes", s.requireCtl(s.webhookRoutesEndpoint))
+	mux.HandleFunc("/webhook-routes/", s.requireCtl(s.webhookRoutesEndpoint))
+	mux.HandleFunc("/admin/api/webhook-jobs", s.requireCtl(s.adminWebhookJobEndpoint))
+	mux.HandleFunc("/admin/api/webhook-jobs/", s.requireCtl(s.adminWebhookJobEndpoint))
+	mux.HandleFunc("/.well-known/oauth-protected-resource", s.oauthProtectedResource)
+	mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
+	mux.HandleFunc("/register", s.oauthRegister)
+	mux.HandleFunc("/authorize", s.oauthAuthorize)
+	mux.HandleFunc("/token", s.oauthToken)
+	// Canonical OAuth paths are namespaced; root aliases remain for clients
+	// pinned to the pre-contract endpoint names during the migration window.
+	mux.HandleFunc("/oauth/authorize", s.oauthAuthorize)
+	mux.HandleFunc("/oauth/token", s.oauthToken)
+	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/connect", s.connectionPage)
+	mux.HandleFunc("/connect.json", s.connectionPage)
+	mux.HandleFunc("/connect/callback", s.browserOAuthCallback)
+	mux.HandleFunc("/secret-input/", s.secretIngress)
+	mux.HandleFunc("/_services/", s.httpServiceEndpoint)
+	mux.HandleFunc("/server/", s.serverMCPEndpoint)
+	// Legacy alias kept for old pinned MCP URLs.
+	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
+	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
+	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
+	mux.HandleFunc("/proxy-control/v1/request", s.requireCtl(s.networkProxyRequestHTTP))
+	mux.HandleFunc("/proxy-control/v1/approve", s.requireCtl(s.networkProxyApproveHTTP))
+	mux.HandleFunc("/proxy-control/v1/issue", s.requireCtl(s.networkProxyIssueHTTP))
+	mux.HandleFunc("/proxy-control/v1/open", s.requireCtl(s.networkProxyOpenHTTP))
+	mux.HandleFunc("/proxy-control/v1/status", s.requireCtl(s.networkProxyStatusHTTP))
+	mux.HandleFunc("/proxy-control/v1/revoke", s.requireCtl(s.networkProxyRevokeHTTP))
+	mux.HandleFunc("/proxy-agent/offers", s.networkProxyOfferPullHTTP)
+	mux.HandleFunc("/proxy-agent/public-key", s.networkProxyOfferPublicKeyHTTP)
+	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.adminMCPManage))
+	mux.HandleFunc("/admin/api/settings", s.requireCtl(s.adminSettings))
+	mux.HandleFunc("/admin/api/settings/history", s.requireCtl(s.adminSettingsHistory))
+	mux.HandleFunc("/admin/api/settings/rollback", s.requireCtl(s.adminSettingsRollback))
+	mux.HandleFunc("/admin/api/registry-maintenance", s.requireCtl(s.adminRegistryMaintenance))
+	mux.HandleFunc("/admin/api/diagnose", s.requireCtl(s.adminDiagnose))
+	mux.HandleFunc("/admin/api/handover", s.requireCtl(s.adminHandover))
+	mux.HandleFunc("/admin/api/virtual-mcps", s.requireCtl(s.adminVirtualMCPEndpoint))
+	mux.HandleFunc("/admin/api/virtual-mcps/", s.requireCtl(s.adminVirtualMCPEndpoint))
+	mux.HandleFunc("/admin/api/mcp/issue-token", s.requireCtl(s.trackAccessOperation(s.adminMCPIssueToken)))
+	mux.HandleFunc("/admin/api/mcp/tokens/", s.requireCtl(s.trackAccessOperation(s.adminMCPTokenAction)))
+	mux.HandleFunc("/admin/api/access-profiles", s.requireCtl(s.adminAccessProfiles))
+	mux.HandleFunc("/admin/api/access-profiles/", s.requireCtl(s.trackAccessOperation(s.adminAccessProfile)))
+	mux.HandleFunc("/admin/api/client-bindings/", s.requireCtl(s.trackAccessOperation(s.adminClientBinding)))
+	mux.HandleFunc("/admin/api/mcp/resources/list", s.requireCtl(s.adminMCPResourcesList))
+	mux.HandleFunc("/admin/api/mcp/resources/read", s.requireCtl(s.adminMCPResourceRead))
+	mux.HandleFunc("/admin/api/auth/rotate-oauth", s.requireCtl(s.adminRotateOAuth))
+	mux.HandleFunc("/admin/api/security/env", s.requireCtl(s.adminSecurityEnv))
+	mux.HandleFunc("/admin/api/security/reauth", s.requireCtl(s.adminSecurityReauth))
+	mux.HandleFunc("/admin/api/security/heartbeat", s.requireCtl(s.adminSecurityHeartbeat))
+	mux.HandleFunc("/admin/api/security/preset", s.requireCtl(s.adminSecurityPreset))
+	mux.HandleFunc("/admin/api/security/profile", s.requireCtl(s.adminSecurityProfile))
+	mux.HandleFunc("/admin/api/security/mfa/totp/enroll", s.requireCtl(s.adminTOTPEnroll))
+	mux.HandleFunc("/admin/api/security/mfa/totp/verify", s.requireCtl(s.adminTOTPVerify))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/register/begin", s.requireCtl(s.adminWebAuthnRegisterBegin))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/register/finish", s.requireCtl(s.adminWebAuthnRegisterFinish))
+	// Login ceremonies are the one admin surface reachable before the admin
+	// session exists. The handler still requires an exact same-origin browser
+	// request (or an existing internal credential), so it cannot become a
+	// cross-site credential oracle.
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/login/begin", s.requireWebAuthnBrowser(s.adminWebAuthnLoginBegin))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/login/finish", s.requireWebAuthnBrowser(s.adminWebAuthnLoginFinish))
+	mux.HandleFunc("/admin/api/telemetry", s.requireCtl(s.adminTelemetry))
+	mux.HandleFunc("/admin/api/telemetry/event", s.requireCtl(s.adminTelemetry))
+	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
+	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.trackAccessOperation(s.adminClientDelete)))
+	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/instruction-sets/default", s.requireCtl(s.adminDefaultInstructionSet))
+	mux.HandleFunc("/admin/api/instruction-sets", s.requireCtl(s.adminInstructionSets))
+	mux.HandleFunc("/admin/api/instruction-sets/", s.requireCtl(s.adminInstructionSet))
+	mux.HandleFunc("/admin/api/update", s.requireCtl(s.adminTriggerUpdate))
+	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
+	mux.HandleFunc("/admin/api/failover/reclaim/accept", s.requireCtl(s.adminFailoverReclaimAccept))
+	mux.HandleFunc("/admin/api/failover/reclaim", s.requireCtl(s.adminFailoverReclaim))
+	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
+	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
+	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
+	mux.HandleFunc("/admin/api/operations", s.requireCtl(s.adminOperations))
+	mux.HandleFunc("/admin/api/connection-debug", s.requireCtl(s.connectionDebug))
+	mux.HandleFunc("/admin/api/approvals", s.requireCtl(s.adminApprovals))
+	mux.HandleFunc("/admin/api/approvals/", s.requireCtl(s.adminApproval))
+	mux.HandleFunc("/admin/api/client-roles/", s.requireCtl(s.trackAccessOperation(s.adminClientRole)))
+	mux.HandleFunc("/admin/api/clients", s.requireCtl(s.adminClients))
+	mux.HandleFunc("/admin/login", s.adminLogin)
+	mux.HandleFunc("/admin/logout", s.adminLogout)
+	mux.HandleFunc("/cloudos", s.cloudOSUI)
+	mux.HandleFunc("/cloudos/", s.cloudOSUI)
+	mux.HandleFunc("/admin/legacy/", s.adminLegacyStatic)
+	mux.HandleFunc("/admin/", s.adminStatic)
+	mux.HandleFunc("/admin", s.adminIndex)
+	return withRequestTrace(withIngressAudit(withCORS(mux)))
+}
+
+// cloudOSUI exposes the locally installed CloudOS UI below the same Hub origin.
+// Personal FRP hostnames already route to this Hub, so this does not create a
+// second public hostname or authentication ceremony.
+func (s *Server) cloudOSUI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/cloudos" {
+		http.Redirect(w, r, "/cloudos/", http.StatusTemporaryRedirect)
+		return
+	}
+	target, _ := url.Parse("http://127.0.0.1:3030")
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.URL.Path = strings.TrimPrefix(r.URL.Path, "/cloudos")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Header.Set("X-Forwarded-Prefix", "/cloudos")
+		req.Header.Set("X-Forwarded-Proto", requestScheme(r))
+		req.Header.Set("X-Forwarded-Host", r.Host)
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "CloudOS UI is unavailable"})
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func (s *Server) httpServiceEndpoint(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/_services/")
+	parts := strings.SplitN(trimmed, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	serviceSlug, endpointName := parts[0], parts[1]
+	var endpoint map[string]any
+	s.mu.Lock()
+	for _, a := range s.agents {
+		if agentSlug(a.AgentID) != serviceSlug && agentSlug(a.Name) != serviceSlug {
+			continue
+		}
+		for _, raw := range sliceValue(a.Meta["http_endpoints"]) {
+			ep := mapValue(raw)
+			if firstString(ep, "name") == endpointName {
+				endpoint = ep
+				break
+			}
+		}
+		break
+	}
+	s.mu.Unlock()
+	if endpoint == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Only endpoints that explicitly opt in as a public capability are exposed
+	// through the tunnel. This prevents a private MCP that happens to register an
+	// http_endpoints entry from accidentally becoming publicly reachable.
+	if !isPublicCapability(endpoint) {
+		http.NotFound(w, r)
+		return
+	}
+	targetRaw := firstString(endpoint, "local_url")
+	target, err := url.Parse(targetRaw)
+	if err != nil || target.Scheme != "http" || !isLoopbackServiceHost(target.Hostname()) || target.Port() == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "invalid service endpoint"})
+		return
+	}
+	prefix := "/_services/" + serviceSlug + "/" + endpointName
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		if truthyAny(endpoint["strip_prefix"]) {
+			rest := strings.TrimPrefix(req.URL.Path, prefix)
+			if rest == "" {
+				rest = "/"
+			}
+			req.URL.Path = rest
+		}
+		req.Header.Set("X-Forwarded-Prefix", prefix)
+		req.Header.Set("X-Forwarded-Proto", requestScheme(r))
+		req.Header.Set("X-Forwarded-Host", r.Host)
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("http service proxy failed agent=%s endpoint=%s target=%s err=%v", serviceSlug, endpointName, targetRaw, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "service unavailable"})
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func isLoopbackServiceHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// isPublicCapability reports whether an http_endpoints entry has explicitly
+// opted in to being reachable through the public tunnel ingress.
+func isPublicCapability(endpoint map[string]any) bool {
+	return strings.TrimSpace(strings.ToLower(firstString(endpoint, "visibility"))) == "public-capability"
+}
+
+func truthyAny(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return truthyString(x)
+	default:
+		return false
+	}
+}
+
+func sliceValue(v any) []any {
+	if xs, ok := v.([]any); ok {
+		return xs
+	}
+	return nil
+}
+
+func requestScheme(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); v != "" {
+		return v
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func withCORS(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization,content-type,if-match,x-ctl-token,x-mcp-relay-token")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (s *Server) version(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit})
+}
+
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/api/instruction-sets/default" && (r.Method == http.MethodGet || r.Method == http.MethodPut) {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if strings.HasPrefix(r.URL.Path, "/admin/api/instruction-sets/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if strings.HasPrefix(r.URL.Path, "/admin/api/access-profiles/") || strings.HasPrefix(r.URL.Path, "/admin/api/client-bindings/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			s.markLegacyCtlToken(w)
+			if !s.legacyCtlTokenAllowed() {
+				s.authAudit("ctl_auth_denied", r, map[string]any{"reason": "legacy ctl token migration deadline passed"})
+				s.writeCtlUnauthorized(w, r)
+				return
+			}
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
+			next(w, r)
+			return
+		}
+		// An unset admin password means the dashboard has no cookie gate; it must
+		// not turn every request into an authenticated relay API request.
+		if s.cfg.AdminPassword != "" && s.adminSessionValid(r) {
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "admin_cookie"})
+			next(w, r)
+			return
+		}
+		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			if claims, ok := s.existingMCPBearerClaims(strings.TrimSpace(auth[7:])); ok {
+				s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": configuredMCPBearerTokenKind, "client_id": claims["client_id"]})
+				*r = *requestWithAuthClaims(r, claims)
+				*r = *s.applyAccessProfileContext(r, claims)
+				if !s.clientHTTPPathAllowed(r) {
+					writeJSON(w, http.StatusForbidden, map[string]any{"detail": "MCP client credentials cannot access the admin API"})
+					return
+				}
+				next(w, r)
+				return
+			}
+		}
+		if claims, err := s.verifyBearerJWTFromRequest(r); err == nil {
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
+			*r = *requestWithAuthClaims(r, claims)
+			*r = *s.applyAccessProfileContext(r, claims)
+			if !s.clientHTTPPathAllowed(r) {
+				detail := "MCP client credentials cannot access the admin API"
+				if requestAccessMode(r) == accessModeReadonly {
+					detail = "read-only client cannot access the admin API"
+				}
+				writeJSON(w, http.StatusForbidden, map[string]any{"detail": detail})
+				return
+			}
+			next(w, r)
+			return
+		} else {
+			s.authAudit("ctl_auth_denied", r, map[string]any{"reason": err.Error()})
+		}
+		if s.authFailureRateLimited(w, r) {
+			return
+		}
+		s.writeCtlUnauthorized(w, r)
+	}
+}
+
+func (s *Server) requireWebAuthnBrowser(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			next(w, r)
+			return
+		}
+		if s.cfg.AdminPassword != "" && s.adminSessionValid(r) {
+			next(w, r)
+			return
+		}
+		expected := strings.TrimRight(s.origin(r), "/")
+		requestOrigin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+		if requestOrigin == "" {
+			if referer, err := url.Parse(r.Referer()); err == nil && referer.Scheme != "" && referer.Host != "" {
+				requestOrigin = strings.TrimRight(referer.Scheme+"://"+referer.Host, "/")
+			}
+		}
+		if requestOrigin != expected {
+			s.authAudit("webauthn_browser_denied", r, map[string]any{"reason": "same-origin required"})
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "same-origin browser request required"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) requireRelay(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.RelayAgentToken != "" && (tokenMatches(r, s.cfg.RelayAgentToken) || hmac.Equal([]byte(r.Header.Get("X-MCP-Relay-Token")), []byte(s.cfg.RelayAgentToken))) {
+		return true
+	}
+	writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+	return false
+}
+
+func relayCredential(r *http.Request) string {
+	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+		return strings.TrimSpace(authorization[len("Bearer "):])
+	}
+	return strings.TrimSpace(r.Header.Get("X-MCP-Relay-Token"))
+}
+
+func relayCredentialDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+// relayEnrollmentAllowed deliberately accepts the administrator password only
+// for POST /mcp-relay/register. Poll and result calls must use an agent-bound
+// credential, so knowledge of the password never grants ongoing relay access.
+func (s *Server) relayEnrollmentAllowed(credential string) bool {
+	return credential != "" && s.cfg.AdminPassword != "" && hmac.Equal([]byte(credential), []byte(s.cfg.AdminPassword))
+}
+
+func (s *Server) legacyRelayCredentialAllowed(credential string) bool {
+	return credential != "" && s.cfg.RelayAgentToken != "" && hmac.Equal([]byte(credential), []byte(s.cfg.RelayAgentToken))
+}
+
+func (s *Server) relayCredentialAllowedLocked(agentID, credential string) bool {
+	digest := s.relayCredentials[agentID]
+	return credential != "" && digest != "" && hmac.Equal([]byte(relayCredentialDigest(credential)), []byte(digest))
+}
+
+func newRelayCredential() (string, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", err
+	}
+	return "gptr_" + base64.RawURLEncoding.EncodeToString(secret), nil
+}
+
+func relayEnrollmentMessage(agentID, challenge string) []byte {
+	return []byte("gptadmin-relay-enroll-v1\n" + agentID + "\n" + challenge)
+}
+
+func verifyRelayEnrollment(agentID string, enrollment relayEnrollment, signatureB64 string) bool {
+	publicDER, err := base64.RawURLEncoding.DecodeString(enrollment.PublicKey)
+	if err != nil {
+		return false
+	}
+	parsed, err := x509.ParsePKIXPublicKey(publicDER)
+	if err != nil {
+		return false
+	}
+	publicKey, ok := parsed.(ed25519.PublicKey)
+	if !ok {
+		return false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(signatureB64)
+	return err == nil && ed25519.Verify(publicKey, relayEnrollmentMessage(agentID, enrollment.Challenge), signature)
+}
+
+func relayFingerprintMatches(publicKey, fingerprint string) bool {
+	publicDER, err := base64.RawURLEncoding.DecodeString(publicKey)
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256(publicDER)
+	return hmac.Equal([]byte(strings.ToLower(fingerprint)), []byte(hex.EncodeToString(digest[:])))
+}
+
+func (s *Server) requireArtifact(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// ShellMCP updates use the agent-bound credential, so they remain
+		// possible after the human CLI bearer migration deadline.
+		if s.cfg.ShellToken != "" && tokenMatches(r, s.cfg.ShellToken) && (s.cfg.ShellToken != s.cfg.CtlToken || s.legacyCtlTokenAllowed()) {
+			next(w, r)
+			return
+		}
+		s.requireCtl(next)(w, r)
+	}
+}
+
+func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.ShellToken == "" || !tokenMatches(r, s.cfg.ShellToken) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func tokenMatches(r *http.Request, expected string) bool {
+	candidates := []string{
+		r.Header.Get("X-CTL-Token"),
+		r.Header.Get("X-GPTAdmin-Token"),
+		r.Header.Get("X-MCP-Relay-Token"),
+		r.URL.Query().Get("token"),
+	}
+	if h := strings.TrimSpace(r.Header.Get("Authorization")); h != "" {
+		if strings.HasPrefix(strings.ToLower(h), "bearer ") {
+			candidates = append(candidates, strings.TrimSpace(h[7:]))
+		} else {
+			candidates = append(candidates, h)
+		}
+	}
+	for _, got := range candidates {
+		if got == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
+	body := defaultCustomGPTActionsOpenAPI(s.actionsSpecOrigin(r))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
+}
+
+// actionsInstructions serves the ready-to-paste Custom GPT instructions text
+// from the public payload so the admin UI and operators always copy the
+// current prompt instead of a stale local file.
+func (s *Server) actionsInstructions(w http.ResponseWriter, r *http.Request) {
+	path := filepath.Join(s.cfg.PublicDir, "custom-gpt-instructions.md")
+	if _, err := os.Stat(path); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Custom GPT instructions file was not found"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	http.ServeFile(w, r, path)
+}
+
+// actionsSpecOrigin advertises the public host the Actions spec was actually
+// fetched from. OpenAI Custom GPTs require servers.url to share the domain of
+// the OpenAPI URL, and this hub is published under several public hosts (the
+// main domain and per-user tenant hosts), so the configured PublicOrigin would
+// mislabel every spec fetched through any other host.
+func (s *Server) actionsSpecOrigin(r *http.Request) string {
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if host == "" || isLoopbackServiceHost(stripPort(host)) {
+		return s.origin(r)
+	}
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		scheme = "http"
+	}
+	return normalizePublicURL(scheme + "://" + host)
+}
+
+func stripPort(hostport string) string {
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		return host
+	}
+	return hostport
+}
+
+// legacyActionsOpenAPIContract is retained only for source compatibility while
+// callers migrate to the Custom-GPT-safe default contract above. It is not
+// registered as an HTTP handler.
+func (s *Server) legacyActionsOpenAPIContract(w http.ResponseWriter, r *http.Request) {
+	origin := s.origin(r)
+	yaml := fmt.Sprintf(`openapi: 3.1.0
+info:
+  title: GPTAdmin MCP Relay
+  version: "1.0.0"
+  description: |
+    Compact control API: discover → schema → execute. Poll job when background=true.
+
+    Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
+    The hub itself is exposed as target "hub" for registry and approval tools.
+servers:
+  - url: %s
+security:
+  - bearerAuth: []
+paths:
+  /mcp-relay/servers:
+    get:
+      operationId: discover
+      summary: Discover targets
+      description: List compact MCP targets. Add detail=full only when metadata is needed.
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: Opt in to transport, capabilities and metadata.
+          schema:
+            type: string
+            enum: [full]
+      responses:
+        "200":
+          description: Available MCP servers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+  /mcp-relay/tools:
+    post:
+      operationId: schema
+      summary: Get target schema
+      description: List tools for one target from discover. Never use target="default".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SchemaRequest"
+      responses:
+        "200":
+          description: Tool list response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+  /mcp-relay/call:
+    post:
+      operationId: execute
+      summary: Execute one tool
+      description: Execute one tool on one selected target. Use schema first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteRequest"
+      responses:
+        "200":
+          description: Tool call response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "428":
+          description: A write-capable call is waiting for one administrator approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequired"
+        "429":
+          description: The bounded-autonomous profile has exhausted its write budget for the current window.
+  /mcp-relay/job/{job_id}:
+    get:
+      operationId: job
+      summary: Get job
+      description: Read a background job by id.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job id returned by execute.
+          schema:
+            type: string
+        - name: detail
+          in: query
+          required: false
+          description: Response detail level; compact is the default and full adds transport diagnostics.
+          schema:
+            type: string
+            enum: [compact, full]
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: MCP job status and optional result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+  /webhooks/v1/{route}:
+    post:
+      operationId: webhookIngress
+      summary: Accept one authenticated webhook event
+      description: The configured route selects the target action; the event cannot select a target or callback URL.
+      security:
+        - webhookToken: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json: {}
+      responses:
+        "202":
+          description: Accepted webhook job
+  /webhook-jobs/{job_id}:
+    get:
+      operationId: webhookJob
+      summary: Read an authenticated webhook job
+      security:
+        - webhookToken: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+  /admin/api/webhook-jobs/{job_id}:
+    get:
+      operationId: getAdminWebhookJob
+      summary: Read one webhook job with operator authentication
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Durable webhook job state
+  /webhook-routes:
+    get:
+      operationId: listWebhookRoutes
+      summary: List secret-free webhook route metadata
+      responses:
+        "200":
+          description: Route metadata without secrets
+    post:
+      operationId: createWebhookRoute
+      summary: Create an operator-owned fixed-target webhook route
+      parameters:
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "201":
+          description: Created route metadata without secrets
+  /webhook-routes/{route}:
+    put:
+      operationId: replaceWebhookRoute
+      summary: Replace an operator-owned webhook route
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema: {type: string}
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "200":
+          description: Updated route metadata without secrets
+    delete:
+      operationId: deleteWebhookRoute
+      summary: Delete an operator-owned webhook route
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema: {type: string}
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        "204":
+          description: Route deleted
+  /proxy-control/v1/request:
+    post:
+      operationId: networkProxyRequest
+      summary: Request a bounded Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile_id, policy]
+              properties:
+                profile_id: {type: string}
+                policy: {type: object, additionalProperties: true}
+      responses:
+        "201": {description: Pending capability}
+  /proxy-control/v1/approve:
+    post:
+      operationId: networkProxyApprove
+      summary: Approve a pending Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id: {type: string}
+      responses:
+        "200": {description: Active capability}
+  /proxy-control/v1/issue:
+    post:
+      operationId: networkProxyIssue
+      summary: Issue one client and one agent stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id, target]
+              properties:
+                capability_id: {type: string}
+                target: {type: string}
+      responses:
+        "200": {description: Short-lived role-bound grants}
+  /proxy-control/v1/open:
+    post:
+      operationId: networkProxyOpen
+      summary: Consume a one-time stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, role]
+              properties:
+                token: {type: string}
+                role: {type: string, enum: [client, agent]}
+      responses:
+        "200": {description: Consumed grant metadata without the bearer token}
+  /proxy-control/v1/status:
+    get:
+      operationId: networkProxyStatus
+      summary: Read Network Tunnel capability state
+      parameters:
+        - name: capability_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Capability state}
+  /proxy-control/v1/revoke:
+    post:
+      operationId: networkProxyRevoke
+      summary: Revoke and drain a Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id: {type: string}
+      responses:
+        "200": {description: Draining capability}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    webhookToken:
+      type: http
+      scheme: bearer
+  schemas:
+    WebhookRoute:
+      type: object
+      additionalProperties: false
+      required: [id, action]
+      properties:
+        id: {type: string}
+        token: {type: string, writeOnly: true}
+        hmac_secret: {type: string, writeOnly: true}
+        signature_version: {type: string, enum: [v1, v2]}
+        max_skew_seconds: {type: integer, minimum: 1}
+        action:
+          type: object
+          additionalProperties: false
+          required: [kind, target]
+          properties:
+            kind: {type: string, enum: [mcp, prompt, shell]}
+            target: {type: string}
+            approval_mode: {type: string, enum: [ask_before_write, bounded_autonomous]}
+            tool: {type: string}
+            arguments: {type: object, additionalProperties: true}
+            prompt: {type: string}
+            prompt_arg: {type: string}
+            command: {type: string}
+            cwd: {type: string}
+        callback:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url: {type: string}
+            token: {type: string, writeOnly: true}
+            hmac_secret: {type: string, writeOnly: true}
+    ApprovalRequired:
+      type: object
+      additionalProperties: false
+      required: [status, approval_id, expires_at, target, tool]
+      properties:
+        status:
+          type: string
+          enum: [approval_required]
+        approval_id:
+          type: string
+          description: Opaque one-time approval handle; never a copy of the request arguments.
+        expires_at:
+          type: string
+          format: date-time
+        target:
+          type: string
+        tool:
+          type: string
+        message:
+          type: string
+    BoundedAutonomousLimit:
+      type: object
+      additionalProperties: false
+      required: [status, retry_at, limit, window]
+      properties:
+        status:
+          type: string
+          enum: [bounded_autonomous_limit]
+        retry_at:
+          type: string
+          format: date-time
+        limit:
+          type: integer
+          minimum: 1
+        window:
+          type: string
+        message:
+          type: string
+    DiscoverResponse:
+      type: object
+      additionalProperties: false
+      required: [servers]
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServer"
+    McpServer:
+      type: object
+      additionalProperties: true
+      required: [server_id, name, kind, status]
+      properties:
+        server_id:
+          type: string
+          description: Target id to use in schema and execute.
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [real_mcp, virtual_shell, virtual_hub, hub]
+        transport:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [online, offline, stale]
+        last_seen:
+          type: number
+          nullable: true
+        capabilities:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+          additionalProperties: true
+    SchemaRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: Target id from discover. Never use "default".
+        timeout:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 35
+          default: 30
+        background:
+          type: boolean
+          default: false
+    ExecuteRequest:
+      type: object
+      additionalProperties: true
+      required: [target, tool]
+      properties:
+        target:
+          type: string
+          description: Target id from discover. Never use "default".
+        tool:
+          type: string
+          description: Tool name from schema.
+        tool_name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+        args:
+          type: object
+          additionalProperties: true
+          default: {}
+        args_json:
+          type: string
+          description: JSON object encoded as a string; universal fallback for Actions clients that cannot expose free-form object fields.
+        cmd:
+          type: string
+          nullable: true
+        query:
+          type: string
+          nullable: true
+        cwd:
+          type: string
+          nullable: true
+        timeout:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 86400
+          description: Tool execution timeout in seconds when the selected tool supports it. This does not control the Actions HTTP wait; long calls return a job_id/task_id after the bounded synchronous wait window.
+        background:
+          type: boolean
+          default: false
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Reuse only for the same operation.
+        schema_version:
+          type: string
+          deprecated: true
+          description: Optional compatibility/cache hint from a prior schema response. It is not required for execution and stale values do not block a call.
+        schema_digest_sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[a-f0-9]{64}$'
+          deprecated: true
+          description: Optional compatibility/cache hint from a prior schema response. It is not an authorization gate and stale values do not block execution.
+    Result:
+      type: object
+      additionalProperties: true
+      required: [server_id, status]
+      properties:
+        server_id:
+          type: string
+        status:
+          type: string
+          enum: [completed, running, failed, running_or_unknown]
+        response:
+          type: object
+          nullable: true
+          description: Tool/schema responses may include schema_version and schema_digest_sha256 as optional cache/debug metadata.
+          additionalProperties: true
+        background:
+          type: boolean
+        job_id:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+        error:
+          type: object
+          nullable: true
+          additionalProperties: true
+    Job:
+      type: object
+      additionalProperties: true
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, orphaned, running_or_unknown]
+        server_id:
+          type: string
+          nullable: true
+        response:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: object
+          nullable: true
+          additionalProperties: true
+        acked:
+          type: boolean
+          default: false
+    McpError:
+      type: object
+      additionalProperties: true
+      properties:
+        message:
+          type: string
+          nullable: true
+        code:
+          type: string
+          nullable: true
+`, origin)
+	b := []byte(yaml)
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
+// defaultCustomGPTActionsOpenAPI deliberately stays limited to the relay
+// workflow. Optional network-proxy and webhooks capabilities are exposed only
+// after enablement as normal per-server virtual MCP schemas.
+func defaultCustomGPTActionsOpenAPI(origin string) string {
+	return fmt.Sprintf(`openapi: 3.1.0
+info:
+  title: GPTAdmin MCP Relay
+  version: "1.0.0"
+  description: "Custom GPT relay workflow: discover, schema, execute, then poll a background job when needed. Optional capabilities are separate virtual MCP servers."
+servers:
+  - url: %s
+security:
+  - bearerAuth: []
+paths:
+  /mcp-relay/servers:
+    get:
+      operationId: discover
+      summary: Discover targets
+      responses:
+        "200": {description: Available MCP servers}
+  /mcp-relay/tools:
+    post:
+      operationId: schema
+      summary: Get target schema
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target: {type: string, description: 'Target id to use in schema and execute. Never use target="default".'}
+              additionalProperties: false
+      responses:
+        "200": {description: Tool list}
+  /mcp-relay/call:
+    post:
+      operationId: execute
+      summary: Execute one tool on one selected target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target, tool]
+              properties:
+                target: {type: string, description: 'Target id to use in schema and execute. Never use target="default".'}
+                tool: {type: string, description: "Tool name from schema."}
+                tool_name: {type: string}
+                args: {type: object, additionalProperties: true}
+                arguments: {type: object, additionalProperties: true}
+                args_json: {type: string, description: "JSON object string fallback for arbitrary tool arguments."}
+                cmd: {type: string}
+                query: {type: string}
+                cwd: {type: string}
+                idempotency_key: {type: string}
+                detail: {type: string, enum: [compact, full], description: "Full includes transport diagnostics."}
+              additionalProperties: true
+      responses:
+        "200": {description: Tool result or background job}
+        "428": {description: Approval required}
+  /mcp-relay/job/{job_id}:
+    get:
+      operationId: job
+      summary: Read a background job
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: detail
+          in: query
+          required: false
+          description: Response detail level; compact is the default and full adds transport diagnostics.
+          schema: {type: string, enum: [compact, full]}
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema: {type: boolean, default: false}
+      responses:
+        "200": {description: Job status}
+components:
+  # Custom GPT requires a non-empty schemas object; an inline empty YAML map
+  # is rejected by its OpenAPI importer.
+  schemas:
+    EmptyObject:
+      type: object
+      properties: {}
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+`, yamlQuote(origin))
+}
+func (s *Server) shellmcpArtifactPath() string {
+	return filepath.Join(s.cfg.ArtifactDir, "gptadmin-shellmcp.tar.gz")
+}
+
+type shellmcpArtifactMetadata struct {
+	Component    string `json:"component"`
+	BuildVersion int    `json:"build_version"`
+	GitCommit    string `json:"git_commit"`
+	SHA256       string `json:"sha256"`
+}
+
+func (s *Server) loadShellMCPArtifactMetadata() (shellmcpArtifactMetadata, error) {
+	path := filepath.Join(s.cfg.ArtifactDir, "gptadmin-shellmcp.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return shellmcpArtifactMetadata{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(raw) > 64*1024 {
+		return shellmcpArtifactMetadata{}, errors.New("shellmcp artifact metadata exceeds 64 KiB")
+	}
+	var metadata shellmcpArtifactMetadata
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return shellmcpArtifactMetadata{}, fmt.Errorf("decode shellmcp artifact metadata: %w", err)
+	}
+	metadata.Component = strings.TrimSpace(metadata.Component)
+	metadata.GitCommit = strings.TrimSpace(metadata.GitCommit)
+	metadata.SHA256 = strings.ToLower(strings.TrimSpace(metadata.SHA256))
+	if metadata.Component != "shellmcp" {
+		return shellmcpArtifactMetadata{}, errors.New("shellmcp artifact metadata has invalid component")
+	}
+	if metadata.BuildVersion <= 0 {
+		return shellmcpArtifactMetadata{}, errors.New("shellmcp artifact metadata has invalid build_version")
+	}
+	if metadata.GitCommit == "" {
+		return shellmcpArtifactMetadata{}, errors.New("shellmcp artifact metadata has empty git_commit")
+	}
+	decodedSHA, err := hex.DecodeString(metadata.SHA256)
+	if err != nil || len(decodedSHA) != sha256.Size {
+		return shellmcpArtifactMetadata{}, errors.New("shellmcp artifact metadata has invalid sha256")
+	}
+	return metadata, nil
+}
+
+func (s *Server) shellmcpArtifactManifest(w http.ResponseWriter, r *http.Request) {
+	artifact := s.shellmcpArtifactPath()
+	st, err := os.Stat(artifact)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "shellmcp artifact not found: " + artifact})
+		return
+	}
+	sha, err := sha256File(artifact)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	metadata, err := s.loadShellMCPArtifactMetadata()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if metadata.SHA256 != strings.ToLower(sha) {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "shellmcp artifact metadata sha256 does not match archive"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"component": metadata.Component, "build_version": metadata.BuildVersion, "git_commit": metadata.GitCommit, "sha256": sha, "size": st.Size(), "url": s.origin(r) + "/artifacts/shellmcp.tar.gz"})
+}
+
+func (s *Server) shellmcpArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	artifact := s.shellmcpArtifactPath()
+	if _, err := os.Stat(artifact); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "shellmcp artifact not found: " + artifact})
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", `attachment; filename="gptadmin-shellmcp.tar.gz"`)
+	http.ServeFile(w, r, artifact)
+}
+
+func (s *Server) androidShellmcpBinaryPath() string {
+	return filepath.Join(s.cfg.ArtifactDir, "android-arm64", "bin", "shellmcp")
+}
+
+func (s *Server) androidShellmcpBuildVersion() (int, error) {
+	versionPath := filepath.Join(s.cfg.ArtifactDir, "gptadmin-android-arm64.version")
+	raw, err := os.ReadFile(versionPath)
+	if err != nil {
+		return 0, fmt.Errorf("read Android artifact version: %w", err)
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || version <= 0 {
+		return 0, fmt.Errorf("invalid Android artifact version %q", strings.TrimSpace(string(raw)))
+	}
+	return version, nil
+}
+
+func (s *Server) androidShellmcpArtifactManifest(w http.ResponseWriter, r *http.Request) {
+	binary := s.androidShellmcpBinaryPath()
+	st, err := os.Stat(binary)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Android shellmcp binary not found: " + binary})
+		return
+	}
+	version, err := s.androidShellmcpBuildVersion()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	sha, err := sha256File(binary)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"component": "shellmcp-android-arm64", "build_version": version, "sha256": sha, "size": st.Size(), "url": s.origin(r) + "/artifacts/shellmcp-android-arm64.bin"})
+}
+
+func (s *Server) androidShellmcpArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	binary := s.androidShellmcpBinaryPath()
+	if _, err := os.Stat(binary); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Android shellmcp binary not found: " + binary})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="shellmcp-android-arm64"`)
+	http.ServeFile(w, r, binary)
+}
+
+func (s *Server) serversList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	servers := []map[string]any{}
+	for _, a := range s.agents {
+		if strings.HasPrefix(a.AgentID, "shell:") {
+			servers = append(servers, map[string]any{"name": strings.TrimPrefix(a.AgentID, "shell:"), "server_id": a.AgentID, "status": a.Status, "last_seen": a.LastSeen, "mode": a.Transport, "meta": a.Meta})
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"servers": servers, "count": len(servers)})
+}
+
+func (s *Server) bulkExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	response, status := s.fleetExecForRequest(r, req, false)
+	writeJSON(w, status, response)
+}
+
+func fleetExecFingerprint(targets []string, req map[string]any) (string, error) {
+	normalizedTargets := make([]string, 0, len(targets))
+	for _, target := range targets {
+		name := strings.TrimSpace(strings.TrimPrefix(target, "shell:"))
+		if name != "" {
+			normalizedTargets = append(normalizedTargets, "shell:"+name)
+		}
+	}
+	sort.Strings(normalizedTargets)
+	payload := struct {
+		Operation string   `json:"operation"`
+		Targets   []string `json:"targets"`
+		Cmd       string   `json:"cmd"`
+		Cwd       string   `json:"cwd,omitempty"`
+		Timeout   int      `json:"timeout,omitempty"`
+	}{Operation: "fleetExec", Targets: normalizedTargets, Cmd: firstString(req, "cmd", "command"), Cwd: firstString(req, "cwd"), Timeout: intFromAny(req["timeout"])}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(b), nil
+}
+
+func (s *Server) reserveFleetIdempotency(r *http.Request, key, fingerprint string) (*idempotencyEntry, map[string]any, int, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, nil, 0, false
+	}
+	if len(key) > idempotencyKeyMax {
+		return nil, map[string]any{"detail": fmt.Sprintf("idempotency_key must be at most %d characters", idempotencyKeyMax)}, http.StatusBadRequest, true
+	}
+	authorization := ""
+	if r != nil {
+		authorization = r.Header.Get("Authorization")
+	}
+	entryKey := sha256Hex([]byte(authorization)) + ":fleet:" + key
+	if s.cfg.ConfigDir != "" {
+		decision, err := s.reserveDurableTaskRequest(entryKey, fingerprint)
+		if err != nil {
+			return nil, taskPersistenceFailure(err), http.StatusServiceUnavailable, true
+		}
+		if decision.replay {
+			return nil, decision.response, decision.status, true
+		}
+	}
+	s.mu.Lock()
+	now := time.Now()
+	for existingKey, entry := range s.idempotency {
+		if now.Sub(entry.CreatedAt) > idempotencyTTL {
+			delete(s.idempotency, existingKey)
+		}
+	}
+	if entry := s.idempotency[entryKey]; entry != nil {
+		if entry.Fingerprint != fingerprint {
+			s.mu.Unlock()
+			return nil, map[string]any{"detail": "idempotency_key was already used for a different fleet operation"}, http.StatusConflict, true
+		}
+		done := entry.Done
+		s.mu.Unlock()
+		select {
+		case <-done:
+			s.mu.Lock()
+			response, status := cloneMap(entry.Response), entry.Status
+			s.mu.Unlock()
+			return nil, response, status, true
+		case <-time.After(s.cfg.DefaultTimeout):
+			return nil, map[string]any{"status": "running", "idempotency_key": key, "message": "the original fleet operation is still being created"}, http.StatusAccepted, true
+		}
+	}
+	if len(s.idempotency) >= idempotencyMaxSize {
+		for existingKey, existingEntry := range s.idempotency {
+			select {
+			case <-existingEntry.Done:
+				delete(s.idempotency, existingKey)
+			default:
+			}
+			if len(s.idempotency) < idempotencyMaxSize {
+				break
+			}
+		}
+		if len(s.idempotency) >= idempotencyMaxSize {
+			s.mu.Unlock()
+			return nil, map[string]any{"detail": "idempotency store is temporarily full; retry later"}, http.StatusTooManyRequests, true
+		}
+	}
+	entry := &idempotencyEntry{Key: entryKey, Fingerprint: fingerprint, CreatedAt: now, Done: make(chan struct{})}
+	s.idempotency[entryKey] = entry
+	s.mu.Unlock()
+	return entry, nil, 0, false
+}
+
+func (s *Server) finishFleetIdempotency(entry *idempotencyEntry, response map[string]any, status int) error {
+	if entry == nil {
+		return nil
+	}
+	if s.cfg.ConfigDir != "" {
+		if err := s.withTaskDatabase(func(t *taskTransaction) error { return t.finishRequest(entry.Key, response, status) }); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry.JobID = firstString(response, "task_id", "job_id")
+	entry.Response = cloneMap(response)
+	entry.Status = status
+	select {
+	case <-entry.Done:
+	default:
+		close(entry.Done)
+	}
+	return nil
+}
+
+func (s *Server) fleetExecForRequest(r *http.Request, req map[string]any, taskMode bool) (map[string]any, int) {
+	cmd := firstString(req, "cmd", "command")
+	if cmd == "" {
+		return map[string]any{"ok": false, "error": "missing cmd"}, http.StatusBadRequest
+	}
+	targets := []string{}
+	if arr, ok := req["servers"].([]any); ok {
+		for _, item := range arr {
+			if v, ok := item.(string); ok && strings.TrimSpace(v) != "" {
+				targets = append(targets, v)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		s.mu.Lock()
+		for _, a := range s.agents {
+			if strings.HasPrefix(a.AgentID, "shell:") && a.Status == "online" {
+				targets = append(targets, strings.TrimPrefix(a.AgentID, "shell:"))
+			}
+		}
+		s.mu.Unlock()
+	}
+	var idemEntry *idempotencyEntry
+	if taskMode {
+		if key := firstString(req, "idempotency_key"); key != "" {
+			fingerprint, err := fleetExecFingerprint(targets, req)
+			if err != nil {
+				return map[string]any{"detail": "fleet operation cannot be serialized for idempotency"}, http.StatusBadRequest
+			}
+			entry, replay, replayStatus, handled := s.reserveFleetIdempotency(r, key, fingerprint)
+			if handled {
+				return replay, replayStatus
+			}
+			idemEntry = entry
+		}
+	}
+	results := map[string]any{}
+	responseStatus := http.StatusOK
+	approvalID := firstString(req, "approval_id")
+	approvalIDs := mapValue(req["approval_ids"])
+	parentID := newID()
+	children := []any{}
+	for _, srv := range targets {
+		target := "shell:" + strings.TrimPrefix(srv, "shell:")
+		if !profileAllowsTarget(r, target) || !profileAllowsTool(r, "shell_exec") {
+			results[srv] = map[string]any{"status": "failed", "error": "access profile denies this target or tool"}
+			if responseStatus < http.StatusForbidden {
+				responseStatus = http.StatusForbidden
+			}
+			continue
+		}
+		args := map[string]any{"cmd": cmd, "cwd": firstString(req, "cwd"), "timeout": req["timeout"]}
+		serverApprovalID := firstString(approvalIDs, srv, target)
+		if serverApprovalID == "" {
+			serverApprovalID = approvalID
+		}
+		if serverApprovalID != "" {
+			args["approval_id"] = serverApprovalID
+		}
+		policyRequest := requestWithAutomationProfile(r, "fleet-exec", target, "shell_exec", approvalModeAskBeforeWrite)
+		result, status := s.executeMCPTool(policyRequest, target, "shell_exec", args, true, s.cfg.DefaultTimeout, "")
+		if taskMode && status == http.StatusPreconditionRequired && firstString(result, "status") == "approval_required" {
+			cleanArgs, _ := approvalArguments(args)
+			result = s.createApprovalShellTask(policyRequest, target, "shell_exec", cleanArgs, result)
+			status = taskResponseStatus(result)
+		}
+		results[srv] = result
+		if status > responseStatus {
+			responseStatus = status
+		}
+		if childID := firstString(result, "job_id", "task_id", "taskId"); childID != "" {
+			children = append(children, childID)
+		}
+	}
+	response := map[string]any{"ok": responseStatus < http.StatusBadRequest, "results": results}
+	if len(children) > 0 {
+		parent := &relayJob{
+			ID: parentID, AgentID: "hub", Method: "task/group", CreatedAt: nowFloat(), Status: "running",
+			TraceID: requestTraceID(r), TraceParent: requestTraceParent(r),
+			Params: map[string]any{"label": "fleetExec", "children": children},
+		}
+		s.mu.Lock()
+		changedIDs := []string{parentID}
+		for _, raw := range children {
+			if id, ok := raw.(string); ok {
+				changedIDs = append(changedIDs, id)
+			}
+		}
+		change := s.beginTaskMutationLocked(changedIDs...)
+		var ownerErr error
+		parent.OwnerID, ownerErr = s.ensureTaskOwnerLocked()
+		if ownerErr != nil {
+			s.mu.Unlock()
+			failure := taskPersistenceFailure(ownerErr)
+			failure["results"] = results
+			return failure, http.StatusServiceUnavailable
+		}
+		if idemEntry != nil {
+			parent.RequestKey = idemEntry.Key
+		}
+		s.relayJobs[parentID] = parent
+		for _, rawID := range children {
+			id, _ := rawID.(string)
+			if child := s.shellJobs[id]; child != nil {
+				child.ParentTaskID = parentID
+			}
+			if child := s.relayJobs[id]; child != nil && child != parent {
+				child.ParentTaskID = parentID
+			}
+		}
+		s.refreshTaskGroupLocked(parent)
+		if err := change.commit(); err != nil {
+			s.mu.Unlock()
+			failure := taskPersistenceFailure(err)
+			failure["results"] = results
+			return failure, http.StatusServiceUnavailable
+		}
+		parentStatus := parent.Status
+		s.mu.Unlock()
+		response["task_id"] = parentID
+		response["job_id"] = parentID
+		response["background"] = true
+		response["status"] = parentStatus
+	}
+	if err := s.finishFleetIdempotency(idemEntry, response, responseStatus); err != nil {
+		failure := taskPersistenceFailure(err)
+		failure["results"] = results
+		return failure, http.StatusServiceUnavailable
+	}
+	return response, responseStatus
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var beat map[string]any
+	if err := readJSON(r, &beat); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	name := firstString(beat, "name", "server_name", "host", "hostname")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing heartbeat name"})
+		return
+	}
+	agentID := "shell:" + name
+	now := nowFloat()
+	meta := cloneMap(beat)
+	delete(meta, "name")
+	delete(meta, "server_name")
+	mode := firstString(beat, "mode")
+	transport := mode
+	if transport == "" {
+		transport = "webhook"
+	}
+	identity := shellIdentityFromMap(meta)
+	s.mu.Lock()
+	approved := s.shellIdentityApprovedLocked(agentID, identity)
+	meta["approved"] = approved
+	status := "online"
+	if !approved {
+		status = "awaiting_approval"
+	}
+	newAgent := &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: transport, Status: status, LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
+	s.prepareAgentLocked(newAgent)
+	s.agents[agentID] = newAgent
+	auditName := "heartbeat"
+	if !approved {
+		auditName = "heartbeat_awaiting_approval"
+	}
+	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": transport})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		log.Printf("registry state save failed: %v", err)
+	}
+	if err := s.saveFailoverStateBundleLocked(); err != nil {
+		log.Printf("failover state save failed: %v", err)
+	}
+	runtimeSettings := s.shellRuntimeSettingsLocked()
+	s.mu.Unlock()
+	responseStatus := "registered"
+	if !approved {
+		responseStatus = "awaiting_approval"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": responseStatus, "runtime_settings": runtimeSettings})
+}
+
+func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
+	trim := strings.TrimPrefix(r.URL.Path, "/queue/")
+	parts := strings.Split(strings.Trim(trim, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "missing queue name"})
+		return
+	}
+	name, _ := url.PathUnescape(parts[0])
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		s.pollShellQueue(w, r, name)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "result" && r.Method == http.MethodPost {
+		s.shellQueueResult(w, r, name)
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "not found"})
+}
+
+func (s *Server) shellQueuePollMaxLocked() time.Duration {
+	configured := s.cfg.PollMaxTimeout
+	setting := time.Duration(s.hubSettingIntLocked("shell_queue_long_poll_seconds")) * time.Second
+	if configured > 0 && configured < setting {
+		return configured
+	}
+	return setting
+}
+
+func (s *Server) shellRuntimeSettingsLocked() map[string]any {
+	desired := s.hubSettingIntLocked("fleet_desired_build_version")
+	if desired <= 0 {
+		desired = intFromAny(BuildVersion)
+	}
+	return map[string]any{
+		"queue_long_poll_seconds":     s.hubSettingIntLocked("shell_queue_long_poll_seconds"),
+		"queue_retry_seconds":         s.hubSettingIntLocked("shell_queue_retry_seconds"),
+		"spool_retention_hours":       s.hubSettingIntLocked("shell_spool_retention_hours"),
+		"storage_max_mb":              s.hubSettingIntLocked("shell_storage_max_mb"),
+		"outbox_backoff_base_seconds": s.hubSettingIntLocked("shell_outbox_backoff_base_seconds"),
+		"outbox_backoff_cap_seconds":  s.hubSettingIntLocked("shell_outbox_backoff_cap_seconds"),
+		"self_repair_enabled":         s.hubSettingBoolLocked("fleet_auto_update_enabled"),
+		"desired_build_version":       desired,
+		"release_repo":                "megamen32/gptadmin_opensource",
+	}
+}
+
+func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name string) {
+	timeout := boundedQueryDuration(r, "timeout", s.shellQueuePollMaxLocked())
+	deadline := time.Now().Add(timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.touchShellPollLocked(name, r) {
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
+		return
+	}
+	for {
+		if !s.touchShellPollLocked(name, r) {
+			writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
+			return
+		}
+		controlID, err := s.nextDurableTaskControlLocked(name)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task controls unavailable; retry"})
+			return
+		}
+		if controlID != "" {
+			writeJSON(w, http.StatusOK, map[string]any{"id": "control_" + controlID, "server": name, "tool_name": "__gptadmin_cancel_task", "arguments": map[string]any{"task_id": controlID}})
+			return
+		}
+		if controls := s.shellControls[name]; len(controls) > 0 {
+			control := controls[0]
+			s.shellControls[name] = controls[1:]
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":        "control_" + control.TaskID,
+				"server":    name,
+				"tool_name": "__gptadmin_cancel_task",
+				"arguments": map[string]any{"task_id": control.TaskID},
+			})
+			return
+		}
+		if q := s.shellQueues[name]; len(q) > 0 {
+			id := q[0]
+			if err := s.refreshTaskRecordsLocked(id); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+				return
+			}
+			s.shellQueues[name] = q[1:]
+			job := s.shellJobs[id]
+			if job == nil || job.Status != "queued" {
+				continue
+			}
+			previousStatus, previousStarted := job.Status, job.StartedAt
+			job.Status = "running"
+			job.StartedAt = nowFloat()
+			if err := s.saveTaskStateLocked(job.ID); err != nil {
+				log.Printf("task dispatch commit failed: %v", err)
+				job.Status, job.StartedAt = previousStatus, previousStarted
+				s.shellQueues[name] = append([]string{id}, s.shellQueues[name]...)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task dispatch persistence failed; retry polling"})
+				return
+			}
+			payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked()})
+			return
+		}
+		waitCond(s.cond, minDuration(remaining, time.Second))
+	}
+}
+
+func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
+	if name == "" {
+		return false
+	}
+	now := nowFloat()
+	agentID := "shell:" + name
+	mode := strings.TrimSpace(r.URL.Query().Get("mode"))
+	if mode == "" {
+		mode = "long_poll"
+	}
+	meta := map[string]any{
+		"mode":                  mode,
+		"transport_role":        firstNonEmpty(r.URL.Query().Get("transport_role"), "shellmcp_transport_layer"),
+		"backend":               firstNonEmpty(r.URL.Query().Get("backend"), "local"),
+		"poll_heartbeat":        true,
+		"heartbeat_best_effort": true,
+	}
+	for _, key := range []string{"server_id", "public_key", "fingerprint", "base_url", "os", "git_commit", "default_user", "default_home", "default_cwd", "self_repair_state"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+			meta[key] = v
+		}
+	}
+	for _, key := range []string{"cores", "mem_mb", "build_version", "spool_bytes", "storage_bytes", "outbox_depth", "outbox_retry_attempts", "queue_poll_count", "queue_poll_errors", "queue_poll_latency_ms", "outbox_retry_failures", "outbox_delivered", "self_repair_desired"} {
+		if v := intFromString(r.URL.Query().Get(key)); v > 0 {
+			meta[key] = v
+		}
+	}
+	approved := s.shellIdentityApprovedLocked(agentID, shellIdentityFromMap(meta))
+	meta["approved"] = approved
+	if a := s.agents[agentID]; a != nil {
+		if !approved {
+			a.Status = "awaiting_approval"
+			a.LastSeen = now
+		} else {
+			s.markAgentOnlineLocked(a, now)
+		}
+		a.Transport = mode
+		if a.Meta == nil {
+			a.Meta = map[string]any{}
+		}
+		for k, v := range meta {
+			a.Meta[k] = v
+		}
+		return approved
+	}
+	status := "online"
+	auditName := "queue_poll_register"
+	if !approved {
+		status = "awaiting_approval"
+		auditName = "queue_poll_awaiting_approval"
+	}
+	newAgent := &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: mode, Status: status, LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
+	s.prepareAgentLocked(newAgent)
+	s.agents[agentID] = newAgent
+	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": mode})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		log.Printf("registry state save failed: %v", err)
+	}
+	if err := s.saveFailoverStateBundleLocked(); err != nil {
+		log.Printf("failover state save failed: %v", err)
+	}
+	return approved
+}
+
+func shellIdentityFromMap(values map[string]any) map[string]string {
+	identity := map[string]string{}
+	for _, key := range []string{"server_id", "public_key", "fingerprint"} {
+		if value := strings.TrimSpace(fmt.Sprint(values[key])); value != "" && value != "<nil>" {
+			identity[key] = value
+		}
+	}
+	return identity
+}
+
+func (s *Server) shellIdentityApprovedLocked(agentID string, identity map[string]string) bool {
+	if len(identity) == 0 {
+		return true
+	}
+	agent := s.agents[agentID]
+	if agent == nil {
+		return false
+	}
+	for key, expected := range identity {
+		actual := strings.TrimSpace(fmt.Sprint(agent.Meta[key]))
+		if actual != "" && actual != "<nil>" && actual != expected {
+			return false
+		}
+	}
+	if approved, ok := agent.Meta["approved"].(bool); ok {
+		return approved
+	}
+	return true
+}
+
+func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name string) {
+	var res struct {
+		ID     string `json:"id"`
+		Result any    `json:"result"`
+		Error  any    `json:"error"`
+	}
+	if err := readJSON(r, &res); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	s.mu.Lock()
+	s.touchShellPollLocked(name, r)
+	if err := s.refreshTaskRecordsLocked(res.ID); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+		return
+	}
+	job := s.shellJobs[res.ID]
+	if job == nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+		return
+	}
+	if job.Status == "cancelled" {
+		if err := s.acknowledgeTaskControlLocked(name, job.ID); err != nil {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "cancellation acknowledgement failed; retry"})
+			return
+		}
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
+		return
+	}
+	change := s.beginTaskMutationLocked(job.ID)
+	job.DoneAt = nowFloat()
+	job.Status = "completed"
+	job.Result = res.Result
+	if res.Error != nil {
+		job.Status = "failed"
+		job.Error = res.Error
+	}
+	fields := map[string]any{"server": name, "job_id": res.ID, "status": job.Status}
+	if job.TraceID != "" {
+		fields["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		fields["traceparent"] = job.TraceParent
+	}
+	s.addAuditLocked("shell_result", fields)
+	if err := change.commit(); err != nil {
+		log.Printf("task result commit failed: %v", err)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task result persistence failed; retry delivery"})
+		return
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) mcpRelayRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	agentID := firstString(req, "agent_id", "id")
+	if agentID == "" {
+		agentID = firstString(req, "name")
+	}
+	if agentID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing agent_id"})
+		return
+	}
+	name := firstString(req, "name")
+	if name == "" {
+		name = agentID
+	}
+	kind := firstString(req, "kind")
+	if kind == "" {
+		kind = "real_mcp"
+	}
+	transport := firstString(req, "transport")
+	if transport == "" {
+		transport = "stdio"
+	}
+	caps := stringSlice(req["capabilities"])
+	meta := mapValue(req["meta"])
+	credential := relayCredential(r)
+	legacyCredential := s.legacyRelayCredentialAllowed(credential)
+	enrollment := s.relayEnrollmentAllowed(credential)
+	publicKey := firstString(req, "public_key")
+	fingerprint := firstString(req, "fingerprint")
+	signature := firstString(req, "signature")
+	var issuedCredential string
+	s.mu.Lock()
+	boundCredential := s.relayCredentialAllowedLocked(agentID, credential)
+	existing := s.agents[agentID]
+	if legacyCredential || boundCredential {
+		newAgent := &Agent{AgentID: agentID, Name: name, Kind: kind, Transport: transport, Status: "online", LastSeen: nowFloat(), Capabilities: caps, Meta: meta}
+		s.prepareAgentLocked(newAgent)
+		s.agents[agentID] = newAgent
+		credentialMode := "agent"
+		if legacyCredential {
+			credentialMode = "legacy"
+		}
+		s.addAuditLocked("mcp_register", map[string]any{"agent_id": agentID, "kind": kind, "transport": transport, "credential_mode": credentialMode})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "registry persistence failed"})
+			return
+		}
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
+		return
+	}
+	if enrollment {
+		if publicKey == "" || fingerprint == "" || !relayFingerprintMatches(publicKey, fingerprint) || existing != nil || s.relayEnrollments[agentID].AgentID != "" {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "agent_id is already enrolled or identity is missing"})
+			return
+		}
+		challenge, err := newRelayCredential()
+		if err != nil {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "enrollment challenge generation failed"})
+			return
+		}
+		candidate := &Agent{AgentID: agentID, Name: name, Kind: kind, Transport: transport, Status: "awaiting_approval", LastSeen: nowFloat(), Capabilities: caps, Meta: meta}
+		s.prepareAgentLocked(candidate)
+		candidate.Meta["public_key"] = publicKey
+		candidate.Meta["fingerprint"] = fingerprint
+		candidate.Meta["approved"] = false
+		s.agents[agentID] = candidate
+		s.relayEnrollments[agentID] = relayEnrollment{AgentID: agentID, PublicKey: publicKey, Fingerprint: fingerprint, Challenge: challenge}
+		if err := s.saveRegistryStateLocked(); err != nil {
+			delete(s.agents, agentID)
+			delete(s.relayEnrollments, agentID)
+			s.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "registry persistence failed"})
+			return
+		}
+		s.addAuditLocked("mcp_enrollment_pending", map[string]any{"agent_id": agentID, "fingerprint": fingerprint})
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "awaiting_approval", "challenge": challenge})
+		return
+	}
+	candidate, pending := s.relayEnrollments[agentID]
+	if !pending || publicKey != candidate.PublicKey || fingerprint != candidate.Fingerprint || !verifyRelayEnrollment(agentID, candidate, signature) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+		return
+	}
+	if existing == nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "pending enrollment agent is missing"})
+		return
+	}
+	if existing.Meta == nil {
+		existing.Meta = map[string]any{}
+	}
+	if existing.Meta["approved"] != true && s.cfg.DebugLowSecurity {
+		existing.Meta["approved"] = true
+		s.addAuditLocked("debug_autoapprove_signed_relay_enrollment", map[string]any{"agent_id": agentID, "fingerprint": fingerprint})
+	}
+	if existing.Meta["approved"] != true {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "awaiting_approval"})
+		return
+	}
+	var err error
+	issuedCredential, err = newRelayCredential()
+	if err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "relay credential generation failed"})
+		return
+	}
+	s.relayCredentials[agentID] = relayCredentialDigest(issuedCredential)
+	delete(s.relayEnrollments, agentID)
+	s.markAgentOnlineLocked(existing, nowFloat())
+	s.addAuditLocked("mcp_enrollment_approved", map[string]any{"agent_id": agentID, "fingerprint": fingerprint})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		delete(s.relayCredentials, agentID)
+		s.relayEnrollments[agentID] = candidate
+		existing.Status = "awaiting_approval"
+		existing.Meta["approved"] = true
+		s.mu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "registry persistence failed"})
+		return
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered", "relay_token": issuedCredential})
+}
+
+func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	agentID, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/mcp-relay/poll/"))
+	agentID = strings.Trim(agentID, "/")
+	if agentID == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "missing agent"})
+		return
+	}
+	credential := relayCredential(r)
+	if !s.legacyRelayCredentialAllowed(credential) {
+		s.mu.Lock()
+		allowed := s.relayCredentialAllowedLocked(agentID, credential)
+		s.mu.Unlock()
+		if !allowed {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+			return
+		}
+	}
+	timeout := boundedQueryDuration(r, "timeout", s.shellQueuePollMaxLocked())
+	deadline := time.Now().Add(timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if a := s.agents[agentID]; a != nil {
+			s.markAgentOnlineLocked(a, nowFloat())
+		}
+		if q := s.relayQueues[agentID]; len(q) > 0 {
+			id := q[0]
+			if err := s.refreshTaskRecordsLocked(id); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+				return
+			}
+			s.relayQueues[agentID] = q[1:]
+			job := s.relayJobs[id]
+			if job == nil || job.Status != "queued" {
+				continue
+			}
+			previousStatus, previousStarted := job.Status, job.StartedAt
+			job.Status = "running"
+			job.StartedAt = nowFloat()
+			if err := s.saveTaskStateLocked(job.ID); err != nil {
+				log.Printf("task dispatch commit failed: %v", err)
+				job.Status, job.StartedAt = previousStatus, previousStarted
+				s.relayQueues[agentID] = append([]string{id}, s.relayQueues[agentID]...)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task dispatch persistence failed; retry polling"})
+				return
+			}
+			payload := map[string]any{"id": job.ID, "method": job.Method, "params": job.Params}
+			if job.TraceID != "" {
+				payload["trace_id"] = job.TraceID
+			}
+			if job.TraceParent != "" {
+				payload["traceparent"] = job.TraceParent
+			}
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			writeJSON(w, http.StatusOK, map[string]any{})
+			return
+		}
+		waitCond(s.cond, minDuration(remaining, time.Second))
+	}
+}
+
+func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	agentID, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/mcp-relay/result/"))
+	agentID = strings.Trim(agentID, "/")
+	credential := relayCredential(r)
+	if !s.legacyRelayCredentialAllowed(credential) {
+		s.mu.Lock()
+		allowed := s.relayCredentialAllowedLocked(agentID, credential)
+		s.mu.Unlock()
+		if !allowed {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+			return
+		}
+	}
+	var res struct {
+		ID     string         `json:"id"`
+		OK     *bool          `json:"ok"`
+		Result map[string]any `json:"result"`
+		Error  any            `json:"error"`
+	}
+	if err := readJSON(r, &res); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	s.mu.Lock()
+	if err := s.refreshTaskRecordsLocked(res.ID); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+		return
+	}
+	job := s.relayJobs[res.ID]
+	if job == nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+		return
+	}
+	if job.AgentID != agentID {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "relay result does not belong to this agent"})
+		return
+	}
+	if job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled" {
+		s.mu.Unlock()
+		if job.Status == "cancelled" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "relay job already has a terminal result"})
+		return
+	}
+	change := s.beginTaskMutationLocked(job.ID)
+	job.DoneAt = nowFloat()
+	job.Result = res.Result
+	if res.OK != nil && !*res.OK {
+		job.Status = "failed"
+		job.Error = res.Error
+	} else {
+		job.Status = "completed"
+	}
+	for _, entry := range s.idempotency {
+		if entry.JobID == job.ID {
+			entry.Response = cloneMap(relayJobResponse(job))
+		}
+	}
+	fields := map[string]any{"server_id": agentID, "job_id": res.ID, "status": job.Status}
+	if job.TraceID != "" {
+		fields["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		fields["traceparent"] = job.TraceParent
+	}
+	s.addAuditLocked("mcp_result", fields)
+	if err := change.commit(); err != nil {
+		log.Printf("task result commit failed: %v", err)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task result persistence failed; retry delivery"})
+		return
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) mcpRelayServers(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	servers := s.publicServersLockedWithDetail(r, fullDetailRequested(r.URL.Query().Get("detail")))
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
+}
+
+// mcpRelayAgents is a deprecated compatibility alias for old clients.
+func (s *Server) mcpRelayAgents(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	agents := s.publicAgentsLocked(r)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) publicServersLocked(r *http.Request) []map[string]any {
+	return s.publicServersLockedWithDetail(r, false)
+}
+
+func (s *Server) publicServersLockedWithDetail(r *http.Request, detail bool) []map[string]any {
+	agents := s.publicAgentsLocked(r)
+	servers := make([]map[string]any, 0, len(agents))
+	for _, a := range agents {
+		server := agentAsServer(a)
+		if !detail {
+			server = compactServer(server)
+		}
+		servers = append(servers, server)
+	}
+	return servers
+}
+
+func compactServer(server map[string]any) map[string]any {
+	return map[string]any{
+		"server_id": server["server_id"],
+		"name":      server["name"],
+		"kind":      server["kind"],
+		"status":    server["status"],
+	}
+}
+
+func fullDetailRequested(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "full") || truthyString(v)
+	default:
+		return false
+	}
+}
+
+func agentAsServer(a Agent) map[string]any {
+	return map[string]any{
+		"server_id":    a.AgentID,
+		"name":         a.Name,
+		"kind":         a.Kind,
+		"transport":    a.Transport,
+		"status":       a.Status,
+		"last_seen":    a.LastSeen,
+		"capabilities": a.Capabilities,
+		"meta":         redactPublicMetadata(a.Meta),
+	}
+}
+
+// redactPublicMetadata removes credentials from agent metadata before it is
+// returned by discovery. Agent transport arguments are operator-supplied and
+// can contain authorization headers even when their enclosing key is benign.
+func redactPublicMetadata(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if isSensitiveMetadataKey(key) {
+				redacted[key] = "<redacted>"
+				continue
+			}
+			redacted[key] = redactPublicMetadata(nested)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(typed))
+		for index, nested := range typed {
+			redacted[index] = redactPublicMetadata(nested)
+		}
+		return redacted
+	case string:
+		if isSensitiveMetadataValue(typed) {
+			return "<redacted>"
+		}
+	}
+	return value
+}
+
+func isSensitiveMetadataKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, marker := range []string{"token", "secret", "password", "authorization", "credential", "bearer", "api_key"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveMetadataValue(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "authorization:") || strings.Contains(lower, "bearer ") {
+		return true
+	}
+	for _, key := range []string{"token", "secret", "password", "api_key"} {
+		if strings.Contains(lower, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
+	agents := make([]Agent, 0, len(s.agents)+len(virtualMCPDefinitions)+1)
+	hub := s.hubAgentLocked()
+	agents = append(agents, s.withExposeMetaLocked(hub, r))
+	for _, virtual := range s.virtualAgentsLocked() {
+		agents = append(agents, s.withExposeMetaLocked(virtual, r))
+	}
+	parents := make([]Agent, 0, len(s.agents))
+	for _, a := range s.agents {
+		cp := *a
+		parents = append(parents, cp)
+		agents = append(agents, s.withExposeMetaLocked(cp, r))
+		if strings.HasPrefix(cp.AgentID, "shell:") && supportsPairedFileTarget(cp) {
+			fileAgent := fileAgentForShell(cp)
+			agents = append(agents, s.withExposeMetaLocked(fileAgent, r))
+		}
+	}
+	usedSlugs := map[string]bool{}
+	for _, a := range agents {
+		usedSlugs[exposedAgentSlug(a)] = true
+	}
+	for _, parent := range parents {
+		if !strings.HasPrefix(parent.AgentID, "shell:") {
+			continue
+		}
+		children := childMCPAgents(parent)
+		for _, child := range children {
+			slug := agentSlug(firstString(child.Meta, "child_ref"))
+			if slug == "" {
+				continue
+			}
+			if usedSlugs[slug] {
+				slug = agentSlug(parent.AgentID) + "-" + slug
+			}
+			if usedSlugs[slug] {
+				continue
+			}
+			child.Meta["public_mcp_slug"] = slug
+			usedSlugs[slug] = true
+			agents = append(agents, s.withExposeMetaLocked(child, r))
+		}
+	}
+	return agents
+}
+
+func childMCPAgents(parent Agent) []Agent {
+	items := sliceValue(parent.Meta["mcp_agents"])
+	children := make([]Agent, 0, len(items))
+	for _, raw := range items {
+		descriptor := mapValue(raw)
+		ref := strings.TrimSpace(firstString(descriptor, "ref"))
+		if ref == "" || !truthyAny(descriptor["enabled"]) {
+			continue
+		}
+		name := firstString(descriptor, "name")
+		if name == "" {
+			name = ref
+		}
+		status := parent.Status
+		childMeta := map[string]any{
+			"parent_server_id": parent.AgentID,
+			"child_ref":        ref,
+			"enabled":          true,
+		}
+		if health := mapValue(descriptor["health"]); len(health) > 0 {
+			childMeta["health"] = health
+			protocol := mapValue(health["protocol"])
+			process := mapValue(health["process"])
+			if protocol["state"] == "failed" || process["state"] == "exited" {
+				status = "failed"
+			}
+		}
+		children = append(children, Agent{
+			AgentID:      "mcp:" + parent.AgentID + ":" + ref,
+			Name:         name,
+			Kind:         "child_mcp",
+			Transport:    firstString(descriptor, "transport"),
+			Status:       status,
+			LastSeen:     parent.LastSeen,
+			Capabilities: []string{"tools/list", "tools/call"},
+			Meta:         childMeta,
+		})
+	}
+	sort.Slice(children, func(i, j int) bool { return children[i].AgentID < children[j].AgentID })
+	return children
+}
+
+func isChildMCPAgent(agent Agent) bool {
+	return agent.Kind == "child_mcp" && firstString(agent.Meta, "parent_server_id") != "" && firstString(agent.Meta, "child_ref") != ""
+}
+
+func exposedAgentSlug(agent Agent) string {
+	if slug := firstString(agent.Meta, "public_mcp_slug"); slug != "" {
+		return slug
+	}
+	if slug := agentSlug(agent.AgentID); slug != "" {
+		return slug
+	}
+	return agentSlug(agent.Name)
+}
+
+func childMCPResponse(raw map[string]any) map[string]any {
+	response := mapValue(raw["response"])
+	current := mapValue(response["structuredContent"])
+	for range 5 {
+		if firstString(current, "ref") != "" || firstString(current, "name") != "" {
+			return current
+		}
+		if structured := mapValue(current["structuredContent"]); len(structured) > 0 {
+			current = structured
+			continue
+		}
+		if result := mapValue(current["result"]); len(result) > 0 {
+			current = result
+			continue
+		}
+		break
+	}
+	return current
+}
+
+func childMCPTools(raw map[string]any) []map[string]any {
+	child := childMCPResponse(raw)
+	items := sliceValue(child["tools"])
+	tools := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if tool := mapValue(item); len(tool) > 0 {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
+}
+
+func (s *Server) withExposeMetaLocked(a Agent, r *http.Request) Agent {
+	slug := firstString(a.Meta, "public_mcp_slug")
+	if slug == "" {
+		slug = exposedAgentSlug(a)
+	}
+	if slug == "" {
+		slug = agentSlug(a.Name)
+	}
+	if a.Meta == nil {
+		a.Meta = map[string]any{}
+	} else {
+		cp := make(map[string]any, len(a.Meta)+6)
+		for k, v := range a.Meta {
+			cp[k] = v
+		}
+		a.Meta = cp
+	}
+	path := "/server/" + slug + "/mcp"
+	a.Meta["exposed_by_default"] = true
+	a.Meta["public_mcp_slug"] = slug
+	a.Meta["public_mcp_path"] = path
+	if r != nil {
+		a.Meta["public_mcp_endpoint"] = s.origin(r) + path
+	}
+	a.Meta["public_mcp_auth"] = map[string]any{"bearer": true, "oauth": true}
+	return a
+}
+
+func (s *Server) hubAgentLocked() Agent {
+	return Agent{AgentID: "hub", Name: "GPTAdmin Hub", Kind: "hub", Transport: "internal", Status: "online", LastSeen: nowFloat(), Capabilities: []string{"registry", "pending_servers", "mcp_relay"}, Meta: map[string]any{"server_count": len(s.agents)}}
+}
+
+// selectMCPRelayTarget validates a target before it can create a relay job.
+// The relay must never infer a target because that can route an operation to
+// an unrelated server.
+func (s *Server) selectMCPRelayTarget(target string) (string, int, string) {
+	target = strings.TrimSpace(target)
+	if target == "" || target == "default" {
+		return "", http.StatusBadRequest, "Explicit MCP target is required. Call listMcpServers first and pass one returned server_id. There is no default target."
+	}
+	if target == "hub" {
+		return target, http.StatusOK, ""
+	}
+	if strings.HasPrefix(target, "file:") {
+		backing := "shell:" + strings.TrimPrefix(target, "file:")
+		s.mu.Lock()
+		agent, exists := s.agents[backing]
+		supported := exists && agent != nil && supportsPairedFileTarget(*agent)
+		s.mu.Unlock()
+		if supported {
+			return target, http.StatusOK, ""
+		}
+		return "", http.StatusNotFound, fmt.Sprintf("unknown file server %s", strings.TrimPrefix(target, "file:"))
+	}
+
+	s.mu.Lock()
+	_, exists := s.agents[target]
+	if !exists {
+		exists = s.virtualMCP[target]
+	}
+	if !exists {
+		_, exists = s.exposedAgentByIDLocked(target)
+	}
+	s.mu.Unlock()
+	if exists {
+		return target, http.StatusOK, ""
+	}
+	if strings.HasPrefix(target, "shell:") {
+		return "", http.StatusNotFound, fmt.Sprintf("unknown shell server %s", strings.TrimPrefix(target, "shell:"))
+	}
+	return "", http.StatusNotFound, fmt.Sprintf("unknown MCP relay server %s", target)
+}
+
+func (s *Server) exposedAgentByIDLocked(target string) (Agent, bool) {
+	for _, agent := range s.publicAgentsLocked(nil) {
+		if agent.AgentID == target {
+			return agent, true
+		}
+	}
+	return Agent{}, false
+}
+
+func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	_ = readJSON(r, &req)
+	if err := authorizeFacadeCall(r, "schema", req); err != nil {
+		s.auditToolDecision(r, firstString(req, "target", "server_id", "agent_id"), "schema", req, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]any{"detail": detail})
+		return
+	}
+	target = selectedTarget
+	if target == "hub" {
+		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, hubTools())}}), target))
+		return
+	}
+	if virtual, ok := virtualMCPDefinitions[target]; ok {
+		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.virtualMCPToolsForRequest(r, virtual)}}), target))
+		return
+	}
+	if strings.HasPrefix(target, "shell:") {
+		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, shellTools())}}), target))
+		return
+	}
+	if strings.HasPrefix(target, "file:") {
+		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, fileTools())}}), target))
+		return
+	}
+	s.mu.Lock()
+	child, isChild := s.exposedAgentByIDLocked(target)
+	s.mu.Unlock()
+	if isChild && isChildMCPAgent(child) {
+		result, err := s.agentToolsListForRequest(r, child)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": target, "status": "failed", "error": err})
+			return
+		}
+		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": result}), target))
+		return
+	}
+	if requestAccessMode(r) == accessModeReadonly {
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}})
+		return
+	}
+	jobID := s.enqueueRelay(target, "tools/list", nil)
+	if failure := s.relayEnqueueFailure(jobID); failure != nil {
+		writeJSON(w, http.StatusServiceUnavailable, failure)
+		return
+	}
+	if truthy(req["background"]) {
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
+		return
+	}
+	resp := s.withSchemaContractMetadata(s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
+	resp = withActionToolHints(resp, target)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := validateToolOutputDetail(req["detail"]); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	toolName := firstString(req, "tool", "tool_name", "name")
+	args := mapValue(req["arguments"])
+	if len(args) == 0 {
+		args = mapValue(req["args"])
+	}
+	if len(args) == 0 && firstString(req, "args_json") != "" {
+		var err error
+		args, err = toolArgsFromJSON(firstString(req, "args_json"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	if len(args) == 0 {
+		args = toolArgsFromTopLevel(req)
+	}
+	if toolName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing tool_name"})
+		return
+	}
+	if err := authorizeToolCall(r, target, toolName); err != nil {
+		s.auditToolDecision(r, target, toolName, args, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]any{"detail": detail})
+		return
+	}
+	target = selectedTarget
+	if response, blocked := s.validateSchemaContract(r, target, req); blocked {
+		writeJSON(w, http.StatusConflict, response)
+		return
+	}
+	// /mcp-relay/call is a task-aware Actions facade. Do not hold its HTTP
+	// request open for the tool's execution timeout: that makes in-flight calls
+	// fragile across Hub handover. Short calls still complete inline; longer
+	// calls return job_id/task_id and are read through the job endpoint.
+	waitTimeout := s.cfg.ActionSyncWait
+	resp, status := s.executeMCPTool(r, target, toolName, args, truthy(req["background"]), waitTimeout, firstString(req, "idempotency_key"))
+	writeJSON(w, status, s.formatToolOutput(resp, toolName, req["detail"]))
+}
+
+const (
+	idempotencyTTL     = 15 * time.Minute
+	idempotencyMaxSize = 1024
+	idempotencyKeyMax  = 200
+)
+
+func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	callArgs, approvalID := approvalArguments(args)
+	if response, blocked := s.approvalGate(r, target, toolName, callArgs, approvalID); blocked {
+		s.auditToolDecision(r, target, toolName, callArgs, "deny", "approval required", response, http.StatusPreconditionRequired)
+		return response, http.StatusPreconditionRequired
+	}
+	if response, blocked := s.boundedAutonomousGate(r, target, toolName); blocked {
+		s.auditToolDecision(r, target, toolName, callArgs, "deny", "bounded autonomous budget exhausted", response, http.StatusTooManyRequests)
+		return response, http.StatusTooManyRequests
+	}
+	args = callArgs
+	secretValues := []string(nil)
+	if toolName == "shell_exec" {
+		resolvedArgs, resolvedSecrets, err := s.resolveSecretEnvForRequest(r, target, args)
+		if err != nil {
+			s.auditToolDecision(r, target, toolName, callArgs, "deny", err.Error(), nil, http.StatusForbidden)
+			return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+		}
+		args = resolvedArgs
+		secretValues = resolvedSecrets
+	}
+	durableRequestKey := ""
+	operation := func() (map[string]any, int) {
+		if target == "hub" {
+			resp, status := s.callHubToolForRequest(r, toolName, args)
+			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
+		}
+		if virtual, ok := virtualMCPDefinitions[target]; ok {
+			resp, status := s.callVirtualMCP(virtual, AccessProfileIDFromRequest(r), toolName, args)
+			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
+		}
+		if strings.HasPrefix(target, "shell:") {
+			return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+		}
+		if strings.HasPrefix(target, "file:") {
+			if !fileToolAllowed(toolName) {
+				return map[string]any{"server_id": target, "status": "failed", "error": "tool is not exposed by file target"}, http.StatusBadRequest
+			}
+			backing := "shell:" + strings.TrimPrefix(target, "file:")
+			resp := s.callShellToolWithTraceParentAndSecrets(backing, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey)
+			resp["server_id"] = target
+			return resp, http.StatusOK
+		}
+		s.mu.Lock()
+		child, isChild := s.exposedAgentByIDLocked(target)
+		s.mu.Unlock()
+		if isChild && isChildMCPAgent(child) {
+			parent := firstString(child.Meta, "parent_server_id")
+			ref := firstString(child.Meta, "child_ref")
+			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", map[string]any{
+				"ref": ref, "name": toolName, "arguments": args,
+			}, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+		}
+		jobID := s.enqueueRelayWithTraceParent(target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
+		if failure := s.relayEnqueueFailure(jobID); failure != nil {
+			return failure, http.StatusServiceUnavailable
+		}
+		if background {
+			response := map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID}
+			if traceID := requestTraceID(r); traceID != "" {
+				response["trace_id"] = traceID
+			}
+			if parent := requestTraceParent(r); parent != "" {
+				response["traceparent"] = parent
+			}
+			return response, http.StatusOK
+		}
+		return s.waitRelay(jobID, timeout), http.StatusOK
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		response, status := operation()
+		if taskResponseStatus(response) != http.StatusOK {
+			status = taskResponseStatus(response)
+		}
+		s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
+		return response, status
+	}
+	if len(key) > idempotencyKeyMax {
+		return map[string]any{"detail": fmt.Sprintf("idempotency_key must be at most %d characters", idempotencyKeyMax)}, http.StatusBadRequest
+	}
+	fingerprintBytes, err := json.Marshal(struct {
+		Target    string         `json:"target"`
+		ToolName  string         `json:"tool_name"`
+		Arguments map[string]any `json:"arguments"`
+	}{target, toolName, args})
+	if err != nil {
+		return map[string]any{"detail": "arguments cannot be serialized for idempotency"}, http.StatusBadRequest
+	}
+	fingerprint := sha256Hex(fingerprintBytes)
+	authorization := ""
+	if r != nil {
+		authorization = r.Header.Get("Authorization")
+	}
+	scope := sha256Hex([]byte(authorization))
+	entryKey := scope + ":" + key
+	if s.cfg.ConfigDir != "" {
+		durableRequestKey = entryKey
+		return s.executeDurableTaskRequest(entryKey, fingerprint, func() (map[string]any, int) {
+			response, status := operation()
+			if taskResponseStatus(response) != http.StatusOK {
+				status = taskResponseStatus(response)
+			}
+			s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
+			return response, status
+		})
+	}
+
+	s.mu.Lock()
+	now := time.Now()
+	for existingKey, entry := range s.idempotency {
+		if now.Sub(entry.CreatedAt) > idempotencyTTL {
+			delete(s.idempotency, existingKey)
+		}
+	}
+	if len(s.idempotency) >= idempotencyMaxSize {
+		for existingKey, existingEntry := range s.idempotency {
+			select {
+			case <-existingEntry.Done:
+				delete(s.idempotency, existingKey)
+			default:
+			}
+			if len(s.idempotency) < idempotencyMaxSize {
+				break
+			}
+		}
+		if len(s.idempotency) >= idempotencyMaxSize {
+			s.mu.Unlock()
+			return map[string]any{"detail": "idempotency store is temporarily full; retry later"}, http.StatusTooManyRequests
+		}
+	}
+	if entry := s.idempotency[entryKey]; entry != nil {
+		if entry.Fingerprint != fingerprint {
+			s.mu.Unlock()
+			return map[string]any{"detail": "idempotency_key was already used for different target, tool_name, or arguments"}, http.StatusConflict
+		}
+		done := entry.Done
+		s.mu.Unlock()
+		select {
+		case <-done:
+			s.mu.Lock()
+			response, status := cloneMap(entry.Response), entry.Status
+			s.mu.Unlock()
+			return response, status
+		case <-time.After(timeout):
+			return map[string]any{"status": "running", "idempotency_key": key, "message": "the original MCP call is still running"}, http.StatusAccepted
+		}
+	}
+	entry := &idempotencyEntry{Fingerprint: fingerprint, CreatedAt: now, Done: make(chan struct{})}
+	s.idempotency[entryKey] = entry
+	s.mu.Unlock()
+
+	response, status := operation()
+	s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
+	s.mu.Lock()
+	entry.JobID = firstString(response, "job_id")
+	entry.Response = cloneMap(response)
+	entry.Status = status
+	close(entry.Done)
+	if entry.JobID != "" {
+		if err := s.saveTaskStateLocked(entry.JobID); err != nil {
+			log.Printf("task/idempotency state save failed: %v", err)
+		}
+	}
+	s.mu.Unlock()
+	return response, status
+}
+
+func approvalArguments(args map[string]any) (map[string]any, string) {
+	callArgs := cloneMap(args)
+	approvalID := firstString(callArgs, "approval_id")
+	delete(callArgs, "approval_id")
+	return callArgs, approvalID
+}
+
+func (s *Server) approvalGate(r *http.Request, target, toolName string, args map[string]any, approvalID string) (map[string]any, bool) {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound || profile.ApprovalMode != approvalModeAskBeforeWrite || isReadOnlyTool(target, toolName) {
+		return nil, false
+	}
+	actor := s.actorForRequest(r)
+	digestBytes, err := json.Marshal(args)
+	if err != nil {
+		return map[string]any{"status": "failed", "error": "arguments cannot be serialized"}, true
+	}
+	digest := sha256Hex(digestBytes)
+	now := s.now()
+	if approvalID != "" {
+		s.mu.Lock()
+		approval := s.approvals[approvalID]
+		if approval != nil && approval.Status == "approved" && now.Before(approval.ExpiresAt) &&
+			approval.ProfileID == profile.ID && approval.Actor == actor && approval.Target == target &&
+			approval.Tool == toolName && approval.ArgumentsDigest == digest {
+			approval.Status = "consumed"
+			s.mu.Unlock()
+			return nil, false
+		}
+		s.mu.Unlock()
+	}
+	approval := &approvalRequest{
+		ID: newID(), ProfileID: profile.ID, Actor: actor, Target: target, Tool: toolName,
+		ArgumentsDigest: digest, CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute), Status: "pending",
+	}
+	s.mu.Lock()
+	if len(s.approvals) >= 256 {
+		s.mu.Unlock()
+		return map[string]any{"status": "failed", "error": "approval queue is full"}, true
+	}
+	s.approvals[approval.ID] = approval
+	s.mu.Unlock()
+	return map[string]any{
+		"status": "approval_required", "approval_id": approval.ID,
+		"expires_at": approval.ExpiresAt, "target": target, "tool": toolName,
+		"message": "An administrator must approve this write before execution.",
+	}, true
+}
+
+func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string) (map[string]any, bool) {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound || profile.ApprovalMode != approvalModeBoundedAutonomous || isReadOnlyTool(target, toolName) {
+		return nil, false
+	}
+	key := profile.ID + "\x00" + s.actorForRequest(r)
+	now := s.now()
+	s.mu.Lock()
+	budget := s.autonomous[key]
+	if budget == nil || !now.Before(budget.WindowStart.Add(autonomousWindowSize)) {
+		budget = &autonomousBudget{WindowStart: now}
+		s.autonomous[key] = budget
+	}
+	if budget.Count >= autonomousCallLimit {
+		retryAt := budget.WindowStart.Add(autonomousWindowSize)
+		s.mu.Unlock()
+		return map[string]any{
+			"status":   "bounded_autonomous_limit",
+			"retry_at": retryAt,
+			"limit":    autonomousCallLimit,
+			"window":   autonomousWindowSize.String(),
+			"message":  "The bounded autonomous write budget is exhausted; retry after the window.",
+		}, true
+	}
+	budget.Count++
+	s.mu.Unlock()
+	return nil, false
+}
+
+func isReadOnlyTool(target, toolName string) bool {
+	if toolName == "resources/list" || toolName == "resources/read" {
+		return true
+	}
+	if target == "hub" {
+		switch toolName {
+		case "discover", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
+			return true
+		default:
+			return false
+		}
+	}
+	return strings.HasPrefix(target, "shell:") && toolName == "system_inspect"
+}
+
+func (s *Server) actorForRequest(r *http.Request) string {
+	if r == nil {
+		return "anonymous"
+	}
+	if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+		return "legacy_ctl"
+	}
+	if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+		if actor := firstString(claims, "client_id", "sub"); actor != "" {
+			return actor
+		}
+		return "scoped_connection"
+	}
+	if s.adminSessionValid(r) {
+		return "admin_session"
+	}
+	return "anonymous"
+}
+
+func sha256Hex(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Server) auditToolDecision(r *http.Request, target, toolName string, args map[string]any, decision, reason string, response map[string]any, status int) {
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		encoded = []byte("<unserializable>")
+	}
+	resultReference := "none"
+	if response != nil {
+		resultReference = firstString(response, "job_id", "id")
+		if resultReference == "" {
+			resultReference = "inline"
+		}
+	}
+	actor := "anonymous"
+	identityFields := map[string]any{}
+	if r != nil {
+		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			actor = "legacy_ctl"
+		} else if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+			actor = firstString(claims, "client_id", "sub")
+			identityFields["client_id"] = firstString(claims, "client_id")
+			identityFields["subject"] = firstString(claims, "sub")
+			identityFields["jti"] = firstString(claims, "jti")
+			if actor == "" {
+				actor = "scoped_connection"
+			}
+		} else if s.adminSessionValid(r) {
+			actor = "admin_session"
+		}
+	}
+	fields := map[string]any{
+		"actor":            actor,
+		"profile_id":       AccessProfileIDFromRequest(r),
+		"target":           target,
+		"tool":             toolName,
+		"policy_decision":  decision,
+		"arguments_digest": sha256Hex(encoded),
+		"result_reference": resultReference,
+		"status":           status,
+		"access_mode":      requestAccessMode(r),
+	}
+	if reason != "" {
+		fields["policy_reason"] = reason
+	}
+	if traceID := requestTraceID(r); traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	for key, value := range identityFields {
+		if value != "" {
+			fields[key] = value
+		}
+	}
+	s.mu.Lock()
+	s.addAuditLocked("tool_policy_decision", fields)
+	s.mu.Unlock()
+}
+
+func toolArgsFromJSON(raw string) (map[string]any, error) {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, fmt.Errorf("args_json must be a JSON object: %w", err)
+	}
+	if args == nil {
+		return nil, fmt.Errorf("args_json must be a JSON object")
+	}
+	return args, nil
+}
+
+func toolArgsFromTopLevel(req map[string]any) map[string]any {
+	reserved := map[string]bool{
+		"target": true, "server_id": true, "agent_id": true,
+		"tool": true, "tool_name": true, "name": true,
+		"arguments": true, "args": true, "args_json": true,
+		"background":           true,
+		"detail":               true,
+		"idempotency_key":      true,
+		"schema_version":       true,
+		"schema_digest_sha256": true,
+	}
+	args := map[string]any{}
+	for k, v := range req {
+		if reserved[k] || v == nil {
+			continue
+		}
+		args[k] = v
+	}
+	return args
+}
+
+func withActionToolHints(resp map[string]any, target string) map[string]any {
+	response := mapValue(resp["response"])
+	rawTools, ok := response["tools"].([]map[string]any)
+	if !ok {
+		if items, ok := response["tools"].([]any); ok {
+			rawTools = make([]map[string]any, 0, len(items))
+			for _, item := range items {
+				if tool, ok := item.(map[string]any); ok {
+					rawTools = append(rawTools, tool)
+				}
+			}
+		}
+	}
+	for _, tool := range rawTools {
+		name := firstString(tool, "name")
+		if name == "" {
+			continue
+		}
+		hint := map[string]any{"operationId": "callMcpTool", "target": target, "tool_name": name}
+		for _, field := range actionShortcutFields(tool) {
+			hint[field] = "<" + field + ">"
+		}
+		tool["gptadmin_action_call"] = hint
+	}
+	return resp
+}
+
+func actionShortcutFields(tool map[string]any) []string {
+	schema := mapValue(tool["inputSchema"])
+	props := mapValue(schema["properties"])
+	out := []string{}
+	for _, key := range []string{"cmd", "query", "cwd", "timeout", "run_as_user"} {
+		if _, ok := props[key]; ok {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if err := authorizeToolCall(r, "shell:direct", "shell_exec"); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	cmd := firstString(req, "cmd", "command")
+	if cmd == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing cmd"})
+		return
+	}
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]any{"detail": detail})
+		return
+	}
+	target = selectedTarget
+	if !strings.HasPrefix(target, "shell:") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "target must be a shell:* agent"})
+		return
+	}
+	args := map[string]any{
+		"cmd":         cmd,
+		"cwd":         req["cwd"],
+		"timeout":     req["timeout"],
+		"run_as_user": firstString(req, "run_as_user", "user"),
+	}
+	if raw, ok := req["secret_env"]; ok {
+		args["secret_env"] = raw
+	}
+	resp, responseStatus := s.executeMCPTool(r, target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, responseStatus, resp)
+}
+
+func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.TrimPrefix(r.URL.Path, "/mcp-relay/get_mcp_job/")
+	jobID = strings.TrimPrefix(jobID, "/mcp-relay/job/")
+	jobID, _ = url.PathUnescape(strings.Trim(jobID, "/"))
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing job_id"})
+		return
+	}
+	outputDetail := r.URL.Query().Get("detail")
+	if err := validateToolOutputDetail(outputDetail); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	ack := r.URL.Query().Get("ack") == "true" || r.URL.Query().Get("ack") == "1"
+	s.mu.Lock()
+	if err := s.refreshTaskRecordsLocked(jobID); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+		return
+	}
+	if j := s.relayJobs[jobID]; j != nil {
+		resp := relayJobResponse(j)
+		if ack && (j.Status == "completed" || j.Status == "failed") {
+			delete(s.relayJobs, jobID)
+		}
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, s.formatToolOutput(resp, "", outputDetail))
+		return
+	}
+	if j := s.shellJobs[jobID]; j != nil {
+		resp := shellJobResponse(j)
+		if ack && (j.Status == "completed" || j.Status == "failed") {
+			delete(s.shellJobs, jobID)
+		}
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, s.formatToolOutput(resp, j.ToolName, outputDetail))
+		return
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+}
+
+func (s *Server) enqueueRelay(agentID, method string, params map[string]any) string {
+	return s.enqueueRelayWithTrace(agentID, method, params, "")
+}
+
+func (s *Server) enqueueRelayWithTrace(agentID, method string, params map[string]any, traceID string) string {
+	return s.enqueueRelayWithTraceParent(agentID, method, params, traceID, "")
+}
+
+func (s *Server) enqueueRelayWithTraceParent(agentID, method string, params map[string]any, traceID, traceParent string, requestKeys ...string) string {
+	id := newID()
+	s.mu.Lock()
+	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
+	if len(requestKeys) > 0 {
+		s.relayJobs[id].RequestKey = requestKeys[0]
+	}
+	fields := map[string]any{"server_id": agentID, "job_id": id, "method": method}
+	if traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	if traceParent != "" {
+		fields["traceparent"] = traceParent
+	}
+	s.addAuditLocked("mcp_enqueue", fields)
+	owner, err := s.ensureTaskOwnerLocked()
+	if err == nil {
+		s.relayJobs[id].OwnerID = owner
+		err = s.saveTaskStateLocked(id)
+	}
+	if err != nil {
+		s.relayJobs[id].Status = "failed"
+		s.relayJobs[id].Error = taskPersistenceFailure(err)["error"]
+		s.relayJobs[id].DoneAt = nowFloat()
+	} else {
+		s.relayQueues[agentID] = append(s.relayQueues[agentID], id)
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	return id
+}
+
+func (s *Server) waitRelay(jobID string, timeout time.Duration) map[string]any {
+	deadline := time.Now().Add(timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if err := s.refreshTaskRecordsLocked(jobID); err != nil {
+			return taskPersistenceFailure(err)
+		}
+		job := s.relayJobs[jobID]
+		if job == nil {
+			return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}
+		}
+		if job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled" {
+			return relayJobResponse(job)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return map[string]any{"server_id": job.AgentID, "status": "running", "background": true, "job_id": jobID, "message": "MCP relay job is still running"}
+		}
+		waitCond(s.cond, minDuration(remaining, 500*time.Millisecond))
+	}
+}
+
+func relayJobResponse(job *relayJob) map[string]any {
+	response := map[string]any{"server_id": job.AgentID, "status": job.Status, "job_id": job.ID}
+	if job.TraceID != "" {
+		response["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		response["traceparent"] = job.TraceParent
+	}
+	if job.Status == "failed" {
+		response["error"] = job.Error
+		return response
+	}
+	response["response"] = spillFriendly(job.Result)
+	return response
+}
+
+func shellJobResponse(job *shellJob) map[string]any {
+	out := map[string]any{"server_id": "shell:" + job.Server, "status": job.Status, "job_id": job.ID, "task_id": job.ID}
+	if job.TraceID != "" {
+		out["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		out["traceparent"] = job.TraceParent
+	}
+	if job.Result != nil {
+		structured := map[string]any{"server": job.Server, "result": redactSecretValues(job.Result, job.SecretValues)}
+		if resources := shellJobOutputResources(job); len(resources) > 0 {
+			structured["resources"] = resources
+		}
+		out["response"] = map[string]any{"content": []map[string]any{{"type": "text", "text": "shell_exec completed on " + job.Server}}, "structuredContent": structured}
+	}
+	if job.Error != nil {
+		out["error"] = redactSecretValues(job.Error, job.SecretValues)
+	}
+	return out
+}
+
+func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, int) {
+	return s.callHubToolForRequest(nil, name, args)
+}
+
+func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[string]any) (map[string]any, int) {
+	if name == "access_clients" || name == "operations" {
+		return s.callAccessClientTool(r, name, args)
+	}
+	if name == "access_profiles" {
+		return s.callAccessProfileTool(r, args)
+	}
+	if name == "handover_status" {
+		return map[string]any{"state": readHubHandoverState()}, http.StatusOK
+	}
+	if name == "handover_start" {
+		return s.startHubHandover(s.actorForRequest(r))
+	}
+	if name == "diagnose" {
+		return s.diagnoseHub(), http.StatusOK
+	}
+	if isNetworkProxyHubTool(name) {
+		return s.callNetworkProxyTool(AccessProfileIDFromRequest(r), name, args)
+	}
+	if isWebhookHubTool(name) {
+		return s.callWebhookHubTool(name, args)
+	}
+	if name == "resource_receipt" {
+		return s.appsSDKResourceReceipt(r, firstString(args, "uri")), http.StatusOK
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fields := map[string]any{"tool": name}
+	if traceID := requestTraceID(r); traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	s.addAuditLocked("hub_tool", fields)
+	switch name {
+	case "discover", "listMcpServers", "list_mcp_servers":
+		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
+		return map[string]any{"servers": servers}, http.StatusOK
+	case "listMcpAgents", "list_mcp_agents":
+		agents := s.publicAgentsLocked(nil)
+		return map[string]any{"agents": agents}, http.StatusOK
+	case "pending", "list_pending_servers":
+		pending := make([]map[string]any, 0)
+		for _, agent := range s.agents {
+			if agent != nil && agent.Status == "awaiting_approval" {
+				pending = append(pending, agentAsServer(*agent))
+			}
+		}
+		return map[string]any{"pending": pending, "count": len(pending)}, http.StatusOK
+	case "approve_pending_server":
+		target := firstString(args, "server_id", "agent_id", "name")
+		if target == "" {
+			return map[string]any{"error": "server_id or name is required"}, http.StatusBadRequest
+		}
+		if _, exists := s.agents[target]; !exists && !strings.HasPrefix(target, "shell:") {
+			target = "shell:" + target
+		}
+		agent := s.agents[target]
+		if agent == nil || agent.Status != "awaiting_approval" {
+			return map[string]any{"error": "pending server not found", "server_id": target}, http.StatusNotFound
+		}
+		// Relay agents stay pending until their signed enrollment proof collects
+		// the agent-bound credential. Shell agents become online immediately.
+		if _, relay := s.relayEnrollments[target]; !relay {
+			agent.Status = "online"
+		}
+		agent.LastSeen = nowFloat()
+		if agent.Meta == nil {
+			agent.Meta = map[string]any{}
+		}
+		agent.Meta["approved"] = true
+		s.addAuditLocked("approve_pending_server", map[string]any{"agent_id": target})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			log.Printf("registry state save failed: %v", err)
+		}
+		return map[string]any{"ok": true, "status": "approved", "server_id": target}, http.StatusOK
+	case "settings_schema":
+		return map[string]any{"schema": hubSettingsSchema()}, http.StatusOK
+	case "settings_get":
+		return map[string]any{"settings": s.hubSettingsLocked(), "schema_version": 1}, http.StatusOK
+	case "settings_set":
+		updates := args
+		if nested := mapValue(args["settings"]); len(nested) > 0 {
+			updates = nested
+		}
+		changed, err := s.applyHubSettingsLocked(updates)
+		if err != nil {
+			return map[string]any{"error": err.Error()}, http.StatusBadRequest
+		}
+		if len(changed) == 0 {
+			return map[string]any{"ok": true, "settings": s.hubSettingsLocked(), "revision": s.settingsRevision, "changed": changed}, http.StatusOK
+		}
+		revision := s.recordSettingsRevisionLocked(s.actorForRequest(r), "mcp_or_admin", changed)
+		removed := s.cleanupStaleMCPAgentsLocked()
+		s.addAuditLocked("hub_settings_changed", map[string]any{"revision": revision.Revision, "actor": revision.Actor, "changed": changed, "removed_stale_mcp": removed})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			return map[string]any{"error": "failed to persist settings"}, http.StatusInternalServerError
+		}
+		return map[string]any{"ok": true, "settings": s.hubSettingsLocked(), "revision": revision, "changed": changed, "removed_stale_mcp": removed}, http.StatusOK
+	case "settings_history":
+		history := append([]settingsRevision(nil), s.settingsHistory...)
+		return map[string]any{"revision": s.settingsRevision, "history": history}, http.StatusOK
+	case "settings_rollback":
+		revisionID, _ := int64FromAny(args["revision"])
+		if revisionID <= 0 {
+			return map[string]any{"error": "revision must be positive"}, http.StatusBadRequest
+		}
+		revision, err := s.rollbackSettingsLocked(revisionID, s.actorForRequest(r), "rollback")
+		if err != nil {
+			return map[string]any{"error": err.Error()}, http.StatusNotFound
+		}
+		s.addAuditLocked("hub_settings_rollback", map[string]any{"target_revision": revisionID, "new_revision": revision.Revision, "actor": revision.Actor})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			return map[string]any{"error": "failed to persist settings"}, http.StatusInternalServerError
+		}
+		return map[string]any{"ok": true, "settings": s.hubSettingsLocked(), "revision": revision}, http.StatusOK
+	case "stale_cleanup_preview":
+		items := s.cleanupCandidatesLocked()
+		eligible := 0
+		for _, item := range items {
+			if item["eligible"] == true {
+				eligible++
+			}
+		}
+		return map[string]any{"candidates": items, "eligible_count": eligible, "total_stale": len(items)}, http.StatusOK
+	case "stale_cleanup_run":
+		removed := []string{}
+		for _, item := range s.cleanupCandidatesLocked() {
+			if item["eligible"] == true {
+				id := firstString(item, "agent_id")
+				if s.deleteStaleAgentLocked(id, "manual_cleanup") {
+					removed = append(removed, id)
+				}
+			}
+		}
+		s.addAuditLocked("stale_mcp_manual_cleanup", map[string]any{"actor": s.actorForRequest(r), "removed": removed})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			return map[string]any{"error": "failed to persist cleanup"}, http.StatusInternalServerError
+		}
+		return map[string]any{"ok": true, "removed": removed, "count": len(removed)}, http.StatusOK
+	case "agent_policy_get":
+		id := firstString(args, "agent_id", "server_id")
+		if id == "" {
+			return map[string]any{"error": "agent_id is required"}, http.StatusBadRequest
+		}
+		if s.agents[id] == nil {
+			return map[string]any{"error": "agent not found", "agent_id": id}, http.StatusNotFound
+		}
+		return map[string]any{"agent_id": id, "policy": s.agentPolicies[id]}, http.StatusOK
+	case "agent_policy_set":
+		id := firstString(args, "agent_id", "server_id")
+		if id == "" {
+			return map[string]any{"error": "agent_id is required"}, http.StatusBadRequest
+		}
+		if s.agents[id] == nil {
+			return map[string]any{"error": "agent not found", "agent_id": id}, http.StatusNotFound
+		}
+		policy := s.agentPolicies[id]
+		if v, ok := args["protected"].(bool); ok {
+			policy.Protected = v
+		}
+		if v, ok := args["never_delete"].(bool); ok {
+			policy.NeverDelete = v
+		}
+		if _, ok := args["retention_days"]; ok {
+			days := intFromAny(args["retention_days"])
+			if days < 0 || days > 3650 {
+				return map[string]any{"error": "retention_days must be 0..3650"}, http.StatusBadRequest
+			}
+			policy.RetentionDays = days
+		}
+		s.agentPolicies[id] = policy
+		s.addAuditLocked("agent_cleanup_policy_changed", map[string]any{"actor": s.actorForRequest(r), "agent_id": id, "policy": policy})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			return map[string]any{"error": "failed to persist policy"}, http.StatusInternalServerError
+		}
+		return map[string]any{"ok": true, "agent_id": id, "policy": policy}, http.StatusOK
+	case "agent_tombstones":
+		return map[string]any{"tombstones": append([]agentTombstone(nil), s.tombstones...)}, http.StatusOK
+	case "hub_status", "status":
+		awaiting := 0
+		for _, agent := range s.agents {
+			if agent != nil && agent.Status == "awaiting_approval" {
+				awaiting++
+			}
+		}
+		return map[string]any{"ok": true, "servers": len(s.agents), "awaiting_approval": awaiting, "relay_jobs": len(s.relayJobs), "shell_jobs": len(s.shellJobs)}, http.StatusOK
+	case "demo":
+		return map[string]any{
+			"status":        "ok",
+			"connection":    map[string]any{"hub_url": s.origin(r), "mcp_endpoint": s.origin(r) + "/mcp"},
+			"build_version": BuildVersion,
+			"access_mode":   requestAccessMode(r),
+			"capabilities":  []string{"mcp", "read_only_demo"},
+			"message":       "GPTAdmin safe demo is ready; no command or credential access was used.",
+		}, http.StatusOK
+	default:
+		return map[string]any{"error": "unsupported hub tool", "tool": name, "arguments": args}, http.StatusBadRequest
+	}
+}
+
+func canonicalShellQueueName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "server01", "home-assistant":
+		return "haos"
+	default:
+		return strings.TrimSpace(name)
+	}
+}
+
+func (s *Server) callShellTool(target, toolName string, args map[string]any, background bool, timeout time.Duration) map[string]any {
+	return s.callShellToolWithTrace(target, toolName, args, background, timeout, "")
+}
+
+func (s *Server) callShellToolWithTrace(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID string) map[string]any {
+	return s.callShellToolWithTraceParent(target, toolName, args, background, timeout, traceID, "")
+}
+
+func (s *Server) callShellToolWithTraceParent(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string) map[string]any {
+	return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, traceID, traceParent, nil)
+}
+
+func (s *Server) callShellToolWithTraceParentAndSecrets(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, requestKeys ...string) map[string]any {
+	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
+	if toolName == "" {
+		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
+	}
+	job := &shellJob{ID: newID(), Server: server, TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), CreatedAt: nowFloat(), Status: "queued"}
+	if toolName == "shell_exec" {
+		job.Cmd = firstString(args, "cmd", "command")
+		if job.Cmd == "" {
+			return map[string]any{"server_id": target, "status": "failed", "error": "missing cmd"}
+		}
+		job.Cwd = firstString(args, "cwd")
+		job.Timeout = intFromAny(args["timeout"])
+		job.Env = mapValue(args["env"])
+	}
+	if len(requestKeys) > 0 {
+		job.RequestKey = requestKeys[0]
+	}
+	s.mu.Lock()
+	owner, err := s.ensureTaskOwnerLocked()
+	if err != nil {
+		s.mu.Unlock()
+		return taskPersistenceFailure(err)
+	}
+	job.OwnerID = owner
+	change := s.beginTaskMutationLocked(job.ID)
+	s.shellJobs[job.ID] = job
+	fields := map[string]any{"server": server, "job_id": job.ID}
+	if traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	if traceParent != "" {
+		fields["traceparent"] = traceParent
+	}
+	s.addAuditLocked("shell_enqueue", fields)
+	if err := change.commit(); err != nil {
+		s.mu.Unlock()
+		return taskPersistenceFailure(err)
+	}
+	s.shellQueues[server] = append(s.shellQueues[server], job.ID)
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	if background {
+		response := map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job queued"}
+		if traceID != "" {
+			response["trace_id"] = traceID
+		}
+		if traceParent != "" {
+			response["traceparent"] = traceParent
+		}
+		return response
+	}
+	deadline := time.Now().Add(timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if err := s.refreshTaskRecordsLocked(job.ID); err != nil {
+			return taskPersistenceFailure(err)
+		}
+		j := s.shellJobs[job.ID]
+		if j.Status == "completed" || j.Status == "failed" || j.Status == "cancelled" {
+			return shellJobResponse(j)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job is still running"}
+		}
+		waitCond(s.cond, minDuration(remaining, 500*time.Millisecond))
+	}
+}
+
+func hubTools() []map[string]any {
+	tools := []map[string]any{
+		{"name": "discover", "description": "List registered targets", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{
+			"name":         "resource_receipt",
+			"description":  "Read one GPTAdmin MCP resource and return a metadata-only URI, MIME, byte-size, SHA-256, content-count receipt.",
+			"inputSchema":  resourceReceiptInputSchema(),
+			"outputSchema": resourceReceiptOutputSchema(),
+			"annotations":  map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+		},
+		{"name": "pending", "description": "List pending approvals", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "approve_pending_server", "description": "Approve one ShellMCP device awaiting enrollment", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
+		{"name": "fleetExec", "description": "Run one shell command across multiple ShellMCP targets; returns one parent task. Use approval_ids for per-target approvals.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "approval_ids": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"cmd"}, "additionalProperties": false}},
+		{"name": "status", "description": "Return Hub status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "settings_schema", "description": "Describe the unified typed Hub settings registry", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "settings_get", "description": "Read persisted Hub settings", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "settings_set", "description": "Update one or more persisted Hub settings", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"settings": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"settings"}, "additionalProperties": false}},
+		{"name": "settings_history", "description": "List persisted Hub settings revisions", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "settings_rollback", "description": "Rollback Hub settings to a prior revision", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"revision": map[string]any{"type": "integer", "minimum": 1}}, "required": []string{"revision"}, "additionalProperties": false}},
+		{"name": "stale_cleanup_preview", "description": "Preview stale MCP cleanup candidates and protection reasons", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "stale_cleanup_run", "description": "Delete currently eligible stale MCP agents and create tombstones", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "agent_policy_get", "description": "Read cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}}, "required": []string{"agent_id"}, "additionalProperties": false}},
+		{"name": "agent_policy_set", "description": "Set cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}, "protected": map[string]any{"type": "boolean"}, "never_delete": map[string]any{"type": "boolean"}, "retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650}}, "required": []string{"agent_id"}, "additionalProperties": false}},
+		{"name": "agent_tombstones", "description": "List safe tombstones for auto/manually removed MCP agents", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "handover_status", "description": "Read zero-downtime Hub handover state", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+	}
+	return append(append(append(tools, accessProfileTool()), accessClientTools()...), secretHubTools()...)
+}
+
+func shellTools() []map[string]any {
+	return []map[string]any{
+		{"name": "shell_exec", "description": "Run one command as the configured default non-root user; use run_as_user=root only when privileged shell execution is intentional. File reads/edits/checkpoints live on the paired file:<host> target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
+		{"name": "mcp_manage", "description": "Manage child MCP definitions on this selected ShellMCP host. Use list/status/config to inspect; upsert/remove/enable/disable/restart to change or run them. GPTAdmin Hub only routes the call and does not start the child elsewhere. To manage another machine, select that machine's ShellMCP target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
+		{"name": "mcp_tools", "description": "Run MCP tools/list for one configured child MCP on this host. Use the ref returned by mcp_manage list or status.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}}, "required": []string{"ref"}, "additionalProperties": false}},
+		{"name": "mcp_call", "description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
+	}
+}
+
+func fileTools() []map[string]any {
+	return []map[string]any{
+		{"name": "system_inspect", "description": "Read bounded redacted files/directories without shell commands. On a system-mode installation this paired file target runs through the privileged ShellMCP runtime and can inspect root-owned configuration while preserving redaction boundaries.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}}, "path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576}}, "required": []string{"action", "path"}, "additionalProperties": false}},
+		{"name": "file_editor", "description": "Primary text file tool. view returns bounded current text with N:hhhh line ids; str_replace changes exact text and on no/multiple match returns current candidate text with fresh N:hhhh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects the whole batch if any id is stale. Successful edits return a compact diff with fresh ids. create/delete are supported. Existing ownership/mode are preserved; privileged system-mode file targets can edit root-owned files without shell/sed/python.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"view", "create", "str_replace", "batch_edit", "delete"}}, "path": map[string]any{"type": "string"}, "content": map[string]any{"type": []string{"string", "null"}}, "old_text": map[string]any{"type": []string{"string", "null"}}, "new_text": map[string]any{"type": []string{"string", "null"}}, "replace_all": map[string]any{"type": "boolean", "default": false}, "start_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "end_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144}, "operations": map[string]any{"type": []string{"array", "null"}, "maxItems": 50, "items": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"replace", "insert"}}, "start": map[string]any{}, "end": map[string]any{}, "content": map[string]any{"type": "string"}}, "required": []string{"action", "start", "content"}, "additionalProperties": false}}}, "required": []string{"action", "path"}, "additionalProperties": false}},
+		{"name": "file_checkpoint", "description": "Explicit durable filesystem checkpoints using SHA-256 content-addressed gzip storage and manifests. create snapshots files/directories; diff compares to live state; restore automatically creates a restore-safety checkpoint first, so rollback is itself reversible. Use checkpoints at meaningful boundaries, not before every edit. Privileged system-mode file targets preserve owner/group/mode for system files.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"create", "list", "diff", "restore", "delete", "cleanup", "gc"}, "default": "create"}, "path": map[string]any{"type": []string{"string", "null"}}, "paths": map[string]any{"type": []string{"array", "null"}, "items": map[string]any{"type": "string"}}, "checkpoint_id": map[string]any{"type": []string{"string", "null"}}, "name": map[string]any{"type": []string{"string", "null"}}, "ttl_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "default": 30}, "limit": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_age_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0}}, "additionalProperties": false}},
+		{"name": "file_backup", "description": "Legacy compatibility backup/restore tool. Prefer file_checkpoint for durable restore points and file_editor for normal edits; do not create a backup before every edit.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"backup", "list", "cleanup", "restore"}, "default": "backup"}, "path": map[string]any{"type": []string{"string", "null"}}, "backup_id": map[string]any{"type": []string{"string", "null"}}, "ttl_days": map[string]any{"type": []string{"integer", "null"}, "default": 30}, "label": map[string]any{"type": []string{"string", "null"}}, "use_sudo": map[string]any{"type": "boolean", "default": false}, "overwrite": map[string]any{"type": "boolean", "default": false}, "limit": map[string]any{"type": []string{"integer", "null"}}, "max_age_days": map[string]any{"type": []string{"integer", "null"}}}, "additionalProperties": false}},
+	}
+}
+
+func fileToolAllowed(name string) bool {
+	switch name {
+	case "system_inspect", "file_editor", "file_checkpoint", "file_backup":
+		return true
+	default:
+		return false
+	}
+}
+
+func supportsPairedFileTarget(shell Agent) bool {
+	if !strings.HasPrefix(shell.AgentID, "shell:") {
+		return false
+	}
+	// Build 194 introduced the paired file contract. Keep the virtual target
+	// absent for older transports so discovery never advertises dead tools.
+	return intFromAny(shell.Meta["build_version"]) >= 194
+}
+
+func fileAgentForShell(shell Agent) Agent {
+	host := strings.TrimPrefix(shell.AgentID, "shell:")
+	meta := map[string]any{"backing_server_id": shell.AgentID, "paired": true}
+	return Agent{AgentID: "file:" + host, Name: "Files: " + host, Kind: "virtual_file", Transport: shell.Transport, Status: shell.Status, LastSeen: shell.LastSeen, Capabilities: []string{"files", "checkpoints"}, Meta: meta}
+}
+
+func (s *Server) tasksEndpoint(w http.ResponseWriter, r *http.Request) {
+	trim := strings.TrimPrefix(r.URL.Path, "/tasks/")
+	parts := strings.Split(strings.Trim(trim, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "missing server"})
+		return
+	}
+	srv, _ := url.PathUnescape(parts[0])
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		s.mu.Lock()
+		items := []map[string]any{}
+		for _, j := range s.shellJobs {
+			if j.Server == srv {
+				items = append(items, map[string]any{"task_id": j.ID, "job_id": j.ID, "server": j.Server, "cmd": redactSecretValues(j.Cmd, j.SecretValues), "status": j.Status, "result": redactSecretValues(j.Result, j.SecretValues), "error": redactSecretValues(j.Error, j.SecretValues), "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+			}
+		}
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"tasks": items, "count": len(items)})
+		return
+	}
+	if len(parts) >= 2 {
+		tid, _ := url.PathUnescape(parts[1])
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			s.mu.Lock()
+			j := s.shellJobs[tid]
+			if j == nil || j.Server != srv {
+				s.mu.Unlock()
+				writeJSON(w, http.StatusNotFound, map[string]any{"detail": "task not found"})
+				return
+			}
+			resp := shellJobResponse(j)
+			if r.URL.Query().Get("ack") == "1" || r.URL.Query().Get("ack") == "true" {
+				delete(s.shellJobs, tid)
+			}
+			s.mu.Unlock()
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		if len(parts) == 3 && parts[2] == "ack" && r.Method == http.MethodPost {
+			s.mu.Lock()
+			_, existed := s.shellJobs[tid]
+			delete(s.shellJobs, tid)
+			s.mu.Unlock()
+			status := "not_found"
+			if existed {
+				status = "acknowledged"
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": status, "server": srv, "task_id": tid})
+			return
+		}
+		if len(parts) == 3 && parts[2] == "edit" && r.Method == http.MethodPost {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "unsupported_in_go_hub_yet", "server": srv, "task_id": tid})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "not found"})
+}
+
+func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.Lock()
+		settings := s.hubSettingsLocked()
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"settings": settings, "schema": hubSettingsSchema()})
+	case http.MethodPut, http.MethodPost:
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
+			return
+		}
+		result, status := s.callHubToolForRequest(r, "settings_set", map[string]any{"settings": req})
+		writeJSON(w, status, result)
+	default:
+		w.Header().Set("Allow", "GET, PUT, POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+	}
+}
+
+func (s *Server) adminSettingsHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	result, status := s.callHubToolForRequest(r, "settings_history", map[string]any{})
+	writeJSON(w, status, result)
+}
+func (s *Server) adminSettingsRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
+		return
+	}
+	result, status := s.callHubToolForRequest(r, "settings_rollback", req)
+	writeJSON(w, status, result)
+}
+func (s *Server) adminRegistryMaintenance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		result, status := s.callHubToolForRequest(r, "stale_cleanup_preview", map[string]any{})
+		writeJSON(w, status, result)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
+		return
+	}
+	action := firstString(req, "action")
+	var tool string
+	switch action {
+	case "cleanup":
+		tool = "stale_cleanup_run"
+	case "policy_get":
+		tool = "agent_policy_get"
+	case "policy_set":
+		tool = "agent_policy_set"
+	case "tombstones":
+		tool = "agent_tombstones"
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "unknown action"})
+		return
+	}
+	delete(req, "action")
+	result, status := s.callHubToolForRequest(r, tool, req)
+	writeJSON(w, status, result)
+}
+
+func (s *Server) adminDiagnose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.diagnoseHub())
+}
+func (s *Server) adminHandover(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{"state": readHubHandoverState()})
+		return
+	}
+	if r.Method == http.MethodPost {
+		result, status := s.startHubHandover(s.actorForRequest(r))
+		writeJSON(w, status, result)
+		return
+	}
+	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+}
+
+func (s *Server) adminMCPManage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	_ = readJSON(r, &req)
+	action := firstString(req, "action")
+	if action == "" {
+		action = "list"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target": firstString(req, "target"), "action": action, "response": map[string]any{"note": "go hub MCP manage is read-only/placeholder; use shell:mcp_tools for mutation until full parity", "servers": len(s.agents)}})
+}
+
+func (s *Server) adminClientsRevokeAll(w http.ResponseWriter, r *http.Request) {
+	if err := s.refreshAccessState(); err != nil {
+		writeJSON(w, 503, map[string]any{"detail": "access state unavailable"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	revoked := 0
+	for id, record := range s.managedMCP {
+		if record.TokenKind == "legacy_ctl" {
+			continue
+		}
+		if record.RevokedAt == 0 {
+			record.RevokedAt = time.Now().Unix()
+			s.managedMCP[id] = record
+			revoked++
+		}
+	}
+	err := s.saveManagedMCPStateLocked()
+	s.mu.Unlock()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked_count": revoked})
+}
+
+func (s *Server) adminClientDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.refreshAccessState(); err != nil {
+		writeJSON(w, 503, map[string]any{"detail": "access state unavailable"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	id, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/admin/api/clients/"))
+	if err != nil || id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid token id"})
+		return
+	}
+	s.mu.Lock()
+	record, ok := s.managedMCP[id]
+	if ok && record.RevokedAt == 0 {
+		record.RevokedAt = time.Now().Unix()
+		s.managedMCP[id] = record
+		err = s.saveManagedMCPStateLocked()
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "MCP token not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked": true, "token_id": id})
+}
+
+func (s *Server) adminMCPResourcesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	if target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target"})
+		return
+	}
+	if err := authorizeToolCall(r, target, "resources/list"); err != nil {
+		s.auditToolDecision(r, target, "resources/list", nil, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	args := map[string]any{}
+	result, status := s.executeMCPTool(r, target, "resources/list", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, status, result)
+}
+
+func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	uri := firstString(req, "uri")
+	if target == "" || uri == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target or uri"})
+		return
+	}
+	if err := authorizeToolCall(r, target, "resources/read"); err != nil {
+		s.auditToolDecision(r, target, "resources/read", map[string]any{"uri": uri}, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	result, status := s.executeMCPTool(r, target, "resources/read", map[string]any{"uri": uri}, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, status, result)
+}
+
+func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	servers := s.publicServersLockedWithDetail(r, true)
+	jobs := s.adminJobsDataLocked()
+	audit := append([]auditEvent(nil), s.audit...)
+	clients := s.managedMCPClientsLocked()
+	s.mu.Unlock()
+	hubPublicURL := firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin, s.origin(r))
+	tunnel := map[string]any{
+		"mode":       os.Getenv("TUNNEL_MODE"),
+		"public_url": hubPublicURL,
+		"frp": map[string]any{
+			"enabled":       truthyString(os.Getenv("FRP_ENABLE")),
+			"domain":        os.Getenv("FRP_DOMAIN"),
+			"subdomain":     os.Getenv("FRP_SUBDOMAIN"),
+			"server_addr":   os.Getenv("FRP_SERVER_ADDR"),
+			"server_port":   os.Getenv("FRP_SERVER_PORT"),
+			"token_present": os.Getenv("FRP_TOKEN") != "",
+		},
+	}
+	// Aggregate shell builds from heartbeat data.
+	shellBuilds := map[string]any{
+		"latest":   0,
+		"oldest":   0,
+		"versions": map[string]int{},
+	}
+	{
+		buildCounts := map[string]int{}
+		for _, srv := range servers {
+			if meta, ok := srv["meta"].(map[string]any); ok {
+				if bv, ok := meta["build_version"]; ok && bv != nil {
+					ver := fmt.Sprintf("%v", bv)
+					if f, ok := bv.(float64); ok {
+						ver = fmt.Sprintf("%d", int(f))
+					}
+					if ver != "" && ver != "0" {
+						buildCounts[ver]++
+					}
+				}
+			}
+		}
+		versions := map[string]int{}
+		latest := 0
+		oldest := 0
+		for ver, count := range buildCounts {
+			versions[ver] = count
+			v, _ := strconv.Atoi(ver)
+			if v > latest {
+				latest = v
+			}
+			if oldest == 0 || (v > 0 && v < oldest) {
+				oldest = v
+			}
+		}
+		shellBuilds["latest"] = latest
+		shellBuilds["oldest"] = oldest
+		shellBuilds["versions"] = versions
+	}
+	// Read update state.
+	updateState := map[string]any{
+		"current":     map[string]string{"status": "idle"},
+		"last_result": nil,
+	}
+	if st, err := ReadUpdateState(s.updateStatePath); err == nil {
+		st = EnsureDefaultUpdateState(st)
+		updateState["current"] = map[string]string{"status": st.Current.Status}
+		if st.LastResult != nil {
+			updateState["last_result"] = st.LastResult
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "shell_builds": shellBuilds, "update": updateState, "clients": clients, "client_count": len(clients), "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "mcp_token_state": s.managedMCPStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover, "settings": s.settings})
+}
+
+func (s *Server) adminTriggerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+
+	// Check if an update is already running.
+	st, _ := ReadUpdateState(s.updateStatePath)
+	st = EnsureDefaultUpdateState(st)
+	if st.Current.Status == "running" || (s.updateLauncher != nil && s.updateLauncher.CheckUpdateRunning()) {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Try to acquire lock.
+	lock, err := AcquireUpdateLock(s.updateLockPath)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Mark running in state file.
+	st.Current.Status = "running"
+	now := time.Now().Unix()
+	if st.LastResult != nil {
+		st.LastResult.StartedAt = now
+	} else {
+		st.LastResult = &UpdateResult{StartedAt: now}
+	}
+	if err := WriteUpdateState(s.updateStatePath, st); err != nil {
+		ReleaseUpdateLock(lock)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to write state"})
+		return
+	}
+	ReleaseUpdateLock(lock) // release — the external supervisor holds its own lifecycle
+
+	// Launch via external supervisor.
+	if s.updateLauncher == nil {
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    "update launcher not initialized",
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "update launcher not configured"})
+		return
+	}
+	if err := s.updateLauncher.LaunchUpdate(); err != nil {
+		// Reset state on launch failure.
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    err.Error(),
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to start update"})
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "running"})
+}
+
+func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req struct {
+		Role       string `json:"role"`
+		ProfileID  string `json:"profile_id"`
+		ClientID   string `json:"client_id"`
+		TTLDays    int    `json:"ttl_days"`
+		AccessMode string `json:"access_mode"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	clientID := strings.TrimSpace(req.ClientID)
+	if clientID == "" {
+		clientID = "custom-mcp-client"
+	}
+	ttlDays := req.TTLDays
+	if ttlDays == 0 {
+		ttlDays = defaultManagedMCPTokenTTLDays
+	}
+	if ttlDays < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ttl_days must be zero or positive"})
+		return
+	}
+	role, roleErr := normalizedAccessRole(req.Role)
+	if roleErr != nil {
+		writeJSON(w, 400, map[string]any{"detail": roleErr.Error()})
+		return
+	}
+	origin := s.origin(r)
+	resource := s.resource(r)
+	accessMode := strings.ToLower(strings.TrimSpace(req.AccessMode))
+	if accessMode == "" {
+		accessMode = accessModeFull
+	}
+	if accessMode != accessModeFull && accessMode != accessModeReadonly {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "access_mode must be full or readonly"})
+		return
+	}
+	if req.ProfileID != "" {
+		profiles, err := s.accessProfilesSnapshot()
+		if err != nil {
+			writeAccessProfileError(w, err)
+			return
+		}
+		if _, ok := profiles[req.ProfileID]; !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "access profile not found"})
+			return
+		}
+	}
+	token, record, err := s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessMode, req.ProfileID, role)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"client_id":    clientID,
+		"access_mode":  record.AccessMode,
+		"token_id":     record.ID,
+		"role":         record.Role,
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   ttlDays * 24 * 3600,
+		"issuer":       origin,
+		"audience":     resource,
+		"mcp_url":      origin + "/mcp",
+	})
+}
+
+func (s *Server) issueManagedMCPToken(clientID string, ttlDays int, origin, resource string) (string, managedMCPToken, error) {
+	return s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessModeFull, "")
+}
+
+func newManagedMCPToken(clientID string, ttlDays int, origin, resource, accessMode, profileID, role string, now int64) (string, managedMCPToken, error) {
+	scope := "gptadmin.read gptadmin.exec"
+	if accessMode == accessModeReadonly {
+		scope = "gptadmin.read gptadmin.inspect"
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", managedMCPToken{}, err
+	}
+	record := managedMCPToken{ID: newID(), ClientID: clientID, Role: role, TokenKind: "durable", Issuer: origin, Audience: resource, Scope: scope, AccessMode: accessMode, ProfileID: profileID, IssuedAt: now}
+	if ttlDays > 0 {
+		record.ExpiresAt = now + int64(ttlDays)*86400
+	}
+	token := "gptk_" + record.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	digest := sha256.Sum256([]byte(token))
+	record.TokenDigest = hex.EncodeToString(digest[:])
+	record.TokenValue = token
+	return token, record, nil
+}
+func (s *Server) issueManagedMCPTokenWithMode(clientID string, ttlDays int, origin, resource, accessMode, profileID string, roles ...string) (string, managedMCPToken, error) {
+	role := "client"
+	if len(roles) > 0 {
+		var err error
+		role, err = normalizedAccessRole(roles[0])
+		if err != nil {
+			return "", managedMCPToken{}, err
+		}
+	}
+	token, record, err := newManagedMCPToken(clientID, ttlDays, origin, resource, accessMode, profileID, role, s.now().Unix())
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	s.mu.Lock()
+	s.managedMCP[record.ID] = record
+	err = s.saveManagedMCPStateLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	return token, record, nil
+}
+func (s *Server) adminMCPTokenAction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/api/mcp/tokens/"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeJSON(w, 404, map[string]any{"detail": "not found"})
+		return
+	}
+	id, err := url.PathUnescape(parts[0])
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"detail": "invalid token id"})
+		return
+	}
+	if parts[1] == "value" && r.Method == http.MethodGet {
+		s.adminTokenValue(w, r, id)
+		return
+	}
+	if parts[1] != "rotate" || r.Method != http.MethodPost {
+		writeJSON(w, 404, map[string]any{"detail": "not found"})
+		return
+	}
+	if err = s.refreshAccessState(); err != nil {
+		writeJSON(w, 503, map[string]any{"detail": "access state unavailable"})
+		return
+	}
+	s.mu.Lock()
+	record, ok := s.managedMCP[id]
+	if !ok {
+		s.mu.Unlock()
+		writeJSON(w, 404, map[string]any{"detail": "token not found"})
+		return
+	}
+	if record.RevokedAt != 0 {
+		s.mu.Unlock()
+		writeJSON(w, 409, map[string]any{"detail": "token already revoked"})
+		return
+	}
+	if record.TokenKind != "durable" && record.TokenKind != "managed_jwt" && record.TokenKind != "" {
+		s.mu.Unlock()
+		writeJSON(w, 400, map[string]any{"detail": "token kind cannot be rotated here"})
+		return
+	}
+	token, replacement, err := newManagedMCPToken(record.ClientID, 0, s.origin(r), s.resource(r), record.AccessMode, record.ProfileID, record.Role, s.now().Unix())
+	if err == nil {
+		replacement.ExpiresAt = record.ExpiresAt
+		record.RevokedAt = s.now().Unix()
+		s.managedMCP[id] = record
+		s.managedMCP[replacement.ID] = replacement
+		err = s.saveManagedMCPStateLocked()
+	}
+	s.mu.Unlock()
+	if err != nil {
+		writeJSON(w, 409, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "replaced_token_id": id, "token_id": replacement.ID, "client_id": replacement.ClientID, "role": replacement.Role, "access_mode": replacement.AccessMode, "access_token": token, "token_type": "Bearer", "mcp_url": s.origin(r) + "/mcp"})
+}
+
+func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
+	limit, offset := 200, 0
+	for key, dest := range map[string]*int{"limit": &limit, "offset": &offset} {
+		if raw := r.URL.Query().Get(key); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 0 || (key == "limit" && (n < 1 || n > 500)) {
+				writeJSON(w, 400, map[string]any{"detail": "invalid jobs pagination"})
+				return
+			}
+			*dest = n
+		}
+	}
+	s.mu.Lock()
+	jobs := s.adminJobsDataLocked(offset, limit)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	query := r.URL.Query()
+	limit := 100
+	offset := 0
+	var err error
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 500 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "limit must be between 1 and 500"})
+			return
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "offset must be non-negative"})
+			return
+		}
+	}
+	s.mu.Lock()
+	all := append([]auditEvent(nil), s.audit...)
+	s.mu.Unlock()
+	nameFilter := strings.TrimSpace(query.Get("name"))
+	actorFilter := strings.TrimSpace(query.Get("actor"))
+	targetFilter := strings.TrimSpace(query.Get("target"))
+	textFilter := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	filtered := make([]auditEvent, 0, len(all))
+	for _, event := range all {
+		if nameFilter != "" && event.Name != nameFilter {
+			continue
+		}
+		if actorFilter != "" && firstString(event.Fields, "actor", "client_id", "subject") != actorFilter {
+			continue
+		}
+		if targetFilter != "" && firstString(event.Fields, "target", "server_id", "agent_id") != targetFilter {
+			continue
+		}
+		if textFilter != "" {
+			encoded, _ := json.Marshal(event)
+			if !strings.Contains(strings.ToLower(string(encoded)), textFilter) {
+				continue
+			}
+		}
+		filtered = append(filtered, event)
+	}
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	items := filtered[offset:end]
+	response := map[string]any{"events": items, "count": len(items), "total": total, "offset": offset, "audit_log": "durable-jsonl"}
+	if end < total {
+		response["next_offset"] = end
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) adminApprovals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	items := s.approvalSnapshotLocked()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": items})
+}
+
+func (s *Server) adminApproval(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/api/approvals/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid approval id"})
+		return
+	}
+	s.mu.Lock()
+	approval, ok := s.approvals[id]
+	if ok && approval.Status == "pending" && !s.now().Before(approval.ExpiresAt) {
+		approval.Status = "expired"
+	}
+	if !ok {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "approval not found"})
+		return
+	}
+	if r.Method == http.MethodGet {
+		result := *approval
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.mu.Unlock()
+		w.Header().Set("Allow", "GET, POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if approval.Status != "pending" {
+		status := approval.Status
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "approval is no longer pending", "status": status})
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Action)) {
+	case "approve":
+		approval.Status = "approved"
+	case "reject":
+		approval.Status = "rejected"
+	default:
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "action must be approve or reject"})
+		return
+	}
+	result := *approval
+	s.mu.Unlock()
+	s.addApprovalAudit(result)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) approvalSnapshotLocked() []approvalRequest {
+	items := make([]approvalRequest, 0, len(s.approvals))
+	now := s.now()
+	for _, approval := range s.approvals {
+		if approval.Status == "pending" && !now.Before(approval.ExpiresAt) {
+			approval.Status = "expired"
+		}
+		items = append(items, *approval)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	return items
+}
+
+func (s *Server) addApprovalAudit(approval approvalRequest) {
+	s.mu.Lock()
+	s.addAuditLocked("approval_"+approval.Status, map[string]any{
+		"approval_id": approval.ID, "profile_id": approval.ProfileID, "actor": approval.Actor,
+		"target": approval.Target, "tool": approval.Tool, "arguments_digest": approval.ArgumentsDigest,
+	})
+	s.mu.Unlock()
+}
+
+func (s *Server) adminRotateOAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if !s.requireSensitiveSecurityReauth(w, r) {
+		return
+	}
+	if strings.TrimSpace(s.cfg.EnvFile) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "OAuth env file is not configured"})
+		return
+	}
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to generate OAuth secret"})
+		return
+	}
+	secret := hex.EncodeToString(secretBytes)
+	if err := replaceEnvValue(s.cfg.EnvFile, "OAUTH_CLIENT_SECRET", secret); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to persist OAuth secret"})
+		return
+	}
+	s.cfg.OAuthClientSecret = secret
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"restart_required": true,
+		"message":          "OAuth secret rotated. Restart the Hub to load the persisted value for all workers.",
+	})
+}
+
+func (s *Server) adminSecurityEnv(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	data, err := os.ReadFile(s.cfg.EnvFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "env file not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to read env metadata"})
+		return
+	}
+	variables := make([]map[string]any, 0)
+	heartbeat := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "SHELLMCP_HEARTBEAT" {
+			heartbeat = truthyString(value)
+		}
+		variables = append(variables, map[string]any{
+			"key":       key,
+			"present":   value != "",
+			"length":    len(value),
+			"sensitive": sensitiveEnvKey(key),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"variables": variables, "shellmcp_heartbeat": heartbeat})
+}
+
+func (s *Server) adminSecurityHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if !s.requireSensitiveSecurityReauth(w, r) {
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := readJSON(r, &req); err != nil || req.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "enabled boolean is required"})
+		return
+	}
+	if strings.TrimSpace(s.cfg.EnvFile) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "env file is not configured"})
+		return
+	}
+	value := "0"
+	if *req.Enabled {
+		value = "1"
+	}
+	if err := replaceEnvValue(s.cfg.EnvFile, "SHELLMCP_HEARTBEAT", value); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to persist heartbeat setting"})
+		return
+	}
+	s.addSecurityAudit("security_heartbeat_changed", map[string]any{"enabled": *req.Enabled, "restart_required": true})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled, "restart_required": true, "message": "Restart the ShellMCP service to apply the setting."})
+}
+
+func sensitiveEnvKey(key string) bool {
+	key = strings.ToUpper(key)
+	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "BEARER", "API_KEY", "PRIVATE_KEY"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceEnvValue(filename, key, value string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	prefix := key + "="
+	replaced := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			lines[i] = prefix + value
+			replaced = true
+		}
+	}
+	if !replaced {
+		lines = append(lines, prefix+value)
+	}
+	if err := os.MkdirAll(filepath.Dir(filename), 0o750); err != nil {
+		return err
+	}
+	tmp := filename + ".tmp-" + newID()
+	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filename); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (s *Server) adminClients(w http.ResponseWriter, r *http.Request) {
+	if err := s.refreshAccessState(); err != nil {
+		writeJSON(w, 503, map[string]any{"detail": "access state unavailable"})
+		return
+	}
+	s.mu.Lock()
+	clients := s.managedMCPClientsLocked()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"clients": clients, "client_count": len(clients)})
+}
+
+func (s *Server) managedMCPClientsLocked() []managedMCPToken {
+	clients := make([]managedMCPToken, 0, len(s.managedMCP)+len(s.oauthClients)+1)
+	for _, record := range s.managedMCP {
+		clients = append(clients, record)
+	}
+	for clientID, metadata := range s.oauthClients {
+		clients = append(clients, oauthClientInventory(metadata, clientID))
+	}
+	if s.cfg.CtlToken != "" && s.legacyCtlTokenAllowed() {
+		clients = append(clients, managedMCPToken{
+			ID:         "legacy-ctl",
+			ClientID:   "legacy-ctl",
+			TokenKind:  "legacy_ctl",
+			Scope:      "legacy transition credential",
+			AccessMode: accessModeFull,
+		})
+	}
+	return clients
+}
+
+func serverStatusCounts(servers []map[string]any) map[string]int {
+	counts := map[string]int{"online": 0, "offline": 0, "stale": 0, "awaiting_approval": 0}
+	for _, srv := range servers {
+		if st, _ := srv["status"].(string); st != "" {
+			counts[st]++
+		}
+	}
+	return counts
+}
+
+const adminSessionCookieName = "gptadmin_admin_session"
+const adminSessionTTL = 12 * time.Hour
+
+func (s *Server) adminIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.adminSessionValid(r) {
+		s.renderAdminLogin(w, r, "")
+		return
+	}
+	http.Redirect(w, r, "/admin/index.html", http.StatusFound)
+}
+
+func (s *Server) adminStatic(w http.ResponseWriter, r *http.Request) {
+	if !s.adminSessionValid(r) {
+		if wantsHTML(r) || r.URL.Path == "/admin/" || r.URL.Path == "/admin/index.html" {
+			s.renderAdminLogin(w, r, "")
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	root := filepath.Join(s.cfg.PublicDir, "admin")
+	fs := http.StripPrefix("/admin/", http.FileServer(http.Dir(root)))
+	fs.ServeHTTP(w, r)
+}
+
+// adminLegacyStatic preserves old bookmarks and the existing session gate.
+// Operational panels now live in the primary React application.
+func (s *Server) adminLegacyStatic(w http.ResponseWriter, r *http.Request) {
+	if !s.adminSessionValid(r) {
+		if wantsHTML(r) || strings.HasPrefix(r.URL.Path, "/admin/legacy/") {
+			s.renderAdminLogin(w, r, "")
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, "/admin/#overview", http.StatusFound)
+}
+
+func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if s.adminSessionValid(r) {
+			http.Redirect(w, r, safeAdminNext(r.FormValue("next")), http.StatusFound)
+			return
+		}
+		s.renderAdminLogin(w, r, "")
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			s.renderAdminLogin(w, r, "bad request")
+			return
+		}
+		password := r.FormValue("password")
+		if s.cfg.AdminPassword == "" || !hmac.Equal([]byte(password), []byte(s.cfg.AdminPassword)) {
+			s.authAudit("admin_login_denied", r, map[string]any{"reason": "bad_password"})
+			if s.authFailureRateLimited(w, r) {
+				return
+			}
+			s.renderAdminLogin(w, r, "неверный пароль")
+			return
+		}
+		if s.securityRequiresMFA() && !s.verifyAdminMFARequest(r, r.FormValue("mfa_code")) {
+			s.authAudit("admin_login_denied", r, map[string]any{"reason": "mfa_required_or_invalid"})
+			if s.authFailureRateLimited(w, r) {
+				return
+			}
+			s.renderAdminLogin(w, r, "нужен корректный MFA-код")
+			return
+		}
+		expires := time.Now().Add(adminSessionTTL)
+		http.SetCookie(w, &http.Cookie{
+			Name:     adminSessionCookieName,
+			Value:    s.signAdminSession(expires),
+			Path:     "/",
+			Expires:  expires,
+			MaxAge:   int(adminSessionTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   isSecureRequest(r) || strings.HasPrefix(s.origin(r), "https://"),
+			SameSite: http.SameSiteLaxMode,
+		})
+		s.authAudit("admin_login_ok", r, map[string]any{"auth_kind": "admin_password"})
+		http.Redirect(w, r, safeAdminNext(r.FormValue("next")), http.StatusFound)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: adminSessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: isSecureRequest(r) || strings.HasPrefix(s.origin(r), "https://"), SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, "/admin/login", http.StatusFound)
+}
+
+func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+	next := safeAdminNext(r.URL.Query().Get("next"))
+	if next == "/admin/login" || next == "/admin/logout" {
+		next = "/admin/"
+	}
+	errHTML := ""
+	if errMsg != "" {
+		errHTML = `<div class="err">` + html.EscapeString(errMsg) + `</div>`
+	}
+	mfaHTML := ""
+	if s.securityRequiresMFA() {
+		passkeyEnrolled := s.webAuthnEnrolled()
+		mfaRequired := " required"
+		if passkeyEnrolled {
+			mfaRequired = ""
+		}
+		mfaHTML = `<label for="mfa_code">MFA-код</label><input id="mfa_code" name="mfa_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}"` + mfaRequired + `>`
+		if passkeyEnrolled {
+			mfaHTML += `<button id="webauthn-login" type="button">Войти с passkey</button><div id="webauthn-status" class="foot" role="status" aria-live="polite"></div><script>
+(function () {
+  const form = document.getElementById('login-form');
+  const button = document.getElementById('webauthn-login');
+  const status = document.getElementById('webauthn-status');
+  const decode = (value) => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)), (char) => char.charCodeAt(0));
+  const encode = (value) => { let binary = ''; new Uint8Array(value).forEach((byte) => { binary += String.fromCharCode(byte); }); return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
+  const fail = (error) => { status.textContent = error instanceof Error ? error.message : 'Passkey не подтверждён'; button.disabled = false; };
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    status.textContent = 'Подтвердите passkey в браузере';
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) throw new Error('Этот браузер не поддерживает passkey');
+      const begin = await fetch('/admin/api/security/mfa/webauthn/login/begin', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!begin.ok) throw new Error('Не удалось начать проверку passkey');
+      const options = (await begin.json()).publicKey;
+      options.challenge = decode(options.challenge);
+      if (options.allowCredentials) options.allowCredentials = options.allowCredentials.map((item) => ({ ...item, id: decode(item.id) }));
+      const credential = await navigator.credentials.get({ publicKey: options });
+      if (!credential) throw new Error('Passkey не выбран');
+      const response = credential.response;
+      const finish = await fetch('/admin/api/security/mfa/webauthn/login/finish', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: credential.id, rawId: encode(credential.rawId), response: { clientDataJSON: encode(response.clientDataJSON), authenticatorData: encode(response.authenticatorData), signature: encode(response.signature), userHandle: response.userHandle ? encode(response.userHandle) : null }, type: credential.type }) });
+      if (!finish.ok) throw new Error('Сервер отклонил passkey');
+      document.getElementById('mfa_code').required = false;
+      form.submit();
+    } catch (error) { fail(error); }
+  });
+}());
+</script>`
+		}
+	}
+	page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.hint{margin:0 0 18px;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Войдите с <strong>AdminPassword</strong>. Без cookie-сессии админка и её API не отдаются.</p><div class="hint">Для настройки MCP client используйте Connect.</div>` + errHTML + `<form id="login-form" method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required>` + mfaHTML + `<button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
+	_, _ = io.WriteString(w, page)
+}
+
+func (s *Server) adminSessionValid(r *http.Request) bool {
+	if s.cfg.AdminPassword == "" {
+		return true
+	}
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != adminSessionCookieName || cookie.Value == "" {
+			continue
+		}
+		parts := strings.Split(cookie.Value, ".")
+		if len(parts) != 2 {
+			continue
+		}
+		exp, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil || exp < time.Now().Unix() {
+			continue
+		}
+		mac, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			continue
+		}
+		want := s.adminSessionMAC(parts[0])
+		if hmac.Equal(mac, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) signAdminSession(expires time.Time) string {
+	payload := strconv.FormatInt(expires.Unix(), 10)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(s.adminSessionMAC(payload))
+}
+
+func (s *Server) adminSessionMAC(payload string) []byte {
+	secret := firstNonEmpty(s.cfg.OAuthClientSecret, s.cfg.AdminPassword, s.cfg.CtlToken, "gptadmin-admin-session")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("admin-session:" + payload))
+	return mac.Sum(nil)
+}
+
+func wantsHTML(r *http.Request) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "text/html")
+}
+
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on")
+}
+
+func safeAdminNext(v string) string {
+	if v == "" {
+		return "/admin/"
+	}
+	if !strings.HasPrefix(v, "/admin/") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/admin/api/") {
+		return "/admin/"
+	}
+	return v
+}
+
+func (s *Server) addAuditLocked(name string, fields map[string]any) {
+	event := auditEvent{Time: time.Now().Format(time.RFC3339), Name: name, Fields: fields}
+	s.audit = append(s.audit, event)
+	s.enqueueTelemetryAudit(event)
+	maxEvents := s.hubSettingIntLocked("audit_max_events")
+	if len(s.audit) > maxEvents {
+		s.audit = s.audit[len(s.audit)-maxEvents:]
+	}
+	if path := s.auditStatePath(); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			log.Printf("audit state directory failed path=%s err=%v", path, err)
+			return
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			log.Printf("audit state append failed path=%s err=%v", path, err)
+			return
+		}
+		_ = file.Chmod(0o600)
+		if err := json.NewEncoder(file).Encode(event); err != nil {
+			log.Printf("audit state encode failed path=%s err=%v", path, err)
+		}
+		if err := file.Close(); err != nil {
+			log.Printf("audit state close failed path=%s err=%v", path, err)
+		}
+	}
+}
+
+func (s *Server) auditStatePath() string {
+	if s.cfg.AuditStateFile != "" {
+		return s.cfg.AuditStateFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "audit.jsonl")
+}
+
+func (s *Server) loadAuditState() error {
+	path := s.auditStatePath()
+	if path == "" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 2<<20)
+	for scanner.Scan() {
+		var event auditEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return fmt.Errorf("decode audit event: %w", err)
+		}
+		s.audit = append(s.audit, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	maxEvents := s.hubSettingIntLocked("audit_max_events")
+	if len(s.audit) > maxEvents {
+		s.audit = s.audit[len(s.audit)-maxEvents:]
+	}
+	return nil
+}
+
+func readJSON(r *http.Request, dst any) error {
+	body, err := io.ReadAll(http.MaxBytesReader(nilWriter{}, r.Body, 64<<20))
+	if err != nil {
+		return err
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return errors.New("empty JSON body")
+	}
+	return json.Unmarshal(body, dst)
+}
+
+type nilWriter struct{}
+
+func (nilWriter) Header() http.Header         { return http.Header{} }
+func (nilWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (nilWriter) WriteHeader(statusCode int)  {}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		status = http.StatusInternalServerError
+		b = []byte(`{"error":"json encode failed"}`)
+	}
+	b = append(b, '\n')
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(status)
+	_, _ = w.Write(b)
+}
+
+func mcpToolResult(payload any) map[string]any {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		b = []byte(`{"error":"json encode failed"}`)
+	}
+	return map[string]any{
+		"resultType":        "complete",
+		"content":           []map[string]any{{"type": "text", "text": string(b)}},
+		"structuredContent": payload,
+	}
+}
+
+const (
+	mcpTaskTTLMS          = 24 * 60 * 60 * 1000
+	mcpTaskPollIntervalMS = 1000
+)
+
+func mcpTasksOptedIn(params map[string]any) bool {
+	meta := mapValue(params["_meta"])
+	caps := mapValue(meta["io.modelcontextprotocol/clientCapabilities"])
+	extensions := mapValue(caps["extensions"])
+	_, ok := extensions["io.modelcontextprotocol/tasks"]
+	return ok
+}
+
+func mcpTaskTime(ts float64) string {
+	if ts <= 0 {
+		return ""
+	}
+	sec := int64(ts)
+	nsec := int64((ts - float64(sec)) * 1e9)
+	return time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano)
+}
+
+func mcpTaskStatus(status string) string {
+	switch status {
+	case "completed":
+		return "completed"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	case "input_required":
+		return "input_required"
+	default:
+		return "working"
+	}
+}
+
+func mcpCreateTaskResult(jobID string, createdAt, updatedAt float64, status string) map[string]any {
+	if updatedAt <= 0 {
+		updatedAt = createdAt
+	}
+	return map[string]any{
+		"resultType":     "task",
+		"taskId":         jobID,
+		"status":         mcpTaskStatus(status),
+		"statusMessage":  "GPTAdmin operation is running",
+		"createdAt":      mcpTaskTime(createdAt),
+		"lastUpdatedAt":  mcpTaskTime(updatedAt),
+		"ttlMs":          mcpTaskTTLMS,
+		"pollIntervalMs": mcpTaskPollIntervalMS,
+	}
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch x := v.(type) {
+			case string:
+				if strings.TrimSpace(x) != "" {
+					return strings.TrimSpace(x)
+				}
+			case fmt.Stringer:
+				return x.String()
+			}
+		}
+	}
+	return ""
+}
+
+func mapValue(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok && m != nil {
+		return m
+	}
+	return map[string]any{}
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func stringSlice(v any) []string {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func queryDuration(r *http.Request, name string, def time.Duration) time.Duration {
+	v, err := strconv.Atoi(r.URL.Query().Get(name))
+	if err != nil || v <= 0 {
+		return def
+	}
+	return time.Duration(v) * time.Second
+}
+
+func boundedQueryDuration(r *http.Request, name string, max time.Duration) time.Duration {
+	requested := queryDuration(r, name, max)
+	if requested > max {
+		return max
+	}
+	return requested
+}
+
+func timeoutFromReq(req map[string]any, def time.Duration) time.Duration {
+	if v := intFromAny(req["timeout"]); v > 0 {
+		return time.Duration(v) * time.Second
+	}
+	return def
+}
+
+func intFromString(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
+}
+
+func intFromAny(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case json.Number:
+		n, _ := x.Int64()
+		return int(n)
+	case string:
+		n, _ := strconv.Atoi(x)
+		return n
+	default:
+		return 0
+	}
+}
+
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		x = strings.ToLower(strings.TrimSpace(x))
+		return x == "1" || x == "true" || x == "yes" || x == "on"
+	case float64:
+		return x != 0
+	default:
+		return false
+	}
+}
+
+func nowFloat() float64 { return float64(time.Now().UnixNano()) / 1e9 }
+
+func newID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func waitCond(c *sync.Cond, d time.Duration) {
+	t := time.AfterFunc(d, func() {
+		c.L.Lock()
+		c.Broadcast()
+		c.L.Unlock()
+	})
+	c.Wait()
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+func spillFriendly(v any) any {
+	// Keep Go hub responses compatible with the Python hub contract.  Actual
+	// filesystem spilling can be added here without changing external JSON.
+	return v
+}
+
+func (s *Server) origin(r *http.Request) string {
+	if s.cfg.PublicOrigin != "" {
+		return s.cfg.PublicOrigin
+	}
+	scheme := "http"
+	if r != nil && (r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https") {
+		scheme = "https"
+	}
+	host := ""
+	if r != nil {
+		host = r.Host
+		if xf := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xf != "" {
+			host = xf
+		}
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return normalizePublicURL(scheme + "://" + strings.TrimRight(host, "/"))
+}
+
+func (s *Server) resource(r *http.Request) string {
+	if s.cfg.MCPResource != "" {
+		return s.cfg.MCPResource
+	}
+	return s.origin(r)
+}
+
+func normalizePublicURLList(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := normalizePublicURL(value)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		u, err := url.Parse(normalized)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func parsePublicURLList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return normalizePublicURLList(strings.Split(raw, ","))
+}
+
+func publicURLMatchesAny(value string, allowed []string) bool {
+	candidate := normalizePublicURL(value)
+	if candidate == "" {
+		return false
+	}
+	for _, expected := range allowed {
+		if candidate == normalizePublicURL(expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) acceptedPublicURLs(primary string) []string {
+	values := []string{normalizePublicURL(primary)}
+	values = append(values, s.cfg.LegacyPublicOrigins...)
+	return normalizePublicURLList(values)
+}
+
+func (s *Server) migrationEquivalentResource(left, right string) bool {
+	l := normalizePublicURL(left)
+	r := normalizePublicURL(right)
+	if l == "" || r == "" {
+		return false
+	}
+	if l == r {
+		return true
+	}
+	allowed := s.acceptedPublicURLs(s.cfg.MCPResource)
+	return publicURLMatchesAny(l, allowed) && publicURLMatchesAny(r, allowed)
+}
+
+// normalizePublicURL is the canonical issuer/audience/resource
+// representation. It preserves an optional resource path while dropping
+// values that cannot identify an OAuth protected resource.
+func normalizePublicURL(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" {
+		host += ":" + port
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = host
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/")
+}
+
+func (s *Server) oauthProtectedResource(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resource":               s.resource(r),
+		"authorization_servers":  []string{s.origin(r)},
+		"scopes_supported":       []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec", "gptadmin.settings.read", "gptadmin.settings.write", "gptadmin.registry.read", "gptadmin.registry.manage", "gptadmin.update", "offline_access"},
+		"resource_documentation": s.origin(r) + "/",
+	})
+}
+
+func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request) {
+	origin := s.origin(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                                origin,
+		"authorization_endpoint":                origin + "/oauth/authorize",
+		"token_endpoint":                        origin + "/oauth/token",
+		"registration_endpoint":                 origin + "/register",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
+		"scopes_supported":                      []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec", "gptadmin.settings.read", "gptadmin.settings.write", "gptadmin.registry.read", "gptadmin.registry.manage", "gptadmin.update", "offline_access"},
+	})
+}
+
+func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readOAuthRegistrationJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_client_metadata", "error_description": err.Error()})
+		return
+	}
+	redirectURIs, err := oauthRedirectURIsFromRequest(req["redirect_uris"])
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_client_metadata", "error_description": err.Error()})
+		return
+	}
+	clientID := "gptadmin-" + newID()
+	clientSecret := newID()
+	s.mu.Lock()
+	if len(s.oauthClients) >= oauthClientsMaxItems {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "temporarily_unavailable", "error_description": "OAuth client registry is full"})
+		return
+	}
+	s.oauthClients[clientID] = oauthClientMetadata{RedirectURIs: redirectURIs, CreatedAt: time.Now().Unix()}
+	if err := s.saveOAuthClientsStateLocked(); err != nil {
+		delete(s.oauthClients, clientID)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "server_error", "error_description": "failed to persist OAuth client metadata"})
+		return
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"client_id":                  clientID,
+		"client_secret":              clientSecret,
+		"client_id_issued_at":        time.Now().Unix(),
+		"client_secret_expires_at":   0,
+		"redirect_uris":              redirectURIs,
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"token_endpoint_auth_method": "none",
+		"code_challenge_methods":     []string{"S256"},
+		"scope":                      "gptadmin.read gptadmin.exec offline_access",
+	})
+}
+
+func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.oauthAuthorizeGet(w, r)
+	case http.MethodPost:
+		s.oauthAuthorizePost(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+	}
+}
+
+func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	redirectURI := q.Get("redirect_uri")
+	resource := strings.TrimRight(q.Get("resource"), "/")
+	if resource == "" {
+		resource = s.resource(r)
+	}
+	if !s.allowedRedirect(redirectURI) || !s.allowedResource(resource, r) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid redirect_uri or resource", "redirect_uri": redirectURI, "resource": resource, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
+		return
+	}
+	if !s.oauthClientAllowsRedirect(q.Get("client_id"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
+		return
+	}
+	if s.effectiveBearerSecurityProfile().RequirePKCE && !validPKCEParameters(q.Get("code_challenge"), q.Get("code_challenge_method"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid PKCE parameters"})
+		return
+	}
+	hidden := ""
+	for _, k := range []string{"client_id", "redirect_uri", "state", "scope", "code_challenge", "code_challenge_method", "resource"} {
+		v := q.Get(k)
+		if k == "resource" && v == "" {
+			v = resource
+		}
+		hidden += `<input type="hidden" name="` + html.EscapeString(k) + `" value="` + html.EscapeString(v) + `">` + "\n"
+	}
+	scope := q.Get("scope")
+	if scope == "" {
+		scope = "gptadmin.read gptadmin.exec"
+	}
+	page := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize GPTAdmin MCP</title><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:28px;border:1px solid #1e293b;border-radius:24px;background:#0f1623}.hint{margin:16px 0;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:14px;margin-top:10px}input{background:#111827;color:#fff;border:1px solid #334155}button{border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;font-weight:800}.muted{color:#94a3b8;word-break:break-all}</style></head><body><main class="card"><h1>Authorize GPTAdmin MCP</h1><p class="muted">Client: ` + html.EscapeString(q.Get("client_id")) + `</p><p class="muted">Resource: ` + html.EscapeString(resource) + `</p><p>Scopes: ` + html.EscapeString(scope) + `</p><div class="hint">Эта страница выпускает Bearer JWT для MCP/Custom GPT. Используйте OAuth или готовый Bearer JWT, выпущенный через Hub; credential values никогда не показываются на этой странице.</div><form method="POST" action="/oauth/authorize">` + hidden + `<label>Admin password</label><input type="password" name="password" autofocus required autocomplete="current-password"><button type="submit">Authorize</button></form></main></body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(page))
+}
+
+func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
+		return
+	}
+	if !s.adminPasswordOK(r.Form.Get("password")) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid password", "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "invalid password"})
+		return
+	}
+	redirectURI := r.Form.Get("redirect_uri")
+	resource := strings.TrimRight(r.Form.Get("resource"), "/")
+	if resource == "" {
+		resource = s.resource(r)
+	}
+	if !s.allowedRedirect(redirectURI) || !s.allowedResource(resource, r) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid redirect_uri or resource", "redirect_uri": redirectURI, "resource": resource, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
+		return
+	}
+	if !s.oauthClientAllowsRedirect(r.Form.Get("client_id"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
+		return
+	}
+	if s.effectiveBearerSecurityProfile().RequirePKCE && !validPKCEParameters(r.Form.Get("code_challenge"), r.Form.Get("code_challenge_method"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid PKCE parameters"})
+		return
+	}
+	code := newID()
+	scope := r.Form.Get("scope")
+	if scope == "" {
+		scope = "gptadmin.read gptadmin.exec"
+	}
+	s.mu.Lock()
+	s.oauthCodes[code] = oauthCode{Created: time.Now(), Challenge: r.Form.Get("code_challenge"), ClientID: r.Form.Get("client_id"), RedirectURI: redirectURI, Resource: resource, Scope: scope, State: r.Form.Get("state")}
+	s.addAuditLocked("oauth_code_issued", map[string]any{"client_id": r.Form.Get("client_id"), "resource": resource})
+	s.mu.Unlock()
+	s.authAudit("oauth_authorize_ok", r, map[string]any{"client_id": r.Form.Get("client_id"), "redirect_uri": redirectURI, "resource": resource, "scope": scope, "code": s.secretForAudit(code), "form": s.formForAudit(r)})
+	loc := redirectURI
+	sep := "?"
+	if strings.Contains(loc, "?") {
+		sep = "&"
+	}
+	loc += sep + url.Values{"code": {code}, "state": {r.Form.Get("state")}}.Encode()
+	http.Redirect(w, r, loc, http.StatusFound)
+}
+
+func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
+		return
+	}
+	grantType := strings.TrimSpace(r.Form.Get("grant_type"))
+	if grantType == "refresh_token" {
+		s.oauthRefreshToken(w, r)
+		return
+	}
+	if grantType != "" && grantType != "authorization_code" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported_grant_type"})
+		return
+	}
+	code := r.Form.Get("code")
+	s.mu.Lock()
+	data, ok := s.oauthCodes[code]
+	delete(s.oauthCodes, code)
+	s.mu.Unlock()
+	resource := strings.TrimRight(r.Form.Get("resource"), "/")
+	if resource == "" {
+		resource = data.Resource
+	}
+	if !ok || time.Since(data.Created) > 5*time.Minute || !s.allowedResource(resource, r) || !s.migrationEquivalentResource(data.Resource, resource) {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "code not found, expired, or resource mismatch", "resource": resource, "stored_resource": data.Resource, "code_found": ok, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"})
+		return
+	}
+	clientID, clientIDOK := oauthTokenClientID(r)
+	if !clientIDOK || clientID != data.ClientID || !oauthRedirectMatches(data.RedirectURI, r.Form.Get("redirect_uri")) {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "client or redirect mismatch", "client_id": data.ClientID, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "client or redirect mismatch"})
+		return
+	}
+	if s.effectiveBearerSecurityProfile().RequirePKCE && data.Challenge != "" && !pkceOK(r.Form.Get("code_verifier"), data.Challenge) {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "PKCE verification failed", "client_id": data.ClientID, "resource": resource, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "PKCE verification failed"})
+		return
+	}
+	token, err := s.issueOAuthAccessToken(data.ClientID, resource, data.Scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	refreshToken, refreshRecord, err := s.issueOAuthRefreshToken(data.ClientID, resource, data.Scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.mu.Lock()
+	s.addAuditLocked("oauth_token_issued", map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource})
+	s.mu.Unlock()
+	s.authAudit("oauth_token_ok", r, map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource, "access_token": s.secretForAudit(token), "jwt_claims": decodeJWTClaimsUnverified(token), "form": s.formForAudit(r)})
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200, "refresh_token": refreshToken, "refresh_token_expires_in": refreshRecord.ExpiresAt - s.now().Unix()})
+}
+
+// oauthTokenClientID accepts the two OAuth token endpoint client-identification
+// forms advertised by discovery: client_id in the form, or HTTP Basic. If both
+// are supplied, they must name the same client.
+func oauthTokenClientID(r *http.Request) (string, bool) {
+	formClientID := strings.TrimSpace(r.Form.Get("client_id"))
+	basicClientID, _, hasBasic := r.BasicAuth()
+	if !hasBasic {
+		return formClientID, true
+	}
+	if formClientID != "" && formClientID != basicClientID {
+		return "", false
+	}
+	return basicClientID, true
+}
+
+// Native OAuth clients bind a loopback callback before opening the browser.
+// The operating system may choose a different ephemeral port for the token
+// exchange, while the callback path, client, authorization code, and PKCE
+// verifier remain bound. Keep exact matching for every non-loopback redirect.
+func oauthRedirectMatches(issued, requested string) bool {
+	if issued == requested {
+		return true
+	}
+	left, err := url.Parse(issued)
+	if err != nil {
+		return false
+	}
+	right, err := url.Parse(requested)
+	if err != nil {
+		return false
+	}
+	return left.Scheme == "http" && right.Scheme == "http" &&
+		left.Hostname() == "127.0.0.1" && right.Hostname() == "127.0.0.1" &&
+		left.EscapedPath() == right.EscapedPath() && left.RawQuery == right.RawQuery &&
+		left.User == nil && right.User == nil && left.Fragment == "" && right.Fragment == ""
+}
+
+// oauthRefreshToken rotates a durable OAuth refresh credential and returns a
+// short-lived access JWT. Refresh credentials are server-stored digests so a
+// Hub restart and OAuth signing-key change do not erase client authorization.
+func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
+	resource := strings.TrimRight(r.Form.Get("resource"), "/")
+	clientID := strings.TrimSpace(r.Form.Get("client_id"))
+	refreshToken := strings.TrimSpace(r.Form.Get("refresh_token"))
+	record, ok := s.oauthRefreshTokenRecord(refreshToken, clientID, resource)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "refresh token is invalid, expired, or belongs to a different client"})
+		return
+	}
+	accessToken, err := s.issueOAuthAccessToken(record.ClientID, record.Audience, record.Scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	newRefreshToken, newRecord, err := newOAuthRefreshToken(record.ClientID, record.Audience, record.Scope, s.now())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !s.rotateOAuthRefreshToken(refreshToken, record, newRecord) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "refresh token is no longer valid"})
+		return
+	}
+	s.authAudit("oauth_refresh_ok", r, map[string]any{"client_id": record.ClientID, "resource": record.Audience, "scope": record.Scope, "refresh_token": s.secretForAudit(refreshToken)})
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 43200, "refresh_token": newRefreshToken, "refresh_token_expires_in": newRecord.ExpiresAt - s.now().Unix()})
+}
+
+func (s *Server) issueOAuthAccessToken(clientID, resource, scope string) (string, error) {
+	now := s.now()
+	claims := map[string]any{"sub": "admin", "scope": scope, "client_id": clientID, "iss": strings.TrimRight(s.cfg.PublicOrigin, "/"), "aud": resource, "resource": resource, "exp": now.Add(12 * time.Hour).Unix(), "iat": now.Unix(), "kid": s.jwtKeyID()}
+	if claims["iss"] == "" {
+		claims["iss"] = resource
+	}
+	if profileID := s.oauthClientProfileID(clientID); profileID != "" {
+		claims["profile_id"] = profileID
+	}
+	return s.signJWT(claims)
+}
+
+func (s *Server) issueOAuthRefreshToken(clientID, resource, scope string) (string, managedMCPToken, error) {
+	token, record, err := newOAuthRefreshToken(clientID, resource, scope, s.now())
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	s.mu.Lock()
+	s.managedMCP[record.ID] = record
+	err = s.saveManagedMCPStateLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	return token, record, nil
+}
+
+func newOAuthRefreshToken(clientID, resource, scope string, now time.Time) (string, managedMCPToken, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", managedMCPToken{}, err
+	}
+	record := managedMCPToken{ID: newID(), ClientID: clientID, TokenKind: "oauth_refresh", Audience: resource, Scope: scope, IssuedAt: now.Unix(), ExpiresAt: now.AddDate(5, 0, 0).Unix()}
+	token := "gptr_" + record.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	digest := sha256.Sum256([]byte(token))
+	record.TokenDigest = hex.EncodeToString(digest[:])
+	record.TokenValue = token
+	return token, record, nil
+}
+
+func (s *Server) oauthRefreshTokenRecord(token, clientID, resource string) (managedMCPToken, bool) {
+	parts := strings.SplitN(token, "_", 3)
+	if len(parts) != 3 || parts[0] != "gptr" || parts[1] == "" || parts[2] == "" || clientID == "" {
+		return managedMCPToken{}, false
+	}
+	digest := sha256.Sum256([]byte(token))
+	now := s.now().Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshManagedMCPStateLocked(); err != nil {
+		return managedMCPToken{}, false
+	}
+	record, ok := s.managedMCP[parts[1]]
+	if !ok || record.TokenKind != "oauth_refresh" || record.RevokedAt != 0 || record.ExpiresAt <= now || record.ClientID != clientID || (resource != "" && !s.migrationEquivalentResource(record.Audience, resource)) || record.TokenDigest == "" || !hmac.Equal([]byte(record.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return managedMCPToken{}, false
+	}
+	return record, true
+}
+
+func (s *Server) rotateOAuthRefreshToken(token string, oldRecord, newRecord managedMCPToken) bool {
+	digest := sha256.Sum256([]byte(token))
+	now := s.now().Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshManagedMCPStateLocked(); err != nil {
+		return false
+	}
+	stored, ok := s.managedMCP[oldRecord.ID]
+	if !ok || stored.TokenKind != "oauth_refresh" || stored.RevokedAt != 0 || stored.ExpiresAt <= now || stored.TokenDigest == "" || !hmac.Equal([]byte(stored.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return false
+	}
+	stored.RevokedAt = now
+	s.managedMCP[stored.ID] = stored
+	s.managedMCP[newRecord.ID] = newRecord
+	if err := s.saveManagedMCPStateLocked(); err != nil {
+		return false
+	}
+	return true
+}
+
+func agentSlug(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range v {
+		if r >= 'A' && r <= 'Z' {
+			r = r + ('a' - 'A')
+		}
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlnum {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func compactSlug(v string) string {
+	return strings.ReplaceAll(agentSlug(v), "-", "")
+}
+
+func (s *Server) resolveExposedAgent(slug string) (Agent, bool) {
+	slug, _ = url.PathUnescape(strings.Trim(slug, "/"))
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return Agent{}, false
+	}
+	want := agentSlug(slug)
+	wantCompact := compactSlug(slug)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.publicAgentsLocked(nil) {
+		aliases := []string{a.AgentID, a.Name, exposedAgentSlug(a), agentSlug(a.AgentID), agentSlug(a.Name), compactSlug(a.AgentID), compactSlug(a.Name)}
+		for _, alias := range aliases {
+			if strings.EqualFold(slug, alias) || want == agentSlug(alias) || wantCompact == compactSlug(alias) {
+				return a, true
+			}
+		}
+	}
+	return Agent{}, false
+}
+
+func (s *Server) agentCopiesLocked() []Agent {
+	agents := make([]Agent, 0, len(s.agents))
+	for _, a := range s.agents {
+		if a == nil {
+			continue
+		}
+		cp := *a
+		agents = append(agents, cp)
+	}
+	return agents
+}
+
+func parseAgentPath(p string) (slug, tail string, ok bool) {
+	rest := strings.TrimPrefix(strings.TrimPrefix(p, "/server/"), "/agent/")
+	if rest == p || rest == "" {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", "", false
+	}
+	tail = ""
+	if len(parts) > 1 {
+		tail = strings.Join(parts[1:], "/")
+	}
+	return parts[0], tail, true
+}
+
+func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	slug, tail, ok := parseAgentPath(r.URL.Path)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "missing agent slug"})
+		return
+	}
+	agent, ok := s.resolveExposedAgent(slug)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown exposed MCP agent", "slug": slug})
+		return
+	}
+	if tail != "" && tail != "mcp" && tail != "card" && tail != "health" && !strings.HasPrefix(tail, "actions/") {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown server endpoint", "endpoint": tail})
+		return
+	}
+	if tail == "actions/openapi.yaml" || tail == "actions/openapi.yml" || tail == "actions/openapi.json" {
+		s.serverActionsOpenAPI(w, r, agent)
+		return
+	}
+	if tail == "" || tail == "mcp" {
+		w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	if !s.mcpAuth(w, r) {
+		return
+	}
+	if tail == "card" {
+		writeJSON(w, http.StatusOK, s.agentCard(r, agent))
+		return
+	}
+	if tail == "health" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": agent.Status == "online" || agent.AgentID == "hub", "server_id": agent.AgentID, "status": agent.Status})
+		return
+	}
+	if strings.HasPrefix(tail, "actions/tools/") {
+		s.serverActionToolCall(w, r, agent, tail)
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, s.agentCard(r, agent))
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var body map[string]any
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": err.Error()}})
+		return
+	}
+	if headerErr := validateMCP20260728RoutingHeaders(r, body); headerErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": headerErr})
+		return
+	}
+	result, rpcErr, noContent := s.agentMCPJSONRPC(r, agent, body)
+	if noContent {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	resp := map[string]any{"jsonrpc": "2.0", "id": body["id"]}
+	if rpcErr != nil {
+		resp["error"] = rpcErr
+	} else {
+		if isMCP20260728Request(r, body) {
+			result = withMCPServerResultMeta(result, "gptadmin-server-"+exposedAgentSlug(agent), BuildVersion)
+		}
+		resp["result"] = result
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// agentMCPEndpoint is a deprecated compatibility alias for old pinned MCP URLs.
+func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
+	s.serverMCPEndpoint(w, r)
+}
+
+func (s *Server) agentCard(r *http.Request, agent Agent) map[string]any {
+	slug := exposedAgentSlug(agent)
+	path := "/server/" + slug + "/mcp"
+	return map[string]any{
+		"ok":                  true,
+		"server_id":           agent.AgentID,
+		"name":                agent.Name,
+		"kind":                agent.Kind,
+		"transport":           agent.Transport,
+		"status":              agent.Status,
+		"slug":                slug,
+		"mcp_path":            path,
+		"mcp_endpoint":        s.origin(r) + path,
+		"auth":                map[string]any{"bearer": true, "oauth": true},
+		"tools_endpoint":      path,
+		"drop_in_replacement": true,
+	}
+}
+
+func (s *Server) serverActionsOpenAPI(w http.ResponseWriter, r *http.Request, agent Agent) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	result, rpcErr := s.agentToolsList(agent)
+	if rpcErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "failed to list MCP server tools", "server_id": agent.AgentID, "error": rpcErr})
+		return
+	}
+	tools := mcpToolsFromResult(result)
+	slug := exposedAgentSlug(agent)
+	if slug == "" {
+		slug = agentSlug(agent.Name)
+	}
+	body := buildServerActionsOpenAPI(s.origin(r), slug, agent, tools)
+	ct := "application/yaml; charset=utf-8"
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		ct = "application/json; charset=utf-8"
+		body = buildServerActionsOpenAPIJSON(s.origin(r), slug, agent, tools)
+	}
+	b := []byte(body)
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
+func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, agent Agent, tail string) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	toolName, _ := url.PathUnescape(strings.TrimPrefix(tail, "actions/tools/"))
+	toolName = strings.Trim(toolName, "/")
+	if toolName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing tool name"})
+		return
+	}
+	args := map[string]any{}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := readJSON(r, &args); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	var authErr error
+	if agent.AgentID == "hub" {
+		authErr = authorizeFacadeCall(r, toolName, args)
+	} else {
+		authErr = authorizeToolCall(r, agent.AgentID, toolName)
+	}
+	if authErr != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": authErr.Error()})
+		return
+	}
+	callArgs, approvalID := approvalArguments(args)
+	if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, toolName, callArgs, approvalID); blocked {
+		writeJSON(w, http.StatusPreconditionRequired, approvalResponse)
+		return
+	}
+	if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, toolName); blocked {
+		writeJSON(w, http.StatusTooManyRequests, budgetResponse)
+		return
+	}
+	result, rpcErr := s.agentToolCall(r, agent, toolName, callArgs)
+	if rpcErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "failed", "error": rpcErr})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "completed", "response": result})
+}
+
+func mcpToolsFromResult(v any) []map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := m["tools"]
+	if !ok {
+		return nil
+	}
+	switch items := raw.(type) {
+	case []map[string]any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if tool, ok := item.(map[string]any); ok {
+				out = append(out, tool)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func buildServerActionsOpenAPI(origin, slug string, agent Agent, tools []map[string]any) string {
+	var b strings.Builder
+	serverPath := "/server/" + slug + "/actions/tools/"
+	b.WriteString("openapi: 3.1.0\n")
+	b.WriteString("info:\n")
+	b.WriteString("  title: " + yamlQuote("GPTAdmin proxy for "+agent.Name) + "\n")
+	b.WriteString("  version: \"1.0.0\"\n")
+	b.WriteString("  description: " + yamlQuote("OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: "+agent.AgentID) + "\n")
+	b.WriteString("servers:\n")
+	b.WriteString("  - url: " + yamlQuote(origin) + "\n")
+	b.WriteString("security:\n")
+	b.WriteString("  - bearerAuth: []\n")
+	b.WriteString("paths:\n")
+	if len(tools) == 0 {
+		b.WriteString("  {}\n")
+	} else {
+		used := map[string]int{}
+		for _, tool := range tools {
+			name := firstString(tool, "name")
+			if name == "" {
+				continue
+			}
+			opID := openAPIActionOperationID(name, used)
+			desc := firstString(tool, "description", "title")
+			if desc == "" {
+				desc = "Call MCP tool " + name
+			}
+			schema := openAPIActionInputSchema(tool)
+			b.WriteString("  " + yamlQuote(serverPath+url.PathEscape(name)) + ":\n")
+			b.WriteString("    post:\n")
+			b.WriteString("      operationId: " + yamlQuote(opID) + "\n")
+			b.WriteString("      summary: " + yamlQuote(name) + "\n")
+			b.WriteString("      description: " + yamlQuote(desc) + "\n")
+			b.WriteString("      requestBody:\n")
+			b.WriteString("        required: true\n")
+			b.WriteString("        content:\n")
+			b.WriteString("          application/json:\n")
+			b.WriteString("            schema: " + compactJSON(schema) + "\n")
+			b.WriteString("      responses:\n")
+			b.WriteString("        \"200\":\n")
+			b.WriteString("          description: MCP tool result\n")
+			b.WriteString("          content:\n")
+			b.WriteString("            application/json:\n")
+			b.WriteString("              schema: {\"type\":\"object\",\"additionalProperties\":true}\n")
+		}
+	}
+	b.WriteString("components:\n")
+	b.WriteString("  securitySchemes:\n")
+	b.WriteString("    bearerAuth:\n")
+	b.WriteString("      type: http\n")
+	b.WriteString("      scheme: bearer\n")
+	return b.String()
+}
+
+func buildServerActionsOpenAPIJSON(origin, slug string, agent Agent, tools []map[string]any) string {
+	paths := map[string]any{}
+	used := map[string]int{}
+	for _, tool := range tools {
+		name := firstString(tool, "name")
+		if name == "" {
+			continue
+		}
+		desc := firstString(tool, "description", "title")
+		if desc == "" {
+			desc = "Call MCP tool " + name
+		}
+		paths["/server/"+slug+"/actions/tools/"+url.PathEscape(name)] = map[string]any{"post": map[string]any{
+			"operationId": openAPIActionOperationID(name, used),
+			"summary":     name,
+			"description": desc,
+			"requestBody": map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": openAPIActionInputSchema(tool)}}},
+			"responses":   map[string]any{"200": map[string]any{"description": "MCP tool result", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "additionalProperties": true}}}}},
+		}}
+	}
+	payload := map[string]any{
+		"openapi":    "3.1.0",
+		"info":       map[string]any{"title": "GPTAdmin proxy for " + agent.Name, "version": "1.0.0", "description": "OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: " + agent.AgentID},
+		"servers":    []map[string]any{{"url": origin}},
+		"security":   []map[string]any{{"bearerAuth": []any{}}},
+		"paths":      paths,
+		"components": map[string]any{"securitySchemes": map[string]any{"bearerAuth": map[string]any{"type": "http", "scheme": "bearer"}}},
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "{}\n"
+	}
+	return string(b) + "\n"
+}
+
+func openAPIActionInputSchema(tool map[string]any) map[string]any {
+	if schema, ok := tool["inputSchema"].(map[string]any); ok && schema != nil {
+		return schema
+	}
+	if schema, ok := tool["input_schema"].(map[string]any); ok && schema != nil {
+		return schema
+	}
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": true}
+}
+
+func openAPIActionOperationID(name string, used map[string]int) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_-")
+	if out == "" {
+		out = "call_tool"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "call_" + out
+	}
+	used[out]++
+	if used[out] > 1 {
+		return out + "_" + strconv.Itoa(used[out])
+	}
+	return out
+}
+
+func yamlQuote(v string) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
+
+func compactJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"type":"object","additionalProperties":true}`
+	}
+	return string(b)
+}
+
+func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]any) (any, any, bool) {
+	method := firstString(body, "method")
+	params := mapValue(body["params"])
+	switch method {
+	case "server/discover":
+		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
+			return mcpDiscoverResult("gptadmin-server-"+exposedAgentSlug(agent), BuildVersion), nil, false
+		}
+		jobID := s.enqueueRelay(agent.AgentID, method, params)
+		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+		return result, rpcErr, false
+	case "initialize":
+		// Legacy compatibility shim for pre-2026-07-28 MCP clients.
+		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
+			return map[string]any{"protocolVersion": mcpProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + exposedAgentSlug(agent), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
+		}
+		jobID := s.enqueueRelay(agent.AgentID, method, params)
+		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+		return result, rpcErr, false
+	case "notifications/initialized", "notifications/cancelled":
+		return nil, nil, true
+	case "tools/list":
+		result, err := s.agentToolsListForRequest(r, agent)
+		if err == nil {
+			if m, ok := result.(map[string]any); ok {
+				result = mcpCacheableResult(m, 30000, "private")
+			}
+		}
+		return result, err, false
+	case "tools/call":
+		name := firstString(params, "name")
+		args := mapValue(params["arguments"])
+		if name == "" {
+			return nil, map[string]any{"code": -32602, "message": "tool name is required"}, false
+		}
+		if agent.AgentID == "hub" {
+			if id := virtualMCPToolID(name); id != "" {
+				return nil, map[string]any{"code": -32601, "message": "tool is exposed only by the optional virtual MCP " + id}, false
+			}
+		}
+		var authErr error
+		if agent.AgentID == "hub" {
+			authErr = authorizeFacadeCall(r, name, args)
+		} else {
+			authErr = authorizeToolCall(r, agent.AgentID, name)
+		}
+		if authErr != nil {
+			return nil, map[string]any{"code": -32003, "message": authErr.Error()}, false
+		}
+		callArgs, approvalID := approvalArguments(args)
+		if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, name, callArgs, approvalID); blocked {
+			if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" && firstString(approvalResponse, "status") == "approval_required" {
+				return s.createApprovalShellTask(r, agent.AgentID, name, callArgs, approvalResponse), nil, false
+			}
+			return nil, map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}, false
+		}
+		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name); blocked {
+			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
+		}
+		if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" {
+			raw := s.callShellToolWithTraceParent(agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
+				return taskResult, nil, false
+			}
+		}
+		result, err := s.agentToolCall(r, agent, name, callArgs)
+		if err == nil {
+			if taskResult := s.mcpTaskResultFromPayload(result, params); taskResult != nil {
+				return taskResult, nil, false
+			}
+		}
+		return result, err, false
+	case "resources/list":
+		result, err := s.agentResourcesList(r, agent)
+		if err == nil {
+			if m, ok := result.(map[string]any); ok {
+				result = mcpCacheableResult(m, 30000, "private")
+			}
+		}
+		return result, err, false
+	case "resources/read":
+		uri := firstString(params, "uri")
+		if uri == "" {
+			return nil, map[string]any{"code": -32602, "message": "resource uri is required"}, false
+		}
+		result, err := s.agentResourceRead(r, agent, uri)
+		if err == nil {
+			if m, ok := result.(map[string]any); ok {
+				result = mcpCacheableResult(m, 5000, "private")
+			}
+		}
+		return result, err, false
+	case "prompts/list":
+		result, err := s.agentPromptsList(agent)
+		if err == nil {
+			if m, ok := result.(map[string]any); ok {
+				result = mcpCacheableResult(m, 30000, "private")
+			}
+		}
+		return result, err, false
+	case "prompts/get":
+		result, err := s.agentPromptGet(agent, params)
+		if err == nil {
+			if m, ok := result.(map[string]any); ok {
+				result = mcpCacheableResult(m, 5000, "private")
+			}
+		}
+		return result, err, false
+	case "tasks/get":
+		if !mcpTasksOptedIn(params) {
+			return nil, map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}, false
+		}
+		result, err := s.mcpTaskGet(firstString(params, "taskId"), agent.AgentID)
+		return result, err, false
+	case "tasks/cancel":
+		if !mcpTasksOptedIn(params) {
+			return nil, map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}, false
+		}
+		result, err := s.mcpTaskCancel(firstString(params, "taskId"), agent.AgentID)
+		return result, err, false
+	case "tasks/update":
+		if !mcpTasksOptedIn(params) {
+			return nil, map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}, false
+		}
+		result, err := s.mcpTaskUpdate(r, firstString(params, "taskId"), mapValue(params["inputResponses"]), agent.AgentID)
+		return result, err, false
+	default:
+		return nil, map[string]any{"code": -32601, "message": "method not found"}, false
+	}
+}
+
+func (s *Server) agentToolsList(agent Agent) (any, any) {
+	if agent.AgentID == "hub" {
+		return map[string]any{"tools": appsSDKTools()}, nil
+	}
+	if isVirtualMCPAgent(agent) {
+		return map[string]any{"tools": virtualMCPTools(agent)}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return map[string]any{"tools": shellTools()}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "file:") {
+		return map[string]any{"tools": fileTools()}, nil
+	}
+	if isChildMCPAgent(agent) {
+		parent := firstString(agent.Meta, "parent_server_id")
+		ref := firstString(agent.Meta, "child_ref")
+		raw := s.callShellToolWithTraceParent(parent, "mcp_tools", map[string]any{"ref": ref}, false, s.cfg.DefaultTimeout, "", "")
+		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
+			return unwrapMCPUpstream(raw)
+		}
+		return map[string]any{"tools": childMCPTools(raw)}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "tools/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, any) {
+	if requestAccessMode(r) != accessModeReadonly {
+		return s.agentToolsList(agent)
+	}
+	if agent.AgentID == "hub" {
+		return map[string]any{"tools": appsSDKToolsForRequest(r)}, nil
+	}
+	if isVirtualMCPAgent(agent) {
+		return map[string]any{"tools": s.virtualMCPToolsForRequest(r, agent)}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, shellTools())}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "file:") {
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, fileTools())}, nil
+	}
+	if isChildMCPAgent(agent) {
+		result, err := s.agentToolsList(agent)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	return map[string]any{"tools": []map[string]any{}}, nil
+}
+
+func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
+	if agent.AgentID == "hub" {
+		if name == "resource_receipt" {
+			return mcpToolResult(s.appsSDKResourceReceipt(r, firstString(args, "uri"))), nil
+		}
+		return mcpToolResult(s.appsSDKCall(name, args)), nil
+	}
+	if isVirtualMCPAgent(agent) {
+		return s.callVirtualMCPTool(r, agent, name, args)
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return unwrapMCPUpstream(s.callShellToolWithTraceParent(agent.AgentID, name, args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r)))
+	}
+	if strings.HasPrefix(agent.AgentID, "file:") {
+		if !fileToolAllowed(name) {
+			return nil, map[string]any{"code": -32601, "message": "tool is not exposed by file target"}
+		}
+		backing := "shell:" + strings.TrimPrefix(agent.AgentID, "file:")
+		raw := s.callShellToolWithTraceParent(backing, name, args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		raw["server_id"] = agent.AgentID
+		return unwrapMCPUpstream(raw)
+	}
+	if isChildMCPAgent(agent) {
+		parent := firstString(agent.Meta, "parent_server_id")
+		ref := firstString(agent.Meta, "child_ref")
+		raw := s.callShellToolWithTraceParent(parent, "mcp_call", map[string]any{
+			"ref":       ref,
+			"name":      name,
+			"arguments": args,
+		}, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
+			return unwrapMCPUpstream(raw)
+		}
+		child := childMCPResponse(raw)
+		if result := mapValue(child["result"]); len(result) > 0 {
+			return result, nil
+		}
+		return child, nil
+	}
+	jobID := s.enqueueRelayWithTraceParent(agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args}, requestTraceID(r), requestTraceParent(r))
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
+	if agent.AgentID == "hub" {
+		return s.appsSDKResourcesList(), nil
+	}
+	if isVirtualMCPAgent(agent) {
+		return map[string]any{"resources": []any{}}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return map[string]any{"resources": []map[string]any{
+			{"uri": startupInstructionsResourceURI, "name": "GPTAdmin startup instructions", "mimeType": "text/markdown"},
+			{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"},
+		}}, nil
+	}
+	if !hasCapability(agent, "resources/list") {
+		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "resources/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (any, any) {
+	if agent.AgentID == "hub" {
+		return s.appsSDKResourceRead(r, uri), nil
+	}
+	if isVirtualMCPAgent(agent) {
+		return nil, map[string]any{"code": -32601, "message": "resources/read is not supported by this virtual MCP"}
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		if strings.HasPrefix(uri, "gptadmin://task/") {
+			return s.taskOutputResourceRead(r, uri, agent.AgentID), nil
+		}
+		if uri == startupInstructionsResourceURI {
+			return s.startupInstructionsResourceRead(r, uri), nil
+		}
+		b, _ := json.Marshal(s.agentCard(r, agent))
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
+	}
+	if strings.HasPrefix(uri, "gptadmin://server/") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
+		b, _ := json.Marshal(s.agentCard(r, agent))
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "resources/read", map[string]any{"uri": uri})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentPromptsList(agent Agent) (any, any) {
+	if agent.AgentID == "hub" || isVirtualMCPAgent(agent) || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/list") {
+		return map[string]any{"prompts": []any{}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "prompts/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentPromptGet(agent Agent, params map[string]any) (any, any) {
+	if agent.AgentID == "hub" || isVirtualMCPAgent(agent) || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/get") {
+		return nil, map[string]any{"code": -32601, "message": "prompts/get is not supported by this agent"}
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "prompts/get", params)
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func hasCapability(agent Agent, cap string) bool {
+	for _, item := range agent.Capabilities {
+		if item == cap {
+			return true
+		}
+	}
+	return false
+}
+
+func unwrapMCPUpstream(resp map[string]any) (any, any) {
+	status := firstString(resp, "status")
+	if status == "failed" {
+		return nil, map[string]any{"code": -32000, "message": "upstream MCP call failed", "data": resp}
+	}
+	if status == "running" || truthy(resp["background"]) {
+		return nil, map[string]any{"code": -32001, "message": "upstream MCP call is still running", "data": resp}
+	}
+	if v, ok := resp["response"]; ok {
+		return v, nil
+	}
+	return resp, nil
+}
+
+func isMCP20260728Request(r *http.Request, body map[string]any) bool {
+	if r != nil && strings.TrimSpace(r.Header.Get("MCP-Protocol-Version")) == mcpProtocolVersion {
+		return true
+	}
+	params := mapValue(body["params"])
+	meta := mapValue(params["_meta"])
+	return firstString(meta, "io.modelcontextprotocol/protocolVersion") == mcpProtocolVersion
+}
+
+func withMCPServerResultMeta(result any, serverName, version string) any {
+	m, ok := result.(map[string]any)
+	if !ok {
+		return result
+	}
+	out := cloneMap(m)
+	meta := cloneMap(mapValue(out["_meta"]))
+	meta["io.modelcontextprotocol/serverInfo"] = map[string]any{"name": serverName, "version": version}
+	out["_meta"] = meta
+	return out
+}
+
+func mcpRoutingName(method string, params map[string]any) string {
+	switch method {
+	case "tools/call", "prompts/get":
+		return firstString(params, "name")
+	case "resources/read":
+		return firstString(params, "uri")
+	case "tasks/get", "tasks/update", "tasks/cancel":
+		return firstString(params, "taskId")
+	default:
+		return ""
+	}
+}
+
+func validateMCP20260728RoutingHeaders(r *http.Request, body map[string]any) map[string]any {
+	method := firstString(body, "method")
+	params := mapValue(body["params"])
+	meta := mapValue(params["_meta"])
+	bodyVersion := firstString(meta, "io.modelcontextprotocol/protocolVersion")
+	headerVersion := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))
+	modern := headerVersion == mcpProtocolVersion || bodyVersion == mcpProtocolVersion
+	if !modern {
+		return nil
+	}
+	mismatch := func(message string) map[string]any { return map[string]any{"code": -32020, "message": message} }
+	if headerVersion != mcpProtocolVersion {
+		return mismatch("MCP-Protocol-Version header is required and must match the request protocol version")
+	}
+	if got := strings.TrimSpace(r.Header.Get("Mcp-Method")); got != method || got == "" {
+		return mismatch("Mcp-Method header must match JSON-RPC method")
+	}
+	expectedName := mcpRoutingName(method, params)
+	if expectedName != "" {
+		if got := r.Header.Get("Mcp-Name"); got != expectedName {
+			return mismatch("Mcp-Name header must match the routed request name")
+		}
+	}
+	return nil
+}
+
+func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
+	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !s.mcpAuth(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "GPTAdmin MCP", "tools": appsSDKToolsForRequest(r)})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var body map[string]any
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": err.Error()}})
+		return
+	}
+	id := body["id"]
+	if headerErr := validateMCP20260728RoutingHeaders(r, body); headerErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": id, "error": headerErr})
+		return
+	}
+	method := firstString(body, "method")
+	params := mapValue(body["params"])
+	var result any
+	var rpcErr any
+	switch method {
+	case "server/discover":
+		result = mcpDiscoverResult("gptadmin-go-hub", BuildVersion)
+	case "initialize":
+		// Legacy compatibility shim; MCP 2026-07-28 itself is stateless.
+		result = map[string]any{"protocolVersion": mcpProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}
+	case "notifications/initialized":
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case "tools/list":
+		result = mcpCacheableResult(map[string]any{"tools": appsSDKToolsForRequest(r)}, 30000, "private")
+	case "tools/call":
+		name := firstString(params, "name")
+		args := mapValue(params["arguments"])
+		if name == "" {
+			rpcErr = map[string]any{"code": -32602, "message": "tool name is required"}
+		} else if id := virtualMCPToolID(name); id != "" {
+			rpcErr = map[string]any{"code": -32601, "message": "tool is exposed only by the optional virtual MCP " + id}
+		} else if err := authorizeFacadeCall(r, name, args); err != nil {
+			s.recordActivationTelemetry("failure")
+			s.auditToolDecision(r, "hub", name, args, "deny", err.Error(), nil, http.StatusForbidden)
+			rpcErr = map[string]any{"code": -32003, "message": err.Error()}
+		} else {
+			callArgs, approvalID := approvalArguments(args)
+			// In MCP Tasks mode the facade is a transparent router for approval:
+			// checkpoint the actual shell target/tool instead of creating a second
+			// approval for the execute/callMcpTool wrapper itself. Legacy clients
+			// keep the historical wrapper approval behavior below.
+			if mcpTasksOptedIn(params) && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
+				nestedTarget := firstString(callArgs, "target", "server_id", "agent_id")
+				nestedTool := firstString(callArgs, "tool", "tool_name", "name")
+				nestedArgs := mapValue(callArgs["arguments"])
+				if len(nestedArgs) == 0 {
+					nestedArgs = mapValue(callArgs["args"])
+				}
+				if len(nestedArgs) == 0 {
+					nestedArgs = toolArgsFromTopLevel(callArgs)
+				}
+				nestedCallArgs, nestedApprovalID := approvalArguments(nestedArgs)
+				if nestedApprovalID == "" {
+					nestedApprovalID = approvalID
+				}
+				if strings.HasPrefix(nestedTarget, "shell:") && nestedTool == "shell_exec" {
+					if approvalResponse, blocked := s.approvalGate(r, nestedTarget, nestedTool, nestedCallArgs, nestedApprovalID); blocked && firstString(approvalResponse, "status") == "approval_required" {
+						result = s.createApprovalShellTask(r, nestedTarget, nestedTool, nestedCallArgs, approvalResponse)
+						break
+					}
+				}
+			}
+			if result != nil {
+				break
+			}
+			skipHubApproval := mcpTasksOptedIn(params) && (name == "fleetExec" || name == "fleet_exec")
+			if !skipHubApproval {
+				if approvalResponse, blocked := s.approvalGate(r, "hub", name, callArgs, approvalID); blocked {
+					s.recordActivationTelemetry("failure")
+					s.auditToolDecision(r, "hub", name, callArgs, "deny", "approval required", approvalResponse, http.StatusPreconditionRequired)
+					rpcErr = map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}
+					break
+				}
+			}
+			if budgetResponse, blocked := s.boundedAutonomousGate(r, "hub", name); blocked {
+				s.recordActivationTelemetry("failure")
+				s.auditToolDecision(r, "hub", name, callArgs, "deny", "bounded autonomous budget exhausted", budgetResponse, http.StatusTooManyRequests)
+				rpcErr = map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}
+				break
+			}
+			s.recordActivationTelemetry("first_tool")
+			if mcpTasksOptedIn(params) && (name == "callMcpTool" || name == "call_mcp_tool" || name == "execute") {
+				target := firstString(callArgs, "target", "server_id", "agent_id")
+				tool := firstString(callArgs, "tool", "tool_name", "name")
+				if strings.HasPrefix(target, "shell:") && tool == "shell_exec" {
+					callArgs = cloneMap(callArgs)
+					callArgs["background"] = true
+				}
+			}
+			var structured any
+			if mcpTasksOptedIn(params) && (name == "fleetExec" || name == "fleet_exec") {
+				fleetResult, _ := s.fleetExecForRequest(r, callArgs, true)
+				structured = fleetResult
+			} else {
+				structured = s.appsSDKCallForRequest(r, name, callArgs)
+			}
+			if taskResult := s.mcpTaskResultFromPayload(structured, params); taskResult != nil {
+				result = taskResult
+			} else {
+				result = mcpToolResult(structured)
+			}
+			s.auditToolDecision(r, "hub", name, callArgs, "allow", "", map[string]any{}, http.StatusOK)
+		}
+	case "resources/list":
+		result = mcpCacheableResult(s.appsSDKResourcesList(), 30000, "private")
+	case "resources/read":
+		uri := firstString(params, "uri")
+		if uri == "" {
+			rpcErr = map[string]any{"code": -32602, "message": "resource uri is required"}
+		} else {
+			result = mcpCacheableResult(s.appsSDKResourceRead(r, uri), 5000, "private")
+		}
+	case "tasks/get":
+		if !mcpTasksOptedIn(params) {
+			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
+		} else {
+			result, rpcErr = s.mcpTaskGet(firstString(params, "taskId"), "")
+		}
+	case "tasks/cancel":
+		if !mcpTasksOptedIn(params) {
+			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
+		} else {
+			result, rpcErr = s.mcpTaskCancel(firstString(params, "taskId"), "")
+		}
+	case "tasks/update":
+		if !mcpTasksOptedIn(params) {
+			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
+		} else {
+			result, rpcErr = s.mcpTaskUpdate(r, firstString(params, "taskId"), mapValue(params["inputResponses"]), "")
+		}
+	default:
+		rpcErr = map[string]any{"code": -32601, "message": "method not found"}
+	}
+	resp := map[string]any{"jsonrpc": "2.0", "id": id}
+	if rpcErr != nil {
+		resp["error"] = rpcErr
+	} else {
+		if isMCP20260728Request(r, body) {
+			result = withMCPServerResultMeta(result, "gptadmin-go-hub", BuildVersion)
+		}
+		resp["result"] = result
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func shellJobOutputResources(job *shellJob) []map[string]any {
+	if job == nil || job.Result == nil {
+		return nil
+	}
+	result := mapValue(job.Result)
+	if len(result) == 0 || !truthy(result["_spilled"]) {
+		return nil
+	}
+	resources := []map[string]any{}
+	if firstString(result, "stdout_path") != "" {
+		resources = append(resources, map[string]any{"uri": "gptadmin://task/" + url.PathEscape(job.ID) + "/stdout", "name": "stdout", "mimeType": "text/plain"})
+	}
+	if firstString(result, "stderr_path") != "" {
+		resources = append(resources, map[string]any{"uri": "gptadmin://task/" + url.PathEscape(job.ID) + "/stderr", "name": "stderr", "mimeType": "text/plain"})
+	}
+	return resources
+}
+
+func parseTaskOutputResourceURI(raw string) (taskID, stream string, offset, limit int64, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "gptadmin" || u.Host != "task" {
+		return "", "", 0, 0, false
+	}
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if len(parts) != 2 || (parts[1] != "stdout" && parts[1] != "stderr") {
+		return "", "", 0, 0, false
+	}
+	id, err := url.PathUnescape(parts[0])
+	if err != nil || id == "" {
+		return "", "", 0, 0, false
+	}
+	const defaultLimit int64 = 1024 * 1024
+	offset, limit = 0, defaultLimit
+	if rawOffset := strings.TrimSpace(u.Query().Get("offset")); rawOffset != "" {
+		parsed, err := strconv.ParseInt(rawOffset, 10, 64)
+		if err != nil || parsed < 0 {
+			return "", "", 0, 0, false
+		}
+		offset = parsed
+	}
+	if rawLimit := strings.TrimSpace(u.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.ParseInt(rawLimit, 10, 64)
+		if err != nil || parsed < 1 || parsed > defaultLimit {
+			return "", "", 0, 0, false
+		}
+		limit = parsed
+	}
+	return id, parts[1], offset, limit, true
+}
+
+func taskOutputResourceURI(taskID, stream string, offset, limit int64) string {
+	base := "gptadmin://task/" + url.PathEscape(taskID) + "/" + stream
+	if offset <= 0 && (limit <= 0 || limit == 1024*1024) {
+		return base
+	}
+	q := url.Values{}
+	if offset > 0 {
+		q.Set("offset", strconv.FormatInt(offset, 10))
+	}
+	if limit > 0 && limit != 1024*1024 {
+		q.Set("limit", strconv.FormatInt(limit, 10))
+	}
+	if encoded := q.Encode(); encoded != "" {
+		return base + "?" + encoded
+	}
+	return base
+}
+
+func (s *Server) taskOutputResourceRead(r *http.Request, uri, owner string) map[string]any {
+	taskID, stream, offset, limit, ok := parseTaskOutputResourceURI(uri)
+	if !ok {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "invalid GPTAdmin task resource"}}}
+	}
+	s.mu.Lock()
+	job := s.shellJobs[taskID]
+	if job == nil || (owner != "" && owner != "shell:"+job.Server && owner != "hub") {
+		s.mu.Unlock()
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task resource not found"}}}
+	}
+	result := mapValue(job.Result)
+	path := firstString(result, stream+"_path")
+	server := job.Server
+	s.mu.Unlock()
+	if path == "" {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task output was not spilled"}}}
+	}
+	read := s.callShellToolWithTraceParent("shell:"+server, "system_inspect", map[string]any{"action": "read_file", "path": path, "max_bytes": limit, "offset": offset}, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+	if firstString(read, "status") == "failed" || truthy(read["background"]) {
+		b, _ := json.Marshal(read)
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
+	}
+	response := mapValue(read["response"])
+	structured := mapValue(response["structuredContent"])
+	// Shell jobs wrap the actual ShellMCP tool result under structuredContent.result.
+	// Unwrap that layer before reading system_inspect's own structuredContent.
+	if inner := mapValue(structured["result"]); len(inner) > 0 {
+		if innerStructured := mapValue(inner["structuredContent"]); len(innerStructured) > 0 {
+			structured = innerStructured
+		}
+	}
+	inspection := mapValue(structured["inspection"])
+	content := firstString(inspection, "content")
+	bytesRead := int64(intFromAny(inspection["bytes_read"]))
+	totalSize := int64(intFromAny(inspection["size"]))
+	actualOffset := int64(intFromAny(inspection["offset"]))
+	out := map[string]any{
+		"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": content}},
+		"offset":   actualOffset, "bytesRead": bytesRead, "totalSize": totalSize,
+	}
+	if truthy(inspection["truncated"]) || (totalSize > 0 && actualOffset+bytesRead < totalSize) {
+		out["nextUri"] = taskOutputResourceURI(taskID, stream, actualOffset+bytesRead, limit)
+	}
+	return out
+}
+
+func mcpCacheableResult(payload map[string]any, ttlMs int, cacheScope string) map[string]any {
+	out := cloneMap(payload)
+	out["resultType"] = "complete"
+	out["ttlMs"] = ttlMs
+	out["cacheScope"] = cacheScope
+	return out
+}
+
+func mcpDiscoverResult(name, version string) map[string]any {
+	return map[string]any{
+		"resultType":        "complete",
+		"supportedVersions": []string{mcpProtocolVersion},
+		"capabilities": map[string]any{
+			"tools":     map[string]any{},
+			"resources": map[string]any{},
+			"prompts":   map[string]any{},
+			"extensions": map[string]any{
+				"io.modelcontextprotocol/tasks": map[string]any{},
+			},
+		},
+		"serverInfo": map[string]any{"name": name, "version": version},
+		"ttlMs":      30000,
+		"cacheScope": "public",
+	}
+}
+
+func approvalTaskInputRequests(approvalID string) map[string]any {
+	message := "Administrator approval is required before execution."
+	if approvalID != "" {
+		message += " Approval handle: " + approvalID
+	}
+	return map[string]any{
+		"approval": map[string]any{
+			"method": "elicitation/create",
+			"params": map[string]any{
+				"mode":    "form",
+				"message": message,
+				"requestedSchema": map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{"approved": map[string]any{"type": "boolean"}},
+					"required":             []string{"approved"},
+					"additionalProperties": false,
+				},
+			},
+		},
+	}
+}
+
+func (s *Server) createApprovalShellTask(r *http.Request, target, toolName string, args map[string]any, approvalResponse map[string]any) map[string]any {
+	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
+	job := &shellJob{
+		ID:            newID(),
+		Server:        server,
+		TraceID:       requestTraceID(r),
+		TraceParent:   requestTraceParent(r),
+		ToolName:      toolName,
+		Arguments:     cloneMap(args),
+		CreatedAt:     nowFloat(),
+		Status:        "input_required",
+		ApprovalID:    firstString(approvalResponse, "approval_id"),
+		ApprovalActor: s.actorForRequest(r),
+	}
+	if profile, ok := AccessProfileFromRequest(r); ok {
+		job.ApprovalProfileID = profile.ID
+	}
+	if toolName == "shell_exec" {
+		job.Cmd = firstString(args, "cmd", "command")
+		job.Cwd = firstString(args, "cwd")
+		job.Timeout = intFromAny(args["timeout"])
+		job.Env = mapValue(args["env"])
+	}
+	s.mu.Lock()
+	owner, err := s.ensureTaskOwnerLocked()
+	if err != nil {
+		s.mu.Unlock()
+		return taskPersistenceFailure(err)
+	}
+	job.OwnerID = owner
+	change := s.beginTaskMutationLocked(job.ID)
+	s.shellJobs[job.ID] = job
+	if err := change.commit(); err != nil {
+		s.mu.Unlock()
+		return taskPersistenceFailure(err)
+	}
+	s.mu.Unlock()
+	out := mcpCreateTaskResult(job.ID, job.CreatedAt, job.CreatedAt, job.Status)
+	out["statusMessage"] = "Administrator approval is required before execution"
+	out["inputRequests"] = approvalTaskInputRequests(job.ApprovalID)
+	return out
+}
+
+func (s *Server) mcpTaskResultFromPayload(payload any, params map[string]any) map[string]any {
+	if !mcpTasksOptedIn(params) {
+		return nil
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	jobID := firstString(m, "task_id", "job_id")
+	if jobID == "" || (!truthy(m["background"]) && firstString(m, "status") != "running" && firstString(m, "status") != "queued") {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j := s.shellJobs[jobID]; j != nil {
+		updated := j.StartedAt
+		if updated <= 0 {
+			updated = j.CreatedAt
+		}
+		return mcpCreateTaskResult(j.ID, j.CreatedAt, updated, j.Status)
+	}
+	if j := s.relayJobs[jobID]; j != nil {
+		updated := j.StartedAt
+		if updated <= 0 {
+			updated = j.CreatedAt
+		}
+		out := mcpCreateTaskResult(j.ID, j.CreatedAt, updated, j.Status)
+		if j.Method == "task/group" && j.Status == "input_required" {
+			if inputRequests := s.taskGroupInputRequestsLocked(j); len(inputRequests) > 0 {
+				out["inputRequests"] = inputRequests
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func (s *Server) taskGroupInputRequestsLocked(group *relayJob) map[string]any {
+	if group == nil || group.Method != "task/group" {
+		return nil
+	}
+	handles := []string{}
+	targets := []string{}
+	for _, id := range taskGroupChildIDs(group) {
+		if job := s.shellJobs[id]; job != nil && job.Status == "input_required" && job.ApprovalID != "" {
+			handles = append(handles, job.ApprovalID)
+			targets = append(targets, "shell:"+job.Server)
+		}
+	}
+	if len(handles) == 0 {
+		return nil
+	}
+	message := fmt.Sprintf("Administrator approval is required for %d fleet targets: %s. Approval handles: %s", len(handles), strings.Join(targets, ", "), strings.Join(handles, ", "))
+	return map[string]any{
+		"approval": map[string]any{
+			"method": "elicitation/create",
+			"params": map[string]any{
+				"mode": "form", "message": message,
+				"requestedSchema": map[string]any{
+					"type": "object", "properties": map[string]any{"approved": map[string]any{"type": "boolean"}},
+					"required": []string{"approved"}, "additionalProperties": false,
+				},
+			},
+		},
+	}
+}
+
+func approvalInputDecision(inputResponses map[string]any) (string, error) {
+	approvalResponse := mapValue(inputResponses["approval"])
+	if len(approvalResponse) == 0 {
+		return "", fmt.Errorf("approval input response is required")
+	}
+	action := firstString(approvalResponse, "action")
+	if action == "decline" || action == "cancel" {
+		return "decline", nil
+	}
+	if action != "accept" {
+		return "", fmt.Errorf("approval input response action must be accept or decline")
+	}
+	if !truthy(mapValue(approvalResponse["content"])["approved"]) {
+		return "", fmt.Errorf("approval response must contain content.approved=true")
+	}
+	return "accept", nil
+}
+
+func (s *Server) shellApprovalReadyLocked(job *shellJob) error {
+	if job == nil || job.Status != "input_required" || job.ApprovalID == "" {
+		return nil
+	}
+	approval := s.approvals[job.ApprovalID]
+	if approval == nil {
+		return fmt.Errorf("approval %s is missing", job.ApprovalID)
+	}
+	now := s.now()
+	if approval.Status != "approved" || !now.Before(approval.ExpiresAt) {
+		return fmt.Errorf("approval %s is not approved or has expired", job.ApprovalID)
+	}
+	digestBytes, err := json.Marshal(job.Arguments)
+	if err != nil {
+		return fmt.Errorf("task arguments cannot be serialized")
+	}
+	if approval.Target != "shell:"+job.Server || approval.Tool != job.ToolName || approval.ArgumentsDigest != sha256Hex(digestBytes) || approval.ProfileID != job.ApprovalProfileID || approval.Actor != job.ApprovalActor {
+		return fmt.Errorf("approval %s does not match child task %s", job.ApprovalID, job.ID)
+	}
+	return nil
+}
+
+func (s *Server) detailedTaskGroup(group *relayJob) map[string]any {
+	s.refreshTaskGroupLocked(group)
+	out := detailedRelayTaskBase(group)
+	ids := taskGroupChildIDs(group)
+	children := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]any{"taskId": id, "status": s.taskStatusLocked(id)}
+		if j := s.shellJobs[id]; j != nil {
+			entry["target"] = "shell:" + j.Server
+			entry["tool"] = j.ToolName
+		}
+		if j := s.relayJobs[id]; j != nil && j.Method != "task/group" {
+			entry["target"] = j.AgentID
+			entry["method"] = j.Method
+		}
+		children = append(children, entry)
+	}
+	out["children"] = children
+	if group.Status == "input_required" {
+		if inputRequests := s.taskGroupInputRequestsLocked(group); len(inputRequests) > 0 {
+			out["inputRequests"] = inputRequests
+		}
+	}
+	progress := mapValue(mapValue(out["_meta"])["io.gptadmin/taskProgress"])
+	if group.Result != nil {
+		progress["counts"] = group.Result["counts"]
+	}
+	progress["childCount"] = len(children)
+	meta := cloneMap(mapValue(out["_meta"]))
+	meta["io.gptadmin/taskProgress"] = progress
+	out["_meta"] = meta
+	return out
+}
+
+func detailedRelayTaskBase(j *relayJob) map[string]any {
+	updated := j.DoneAt
+	if updated <= 0 {
+		updated = j.StartedAt
+	}
+	if updated <= 0 {
+		updated = j.CreatedAt
+	}
+	out := mcpCreateTaskResult(j.ID, j.CreatedAt, updated, j.Status)
+	out["resultType"] = "complete"
+	if j.ParentTaskID != "" {
+		out["parentTaskId"] = j.ParentTaskID
+	}
+	out["statusMessage"] = "GPTAdmin relay operation " + mcpTaskStatus(j.Status)
+	if j.ParentTaskID != "" {
+		out["parentTaskId"] = j.ParentTaskID
+	}
+	progress := map[string]any{"stage": mcpTaskStatus(j.Status), "target": j.AgentID, "method": j.Method}
+	now := nowFloat()
+	if j.StartedAt > 0 {
+		progress["elapsedMs"] = int64((now - j.StartedAt) * 1000)
+	}
+	if j.DoneAt > 0 && j.StartedAt > 0 {
+		progress["durationMs"] = int64((j.DoneAt - j.StartedAt) * 1000)
+		delete(progress, "elapsedMs")
+	}
+	meta := cloneMap(mapValue(out["_meta"]))
+	meta["io.gptadmin/taskProgress"] = progress
+	out["_meta"] = meta
+	return out
+}
+
+func (s *Server) mcpTaskGet(taskID, owner string) (any, any) {
+	if taskID == "" {
+		return nil, map[string]any{"code": -32602, "message": "taskId is required"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshTaskRecordsLocked(taskID); err != nil {
+		return nil, taskPersistenceRPCError(err)
+	}
+	if j := s.shellJobs[taskID]; j != nil {
+		if owner != "" && owner != "shell:"+j.Server && owner != "hub" {
+			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
+		}
+		return s.detailedShellTask(j), nil
+	}
+	if j := s.relayJobs[taskID]; j != nil {
+		if j.Method == "task/group" {
+			if owner != "" && owner != "hub" {
+				return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
+			}
+			return s.detailedTaskGroup(j), nil
+		}
+		if owner != "" && owner != j.AgentID && owner != "hub" {
+			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
+		}
+		return s.detailedRelayTask(j), nil
+	}
+	return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+}
+
+func (s *Server) detailedShellTask(j *shellJob) map[string]any {
+	updated := j.DoneAt
+	if updated <= 0 {
+		updated = j.StartedAt
+	}
+	if updated <= 0 {
+		updated = j.CreatedAt
+	}
+	out := mcpCreateTaskResult(j.ID, j.CreatedAt, updated, j.Status)
+	out["resultType"] = "complete"
+	out["statusMessage"] = "GPTAdmin shell operation " + mcpTaskStatus(j.Status)
+	if j.Status == "input_required" {
+		out["inputRequests"] = approvalTaskInputRequests(j.ApprovalID)
+	} else if j.Status == "completed" {
+		out["result"] = mcpToolResult(shellJobResponse(j))
+	} else if j.Status == "failed" {
+		out["error"] = map[string]any{"code": -32000, "message": "GPTAdmin shell task failed", "data": redactSecretValues(j.Error, j.SecretValues)}
+	}
+	progress := map[string]any{"stage": mcpTaskStatus(j.Status), "target": "shell:" + j.Server, "tool": j.ToolName}
+	now := nowFloat()
+	if j.StartedAt > 0 {
+		progress["elapsedMs"] = int64((now - j.StartedAt) * 1000)
+	}
+	if j.DoneAt > 0 && j.StartedAt > 0 {
+		progress["durationMs"] = int64((j.DoneAt - j.StartedAt) * 1000)
+		delete(progress, "elapsedMs")
+	}
+	if result := mapValue(j.Result); len(result) > 0 {
+		if n, ok := int64FromAny(result["stdout_bytes"]); ok && n > 0 {
+			progress["stdoutBytes"] = n
+		}
+		if n, ok := int64FromAny(result["stderr_bytes"]); ok && n > 0 {
+			progress["stderrBytes"] = n
+		}
+		if _, ok := result["returncode"]; ok {
+			progress["returnCode"] = intFromAny(result["returncode"])
+		}
+		if truthy(result["timed_out"]) {
+			progress["timedOut"] = true
+		}
+		if truthy(result["_spilled"]) {
+			progress["spilled"] = true
+		}
+	}
+	if j.Status == "queued" {
+		for i, id := range s.shellQueues[j.Server] {
+			if id == j.ID {
+				progress["queuePosition"] = i + 1
+				break
+			}
+		}
+	}
+	meta := cloneMap(mapValue(out["_meta"]))
+	meta["io.gptadmin/taskProgress"] = progress
+	out["_meta"] = meta
+	return out
+}
+
+func (s *Server) detailedRelayTask(j *relayJob) map[string]any {
+	if j.Method == "task/group" {
+		return s.detailedTaskGroup(j)
+	}
+	out := detailedRelayTaskBase(j)
+	if j.Status == "completed" {
+		if v, ok := relayJobResponse(j)["response"]; ok {
+			out["result"] = v
+		}
+	} else if j.Status == "failed" {
+		out["error"] = map[string]any{"code": -32000, "message": "GPTAdmin relay task failed", "data": j.Error}
+	}
+	return out
+}
+
+func (s *Server) bridgeKeyMatches(key string) bool {
+	if s.cfg.BridgeKey == "" || key != s.cfg.BridgeKey {
+		return false
+	}
+	// The default bridge key is the legacy CTL bearer. A separately configured
+	// bridge credential remains valid after the migration deadline.
+	return s.cfg.BridgeKey != s.cfg.CtlToken || s.legacyCtlTokenAllowed()
+}
+
+func (s *Server) mcpPrompt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !s.bridgeKeyMatches(r.URL.Query().Get("key")) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	target := r.URL.Query().Get("target")
+	if target == "" || target == "all" {
+		s.mu.Lock()
+		servers := s.publicServersLocked(nil)
+		s.mu.Unlock()
+		var b strings.Builder
+		b.WriteString("You have GPTAdmin MCP tools. Use JSON target/tool/args.\nAvailable servers:\n")
+		for _, srv := range servers {
+			b.WriteString("  " + fmt.Sprint(srv["server_id"]) + " (" + fmt.Sprint(srv["kind"]) + ")\n")
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(b.String()))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("Tools for " + target + " are available through /mcp-relay/list_mcp_tools or /mcp JSON-RPC tools/list.\n"))
+}
+
+func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !s.bridgeKeyMatches(r.URL.Query().Get("key")) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	tool := firstString(req, "tool", "tool_name", "name")
+	args := mapValue(req["args"])
+	if len(args) == 0 {
+		args = mapValue(req["arguments"])
+	}
+	if tool == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tool is required"})
+		return
+	}
+	// The legacy bridge key is an ingress credential, not a scoped MCP client.
+	// Treat bridge calls as read-only until the caller migrates to an OAuth
+	// connection with an explicit access profile; otherwise this endpoint would
+	// invoke the executor with a nil request and bypass policy gates.
+	bridgeRequest := requestWithAuthClaims(r, map[string]any{
+		"sub":         "legacy-bridge",
+		"scope":       "gptadmin.read",
+		"access_mode": accessModeReadonly,
+	})
+	if err := authorizeFacadeCall(bridgeRequest, tool, args); err != nil {
+		s.auditToolDecision(bridgeRequest, "bridge", tool, args, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"status": "failed", "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "result": s.appsSDKCallForRequest(bridgeRequest, tool, args)})
+}
+
+func (s *Server) appsSDKCall(name string, args map[string]any) any {
+	switch name {
+	case "secret_request", "secret_status":
+		return s.secretToolForRequest(nil, name, args)
+	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard":
+		s.mu.Lock()
+		servers := s.publicServersLocked(nil)
+		s.mu.Unlock()
+		return map[string]any{
+			"status":       "ready",
+			"app":          "GPTAdmin MCP",
+			"server_count": len(servers),
+			"servers":      servers,
+			"hint":         "Interactive dashboard rendered. The widget can call discover, schema, execute, and job through the MCP Apps bridge.",
+		}
+	case "resource_receipt":
+		return s.appsSDKResourceReceipt(nil, firstString(args, "uri"))
+	case "discover", "list_mcp_servers", "listMcpServers":
+		s.mu.Lock()
+		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
+		s.mu.Unlock()
+		return map[string]any{"servers": servers}
+	case "pending", "list_pending_servers", "approve_pending_server":
+		result, _ := s.callHubToolForRequest(nil, name, args)
+		return result
+	case "demo":
+		result, _ := s.callHubTool(name, args)
+		return result
+	case "list_mcp_agents", "listMcpAgents":
+		s.mu.Lock()
+		agents := s.publicAgentsLocked(nil)
+		s.mu.Unlock()
+		return map[string]any{"agents": agents}
+	case "schema", "list_mcp_tools", "listMcpTools":
+		target := firstString(args, "target", "server_id", "agent_id")
+		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+		if status != http.StatusOK {
+			return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+		}
+		target = selectedTarget
+		if target == "hub" {
+			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
+		}
+		if strings.HasPrefix(target, "shell:") {
+			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
+		}
+		if strings.HasPrefix(target, "file:") {
+			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": fileTools()}})
+		}
+		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
+		return s.withSchemaContractMetadata(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+	case "inspect", "inspect_system", "inspectSystem":
+		target := firstString(args, "target", "server_id", "agent_id")
+		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+		if status != http.StatusOK {
+			return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+		}
+		if strings.HasPrefix(selectedTarget, "file:") {
+			backing := "shell:" + strings.TrimPrefix(selectedTarget, "file:")
+			resp := s.callShellTool(backing, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout)
+			resp["server_id"] = selectedTarget
+			return resp
+		}
+		if !strings.HasPrefix(selectedTarget, "shell:") {
+			return map[string]any{"server_id": selectedTarget, "status": "failed", "error": "system inspection requires a file:* target (shell:* remains accepted for legacy agents)"}
+		}
+		return s.callShellTool(selectedTarget, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout)
+	case "execute", "call_mcp_tool", "callMcpTool":
+		return s.appsSDKCallMCP(nil, name, args)
+	case "job", "get_mcp_job", "getMcpJob":
+		if err := validateToolOutputDetail(args["detail"]); err != nil {
+			return map[string]any{"status": "failed", "error": err.Error()}
+		}
+		jobID := firstString(args, "id", "job_id")
+		s.mu.Lock()
+		if err := s.refreshTaskRecordsLocked(jobID); err != nil {
+			s.mu.Unlock()
+			return taskPersistenceFailure(err)
+		}
+		if j := s.relayJobs[jobID]; j != nil {
+			resp := relayJobResponse(j)
+			s.mu.Unlock()
+			return s.formatToolOutput(resp, "", args["detail"])
+		}
+		if j := s.shellJobs[jobID]; j != nil {
+			resp := shellJobResponse(j)
+			s.mu.Unlock()
+			return s.formatToolOutput(resp, j.ToolName, args["detail"])
+		}
+		s.mu.Unlock()
+		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}
+	default:
+		return map[string]any{"error": "unknown tool", "tool": name}
+	}
+}
+
+func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
+	if id := virtualMCPToolID(name); id != "" {
+		return map[string]any{"status": "failed", "error": "tool is exposed only by the optional virtual MCP " + id}
+	}
+	if name == "secret_request" || name == "secret_status" {
+		return s.secretToolForRequest(r, name, args)
+	}
+	if name == "resource_receipt" {
+		return s.appsSDKResourceReceipt(r, firstString(args, "uri"))
+	}
+	if name == "demo" {
+		result, _ := s.callHubToolForRequest(r, name, args)
+		return result
+	}
+	if name == "schema" || name == "list_mcp_tools" || name == "listMcpTools" {
+		if err := authorizeFacadeCall(r, name, args); err != nil {
+			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
+		}
+		requestedTarget := firstString(args, "target", "server_id", "agent_id")
+		if requestAccessMode(r) == accessModeReadonly && requestedTarget != "hub" && !strings.HasPrefix(requestedTarget, "shell:") && !strings.HasPrefix(requestedTarget, "file:") {
+			return map[string]any{"server_id": requestedTarget, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}}
+		}
+		return s.appsSDKSchemaForRequest(r, args)
+	}
+	if name == "inspect" || name == "inspect_system" || name == "inspectSystem" {
+		if err := authorizeFacadeCall(r, name, args); err != nil {
+			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
+		}
+		target := firstString(args, "target", "server_id", "agent_id")
+		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+		if status != http.StatusOK {
+			return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+		}
+		if !strings.HasPrefix(selectedTarget, "shell:") && !strings.HasPrefix(selectedTarget, "file:") {
+			return map[string]any{"server_id": selectedTarget, "status": "failed", "error": "system inspection requires a file:* target (shell:* remains accepted for legacy agents)"}
+		}
+		response, responseStatus := s.executeMCPTool(r, selectedTarget, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout, "")
+		if responseStatus >= http.StatusBadRequest {
+			return map[string]any{"server_id": selectedTarget, "status": "failed", "error": response}
+		}
+		return response
+	}
+	if requestAccessMode(r) == accessModeReadonly && (name == "schema" || name == "list_mcp_tools" || name == "listMcpTools") {
+		target := firstString(args, "target", "server_id", "agent_id")
+		if target != "hub" && !strings.HasPrefix(target, "shell:") && !strings.HasPrefix(target, "file:") {
+			return map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}}
+		}
+	}
+	if name == "fleetExec" || name == "fleet_exec" {
+		response, _ := s.fleetExecForRequest(r, args, false)
+		return response
+	}
+	if name == "call_mcp_tool" || name == "callMcpTool" {
+		return s.appsSDKCallMCP(r, name, args)
+	}
+	if name == "execute" {
+		return s.appsSDKCallMCP(r, name, args)
+	}
+	result := s.appsSDKCall(name, args)
+	if requestAccessMode(r) != accessModeReadonly || (name != "schema" && name != "list_mcp_tools" && name != "listMcpTools") {
+		return result
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return result
+	}
+	target := firstString(args, "target", "server_id", "agent_id")
+	response := mapValue(payload["response"])
+	if raw, ok := response["tools"].([]map[string]any); ok {
+		response["tools"] = toolsForRequest(r, target, raw)
+	}
+	return payload
+}
+
+func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) any {
+	target := firstString(args, "target", "server_id", "agent_id")
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+	}
+	target = selectedTarget
+	var result map[string]any
+	if target == "hub" {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}
+	} else if virtual, ok := virtualMCPDefinitions[target]; ok {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.virtualMCPToolsForRequest(r, virtual)}}
+	} else if strings.HasPrefix(target, "shell:") {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
+	} else if strings.HasPrefix(target, "file:") {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": fileTools()}}
+	} else {
+		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
+		result = s.waitRelay(jobID, s.cfg.DefaultTimeout)
+	}
+	if response, ok := result["response"].(map[string]any); ok {
+		if raw, ok := response["tools"].([]map[string]any); ok {
+			response["tools"] = toolsForRequest(r, target, raw)
+		}
+	}
+	return s.withSchemaContractMetadata(result)
+}
+
+func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]any) any {
+	if err := validateToolOutputDetail(args["detail"]); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}
+	}
+	target := firstString(args, "target", "server_id", "agent_id")
+	toolName := firstString(args, "tool", "tool_name", "name")
+	if toolName == "" {
+		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool_name"}
+	}
+	callArgs := mapValue(args["arguments"])
+	if len(callArgs) == 0 {
+		callArgs = mapValue(args["args"])
+	}
+	if len(callArgs) == 0 && firstString(args, "args_json") != "" {
+		var err error
+		callArgs, err = toolArgsFromJSON(firstString(args, "args_json"))
+		if err != nil {
+			return map[string]any{"server_id": target, "status": "failed", "error": err.Error()}
+		}
+	}
+	if len(callArgs) == 0 {
+		callArgs = toolArgsFromTopLevel(args)
+	}
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+	}
+	if response, blocked := s.validateSchemaContract(r, selectedTarget, args); blocked {
+		return response
+	}
+	response, status := s.executeMCPTool(r, selectedTarget, toolName, callArgs, truthy(args["background"]), s.cfg.DefaultTimeout, firstString(args, "idempotency_key"))
+	if status >= http.StatusBadRequest {
+		return map[string]any{"server_id": selectedTarget, "status": "failed", "error": response}
+	}
+	return s.formatToolOutput(response, toolName, args["detail"])
+}
+
+func resourceReceiptInputSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"uri": map[string]any{"type": "string", "minLength": 1}},
+		"required":             []string{"uri"},
+		"additionalProperties": false,
+	}
+}
+
+func resourceReceiptOutputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"uri":           map[string]any{"type": "string"},
+			"mime_type":     map[string]any{"type": "string"},
+			"byte_size":     map[string]any{"type": "integer", "minimum": 0},
+			"sha256":        map[string]any{"type": "string"},
+			"content_count": map[string]any{"type": "integer", "minimum": 0},
+			"ok":            map[string]any{"type": "boolean"},
+			"error": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"code":    map[string]any{"type": "string"},
+					"message": map[string]any{"type": "string"},
+				},
+				"required":             []string{"code", "message"},
+				"additionalProperties": false,
+			},
+		},
+		"required":             []string{"uri", "mime_type", "byte_size", "sha256", "content_count", "ok"},
+		"additionalProperties": false,
+	}
+}
+
+func appsSDKTools() []map[string]any {
+	readScopes := []string{"gptadmin.read"}
+	execScopes := []string{"gptadmin.read", "gptadmin.exec"}
+	readSecurity := []map[string]any{{"type": "oauth2", "scopes": readScopes}}
+	execSecurity := []map[string]any{{"type": "oauth2", "scopes": execScopes}}
+	readMeta := map[string]any{
+		"securitySchemes":                readSecurity,
+		"openai/toolInvocation/invoking": "Loading…",
+		"openai/toolInvocation/invoked":  "Loaded.",
+	}
+	execMeta := map[string]any{
+		"securitySchemes":                execSecurity,
+		"openai/toolInvocation/invoking": "Running…",
+		"openai/toolInvocation/invoked":  "Done.",
+	}
+	renderMeta := map[string]any{
+		"securitySchemes":                readSecurity,
+		"ui":                             map[string]any{"resourceUri": "ui://widget/admin-v3.html", "visibility": []string{"model", "app"}},
+		"openai/outputTemplate":          "ui://widget/admin-v3.html",
+		"openai/widgetAccessible":        true,
+		"openai/toolInvocation/invoking": "Opening GPTAdmin…",
+		"openai/toolInvocation/invoked":  "GPTAdmin ready.",
+	}
+	tools := []map[string]any{
+		{
+			"name":            "ui",
+			"title":           "Open UI",
+			"description":     "Open the GPTAdmin UI when interactive server or tool selection is needed.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"status": map[string]any{"type": "string"}, "app": map[string]any{"type": "string"}, "server_count": map[string]any{"type": "integer"}, "servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}, "hint": map[string]any{"type": "string"}}, "required": []string{"status", "app"}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           renderMeta,
+		},
+		{
+			"name":            "resource_receipt",
+			"title":           "Resource read receipt",
+			"description":     "Read one GPTAdmin MCP resource and return only its URI, MIME type, byte size, SHA-256 digest, content count, and success status. Resource contents are never returned.",
+			"inputSchema":     resourceReceiptInputSchema(),
+			"outputSchema":    resourceReceiptOutputSchema(),
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "discover",
+			"title":           "Discover",
+			"description":     "List compact MCP targets. Set detail=full only when metadata is needed.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"detail": map[string]any{"type": "string", "enum": []string{"full"}, "description": "Opt in to transport, capabilities and metadata."}}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}}, "required": []string{"servers"}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "demo",
+			"title":           "Safe connection check",
+			"description":     "Run a read-only connection check without shell execution, file access or credentials.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "approve_pending_server",
+			"title":           "Approve ShellMCP device",
+			"description":     "Approve one ShellMCP device awaiting enrollment. Use the exact server_id returned by discover with detail=full or pending.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}}, "required": []string{"server_id"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
+			"name": "settings_schema", "title": "Hub settings schema", "description": "Describe the unified typed Hub settings registry.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}, "outputSchema": map[string]any{"type": "object", "additionalProperties": true},
+			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}, "securitySchemes": readSecurity, "_meta": readMeta,
+		},
+		{
+			"name": "settings_get", "title": "Hub settings", "description": "Read Hub settings.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}, "outputSchema": map[string]any{"type": "object", "additionalProperties": true},
+			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}, "securitySchemes": readSecurity, "_meta": readMeta,
+		},
+		{
+			"name": "settings_set", "title": "Update Hub settings", "description": "Update persisted Hub settings.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"settings": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"settings"}, "additionalProperties": false}, "outputSchema": map[string]any{"type": "object", "additionalProperties": true},
+			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}, "securitySchemes": execSecurity, "_meta": execMeta,
+		},
+		{
+			"name":            "schema",
+			"title":           "Schema",
+			"description":     "List target tools; never use target=default.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "description": "May include schema_version and schema_digest_sha256 as optional cache/debug metadata when listing tools.", "additionalProperties": true}}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":        "inspect",
+			"title":       "Inspect",
+			"description": "Read a bounded file or directory on a shell target; no command execution.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"target":    map[string]any{"type": "string", "description": "Explicit shell:* server id"},
+				"action":    map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}},
+				"path":      map[string]any{"type": "string"},
+				"max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576},
+			}, "required": []string{"target", "action", "path"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":        "fleetExec",
+			"title":       "Fleet execute",
+			"description": "Run one command across multiple ShellMCP targets. Returns per-target approvals first, then one parent task.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"servers":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Shell server names or shell:* ids; omit for all online shell agents."},
+				"cmd":             map[string]any{"type": "string"},
+				"cwd":             map[string]any{"type": []string{"string", "null"}},
+				"timeout":         map[string]any{"type": []string{"integer", "null"}},
+				"approval_ids":    map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Per-server approval IDs from a previous fleetExec call."},
+				"idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax},
+			}, "required": []string{"cmd"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
+			"name":            "execute",
+			"title":           "Execute",
+			"description":     "Execute target/tool. Use schema first; reuse idempotency_key on retry. detail=full adds diagnostics.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema(), "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"target", "tool"}, "additionalProperties": true},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
+			"name":            "job",
+			"title":           "Job",
+			"description":     "Read a job; detail=full adds diagnostics.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+	}
+	return append(tools, secretAppsTools()...)
+}
+
+const startupInstructionsResourceURI = "gptadmin://startup-instructions"
+
+func (s *Server) appsSDKResourcesList() map[string]any {
+	return map[string]any{"resources": []map[string]any{
+		{"uri": startupInstructionsResourceURI, "name": "GPTAdmin startup instructions", "description": "Operational guidance for GPTAdmin system administration; permissions and approvals remain authoritative.", "mimeType": "text/markdown"},
+		{
+			"uri":         "ui://widget/admin-v3.html",
+			"name":        "GPTAdmin dashboard widget",
+			"title":       "GPTAdmin MCP",
+			"description": "Interactive GPTAdmin dashboard for servers, tools, shell commands, and jobs.",
+			"mimeType":    "text/html;profile=mcp-app",
+			"_meta":       appsSDKWidgetMeta(),
+		},
+		{"uri": "gptadmin://servers", "name": "GPTAdmin servers", "mimeType": "application/json"},
+	}}
+}
+
+func appsSDKWidgetMeta() map[string]any {
+	connectDomains := []string{"https://became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
+	resourceDomains := []string{"https://your-subdomain.t.became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://persistent.oaistatic.com"}
+	return map[string]any{
+		"ui": map[string]any{
+			"domain":        "https://your-subdomain.t.became.bezrabotnyi.com",
+			"prefersBorder": true,
+			"csp":           map[string]any{"connectDomains": connectDomains, "resourceDomains": resourceDomains},
+		},
+		"openai/widgetDescription":   "Interactive GPTAdmin dashboard for selecting MCP servers, listing tools, running calls, and polling jobs.",
+		"openai/widgetPrefersBorder": true,
+		"openai/widgetDomain":        "https://your-subdomain.t.became.bezrabotnyi.com",
+		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}},
+	}
+}
+
+func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
+	if strings.HasPrefix(uri, "gptadmin://task/") {
+		return s.taskOutputResourceRead(r, uri, "")
+	}
+	if uri == startupInstructionsResourceURI {
+		return s.startupInstructionsResourceRead(r, uri)
+	}
+	if uri == "gptadmin://servers" || uri == "gptadmin://agents" {
+		s.mu.Lock()
+		servers := s.publicServersLocked(nil)
+		s.mu.Unlock()
+		b, _ := json.Marshal(map[string]any{"servers": servers})
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
+	}
+	if uri != "ui://widget/admin-v3.html" {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "unknown GPTAdmin resource"}}}
+	}
+	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": appsSDKWidgetHTML(s.origin(r)), "_meta": appsSDKWidgetMeta()}}}
+}
+
+func (s *Server) appsSDKResourceReceipt(r *http.Request, uri string) map[string]any {
+	failure := func(code, message string, contentCount int) map[string]any {
+		return map[string]any{
+			"uri":           uri,
+			"mime_type":     "",
+			"byte_size":     0,
+			"sha256":        "",
+			"content_count": contentCount,
+			"ok":            false,
+			"error":         map[string]any{"code": code, "message": message},
+		}
+	}
+	if uri == "" {
+		return failure("invalid_uri", "resource uri is required", 0)
+	}
+	if uri != startupInstructionsResourceURI && uri != "gptadmin://servers" && uri != "gptadmin://agents" && uri != "ui://widget/admin-v3.html" {
+		return failure("resource_not_found", "unknown GPTAdmin resource", 0)
+	}
+	contents, ok := s.appsSDKResourceRead(r, uri)["contents"].([]map[string]any)
+	if !ok || len(contents) != 1 {
+		return failure("invalid_resource_result", "resource read did not return exactly one content item", len(contents))
+	}
+	content := contents[0]
+	if firstString(content, "uri") != uri {
+		return failure("resource_uri_mismatch", "resource read returned a different uri", 1)
+	}
+	payload := firstString(content, "text", "blob")
+	if payload == "" {
+		return failure("empty_resource", "resource read returned no text or blob payload", 1)
+	}
+	digest := sha256.Sum256([]byte(payload))
+	return map[string]any{
+		"uri":           uri,
+		"mime_type":     firstString(content, "mimeType", "mime_type"),
+		"byte_size":     len([]byte(payload)),
+		"sha256":        hex.EncodeToString(digest[:]),
+		"content_count": len(contents),
+		"ok":            true,
+	}
+}
+
+func (s *Server) startupInstructionsResourceRead(r *http.Request, uri string) map[string]any {
+	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/markdown", "text": s.startupInstructionsTextForRequest(r)}}}
+}
+
+func appsSDKWidgetHTML(origin string) string {
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPTAdmin MCP</title>
+<style>
+:root{color-scheme:dark;--bg:#070a12;--card:#0f1623;--card2:#111827;--line:#243244;--text:#dbeafe;--muted:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--bad:#fb7185;--accent:#8b5cf6;--accent2:#38bdf8}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#050711,#0b1020);color:var(--text);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:10px}.wrap{display:grid;gap:10px}.card{background:rgba(15,22,35,.95);border:1px solid var(--line);border-radius:14px;padding:12px;box-shadow:0 10px 30px rgba(0,0,0,.22)}.top{display:flex;align-items:center;gap:10px}.logo{font-weight:800;color:#fff;font-size:16px}.pill{font-size:11px;color:#c4b5fd;border:1px solid #4c1d95;background:#2e1065;border-radius:999px;padding:2px 8px}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(210px,.9fr) minmax(260px,1.1fr);gap:10px}@media(max-width:720px){.grid{grid-template-columns:1fr}}button,input,select,textarea{font:inherit}button{border:1px solid var(--line);background:#172033;color:var(--text);border-radius:9px;padding:7px 10px;cursor:pointer}button:hover{border-color:var(--accent2);color:white}button.primary{background:linear-gradient(135deg,#4f46e5,#7c3aed);border-color:#6d5dfc}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.stack{display:grid;gap:8px}.list{display:grid;gap:6px;max-height:310px;overflow:auto}.item{border:1px solid var(--line);background:var(--card2);border-radius:10px;padding:8px;cursor:pointer}.item:hover,.item.sel{border-color:var(--accent2)}.title{font-weight:700}.small{font-size:11px}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}input,select,textarea{width:100%;border:1px solid var(--line);background:#08111f;color:var(--text);border-radius:9px;padding:8px}textarea{min-height:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;resize:vertical}.pre{white-space:pre-wrap;word-break:break-word;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#bfdbfe;background:#06101e;border:1px solid var(--line);border-radius:10px;padding:9px;max-height:260px;overflow:auto}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 8px}.dot{width:8px;height:8px;border-radius:99px;background:var(--ok);display:inline-block}.dot.w{background:var(--warn)}.dot.b{background:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card top"><span id="dot" class="dot"></span><div><div class="logo">GPTAdmin MCP</div><div id="status" class="muted small">loading...</div></div><span class="pill">Apps SDK</span><button id="refresh" style="margin-left:auto">Refresh</button></div>
+  <div class="grid">
+    <div class="card stack"><div class="row"><button id="serversBtn" class="primary">Servers</button></div><input id="filter" placeholder="filter servers..."><div id="servers" class="list"></div></div>
+    <div class="card stack"><div class="kv small"><div class="muted">Target</div><div id="target">—</div><div class="muted">Tools</div><div id="toolCount">—</div></div><select id="tool"></select><textarea id="args" spellcheck="false">{}</textarea><div class="row"><button id="listTools">List tools</button><button id="call" class="primary">Call tool</button><button id="poll" style="display:none">Poll job</button></div><div id="out" class="pre">Waiting for tool result...</div></div>
+  </div>
+</div>
+<script>
+(function(){
+var ORIGIN='` + html.EscapeString(origin) + `';
+var state={servers:[],target:'',tools:[],job_id:''};
+var seq=1,pending={};
+function el(id){return document.getElementById(id)}
+function setStatus(t,k){el('status').textContent=t;el('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'')}
+function redact(v){var re=/(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){var o={};Object.keys(v).forEach(function(k){o[k]=re.test(k)?'***':redact(v[k])});return o}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***');return v}
+function pretty(v){try{return JSON.stringify(redact(v),null,2)}catch(e){return String(v)}}
+function show(v){el('out').textContent=pretty(v);var j=v&&((v.structuredContent&&v.structuredContent.job_id)||v.job_id||(v.response&&v.response.job_id));if(j){state.job_id=j;el('poll').style.display='inline-block'}}
+function resize(){try{if(window.openai&&window.openai.notifyIntrinsicHeight)window.openai.notifyIntrinsicHeight(Math.min(document.body.scrollHeight+8,760))}catch(e){}}
+function rpc(method,params){return new Promise(function(resolve,reject){var id=seq++;pending[id]={resolve:resolve,reject:reject};window.parent.postMessage({jsonrpc:'2.0',id:id,method:method,params:params||{}},'*');setTimeout(function(){if(pending[id]){delete pending[id];reject(new Error('MCP Apps bridge timeout'))}},30000)})}
+window.addEventListener('message',function(event){if(event.source!==window.parent)return;var m=event.data||{};if(m.id&&pending[m.id]){var p=pending[m.id];delete pending[m.id];if(m.error)p.reject(m.error);else p.resolve(m.result);return}if(m.jsonrpc==='2.0'&&m.method==='ui/notifications/tool-result'){show(m.params||{});setStatus('tool result','');resize()}if(m.jsonrpc==='2.0'&&m.method==='ui/notifications/tool-input'){setStatus('tool input','w')}});
+async function callTool(name,args){setStatus('calling '+name+'...','w');var r;if(window.openai&&window.openai.callTool){r=await window.openai.callTool(name,args||{})}else{r=await rpc('tools/call',{name:name,arguments:args||{}})}var sc=(r&&r.structuredContent)||r;show(sc);setStatus('ready','');resize();return sc}
+function normalizeResult(r,key){if(!r)return[];if(r[key])return r[key];if(r.structuredContent&&r.structuredContent[key])return r.structuredContent[key];if(r.response&&r.response[key])return r.response[key];return[]}
+function renderServers(items){var q=el('filter').value.toLowerCase();var box=el('servers');box.innerHTML='';items.filter(function(a){return !q||pretty(a).toLowerCase().indexOf(q)>=0}).forEach(function(a){var id=a.agent_id||a.server_id||a.id||'';var d=document.createElement('div');d.className='item'+(id===state.target?' sel':'');d.innerHTML='<div class="title">'+id.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div><div class="small muted">'+(a.status||'')+' · '+(a.kind||'')+' · '+(a.name||'')+'</div>';d.onclick=function(){state.target=id;el('target').textContent=id;renderServers(items);listTools()};box.appendChild(d)});resize()}
+async function loadServers(){var r=await callTool('discover',{});state.servers=normalizeResult(r,'servers');renderServers(state.servers);return state.servers}
+async function listTools(){if(!state.target){setStatus('choose target','w');return}var r=await callTool('schema',{target:state.target});var tools=normalizeResult(r.response||r,'tools');state.tools=tools;el('toolCount').textContent=String(tools.length);var sel=el('tool');sel.innerHTML='';tools.forEach(function(t){var o=document.createElement('option');o.value=t.name;o.textContent=t.name+(t.description?' — '+t.description.slice(0,80):'');sel.appendChild(o)});if(tools.length){sel.value=tools[0].name;fillArgs()}resize()}
+function fillArgs(){var name=el('tool').value;if(name==='shell_exec')el('args').value=JSON.stringify({cmd:'pwd',cwd:null,timeout:30},null,2);else el('args').value='{}'}
+async function callSelected(){if(!state.target){setStatus('choose target','w');return}var args={};try{args=JSON.parse(el('args').value||'{}')}catch(e){setStatus('bad JSON: '+e.message,'b');return}await callTool('execute',{target:state.target,tool:el('tool').value,args:args})}
+async function poll(){if(!state.job_id){setStatus('no job','w');return}await callTool('job',{id:state.job_id,ack:false})}
+el('refresh').onclick=loadServers;el('serversBtn').onclick=loadServers;el('filter').oninput=function(){renderServers(state.servers)};el('listTools').onclick=listTools;el('call').onclick=callSelected;el('poll').onclick=poll;el('tool').onchange=fillArgs;
+try{setStatus('ready at '+ORIGIN,'');var initial=(window.openai&&(window.openai.toolOutput||window.openai.toolResponseMetadata));if(initial)show(initial);loadServers().catch(function(e){setStatus(String(e.message||e),'b');show({error:String(e.message||e)})})}catch(e){setStatus(String(e),'b');show({error:String(e)})}
+})();
+</script>
+</body>
+</html>`
+}
+
+func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, error) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		if auth == "" {
+			return nil, errors.New("missing authorization header")
+		}
+		return nil, errors.New("unsupported authorization scheme")
+	}
+	tok := strings.TrimSpace(auth[7:])
+	if tok == "" {
+		return nil, errors.New("empty bearer token")
+	}
+	return s.verifyJWTForRequest(r, tok)
+}
+
+func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]any, error) {
+	claims, managed := s.verifyManagedMCPToken(token)
+	if !managed {
+		var err error
+		claims, err = s.verifyJWT(token)
+		if err != nil {
+			return nil, err
+		}
+	}
+	profile := s.effectiveBearerSecurityProfile()
+	expectedIssuer := normalizePublicURL(s.origin(r))
+	expected := normalizePublicURL(s.resource(r))
+	// Existing pre-contract JWTs without an issuer remain readable until they
+	// expire, but every new CLI/OAuth/Admin token carries it and a mismatched
+	// issuer is a distinct rejection reason.
+	issuer := ""
+	if rawIssuer, present := claims["iss"]; present && rawIssuer != nil {
+		issuer = strings.TrimSpace(fmt.Sprint(rawIssuer))
+	}
+	acceptedIssuers := s.acceptedPublicURLs(expectedIssuer)
+	acceptedResources := s.acceptedPublicURLs(expected)
+	if profile.RequireIssuer && (issuer == "" || !publicURLMatchesAny(issuer, acceptedIssuers)) {
+		return nil, errors.New("token issuer does not match this Hub")
+	}
+	if !profile.RequireIssuer && profile.Mode == processSecurityNormal && issuer != "" && !publicURLMatchesAny(issuer, acceptedIssuers) {
+		return nil, errors.New("token issuer does not match this Hub")
+	}
+	if profile.RequireAudience && (expected == "" || !jwtAudienceMatchesAny(claims["aud"], acceptedResources)) {
+		return nil, errors.New("token audience does not match this Hub")
+	}
+	resource, ok := claims["resource"].(string)
+	if profile.RequireResource && (!ok || !publicURLMatchesAny(resource, acceptedResources)) {
+		return nil, errors.New("token resource does not match this Hub")
+	}
+	if profile.RequireScope {
+		scope, ok := claims["scope"].(string)
+		if !ok || !validJWTScopes(scope) {
+			return nil, errors.New("token scope is invalid")
+		}
+	}
+	if profile.RequireSubject {
+		sub, ok := claims["sub"].(string)
+		if !ok || strings.TrimSpace(sub) == "" {
+			return nil, errors.New("token subject is required")
+		}
+	}
+	if profile.RequireIssuedAt {
+		if iat := intFromAny(claims["iat"]); iat <= 0 || int64(iat) > time.Now().Unix()+60 {
+			return nil, errors.New("token issued-at is invalid")
+		}
+	}
+	if !s.cfg.RelaxAuthChecks {
+		if kid, ok := claims["kid"].(string); !ok || strings.TrimSpace(kid) == "" || kid != s.jwtKeyID() {
+			return nil, errors.New("token key id is invalid")
+		}
+	}
+	return claims, nil
+}
+
+func (s *Server) verifyManagedMCPToken(token string) (map[string]any, bool) {
+	parts := strings.SplitN(token, "_", 3)
+	if len(parts) != 3 || parts[0] != "gptk" || parts[1] == "" || parts[2] == "" {
+		return nil, false
+	}
+	digest := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	if err := s.refreshManagedMCPStateLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, false
+	}
+	record, known := s.managedMCP[parts[1]]
+	s.mu.Unlock()
+	if !known || record.TokenDigest == "" || !hmac.Equal([]byte(record.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return nil, false
+	}
+	if record.TokenKind != "durable" || record.RevokedAt != 0 {
+		return nil, false
+	}
+	if s.effectiveBearerSecurityProfile().EnforceTokenLifecycle && record.ExpiresAt > 0 && !s.now().Before(time.Unix(record.ExpiresAt, 0)) {
+		return nil, false
+	}
+	return map[string]any{
+		"sub": "admin", "scope": record.Scope, "access_mode": record.AccessMode,
+		"client_id": record.ClientID, "jti": record.ID, "iat": record.IssuedAt, "kid": s.jwtKeyID(),
+		"exp": record.ExpiresAt,
+		"iss": record.Issuer, "aud": record.Audience, "resource": record.Audience,
+		"profile_id": record.ProfileID,
+	}, true
+}
+
+func (s *Server) jwtKeyID() string {
+	if strings.TrimSpace(s.cfg.OAuthKeyID) != "" {
+		return strings.TrimSpace(s.cfg.OAuthKeyID)
+	}
+	return defaultJWTKeyID
+}
+
+func validJWTScopes(value string) bool {
+	allowed := map[string]bool{"gptadmin.read": true, "gptadmin.inspect": true, "gptadmin.exec": true, "gptadmin.settings.read": true, "gptadmin.settings.write": true, "gptadmin.registry.read": true, "gptadmin.registry.manage": true, "gptadmin.update": true}
+	for _, scope := range strings.Fields(value) {
+		if !allowed[scope] {
+			return false
+		}
+	}
+	return strings.TrimSpace(value) != ""
+}
+
+func jwtAudienceMatches(value any, expected string) bool {
+	switch audience := value.(type) {
+	case string:
+		return normalizePublicURL(audience) == expected
+	case []any:
+		for _, item := range audience {
+			if candidate, ok := item.(string); ok && normalizePublicURL(candidate) == expected {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jwtAudienceMatchesAny(value any, expected []string) bool {
+	for _, candidate := range expected {
+		if jwtAudienceMatches(value, normalizePublicURL(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) authAudit(name string, r *http.Request, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	for k, v := range s.requestForAudit(r) {
+		fields[k] = v
+	}
+	s.mu.Lock()
+	s.addAuditLocked(name, fields)
+	s.mu.Unlock()
+	if b, err := json.Marshal(fields); err == nil {
+		log.Printf("auth_audit name=%s fields=%s", name, string(b))
+	}
+}
+
+func (s *Server) requestForAudit(r *http.Request) map[string]any {
+	if r == nil {
+		return map[string]any{}
+	}
+	fields := map[string]any{
+		"method":          r.Method,
+		"path":            r.URL.Path,
+		"raw_query":       queryForAudit(r.URL.RawQuery),
+		"host":            r.Host,
+		"remote_addr":     r.RemoteAddr,
+		"x_forwarded_for": r.Header.Get("X-Forwarded-For"),
+		"x_real_ip":       r.Header.Get("X-Real-IP"),
+		"user_agent":      r.UserAgent(),
+		"referer":         r.Referer(),
+		"origin":          r.Header.Get("Origin"),
+		"content_type":    r.Header.Get("Content-Type"),
+	}
+	fields["authorization"] = redactSecret(r.Header.Get("Authorization"))
+	if r.Header.Get("Cookie") != "" {
+		fields["cookie"] = "<redacted>"
+	}
+	return fields
+}
+
+func (s *Server) formForAudit(r *http.Request) map[string]any {
+	out := map[string]any{}
+	if r == nil || r.Form == nil {
+		return out
+	}
+	for k, vals := range r.Form {
+		vv := append([]string(nil), vals...)
+		if isSensitiveField(k) {
+			for i := range vv {
+				vv[i] = redactSecret(vv[i])
+			}
+		}
+		if len(vv) == 1 {
+			out[k] = vv[0]
+		} else {
+			out[k] = vv
+		}
+	}
+	return out
+}
+
+func (s *Server) secretForAudit(v string) string {
+	return redactSecret(v)
+}
+
+func isSensitiveField(k string) bool {
+	k = strings.ToLower(k)
+	return strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "token") || strings.Contains(k, "code") || strings.Contains(k, "verifier")
+}
+
+func queryForAudit(raw string) string {
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return "<unparseable>"
+	}
+	for key, entries := range values {
+		if isSensitiveField(key) {
+			for i := range entries {
+				entries[i] = redactSecret(entries[i])
+			}
+			values[key] = entries
+		}
+	}
+	return values.Encode()
+}
+
+func redactSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	return "<redacted len=" + strconv.Itoa(len(v)) + ">"
+}
+
+func decodeJWTClaimsUnverified(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return map[string]any{"decode_error": err.Error()}
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return map[string]any{"decode_error": err.Error()}
+	}
+	return claims
+}
+
+func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		tok := strings.TrimSpace(auth[7:])
+		if s.cfg.CtlToken != "" && tok == s.cfg.CtlToken {
+			s.markLegacyCtlToken(w)
+			if !s.legacyCtlTokenAllowed() {
+				s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "legacy ctl token migration deadline passed"})
+				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "legacy token expired; use OAuth connection"})
+				return false
+			}
+			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
+			return true
+		}
+		if claims, ok := s.existingMCPBearerClaims(tok); ok {
+			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": configuredMCPBearerTokenKind, "client_id": claims["client_id"]})
+			*r = *requestWithAuthClaims(r, claims)
+			*r = *s.applyAccessProfileContext(r, claims)
+			return true
+		}
+		if claims, err := s.verifyJWTForRequest(r, tok); err == nil {
+			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
+			*r = *requestWithAuthClaims(r, claims)
+			*r = *s.applyAccessProfileContext(r, claims)
+			return true
+		} else {
+			s.authAudit("mcp_auth_denied", r, map[string]any{"reason": err.Error(), "jwt_claims_unverified": decodeJWTClaimsUnverified(tok)})
+		}
+	} else if auth == "" {
+		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "missing authorization header"})
+	} else {
+		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "unsupported authorization scheme"})
+	}
+	if s.authFailureRateLimited(w, r) {
+		return false
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+	return false
+}
+
+func (s *Server) writeCtlUnauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{
+		"detail": "unauthorized",
+		"auth": map[string]any{
+			"admin_login":          s.origin(r) + "/admin/login",
+			"oauth_authorize":      s.origin(r) + "/authorize",
+			"oauth_resource_meta":  s.origin(r) + "/.well-known/oauth-protected-resource",
+			"accepts_bearer_token": true,
+		},
+	})
+}
+
+func (s *Server) adminPasswordOK(v string) bool {
+	secret := s.cfg.AdminPassword
+	if secret == "" && s.legacyCtlTokenAllowed() {
+		secret = s.cfg.CtlToken
+	}
+	return secret != "" && hmac.Equal([]byte(v), []byte(secret))
+}
+
+func (s *Server) allowedRedirect(uri string) bool {
+	if s.cfg.OAuthPermissiveRedirects && !s.effectiveBearerSecurityProfile().EnforceRedirectAllowlist {
+		return uri != ""
+	}
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if s.sameOriginOAuthCallback(u) {
+		return true
+	}
+	host := strings.ToLower(u.Hostname())
+	if (host == "localhost" || host == "127.0.0.1") && (u.Scheme == "http" || u.Scheme == "https") {
+		return true
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	if (host == "chatgpt.com" || strings.HasSuffix(host, ".chatgpt.com")) && strings.HasPrefix(u.Path, "/connector/oauth/") {
+		return true
+	}
+	// Custom GPT Actions use the legacy OpenAI callback shape, not the
+	// connector callback. Reuse the strict profile used by the no-PKCE
+	// compatibility exception so the two authorization boundaries cannot drift.
+	if isCustomGPTActionsCallback(uri) {
+		return true
+	}
+	if host == "opencode.bezrabotnyi.com" && u.Path == "/mcp/oauth/callback" {
+		return true
+	}
+	return false
+}
+
+func (s *Server) sameOriginOAuthCallback(uri *url.URL) bool {
+	if uri == nil || uri.Path != "/connect/callback" || uri.RawQuery != "" || uri.Fragment != "" {
+		return false
+	}
+	for _, raw := range s.acceptedPublicURLs(s.cfg.PublicOrigin) {
+		origin, err := url.Parse(strings.TrimRight(raw, "/"))
+		if err != nil || origin.Scheme == "" || origin.Host == "" {
+			continue
+		}
+		if uri.Scheme == origin.Scheme && strings.EqualFold(uri.Host, origin.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) allowedResource(resource string, r *http.Request) bool {
+	if s.cfg.OAuthPermissiveResources && !s.effectiveBearerSecurityProfile().EnforceResourceAllowlist {
+		return true
+	}
+	want := strings.TrimRight(s.resource(r), "/")
+	return publicURLMatchesAny(resource, s.acceptedPublicURLs(want))
+}
+
+func pkceOK(verifier, challenge string) bool {
+	if verifier == "" || challenge == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	return hmac.Equal([]byte(b64url(sum[:])), []byte(challenge))
+}
+
+// validPKCEParameters accepts RFC 7636 S256 for every OAuth client. The sole
+// no-PKCE exception is the exact legacy Custom GPT Actions callback profile;
+// it is deliberately not a generic redirect/client exception. Authorization
+// codes remain one-time and bound to client, redirect URI, and resource in
+// oauthToken.
+func validPKCEParameters(challenge, method, redirectURI string) bool {
+	challenge = strings.TrimSpace(challenge)
+	method = strings.TrimSpace(method)
+	if challenge != "" || method != "" {
+		return challenge != "" && method == "S256"
+	}
+	return isCustomGPTActionsCallback(redirectURI)
+}
+
+func isCustomGPTActionsCallback(uri string) bool {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Host, "chat.openai.com") || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	const prefix = "/aip/g-"
+	const suffix = "/oauth/callback"
+	if !strings.HasPrefix(u.Path, prefix) || !strings.HasSuffix(u.Path, suffix) {
+		return false
+	}
+	gptID := strings.TrimSuffix(strings.TrimPrefix(u.Path, prefix), suffix)
+	return gptID != "" && !strings.Contains(gptID, "/")
+}
+
+func (s *Server) signJWT(claims map[string]any) (string, error) {
+	if s.cfg.OAuthClientSecret == "" {
+		return "", errors.New("OAuth client secret is not configured")
+	}
+	header := map[string]any{"alg": "HS256", "typ": "JWT"}
+	hb, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	pb, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	unsigned := b64url(hb) + "." + b64url(pb)
+	mac := hmac.New(sha256.New, []byte(s.cfg.OAuthClientSecret))
+	_, _ = mac.Write([]byte(unsigned))
+	return unsigned + "." + b64url(mac.Sum(nil)), nil
+}
+
+func (s *Server) verifyJWT(token string) (map[string]any, error) {
+	if claims, ok := s.verifyManagedMCPToken(token); ok {
+		return claims, nil
+	}
+	if s.cfg.OAuthClientSecret == "" {
+		return nil, errors.New("OAuth client secret is not configured")
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, errors.New("invalid jwt")
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || json.Unmarshal(headerBytes, &header) != nil || header.Alg != "HS256" {
+		return nil, errors.New("unsupported jwt algorithm")
+	}
+	unsigned := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, []byte(s.cfg.OAuthClientSecret))
+	_, _ = mac.Write([]byte(unsigned))
+	if !hmac.Equal([]byte(b64url(mac.Sum(nil))), []byte(parts[2])) {
+		return nil, errors.New("invalid signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, err
+	}
+	exp := intFromAny(claims["exp"])
+	profile := s.effectiveBearerSecurityProfile()
+	if exp <= 0 && profile.RequireExpiry {
+		return nil, errors.New("token expiry is required")
+	}
+	if profile.RequireExpiry && s.now().Unix() > int64(exp) {
+		return nil, errors.New("token expired")
+	}
+	if jti, _ := claims["jti"].(string); jti != "" {
+		s.mu.Lock()
+		if err := s.refreshManagedMCPStateLocked(); err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		record, known := s.managedMCP[jti]
+		s.mu.Unlock()
+		if known && record.RevokedAt != 0 {
+			return nil, errors.New("token revoked")
+		}
+		if known && record.ProfileID != "" {
+			claims["profile_id"] = record.ProfileID
+		}
+	}
+	return claims, nil
+}
+
+func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+func postJSON(ctx context.Context, client *http.Client, base, p, token string, payload any) (*http.Response, []byte, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	u, err := url.Parse(strings.TrimRight(base, "/"))
+	if err != nil {
+		return nil, nil, err
+	}
+	u.Path = path.Join(u.Path, p)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(b))
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	resp.Body.Close()
+	return resp, body, nil
+}

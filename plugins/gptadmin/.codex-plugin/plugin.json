@@ -1,0 +1,41 @@
+{
+  "name": "gptadmin",
+  "version": "1.0.0",
+  "description": "Connect Codex to the OAuth-protected GPTAdmin MCP hub for profiles, server administration, child-MCP installation, and memory-directed workflows.",
+  "author": {
+    "name": "GPTAdmin contributors",
+    "url": "https://github.com/megamen32"
+  },
+  "homepage": "https://github.com/megamen32/gptadmin",
+  "repository": "https://github.com/megamen32/gptadmin",
+  "license": "AGPL-3.0",
+  "keywords": [
+    "mcp",
+    "oauth",
+    "server-administration",
+    "profiles",
+    "memory",
+    "mcp-proxy"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "GPTAdmin",
+    "shortDescription": "OAuth MCP hub for profiles and server workflows.",
+    "longDescription": "Installing GPTAdmin adds a remote OAuth-protected MCP server. On first connection the Hub opens a browser consent page where the user enters the admin password; the password and bearer tokens never belong in Codex chat or plugin files. GPTAdmin then exposes profile-scoped server administration, child-MCP proxying, and memory-directed workflows.",
+    "developerName": "GPTAdmin contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "OAuth remote MCP",
+      "Profile-scoped administration",
+      "Child MCP proxying",
+      "Memory-directed workflows"
+    ],
+    "defaultPrompt": [
+      "Connect to GPTAdmin through its OAuth browser flow.",
+      "Show the active GPTAdmin profile and available MCP targets.",
+      "Install or use a child MCP through GPTAdmin.",
+      "Use the memory MCP named by the active GPTAdmin profile."
+    ]
+  }
+}
