@@ -1,0 +1,12 @@
+[Unit]
+Description=GPTAdmin local HA self-repair loop
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=2s
+AccuracySec=500ms
+Persistent=true
+Unit=gptadmin-failover-controller.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "openai-action",
+    "adapter": "OpenAI Action",
+    "clients": ["ChatGPT Custom GPT"],
+    "version_policy": "OpenAPI 3.1 live schema; certify the public ChatGPT runtime separately",
+    "smoke_command": "python3 -m pytest tests/test_hub_contract.py -q",
+    "evidence_class": "external_required",
+    "write_retry": "idempotency_key_required"
+  },
+  {
+    "id": "mcp-remote",
+    "adapter": "MCP remote",
+    "clients": ["Codex", "Claude Desktop", "OpenCode", "Mavis"],
+    "version_policy": "Streamable HTTP JSON-RPC; verify client CLI versions in the installed-client runner",
+    "smoke_command": "python3 -m pytest tests/test_real_mcp_clients.py -q",
+    "evidence_class": "local",
+    "write_retry": "idempotency_key_required"
+  },
+  {
+    "id": "oauth-handshake",
+    "adapter": "OAuth handshake",
+    "clients": ["PKCE OAuth MCP clients"],
+    "version_policy": "RFC 8414/RFC 9728 metadata with PKCE S256",
+    "smoke_command": "python3 -m pytest tests/test_hub_contract.py -q",
+    "evidence_class": "local",
+    "write_retry": "idempotency_key_required"
+  },
+  {
+    "id": "browser-extension",
+    "adapter": "Browser extension",
+    "clients": ["DeepSeek", "Qwen", "Alice", "web chats"],
+    "version_policy": "Browser userscript/bridge; certify each public browser host separately",
+    "smoke_command": "python3 -m pytest tests/test_admin_ui.py -q",
+    "evidence_class": "external_required",
+    "write_retry": "idempotency_key_required"
+  }
+]

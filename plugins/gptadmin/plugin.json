@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gptadmin",
+  "version": "1.3.0",
+  "description": "GPTAdmin: current profile instructions, compact MCP results and authorized server workflows.",
+  "author": {
+    "name": "GPTAdmin contributors",
+    "url": "https://github.com/megamen32"
+  },
+  "homepage": "https://github.com/megamen32/gptadmin",
+  "repository": "https://github.com/megamen32/gptadmin",
+  "license": "AGPL-3.0",
+  "keywords": [
+    "mcp",
+    "oauth",
+    "server-administration",
+    "profiles",
+    "memory",
+    "mcp-proxy"
+  ]
+}

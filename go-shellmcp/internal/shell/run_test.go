@@ -1,0 +1,163 @@
+package shell
+
+import (
+	"context"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestRunSuccess(t *testing.T) {
+	res := Run(context.Background(), Request{Cmd: "printf hello", SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode != 0 || res.Stdout != "hello" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestRunExitCodeAndStderr(t *testing.T) {
+	res := Run(context.Background(), Request{Cmd: "echo bad >&2; exit 7", SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode != 7 {
+		t.Fatalf("want rc 7 got %+v", res)
+	}
+	if !strings.Contains(res.Stderr, "bad") {
+		t.Fatalf("stderr missing: %+v", res)
+	}
+}
+
+func TestRunTimeout(t *testing.T) {
+	res := Run(context.Background(), Request{Cmd: "sleep 2", Timeout: 1, SpillDir: t.TempDir()}, 8192)
+	if !res.TimedOut {
+		t.Fatalf("want timeout got %+v", res)
+	}
+}
+
+func TestOutputLimitKeepsTailAndSpills(t *testing.T) {
+	dir := t.TempDir()
+	res := Run(context.Background(), Request{Cmd: "printf 123456789", SpillDir: dir}, 4)
+	if res.Stdout != "6789" {
+		t.Fatalf("want tail got %q", res.Stdout)
+	}
+	if !res.Spilled || res.StdoutPath == "" {
+		t.Fatalf("want spill got %+v", res)
+	}
+	b, err := os.ReadFile(res.StdoutPath)
+	if err != nil || string(b) != "123456789" {
+		t.Fatalf("bad spill file err=%v body=%q", err, string(b))
+	}
+}
+
+func TestRunLiveEvents(t *testing.T) {
+	var mu sync.Mutex
+	var events []Event
+	res := RunLive(context.Background(), Request{Cmd: "echo out; echo err >&2", SpillDir: t.TempDir()}, 8192, func(e Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+	if res.ReturnCode != 0 {
+		t.Fatalf("bad res %+v", res)
+	}
+	seenOut, seenErr, seenExit := false, false, false
+	for _, e := range events {
+		if e.Type == "chunk" && e.Stream == "stdout" && strings.Contains(e.Data, "out") {
+			seenOut = true
+		}
+		if e.Type == "chunk" && e.Stream == "stderr" && strings.Contains(e.Data, "err") {
+			seenErr = true
+		}
+		if e.Type == "exit" {
+			seenExit = true
+		}
+	}
+	if !seenOut || !seenErr || !seenExit {
+		t.Fatalf("missing events: %#v", events)
+	}
+}
+
+func TestDefaultUserSelection(t *testing.T) {
+	if got, explicit := targetRunUser(Request{Cmd: "id", DefaultUser: "admin"}); got != "admin" || explicit {
+		t.Fatalf("default user not selected: got=%q explicit=%v", got, explicit)
+	}
+	if got, _ := targetRunUser(Request{Cmd: "sudo id", DefaultUser: "admin"}); got != "" {
+		t.Fatalf("sudo command should not use default user, got %q", got)
+	}
+	if got, explicit := targetRunUser(Request{Cmd: "id", RunAsUser: "root", DefaultUser: "admin"}); got != "root" || !explicit {
+		t.Fatalf("explicit user not selected: got=%q explicit=%v", got, explicit)
+	}
+}
+
+func TestDownshiftPreservesOnlyEnvironmentNamesInArgv(t *testing.T) {
+	secretValue := `{"title":"disk","body":"private telemetry"}`
+	command, _ := buildCommand(context.Background(), Request{
+		Cmd:       `printf '%s' "$GPTADMIN_WEBHOOK_VALUE_0"`,
+		RunAsUser: "admin",
+		Env:       map[string]string{"GPTADMIN_WEBHOOK_VALUE_0": secretValue},
+	})
+	arguments := strings.Join(command.Args, " ")
+	if !strings.Contains(arguments, "--preserve-env=GPTADMIN_WEBHOOK_VALUE_0") {
+		t.Fatalf("sudo command does not preserve the allowed environment name: %q", arguments)
+	}
+	if strings.Contains(arguments, secretValue) {
+		t.Fatalf("environment value leaked into argv: %q", arguments)
+	}
+}
+
+func TestInvalidEnvironmentNameFailsClosed(t *testing.T) {
+	res := Run(context.Background(), Request{Cmd: "true", Env: map[string]string{"BAD;touch /tmp/no": "x"}, SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode == 0 || !strings.Contains(res.Error, "invalid environment variable name") {
+		t.Fatalf("invalid environment name was not rejected: %+v", res)
+	}
+}
+
+func TestRootProcessWithoutDefaultUserIsRejected(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires a root test process")
+	}
+	res := Run(context.Background(), Request{Cmd: "id -u", SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode == 0 || !strings.Contains(res.Error, "default user") {
+		t.Fatalf("root process must reject an implicit root command: %+v", res)
+	}
+}
+
+func TestAndroidPrivilegeModeAndShizukuHelpers(t *testing.T) {
+	if got := androidPrivilegeMode(Request{Cmd: "id"}); got != "auto" {
+		t.Fatalf("default mode should be auto: %q", got)
+	}
+	req := Request{Cmd: "id", Env: map[string]string{"SHELLMCP_ANDROID_PRIVILEGE": "rish", "SHELLMCP_SHIZUKU_RISH": "/data/local/tmp/rish"}}
+	if got := androidPrivilegeMode(req); got != "shizuku" {
+		t.Fatalf("mode alias not normalized: %q", got)
+	}
+	if got := shizukuRishPath(req); got != "/data/local/tmp/rish" {
+		t.Fatalf("bad rish path: %q", got)
+	}
+	if got := stripLeadingSudo("sudo -n -E id"); got != "id" {
+		t.Fatalf("sudo not stripped: %q", got)
+	}
+	if got := stripLeadingSudo("echo sudo ok"); got != "echo sudo ok" {
+		t.Fatalf("non-leading sudo changed: %q", got)
+	}
+}
+
+func TestShellNameForAndroidFallsBackToSystemShell(t *testing.T) {
+	t.Setenv("SHELL", "")
+	t.Setenv("PREFIX", "")
+	if got := shellNameForGOOS("android"); got != "/system/bin/sh" {
+		t.Fatalf("bad android shell fallback: %q", got)
+	}
+}
+
+func TestRunRemovesCaptureFilesWhenOutputDidNotSpill(t *testing.T) {
+	dir := t.TempDir()
+	res := Run(context.Background(), Request{Cmd: "printf small", SpillDir: dir}, 1024)
+	if res.Spilled {
+		t.Fatalf("unexpected spill: %+v", res)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("non-spilled capture files remain: %#v", entries)
+	}
+}

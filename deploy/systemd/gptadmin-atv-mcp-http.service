@@ -1,0 +1,36 @@
+[Unit]
+Description=GPTAdmin owner-local ATV HTTP MCP singleton
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/PycharmProjects/TelegramAuto
+EnvironmentFile=/etc/gptadmin/mcp-http/atv-zcode100.env
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ExecStart=/home/admin/PycharmProjects/TelegramAuto/ATV/.venv/bin/python /home/admin/gptadmin/tools/python_mcp_http.py --config /var/lib/gptadmin/mcp-http/atv-zcode100/binding.json
+UMask=0077
+# The original ATV module uses sudo only to read its protected HA DB binding.
+# Preserve that existing user authority; never substitute/copy the DB credential.
+NoNewPrivileges=false
+PrivateTmp=true
+TemporaryFileSystem=/tmp:rw,size=64M,nr_inodes=4096 /var/tmp:rw,size=16M,nr_inodes=1024
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/gptadmin/mcp-http/atv-zcode100
+LimitFSIZE=32M
+MemoryHigh=256M
+MemoryMax=512M
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=128
+IOWeight=10
+TimeoutStopSec=12
+KillMode=control-group
+Restart=no
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "project": "grepmesh-mcp",
+  "source": {
+    "repository": "/home/admin/gptadmin",
+    "revision": "5664d9b",
+    "source_paths": [
+      "grepmesh/Cargo.toml",
+      "grepmesh/Cargo.lock",
+      "grepmesh/src"
+    ],
+    "artifact": "grepmesh/target/release/grepmesh-mcp",
+    "install_path": "/usr/local/bin/grepmesh-mcp"
+  },
+  "service": {
+    "unit": "grepmesh/grepmesh-mcp.service",
+    "unit_name": "grepmesh-mcp.service",
+    "config_path": "/etc/grepmesh-mcp/config.json",
+    "state_dir": "/var/lib/grepmesh-mcp",
+    "service_user": "admin-search",
+    "service_group": "admin-search",
+    "supplementary_group": "admin",
+    "search_acl_paths": [
+      "/home/admin/gptadmin"
+    ],
+    "peer_env_path": "/etc/grepmesh-mcp/peer.env",
+    "peer_token_env": "GREPMESH_PEER_TOKEN"
+  },
+  "transport": {
+    "mode": "management-vpn",
+    "scheme": "http",
+    "requires_existing_peer_token": true,
+    "requires_firewall_allowlist": true
+  },
+  "targets": [
+    {
+      "host_id": "server-100",
+      "ssh_alias": "local",
+      "bind": "203.0.113.10:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/admin",
+      "roots": {
+        "home": ["/home/admin"],
+        "opt": ["/opt"],
+        "mobile-browser": ["/opt/mobile-browser"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-88",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        },
+        {
+          "host_id": "server01",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        }
+      ]
+    },
+    {
+      "host_id": "server-88",
+      "ssh_alias": "88",
+      "bind": "203.0.113.10:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/admin",
+      "roots": {
+        "home": ["/home/admin"],
+        "opt": ["/opt"],
+        "mobile-browser": ["/opt/mobile-browser"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-100",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        },
+        {
+          "host_id": "server01",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        }
+      ]
+    },
+    {
+      "host_id": "server01",
+      "ssh_alias": "44",
+      "bind": "203.0.113.10:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/admin",
+      "roots": {
+        "home": ["/home/admin"],
+        "opt": ["/opt"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-100",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        },
+        {
+          "host_id": "server-88",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://203.0.113.10:9419/mcp"
+        }
+      ]
+    }
+  ]
+}

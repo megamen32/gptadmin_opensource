@@ -1,0 +1,13 @@
+[Unit]
+Description=GPTAdmin Hub Standby for zero-downtime handover
+After=network-online.target gptadmin-hub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/gptadmin-hub-standby-run
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

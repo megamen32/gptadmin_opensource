@@ -1,0 +1,10 @@
+[Unit]
+Description=Run GPTAdmin live canary every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=gptadmin-live-canary.service
+
+[Install]
+WantedBy=timers.target

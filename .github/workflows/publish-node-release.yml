@@ -1,0 +1,93 @@
+name: Publish verified Node release
+
+on:
+  workflow_run:
+    workflows: ['Public Product CI']
+    types: [completed]
+
+concurrency:
+  group: gptadmin-public-node-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GOMAXPROCS: '2'
+      GOFLAGS: '-p=2'
+    steps:
+      - name: Checkout the exact source that passed all public product gates
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Require that the tested source is still public main
+        id: current
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if [[ "$(git rev-parse FETCH_HEAD)" == "$SOURCE_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip commits outside the unified Node package
+        id: scope
+        if: steps.current.outputs.current == 'true'
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          paths="$(git diff-tree --no-commit-id --name-only -r "$SOURCE_SHA")"
+          changed=false
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/publish-node-release.yml|VERSION|cli.py|go-hub/*|go-shellmcp/*|scripts/gptadmin_node_*.py|tools/build_node.py|tools/publish_node_release.py|tests/test_node_autoupdate.py|tests/test_node_release_publisher.py)
+                changed=true
+                break
+                ;;
+            esac
+          done <<< "$paths"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Test unified Node components and updater
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        run: |
+          (cd go-hub && go test ./...)
+          (cd go-shellmcp && go test ./...)
+          PYTHONPATH=tests python3 -m unittest test_node_autoupdate test_node_release_publisher
+
+      - name: Build both verified Node packages
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        run: python3 tools/build_node.py --arch amd64 --arch arm64
+
+      - name: Publish immutable Node release for this public source commit
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 tools/publish_node_release.py
+          --directory .tmp/node-packages
+          --source "$SOURCE_SHA"
+          --repository megamen32/gptadmin_opensource

@@ -1,0 +1,22 @@
+[Unit]
+Description=Verified public GPTAdmin Node package update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/gptadmin/gptadmin_node_autoupdate.py
+TimeoutStartSec=180
+MemoryHigh=256M
+MemoryMax=384M
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=64
+IOWeight=10
+UMask=0077
+Environment=GOMAXPROCS=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Secure input</title>
+  <style>
+    body { background: #101216; color: #f4f5f7; font: 16px system-ui, sans-serif; margin: 0; padding: 12vh 1.25rem; }
+    main { margin: auto; max-width: 32rem; }
+    label { display: block; margin: 1rem 0 .5rem; }
+    input, button { box-sizing: border-box; font: inherit; padding: .75rem; width: 100%; }
+    button { cursor: pointer; margin-top: 1rem; }
+    p { color: #b8beca; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Secure input</h1>
+    <p>Enter the requested value once. This page does not display it after submission.</p>
+    <form method="post" autocomplete="off">
+      <label for="value">Value</label>
+      <input id="value" name="value" type="password" autocomplete="new-password" required>
+      <button type="submit">Submit securely</button>
+    </form>
+  </main>
+</body>
+</html>

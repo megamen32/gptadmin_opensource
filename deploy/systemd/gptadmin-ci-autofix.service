@@ -1,0 +1,19 @@
+[Unit]
+Description=Bounded GitHub CI failures to native OpenCode repair (minimax-coding-plan/MiniMax-M3, 24h inputId dedup, fail-closed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/admin/gptadmin
+ExecStart=/usr/bin/python3 /home/admin/gptadmin/scripts/github_ci_autofix.py once
+TimeoutStartSec=90
+MemoryHigh=128M
+MemoryMax=256M
+MemorySwapMax=0
+CPUQuota=25%
+TasksMax=32
+IOWeight=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes

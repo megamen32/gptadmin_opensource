@@ -1,0 +1,271 @@
+# Standard public runners. No private checkout or secret inputs.
+name: Public Product CI
+'on':
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: public-product-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOMAXPROCS: '2'
+  GOFLAGS: -p=2
+  GOMEMLIMIT: 6GiB
+  CARGO_BUILD_JOBS: '1'
+  NODE_OPTIONS: --max-old-space-size=1536
+jobs:
+  go-unit-tests:
+    name: Go source regressions and exact Node artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Test Hub and ShellMCP before any release
+      run: 'mkdir -p .tmp/ci-go-tmp
+
+        export TMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp" GOTMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp"
+
+        (cd go-hub && go test ./...)
+
+        (cd go-shellmcp && go test ./...)
+
+        (cd go-proxyrelay && go test ./...)
+
+        (cd bezhook && go test ./...)
+
+        '
+    - name: Build manifest-pinned production Node package
+      run: python3 tools/build_node.py --arch amd64 --arch arm64
+    - name: Retain exact artifact for controlled fleet deployment
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-node-${{ github.sha }}
+        path: .tmp/node-packages/gptadmin-node-linux-*.tar.gz*
+        if-no-files-found: error
+        retention-days: 1
+  admin-ui-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Install admin UI dependencies
+      working-directory: admin-ui
+      timeout-minutes: 8
+      env:
+        NPM_CONFIG_FETCH_RETRIES: 4
+        NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: 1000
+        NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: 10000
+        NPM_CONFIG_FETCH_TIMEOUT: 30000
+      run: npm ci --prefer-offline --no-audit --no-fund
+    - name: Test admin UI
+      working-directory: admin-ui
+      run: npm test
+    - name: Lint admin UI
+      working-directory: admin-ui
+      run: npm run lint
+    - name: Build admin UI
+      working-directory: admin-ui
+      run: npm run build -- --base=/admin/
+    - name: Verify admin UI asset base
+      working-directory: admin-ui
+      run: 'test -s dist/index.html
+
+        grep -q ''/admin/assets/'' dist/index.html
+
+        '
+  failover-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Run failover Docker black-box suite
+      run: docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-container-exit --exit-code-from failover-e2e
+  installer-e2e-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Run real Linux install e2e (served installer, systemd container)
+      run: tests/e2e/install/run-install-e2e.sh
+  candidate-client-contract:
+    name: Candidate client contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+        cache-dependency-path: go-hub/go.sum
+    - name: Setup Node for Hub public payload
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+    - name: Build Hub + ShellMCP candidate artifacts
+      run: "chmod +x tools/build.sh\n./tools/build.sh hub shellmcp\ntar -C build -czf build/gptadmin-ci-full.tar.gz \\\n  shellmcp grepmesh gptadmin_hub cli hub_source client public\n"
+    - name: Clean-install lifecycle with real execution
+      run: 'tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ci-full.tar.gz
+
+        '
+    - name: Black-box candidate as Custom GPT and native MCP client
+      run: "python3 scripts/ci_candidate_contract.py \\\n  --package build/gptadmin-hub.tar.gz \\\n  --local-origin\n"
+  macos-build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache-dependency-path: 'go-hub/go.sum
+
+          go-shellmcp/go.sum
+
+          '
+    - name: Test Go hub on darwin
+      run: 'cd go-hub
+
+        go test ./...
+
+        '
+    - name: Test Go shellmcp on darwin
+      run: 'cd go-shellmcp
+
+        go test ./...
+
+        '
+    - name: Cross-compile Linux artifacts from Mac
+      run: 'cd go-hub
+
+        GOOS=linux GOARCH=amd64 go build ./...
+
+        '
+    - name: Parse Python CLI
+      run: python3 -c "import ast; ast.parse(open('cli.py').read())"
+  windows-shellmcp:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache-dependency-path: go-shellmcp/go.sum
+    - name: Compile every Go Hub package for Windows
+      shell: pwsh
+      run: 'New-Item -ItemType Directory -Force build/windows | Out-Null
+
+        Set-Location go-hub
+
+        go test -run ''^$'' ./...
+
+        go build -o ../build/windows/gptadmin-hub.exe ./cmd/gptadmin-hub
+
+        '
+    - name: Compile every Go ShellMCP package for Windows
+      shell: pwsh
+      run: 'Set-Location go-shellmcp
+
+        go test -run ''^$'' ./...
+
+        go build -o ../build/windows/shellmcp.exe ./cmd/shellmcp-go
+
+        '
+    - name: Exercise Windows polling configuration contract
+      shell: pwsh
+      run: 'Set-Location go-shellmcp
+
+        go test ./internal/server -run ''^(TestFromEnvUsesWindowsInstallerPollingContract|TestQueueTransportNeverNeedsLocalListener)$'' -count=1
+
+        '
+  public-python:
+    name: Public Python and CLI regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup uv
+      uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
+      with:
+        enable-cache: false
+    - name: Public source contract and CLI tests
+      run: "python3 - <<'PY'\nfrom pathlib import Path\nfor path in ('private', '.agents', '.gitpublic', 'GPTADMIN_PROMPT.md'):\n    assert not Path(path).exists(), path\nPY\nuv sync\nuv run pytest tests/ -q --ignore=tests/test_public_mirror.py --ignore=tests/test_site_docs.py --ignore=tests/test_docs_product_contract.py --ignore=tests/test_release_workflow_contract.py --ignore=tests/test_admin_ui_build_contract.py --deselect=tests/test_completion_matrix.py::test_completion_matrix_commands_execute --deselect=tests/test_golden_paths.py::test_golden_path_commands_execute_once_per_platform_contract --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_auto_tag_uses_the_same_exact_operator_allowlist --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_release_waits_for_installer_and_operator_checks --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_actual_ci_gate_rejects_failure_and_unjustified_skips --deselect=tests/test_gptadmin_codex_plugin.py::test_gptadmin_marketplace_entry_is_installable_and_points_at_plugin\
+        \ --deselect=tests/test_installer_served_contract.py::test_served_installer_matches_repository_copy\n"
+  ci-gate:
+    name: Public product CI gate
+    if: always()
+    needs:
+    - go-unit-tests
+    - admin-ui-build
+    - failover-e2e
+    - installer-e2e-linux
+    - candidate-client-contract
+    - macos-build
+    - windows-shellmcp
+    - public-python
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+    - name: Require every public product gate
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: 'python3 - <<''PY''
+
+        import json,os
+
+        results=json.loads(os.environ[''RESULTS''])
+
+        assert results and all(job[''result'']==''success'' for job in results.values()), results
+
+        PY
+
+        '
+
+  node-release:
+    name: Publish verified portable Node binaries
+    needs: ci-gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout exact accepted source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Fetch the exact packages built before the gate
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "gptadmin-node-$GITHUB_SHA" --dir .tmp/node-release
+    - name: Publish a separate immutable Node channel
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 tools/publish_node_release.py --directory .tmp/node-release --source "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"

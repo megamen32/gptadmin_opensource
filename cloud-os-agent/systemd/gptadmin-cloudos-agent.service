@@ -1,0 +1,11 @@
+[Unit]
+Description=GPTAdmin CloudOS local agent
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/admin/.local/lib/gptadmin-cloudos/agent.py --hub http://127.0.0.1:9001/api/v1/cloud-os --name server-100 --os linux --listen 127.0.0.1:9137 --root /home/admin/gptadmin --state /home/admin/.local/share/gptadmin-cloudos/server-100.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>ShellMCP Exit Proxy</title>
+    <style>body{font:14px system-ui;margin:14px;min-width:290px}select,button{width:100%;margin:6px 0;padding:8px}.muted{color:#666;font-size:12px}.error{color:#a11}</style>
+  </head>
+  <body>
+    <strong>ShellMCP exit node</strong>
+    <select id="nodes" aria-label="Exit node"><option>Loading…</option></select>
+    <button id="connect">Use selected node</button>
+    <button id="disable">Disable Chrome proxy</button>
+    <p id="status" class="muted">Apps can use HTTP proxy 127.0.0.1:3126.</p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+name: Public standard runner acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-standard-runner-probe
+  cancel-in-progress: false
+
+jobs:
+  public-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify a real standard public runner
+        run: |
+          python3 - <<'PY'
+          import json, os
+          print(json.dumps({"public_runner_started": True,
+                            "repository": os.environ["GITHUB_REPOSITORY"],
+                            "source": os.environ["GITHUB_SHA"],
+                            "run_id": os.environ["GITHUB_RUN_ID"]}))
+          assert os.environ["GITHUB_REPOSITORY"] == "megamen32/gptadmin_opensource"
+          PY

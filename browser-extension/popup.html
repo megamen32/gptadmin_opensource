@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=400, initial-scale=1.0">
+  <title>Cloud OS — Computer Link</title>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-primary: #0f1117;
+      --bg-secondary: #1a1d27;
+      --bg-tertiary: #252836;
+      --border: #2e3245;
+      --text-primary: #e4e6f0;
+      --text-secondary: #8b8fa7;
+      --accent: #6366f1;
+      --accent-hover: #818cf8;
+      --green: #22c55e;
+      --green-dim: rgba(34, 197, 94, 0.15);
+      --red: #ef4444;
+      --red-dim: rgba(239, 68, 68, 0.15);
+      --yellow: #eab308;
+      --yellow-dim: rgba(234, 179, 8, 0.15);
+      --radius: 8px;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    }
+
+    body {
+      width: 380px;
+      min-height: 320px;
+      font-family: var(--font);
+      font-size: 13px;
+      color: var(--text-primary);
+      background: var(--bg-primary);
+      line-height: 1.5;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .header-icon {
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .header-icon svg {
+      width: 16px;
+      height: 16px;
+      fill: white;
+    }
+
+    .header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .header h1 span {
+      color: var(--text-secondary);
+      font-weight: 400;
+      font-size: 12px;
+    }
+
+    /* ── Body ───────────────────────────────────────────── */
+    .body {
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* ── Status Card ────────────────────────────────────── */
+    .status-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+
+    .status-dot.connected    { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot.disconnected { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    .status-dot.pairing      { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); animation: pulse 1.5s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.4; }
+    }
+
+    .status-info { flex: 1; min-width: 0; }
+    .status-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+    .status-value { font-size: 14px; font-weight: 600; }
+
+    /* ── Form Fields ────────────────────────────────────── */
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .field input, .field select {
+      padding: 8px 10px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-family: var(--font);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .field input:focus, .field select:focus {
+      border-color: var(--accent);
+    }
+
+    /* ── Pairing Code ───────────────────────────────────── */
+    .pairing-section {
+      display: none;
+      text-align: center;
+      padding: 12px;
+      background: var(--yellow-dim);
+      border: 1px solid rgba(234, 179, 8, 0.3);
+      border-radius: var(--radius);
+    }
+
+    .pairing-section.visible { display: block; }
+
+    .pairing-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .pairing-code {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      color: var(--yellow);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Buttons ────────────────────────────────────────── */
+    .actions { display: flex; gap: 8px; }
+
+    .btn {
+      flex: 1;
+      padding: 9px 14px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+    .btn-danger {
+      background: var(--red-dim);
+      color: var(--red);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .btn-danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.25); }
+
+    /* ── Footer / Meta ──────────────────────────────────── */
+    .meta {
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: flex;
+      justify-content: space-between;
+      padding-top: 4px;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Settings toggle ────────────────────────────────── */
+    .settings-toggle {
+      font-size: 11px;
+      color: var(--accent);
+      cursor: pointer;
+      background: none;
+      border: none;
+      font-family: var(--font);
+      padding: 0;
+    }
+    .settings-toggle:hover { color: var(--accent-hover); }
+
+    .settings {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .settings.visible { display: flex; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="header-icon">
+      <svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM10 17l-3.5-3.5 1.41-1.41L10 14.17l5.09-5.09 1.41 1.41L10 17z"/></svg>
+    </div>
+    <h1>Cloud OS <span>Computer Link</span></h1>
+  </div>
+
+  <div class="body">
+    <!-- Status -->
+    <div class="status-card">
+      <div class="status-dot" id="statusDot"></div>
+      <div class="status-info">
+        <div class="status-label">Status</div>
+        <div class="status-value" id="statusText">Disconnected</div>
+      </div>
+    </div>
+
+    <!-- Pairing Code -->
+    <div class="pairing-section" id="pairingSection">
+      <div class="pairing-label">Enter this code on Cloud OS</div>
+      <div class="pairing-code" id="pairingCode">------</div>
+    </div>
+
+    <!-- Computer Name -->
+    <div class="field">
+      <label for="computerName">Computer Name</label>
+      <input type="text" id="computerName" placeholder="My Computer" />
+    </div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <button class="btn btn-primary" id="btnConnect">Enable this Computer</button>
+      <button class="btn btn-danger" id="btnDisconnect" disabled>Disconnect</button>
+    </div>
+
+    <!-- Settings -->
+    <button class="settings-toggle" id="btnSettings">⚙ Settings</button>
+    <div class="settings" id="settingsPanel">
+      <div class="field">
+        <label for="hubUrl">Hub URL</label>
+        <input type="url" id="hubUrl" placeholder="https://became.bezrabotnyi.com" />
+      </div>
+    </div>
+
+    <!-- Meta -->
+    <div class="meta">
+      <span id="lastHeartbeat">No heartbeat yet</span>
+      <span>v1.0.0</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

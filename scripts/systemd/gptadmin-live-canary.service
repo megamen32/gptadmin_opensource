@@ -1,0 +1,8 @@
+[Unit]
+Description=GPTAdmin live external endpoint canary
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gptadmin/bin/gptadmin-live-canary.sh

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /e2e/out
+printf '[systemctl] %s\n' "$*" >>/e2e/out/systemctl.log
+case " $* " in
+  *" is-active "*) echo active; exit 0;;
+  *" status "*) echo '● mocked active service'; exit 0;;
+  *) exit 0;;
+esac

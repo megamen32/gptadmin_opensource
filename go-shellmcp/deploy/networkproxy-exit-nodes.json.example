@@ -1,0 +1,9 @@
+{
+  "nodes": [
+    {
+      "agent_id": "shell:edge-1",
+      "name": "Edge 1",
+      "capability_id": "replace-with-approved-internet-egress-capability"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=GPTAdmin local HA self-repair controller
+After=network-online.target nginx.service gptadmin-hub.service gptadmin-hub-standby.service
+Wants=network-online.target nginx.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gptadmin-failover-controller
+TimeoutStartSec=45
