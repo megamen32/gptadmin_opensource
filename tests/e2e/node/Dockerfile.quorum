@@ -1,0 +1,20 @@
+# The recovery edge uses HAProxy 3.2 (including init-state fully-down).
+FROM haproxy:3.2-bookworm@sha256:baecd003ae5c2376e58d04a5b2ffc7d82d30e9bebe2869f76222b819f719dee3 AS edge
+FROM golang:1.26-bookworm AS inspector
+WORKDIR /src/go-hub
+COPY go-hub/go.mod go-hub/go.sum ./
+COPY go-shellmcp/go.mod ../go-shellmcp/
+COPY go-hub/third_party/qjs/go.mod ./third_party/qjs/
+COPY tests/e2e/node/quorum_log_read.go /src/quorum_log_read.go
+RUN CGO_ENABLED=0 GOMAXPROCS=2 go build -o /out/quorum-log-read /src/quorum_log_read.go
+
+# Compose supplies the Node, ShellMCP and SDK built by failover-e2e.
+FROM failover_runner
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nftables liblua5.4-0 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=inspector /out/quorum-log-read /usr/local/bin/
+COPY --from=edge /usr/local/sbin/haproxy /usr/sbin/haproxy
+COPY tests/e2e/node/quorum_failover_run.py tests/e2e/node/quorum_matrix.py tests/e2e/node/quorum_storage.py tests/e2e/node/owner_content_probe.py /src/tests/e2e/node/
+COPY scripts/gptadmin_quorum_ingress.py scripts/gptadmin_failover_proxy.py /src/scripts/
+CMD ["python3", "-B", "/src/tests/e2e/node/quorum_failover_run.py", "/usr/local/bin/gptadmin-node", "/tmp", "--shell-binary", "/usr/local/bin/gptadmin-shellmcp"]

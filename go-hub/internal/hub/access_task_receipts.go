@@ -1,0 +1,165 @@
+package hub
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+)
+
+// taskCaller is persisted with each newly submitted result-bearing job. It is
+// transport identity only: callers cannot supply or override it in tool args.
+type taskCaller struct {
+	CallerOrigin   *executionOrigin `json:"caller_origin,omitempty"`
+	BrowserSubject string           `json:"browser_subject,omitempty"`
+	BrowserBinding string           `json:"browser_binding,omitempty"`
+	ClientID       string           `json:"client_id,omitempty"`
+	TokenID        string           `json:"token_id,omitempty"`
+	Subject        string           `json:"subject,omitempty"`
+	ProfileID      string           `json:"profile_id,omitempty"`
+	ProfileVersion int64            `json:"profile_version,omitempty"`
+}
+
+func taskCallerFromRequest(r *http.Request) *taskCaller {
+	if r == nil {
+		return nil
+	}
+	claims, _ := r.Context().Value(authClaimsContextKey{}).(map[string]any)
+	if len(claims) == 0 {
+		return nil
+	}
+	caller := &taskCaller{
+		ClientID:  firstString(claims, "client_id"),
+		TokenID:   firstString(claims, "jti"),
+		Subject:   firstString(claims, "sub"),
+		ProfileID: AccessProfileIDFromRequest(r),
+	}
+	if guard, browser := r.Context().Value(browserGrepMeshGuardKey{}).(browserGrepMeshGuard); browser {
+		caller.BrowserSubject = guard.subject
+		caller.BrowserBinding = guard.fingerprint
+	}
+	if profile, ok := AccessProfileFromRequest(r); ok {
+		caller.ProfileVersion = int64(profile.Version)
+	}
+	if caller.ClientID == "" && caller.TokenID == "" && caller.Subject == "" {
+		return nil
+	}
+	caller.CallerOrigin = captureExecutionOrigin(r, caller)
+	return caller
+}
+
+func sameTaskCaller(a, b *taskCaller) bool {
+	return a != nil && b != nil && a.ClientID == b.ClientID && a.TokenID == b.TokenID &&
+		a.Subject == b.Subject && a.ProfileID == b.ProfileID && a.ProfileVersion == b.ProfileVersion &&
+		a.BrowserSubject == b.BrowserSubject && a.BrowserBinding == b.BrowserBinding
+}
+
+// authorizeTaskReceipt is called before formatting, polling, or acknowledging
+// a persisted job. Admin/control credentials retain their operator view; a
+// managed client must prove the exact submitting identity and current profile.
+func (s *Server) authorizeTaskReceipt(r *http.Request, owner *taskCaller, filesystemACL *filesystemACLPolicy) error {
+	if r == nil {
+		return nil // internal worker paths use their existing owner binding
+	}
+	if err := s.revalidateBrowserGrepMeshReceipt(r); err != nil {
+		return err
+	}
+	claims, _ := r.Context().Value(authClaimsContextKey{}).(map[string]any)
+	if len(claims) == 0 {
+		return nil
+	}
+	authority := s
+	if view, ok := r.Context().Value(ownerReadAuthorityKey{}).(*Server); ok {
+		authority = view
+	}
+	profile, bound := AccessProfileFromRequest(r)
+	if authority.requestHasAdminRole(r) && !bound {
+		return nil // unscoped administrators retain the operator history view
+	}
+	caller := taskCallerFromRequest(r)
+	if !sameTaskCaller(caller, owner) {
+		return errors.New("task receipt is not available to this MCP client")
+	}
+	if owner.ProfileID != "" {
+		if !bound || profile.ID != owner.ProfileID || profile.Version != owner.ProfileVersion {
+			return errors.New("task receipt profile is stale")
+		}
+		profiles, err := authority.accessProfilesSnapshot()
+		if err != nil {
+			return errors.New("task receipt profile state is unavailable")
+		}
+		current, ok := profiles[owner.ProfileID]
+		if !ok || current.Version != owner.ProfileVersion {
+			return errors.New("task receipt profile is stale")
+		}
+	}
+	if filesystemACL != nil && (!bound || owner.ProfileID == "" || int64(profile.Version) != filesystemACL.ProfileVersion) {
+		return errors.New("filesystem-scoped task receipt is not available under the current profile")
+	}
+	return nil
+}
+
+func (s *Server) taskReceiptForRequest(r *http.Request, jobID string, detail any) (map[string]any, bool) {
+	s.mu.Lock()
+	if err := s.refreshTaskRecordsLocked(jobID); err != nil {
+		s.mu.Unlock()
+		return taskPersistenceFailure(err), true
+	}
+	relay, shell := s.relayJobs[jobID], s.shellJobs[jobID]
+	if offlineShellMCP(r) && (shell == nil || relay != nil || !s.offlineShellJobAllowedLocked(r, shell)) {
+		s.mu.Unlock()
+		return nil, false
+	}
+	var caller *taskCaller
+	var filesystemACL *filesystemACLPolicy
+	receiptTarget := ""
+	if relay != nil && relay.Caller != nil {
+		copy := *relay.Caller
+		caller = &copy
+	}
+	if relay == nil && shell != nil {
+		receiptTarget = shell.ReceiptTarget
+		if shell.Caller != nil {
+			copy := *shell.Caller
+			caller = &copy
+		}
+		filesystemACL = cloneFilesystemACLPolicy(shell.FilesystemACL)
+	}
+	s.mu.Unlock()
+	if relay == nil && shell == nil {
+		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
+	}
+	if (receiptTarget != "" && !profileAllowsTarget(r, receiptTarget)) || s.authorizeTaskReceipt(r, caller, filesystemACL) != nil {
+		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
+	}
+	s.mu.Lock()
+	var response map[string]any
+	toolName := ""
+	if relay != nil {
+		if s.relayJobs[jobID] != relay {
+			s.mu.Unlock()
+			return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
+		}
+		if relay.Method == childSchemaMethod || (relay.Method == "tools/list" && strings.HasPrefix(relay.AgentID, "mcp:shell:")) {
+			child, exists := s.exposedAgentByIDLocked(relay.AgentID)
+			if !exists || !profileAllowsTarget(r, relay.AgentID) || !agentOwnerConnectionAllowed(r, child) {
+				s.mu.Unlock()
+				return nil, false
+			}
+			item, found := s.inspectChildSchemaLocked(r, jobID, false)
+			s.mu.Unlock()
+			if !found {
+				return nil, false
+			}
+			return s.withSchemaContractMetadata(item), true
+		}
+		response = relayJobResponse(relay)
+	} else if s.shellJobs[jobID] != shell {
+		s.mu.Unlock()
+		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
+	} else {
+		response = shellJobResponse(shell)
+		toolName = shell.ToolName
+	}
+	s.mu.Unlock()
+	return s.formatToolOutput(response, toolName, detail), true
+}

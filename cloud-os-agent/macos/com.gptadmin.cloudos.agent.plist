@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.gptadmin.cloudos.agent</string>
+<key>ProgramArguments</key><array><string>/opt/homebrew/bin/python3</string><string>/Users/user/.local/bin/gptadmin-cloudos-agent.py</string><string>--hub</string><string>http://192.168.2.100:9001/api/v1/cloud-os</string><string>--name</string><string>Mac mini</string><string>--os</string><string>macos</string><string>--listen</string><string>192.168.2.8:9137</string><string>--root</string><string>/Users/user</string><string>--state</string><string>/Users/user/.local/share/gptadmin-cloudos/agent.json</string></array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>/Users/user/.local/share/gptadmin-cloudos/agent.log</string><key>StandardErrorPath</key><string>/Users/user/.local/share/gptadmin-cloudos/agent.error.log</string>
+</dict></plist>

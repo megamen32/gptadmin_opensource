@@ -1,0 +1,26 @@
+Command: go test -v -count=1 -timeout=60s -run ^TestChildSchemaNamesValidatedBeforeProfileFilter$ ./internal/hub
+Exit: 0
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/missing
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/non_string
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/empty
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/blank
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/valid
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/missing
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/non_string
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/empty
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/blank
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/valid
+--- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter (2.57s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/missing (0.15s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/non_string (0.14s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/empty (0.12s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/blank (0.14s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/valid (0.11s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/missing (0.40s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/non_string (0.38s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/empty (0.39s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/blank (0.37s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/valid (0.38s)
+PASS
+ok  	github.com/megamen32/gptadmin/go-hub/internal/hub	2.585s

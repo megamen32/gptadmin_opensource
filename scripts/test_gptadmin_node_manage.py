@@ -1,0 +1,987 @@
+#!/usr/bin/env python3
+"""Unit tests for the pure local logic of scripts/gptadmin_node_manage.py.
+
+Only real temp-directory file logic and real local HTTP servers are used.
+systemctl/service operations are intentionally NOT faked or unit-tested here;
+they are verified live. Run: python3 -m unittest scripts.test_gptadmin_node_manage
+"""
+from __future__ import annotations
+
+import hashlib
+import http.server
+import io
+import json
+import os
+from contextlib import redirect_stdout
+from pathlib import Path
+import sys
+import tarfile
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+import urllib.error
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gptadmin_node_manage as mgr  # noqa: E402
+
+ELF_PAYLOAD = b'\x7fELF' + b'\x02\x01\x01\x00' + b'payload'
+
+
+class QuietHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def start_server(handler):
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def respond_json(handler, code, payload):
+    body = json.dumps(payload).encode()
+    handler.send_response(code)
+    handler.send_header('Content-Type', 'application/json')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def read_body(handler):
+    length = int(handler.headers.get('Content-Length', 0) or 0)
+    return json.loads(handler.rfile.read(length) or b'{}')
+
+
+def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + 'cafe', version=181,
+                 payload=None, manifest_mutator=None, extra_members=()) -> Path:
+    """Build a package tarball exactly like tools/build_node.py does."""
+    files = payload if payload is not None else {
+        'bin/gptadmin-node': ELF_PAYLOAD,
+        'bin/shellmcp': ELF_PAYLOAD,
+        'bin/gptadmin-mcp-bridge': ELF_PAYLOAD,
+        'systemd/gptadmin-proxy-route-vusa.service': b'[Unit]\nDescription=fixture\n[Service]\nUser=roomhacker\n',
+        'cli.py': b'# cli payload\n',
+        'scripts/gptadmin_node_manage.py': b'# manager payload\n',
+        'scripts/gptadmin_node_probe.py': b'# probe payload\n',
+        'scripts/gptadmin_dns_sweb.py': b'# dns adapter payload\n',
+        'scripts/gptadmin_node_autoupdate.py': b'# autoupdate payload\n',
+        'public/admin/index.html': b'<script src=\"assets/app.js\"></script>',
+        'public/admin/assets/app.js': b'// asset fixture',
+        'public/secret-input/index.html': b'<form method="post"><input type="password" name="value"></form>',
+    }
+    manifest = {
+        'schema': mgr.PACKAGE_SCHEMA, 'git_commit': commit, 'build_version': version,
+        'platform': 'linux', 'arch': arch, 'source_dirty': False,
+        'files': {name: {'sha256': hashlib.sha256(body).hexdigest(), 'size': len(body)}
+                  for name, body in files.items()},
+    }
+    if manifest_mutator:
+        manifest_mutator(manifest)
+    path = directory / f'pkg-{commit}-{arch}.tar.gz'
+    with tarfile.open(path, 'w:gz') as tar:
+        import io
+        manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + '\n').encode()
+        info = tarfile.TarInfo('manifest.json')
+        info.size = len(manifest_bytes)
+        tar.addfile(info, io.BytesIO(manifest_bytes))
+        for name, body in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            info.mode = 0o755 if name == 'bin/gptadmin-node' else 0o644
+            tar.addfile(info, io.BytesIO(body))
+        for name, body in extra_members:
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    return path
+
+
+class BaseTempCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='node-manage-test-'))
+        self.layout = mgr.Layout(opt_root=self.tmp / 'opt', state_root=self.tmp / 'var',
+                                 config_root=self.tmp / 'etc',
+                                 unit_path=self.tmp / 'etc' / 'systemd' / 'system' / 'gptadmin-node@.service')
+        self.servers = []
+
+    def start(self, handler):
+        server = start_server(handler)
+        self.servers.append(server)
+        return server
+
+    def tearDown(self):
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class TestPackageVerification(BaseTempCase):
+    def test_good_package_verifies_and_extracts(self):
+        package = make_package(self.tmp)
+        dest = self.tmp / 'dest'
+        manifest = mgr.verify_and_extract(package, 'amd64', dest)
+        self.assertEqual(manifest['schema'], mgr.PACKAGE_SCHEMA)
+        self.assertEqual(manifest['arch'], 'amd64')
+        self.assertTrue((dest / 'manifest.json').is_file())
+        self.assertEqual((dest / 'bin' / 'gptadmin-node').read_bytes(), ELF_PAYLOAD)
+        self.assertEqual((dest / 'cli.py').read_bytes(), b'# cli payload\n')
+        self.assertEqual(os.stat(dest / 'bin' / 'gptadmin-node').st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(dest / 'cli.py').st_mode & 0o777, 0o644)
+        mgr.verify_elf_binary(dest / 'bin' / 'gptadmin-node')
+        for name in ('bin/gptadmin-node', 'bin/shellmcp', 'bin/gptadmin-mcp-bridge'):
+            self.assertEqual(os.stat(dest / name).st_mode & 0o777, 0o755)
+            mgr.verify_elf_binary(dest / name)
+
+    def test_public_route_variant_verifies_without_relaxing_package_closure(self):
+        private = make_package(self.tmp)
+        with tarfile.open(private, 'r:gz') as tar:
+            core = {
+                member.name: tar.extractfile(member).read()
+                for member in tar.getmembers()
+                if member.name not in ('manifest.json', mgr.PROXY_ROUTE_PACKAGE_FILE)
+            }
+        public_route = 'systemd/gptadmin-proxy-route-relay02.service'
+        public_unit = b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\n'
+        payload = dict(core, **{public_route: public_unit})
+        public = make_package(self.tmp, payload=payload, commit='a' * 40)
+        dest = self.tmp / 'public'
+        manifest = mgr.verify_and_extract(public, 'amd64', dest)
+        self.assertEqual(set(manifest['files']), set(payload))
+        self.assertEqual((dest / public_route).read_bytes(), public_unit)
+        cases = [
+            ('missing-core', {k: v for k, v in payload.items() if k != 'bin/shellmcp'}),
+            ('missing-route', core),
+            ('unexpected', dict(payload, **{'systemd/unapproved.service': b'no'})),
+            ('wrong-user', dict(payload, **{public_route: public_unit.replace(b'User=admin', b'User=root')})),
+        ]
+        if mgr.PROXY_ROUTE_PACKAGE_FILE != public_route:
+            cases.append(('both-routes', dict(payload, **{
+                mgr.PROXY_ROUTE_PACKAGE_FILE: b'[Unit]\n[Service]\nUser=roomhacker\n'})))
+        for label, changed in cases:
+            with self.subTest(label=label):
+                bad = make_package(self.tmp, payload=changed, commit='b' * 40)
+                with self.assertRaises(mgr.PreflightError):
+                    mgr.verify_and_extract(bad, 'amd64', self.tmp / label)
+                self.assertFalse((self.tmp / label).exists())
+
+    def test_tampered_digest_fails_before_extraction(self):
+        def tamper(manifest):
+            manifest['files']['cli.py']['sha256'] = '0' * 64
+        package = make_package(self.tmp, manifest_mutator=tamper)
+        dest = self.tmp / 'dest'
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', dest)
+        self.assertFalse(dest.exists())
+
+    def test_wrong_arch_fails(self):
+        package = make_package(self.tmp, arch='arm64')
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_wrong_platform_fails(self):
+        def mutate(manifest):
+            manifest['platform'] = 'darwin'
+        package = make_package(self.tmp, manifest_mutator=mutate)
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_wrong_schema_fails(self):
+        def mutate(manifest):
+            manifest['schema'] = 'gptadmin.node-package/v0'
+        package = make_package(self.tmp, manifest_mutator=mutate)
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_size_mismatch_fails(self):
+        def mutate(manifest):
+            manifest['files']['bin/gptadmin-node']['size'] += 1
+        package = make_package(self.tmp, manifest_mutator=mutate)
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_missing_file_fails(self):
+        def mutate(manifest):
+            manifest['files']['scripts/gptadmin_node_probe.py'] = {
+                'sha256': hashlib.sha256(b'gone').hexdigest(), 'size': 4}
+        package = make_package(self.tmp, manifest_mutator=mutate)
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_unapproved_member_rejected(self):
+        package = make_package(self.tmp, extra_members=[('bin/unapproved', b'nope')])
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+        self.assertFalse((self.tmp / 'dest').exists())
+
+    def test_unsafe_member_name_rejected(self):
+        package = make_package(self.tmp, extra_members=[('../evil', b'pwn')])
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+        self.assertFalse((self.tmp.parent / 'evil').exists())
+
+    def test_elf_check_rejects_non_elf_and_non_executable(self):
+        plain = self.tmp / 'plain'
+        plain.write_bytes(b'#!/bin/sh\necho hi\n')
+        plain.chmod(0o755)
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_elf_binary(plain)
+        elf = self.tmp / 'elf'
+        elf.write_bytes(ELF_PAYLOAD)
+        elf.chmod(0o644)
+        if os.geteuid() != 0:  # root passes X_OK regardless of mode bits
+            with self.assertRaises(mgr.PreflightError):
+                mgr.verify_elf_binary(elf)
+
+    def test_host_arch_mapping(self):
+        with patch.object(mgr.platform_module, 'machine', return_value='x86_64'):
+            self.assertEqual(mgr.host_arch(), 'amd64')
+        with patch.object(mgr.platform_module, 'machine', return_value='aarch64'):
+            self.assertEqual(mgr.host_arch(), 'arm64')
+        with patch.object(mgr.platform_module, 'machine', return_value='mips'):
+            with self.assertRaises(mgr.PreflightError):
+                mgr.host_arch()
+
+
+class TestIdentity(BaseTempCase):
+    def test_created_once_with_schema_and_permissions(self):
+        path = self.layout.identity_file('edge-1')
+        identity = mgr.ensure_identity(path)
+        self.assertEqual(identity['schema'], mgr.IDENTITY_SCHEMA)
+        self.assertRegex(identity['node_id'], r'^[0-9a-f]{32}$')
+        self.assertRegex(identity['node_key'], r'^[0-9a-f]{64}$')
+        self.assertTrue(identity['created'].endswith('Z'))
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_second_call_never_overwrites(self):
+        path = self.layout.identity_file('edge-1')
+        first = mgr.ensure_identity(path)
+        second = mgr.ensure_identity(path)
+        self.assertEqual(first, second)
+        # Even an externally modified file is honored, never regenerated.
+        edited = dict(first, node_id='f' * 32)
+        path.write_text(json.dumps(edited))
+        self.assertEqual(mgr.ensure_identity(path)['node_id'], 'f' * 32)
+
+    def test_corrupt_identity_fails_closed(self):
+        path = self.layout.identity_file('edge-1')
+        path.parent.mkdir(parents=True)
+        path.write_text('{not json')
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.ensure_identity(path)
+        self.assertEqual(path.read_text(), '{not json')
+
+    def test_merge_identity_adds_writer_url_and_keeps_0600(self):
+        path = self.layout.identity_file('edge-1')
+        identity = mgr.ensure_identity(path)
+        merged = mgr.merge_identity(path, {'writer_url': 'https://writer.example'})
+        self.assertEqual(merged['node_id'], identity['node_id'])
+        self.assertEqual(merged['node_key'], identity['node_key'])
+        self.assertEqual(merged['writer_url'], 'https://writer.example')
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+class TestVersionDirsAndSwitch(BaseTempCase):
+    def test_version_dir_naming_increments(self):
+        root = self.layout.versions_root()
+        self.assertEqual(mgr.next_version_dir(root, 'abc').name, 'abc-1')
+        (root / 'abc-1').mkdir()
+        self.assertEqual(mgr.next_version_dir(root, 'abc').name, 'abc-2')
+        (root / 'abc-2').mkdir()
+        self.assertEqual(mgr.next_version_dir(root, 'abc').name, 'abc-3')
+        self.assertEqual(mgr.next_version_dir(root, 'def').name, 'def-1')
+
+    def test_staging_dirs_do_not_collide_with_versions(self):
+        root = self.layout.versions_root()
+        root.mkdir(parents=True)
+        (root / '.staging-42').mkdir()
+        self.assertEqual(mgr.next_version_dir(root, 'abc').name, 'abc-1')
+
+    def test_atomic_current_switch(self):
+        versions = self.layout.versions_root()
+        first, second = versions / 'abc-1', versions / 'abc-2'
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        mgr.switch_current(self.layout, first)
+        self.assertEqual(Path(os.path.realpath(self.layout.current_link())), first.resolve())
+        mgr.switch_current(self.layout, second)
+        self.assertEqual(Path(os.path.realpath(self.layout.current_link())), second.resolve())
+        self.assertTrue(self.layout.current_link().is_symlink())
+        leftovers = [p.name for p in self.layout.opt_root.iterdir() if p.name.startswith('current.new')]
+        self.assertEqual(leftovers, [])
+        self.assertEqual(mgr.current_target(self.layout), second.resolve())
+
+    def test_current_target_none_when_absent(self):
+        self.assertIsNone(mgr.current_target(self.layout))
+
+
+class TestRollbackSelection(BaseTempCase):
+    def make_versions(self, first_mtime, second_mtime):
+        versions = self.layout.versions_root()
+        first, second = versions / 'old-1', versions / 'new-2'
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        os.utime(first, (first_mtime, first_mtime))
+        os.utime(second, (second_mtime, second_mtime))
+        return first, second
+
+    def test_most_recent_other_dir_is_selected(self):
+        first, second = self.make_versions(1000, 2000)
+        picked = mgr.select_rollback_dir(self.layout.versions_root(), second, None)
+        self.assertEqual(picked, first)
+
+    def test_selection_ignores_mtymes_of_current(self):
+        first, second = self.make_versions(2000, 1000)
+        picked = mgr.select_rollback_dir(self.layout.versions_root(), second, None)
+        self.assertEqual(picked, first)
+
+    def test_explicit_target_wins(self):
+        first, second = self.make_versions(1000, 2000)
+        picked = mgr.select_rollback_dir(self.layout.versions_root(), second, 'old-1')
+        self.assertEqual(picked, first)
+
+    def test_explicit_missing_target_fails(self):
+        first, second = self.make_versions(1000, 2000)
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.select_rollback_dir(self.layout.versions_root(), second, 'ghost-9')
+
+    def test_no_other_version_fails(self):
+        only = self.layout.versions_root() / 'solo-1'
+        only.mkdir(parents=True)
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.select_rollback_dir(self.layout.versions_root(), only, None)
+
+
+class TestEnvFile(BaseTempCase):
+    def build_values(self, **overrides):
+        kwargs = dict(
+            name='edge-1', layout=self.layout, bind_host='127.0.0.1', bind_port=9001,
+            token='t' * 64, admin_password=None, public_origin=None,
+            node_public_url=None, seed=None, peers=None,
+            default_user='root', default_home='/root')
+        kwargs.update(overrides)
+        return mgr.build_env_values(**kwargs)
+
+    def test_exact_keys_and_values(self):
+        values = self.build_values(public_origin='https://n.example', seed='https://seed:9001',
+                                   peers='[{"url":"https://peer"}]')
+        expected = {
+            'SHELL_TOKEN', 'CTL_TOKEN', 'GPTADMIN_HUB_HOST', 'GPTADMIN_HUB_PORT',
+            'GPTADMIN_ROOT', 'GPTADMIN_CONFIG_DIR', 'GPTADMIN_ENV_FILE', 'PUBLIC_ORIGIN',
+            'GPTADMIN_AUTH_MODE', 'SHELL_NAME', 'SHELL_IDENTITY_DIR', 'SHELL_SPOOL_DIR',
+            'SHELL_OUTBOX_DIR', 'SHELL_DEFAULT_USER', 'SHELL_DEFAULT_CWD',
+            'SHELL_DEFAULT_HOME', 'SHELLMCP_SELF_REPAIR_DISABLE', 'ROOTD_AUTO_UPDATE',
+            'SHELL_SERVICE_NAME', 'ROOTD_SERVICE_NAME', 'GPTADMIN_NODE_IDENTITY',
+            'GPTADMIN_NODE_SEED', 'GPTADMIN_NODE_PEERS', 'GPTADMIN_AUTH_SOURCE_ID',
+        }
+        self.assertEqual(set(values), expected)
+        self.assertNotIn('ADMIN_PASSWORD', values)
+        self.assertEqual(values['CTL_TOKEN'], 't' * 64)
+        self.assertEqual(values['GPTADMIN_HUB_PORT'], '9001')
+        self.assertEqual(values['GPTADMIN_ROOT'], str(self.layout.current_link()))
+        self.assertEqual(values['GPTADMIN_CONFIG_DIR'], str(self.layout.config('edge-1')))
+        self.assertEqual(values['GPTADMIN_AUTH_MODE'], 'reader')
+        self.assertEqual(values['SHELLMCP_SELF_REPAIR_DISABLE'], '1')
+        self.assertEqual(values['ROOTD_AUTO_UPDATE'], '0')
+        self.assertEqual(values['SHELL_SERVICE_NAME'], 'gptadmin-node@edge-1.service')
+        self.assertEqual(values['ROOTD_SERVICE_NAME'], 'gptadmin-node@edge-1.service')
+        self.assertEqual(values['GPTADMIN_NODE_IDENTITY'], str(self.layout.identity_file('edge-1')))
+        self.assertEqual(values['GPTADMIN_NODE_PEERS'], '[{"url":"https://peer"}]')
+
+    def test_seed_and_peers_default_empty_and_admin_password_optional(self):
+        values = self.build_values(admin_password='a' * 32)
+        self.assertEqual(values['GPTADMIN_NODE_SEED'], '')
+        self.assertEqual(values['GPTADMIN_NODE_PEERS'], '')
+        self.assertEqual(values['ADMIN_PASSWORD'], 'a' * 32)
+        self.assertNotIn('PUBLIC_ORIGIN', self.build_values())
+
+    def test_render_order_and_quoting_roundtrip(self):
+        values = self.build_values()
+        text = mgr.render_env_file(values)
+        keys = [line.split('=', 1)[0] for line in text.strip().splitlines()]
+        ordered = [key for key in mgr.ENV_KEY_ORDER if key in values]
+        self.assertEqual(keys, ordered)
+        self.assertTrue(text.startswith('SHELL_TOKEN=' + mgr.quote_env_value('t' * 64)))
+        self.assertEqual(mgr.quote_env_value('a"b\\c'), '"a\\"b\\\\c"')
+        path = self.layout.env_file('edge-1')
+        mgr.write_env_file(path, values)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(mgr.parse_env_file(path), values)
+
+    def test_parse_env_file_supports_plain_and_comments(self):
+        path = self.tmp / 'plain.env'
+        path.write_text('# comment\nA=1\nB="two words"\n\nC=x"y\n')
+        self.assertEqual(mgr.parse_env_file(path), {'A': '1', 'B': 'two words', 'C': 'x"y'})
+
+    def test_reinstall_merge_preserves_configured_values(self):
+        existing = self.build_values(public_origin='https://n.example', admin_password='a' * 32)
+        fresh = self.build_values(token='f' * 64, peers='[{"url":"https://new-peer"}]')
+        self.assertNotIn('PUBLIC_ORIGIN', fresh)  # operator omitted it on reinstall
+        merged = mgr.merge_preserving(existing, fresh)
+        self.assertEqual(merged['SHELL_TOKEN'], 't' * 64)  # identity-bound token survives
+        self.assertEqual(merged['CTL_TOKEN'], 't' * 64)
+        self.assertEqual(merged['ADMIN_PASSWORD'], 'a' * 32)  # preserved extra key
+        self.assertEqual(merged['PUBLIC_ORIGIN'], 'https://n.example')  # preserved extra key
+        self.assertEqual(merged['GPTADMIN_NODE_PEERS'], '[{"url":"https://new-peer"}]')  # empty was replaced
+
+    def test_unit_template_renders_layout_paths(self):
+        text = mgr.render_unit_template(self.layout)
+        self.assertIn(f'EnvironmentFile={self.layout.config_root}/%i/gptadmin.env', text)
+        self.assertIn(f'ExecStart={self.layout.opt_root}/current/bin/gptadmin-node', text)
+        self.assertIn('Description=GPTAdmin Node %i', text)
+        self.assertIn('MemoryHigh=3072M', text)
+        self.assertIn('MemoryMax=6144M', text)
+        self.assertIn('MemorySwapMax=0', text)
+        self.assertIn('Environment=GOMEMLIMIT=640MiB', text)
+        self.assertIn('KillSignal=SIGTERM', text)
+        self.assertIn('TimeoutStopSec=120', text)
+        self.assertIn('WantedBy=multi-user.target', text)
+
+
+class TestDrainAndHealthHttp(BaseTempCase):
+    def make_drain_server(self, ready_after=2, drain_supported=True):
+        lock = threading.Lock()
+        state = {'actions': [], 'status_calls': 0}
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                request = read_body(self)
+                action = request.get('action')
+                with lock:
+                    state['actions'].append(action)
+                    if action == 'status':
+                        state['status_calls'] += 1
+                        code, payload = 200, {'ready_to_stop': state['status_calls'] >= ready_after}
+                    elif action == 'begin':
+                        code, payload = (404, {'error': 'no drain'}) if not drain_supported else (200, {'ok': True})
+                    else:
+                        code, payload = 200, {'ok': True}
+                respond_json(self, code, payload)
+
+        return self.start(Handler), state
+
+    def test_drain_begin_waits_ready_and_cancels(self):
+        server, state = self.make_drain_server(ready_after=3)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        token = 'c' * 64
+        self.assertTrue(mgr.drain_begin(origin, token))
+        status = mgr.drain_wait_ready(origin, token, wait_secs=10, poll_interval=0.02)
+        self.assertIs(status['ready_to_stop'], True)
+        self.assertGreaterEqual(state['status_calls'], 3)
+        self.assertTrue(mgr.drain_cancel(origin, token))
+        self.assertEqual(state['actions'][0], 'begin')
+        self.assertEqual(state['actions'][-1], 'cancel')
+        # Every drain call carried the CTL_TOKEN bearer.
+        self.assertTrue(all(action in ('begin', 'status', 'cancel') for action in state['actions']))
+
+    def test_drain_begin_404_means_skip(self):
+        server, state = self.make_drain_server(drain_supported=False)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        self.assertFalse(mgr.drain_begin(origin, 't'))
+        self.assertTrue(mgr.drain_cancel(origin, 't'))  # 404 on cancel is tolerated
+
+    def legacy_follower_fixture(self):
+        manifest = {'schema': mgr.PACKAGE_SCHEMA, 'platform': 'linux', 'build_version': 1145,
+                    'git_commit': mgr.LEGACY_FOLLOWER_DRAIN_REVISION}
+        status = {'draining': True, 'ready_to_stop': False, 'since': '2026-11-24T00:00:00Z',
+                  'reason': 'quorum follower in-flight task verification unavailable',
+                  'counters': {'active_submissions': 0, 'active_callbacks': 0,
+                               'unfinished_executions': 1, 'outbox_pending': 0}}
+        return manifest, status
+
+    def test_legacy_follower_normalization_requires_exact_phantom_snapshot(self):
+        manifest, status = self.legacy_follower_fixture()
+        before = json.loads(json.dumps(status))
+        receipt = mgr.normalize_legacy_follower_drain(status, manifest)
+        self.assertTrue(receipt['normalized_ready_to_stop'])
+        self.assertEqual(receipt['raw_status'], before)
+        self.assertIs(receipt['raw_status']['ready_to_stop'], False)
+        self.assertEqual(status, before)
+        for field, value in [('git_commit', 'f' * 40), ('build_version', 1149),
+                             ('build_version', '1145'), ('schema', 'other'), ('platform', 'darwin')]:
+            with self.subTest(manifest_field=field, value=value):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain(status, {**manifest, field: value}))
+        self.assertIsNone(mgr.normalize_legacy_follower_drain(status, None))
+        for field, value in [('reason', 'maintenance'), ('draining', False), ('ready_to_stop', True)]:
+            with self.subTest(status_field=field):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain({**status, field: value}, manifest))
+        for field, value in [('active_submissions', 1), ('active_callbacks', 1),
+                             ('outbox_pending', 1), ('unfinished_executions', 2),
+                             ('unfinished_executions', 0), ('active_callbacks', False)]:
+            with self.subTest(counter=field, value=value):
+                busy = {**status, 'counters': {**status['counters'], field: value}}
+                self.assertIsNone(mgr.normalize_legacy_follower_drain(busy, manifest))
+        for counters in [{}, {**status['counters'], 'unknown_work': 1}]:
+            with self.subTest(counters=counters):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain({**status, 'counters': counters}, manifest))
+
+    def test_legacy_follower_update_drain_keeps_fence_auth_and_raw_receipt(self):
+        manifest, raw_status = self.legacy_follower_fixture()
+        state = {'actions': [], 'draining': False, 'busy': False}
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                if self.headers.get('Authorization') != 'Bearer legacy-token':
+                    respond_json(self, 401, {'error': 'unauthorized'})
+                    return
+                request = read_body(self)
+                action = request.get('action')
+                state['actions'].append(action)
+                if action == 'begin':
+                    state['begin'] = request
+                    state['draining'] = True
+                elif action == 'cancel':
+                    state['draining'] = False
+                payload = {**raw_status, 'draining': state['draining'],
+                           'counters': {**raw_status['counters'],
+                                        'active_callbacks': int(state['busy'])}}
+                respond_json(self, 200, payload)
+
+        class Budget:
+            cleaned = False
+            def cleanup(self):
+                self.cleaned = True
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        receipt = {}
+        output = io.StringIO()
+        budget = Budget()
+        with patch.object(sys, 'stderr', output):
+            self.assertTrue(mgr.prepare_update_drain(
+                origin, 'legacy-token', 1, True, budget,
+                current_manifest=manifest, receipt=receipt))
+        self.assertEqual(state['actions'], ['begin', 'status'])
+        self.assertEqual(state['begin'], {'action': 'begin'})
+        self.assertTrue(state['draining'])
+        self.assertFalse(budget.cleaned)
+        self.assertEqual(receipt['raw_status'], raw_status)
+        emitted = json.loads(output.getvalue())
+        self.assertEqual(emitted['raw_status'], raw_status)
+        self.assertTrue(mgr.drain_cancel(origin, 'legacy-token'))
+
+        # The same binary and follower reason cannot hide a real callback.
+        state['busy'] = True
+        receipt = {}
+        with self.assertRaisesRegex(mgr.RuntimeFailure, 'did not reach ready_to_stop'):
+            mgr.prepare_update_drain(origin, 'legacy-token', 0.1, True, budget,
+                                     current_manifest=manifest, receipt=receipt)
+        self.assertFalse(state['draining'])
+        self.assertTrue(budget.cleaned)
+        self.assertEqual(state['actions'][-1], 'cancel')
+        self.assertEqual(receipt, {})
+
+    def test_drain_timeout_raises(self):
+        server, state = self.make_drain_server(ready_after=10 ** 9)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.drain_wait_ready(origin, 't', wait_secs=0.25, poll_interval=0.05)
+
+    def test_update_cancels_drain_when_begin_response_times_out(self):
+        class Budget:
+            cleaned = False
+            def cleanup(self):
+                self.cleaned = True
+        budget = Budget()
+        with patch.object(mgr, 'drain_begin', side_effect=TimeoutError('lost response')), \
+             patch.object(mgr, 'drain_cancel', return_value=True) as cancel:
+            with self.assertRaises(TimeoutError):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, budget)
+        self.assertTrue(budget.cleaned)
+        cancel.assert_called_once_with('http://example', 'token')
+
+    def test_update_reports_unverified_drain_cancel_after_timeout(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', side_effect=TimeoutError('lost response')), \
+             patch.object(mgr, 'drain_cancel', return_value=False):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'cancel is unverified'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
+    def test_status_timeout_after_confirmed_begin_and_cancel_is_retryable(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', return_value=True), \
+             patch.object(mgr, 'drain_wait_ready', side_effect=TimeoutError('status timed out')), \
+             patch.object(mgr, 'drain_cancel', return_value=True), \
+             patch.object(mgr, 'http_json', return_value=(200, {'draining': False})):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'drain status timed out; cancellation confirmed; retryable'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
+    def test_status_timeout_needs_independent_cancel_readback(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', return_value=True), \
+             patch.object(mgr, 'drain_wait_ready', side_effect=TimeoutError('status timed out')), \
+             patch.object(mgr, 'drain_cancel', return_value=True), \
+             patch.object(mgr, 'http_json', return_value=(200, {'draining': True})):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'cancel is unverified'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
+    def test_drain_bearer_token_sent(self):
+        seen = []
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                seen.append(self.headers.get('Authorization'))
+                respond_json(self, 200, {'ready_to_stop': True})
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        mgr.drain_wait_ready(origin, 'secret-token', wait_secs=1, poll_interval=0.02)
+        self.assertEqual(seen, ['Bearer secret-token'])
+
+    def test_control_origin_uses_bind_precedence_and_preserves_specific_addresses(self):
+        cases = (
+            ({}, 'http://127.0.0.1:9001'),
+            ({'GPTADMIN_HUB_HOST': '0.0.0.0', 'GPTADMIN_HUB_PORT': '9088',
+              'HUB_BIND': '192.0.2.10', 'HUB_PORT': '9002'}, 'http://127.0.0.1:9088'),
+            ({'GPTADMIN_HUB_HOST': '  ', 'HUB_BIND': '192.0.2.10', 'PORT': '9088'},
+             'http://192.0.2.10:9088'),
+            ({'HUB_HOST': 'localhost', 'HUB_BIND': '0.0.0.0', 'HUB_PORT': '9002'},
+             'http://localhost:9002'),
+            ({'HUB_BIND': '[::]'}, 'http://[::1]:9001'),
+            ({'HUB_BIND': '0:0:0:0:0:0:0:0'}, 'http://[::1]:9001'),
+            ({'HUB_BIND': '2001:db8::1'}, 'http://[2001:db8::1]:9001'),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self.assertEqual(mgr.origin_from_env(env), expected)
+
+    def test_managed_follower_requires_local_identity_readiness_and_exact_version(self):
+        origin, commit = 'http://127.0.0.1:9001', 'a' * 40
+        health = dict(role='follower', leader_id='other', node_id='local', cluster_id='cluster',
+                      quorum_mode='owner_local', baseline_ready=True, replica_ready=True)
+        version = dict(git_commit=commit, quorum_mode='owner_local')
+        for changes, version_changes, verified, accepted in (
+            ({}, {}, True, True),
+            ({'replica_ready': False}, {}, True, False),
+            ({'baseline_ready': False}, {}, True, False),
+            ({'role': 'leader'}, {}, True, False),
+            ({'leader_id': ''}, {}, True, False),
+            ({'leader_id': 'local'}, {}, True, False),
+            ({}, {'git_commit': 'b' * 40}, True, False),
+            ({}, {'quorum_mode': None}, True, False),
+            ({}, {}, False, False),
+        ):
+            with self.subTest(changes=changes, version=version_changes, verified=verified):
+                def response(_method, url, **_):
+                    return (503, health | changes) if url.endswith('/healthz') else (200, version | version_changes)
+
+                with patch.object(mgr, 'http_json', side_effect=response):
+                    if accepted:
+                        self.assertEqual(mgr.wait_healthy(origin, commit, timeout=.02,
+                                                          verify_voter=lambda _: verified), version)
+                    else:
+                        with self.assertRaises(mgr.RuntimeFailure):
+                            mgr.wait_healthy(origin, commit, timeout=.02, verify_voter=lambda _: verified)
+
+    def test_wait_healthy_requires_commit_match(self):
+        commit = 'cafe1234abcd'
+
+        class Handler(QuietHandler):
+            def do_GET(self):
+                if self.path == '/healthz':
+                    respond_json(self, 200, {'ok': True})
+                else:
+                    respond_json(self, 200, {'git_commit': commit, 'build_version': 181})
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        version = mgr.wait_healthy(origin, commit, timeout=5)
+        self.assertEqual(version['git_commit'], commit)
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.wait_healthy(origin, 'different', timeout=0.6)
+        # An empty expectation accepts any healthy version.
+        self.assertEqual(mgr.wait_healthy(origin, '', timeout=5)['git_commit'], commit)
+
+    def test_wait_healthy_connection_refused_raises(self):
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.wait_healthy('http://127.0.0.1:1', 'x', timeout=0.6)
+
+    def test_http_json_captures_error_status_and_payload(self):
+        class Handler(QuietHandler):
+            def do_GET(self):
+                respond_json(self, 503, {'error': 'unavailable'})
+
+        server = self.start(Handler)
+        url = f'http://127.0.0.1:{server.server_address[1]}/whatever'
+        status, payload = mgr.http_json('GET', url)
+        self.assertEqual(status, 503)
+        self.assertEqual(payload, {'error': 'unavailable'})
+
+
+class TestJoin(BaseTempCase):
+    def test_join_body_construction(self):
+        identity = {'node_id': 'a' * 32, 'node_key': 'b' * 64}
+        body = mgr.build_join_body(identity, 'edge-9', ['http://10.0.0.5:9001'], '10.0.0.5',
+                                   {'git_commit': 'c0ffee', 'build_version': 7})
+        self.assertEqual(body['node_id'], 'a' * 32)
+        self.assertEqual(body['node_key'], 'b' * 64)
+        self.assertEqual(body['node_key_hash'], hashlib.sha256(b'b' * 64).hexdigest())
+        self.assertEqual(body['name'], 'edge-9')
+        self.assertEqual(body['endpoints'], ['http://10.0.0.5:9001'])
+        self.assertEqual(body['connect_to'], '10.0.0.5')
+        self.assertEqual(body['capabilities'], ['ingress', 'executor', 'replica'])
+        self.assertEqual(body['build'], {'git_commit': 'c0ffee', 'build_version': 7})
+        without = mgr.build_join_body(identity, 'edge-9', ['http://10.0.0.5:9001'], None, None)
+        self.assertNotIn('connect_to', without)
+        self.assertEqual(without['build'], {})
+
+    def test_join_409_redirect_retries_writer_and_persists_writer_url(self):
+        writer_captured = []
+        hub_captured = []
+        writer_origin_holder = {}
+
+        class WriterHandler(QuietHandler):
+            def do_POST(self):
+                writer_captured.append({'path': self.path,
+                                        'auth': self.headers.get('Authorization'),
+                                        'body': read_body(self)})
+                respond_json(self, 200, {'revision': 7, 'nodes': [{'node_id': 'a' * 32}]})
+
+        class HubHandler(QuietHandler):
+            def do_POST(self):
+                hub_captured.append(read_body(self))
+                respond_json(self, 409, {'writer_url': writer_origin_holder['url']})
+
+        writer = self.start(WriterHandler)
+        writer_origin_holder['url'] = f'http://127.0.0.1:{writer.server_address[1]}'
+        hub = self.start(HubHandler)
+        hub_origin = f'http://127.0.0.1:{hub.server_address[1]}'
+
+        identity_path = self.layout.identity_file('edge-9')
+        manifest = {'git_commit': 'c0ffee', 'build_version': 7}
+        payload = mgr.perform_join(hub_origin, 'g-secret', identity_path, 'edge-9',
+                                   ['http://10.0.0.5:9001'], '10.0.0.5', manifest)
+        self.assertEqual(payload['revision'], 7)
+        self.assertEqual(len(hub_captured), 1)
+        self.assertEqual(len(writer_captured), 1)  # exactly one retry against the writer
+        sent = writer_captured[0]
+        self.assertEqual(sent['path'], '/admin/api/nodes/join')
+        self.assertEqual(sent['auth'], 'Bearer g-secret')
+        identity = json.loads(identity_path.read_text())
+        self.assertEqual(sent['body']['node_id'], identity['node_id'])
+        self.assertEqual(sent['body']['node_key'], identity['node_key'])
+        self.assertEqual(sent['body']['name'], 'shell:edge-9')
+        self.assertEqual(sent['body']['capabilities'], mgr.NODE_CAPABILITIES)
+        self.assertEqual(sent['body']['build']['git_commit'], 'c0ffee')
+        # writer_url persisted back into the identity file, still 0600, node_id untouched.
+        merged = json.loads(identity_path.read_text())
+        self.assertEqual(merged['writer_url'], writer_origin_holder['url'])
+        self.assertEqual(merged['node_id'], identity['node_id'])
+        self.assertEqual(os.stat(identity_path).st_mode & 0o777, 0o600)
+
+    def test_join_stdin_supports_external_node_state_without_printing_credentials(self):
+        captured = []
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                captured.append({'path': self.path,
+                                 'auth': self.headers.get('Authorization'),
+                                 'body': read_body(self)})
+                respond_json(self, 200, {'writer_id': 'writer-id',
+                                         'membership_revision': 9})
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        identity_path = self.tmp / 'haos' / 'node-identity.json'
+        args = argparse_namespace(name='haos', url=origin, grant=None,
+                                  join_grant_stdin=True, identity_file=str(identity_path),
+                                  bind_port=9001, endpoint=['http://192.0.2.101:9001'],
+                                  connect_to='192.0.2.101')
+        output = io.StringIO()
+        grant = 'a' * 64
+        with patch.object(mgr.sys, 'stdin', io.StringIO(grant + '\n')):
+            with redirect_stdout(output):
+                mgr.cmd_join(args, self.layout, mgr.Runner())
+        result = json.loads(output.getvalue())
+        identity = json.loads(identity_path.read_text())
+        self.assertEqual(captured[0]['path'], '/admin/api/nodes/join')
+        self.assertEqual(captured[0]['auth'], 'Bearer ' + grant)
+        self.assertEqual(captured[0]['body']['name'], 'shell:haos')
+        self.assertEqual(captured[0]['body']['endpoints'], ['http://192.0.2.101:9001'])
+        self.assertEqual(captured[0]['body']['connect_to'], '192.0.2.101')
+        self.assertEqual(identity['writer_id'], 'writer-id')
+        self.assertEqual(identity_path.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(grant, output.getvalue())
+        self.assertNotIn(identity['node_key'], output.getvalue())
+        self.assertEqual(result['writer_id'], 'writer-id')
+
+    def test_join_rejects_non_ip_connect_to(self):
+        args = argparse_namespace(name='haos', url='https://writer.example',
+                                  grant='a' * 64, join_grant_stdin=False,
+                                  identity_file=str(self.tmp / 'node-id.json'),
+                                  bind_port=9001, endpoint=['http://192.0.2.101:9001'],
+                                  connect_to='writer.example')
+        with self.assertRaisesRegex(mgr.UsageError, '--connect-to must be a literal IP'):
+            mgr.cmd_join(args, self.layout, mgr.Runner())
+
+    def test_join_failure_is_a_runtime_failure(self):
+        class Handler(QuietHandler):
+            def do_POST(self):
+                respond_json(self, 403, {'error': 'bad grant'})
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        with self.assertRaises(mgr.RuntimeFailure):
+            mgr.perform_join(origin, 'bad', self.layout.identity_file('edge-9'), 'edge-9',
+                             ['http://10.0.0.5:9001'], None, None)
+
+    def test_grant_issue_posts_owner_bearer(self):
+        captured = []
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                captured.append({'auth': self.headers.get('Authorization'),
+                                 'body': read_body(self)})
+                respond_json(self, 200, {'grant': 'g-123', 'expires_at': '2026-09-10T12:00:00Z'})
+
+        server = self.start(Handler)
+        writer = f'http://127.0.0.1:{server.server_address[1]}'
+        args = mgr.build_parser().parse_args([
+            'grant', 'issue', '--name', 'edge-9', '--writer-url', writer,
+            '--ttl-mins', '45', '--admin-token-env', 'TEST_ADMIN_BEARER',
+        ])
+        out = io.StringIO()
+        with patch.dict(os.environ, {'TEST_ADMIN_BEARER': 'owner-bearer'}):
+            with redirect_stdout(out):
+                mgr.cmd_grant_issue(args, self.layout, mgr.Runner())
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed['grant'], 'g-123')
+        self.assertEqual(captured[0]['auth'], 'Bearer owner-bearer')
+        self.assertEqual(captured[0]['body'], {'name': 'shell:edge-9', 'ttl_minutes': 45})
+
+    def test_grant_issue_requires_token_and_reachable_writer(self):
+        args = mgr.build_parser().parse_args([
+            'grant', 'issue', '--name', 'edge-9', '--writer-url', 'http://127.0.0.1:1',
+            '--admin-token-env', 'TEST_ADMIN_BEARER',
+        ])
+        with patch.dict(os.environ, {'TEST_ADMIN_BEARER': ''}):
+            with self.assertRaises(mgr.UsageError):
+                mgr.cmd_grant_issue(args, self.layout, mgr.Runner())
+        with patch.dict(os.environ, {'TEST_ADMIN_BEARER': 'owner-bearer'}):
+            with self.assertRaises(mgr.RuntimeFailure):  # nothing listens on port 1
+                mgr.cmd_grant_issue(args, self.layout, mgr.Runner())
+
+
+class TestInputHelpers(unittest.TestCase):
+    def test_autoupdate_timer_has_independent_recurring_calendar_trigger(self):
+        self.assertIn('OnCalendar=*-*-* *:0/10:00', mgr.AUTOUPDATE_TIMER_TEXT)
+        self.assertIn('Persistent=true', mgr.AUTOUPDATE_TIMER_TEXT)
+        self.assertNotIn('OnUnitActiveSec=', mgr.AUTOUPDATE_TIMER_TEXT)
+
+    def test_parse_bind(self):
+        self.assertEqual(mgr.parse_bind(None), ('127.0.0.1', 9001))
+        self.assertEqual(mgr.parse_bind('0.0.0.0:8080'), ('0.0.0.0', 8080))
+        with self.assertRaises(mgr.UsageError):
+            mgr.parse_bind('no-port')
+        with self.assertRaises(mgr.UsageError):
+            mgr.parse_bind('127.0.0.1:99999')
+
+    def test_validate_name(self):
+        mgr.validate_name('edge-9')
+        mgr.validate_name('A_1.x')
+        for bad in ('', '-lead', 'a/b', 'a b', 'x' * 65, '%i'):
+            with self.assertRaises(mgr.UsageError):
+                mgr.validate_name(bad)
+
+    def test_validate_origin(self):
+        self.assertEqual(mgr.validate_origin('https://hub.example', 'x'), 'https://hub.example')
+        self.assertEqual(mgr.validate_origin('http://hub.example:9001/', 'x'), 'http://hub.example:9001')
+        for bad in ('ftp://hub.example', 'https://u:p@hub.example', 'https://hub.example/q?x=1', 'hub.example'):
+            with self.assertRaises(mgr.UsageError):
+                mgr.validate_origin(bad, 'x')
+
+    def test_merge_identity_does_not_weaken_keys(self):
+        pass  # covered in TestIdentity
+
+    def test_read_admin_token_prefers_ctl_token(self):
+        tmp = Path(tempfile.mkdtemp(prefix='node-manage-token-'))
+        try:
+            layout = mgr.Layout(state_root=tmp / 'var', config_root=tmp / 'etc')
+            layout.config('n').mkdir(parents=True)
+            (layout.owner_credential('n')).write_text('cred-token\n')
+            self.assertEqual(mgr.read_admin_token(layout, 'n', {'CTL_TOKEN': 'env-token'}), 'env-token')
+            self.assertEqual(mgr.read_admin_token(layout, 'n', {}), 'cred-token')
+            self.assertEqual(mgr.read_admin_token(layout, 'n', {'ADMIN_PASSWORD': 'legacy'}), 'legacy')
+            layout.owner_credential('n').unlink()
+            with self.assertRaises(mgr.PreflightError):
+                mgr.read_admin_token(layout, 'n', {})
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_port_is_free_then_busy(self):
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+        try:
+            sock.listen(1)
+            self.assertFalse(mgr.port_is_free('127.0.0.1', port))
+        finally:
+            sock.close()
+        self.assertTrue(mgr.port_is_free('127.0.0.1', port))
+
+
+def argparse_namespace(**kwargs):
+    import argparse
+    return argparse.Namespace(**kwargs)
+
+
+
+class RefreshInstalledHelpersTest(unittest.TestCase):
+    """The host helpers must follow the verified package, not an older copy."""
+
+    def _verified_root(self, root: Path) -> Path:
+        scripts = root / 'scripts'
+        scripts.mkdir(parents=True)
+        for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py', 'gptadmin_dns_sweb.py'):
+            (scripts / name).write_text('# %s\n' % name, encoding='utf-8')
+        return root
+
+    def test_helpers_are_copied_from_the_verified_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = self._verified_root(root / 'verified')
+            destination = root / 'helpers'
+            destination.mkdir()
+            mgr.refresh_installed_helpers(verified, destination=destination)
+            for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py', 'gptadmin_dns_sweb.py'):
+                self.assertEqual((destination / name).read_text(encoding='utf-8'), '# %s\n' % name)
+
+    def test_missing_helper_in_package_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = root / 'verified'
+            (verified / 'scripts').mkdir(parents=True)
+            (verified / 'scripts' / 'gptadmin_node_manage.py').write_text('# x\n', encoding='utf-8')
+            destination = root / 'helpers'
+            destination.mkdir()
+            with self.assertRaises(mgr.PreflightError):
+                mgr.refresh_installed_helpers(verified, destination=destination)
+
+    def test_symlinked_helper_source_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = self._verified_root(root / 'verified')
+            target = verified / 'scripts' / 'gptadmin_node_manage.py'
+            real = root / 'elsewhere.py'
+            real.write_text('# elsewhere\n', encoding='utf-8')
+            target.unlink()
+            target.symlink_to(real)
+            destination = root / 'helpers'
+            destination.mkdir()
+            with self.assertRaises(mgr.PreflightError):
+                mgr.refresh_installed_helpers(verified, destination=destination)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,26 @@
+# Keep checkout credentials and local runtime state out of this test context.
+.git
+**/.git
+.gitpublic
+.agents
+.tmp
+.buildcache
+.venv
+**/__pycache__
+**/node_modules
+.env
+.env.*
+**/.env
+**/.env.*
+.secret
+.secrets
+secret
+secrets
+**/.secret
+**/.secrets
+**/secret
+**/secrets
+
+# Keep Go test-only edits out of runtime compilation cache keys.
+go-hub/**/*_test.go
+go-shellmcp/**/*_test.go

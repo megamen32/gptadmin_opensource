@@ -1,0 +1,41 @@
+name: Python MCP session admission units
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: python-mcp-session-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  pure-units:
+    if: github.repository == 'megamen32/gptadmin_opensource'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Nine isolated local-logic units (no runtime acceptance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemd-run --quiet --pipe --wait --collect --uid="$(id -u)" \
+            --property=CPUQuota=100% --property=MemoryHigh=256M --property=MemoryMax=512M \
+            --property=MemorySwapMax=0 --property=TasksMax=64 --property=IOWeight=10 \
+            --property=NoNewPrivileges=true --property=PrivateTmp=true --property=LimitFSIZE=16M \
+            --property='TemporaryFileSystem=/tmp:rw,size=64M,nr_inodes=4096' \
+            --property="WorkingDirectory=$GITHUB_WORKSPACE" \
+            /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 60s \
+            /usr/bin/python3 -m unittest discover -s tests -p test_python_mcp_session_http.py -v \
+            2>&1 | tee "$RUNNER_TEMP/python-mcp-session-units.log"
+          python3 - "$RUNNER_TEMP/python-mcp-session-units.log" <<'PY'
+          import sys
+          log=open(sys.argv[1]).read()
+          names=['test_invalid_limits_refuse','test_owned_completed_close_releases_only_its_slot','test_sixteen_initialize_reservations_refuse_before_sdk_and_never_evict','test_cancelled_initial_body_releases_reservation_without_sdk','test_close_runs_once_on_owner_task_and_retains_neighbor','test_invalid_initialize_json_shapes_return400_without_allocation','test_metadata_only_full_pool_refuses_before_body_or_sdk_allocation','test_unknown_or_duplicate_session_does_not_create_module_or_actor','test_two_sse_streams_leave_post_admission_and_duplicate_get_refuses']
+          for name in names:
+              rows=[line for line in log.splitlines() if line.startswith(name+' (')]
+              assert len(rows)==1 and rows[0].endswith(' ... ok'),name
+          assert 'Ran 9 tests in ' in log and '\nOK\n' in log
+          print('9 pure units passed; runtime/native client acceptance is not claimed.')
+          PY

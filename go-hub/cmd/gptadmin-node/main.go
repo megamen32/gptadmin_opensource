@@ -1,0 +1,64 @@
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"github.com/megamen32/gptadmin/go-hub/internal/hub"
+	"github.com/megamen32/gptadmin/go-hub/internal/node"
+	shell "github.com/megamen32/gptadmin/go-shellmcp/runtime"
+)
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cfg := hub.FromEnv()
+	executor := shell.FromEnv()
+	executor = applyExecutorDefaults(cfg, executor)
+	listener, activated, err := hub.AdoptSystemdTCPListener()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !activated {
+		listener, err = net.Listen("tcp", cfg.Addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	log.Printf("gptadmin-node listening addr=%s", listener.Addr())
+	var runErr error
+	if activated {
+		runErr = node.RunActivated(ctx, listener, cfg, executor)
+	} else {
+		runErr = node.Run(ctx, listener, cfg, executor)
+	}
+	if err := runErr; err != nil {
+		log.Fatal(err)
+	}
+}
+
+// applyExecutorDefaults preserves explicit executor settings while binding Node state to its configured root.
+func applyExecutorDefaults(cfg hub.Config, executor shell.Config) shell.Config {
+	// Unified-node defaults keep all state under the configured node root.
+	// Explicit legacy paths remain usable during migration.
+	if os.Getenv("SHELL_IDENTITY_DIR") == "" && os.Getenv("SHELLMCP_IDENTITY_DIR") == "" {
+		executor.IdentityDir = cfg.ConfigDir
+	}
+	if os.Getenv("SHELL_SPOOL_DIR") == "" && os.Getenv("SHELLMCP_SPOOL_DIR") == "" && os.Getenv("SHELL_SPILL_DIR") == "" && os.Getenv("SHELLMCP_SPILL_DIR") == "" {
+		executor.SpillDir = filepath.Join(cfg.ConfigDir, "spool")
+		if os.Getenv("SHELL_OUTBOX_DIR") == "" && os.Getenv("SHELLMCP_OUTBOX_DIR") == "" {
+			executor.OutboxDir = filepath.Join(executor.SpillDir, "outbox")
+		}
+	}
+	// The embedded supervisor's durable child registry lives alongside the
+	// node identity unless an operator selected a different registry explicitly.
+	if executor.MCPConfig == "" {
+		executor.MCPConfig = filepath.Join(cfg.ConfigDir, "shellmcp-mcp.json")
+	}
+	return executor
+}

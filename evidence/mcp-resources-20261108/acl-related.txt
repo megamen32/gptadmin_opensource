@@ -1,0 +1,1 @@
+ok  	github.com/megamen32/gptadmin/go-hub/internal/hub	0.578s

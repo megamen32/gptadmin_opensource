@@ -1,0 +1,12 @@
+[Unit]
+Description=Maintain S21 ShellMCP outbound polling and debug-phone settings
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/roomhacker/bin/android-s21-gptadmin-bridge.sh
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

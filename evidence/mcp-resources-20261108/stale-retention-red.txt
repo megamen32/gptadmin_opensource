@@ -1,0 +1,7 @@
+Command: go test -count=1 -timeout=30s -run ^TestMCPSchemaResourcesCachedFailureIsStale$ ./internal/hub
+Exit: 1
+--- FAIL: TestMCPSchemaResourcesCachedFailureIsStale (0.11s)
+    mcp_schema_resources_test.go:264: expired stale content survived beyond the advertised retention bound
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-hub/internal/hub	0.124s
+FAIL

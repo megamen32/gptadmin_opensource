@@ -1,0 +1,32 @@
+{
+  "host_id": "server-100",
+  "bind": "192.168.2.100:9419",
+  "local_bind": "127.0.0.1:9419",
+  "root": "/home/roomhacker",
+  "roots": {
+    "home": ["/home/roomhacker"],
+    "opt": ["/opt"],
+    "etc": ["/etc"]
+  },
+  "peers": [
+    {
+      "host_id": "server-88",
+      "local_url": "http://127.0.0.1:9419/mcp",
+      "routable_url": "https://server-88.internal:9419/mcp"
+    }
+  ],
+  "limits": {
+    "max_results": 100,
+    "context_lines": 3,
+    "max_response_bytes": 131072,
+    "peer_timeout_ms": 2000,
+    "overall_timeout_ms": 5000,
+    "max_file_bytes": 16777216
+  },
+  "exclude_globs": [],
+  "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
+  "gptadmin_topology_url": "https://gptadmin.internal/mcp-relay/grepmesh",
+  "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
+  "peer_auth_token_env": "GREPMESH_PEER_TOKEN",
+  "topology_ttl_ms": 30000
+}

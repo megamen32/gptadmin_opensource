@@ -1,0 +1,56 @@
+{
+  "date_utc": "2026-11-08T21:11:24.540975+00:00",
+  "base_revision": "7d43d3bafe1409dcb5d8797a229b71bc80b106a7",
+  "scope": "M18L2 source validation only; runtime and actual consumer acceptance owned by root",
+  "feature_red": {
+    "file": "schema-resources-red.txt",
+    "exit": 1
+  },
+  "targeted_green": {
+    "file": "schema-resources-green.txt",
+    "exit": 0,
+    "top_level_passes": 39
+  },
+  "boundary_green": {
+    "file": "schema-resource-boundaries-green.txt",
+    "exit": 0,
+    "test_count": 4
+  },
+  "additional_red_green": [
+    "malformed-definitions",
+    "stale-retention",
+    "snapshot-growth"
+  ],
+  "diff_check": {
+    "command": "git diff --check",
+    "exit": 0
+  },
+  "known_test_fixture_correction": "Initial extended test run timed out during httptest.Server cleanup because the test handler had not drained the request body. Production read returned on time. Handler now drains body and asserts observed upstream cancellation; final test passed.",
+  "uris": [
+    "gptadmin://schemas/active",
+    "gptadmin://schemas/active/all",
+    "gptadmin://schemas/server/<full-enrolled-identity>"
+  ],
+  "limits": {
+    "targets": 128,
+    "snapshot_fetches": 64,
+    "concurrent_fetches": 4,
+    "read_timeout_ms": 8000,
+    "tools_per_server": 4096,
+    "schema_bytes_per_server": 524288,
+    "resource_content_bytes": 2097152,
+    "cache_entries": 128,
+    "cache_bytes": 8388608,
+    "cache_ttl_ms": 60000,
+    "stale_retention_ms": 600000,
+    "failure_ttl_ms": 5000
+  },
+  "source_sha256": {
+    "go-hub/internal/hub/mcp_schema_resources.go": "3cbaaed255f7caa2c814c3b7872759b5b4d9f3d9d44addd1e3576887cfb96a08",
+    "go-hub/internal/hub/mcp_schema_resources_test.go": "6628b59b965dc84c4b0d6131bc5ae9bc759dcd704c67bf5456fe9841f4a27055",
+    "go-hub/internal/hub/child_schema.go": "537f9196777791a8519b63d9db473cd40a06d7d09e7fd0288e9cc6eab4590841",
+    "go-hub/internal/hub/child_schema_direct.go": "0575bd5b307db175086d3a1f667a6a56a170514e0110bdba9db3a226a4449b9a",
+    "go-hub/internal/hub/server.go": "77e8179c4c2abb46de3f1e8a8d100ea87f530a9a3745f0a7d95a6ca20775e411"
+  },
+  "publication": "Not attempted: parent instructed no push or PR after automatic approval rejection."
+}

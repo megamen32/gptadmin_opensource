@@ -1,0 +1,274 @@
+name: Publish verified full release
+
+# Manual full release from an exact, tested public main snapshot.
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful Public Product CI push run for this exact public commit
+        required: true
+        type: string
+      private_source:
+        description: Approved full private Source-Commit recorded in the public snapshot
+        required: true
+        type: string
+
+concurrency:
+  group: gptadmin-public-full-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=2'
+  GOTOOLCHAIN: local
+  NODE_OPTIONS: '--max-old-space-size=1536'
+
+jobs:
+  preflight:
+    name: Verify exact source before the release matrix
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      source: ${{ steps.identity.outputs.source }}
+      version: ${{ steps.identity.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      PRIVATE_SOURCE: ${{ inputs.private_source }}
+    steps:
+      - name: Checkout exact public snapshot
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify public source, CI, Source-Commit and matching Node release
+        id: identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          git fetch --no-tags origin main
+          public_sha="$(git rev-parse HEAD)"
+          test "$public_sha" = "$GITHUB_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$public_sha"
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ && "$PRIVATE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+          mkdir -p .tmp/full-release-node-evidence
+          gh release download "node-v${version}-${public_sha:0:12}" --repo "$GITHUB_REPOSITORY" --dir .tmp/full-release-node-evidence
+          python3 - "$public_sha" "$PRIVATE_SOURCE" "$version" "$CI_RUN_ID" <<'PY'
+          import pathlib, sys
+          from tools.publish_full_release import verify_ci_and_node
+          verify_ci_and_node('megamen32/gptadmin_opensource', sys.argv[1], sys.argv[2],
+                             int(sys.argv[3]), int(sys.argv[4]), pathlib.Path('.tmp/full-release-node-evidence'))
+          PY
+          echo "source=$public_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  platform:
+    name: Release bundles (${{ matrix.pair }})
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pair: linux_amd64
+            cache_fallback: node-linux-amd64
+          - pair: linux_arm64
+            cache_fallback: node-linux-arm64
+          - pair: darwin_amd64
+            cache_fallback: node-darwin-amd64
+          - pair: darwin_arm64
+            cache_fallback: node-darwin-arm64
+          - pair: windows_amd64
+            cache_fallback: node-linux-amd64
+          - pair: windows_arm64
+            cache_fallback: node-linux-amd64
+          - pair: android_amd64
+            cache_fallback: android
+          - pair: android_arm64
+            cache_fallback: android
+    env:
+      PAIR: ${{ matrix.pair }}
+      PUBLIC_SOURCE: ${{ needs.preflight.outputs.source }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Checkout the verified public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Set shared CI cache paths
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+
+      - name: Restore this platform or tested CI compilation cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ runner.temp }}/gptadmin-go-build
+            ${{ runner.temp }}/gptadmin-go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-${{ matrix.cache_fallback }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+
+      - name: Setup Node for the bundled admin UI
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: Locate or install the exact Android NDK
+        if: startsWith(matrix.pair, 'android_')
+        run: |
+          set -euo pipefail
+          ndk_version=27.0.12077973
+          ndk_dir="${ANDROID_HOME:?}/ndk/$ndk_version"
+          compiler_dir="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [[ ! -x "$compiler_dir/x86_64-linux-android24-clang" || ! -x "$compiler_dir/aarch64-linux-android24-clang" ]]; then
+            sdkmanager_path="$(command -v sdkmanager || true)"
+            if [[ -z "$sdkmanager_path" ]]; then
+              sdkmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            fi
+            test -x "$sdkmanager_path"
+            "$sdkmanager_path" --install "ndk;$ndk_version"
+          fi
+          python3 - "$ndk_dir/source.properties" "$ndk_version" <<'PY'
+          import pathlib, sys
+          entries = {}
+          for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              if '=' in line:
+                  key, value = line.split('=', 1)
+                  entries[key.strip()] = value.strip()
+          assert entries.get('Pkg.Revision') == sys.argv[2], 'Android NDK revision differs from the release pin'
+          PY
+          test -x "$compiler_dir/x86_64-linux-android24-clang"
+          test -x "$compiler_dir/aarch64-linux-android24-clang"
+          echo "ANDROID_X86_64_CC=$compiler_dir/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "ANDROID_ARM64_CC=$compiler_dir/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Build both editions for this exact source and platform
+        run: |
+          set -euo pipefail
+          public_sha="$(git rev-parse HEAD)"
+          version="$(tr -d '[:space:]' < VERSION)"
+          test "$public_sha" = "$GITHUB_SHA"
+          test "$public_sha" = "$PUBLIC_SOURCE"
+          test "$version" = "$RELEASE_VERSION"
+          # Local only; the publisher creates the remote tag after all checks.
+          git tag -f "v$version" "$public_sha"
+          TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh release-platform --platform "$PAIR"
+
+      - name: Retain the two source-bound release bundles and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gptadmin-full-${{ matrix.pair }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/gptadmin-*-full.*
+            build/gptadmin-*-client.*
+            build/gptadmin-release-matrix.json
+            build/gptadmin-checksums.txt
+            build/manifest.json
+            build/gptadmin-sbom.spdx.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Verify and publish the complete release
+    needs: [preflight, platform]
+    # Only the exact trusted main may receive a repository write token.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      PRIVATE_SOURCE: ${{ inputs.private_source }}
+      PUBLIC_SOURCE: ${{ needs.preflight.outputs.source }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Checkout the verified public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify public source, CI, Source-Commit and matching Node release
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          git fetch --no-tags origin main
+          public_sha="$(git rev-parse HEAD)"
+          test "$public_sha" = "$GITHUB_SHA"
+          test "$public_sha" = "$PUBLIC_SOURCE"
+          test "$(git rev-parse FETCH_HEAD)" = "$public_sha"
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ && "$PRIVATE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+          test "$version" = "$RELEASE_VERSION"
+          mkdir -p .tmp/full-release-node-evidence
+          gh release download "node-v${version}-${public_sha:0:12}" --repo "$GITHUB_REPOSITORY" --dir .tmp/full-release-node-evidence
+          python3 - "$public_sha" "$PRIVATE_SOURCE" "$version" "$CI_RUN_ID" <<'PY'
+          import pathlib, sys
+          from tools.publish_full_release import verify_ci_and_node
+          verify_ci_and_node('megamen32/gptadmin_opensource', sys.argv[1], sys.argv[2],
+                             int(sys.argv[3]), int(sys.argv[4]), pathlib.Path('.tmp/full-release-node-evidence'))
+          PY
+
+      - name: Download each immutable platform artifact into its own directory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: gptadmin-full-*-${{ github.sha }}-${{ github.run_attempt }}
+          path: .tmp/release-shards
+          merge-multiple: false
+
+      - name: Assemble and verify all 16 exact-source release bundles
+        run: |
+          set -euo pipefail
+          public_sha="$(git rev-parse HEAD)"
+          version="$(tr -d '[:space:]' < VERSION)"
+          git tag -f "v$version" "$public_sha"
+          python3 tools/merge_release_shards.py --shards-dir .tmp/release-shards --output build --source "$public_sha" --version "$version"
+          python3 tools/verify_release_manifest.py verify --root "$GITHUB_WORKSPACE" --manifest "$GITHUB_WORKSPACE/build/manifest.json"
+          python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
+
+      - name: Check the exact release Ubuntu package through its lifecycle
+        run: tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ubuntu-x64-full.tar.gz
+
+      - name: Publish verified assets without changing latest
+        run: |
+          set -euo pipefail
+          python3 tools/publish_full_release.py \
+            --directory build --node-directory .tmp/full-release-node-evidence \
+            --source "$(git rev-parse HEAD)" --private-source "$PRIVATE_SOURCE" \
+            --version "$(tr -d '[:space:]' < VERSION)" --ci-run "$CI_RUN_ID"

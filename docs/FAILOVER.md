@@ -1,0 +1,173 @@
+# Failover and degraded recovery
+
+For read-only runtime, Node updater and independent HAOS controller inspection,
+see [handover_status operator guidance](HANDOVER_STATUS.md). Its local handover
+state does not report or coordinate HAOS promotion.
+
+GPTAdmin is designed so one dead machine does not have to mean a dead control plane. A fallback node can keep a standby hub reachable through the same public tunnel path, so the service keeps living in a degraded mode long enough to inspect logs, reach surviving servers, and repair the primary.
+
+This is not magic multi-master replication. Some fresh in-memory state can be stale or temporarily unavailable while the primary is down. The important part is that GPTAdmin stores the operational trail on disk: queued/background jobs, large stdout/stderr spill files, shellmcp spool files, outbox responses, registry snapshots, failover runtime state, and service logs. That means the system may lose a little immediacy, but recovery work is not blind and most job evidence is not gone forever.
+
+## Roles
+
+| Role | What it does |
+|------|--------------|
+| **Primary hub** | Normal active GPTAdmin hub, admin UI, MCP relay, Action/OpenAPI endpoints, queues and routing. |
+| **Fallback node** | Runs a standby hub or local proxy, watches the public health URL, and can promote itself when the primary stops answering. |
+| **Tunnel** | Public ingress. In an incident it is repointed to the fallback, so clients still have an HTTPS entry point. |
+| **Reclaim path** | When the primary comes back, it sends a signed reclaim/demote request to the active fallback so the fallback becomes a client/standby again. |
+
+## What happens when the primary dies
+
+1. The fallback watchdog checks the primary public health endpoint on an interval.
+2. After the configured failure threshold, the fallback confirms the public URL is still unhealthy.
+3. The fallback keeps its local Hub and reclaim-aware proxy alive, then starts one FRP client per configured endpoint. This is required because modern `frpc` accepts one client server block per process/config.
+4. Existing AI clients and admins continue to reach GPTAdmin through the public URL, but the system is in degraded mode.
+5. Surviving shell/MCP servers reconnect or continue polling. Dead servers are shown as offline/stale and can be repaired from the fallback control plane.
+6. When the primary is healthy again, the primary sends a signed reclaim message. The active fallback demotes and returns to standby/client mode.
+
+## What still works in degraded mode
+
+- Admin UI and health endpoints on the fallback.
+- Shell/MCP operations against servers that are still reachable from the fallback or already connected through long polling.
+- Reading queued/background job state that was persisted to disk on the node handling those jobs.
+- Large command output via spool files instead of losing it in chat context.
+- Outbox-based delivery for queued responses when the transport reconnects.
+- Incident triage: logs, service status, tunnel status, and recovery commands.
+
+## What can be stale or missing temporarily
+
+- Very recent in-memory counters, active request lists, or last-seen data that had not yet been persisted or synced.
+- Running jobs on the machine that died at the exact moment of failure. Their last persisted spool/log state is still useful, but the process itself may need to be re-run.
+- Local-only resources that existed only on the dead server.
+- MCP tools hosted on the dead server until that server is back or another node hosts the same tool.
+
+GPTAdmin treats this as graceful degradation: keep a smaller control plane alive first, then use it to restore the larger one.
+
+## Operator checklist
+
+On the active node:
+
+```bash
+gptadmin urls
+systemctl status gptadmin-hub gptadmin-tunnel-frpc --no-pager
+journalctl -u gptadmin-hub -n 120 --no-pager
+```
+
+On the fallback node, check the watchdog/proxy runtime:
+
+```bash
+ps aux | grep -E 'gptadmin|failover|frpc' | grep -v grep
+curl -fsS http://127.0.0.1:9001/healthz
+curl -fsS http://127.0.0.1:9101/healthz
+```
+
+Then inspect durable state before deleting or restarting aggressively:
+
+```bash
+find /var/lib/gptadmin -maxdepth 4 -type f | sort | tail -100
+find /data/gptadmin-failover -maxdepth 4 -type f | sort | tail -100
+```
+
+Look for spool, outbox, runtime and journal files. They are the recovery trail.
+
+## Current HAOS-style layout
+
+The supported HAOS add-on owns the complete fallback runtime:
+
+```text
+/opt/gptadmin/failover/failover_config.json
+/opt/gptadmin/failover/failover_state.json
+/usr/local/bin/gptadmin_failover_runtime.py
+/usr/local/bin/gptadmin_failover_proxy.py  # 0.0.0.0:9101 -> 127.0.0.1:9001
+/usr/local/bin/gptadmin_failover_watchdog.py
+/usr/local/bin/frpc                     # linux/arm64
+/data/config/frpc-failover-1.toml       # one file/process per FRP endpoint
+/data/config/failover_frpc.pid
+```
+
+The add-on keeps the standby Hub and proxy available even before promotion.
+Its systemd-free runtime runs the watchdog loop, promotes only after
+threshold/confirmation, and accepts signed reclaim when the primary returns.
+The deployment source must provide a real Linux/ARM64 `frpc`; copying the
+primary x86-64 binary silently produces a non-working standby.
+
+If the home ISP blocks the independent FRP server, set `failover.proxy_url`
+to an HTTP CONNECT proxy running on HAOS (for example
+`http://192.168.2.101:3127`). The generated FRPC transport then reaches the
+external FRPS through that proxy while preserving FRP TLS. The proxy and its
+outbound route must survive loss of server-100. Confirm a real FRPS login
+and an authenticated MCP operation through the external server; a promotion
+decision alone does not establish reachable failover. Do not configure an
+endpoint unless its FRPS actually runs there.
+
+The public add-on can read explicitly provisioned `*_mcp_bearer` entries
+from its protected `/data/config/internal-secrets.json`. These are existing
+client credentials, never generated defaults. Provision only the same client
+identity and policy as the primary and verify both successful authorized
+execution and rejection of an unknown bearer after restarting the add-on.
+
+### Preserve both client and executor identities
+
+Reachable TLS and a successful MCP initialize do not prove that the standby
+can execute a command. The standby needs three independent pieces of durable
+state, all inside its existing protected `/data/config` volume:
+
+- `internal-secrets.json`: existing client `codex_mcp_bearer` (or the
+  explicitly provisioned client equivalent) and the existing executor
+  `shellmcp_token`. Never rotate either to make an outage test pass.
+- `mcp_tokens_state.json`: the exact corresponding client principal record,
+  including its digest, role, profile, lifecycle and access mode. Copying a
+  token without its policy must not grant new permissions.
+- `registry_state.json`: the executor identity and its previous approval.
+  The same physical executor can authenticate yet remain `awaiting_approval`
+  on a fresh standby. Match its fingerprint, public key and server ID against
+  the already approved primary record before restoring only that approval
+  through `approve_pending_server`; do not approve other pending devices.
+
+Provision existing protected credentials without printing their values.
+Supervisor options remain the public instance configuration; do not add
+undeclared secret fields to that schema. Read the installed app version and
+the previous update receipt before attempting another update. After changing
+startup credentials, one supported Supervisor restart loads them; keep the
+data volume and inspect every outstanding task before starting a new canary.
+
+The HAOS ShellMCP normally polls its configured public Hub URL. With queue mode
+enabled it has no listener on port 25900; a configured `shell_url` does not
+establish direct connectivity. A valid failover check preserves the poller
+URL and follows its automatic connection through the real recovery ingress.
+Use the existing client bearer to run one harmless command, then read the
+canonical task until its real output and exit status are known. A queued task,
+HTTP 200 or an accepted request is insufficient. A client timeout is UNKNOWN:
+find the existing task rather than resubmitting it. If a restart closes a
+queued task as `hub_restarted_before_dispatch`, that terminal receipt proves
+it was not dispatched; retain it separately from a later deliberate canary.
+
+## Black-box regression coverage
+
+The Docker suite runs in CI and can be run locally without a deployed FRP
+server:
+
+```bash
+docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-container-exit --exit-code-from failover-e2e
+```
+
+It verifies these boundaries separately before testing the combined outage:
+
+- tunnel loss alone does not promote a healthy primary;
+- primary hub loss promotes the fallback through a live tunnel;
+- simultaneous hub and tunnel loss recovers after the tunnel returns;
+- signed primary reclaim removes the fallback route after recovery.
+- rank 1 promotion fences rank 2 through the healthy public endpoint;
+- rank 2 promotes only after its longer threshold when rank 1 is unavailable.
+
+The suite uses real Go hubs, watchdog and proxy processes. Its local ingress
+and FRP-client doubles isolate the repository-owned failover contract from the
+external FRP service. It does not replace the physical HAOS drill: that drill
+must verify `:9001`, `:9101`, one live `frpc` process per configured endpoint,
+the public health route after stopping `server-100`, and signed reclaim after
+the primary returns.
+
+## Design rule
+
+Prefer "alive and degraded" over "perfect and down". During an outage, GPTAdmin should keep enough of itself reachable to answer: what is alive, what died, what jobs were running, where the logs are, and how to restore the primary.

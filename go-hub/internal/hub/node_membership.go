@@ -1,0 +1,2057 @@
+package hub
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"maps"
+	"math"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
+)
+
+// Node mesh membership. One writer owns the authoritative membership state;
+// member nodes hold a replicated view and route peer targets from it. Static
+// GPTADMIN_NODE_PEERS entries remain a bootstrap fallback, never an authority.
+
+const (
+	nodeMembershipSchema    = 1
+	nodeIdentitySchema      = "gptadmin.node-identity/v1"
+	nodeHeartbeatInterval   = 30 * time.Second
+	nodeLeaseTTL            = 90 * time.Second
+	nodeMembershipSyncEvery = 5 * time.Minute
+	nodeGrantDefaultTTL     = 30 * time.Minute
+	nodeGrantMaxTTL         = 24 * time.Hour
+	nodeGrantRetention      = time.Hour
+	// Control envelopes add instruction sets and routing around the bounded
+	// auth bundle; the admission limit grows by exactly this headroom.
+	nodeControlEnvelopeHeadroom = 256 << 10
+	nodeMembershipStateLimit    = 1 << 20
+)
+
+const (
+	nodeStateJoining  = "joining"
+	nodeStateReady    = "ready"
+	nodeStateDraining = "draining"
+	nodeStateOffline  = "offline"
+	nodeStateDisabled = "disabled"
+)
+
+var nodeCapabilities = []string{"ingress", "executor", "replica"}
+
+// nodeIdentity is created once by the lifecycle manager and never regenerated.
+// node_key authenticates this node against the writer's membership endpoints.
+type nodeIdentity struct {
+	Schema     string    `json:"schema"`
+	NodeID     string    `json:"node_id"`
+	NodeKey    string    `json:"node_key"`
+	Created    time.Time `json:"created"`
+	WriterURL  string    `json:"writer_url,omitempty"`
+	WriterID   string    `json:"writer_id,omitempty"`
+	QuorumHubs []string  `json:"quorum_hubs,omitempty"`
+}
+
+const (
+	nodeIdentityTag = "gptadmin.node-identity/v1"
+)
+
+type nodeJoinGrant struct {
+	Name         string    `json:"name"`
+	SecretHash   string    `json:"secret_hash"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Used         bool      `json:"used"`
+	UsedBy       string    `json:"used_by,omitempty"`
+	UsedAt       time.Time `json:"used_at,omitempty"`
+	FRPRelayIPv4 string    `json:"frp_relay_ipv4,omitempty"`
+}
+
+type nodeMember struct {
+	NodeID             string                   `json:"node_id"`
+	KeyHash            string                   `json:"key_hash"`
+	Name               string                   `json:"name"`
+	Capabilities       []string                 `json:"capabilities"`
+	Endpoints          []string                 `json:"endpoints"`
+	ConnectTo          string                   `json:"connect_to,omitempty"`
+	Generation         uint64                   `json:"generation"`
+	State              string                   `json:"state"`
+	LastSeen           time.Time                `json:"last_seen"`
+	LeaseExpires       time.Time                `json:"lease_expires"`
+	Build              string                   `json:"build,omitempty"`
+	SnapshotRev        uint64                   `json:"snapshot_revision,omitempty"`
+	LocalID            string                   `json:"local_id,omitempty"`
+	LocalFingerprint   string                   `json:"local_fingerprint,omitempty"`
+	ExecutorMeta       map[string]any           `json:"executor_meta,omitempty"`
+	ExecutorCatalog    []nodeExecutorDescriptor `json:"executor_catalog,omitempty"`
+	ExecutorCatalogSet bool                     `json:"executor_catalog_set,omitempty"`
+	CatalogFresh       bool                     `json:"-"`
+	OutboundWS         bool                     `json:"outbound_ws,omitempty"`
+	QuorumQueue        bool                     `json:"quorum_queue,omitempty"`
+	FRPRelayIPv4       string                   `json:"frp_relay_ipv4,omitempty"`
+}
+
+type nodeMembershipState struct {
+	FRPSpaceWebPool *frpSpaceWebPool          `json:"frp_spaceweb_pool,omitempty"`
+	Schema          uint64                    `json:"schema"`
+	Revision        uint64                    `json:"revision"`
+	Epoch           uint64                    `json:"epoch"`
+	WriterID        string                    `json:"writer_id"`
+	ControlSourceID string                    `json:"control_source_id,omitempty"`
+	WriterURL       string                    `json:"writer_url,omitempty"`
+	UpdatedAt       time.Time                 `json:"updated_at"`
+	Grants          map[string]*nodeJoinGrant `json:"grants,omitempty"`
+	Nodes           map[string]*nodeMember    `json:"nodes"`
+}
+
+// nodeMembershipView is the member-side replica used to build routes.
+type nodeMembershipView struct {
+	Schema          uint64           `json:"schema"`
+	Revision        uint64           `json:"revision"`
+	SHA256          string           `json:"sha256"`
+	FetchedAt       time.Time        `json:"fetched_at"`
+	WriterID        string           `json:"writer_id"`
+	FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool,omitempty"`
+	Nodes           []*nodeMember    `json:"nodes"`
+}
+
+// controlSnapshot is the minimal bootstrap payload for a member: the bounded
+// auth bundle plus the named instruction sets profiles validate against.
+type controlSnapshot struct {
+	Revision        uint64                `json:"revision"`
+	Generation      uint64                `json:"generation"`
+	SHA256          string                `json:"sha256"`
+	Bundle          authSnapshot          `json:"bundle"`
+	InstructionSets *instructionSetsState `json:"instruction_sets,omitempty"`
+}
+
+// nodePeerRouteLocked resolves a peer route: membership is authoritative,
+// static GPTADMIN_NODE_PEERS entries are only the bootstrap fallback. The
+// process's pinned local executor always wins before this is consulted.
+func (s *Server) nodePeerRouteLocked(target string) (nodePeerRoute, bool) {
+	if s.membershipRoutes != nil {
+		if route, ok := s.membershipRoutes[target]; ok {
+			return route, true
+		}
+	}
+	route, ok := s.nodePeers[target]
+	return route, ok
+}
+
+func hashNodeSecret(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) membershipDir() string {
+	return filepath.Join(s.cfg.ConfigDir, "membership")
+}
+
+func (s *Server) membershipStatePath() string {
+	return filepath.Join(s.membershipDir(), "membership.json")
+}
+
+func (s *Server) memberViewPath() string {
+	return filepath.Join(s.membershipDir(), "member-view.json")
+}
+
+func (s *Server) nodeIdentityPath() string {
+	if s.cfg.NodeIdentityFile != "" {
+		return s.cfg.NodeIdentityFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "node-identity.json")
+}
+
+func loadNodeIdentityFile(path string) *nodeIdentity {
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("node identity unreadable path=%s err=%v", path, err)
+		}
+		return nil
+	}
+	var identity nodeIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		log.Printf("node identity malformed path=%s err=%v", path, err)
+		return nil
+	}
+	if identity.NodeID == "" || identity.NodeKey == "" {
+		log.Printf("node identity incomplete path=%s", path)
+		return nil
+	}
+	return &identity
+}
+
+func saveNodeIdentityFile(path string, identity nodeIdentity) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(identity, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func loadNodeMembershipState(path string) (*nodeMembershipState, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &nodeMembershipState{Schema: nodeMembershipSchema, Revision: 1,
+				Grants: map[string]*nodeJoinGrant{}, Nodes: map[string]*nodeMember{}}, nil
+		}
+		return nil, err
+	}
+	var state nodeMembershipState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, err
+	}
+	if state.Schema != nodeMembershipSchema || state.Nodes == nil {
+		return nil, errors.New("invalid membership schema")
+	}
+	if state.Grants == nil {
+		state.Grants = map[string]*nodeJoinGrant{}
+	}
+	for id, member := range state.Nodes {
+		if member == nil || member.NodeID != id {
+			return nil, fmt.Errorf("invalid membership node %q", id)
+		}
+	}
+	return &state, nil
+}
+
+func loadNodeMembershipView(path string) *nodeMembershipView {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var view nodeMembershipView
+	if json.Unmarshal(raw, &view) != nil || view.Schema != nodeMembershipSchema || view.Nodes == nil {
+		log.Printf("membership view malformed path=%s", path)
+		return nil
+	}
+	return &view
+}
+
+func (s *Server) persistMembershipStateLocked(state *nodeMembershipState) error {
+	if err := s.commitQuorumAuthorityState("membership", "writer", membershipQuorumAuthorityState(state)); err != nil {
+		return fmt.Errorf("commit quorum membership state: %w", err)
+	}
+	return s.writeMembershipStateLocked(state)
+}
+
+func (s *Server) writeMembershipStateLocked(state *nodeMembershipState) error {
+	state.UpdatedAt = s.now()
+	if err := os.MkdirAll(s.membershipDir(), 0o750); err != nil {
+		return err
+	}
+	return writeAccessStateJSON(s.membershipStatePath(), state, nodeMembershipStateLimit)
+}
+
+func membershipQuorumAuthorityState(state *nodeMembershipState) *nodeMembershipState {
+	if state == nil {
+		return nil
+	}
+	copyState := *state
+	copyState.UpdatedAt = time.Time{}
+	copyState.Grants = make(map[string]*nodeJoinGrant, len(state.Grants))
+	for name, grant := range state.Grants {
+		if grant == nil {
+			copyState.Grants[name] = nil
+			continue
+		}
+		copyGrant := *grant
+		copyState.Grants[name] = &copyGrant
+	}
+	copyState.Nodes = make(map[string]*nodeMember, len(state.Nodes))
+	for id, member := range state.Nodes {
+		if member == nil {
+			copyState.Nodes[id] = nil
+			continue
+		}
+		copyMember := *member
+		copyMember.Endpoints = append([]string(nil), member.Endpoints...)
+		copyMember.Capabilities = append([]string(nil), member.Capabilities...)
+		copyMember.LastSeen = time.Time{}
+		copyMember.LeaseExpires = time.Time{}
+		copyMember.Build = ""
+		copyMember.SnapshotRev = 0
+		copyState.Nodes[id] = &copyMember
+	}
+	return &copyState
+}
+
+// membershipSnapshotJSON is the wire form members replicate; grants never leave
+// the writer.
+func membershipSnapshotJSON(state *nodeMembershipState) ([]byte, string) {
+	ids := make([]string, 0, len(state.Nodes))
+	for id := range state.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	nodes := make([]*nodeMember, 0, len(ids))
+	for _, id := range ids {
+		clone := *state.Nodes[id]
+		nodes = append(nodes, &clone)
+	}
+	payload := map[string]any{
+		"schema":            state.Schema,
+		"revision":          state.Revision,
+		"epoch":             state.Epoch,
+		"writer_id":         state.WriterID,
+		"writer_url":        state.WriterURL,
+		"frp_spaceweb_pool": state.FRPSpaceWebPool,
+		"nodes":             nodes,
+	}
+	raw, _ := json.Marshal(payload)
+	return raw, hashNodeSecret(string(raw))
+}
+
+func (s *Server) initNodeMembership() {
+	s.nodeIdentity = loadNodeIdentityFile(s.nodeIdentityPath())
+	if s.nodeIdentity != nil && s.cfg.AuthMode == "reader" && s.cfg.QuorumConfigFile == "" {
+		s.memberQuorumHubs.Set(hubroute.Parse(strings.Join(s.nodeIdentity.QuorumHubs, ",")))
+	}
+	if s.cfg.AuthMode == "writer" {
+		state, err := loadNodeMembershipState(s.membershipStatePath())
+		if err != nil {
+			log.Printf("membership state unavailable path=%s err=%v; join/grant disabled", s.membershipStatePath(), err)
+			s.membershipLoadErr = err
+		} else {
+			s.membership = state
+		}
+	} else {
+		s.membershipView = loadNodeMembershipView(s.memberViewPath())
+	}
+	s.rebuildMembershipRoutes()
+}
+
+// ensureWriterSelfEntry registers the writer itself as a member so every view
+// describes the whole mesh. Called once the local executor identity is known.
+func (s *Server) ensureWriterSelfEntry() {
+	if s.membership == nil {
+		return
+	}
+	s.mu.Lock()
+	localNames := make([]string, 0, len(s.localExecutors))
+	for name := range s.localExecutors {
+		localNames = append(localNames, name)
+	}
+	s.mu.Unlock()
+	if len(localNames) != 1 {
+		return
+	}
+	now := s.now()
+	s.membershipMu.Lock()
+	if s.membership == nil {
+		s.membershipMu.Unlock()
+		return
+	}
+	if s.membership.WriterID == "" {
+		// The writer identity is the local executor server_id once auth
+		// continuity is initialized; it never changes for this state file.
+		s.membership.WriterID = s.authLocalID
+		if s.membership.WriterID == "" {
+			s.membershipMu.Unlock()
+			return
+		}
+	}
+	self, ok := s.membership.Nodes[s.membership.WriterID]
+	if !ok {
+		self = &nodeMember{NodeID: s.membership.WriterID, Name: "shell:" + localNames[0],
+			Capabilities: append([]string(nil), nodeCapabilities...), State: nodeStateReady}
+		if s.cfg.NodePublicURL != "" {
+			self.Endpoints = []string{s.cfg.NodePublicURL}
+		}
+		s.membership.Nodes[self.NodeID] = self
+	}
+	self.Name = localNames[0]
+	if s.cfg.NodePublicURL != "" {
+		self.Endpoints = []string{s.cfg.NodePublicURL}
+	}
+	self.LastSeen = now
+	self.LeaseExpires = now.Add(nodeLeaseTTL)
+	self.Build = GitCommit
+	err := s.persistMembershipStateLocked(s.membership)
+	s.membershipMu.Unlock()
+	if err != nil {
+		log.Printf("membership self entry persist failed: %v", err)
+	}
+	s.rebuildMembershipRoutes()
+}
+
+// rebuildMembershipRoutes derives peer routes from the authoritative state
+// (writer) or the replicated view (member). Leases gate dispatch without
+// deleting identity or membership. On a member, the heartbeat-supplied writer
+// URL is the authoritative route to the writer's own shell target even when
+// the view's writer entry lacks endpoints, because membership never requires
+// the writer to advertise its origin (it does so via heartbeat).
+func (s *Server) rebuildMembershipRoutes() {
+	now := s.now()
+	var nodes []*nodeMember
+	s.membershipMu.Lock()
+	writer := s.membership != nil
+	if writer {
+		for _, member := range s.membership.Nodes {
+			if member != nil {
+				copy := *member
+				nodes = append(nodes, &copy)
+			}
+		}
+	} else if s.membershipView != nil {
+		nodes = s.membershipView.Nodes
+	}
+	heartbeatWriterID, heartbeatWriterURL := s.writerHeartbeatContextLocked()
+	s.membershipMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	routes := map[string]nodePeerRoute{}
+	routeMeta := map[string]map[string]any{}
+	for _, member := range nodes {
+		if member == nil || member.NodeID == s.authLocalID || member.NodeID == s.selfNodeIDLocked() {
+			continue
+		}
+		if member.State != nodeStateReady || !member.LeaseExpires.After(now) {
+			continue
+		}
+		if s.localExecutors[member.Name] != nil {
+			continue
+		}
+		if len(member.Endpoints) == 0 && !(s.nodeIdentity != nil && s.nodeIdentity.WriterID == member.NodeID && heartbeatWriterURL != "") {
+			continue
+		}
+		endpoint := heartbeatWriterURL
+		if len(member.Endpoints) > 0 {
+			endpoint = member.Endpoints[0]
+		}
+		routes[member.Name] = nodePeerRoute{NodeID: member.NodeID, URL: endpoint, ConnectTo: member.ConnectTo, OutboundWS: writer && member.OutboundWS,
+			LocalID: member.LocalID, LocalFingerprint: member.LocalFingerprint, CatalogFresh: member.CatalogFresh}
+		if len(member.ExecutorMeta) > 0 || member.ExecutorCatalogSet {
+			meta := cloneMap(member.ExecutorMeta)
+			if member.ExecutorCatalogSet {
+				// A route-only catalog is accepted only from the authenticated
+				// membership heartbeat. Keep it hidden after restart or an
+				// incomplete heartbeat until a fresh complete catalog arrives.
+				meta["membership_catalog_status"] = "incomplete"
+				delete(meta, "mcp_agents")
+				if member.CatalogFresh {
+					meta["mcp_agents"] = nodeExecutorCatalogMaps(member.ExecutorCatalog)
+					meta["membership_catalog_status"] = "complete"
+				}
+			}
+			routeMeta[member.Name] = meta
+		}
+	}
+	_ = heartbeatWriterID
+	s.membershipRoutes = routes
+	s.membershipRouteMeta = routeMeta
+}
+
+// writerHeartbeatContextLocked returns the writer identity and URL the local
+// node most recently learned from membership heartbeat responses, under
+// membershipMu.
+func (s *Server) writerHeartbeatContextLocked() (string, string) {
+	if s.nodeIdentity == nil {
+		return "", ""
+	}
+	return s.nodeIdentity.WriterID, s.nodeIdentity.WriterURL
+}
+
+func (s *Server) selfNodeIDLocked() string {
+	if s.nodeIdentity != nil {
+		return s.nodeIdentity.NodeID
+	}
+	return ""
+}
+
+func validateNodeMemberName(name string) error {
+	alias := strings.TrimPrefix(name, "shell:")
+	if !strings.HasPrefix(name, "shell:") || alias == "" || alias != canonicalShellQueueName(alias) || strings.ContainsAny(alias, "/\\") {
+		return fmt.Errorf("node name must be a canonical shell:<name> target")
+	}
+	return nil
+}
+
+func validateNodeEndpointURL(origin string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		(u.Path != "" && u.Path != "/") || u.Opaque != "" {
+		return "", errors.New("endpoint must be an http(s) origin without credentials, path, query or fragment")
+	}
+	return strings.TrimSuffix(strings.TrimSpace(origin), "/"), nil
+}
+
+func normalizeNodeCapabilities(raw []string) []string {
+	allowed := map[string]bool{}
+	for _, capability := range nodeCapabilities {
+		allowed[capability] = true
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(nodeCapabilities))
+	for _, capability := range raw {
+		capability = strings.TrimSpace(strings.ToLower(capability))
+		if allowed[capability] && !seen[capability] {
+			seen[capability] = true
+			out = append(out, capability)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), nodeCapabilities...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// nodeMemberAuth resolves the bearer against stored node key hashes. It never
+// accepts owner credentials: member endpoints are a separate authority class.
+func (s *Server) nodeMemberAuth(r *http.Request) *nodeMember {
+	bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if bearer == "" {
+		return nil
+	}
+	digest := hashNodeSecret(bearer)
+	s.membershipMu.Lock()
+	defer s.membershipMu.Unlock()
+	if s.membership == nil {
+		return nil
+	}
+	for _, member := range s.membership.Nodes {
+		if member != nil && member.KeyHash != "" && member.KeyHash == digest {
+			clone := *member
+			return &clone
+		}
+	}
+	return nil
+}
+
+func (s *Server) membershipModeLocked() string {
+	if s.membership != nil {
+		return "writer"
+	}
+	if s.nodeIdentity != nil {
+		return "member"
+	}
+	return "standalone"
+}
+
+// meshSummaryLocked renders the mesh view for read-only tool output. mode
+// names the topology this process runs: "writer" (central membership hub),
+// "member" (replicated view from the writer), or "standalone" (static peers
+// only, no central hub). Static peers and live member connections are always
+// visible so the operator can see which topology is active and where every
+// route comes from. Targets keep their owner node_id, state and dispatch
+// readiness visible.
+func (s *Server) meshSummaryLocked() map[string]any {
+	now := s.now()
+	mode := s.membershipModeLocked()
+	summary := map[string]any{
+		"mode":             mode,
+		"enabled":          mode != "standalone",
+		"static_peers":     staticNodePeersSummary(s.nodePeers),
+		"live_connections": s.nodeConns.names(),
+	}
+	var nodes []*nodeMemberListEntry
+	var revision uint64
+	var writerID string
+	s.membershipMu.Lock()
+	if s.membership != nil {
+		revision, writerID = s.membership.Revision, s.membership.WriterID
+		for _, member := range s.membership.Nodes {
+			clone := *member
+			clone.KeyHash = ""
+			nodes = append(nodes, &nodeMemberListEntry{nodeMember: clone,
+				RoutingReady: s.memberRoutingReady(member, now)})
+		}
+	} else if s.membershipView != nil {
+		revision, writerID = s.membershipView.Revision, s.membershipView.WriterID
+		for _, member := range s.membershipView.Nodes {
+			clone := *member
+			clone.KeyHash = ""
+			nodes = append(nodes, &nodeMemberListEntry{nodeMember: clone,
+				RoutingReady: s.memberRoutingReady(member, now)})
+		}
+	}
+	s.membershipMu.Unlock()
+	if nodes == nil {
+		return summary
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+	summary["revision"] = revision
+	summary["writer_id"] = writerID
+	summary["nodes"] = nodes
+	return summary
+}
+
+// staticNodePeersSummary exposes the operator-configured bootstrap routes;
+// routes carry no secrets, only origins and the optional physical IP pin.
+func staticNodePeersSummary(peers map[string]nodePeerRoute) map[string]nodePeerRoute {
+	out := make(map[string]nodePeerRoute, len(peers))
+	for target, route := range peers {
+		out[target] = route
+	}
+	return out
+}
+
+func (s *Server) nodeMembershipHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	switch strings.TrimPrefix(r.URL.Path, "/admin/api/nodes") {
+	case "", "/":
+		s.requireCtl(s.nodeMembershipList)(w, r)
+	case "/grant":
+		s.requireCtl(s.nodeMembershipGrant)(w, r)
+	case "/join":
+		s.nodeMembershipJoin(w, r)
+	case "/heartbeat":
+		s.nodeMembershipHeartbeat(w, r)
+	case "/connect":
+		s.nodeConnectHTTP(w, r)
+	case "/membership":
+		s.nodeMembershipGet(w, r)
+	case "/control-snapshot":
+		s.nodeMembershipControlSnapshot(w, r)
+	case "/bearer-admission":
+		s.nodeBearerAdmissionHTTP(w, r)
+	case "/secret-resolve":
+		s.nodeSecretResolveHTTP(w, r)
+	case "/disable":
+		s.requireCtl(func(w http.ResponseWriter, r *http.Request) { s.nodeMembershipSetState(w, r, nodeStateDisabled) })(w, r)
+	case "/enable":
+		s.requireCtl(func(w http.ResponseWriter, r *http.Request) { s.nodeMembershipSetState(w, r, nodeStateReady) })(w, r)
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown nodes endpoint"})
+	}
+}
+
+type nodeMemberListEntry struct {
+	nodeMember
+	RoutingReady bool `json:"routing_ready"`
+}
+
+// The writer can distinguish an enrolled WS member's lease from an active
+// transport. In quorum its executor polls the leader independently of WS.
+func (s *Server) memberRoutingReady(member *nodeMember, now time.Time) bool {
+	if member.State != nodeStateReady || !member.LeaseExpires.After(now) {
+		return false
+	}
+	if s.membership != nil && s.quorumNode == nil && member.OutboundWS && member.NodeID != s.membership.WriterID {
+		return s.nodeConns.get(member.Name) != nil
+	}
+	return len(member.Endpoints) > 0
+}
+
+func (s *Server) nodeMembershipList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "GET required"})
+		return
+	}
+	now := s.now()
+	s.membershipMu.Lock()
+	var revision uint64
+	var writerID, writerURL string
+	entries := []*nodeMemberListEntry{}
+	if s.membership != nil {
+		revision, writerID, writerURL = s.membership.Revision, s.membership.WriterID, s.membership.WriterURL
+		for _, member := range s.membership.Nodes {
+			clone := *member
+			clone.KeyHash = ""
+			entries = append(entries, &nodeMemberListEntry{nodeMember: clone,
+				RoutingReady: s.memberRoutingReady(member, now)})
+		}
+	} else if s.membershipView != nil {
+		revision, writerID = s.membershipView.Revision, s.membershipView.WriterID
+		for _, member := range s.membershipView.Nodes {
+			clone := *member
+			clone.KeyHash = ""
+			entries = append(entries, &nodeMemberListEntry{nodeMember: clone,
+				RoutingReady: s.memberRoutingReady(member, now)})
+		}
+	}
+	s.membershipMu.Unlock()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].NodeID < entries[j].NodeID })
+	writeJSON(w, http.StatusOK, map[string]any{
+		"revision": revision, "writer_id": writerID, "writer_url": writerURL, "nodes": entries,
+	})
+}
+
+func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "POST required"})
+		return
+	}
+	// requireCtl already enforced the owner credential class; grant issuing
+	// stays behind the same admin gate as every other owner mutation.
+	if s.membershipLoadErr != nil || s.membership == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "membership store unavailable"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+	if err != nil || len(raw) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "grant request body required"})
+		return
+	}
+	var request struct {
+		Name            string           `json:"name"`
+		TTLMinutes      int              `json:"ttl_minutes"`
+		FRPRelayIPv4    string           `json:"frp_relay_ipv4"`
+		FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool"`
+	}
+	if json.Unmarshal(raw, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "grant request must be JSON"})
+		return
+	}
+	if err := validateNodeMemberName(request.Name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if request.FRPRelayIPv4 != "" && !validFRPRelayIPv4(request.FRPRelayIPv4) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "frp_relay_ipv4 must be a unicast IPv4 address"})
+		return
+	}
+	if p := request.FRPSpaceWebPool; p != nil && (request.FRPRelayIPv4 == "" || !p.valid()) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "a SpaceWeb pool requires an approved relay and one DNS name inside its zone"})
+		return
+	}
+	ttl := nodeGrantDefaultTTL
+	if request.TTLMinutes > 0 {
+		ttl = time.Duration(request.TTLMinutes) * time.Minute
+	}
+	if ttl > nodeGrantMaxTTL {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "grant ttl exceeds the maximum"})
+		return
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "grant generation failed"})
+		return
+	}
+	now := s.now()
+	grant := &nodeJoinGrant{Name: request.Name, SecretHash: hashNodeSecret(hex.EncodeToString(secret)),
+		IssuedAt: now, ExpiresAt: now.Add(ttl), FRPRelayIPv4: request.FRPRelayIPv4}
+	s.membershipMu.Lock()
+	next := *s.membership
+	if p := request.FRPSpaceWebPool; p != nil {
+		if next.FRPSpaceWebPool != nil && *next.FRPSpaceWebPool != *p {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "the cluster already has a different approved FRP DNS pool"})
+			return
+		}
+		next.FRPSpaceWebPool = p
+	}
+	next.Grants = maps.Clone(s.membership.Grants)
+	next.Grants[grant.SecretHash] = grant
+	for hash, existing := range next.Grants {
+		if existing.ExpiresAt.Add(nodeGrantRetention).Before(now) {
+			delete(next.Grants, hash)
+		}
+	}
+	if err := s.persistMembershipStateLocked(&next); err != nil {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "grant persistence failed"})
+		return
+	}
+	s.membership = &next
+	s.membershipMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"grant": hex.EncodeToString(secret), "name": grant.Name,
+		"expires_at": grant.ExpiresAt.UTC().Format(time.RFC3339)})
+}
+
+// nodeJoinBuild mirrors the package manifest summary a joining node carries.
+type nodeJoinBuild struct {
+	GitCommit    string `json:"git_commit"`
+	BuildVersion any    `json:"build_version"`
+}
+
+type nodeJoinRequest struct {
+	NodeID       string        `json:"node_id"`
+	NodeKey      string        `json:"node_key"`
+	Name         string        `json:"name"`
+	Endpoints    []string      `json:"endpoints"`
+	ConnectTo    string        `json:"connect_to"`
+	Capabilities []string      `json:"capabilities"`
+	Build        nodeJoinBuild `json:"build"`
+	LocalID      string        `json:"local_id"`
+}
+
+func (s *Server) writerRedirect(w http.ResponseWriter, r *http.Request) bool {
+	if s.membership != nil {
+		return false
+	}
+	payload := map[string]any{"detail": "join and membership writes require the membership writer"}
+	if s.nodeIdentity != nil && s.nodeIdentity.WriterURL != "" {
+		payload["writer_url"] = s.nodeIdentity.WriterURL
+	} else if s.membershipView != nil && s.membershipView.WriterID != "" {
+		payload["writer_id"] = s.membershipView.WriterID
+	}
+	writeJSON(w, http.StatusConflict, payload)
+	return true
+}
+
+func (s *Server) requestOrigin(r *http.Request) string {
+	if s.cfg.NodePublicURL != "" {
+		return s.cfg.NodePublicURL
+	}
+	scheme := "https"
+	if r.TLS == nil {
+		scheme = "http"
+	}
+	return scheme + "://" + r.Host
+}
+
+func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "POST required"})
+		return
+	}
+	if s.writerRedirect(w, r) {
+		return
+	}
+	if s.membershipLoadErr != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "membership store unavailable"})
+		return
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if bearer == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "join grant required"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<12))
+	if err != nil || len(raw) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "join body required"})
+		return
+	}
+	var request nodeJoinRequest
+	if json.Unmarshal(raw, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "join body must be JSON"})
+		return
+	}
+	now := s.now()
+	if err := validateNodeMemberName(request.Name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if len(request.NodeID) < 16 || len(request.NodeID) > 64 || strings.TrimLeft(request.NodeID, "0123456789abcdef") != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id must be 16-64 hex characters"})
+		return
+	}
+	if len(request.NodeKey) < 32 || len(request.NodeKey)%2 != 0 || strings.TrimLeft(request.NodeKey, "0123456789abcdef") != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_key must be an even hex string of at least 32 characters"})
+		return
+	}
+	endpoints := make([]string, 0, len(request.Endpoints))
+	for _, origin := range request.Endpoints {
+		normalized, err := validateNodeEndpointURL(origin)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+		endpoints = append(endpoints, normalized)
+	}
+	connectTo := strings.TrimSpace(request.ConnectTo)
+	if connectTo != "" && net.ParseIP(connectTo) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "connect_to must be a literal IP"})
+		return
+	}
+	s.membershipMu.Lock()
+	grant, ok := s.membership.Grants[hashNodeSecret(bearer)]
+	if !ok || (grant.Used && (grant.FRPRelayIPv4 == "" || grant.UsedBy != request.NodeID)) || !now.Before(grant.ExpiresAt) {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "join grant is invalid, expired or already used"})
+		return
+	}
+	if grant.Name != request.Name {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "join grant was issued for a different node name"})
+		return
+	}
+	for _, member := range s.membership.Nodes {
+		if member.NodeID == request.NodeID {
+			continue
+		}
+		if member.State == nodeStateDisabled {
+			continue
+		}
+		if member.Name == request.Name {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "node name already belongs to another member"})
+			return
+		}
+	}
+	if s.authLocalID != "" && request.NodeID == s.authLocalID {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "node_id collides with the writer identity"})
+		return
+	}
+	keyHash := hashNodeSecret(request.NodeKey)
+	previous := s.membership.Nodes[request.NodeID]
+	if previous != nil && previous.KeyHash != keyHash {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node identity differs from the enrolled member"})
+		return
+	}
+	member := &nodeMember{NodeID: request.NodeID, KeyHash: keyHash, Name: request.Name,
+		Capabilities: normalizeNodeCapabilities(request.Capabilities), Endpoints: endpoints,
+		ConnectTo: connectTo, State: nodeStateJoining, LastSeen: now, LeaseExpires: now.Add(nodeLeaseTTL),
+		Build: strings.TrimSpace(request.Build.GitCommit), LocalID: strings.TrimSpace(request.LocalID)}
+	if grant.FRPRelayIPv4 != "" {
+		s.finishFRPRelayJoin(w, r, grant, member, previous, now)
+		return
+	}
+	if previous != nil {
+		member.Generation = previous.Generation + 1
+		member.LocalFingerprint = previous.LocalFingerprint
+		member.FRPRelayIPv4 = previous.FRPRelayIPv4
+	} else {
+		member.Generation = 1
+	}
+	s.membership.Nodes[request.NodeID] = member
+	grant.Used = true
+	grant.UsedBy = request.NodeID
+	grant.UsedAt = now
+	s.membership.Revision++
+	if s.membership.WriterURL == "" {
+		s.membership.WriterURL = s.requestOrigin(r)
+	}
+	writerID, writerURL := s.membership.WriterID, s.membership.WriterURL
+	revision := s.membership.Revision
+	var persist error
+	if err := s.persistMembershipStateLocked(s.membership); err != nil {
+		persist = err
+	}
+	s.membershipMu.Unlock()
+	if persist != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "membership persistence failed"})
+		return
+	}
+	s.rebuildMembershipRoutes()
+	s.writeNodeJoinResponse(w, member, writerID, writerURL, revision)
+}
+
+func (s *Server) writeNodeJoinResponse(w http.ResponseWriter, member *nodeMember, writerID, writerURL string, revision uint64) {
+	s.membershipMu.Lock()
+	var pool *frpSpaceWebPool
+	if s.membership != nil && s.membership.FRPSpaceWebPool != nil {
+		copyPool := *s.membership.FRPSpaceWebPool
+		pool = &copyPool
+	}
+	s.membershipMu.Unlock()
+	response := map[string]any{"node_id": member.NodeID, "name": member.Name,
+		"state": member.State, "generation": member.Generation, "membership_revision": revision,
+		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL,
+		"auth_generation": s.writerAuthGeneration()}
+	if pool != nil {
+		response["frp_spaceweb_pool"] = pool
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) writerAuthGeneration() uint64 {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	if !s.authInitialized {
+		return 0
+	}
+	return s.authState.Generation
+}
+
+func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "POST required"})
+		return
+	}
+	if s.writerRedirect(w, r) {
+		return
+	}
+	member := s.nodeMemberAuth(r)
+	if member == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "node credential required"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, nodeHeartbeatBodyLimit+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body required"})
+		return
+	}
+	if len(raw) > nodeHeartbeatBodyLimit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "heartbeat body limit exceeded"})
+		return
+	}
+	var request struct {
+		Revision              uint64          `json:"revision"`
+		State                 string          `json:"state"`
+		Build                 string          `json:"build"`
+		StorageOK             bool            `json:"storage_ok"`
+		SnapshotRev           uint64          `json:"snapshot_revision"`
+		ExecutorCatalog       json.RawMessage `json:"executor_catalog"`
+		ExecutorCatalogStatus string          `json:"executor_catalog_status"`
+		OutboundWS            bool            `json:"outbound_ws"`
+		QuorumQueue           bool            `json:"quorum_queue"`
+		Endpoint              string          `json:"endpoint,omitempty"`
+		LocalID               string          `json:"local_id,omitempty"`
+		LocalName             string          `json:"local_name,omitempty"`
+		LocalFingerprint      string          `json:"local_fingerprint,omitempty"`
+		ExecutorMeta          map[string]any  `json:"executor_meta,omitempty"`
+	}
+	if len(raw) > 0 && json.Unmarshal(raw, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body must be JSON"})
+		return
+	}
+	if request.ExecutorCatalogStatus != "" && request.ExecutorCatalogStatus != "complete" && request.ExecutorCatalogStatus != "incomplete" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid executor catalog status"})
+		return
+	}
+	if request.ExecutorCatalogStatus == "incomplete" && request.ExecutorCatalog != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "incomplete executor catalog cannot replace descriptors"})
+		return
+	}
+	catalog, catalogErr := decodeNodeExecutorCatalog(request.ExecutorCatalog)
+	if catalogErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": catalogErr.Error()})
+		return
+	}
+	executorMeta, metaErr := validateNodeExecutorMeta(request.ExecutorMeta)
+	if metaErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": metaErr.Error()})
+		return
+	}
+	reported := strings.TrimSpace(request.State)
+	if reported != nodeStateJoining && reported != nodeStateReady && reported != nodeStateDraining {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat state must be joining, ready or draining"})
+		return
+	}
+	// A legacy shell registry entry is authoritative for its own approval.
+	// The member credential alone cannot assert a different shell identity.
+	legacyIdentityApproved := false
+	legacyFingerprint := ""
+	if request.LocalID != "" {
+		s.mu.Lock()
+		old := s.agents[request.LocalName]
+		legacyIdentityApproved = old != nil && old.Kind == "virtual_shell" &&
+			truthy(old.Meta["approved"]) && firstString(old.Meta, "server_id") == request.LocalID
+		if legacyIdentityApproved {
+			legacyFingerprint = firstString(old.Meta, "fingerprint")
+		}
+		s.mu.Unlock()
+	}
+	writerGeneration := s.writerAuthGeneration()
+	now := s.now()
+	s.membershipMu.Lock()
+	current := s.membership.Nodes[member.NodeID]
+	if current == nil || current.State == nodeStateDisabled || current.KeyHash != member.KeyHash || current.Name != member.Name {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node is disabled"})
+		return
+	}
+	if request.LocalID != "" {
+		if len(request.LocalID) > 128 || request.LocalName != current.Name ||
+			(current.LocalID != "" && current.LocalID != request.LocalID) {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor identity not approved"})
+			return
+		}
+	}
+	// Only a credential bound to the owner-enrolled local ID may pin its
+	// fingerprint. Generic enrollment still permits liveness, but its unapproved
+	// executor metadata must neither be pinned nor exposed as a trusted alias.
+	// A legacy registry pin additionally constrains an authorized assertion.
+	// Once pinned, a conflicting fingerprint is forbidden even when the
+	// heartbeat omits its optional local ID. Omitted fingerprints remain valid
+	// for older members and never clear an established pin.
+	if request.LocalFingerprint != "" && current.LocalFingerprint != "" && current.LocalFingerprint != request.LocalFingerprint {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor fingerprint not approved"})
+		return
+	}
+	fingerprintAuthorized := request.LocalID != "" && (current.LocalID != "" || legacyIdentityApproved)
+	if fp := request.LocalFingerprint; fp != "" && fingerprintAuthorized {
+		if len(fp) > 128 || strings.TrimSpace(fp) != fp || strings.ContainsAny(fp, "\x00\r\n") ||
+			(legacyFingerprint != "" && legacyFingerprint != fp) {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor fingerprint not approved"})
+			return
+		}
+	}
+	next := reported
+	if current.State == nodeStateJoining && reported == nodeStateReady {
+		// The member declares it has the control snapshot applied locally;
+		// only accept the transition when the writer can verify it.
+		if writerGeneration == 0 || request.SnapshotRev < writerGeneration {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "control snapshot not applied locally yet"})
+			return
+		}
+	} else if reported == nodeStateJoining && request.SnapshotRev >= writerGeneration && writerGeneration > 0 {
+		// Same transition from the member's own joining heartbeat.
+		next = nodeStateReady
+	}
+	changed := false
+	if current.QuorumQueue != request.QuorumQueue {
+		current.QuorumQueue = request.QuorumQueue
+		changed = true
+	}
+	if current.OutboundWS != request.OutboundWS {
+		current.OutboundWS = request.OutboundWS
+		changed = true
+	}
+	if request.LocalID != "" && current.LocalID == "" && legacyIdentityApproved {
+		// New members without a legacy shell remain enrolled, but their
+		// unverified local identity must not refresh an old shell registration.
+		current.LocalID = request.LocalID
+		changed = true
+	}
+	if request.Endpoint != "" {
+		newEndpoint, err := validateNodeEndpointURL(request.Endpoint)
+		if err != nil {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid member endpoint"})
+			return
+		}
+		if len(current.Endpoints) != 1 {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "member endpoint change requires a pinned origin"})
+			return
+		}
+		oldURL, oldErr := url.Parse(current.Endpoints[0])
+		newURL, newErr := url.Parse(newEndpoint)
+		if oldErr != nil || newErr != nil || oldURL.Scheme != newURL.Scheme ||
+			!strings.EqualFold(oldURL.Hostname(), newURL.Hostname()) {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "member origin change requires owner enrollment"})
+			return
+		}
+		if newEndpoint != current.Endpoints[0] {
+			current.Endpoints = []string{newEndpoint}
+			changed = true
+		}
+	}
+	if fingerprintAuthorized && request.LocalFingerprint != "" && current.LocalFingerprint == "" {
+		current.LocalFingerprint = request.LocalFingerprint
+		changed = true
+	}
+	if current.State != next {
+		current.State = next
+		changed = true
+	}
+	current.LastSeen = now
+	current.LeaseExpires = now.Add(nodeLeaseTTL)
+	if request.Build != "" {
+		current.Build = strings.TrimSpace(request.Build)
+	}
+	current.SnapshotRev = request.SnapshotRev
+	// Capability absence inside an explicitly present executor_meta must
+	// clear a previous announcement, mirroring the queue-poll contract for
+	// rollback. An OLD node binary omits the field entirely; that must never
+	// clear capability keys advertised through the legacy queue enrollment.
+	if fingerprintAuthorized && executorMeta != nil {
+		oldMetaJSON, _ := json.Marshal(current.ExecutorMeta)
+		newMetaJSON, _ := json.Marshal(executorMeta)
+		if !bytes.Equal(oldMetaJSON, newMetaJSON) {
+			current.ExecutorMeta = executorMeta
+			changed = true
+		}
+	}
+	if changed {
+		s.membership.Revision++
+	}
+	if err := s.persistMembershipStateLocked(s.membership); err != nil {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "membership persistence failed"})
+		return
+	}
+	revision := s.membership.Revision
+	writerID, writerURL := s.membership.WriterID, s.membership.WriterURL
+	s.membershipMu.Unlock()
+	// Liveness is independent of optional catalog acceptance. Publish committed
+	// routing transitions even if the descriptor update below is rejected.
+	if changed {
+		s.rebuildMembershipRoutes()
+	}
+	catalogChanged := false
+	if request.ExecutorCatalog != nil || request.ExecutorCatalogStatus == "incomplete" {
+		var err error
+		catalogChanged, err = s.applyNodeExecutorCatalog(member, catalog)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	if executorMeta != nil {
+		if _, err := s.applyNodeExecutorMeta(member, executorMeta, fingerprintAuthorized); err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	// Freshness is private, in-process evidence of the current heartbeat.
+	// Missing catalog metadata never revives an old child descriptor.
+	catalogFresh := request.ExecutorCatalogStatus == "complete" && request.ExecutorCatalog != nil
+	s.membershipMu.Lock()
+	freshChanged := false
+	if current := s.membership.Nodes[member.NodeID]; current != nil && current.KeyHash == member.KeyHash &&
+		current.Name == member.Name && current.State != nodeStateDisabled &&
+		current.CatalogFresh != catalogFresh {
+		current.CatalogFresh = catalogFresh
+		freshChanged = true
+	}
+	s.membershipMu.Unlock()
+	if freshChanged {
+		s.rebuildMembershipRoutes()
+	}
+	if catalogChanged {
+		s.refreshSearchCatalogHeartbeat(member.Name)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "changed": revision != request.Revision,
+		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL, "auth_generation": s.writerAuthGeneration(), "executor_catalog_status": request.ExecutorCatalogStatus,
+		"quorum_hubs": s.quorumExecutorOrigins()})
+}
+
+// Members pin the writer_id from enrollment in their reader auth store.
+// Keep that logical source stable across elections. Membership views and
+// Raft keep reporting the physical leader independently.
+func (s *Server) memberControlSourceID(writerID string) string {
+	if s.quorumControlOnly() && s.quorumNode != nil {
+		s.membershipMu.Lock()
+		defer s.membershipMu.Unlock()
+		if s.membership != nil && s.membership.ControlSourceID != "" {
+			return s.membership.ControlSourceID
+		}
+		// A pre-upgrade owner_local cluster without a migration pin keeps its
+		// previous wire contract during the rolling binary installation.
+		return writerID
+	}
+	if s.quorumNode != nil {
+		record, ok := s.quorumNode.LocalRecord("cluster_meta", "task_baseline")
+		var baseline struct {
+			Source string `json:"control_source_id"`
+		}
+		if ok && !record.Deleted && json.Unmarshal(record.Value, &baseline) == nil && baseline.Source != "" {
+			return baseline.Source
+		}
+	}
+	return writerID
+}
+
+func (s *Server) nodeMembershipGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "GET required"})
+		return
+	}
+	if s.writerRedirect(w, r) {
+		return
+	}
+	if member := s.nodeMemberAuth(r); member == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "node credential required"})
+		return
+	}
+	s.membershipMu.Lock()
+	raw, digest := membershipSnapshotJSON(s.membership)
+	revision := s.membership.Revision
+	s.membershipMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "sha256": digest, "size": len(raw),
+		"membership": json.RawMessage(raw)})
+}
+
+func (s *Server) nodeMembershipControlSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "GET required"})
+		return
+	}
+	if s.writerRedirect(w, r) {
+		return
+	}
+	if member := s.nodeMemberAuth(r); member == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "node credential required"})
+		return
+	}
+	if !s.authContinuityEnabled() {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "control snapshots require auth continuity"})
+		return
+	}
+	bundle, err := s.currentWriterControlBundle()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "auth store unavailable"})
+		return
+	}
+	bundle.WriterID = s.memberControlSourceID(bundle.WriterID)
+	snapshot := controlSnapshot{Revision: bundle.Generation, Generation: bundle.Generation, Bundle: bundle}
+	s.instructionSetsMu.RLock()
+	if len(s.instructionSets) > 0 {
+		snapshot.InstructionSets = &instructionSetsState{Sets: cloneInstructionSets(s.instructionSets)}
+	}
+	s.instructionSetsMu.RUnlock()
+	inner, _ := json.Marshal(map[string]any{"bundle": snapshot.Bundle, "instruction_sets": snapshot.InstructionSets})
+	snapshot.SHA256 = hashNodeSecret(string(inner))
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) nodeMembershipSetState(w http.ResponseWriter, r *http.Request, state string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "POST required"})
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+	if err != nil || len(raw) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id body required"})
+		return
+	}
+	var request struct {
+		NodeID string `json:"node_id"`
+	}
+	if json.Unmarshal(raw, &request) != nil || request.NodeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id required"})
+		return
+	}
+	s.membershipMu.Lock()
+	member := s.membership.Nodes[request.NodeID]
+	if member == nil {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown node"})
+		return
+	}
+	if member.NodeID == s.membership.WriterID {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "the writer manages its own state"})
+		return
+	}
+	member.State = state
+	if state == nodeStateReady {
+		member.LeaseExpires = s.now().Add(nodeLeaseTTL)
+	}
+	s.membership.Revision++
+	if err := s.persistMembershipStateLocked(s.membership); err != nil {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "membership persistence failed"})
+		return
+	}
+	s.membershipMu.Unlock()
+	s.rebuildMembershipRoutes()
+	writeJSON(w, http.StatusOK, map[string]any{"node_id": member.NodeID, "state": member.State})
+}
+
+// startMembershipLoops launches the writer lease loop and/or the member sync
+// loop. A node without identity and writer state stays a standalone node.
+func (s *Server) startMembershipLoops() {
+	s.membershipStop = make(chan struct{})
+	s.startNodeConnLoop()
+	if s.quorumNode != nil || s.membership != nil {
+		s.membershipDone.Add(1)
+		go s.membershipWriterLoop()
+	}
+	if s.nodeIdentity != nil && (s.quorumNode != nil || s.membership == nil) {
+		s.membershipDone.Add(1)
+		go s.membershipMemberLoop()
+	}
+}
+
+func (s *Server) stopMembershipLoops() {
+	s.membershipStopOnce.Do(func() {
+		if s.membershipStop != nil {
+			close(s.membershipStop)
+		}
+	})
+	s.nodeConns.closeAll()
+	s.membershipDone.Wait()
+}
+
+func (s *Server) membershipWriterLoop() {
+	defer s.membershipDone.Done()
+	if s.quorumNode == nil {
+		s.membershipMu.Lock()
+		if s.membership != nil && s.membership.WriterID == "" {
+			s.membership.WriterID = s.authLocalID
+			if s.cfg.NodePublicURL != "" && s.membership.WriterURL == "" {
+				s.membership.WriterURL = s.cfg.NodePublicURL
+			}
+		}
+		s.membershipMu.Unlock()
+		s.ensureWriterSelfEntry()
+	}
+	ticker := time.NewTicker(nodeHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.membershipStop:
+			return
+		case <-ticker.C:
+			if s.quorumNode != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := s.ensureQuorumAuthorityMaterialized(ctx); err != nil {
+					cancel()
+					continue
+				}
+				cancel()
+			}
+			s.membershipWriterTick()
+			s.maybeTransferLegacyControlSource()
+		}
+	}
+}
+
+func (s *Server) membershipWriterTick() {
+	if s.quorumNode != nil && s.effectiveAuthMode() != "writer" {
+		return
+	}
+	now := s.now()
+	dirty := false
+	s.membershipMu.Lock()
+	if s.membership == nil {
+		s.membershipMu.Unlock()
+		return
+	}
+	if self := s.membership.Nodes[s.membership.WriterID]; self != nil {
+		if self.LeaseExpires.Sub(now) < nodeLeaseTTL/2 {
+			self.LastSeen = now
+			self.LeaseExpires = now.Add(nodeLeaseTTL)
+			dirty = true
+		}
+	}
+	for _, member := range s.membership.Nodes {
+		if member.NodeID == s.membership.WriterID {
+			continue
+		}
+		if (member.State == nodeStateReady || member.State == nodeStateDraining) && now.After(member.LeaseExpires) {
+			// The lease expires dispatch without deleting identity.
+			member.State = nodeStateOffline
+			dirty = true
+		}
+	}
+	if dirty {
+		if err := s.persistMembershipStateLocked(s.membership); err != nil {
+			log.Printf("membership lease persist failed: %v", err)
+		}
+		s.membershipMu.Unlock()
+		s.rebuildMembershipRoutes()
+		return
+	}
+	s.membershipMu.Unlock()
+}
+
+type nodeHeartbeatResponse struct {
+	QuorumHubs     []string `json:"quorum_hubs"`
+	Revision       uint64   `json:"revision"`
+	Changed        bool     `json:"changed"`
+	WriterID       string   `json:"writer_id"`
+	WriterURL      string   `json:"writer_url"`
+	AuthGeneration uint64   `json:"auth_generation"`
+}
+
+func (s *Server) memberWriterURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nodeIdentity == nil {
+		return ""
+	}
+	if s.nodeIdentity.WriterURL != "" {
+		return s.nodeIdentity.WriterURL
+	}
+	return s.cfg.NodeSeedURL
+}
+
+// nodeMemberHeartbeatIntervalFromEnv bounds seconds before converting to a
+// duration so an oversized environment integer cannot wrap into a fast timer.
+func nodeMemberHeartbeatIntervalFromEnv() time.Duration {
+	seconds := secondsEnv("GPTADMIN_NODE_HEARTBEAT_INTERVAL_S", int(nodeHeartbeatInterval/time.Second))
+	if seconds > int(nodeHeartbeatInterval/time.Second) {
+		return nodeHeartbeatInterval
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) memberHeartbeatInterval() time.Duration {
+	interval := s.cfg.NodeHeartbeatInterval
+	if interval < time.Second || interval > nodeHeartbeatInterval {
+		return nodeHeartbeatInterval
+	}
+	return interval
+}
+
+func (s *Server) membershipMemberLoop() {
+	defer s.membershipDone.Done()
+	client := newNodeMembershipClient(s.cfg.NodeWriterConnectTo)
+	heartbeat := time.NewTicker(s.memberHeartbeatInterval())
+	sync := time.NewTicker(nodeMembershipSyncEvery)
+	defer heartbeat.Stop()
+	defer sync.Stop()
+	s.membershipMemberTick(client, true)
+	for {
+		select {
+		case <-s.membershipStop:
+			return
+		case <-heartbeat.C:
+			s.membershipMemberTick(client, false)
+		case <-sync.C:
+			s.membershipMemberTick(client, true)
+		}
+	}
+}
+
+// membershipMemberTick heartbeats the writer, refreshes the replicated view
+// when the revision moves, and applies a new control generation when offered.
+func (s *Server) memberNodeKey() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nodeIdentity == nil {
+		return ""
+	}
+	return s.nodeIdentity.NodeKey
+}
+
+// nodeExecutorMetaIntKeys and nodeExecutorMetaStringKeys whitelist the
+// executor capability fields a member may mirror to the writer. The set
+// mirrors the legacy queue-poll announcement so paired file targets and
+// capability gates observe the same fields for remote executors.
+var nodeExecutorMetaIntKeys = []string{"build_version", "file_transfer_version", "filesystem_acl_version", "cores", "mem_mb"}
+
+var nodeExecutorMetaStringKeys = []string{"git_commit", "os", "hostname", "backend", "mode", "default_user", "default_home", "default_cwd"}
+
+var nodeExecutorMetaKeys = append(append([]string{}, nodeExecutorMetaIntKeys...), nodeExecutorMetaStringKeys...)
+
+// validateNodeExecutorMeta bounds the heartbeat capability announcement to
+// whitelisted scalar fields before it is stored or projected.
+func validateNodeExecutorMeta(meta map[string]any) (map[string]any, error) {
+	if meta == nil {
+		return nil, nil
+	}
+	if len(meta) > len(nodeExecutorMetaKeys) {
+		return nil, errors.New("executor meta key limit exceeded")
+	}
+	allowed := map[string]bool{}
+	for _, key := range nodeExecutorMetaKeys {
+		allowed[key] = true
+	}
+	intKeys := map[string]bool{}
+	for _, key := range nodeExecutorMetaIntKeys {
+		intKeys[key] = true
+	}
+	out := map[string]any{}
+	for key, value := range meta {
+		if !allowed[key] {
+			return nil, fmt.Errorf("executor meta key not allowed: %s", key)
+		}
+		if intKeys[key] {
+			number, ok := value.(float64)
+			if !ok || number != math.Trunc(number) || number < 0 || number > 1e9 {
+				return nil, fmt.Errorf("executor meta integer expected for %s", key)
+			}
+			out[key] = int(number)
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || len(text) > 256 || strings.ContainsAny(text, "\x00\r\n") {
+			return nil, fmt.Errorf("executor meta string limit exceeded for %s", key)
+		}
+		out[key] = text
+	}
+	return out, nil
+}
+
+// memberLocalExecutorMeta reads the pinned local executor's advertised
+// capability meta. Only whitelisted bounded fields leave the node.
+func (s *Server) memberLocalExecutorMeta() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.localExecutors) != 1 {
+		return nil
+	}
+	for name := range s.localExecutors {
+		agent := s.agents[name]
+		if agent == nil || !truthyAny(agent.Meta["approved"]) {
+			return nil
+		}
+		meta := map[string]any{}
+		for _, key := range nodeExecutorMetaIntKeys {
+			if v := agent.Meta[key]; v != nil {
+				meta[key] = v
+			}
+		}
+		for _, key := range nodeExecutorMetaStringKeys {
+			if v := agent.Meta[key]; v != nil {
+				meta[key] = v
+			}
+		}
+		if len(meta) == 0 {
+			return nil
+		}
+		return meta
+	}
+	return nil
+}
+
+// applyNodeExecutorMeta mirrors a member's explicitly advertised executor
+// capability meta into an existing approved registry parent, following the
+// same contract as the legacy queue-poll announcement: keys absent from the
+// announcement are cleared, so an executor downgrade withdraws the paired
+// file target. Heartbeats that omit the executor_meta field entirely (older
+// node binaries) never touch the parent's capability keys. Members without a
+// registry parent keep their capability meta on the membership route
+// instead; this is not an error.
+func (s *Server) applyNodeExecutorMeta(member *nodeMember, meta map[string]any, identityBound bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipMu.Lock()
+	defer s.membershipMu.Unlock()
+	current := s.membership.Nodes[member.NodeID]
+	if current == nil || current.KeyHash != member.KeyHash || current.Name != member.Name || current.State == nodeStateDisabled {
+		return false, errors.New("executor meta member no longer authorized")
+	}
+	parent := s.agents[member.Name]
+	if parent == nil || !truthyAny(parent.Meta["approved"]) || parent.Status == "awaiting_approval" || s.localExecutors[member.Name] != nil {
+		return false, nil
+	}
+	if member.LocalID != "" && firstString(parent.Meta, "server_id") != member.LocalID {
+		return false, errors.New("executor meta parent identity mismatch")
+	}
+	if !identityBound {
+		return false, nil
+	}
+	next := map[string]any{}
+	for k, v := range parent.Meta {
+		next[k] = v
+	}
+	for _, key := range nodeExecutorMetaKeys {
+		if v, ok := meta[key]; ok {
+			next[key] = v
+		} else {
+			delete(next, key)
+		}
+	}
+	oldJSON, _ := json.Marshal(parent.Meta)
+	newJSON, _ := json.Marshal(next)
+	if bytes.Equal(oldJSON, newJSON) {
+		return false, nil
+	}
+	oldMeta := parent.Meta
+	parent.Meta = next
+	if err := s.saveRegistryStateLocked(); err != nil {
+		parent.Meta = oldMeta
+		return false, err
+	}
+	return true, nil
+}
+
+// memberLocalExecutorIdentity reads only the node's in-process pinned local
+// executor identity. A registry heartbeat cannot claim another shell identity.
+func (s *Server) memberLocalExecutorIdentity() (string, string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.localExecutors) != 1 {
+		return "", "", ""
+	}
+	for name, identity := range s.localExecutors {
+		return name, strings.TrimSpace(identity["server_id"]), strings.TrimSpace(identity["fingerprint"])
+	}
+	return "", "", ""
+}
+
+func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
+	writer, client := s.memberWriterRoute(client)
+	if writer == "" {
+		return
+	}
+	if s.quorumPrivateTLS != nil {
+		defer client.CloseIdleConnections()
+	}
+	s.membershipMu.Lock()
+	viewRevision := uint64(0)
+	if s.membershipView != nil {
+		viewRevision = s.membershipView.Revision
+	}
+	s.membershipMu.Unlock()
+	catalog, err := s.localNodeExecutorCatalog()
+	if err != nil {
+		log.Printf("membership executor catalog incomplete: %v", err)
+	}
+	localName, localID, localFingerprint := s.memberLocalExecutorIdentity()
+	executorMeta := s.memberLocalExecutorMeta()
+	generation := s.writerAuthGeneration()
+	if s.quorumNode != nil {
+		// A voter receives the authoritative policy in its Raft FSM. Its
+		// reader-side files can still belong to an earlier leadership term.
+		var applied struct {
+			Generation uint64 `json:"generation"`
+		}
+		if s.taskQuorumReplicaReady() != nil || s.readQuorumAuthorityState("auth", "bundle", &applied) != nil {
+			return
+		}
+		generation = applied.Generation
+	}
+	payload := map[string]any{
+		"revision": viewRevision, "state": s.membershipReportedState(), "build": GitCommit,
+		"outbound_ws": true, "quorum_queue": true, "storage_ok": true, "snapshot_revision": generation,
+		"endpoint": s.cfg.NodePublicURL, "local_name": localName, "local_id": localID, "local_fingerprint": localFingerprint,
+	}
+	if executorMeta != nil {
+		payload["executor_meta"] = executorMeta
+	}
+	if err != nil {
+		payload["executor_catalog_status"] = "incomplete"
+	} else if catalog != nil {
+		payload["executor_catalog"] = catalog
+		payload["executor_catalog_status"] = "complete"
+	}
+	body, _ := json.Marshal(payload)
+	response, err := postNodeJSON(client, writer+"/admin/api/nodes/heartbeat",
+		"Bearer "+s.memberNodeKey(), body, nodeMembershipStateLimit)
+	if err != nil {
+		var remote *nodeHTTPError
+		if !errors.As(err, &remote) || remote.status >= 500 {
+			s.memberQuorumHubs.Failed(writer)
+		}
+		if errors.As(err, &remote) && remote.status == http.StatusConflict {
+			var detail struct {
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal([]byte(remote.detail), &detail) == nil && detail.Detail == "control snapshot not applied locally yet" {
+				// The writer requires a newer snapshot before accepting this
+				// heartbeat. Fetch it over the authenticated member channel;
+				// the next heartbeat can then complete the transition.
+				if s.quorumNode == nil {
+					s.membershipApplyControlSnapshot(client, writer)
+				}
+			}
+		}
+		log.Printf("membership heartbeat failed writer=%s err=%v", writer, err)
+		return
+	}
+	var heartbeatResponse nodeHeartbeatResponse
+	if json.Unmarshal(response, &heartbeatResponse) != nil {
+		log.Printf("membership heartbeat response malformed writer=%s", writer)
+		return
+	}
+	if s.quorumNode == nil && s.cfg.AuthSourceID != "" && heartbeatResponse.WriterID != s.cfg.AuthSourceID {
+		log.Print("membership heartbeat rejected: control source differs from enrolled writer")
+		return
+	}
+	if heartbeatResponse.WriterURL != "" {
+		s.mu.Lock()
+		changed := heartbeatResponse.WriterURL != s.nodeIdentity.WriterURL || heartbeatResponse.WriterID != s.nodeIdentity.WriterID
+		if s.quorumNode == nil {
+			urls := hubroute.Parse(strings.Join(heartbeatResponse.QuorumHubs, ","))
+			if len(urls) > 0 && len(hubroute.Parse(heartbeatResponse.WriterURL)) == 1 {
+				urls = hubroute.Parse(heartbeatResponse.WriterURL + "," + strings.Join(urls, ","))
+			}
+			if len(urls) > 0 && !slices.Equal(s.nodeIdentity.QuorumHubs, urls) {
+				s.nodeIdentity.QuorumHubs = urls
+				s.memberQuorumHubs.Set(urls)
+				changed = true
+			}
+		}
+		if changed {
+			s.nodeIdentity.WriterURL = heartbeatResponse.WriterURL
+			s.nodeIdentity.WriterID = heartbeatResponse.WriterID
+		}
+		identity := *s.nodeIdentity
+		s.mu.Unlock()
+		if changed {
+			if err := saveNodeIdentityFile(s.nodeIdentityPath(), identity); err != nil {
+				log.Printf("node identity writer update failed: %v", err)
+			}
+		}
+	}
+	if heartbeatResponse.Changed || forceSync || s.membershipView == nil {
+		s.membershipPullView(client, writer)
+	}
+	// Named instructions may change independently of the auth generation.
+	// Reconcile the authenticated control snapshot even when the generation is equal.
+	if heartbeatResponse.AuthGeneration > 0 && s.quorumNode == nil {
+		s.membershipApplyControlSnapshot(client, writer)
+	}
+}
+
+func (s *Server) membershipReportedState() string {
+	if s.NodeDrainStatus().Draining {
+		return nodeStateDraining
+	}
+	if s.writerAuthGeneration() == 0 {
+		return nodeStateJoining
+	}
+	return nodeStateReady
+}
+
+func (s *Server) membershipPullView(client *http.Client, writer string) {
+	response, err := getNodeJSON(client, writer+"/admin/api/nodes/membership",
+		"Bearer "+s.memberNodeKey(), s.cfg.AuthSnapshotBudget+nodeControlEnvelopeHeadroom)
+	if err != nil {
+		log.Printf("membership pull failed writer=%s err=%v", writer, err)
+		return
+	}
+	var envelope struct {
+		Revision   uint64          `json:"revision"`
+		SHA256     string          `json:"sha256"`
+		Size       int             `json:"size"`
+		Membership json.RawMessage `json:"membership"`
+	}
+	if json.Unmarshal(response, &envelope) != nil || len(envelope.Membership) == 0 {
+		log.Printf("membership pull response malformed writer=%s", writer)
+		return
+	}
+	if envelope.Size > 0 && len(envelope.Membership) != envelope.Size {
+		log.Printf("membership pull size mismatch writer=%s", writer)
+		return
+	}
+	var view struct {
+		Schema          uint64           `json:"schema"`
+		Revision        uint64           `json:"revision"`
+		WriterID        string           `json:"writer_id"`
+		FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool"`
+		Nodes           []*nodeMember    `json:"nodes"`
+	}
+	if json.Unmarshal(envelope.Membership, &view) != nil || view.Schema != nodeMembershipSchema || view.Nodes == nil {
+		log.Printf("membership view rejected writer=%s", writer)
+		return
+	}
+	if envelope.SHA256 != hashNodeSecret(string(envelope.Membership)) {
+		log.Printf("membership view checksum mismatch writer=%s", writer)
+		return
+	}
+	for _, member := range view.Nodes {
+		if member == nil || member.NodeID == "" {
+			log.Printf("membership view contains an invalid node writer=%s", writer)
+			return
+		}
+		member.KeyHash = ""
+	}
+	accepted := &nodeMembershipView{Schema: nodeMembershipSchema, Revision: view.Revision,
+		SHA256: envelope.SHA256, FetchedAt: s.now(), WriterID: view.WriterID,
+		FRPSpaceWebPool: view.FRPSpaceWebPool, Nodes: view.Nodes}
+	s.membershipMu.Lock()
+	s.membershipView = accepted
+	if err := os.MkdirAll(s.membershipDir(), 0o750); err == nil {
+		if err := writeAccessStateJSON(s.memberViewPath(), accepted, nodeMembershipStateLimit); err != nil {
+			log.Printf("membership view persist failed: %v", err)
+		}
+	}
+	s.membershipMu.Unlock()
+	s.rebuildMembershipRoutes()
+}
+
+// membershipApplyControlSnapshot pulls and atomically applies the bounded
+// control bundle. A rejected or oversized snapshot leaves the last accepted
+// generation serving, matching the stale-reader contract.
+func (s *Server) membershipApplyControlSnapshot(client *http.Client, writer string) {
+	limit := s.cfg.AuthSnapshotBudget + nodeControlEnvelopeHeadroom
+	response, err := getNodeJSON(client, writer+"/admin/api/nodes/control-snapshot",
+		"Bearer "+s.memberNodeKey(), limit)
+	if err != nil {
+		log.Printf("control snapshot pull failed writer=%s err=%v", writer, err)
+		return
+	}
+	if len(response) > limit {
+		log.Printf("control snapshot exceeds admission budget writer=%s", writer)
+		return
+	}
+	var snapshot controlSnapshot
+	if json.Unmarshal(response, &snapshot) != nil {
+		log.Printf("control snapshot malformed writer=%s", writer)
+		return
+	}
+	// A snapshot is authoritative only from the pinned writer identity.
+	s.mu.Lock()
+	knownWriter := s.nodeIdentity.WriterID
+	s.mu.Unlock()
+	if snapshot.Bundle.WriterID == "" ||
+		(knownWriter != "" && snapshot.Bundle.WriterID != knownWriter) ||
+		(s.cfg.AuthSourceID != "" && snapshot.Bundle.WriterID != s.cfg.AuthSourceID) {
+		log.Printf("control snapshot writer mismatch got=%s want=%s", snapshot.Bundle.WriterID, knownWriter)
+		return
+	}
+	inner, _ := json.Marshal(map[string]any{"bundle": snapshot.Bundle, "instruction_sets": snapshot.InstructionSets})
+	if snapshot.SHA256 == "" || snapshot.SHA256 != hashNodeSecret(string(inner)) {
+		log.Printf("control snapshot checksum mismatch writer=%s", writer)
+		return
+	}
+	if snapshot.Revision != snapshot.Bundle.Generation || snapshot.Generation != snapshot.Revision {
+		log.Printf("control snapshot generation mismatch writer=%s", writer)
+		return
+	}
+	if snapshot.Revision < s.writerAuthGeneration() {
+		return
+	}
+	sets := map[string]InstructionSet{}
+	if snapshot.InstructionSets != nil {
+		sets = snapshot.InstructionSets.Sets
+	}
+	for id, set := range sets {
+		if err := validateNamedInstructionSetID(id); err != nil || set.ID != id || validateInstructionContent(set.Content) != nil || set.Version != instructionSetVersion(set.Content) {
+			log.Printf("control snapshot instruction set invalid id=%s writer=%s", id, writer)
+			return
+		}
+	}
+	if err := validateAuthSnapshotValues(snapshot.Bundle, s.cfg.AuthSnapshotBudget, s.cfg.CtlToken, func(id string) bool {
+		if id == "" || id == defaultInstructionSetID {
+			return true
+		}
+		_, ok := sets[id]
+		return ok
+	}); err != nil {
+		log.Printf("control snapshot validation rejected writer=%s err=%v", writer, err)
+		return
+	}
+	s.authMu.Lock()
+	s.mu.Lock()
+	if snapshot.Revision < s.authState.Generation || (snapshot.Revision == s.authState.Generation && s.authState.Generation != 0 && authSnapshotDigest(snapshot.Bundle) != s.authState.Digest) {
+		s.mu.Unlock()
+		s.authMu.Unlock()
+		log.Printf("control snapshot stale or inconsistent writer=%s", writer)
+		return
+	}
+	s.instructionSetsMu.RLock()
+	current, _ := json.Marshal(s.instructionSets)
+	incoming, _ := json.Marshal(sets)
+	s.instructionSetsMu.RUnlock()
+	if snapshot.Revision == s.authState.Generation && !s.authState.Pending && bytes.Equal(current, incoming) {
+		s.mu.Unlock()
+		s.authMu.Unlock()
+		return
+	}
+	// Persist the fail-closed marker before changing either store. A crash or
+	// write failure leaves admission closed until the writer snapshot retries.
+	s.authState.Pending = true
+	err = writeAccessStateJSON(s.authStatePath(), s.authState, 4096)
+	if err == nil {
+		err = writeInstructionSetsStateAtomic(s.instructionSetsStatePath(), sets)
+	}
+	if err == nil {
+		s.instructionSetsMu.Lock()
+		s.instructionSets = cloneInstructionSets(sets)
+		s.instructionSetsMu.Unlock()
+		err = s.commitAuthSnapshotLocked(snapshot.Bundle, true)
+	}
+	s.mu.Unlock()
+	s.authMu.Unlock()
+	if err != nil {
+		log.Printf("control snapshot apply rejected writer=%s err=%v", writer, err)
+	}
+
+}
+
+// newNodeDialTransport dials through the pinned physical address when
+// split-horizon DNS would loop the hostname back to this node's own proxy.
+// TLS keeps verifying the URL hostname. It returns nil when no literal IP
+// is pinned, so callers fall back to the default dialing path.
+func newNodeDialTransport(connectTo string) *http.Transport {
+	if net.ParseIP(connectTo) == nil {
+		return nil
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(connectTo, port))
+	}
+	return transport
+}
+
+func newNodeMembershipClient(connectTo string) *http.Client {
+	if transport := newNodeDialTransport(connectTo); transport != nil {
+		return &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	}
+	return &http.Client{Timeout: 15 * time.Second}
+}
+
+func postNodeJSON(client *http.Client, url, bearer string, body []byte, limit int) ([]byte, error) {
+	return doNodeJSON(client, http.MethodPost, url, bearer, body, limit)
+}
+
+func getNodeJSON(client *http.Client, url, bearer string, limit int) ([]byte, error) {
+	return doNodeJSON(client, http.MethodGet, url, bearer, nil, limit)
+}
+
+type nodeHTTPError struct {
+	status int
+	detail string
+}
+
+func (e *nodeHTTPError) Error() string { return fmt.Sprintf("status %d: %s", e.status, e.detail) }
+
+func doNodeJSON(client *http.Client, method, url, bearer string, body []byte, limit int) ([]byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(context.Background(), method, url, reader)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", bearer)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 1<<10))
+		return nil, &nodeHTTPError{status: response.StatusCode, detail: strings.TrimSpace(string(detail))}
+	}
+	return io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+}
+
+// maybeTransferLegacyControlSource repairs an explicitly authorized legacy
+// migration without restarting voters or creating another election mechanism.
+// A settled source, missing quorum, active drain or unverified target does
+// not authorize a transfer. The historical leader retains the existing pin
+// checks and commits the source through ordinary Raft authority materialization.
+func (s *Server) maybeTransferLegacyControlSource() {
+	pin := s.cfg.LegacyMemberControlSource
+	node := s.quorumNode
+	if pin == "" || node == nil || !s.quorumControlOnly() || !node.Status().Leader || s.authLocalID == pin || s.NodeDrainStatus().Draining {
+		return
+	}
+	s.membershipMu.Lock()
+	if s.membership == nil || s.membership.ControlSourceID != "" {
+		s.membershipMu.Unlock()
+		return
+	}
+	peer, err := s.legacyControlSourcePeer(s.membership, pin)
+	ready := false
+	if err == nil {
+		member := s.membership.Nodes[peer.ID]
+		ready = member != nil && quorumMemberPromotionReady(*member, peer, s.now())
+	}
+	s.membershipMu.Unlock()
+	if err != nil {
+		log.Printf("control_source_migration code=historical_voter_unverified")
+		return
+	}
+	if !ready || !node.IsVoter(peer.ID) || s.taskQuorumReady() != nil || !s.quorumPeerReadiness(peer, true) {
+		log.Printf("control_source_migration code=historical_voter_not_ready")
+		return
+	}
+	if err := node.TransferLeadershipTo(peer.ID); err != nil {
+		log.Printf("control_source_migration code=leadership_transfer_failed")
+		return
+	}
+	log.Printf("control_source_migration code=leadership_transfer_accepted")
+}

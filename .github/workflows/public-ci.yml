@@ -1,0 +1,993 @@
+name: Public Product CI
+'on':
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: public-product-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOMAXPROCS: '2'
+  GOFLAGS: -p=2
+  GOMEMLIMIT: 6GiB
+  CARGO_BUILD_JOBS: '1'
+  NODE_OPTIONS: --max-old-space-size=1536
+  GOTOOLCHAIN: local
+jobs:
+  go-unit-tests:
+    name: Go source regressions (${{ matrix.os }}, shard ${{ matrix.shard }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - macos-latest
+        shard:
+        - 0
+        - 1
+        - 2
+        - 3
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-shared-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-shared-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-1-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-0-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+      id: go-cache
+    - name: Run every test in its deterministic shard
+      env:
+        SHARD: ${{ matrix.shard }}
+      run: |
+        mkdir -p .tmp/ci-go-tmp
+        export TMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp" GOTMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp"
+        modules=(--module go-hub --module go-shellmcp)
+        if [[ "$RUNNER_OS" == Linux ]]; then
+          modules+=(--module go-proxyrelay --module bezhook)
+        fi
+        python3 tools/ci_test_shards.py go --index "$SHARD" --count 4 "${modules[@]}"
+    - name: Parse Python CLI on Mac
+      if: runner.os == 'macOS' && matrix.shard == 0
+      run: python3 -c "import ast; ast.parse(open('cli.py').read())"
+    - name: Save shared native Go compilation cache once per OS
+      if: matrix.shard == 0 && steps.go-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ steps.go-cache.outputs.cache-primary-key }}
+  go-unit-tests-linux:
+    needs: macos-release-packages
+    name: Go source regressions (${{ matrix.os }}, shard ${{ matrix.shard }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - ubuntu-latest
+        shard:
+        - 0
+        - 1
+        - 2
+        - 3
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-shared-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-shared-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-1-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-0-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+      id: go-cache
+    - name: Run every test in its deterministic shard
+      env:
+        SHARD: ${{ matrix.shard }}
+      run: |
+        mkdir -p .tmp/ci-go-tmp
+        export TMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp" GOTMPDIR="$GITHUB_WORKSPACE/.tmp/ci-go-tmp"
+        modules=(--module go-hub --module go-shellmcp)
+        if [[ "$RUNNER_OS" == Linux ]]; then
+          modules+=(--module go-proxyrelay --module bezhook)
+        fi
+        python3 tools/ci_test_shards.py go --index "$SHARD" --count 4 "${modules[@]}"
+    - name: Parse Python CLI on Mac
+      if: runner.os == 'macOS' && matrix.shard == 0
+      run: python3 -c "import ast; ast.parse(open('cli.py').read())"
+    - name: Save shared native Go compilation cache once per OS
+      if: matrix.shard == 0 && steps.go-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ steps.go-cache.outputs.cache-primary-key }}
+  node-artifact:
+    name: Exact Node package (${{ matrix.platform }}/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - linux
+        - darwin
+        arch:
+        - amd64
+        - arm64
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('go-*/go.sum',
+          'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup Node for the bundled admin UI
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Build manifest-pinned production Node package
+      env:
+        PLATFORM: ${{ matrix.platform }}
+        ARCH: ${{ matrix.arch }}
+      run: |
+        python3 tools/build_node.py --platform "$PLATFORM" --arch "$ARCH"
+    - name: Exercise peer receipts and delegated executor access with the packaged binaries
+      if: matrix.platform == 'linux' && matrix.arch == 'amd64'
+      run: |
+        fixture="$(mktemp -d)"
+        tar -xzf .tmp/node-packages/gptadmin-node-linux-amd64.tar.gz -C "$fixture" bin/gptadmin-node bin/shellmcp
+        python3 tests/e2e/node/peer_run.py "$fixture/bin/gptadmin-node"
+        python3 tests/e2e/node/access_tree_run.py "$fixture/bin/gptadmin-node" "$fixture/bin/shellmcp"
+    - name: Retain exact artifact for verified release publication
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: .tmp/node-packages/gptadmin-node-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz*
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+  android-dns:
+    needs: [release-platform-critical]
+    name: Android ARM64 system DNS resolver
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-android-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-android-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Verify the Android ARM64 client uses the system DNS resolver
+      run: |
+        export ANDROID_ARM64_CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+        bash tools/build.sh android
+        tar -xOzf build/gptadmin-android-arm64.tar.gz bin/shellmcp > "$RUNNER_TEMP/android-shellmcp"
+        go version -m "$RUNNER_TEMP/android-shellmcp" | grep -Fx $'\tbuild\tCGO_ENABLED=1'
+        readelf --wide --dyn-syms "$RUNNER_TEMP/android-shellmcp" | grep -F 'getaddrinfo@LIBC'
+  admin-ui-build:
+    needs: [release-platform-critical]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Install admin UI dependencies
+      working-directory: admin-ui
+      timeout-minutes: 8
+      env:
+        NPM_CONFIG_FETCH_RETRIES: 4
+        NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: 1000
+        NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: 10000
+        NPM_CONFIG_FETCH_TIMEOUT: 30000
+      run: npm ci --prefer-offline --no-audit --no-fund
+    - name: Test admin UI
+      working-directory: admin-ui
+      run: npm test
+    - name: Lint admin UI
+      working-directory: admin-ui
+      run: npm run lint
+    - name: Build admin UI
+      working-directory: admin-ui
+      run: npm run build -- --base=/admin/
+    - name: Verify admin UI asset base
+      working-directory: admin-ui
+      run: |
+        test -s dist/index.html
+        grep -q '/admin/assets/' dist/index.html
+  failover-e2e:
+    name: Real failover (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+        - legacy
+        - member-outage
+        - quorum-outages
+        - quorum-fencing
+        - quorum-storage
+        - quorum-dispatch-capacity
+    steps:
+    - name: Checkout exact source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      with:
+        cleanup: false
+    - name: Verify the clean exact checkout used by Docker
+      run: |
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test -z "$(git status --porcelain --untracked-files=all)"
+    - name: Build exact source with reusable Docker layers
+      uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4
+      with:
+        source: .
+        files: |
+          tests/e2e/failover/docker-compose.yml
+          tests/e2e/node/compose.quorum.yml
+        targets: ${{ startsWith(matrix.suite, 'quorum-') && 'quorum-e2e' || 'failover-e2e' }}
+        load: true
+        set: |
+          *.context=.
+          failover-e2e.cache-from=type=gha,scope=public-failover-base-v1
+          quorum-e2e.cache-from=type=gha,scope=public-failover-quorum-v1
+          failover-e2e.tags=gptadmin-ci-failover:${{ github.sha }}
+          quorum-e2e.tags=gptadmin-ci-quorum:${{ github.sha }}
+      env:
+        DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    - name: Expose scoped Docker cache runtime
+      if: matrix.suite == 'member-outage' || matrix.suite == 'quorum-storage'
+      continue-on-error: true
+      uses: megamen32/gptadmin_opensource/.github/actions/cache-runtime@36322c5f522630d619e4e4d485690e674e989e1c
+    - name: Run real scenario alongside optional cache upload
+      env:
+        SUITE: ${{ matrix.suite }}
+      run: |
+        bash tools/ci_failover.sh "$SUITE"
+  installer-e2e-linux:
+    needs: [release-platform-critical]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Run real Linux install e2e (served installer, systemd container)
+      run: tests/e2e/install/run-install-e2e.sh
+  candidate-client-contract:
+    name: Candidate client contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-candidate-native-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-candidate-native-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup Node for Hub public payload
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Build Hub + ShellMCP candidate artifacts
+      run: |
+        chmod +x tools/build.sh
+        ./tools/build.sh hub shellmcp
+        mkdir -p build/bin
+        (cd go-hub && CGO_ENABLED=0 go build -trimpath -o ../build/bin/gptadmin-node ./cmd/gptadmin-node)
+        tar -C build -czf build/gptadmin-ci-full.tar.gz \
+          bin/gptadmin-node shellmcp grepmesh gptadmin_hub cli hub_source client public
+      env:
+        GPTADMIN_BUILD_PLATFORMS: native
+    - name: Clean-install lifecycle with real execution
+      run: |
+        tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ci-full.tar.gz
+    - name: Black-box candidate as Custom GPT and native MCP client
+      run: |
+        python3 scripts/ci_candidate_contract.py \
+          --package build/gptadmin-hub.tar.gz \
+          --local-origin
+  macos-release-packages:
+    name: Verify both macOS ShellMCP release packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout the exact public source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-macos-clients-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-macos-clients-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Build and verify both macOS client bundles
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        public_sha="$(git rev-parse HEAD)"
+        test "$public_sha" = "$GITHUB_SHA"
+        if [[ "$EVENT_NAME" == push ]]; then
+          python3 - <<'PY'
+        import re, subprocess
+        message = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True)
+        lines = [line.strip() for line in message.splitlines() if line.strip()]
+        trailers = [line for line in lines if line.startswith('Source-Commit:')]
+        assert len(trailers) == 1 and lines[-1] == trailers[0]
+        assert re.fullmatch(r'Source-Commit: [0-9a-f]{40}', trailers[0])
+        PY
+        fi
+        version="$(tr -d '[:space:]' < VERSION)"
+        [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+        # A disposable local tag satisfies the existing tagged-build contract.
+        # It is never pushed and VERSION remains unchanged.
+        git tag -f "v$version" "$public_sha"
+        TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh macos-client
+        python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
+        python3 - "$public_sha" "$version" <<'PY'
+        import json, pathlib, sys
+        matrix = json.loads(pathlib.Path('build/gptadmin-release-matrix.json').read_text())
+        assert matrix['git_commit'] == sys.argv[1] and matrix['build_version'] == int(sys.argv[2])
+        assert len(matrix['artifacts']) == 2
+        PY
+    - name: Retain verified macOS client bundles
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-macos-shellmcp-${{ github.sha }}
+        path: |
+          build/gptadmin-macos-*-client.tar.gz
+          build/gptadmin-checksums.txt
+          build/gptadmin-release-matrix.json
+        if-no-files-found: error
+        retention-days: 7
+  macos-build:
+    needs: macos-release-packages
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-macos-cross-linux-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-macos-cross-linux-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-tests-0-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Download both verified release packages
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: gptadmin-macos-shellmcp-${{ github.sha }}
+        path: .tmp/macos-release
+    - name: Run the exact native release package on macOS
+      run: python3 tools/smoke_macos_release.py --build-dir .tmp/macos-release --version "$(tr -d '[:space:]' < VERSION)"
+        --commit "$GITHUB_SHA"
+    - name: Cross-compile Linux artifacts from Mac
+      run: |
+        cd go-hub
+        GOOS=linux GOARCH=amd64 go build ./...
+    name: Run exact macOS release package
+  windows-shellmcp:
+    needs: [node-artifact]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-windows-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-windows-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Compile every Go Hub package for Windows
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force build/windows | Out-Null
+        Set-Location go-hub
+        go test -run '^$' ./...
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        go build -o ../build/windows/gptadmin-node.exe ./cmd/gptadmin-node
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        go build -o ../build/windows/gptadmin-hub.exe ./cmd/gptadmin-hub
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Compile every Go ShellMCP package for Windows
+      shell: pwsh
+      run: |
+        Set-Location go-shellmcp
+        go test -run '^$' ./...
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        go build -o ../build/windows/shellmcp.exe ./cmd/shellmcp-go
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Install and exercise the unified Windows Node and executor
+      shell: pwsh
+      run: |
+        ./tests/e2e/install/windows_roles.ps1
+        ./tests/e2e/install/windows_release_resolution.ps1
+    - name: Exercise Windows polling configuration contract
+      shell: pwsh
+      run: |
+        Set-Location go-shellmcp
+        go test ./internal/server -run '^(TestFromEnvUsesWindowsInstallerPollingContract|TestQueueTransportNeverNeedsLocalListener)$' -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Verify Windows updater task ownership and PowerShell parsing
+      shell: pwsh
+      run: |
+        Set-Location go-shellmcp
+        go test ./internal/update -run Windows -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  public-python:
+    name: Public Python and CLI regressions (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set scoped Go cache directories
+      shell: bash
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore Go module and compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-python-${{ matrix.shard }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-python-${{ matrix.shard }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-candidate-native-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup uv
+      uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
+      with:
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+    - name: Public source contract and CLI tests
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        for path in ('private', '.gitpublic', 'GPTADMIN_PROMPT.md'):
+            candidate = Path(path)
+            assert not candidate.exists() and not candidate.is_symlink(), path
+        root = Path('.agents')
+        assert not root.is_symlink(), root
+        if root.exists():
+            assert root.is_dir(), root
+            allowed = {root / 'plugins', root / 'plugins/marketplace.json'}
+            actual = set(root.rglob('*'))
+            assert actual == allowed, actual ^ allowed
+            assert not any(path.is_symlink() for path in actual)
+            assert (root / 'plugins').is_dir()
+            assert (root / 'plugins/marketplace.json').is_file()
+        PY
+        uv sync
+        uv run python tools/ci_test_shards.py pytest --index "$SHARD" --count 2 -- tests/ -q --durations=10 --ignore=tests/test_public_mirror.py --ignore=tests/test_site_docs.py --ignore=tests/test_docs_product_contract.py --ignore=tests/test_release_workflow_contract.py --ignore=tests/test_admin_ui_build_contract.py --deselect=tests/test_completion_matrix.py::test_completion_matrix_commands_execute --deselect=tests/test_golden_paths.py::test_golden_path_commands_execute_once_per_platform_contract --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_auto_tag_waits_for_successful_build_before_tagging --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_auto_tag_uses_the_same_exact_operator_allowlist --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_release_waits_for_installer_and_operator_checks --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_actual_ci_gate_rejects_failure_and_unjustified_skips --deselect=tests/test_gptadmin_codex_plugin.py::test_gptadmin_marketplace_entry_is_installable_and_points_at_plugin --deselect=tests/test_installer_served_contract.py::test_served_installer_matches_repository_copy
+      env:
+        SHARD: ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+        - 0
+        - 1
+  ci-gate:
+    name: Public product CI gate
+    if: always()
+    needs:
+    - go-unit-tests
+    - go-unit-tests-linux
+    - node-artifact
+    - android-dns
+    - admin-ui-build
+    - failover-e2e
+    - installer-e2e-linux
+    - candidate-client-contract
+    - macos-release-packages
+    - macos-build
+    - windows-shellmcp
+    - public-python
+    - release-platform-critical
+    - release-platform-android
+    - release-platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+    - name: Require every public product gate
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: |
+        python3 - <<'PY'
+        import json,os
+        results=json.loads(os.environ['RESULTS'])
+        assert results and all(job['result']=='success' for job in results.values()), results
+        PY
+  release-platform-critical:
+    name: Release bundles (${{ matrix.pair }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - pair: linux_amd64
+          cache_fallback: node-linux-amd64
+    env:
+      PAIR: ${{ matrix.pair }}
+      PUBLIC_SOURCE: ${{ github.sha }}
+      GOTOOLCHAIN: local
+      NODE_OPTIONS: --max-old-space-size=1536
+    steps:
+    - name: Checkout the verified public source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set shared CI cache paths
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore this platform or tested CI compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-${{ matrix.cache_fallback }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup Node for the bundled admin UI
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Locate or install the exact Android NDK
+      if: startsWith(matrix.pair, 'android_')
+      run: |
+        set -euo pipefail
+        ndk_version=27.0.12077973
+        ndk_dir="${ANDROID_HOME:?}/ndk/$ndk_version"
+        compiler_dir="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        if [[ ! -x "$compiler_dir/x86_64-linux-android24-clang" || ! -x "$compiler_dir/aarch64-linux-android24-clang" ]]; then
+          sdkmanager_path="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_path" ]]; then
+            sdkmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$sdkmanager_path"
+          "$sdkmanager_path" --install "ndk;$ndk_version"
+        fi
+        python3 - "$ndk_dir/source.properties" "$ndk_version" <<'PY'
+        import pathlib, sys
+        entries = {}
+        for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+            if '=' in line:
+                key, value = line.split('=', 1)
+                entries[key.strip()] = value.strip()
+        assert entries.get('Pkg.Revision') == sys.argv[2], 'Android NDK revision differs from the release pin'
+        PY
+        test -x "$compiler_dir/x86_64-linux-android24-clang"
+        test -x "$compiler_dir/aarch64-linux-android24-clang"
+        echo "ANDROID_X86_64_CC=$compiler_dir/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+        echo "ANDROID_ARM64_CC=$compiler_dir/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+    - name: Build both editions for this exact source and platform
+      run: |
+        set -euo pipefail
+        public_sha="$(git rev-parse HEAD)"
+        version="$(tr -d '[:space:]' < VERSION)"
+        test "$public_sha" = "$GITHUB_SHA"
+        test "$public_sha" = "$PUBLIC_SOURCE"
+        [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+        # Local only; the publisher creates the remote tag after all checks.
+        git tag -f "v$version" "$public_sha"
+        TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh release-platform --platform "$PAIR"
+    - name: Check the exact release Ubuntu package through its lifecycle
+      if: matrix.pair == 'linux_amd64'
+      run: tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ubuntu-x64-full.tar.gz
+    - name: Retain the two source-bound release bundles and provenance
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-full-${{ matrix.pair }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: |
+          build/gptadmin-*-full.*
+          build/gptadmin-*-client.*
+          build/gptadmin-release-matrix.json
+          build/gptadmin-checksums.txt
+          build/manifest.json
+          build/gptadmin-sbom.spdx.json
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+  release-platform-android:
+    name: Release bundles (${{ matrix.pair }})
+    needs: node-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - pair: android_amd64
+          cache_fallback: android
+        - pair: android_arm64
+          cache_fallback: android
+    env:
+      PAIR: ${{ matrix.pair }}
+      PUBLIC_SOURCE: ${{ github.sha }}
+      GOTOOLCHAIN: local
+      NODE_OPTIONS: --max-old-space-size=1536
+    steps:
+    - name: Checkout the verified public source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set shared CI cache paths
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore this platform or tested CI compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-${{ matrix.cache_fallback }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup Node for the bundled admin UI
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Locate or install the exact Android NDK
+      if: startsWith(matrix.pair, 'android_')
+      run: |
+        set -euo pipefail
+        ndk_version=27.0.12077973
+        ndk_dir="${ANDROID_HOME:?}/ndk/$ndk_version"
+        compiler_dir="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        if [[ ! -x "$compiler_dir/x86_64-linux-android24-clang" || ! -x "$compiler_dir/aarch64-linux-android24-clang" ]]; then
+          sdkmanager_path="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_path" ]]; then
+            sdkmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$sdkmanager_path"
+          "$sdkmanager_path" --install "ndk;$ndk_version"
+        fi
+        python3 - "$ndk_dir/source.properties" "$ndk_version" <<'PY'
+        import pathlib, sys
+        entries = {}
+        for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+            if '=' in line:
+                key, value = line.split('=', 1)
+                entries[key.strip()] = value.strip()
+        assert entries.get('Pkg.Revision') == sys.argv[2], 'Android NDK revision differs from the release pin'
+        PY
+        test -x "$compiler_dir/x86_64-linux-android24-clang"
+        test -x "$compiler_dir/aarch64-linux-android24-clang"
+        echo "ANDROID_X86_64_CC=$compiler_dir/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+        echo "ANDROID_ARM64_CC=$compiler_dir/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+    - name: Build both editions for this exact source and platform
+      run: |
+        set -euo pipefail
+        public_sha="$(git rev-parse HEAD)"
+        version="$(tr -d '[:space:]' < VERSION)"
+        test "$public_sha" = "$GITHUB_SHA"
+        test "$public_sha" = "$PUBLIC_SOURCE"
+        [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+        # Local only; the publisher creates the remote tag after all checks.
+        git tag -f "v$version" "$public_sha"
+        TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh release-platform --platform "$PAIR"
+    - name: Check the exact release Ubuntu package through its lifecycle
+      if: matrix.pair == 'linux_amd64'
+      run: tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ubuntu-x64-full.tar.gz
+    - name: Retain the two source-bound release bundles and provenance
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-full-${{ matrix.pair }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: |
+          build/gptadmin-*-full.*
+          build/gptadmin-*-client.*
+          build/gptadmin-release-matrix.json
+          build/gptadmin-checksums.txt
+          build/manifest.json
+          build/gptadmin-sbom.spdx.json
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+  release-platform:
+    name: Release bundles (${{ matrix.pair }})
+    needs: release-platform-critical
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - pair: linux_arm64
+          cache_fallback: node-linux-arm64
+        - pair: darwin_amd64
+          cache_fallback: node-darwin-amd64
+        - pair: darwin_arm64
+          cache_fallback: node-darwin-arm64
+        - pair: windows_amd64
+          cache_fallback: node-linux-amd64
+        - pair: windows_arm64
+          cache_fallback: node-linux-amd64
+    env:
+      PAIR: ${{ matrix.pair }}
+      PUBLIC_SOURCE: ${{ github.sha }}
+      GOTOOLCHAIN: local
+      NODE_OPTIONS: --max-old-space-size=1536
+    steps:
+    - name: Checkout the verified public source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Set shared CI cache paths
+      run: |
+        echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+        echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+    - name: Restore this platform or tested CI compilation cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/gptadmin-go-build
+          ${{ runner.temp }}/gptadmin-go-mod
+        key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum',
+          'bezhook/go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-release-${{ matrix.pair }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-${{ matrix.cache_fallback }}-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+    - name: Setup Node for the bundled admin UI
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: admin-ui/package-lock.json
+    - name: Locate or install the exact Android NDK
+      if: startsWith(matrix.pair, 'android_')
+      run: |
+        set -euo pipefail
+        ndk_version=27.0.12077973
+        ndk_dir="${ANDROID_HOME:?}/ndk/$ndk_version"
+        compiler_dir="$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        if [[ ! -x "$compiler_dir/x86_64-linux-android24-clang" || ! -x "$compiler_dir/aarch64-linux-android24-clang" ]]; then
+          sdkmanager_path="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_path" ]]; then
+            sdkmanager_path="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$sdkmanager_path"
+          "$sdkmanager_path" --install "ndk;$ndk_version"
+        fi
+        python3 - "$ndk_dir/source.properties" "$ndk_version" <<'PY'
+        import pathlib, sys
+        entries = {}
+        for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+            if '=' in line:
+                key, value = line.split('=', 1)
+                entries[key.strip()] = value.strip()
+        assert entries.get('Pkg.Revision') == sys.argv[2], 'Android NDK revision differs from the release pin'
+        PY
+        test -x "$compiler_dir/x86_64-linux-android24-clang"
+        test -x "$compiler_dir/aarch64-linux-android24-clang"
+        echo "ANDROID_X86_64_CC=$compiler_dir/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+        echo "ANDROID_ARM64_CC=$compiler_dir/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+    - name: Build both editions for this exact source and platform
+      run: |
+        set -euo pipefail
+        public_sha="$(git rev-parse HEAD)"
+        version="$(tr -d '[:space:]' < VERSION)"
+        test "$public_sha" = "$GITHUB_SHA"
+        test "$public_sha" = "$PUBLIC_SOURCE"
+        [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+        # Local only; the publisher creates the remote tag after all checks.
+        git tag -f "v$version" "$public_sha"
+        TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh release-platform --platform "$PAIR"
+    - name: Check the exact release Ubuntu package through its lifecycle
+      if: matrix.pair == 'linux_amd64'
+      run: tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ubuntu-x64-full.tar.gz
+    - name: Retain the two source-bound release bundles and provenance
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-full-${{ matrix.pair }}-${{ github.sha }}-${{ github.run_attempt }}
+        path: |
+          build/gptadmin-*-full.*
+          build/gptadmin-*-client.*
+          build/gptadmin-release-matrix.json
+          build/gptadmin-checksums.txt
+          build/manifest.json
+          build/gptadmin-sbom.spdx.json
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1

@@ -1,0 +1,11 @@
+[Unit]
+Description=Discover new failed public GitHub CI every minute (OpenCode repair, explicit provider/model)
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=1
+Unit=gptadmin-ci-autofix.service
+
+[Install]
+WantedBy=timers.target
