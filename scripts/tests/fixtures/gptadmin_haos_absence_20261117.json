@@ -1,0 +1,182 @@
+{
+  "captured": {
+    "auxiliaries": {
+      "auto_update": true,
+      "boot": "auto",
+      "watchdog": false
+    },
+    "environment_file_sha256": "a422b04741ebaf5a571937ead0226433c4eb529c5b10166473af34afe18573dc",
+    "service": {
+      "active": "active",
+      "container_dead": false,
+      "container_id": "2b4cc8fc9b85fb520738ef05e5fab7def70086e5d9cfac17191ce61861115283",
+      "container_restarting": false,
+      "container_running": true,
+      "container_status": "running",
+      "controller_cgroup": "0::/\n",
+      "controller_pid": 520020,
+      "generation": "2026-11-15T15:54:06.18665211Z:5802965",
+      "image_id": "sha256:9a9c975fdb9d1524fdfc3bba41c8fe08350c1b87001a88e1a43fbbef90215671",
+      "inner_pid": 139,
+      "management_container_id": "9eeb7ded9cc00be01d4dbf5bb1721f22bfdca1e43d68a3341c3052c3ecd4def7",
+      "pid": 942047
+    }
+  },
+  "claim": "Retained native observations used as unit inputs; not another runtime stop/start acceptance.",
+  "compensation": {
+    "authority_applied": false,
+    "auto_update_restore_requests": 1,
+    "auxiliaries": {
+      "auto_update": true,
+      "boot": "auto",
+      "watchdog": false
+    },
+    "drain": {
+      "counters": {
+        "active_callbacks": 1,
+        "active_submissions": 0,
+        "outbox_pending": 0,
+        "unfinished_executions": 0
+      },
+      "draining": false,
+      "ready_to_stop": false,
+      "reason": ""
+    },
+    "drain_cancel_requests": 0,
+    "drain_http": 200,
+    "health_http": 200,
+    "normal_start_requests": 1,
+    "runtime": {
+      "active": "active",
+      "container_dead": false,
+      "container_id": "d9cb5cc0164c71df00b16b43ebcdfdcebdb310a979d60dd4fc385669b9a22bf1",
+      "container_restarting": false,
+      "container_running": true,
+      "container_status": "running",
+      "controller_cgroup": "0::/\n",
+      "controller_pid": 523458,
+      "generation": "2026-11-17T12:58:41.469257732Z:22030669",
+      "image_id": "sha256:9a9c975fdb9d1524fdfc3bba41c8fe08350c1b87001a88e1a43fbbef90215671",
+      "inner_pid": 157,
+      "management_container_id": "9eeb7ded9cc00be01d4dbf5bb1721f22bfdca1e43d68a3341c3052c3ecd4def7",
+      "pid": 690152
+    },
+    "status": "restored"
+  },
+  "docker_absence": {
+    "2b4cc8fc9b85fb520738ef05e5fab7def70086e5d9cfac17191ce61861115283": {
+      "rc": 1,
+      "stderr": "Error response from daemon: No such container: 2b4cc8fc9b85fb520738ef05e5fab7def70086e5d9cfac17191ce61861115283\n",
+      "stdout": "[]\n"
+    },
+    "app_21623b8c_gptadmin_hub_standby": {
+      "rc": 1,
+      "stderr": "Error response from daemon: No such container: app_21623b8c_gptadmin_hub_standby\n",
+      "stdout": "[]\n"
+    }
+  },
+  "exact_name_ids": [],
+  "management": {
+    "id": "9eeb7ded9cc00be01d4dbf5bb1721f22bfdca1e43d68a3341c3052c3ecd4def7",
+    "image": "sha256:dc73e24875fd5702bfa7269e6369e680089b990c4aa67b20c1415cd3bcc8357d",
+    "missing_object": false,
+    "mounts": [
+      {
+        "Destination": "/data",
+        "RW": true,
+        "Source": "/mnt/data/supervisor/apps/data/a0d7b954_ssh",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/share",
+        "RW": true,
+        "Source": "/mnt/data/supervisor/share",
+        "Type": "bind"
+      }
+    ],
+    "restart_policy": {
+      "MaximumRetryCount": 0,
+      "Name": "no"
+    },
+    "returncode": 0,
+    "state": {
+      "Dead": false,
+      "Error": "",
+      "ExitCode": 0,
+      "FinishedAt": "0001-01-01T00:00:00Z",
+      "OOMKilled": false,
+      "Paused": false,
+      "Pid": 3251,
+      "Restarting": false,
+      "Running": true,
+      "StartedAt": "2026-11-14T23:48:45.766085546Z",
+      "Status": "running"
+    },
+    "stderr_bytes": 0,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "manifest": {
+    "addon": "21623b8c_gptadmin_hub_standby",
+    "addon_version": "1.0.1139",
+    "binary_sha256": "c0c733ea26de84b9df27131e442477e68fc9f7d1cdc24210773673df896fd3ac",
+    "container": "app_21623b8c_gptadmin_hub_standby",
+    "data_host_path": "/mnt/data/supervisor/apps/data/21623b8c_gptadmin_hub_standby",
+    "entrypoint_sha256": "f281d47f7e19b5a42e833e09cb47f9d0893aad081446e5d855033d1ddc51f970",
+    "file_guards": [
+      {
+        "path": "/run.sh",
+        "sha256": "f281d47f7e19b5a42e833e09cb47f9d0893aad081446e5d855033d1ddc51f970"
+      },
+      {
+        "path": "/data/options.json",
+        "sha256": "b5cfd1d1be583892224f620f84e1eec6bd98e037e2d94fa6ddd8b4021f03fd92"
+      }
+    ],
+    "image_id": "sha256:9a9c975fdb9d1524fdfc3bba41c8fe08350c1b87001a88e1a43fbbef90215671",
+    "management_container": "app_a0d7b954_ssh",
+    "share_host_path": "/mnt/data/supervisor/share"
+  },
+  "original_fence": {
+    "body": {
+      "drain": {
+        "counters": {
+          "active_callbacks": 0,
+          "active_submissions": 0,
+          "outbox_pending": 0,
+          "unfinished_executions": 0
+        },
+        "draining": true,
+        "ready_to_stop": true,
+        "reason": "authority:b64ecee4215a902fc30afff67f51fe9f0d4f084e24d73c64b1659d0165398db8:original",
+        "since": "2026-11-17T12:46:00Z"
+      },
+      "manifest_sha256": "b64ecee4215a902fc30afff67f51fe9f0d4f084e24d73c64b1659d0165398db8",
+      "phase": "stop_requested",
+      "plan_digest": null,
+      "reason": "authority:b64ecee4215a902fc30afff67f51fe9f0d4f084e24d73c64b1659d0165398db8:original",
+      "service": {
+        "container_id": "2b4cc8fc9b85fb520738ef05e5fab7def70086e5d9cfac17191ce61861115283",
+        "generation": "2026-11-15T15:54:06.18665211Z:5802965",
+        "image_id": "sha256:9a9c975fdb9d1524fdfc3bba41c8fe08350c1b87001a88e1a43fbbef90215671",
+        "inner_pid": 139,
+        "pid": 942047
+      }
+    },
+    "sha256": "4e6289d0582e44852b251df6e14b3c5f5b3d4e0f88600f6ef9c0157b00d282df"
+  },
+  "provenance": {
+    "absence_task": "3e72b943006c886caba78e1eb0320589",
+    "compensation_receipt_sha256": "7cfd48318909532cb04fe8d72548667ac98509f7142db375ca2cf5077214294b",
+    "compensation_task": "857c4aa1fa1f629981f539910377f4c4",
+    "diagnosis_task": "7ab71931bf2204c55d78233c6836b398"
+  },
+  "schema": "gptadmin.haos-observed-lifecycle/v1",
+  "supervisor_stopped": {
+    "auto_update": false,
+    "boot": "auto",
+    "slug": "21623b8c_gptadmin_hub_standby",
+    "state": "stopped",
+    "version": "1.0.1139",
+    "watchdog": false
+  }
+}

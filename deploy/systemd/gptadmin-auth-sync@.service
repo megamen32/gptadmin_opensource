@@ -1,0 +1,17 @@
+[Unit]
+Description=GPTAdmin auth snapshot sync to local reader (%i)
+Wants=network-online.target
+After=network-online.target gptadmin-node@%i.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/gptadmin/nodes/%i.env
+EnvironmentFile=/etc/gptadmin/nodes/%i-auth-sync.env
+ExecStart=/usr/bin/python3 /opt/gptadmin/scripts/gptadmin_auth_sync.py run --allow-loopback-http
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

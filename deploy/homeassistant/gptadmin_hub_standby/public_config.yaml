@@ -1,0 +1,88 @@
+name: GPTAdmin Hub Standby
+# The exporter replaces this template version with 1.0.<Node VERSION>.
+version: "1.0.35"
+slug: gptadmin_hub_standby
+description: "GPTAdmin Hub with an optional unified HAOS Node and automatic failover"
+url: "https://github.com/megamen32/gptadmin-haos-addons"
+arch:
+  - aarch64
+image: ghcr.io/megamen32/gptadmin-haos-addons
+startup: services
+boot: auto
+init: false
+host_network: true
+full_access: true
+protected: true
+apparmor: false
+homeassistant_api: true
+hassio_api: true
+hassio_role: admin
+auth_api: true
+docker_api: true
+privileged:
+  - SYS_ADMIN
+  - NET_ADMIN
+map:
+  - config:rw
+  - ssl:rw
+  - addons:rw
+  - share:rw
+  - backup:rw
+  - media:rw
+options:
+  node_mode: "legacy"
+  quorum_enabled: false
+  quorum_ingress_checks: false
+  offline_durable_bearer: false
+  offline_shared_signer: false
+  hub_host: "0.0.0.0"
+  hub_port: 9001
+  auth_snapshot_max_bytes: 1048576
+  legacy_public_origins: []
+  oauth_allowed_redirects: []
+  public_origin:
+  admin_password:
+  failover_frp_token:
+  failover:
+    primary_health_url:
+    primary_public_url:
+    node_id: "shell:haos"
+    rank: 1
+    fail_count_base: 3
+    local_hub_port: 9001
+    endpoints: []
+    proxy_url: ""
+    subdomain:
+    domain:
+    public_confirm_timeout_sec: 3
+    maintenance_until: ""
+schema:
+  node_mode: str
+  quorum_enabled: bool
+  quorum_ingress_checks: bool
+  offline_durable_bearer: bool?
+  offline_shared_signer: bool
+  hub_host: str
+  hub_port: int
+  auth_snapshot_max_bytes: int(1,10485760)?
+  legacy_public_origins:
+    - url
+  oauth_allowed_redirects:
+    - url
+  public_origin: url
+  admin_password: password
+  failover_frp_token: password
+  failover:
+    primary_health_url: url
+    primary_public_url: url
+    node_id: str
+    rank: int
+    fail_count_base: int
+    local_hub_port: int
+    endpoints:
+      - str
+    proxy_url: str?
+    subdomain: str
+    domain: str
+    public_confirm_timeout_sec: int
+    maintenance_until: str?

@@ -1,0 +1,149 @@
+# Changelog
+
+All notable changes to GPT‑Админ are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Optional active MCP schema resources: a compact index, per-server full definitions
+  and an explicitly selected full snapshot, with stable identities, current ACLs,
+  bounded discovery/cache and explicit partial, stale or unavailable status.
+- file_transfer versioned contract 2: stateless stat (with opt-in hash=true SHA-256) and list (sorted, bounded to 1000 entries, optional pattern glob) metadata reads inside the same ACL roots, and upload_replace which atomically replaces an existing file at commit only while its digest still equals expected_sha256 (compare-and-swap without a sidecar file plus mv). The Hub advertises the extended schema only for executors reporting file_transfer_version 2 and rejects the new actions early on older nodes; read-only profiles may use stat and list.
+- shell_exec results now include stdout_base64 whenever the captured stdout tail contains terminal control characters or invalid UTF-8: the JSON string form survives transport byte-exact but terminals visually swallow CSI-style sequences and JSON encoding replaces invalid UTF-8 bytes, so the base64 copy keeps the original bytes verifiable.
+- Public facade search, schema and discover responses now carry target_title next to opaque short target ids, so external bootstrap clients can pick a host without probe calls.
+
+### Fixed
+- Secret redaction also covers stdout_base64 before shell results are returned or persisted.
+- Server inventory resources and direct resource routes enforce current target and
+  personal-connection access instead of exposing the global inventory.
+- Child schema discovery follows bounded `tools/list` pagination and only declares
+  completeness after successful enumeration; malformed definitions cannot disappear
+  through access filtering while retaining a complete marker.
+- Schema cache failures do not extend stale retention beyond the last successful
+  read, and registry changes during a snapshot prevent a false complete result.
+
+### Changed
+- The Node lifecycle manager can enroll an external member through a private identity file and stdin-only join grant, with an explicit advertised endpoint and connect IP.
+
+### Performance
+- Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
+
+### Fixed
+- Failover promotion tolerates a briefly incomplete procfs argument read for its own unreaped FRP child, then still requires exact executable, configuration and process ownership.
+- FRP ownership failures now identify failed checks without disclosing process arguments; strict ownership enforcement is unchanged.
+- A drained Node package update can set an explicit HTTPS legacy-origin allowlist with automatic environment rollback on failure.
+- The HAOS app now passes an explicit legacy-origin allowlist into bearer issuer and resource validation for credentials issued before a public-origin migration.
+- Node drain closes executor poll admission and counts accepted polls until callbacks are reserved, avoiding a false idle report during task delivery.
+- Quorum leaders preserve encrypted undispatched executor input across leader changes and avoid replaying started work; enrolled follower requests use the leader queue.
+- Quorum task log replay validates an atomic cumulative checkpoint before accepting historical entries; old quorum snapshots without this checkpoint require an explicit migration. Follower drain remains unavailable until leader-owned in-flight work can be verified.
+- The browser OAuth callback now delivers its PKCE-bound authorization code to
+  the chat-site opener; the bridge still validates the Hub origin and OAuth state.
+- An asynchronous webhook dispatcher no longer starts a job after it has already
+  reached a terminal state, so late progress updates remain rejected.
+- Nodes in the `failed` state were invisible: the status filter offered no way to select
+  them, the Overview attention panel truncated its list to six rows, and the summary tile
+  counted only online and stale, so the numbers contradicted both each other and the node
+  total. Failed nodes are now filterable, listed first, counted, and labelled in Russian.
+- Child nodes inherited their parent host label, so a shell target, a file target and a
+  child MCP on the same machine rendered as identical rows. Rows now carry a kind
+  qualifier such as «MCP-компонент: BrowserOS» next to the friendly name.
+- For online nodes `last_seen` is the hub poll time, which tracked the current clock and
+  answered nothing. Recent values now render as «только что» / «N минут назад», with the
+  exact timestamp in the tooltip; stale and failed nodes keep absolute time.
+
+### Changed
+- An issued token now states its granted scopes, access mode and expected expiry, in the
+  result block and on the client card. The result block sits next to the issuing form
+  instead of at the top of the page, the form has an «Отмена» action, and the result
+  includes the Hub endpoint plus a copy-ready `mcp.json` server entry.
+
+### Fixed
+- Admin UI renders timestamps as readable local date and time instead of raw
+  Unix seconds on the Servers, Overview and Jobs screens, for ISO strings,
+  Unix seconds, Unix milliseconds and missing values.
+
+### Changed
+- The managed-token form on the Clients screen is now reachable from a primary
+  "Новый клиент" entry point, stays visible while the client list is loading or
+  failed to load, and shows the granted scopes plus a copy-ready
+  `Authorization: Bearer ...` header for `mcp.json`.
+
+
+## [1024] - 2026-10-17
+
+### Added
+- Code Mode chains authorized MCP tools in a bounded JavaScript runtime and returns only selected JSON.
+- Profile-specific instruction delivery before execution, with versioned context receipts and refresh after rule changes.
+- Portable GPTAdmin plugin 1.3.0 packaging alongside the existing Codex format.
+
+### Fixed
+- Secret request and status tools are routed through the generic Hub execution facade.
+- Installation, update verification and acceptance clients obtain the current instruction context before dispatch instead of failing on the new precondition.
+- Exact tool-schema selection stays scoped even with full detail; compact successful replies retain expandable diagnostics.
+- Regression coverage for profile isolation, current-context admission, reader restrictions and cross-node delivery.
+
+## [139] - 2026-08-02
+
+### Fixed
+- Private-source releases no longer fail solely because GitHub does not offer
+  artifact attestations to user-owned private repositories; manifest, SBOM,
+  installer verification and vulnerability gates remain mandatory.
+
+## [138] - 2026-08-02
+
+### Fixed
+- Release documentation no longer links to host-local incident attachments or
+  disposable logs that are absent from a clean source checkout.
+
+## [137] - 2026-08-02
+
+### Added
+- Durable OAuth refresh-token support for MCP/ChatGPT connections, including
+  `offline_access` discovery metadata and digest-only rotating credentials.
+- Explicit documentation for the one-time reconnect required by sessions that
+  predate refresh support.
+
+### Changed
+- HAOS GPTAdmin Hub Standby now deploys as app version 1.0.6 and fails closed
+  when Supervisor rejects an update or the requested listener build is absent.
+- Release identity advances to build 137 so the private source tag and public
+  release do not regress behind existing v136 artifacts.
+
+### Added
+- AGPL-3.0 license
+- SECURITY.md (responsible disclosure policy)
+- CONTRIBUTING.md (dev setup, code style, PR process)
+- CODE_OF_CONDUCT.md (Contributor Covenant v2.1)
+- Open-core launch plan (`docs/OPEN_CORE_PLAN.md`)
+- New README with vision, architecture diagram, quickstart, 3 adapters, use-cases
+- pyproject.toml: license metadata, classifiers, keywords
+
+### Changed
+- `.gitignore`: fixed broken merge conflict markers, merged duplicates, added
+  `.claude/`, `.serena/`, `*.tar.gz`, `*.zip`, `ngrok_url.txt`, `.cloudflared/`,
+  `scripts/check_mac_tunnel_matrix.env`
+
+### Removed
+- `gptadmin_refactor_2026-05-11_15-18-03.tar.gz` (repo junk)
+- `root_hub_license_refactor.zip` (repo junk)
+- `.claude/`, `.serena/` (private AI-assistant settings)
+
+### Security
+- Scrubbed leaked `MCP_AUTH_TOKEN` from git history via `git filter-repo`
+- Scrubbed leaked `CTL_TOKEN` / `ADMIN_PASSWORD` from git history
+
+## [0.1.0] - 2025-05-01
+
+### Added
+- Initial release of GPT‑Админ
+- `gptadmin_hub` — MCP hub, proxies commands to agents
+- `shellmcp` — shell agent (Python + Go) for target machines
+- Three adapters: OpenAI Action, MCP remote SSE, browser extension (userscript)
+- CLI (`gptadmin`): setup, tunnel (FRP/Cloudflare), status, logs
+- Web panel at `/admin` (queue, agent/MCP health, logs)
+- OAuth for OpenAI SDK
+- Auto-tunnel via FRP and Cloudflare
+- Install scripts for Linux/macOS/Windows (user-mode and system-mode)

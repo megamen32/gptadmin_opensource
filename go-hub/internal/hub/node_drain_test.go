@@ -1,0 +1,418 @@
+package hub
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func drainTestHub(t *testing.T, routes map[string]string) *Server {
+	t.Helper()
+	raw := "{}"
+	if len(routes) > 0 {
+		data, err := json.Marshal(routes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = string(data)
+	}
+	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "drain-owner", ShellToken: "drain-shell", NodePeersJSON: raw, DefaultTimeout: 30 * time.Second})
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func drainLocalExecutor(t *testing.T, s *Server) {
+	t.Helper()
+	if err := s.RegisterLocalExecutor("local", map[string]string{"server_id": "local-id", "public_key": "local-key", "fingerprint": "local-fingerprint"}, strings.Repeat("l", 32)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func drainAdminPost(s *Server, body, token string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, "/admin/api/node/drain", strings.NewReader(body))
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func drainAdminGet(s *Server, token string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodGet, "/admin/api/node/drain", nil)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func waitForDrainCondition(t *testing.T, s *Server, what string, cond func(NodeDrainStatus) bool) NodeDrainStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status := s.NodeDrainStatus()
+		if cond(status) {
+			return status
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("drain condition not met (%s): %+v", what, status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// dispatchLocalJob performs the executor poll that hands the queued job over.
+// The Hub refuses a receipt for a task that was never dispatched, so a test
+// that reports an executor result must first take the job from the queue.
+func dispatchLocalJob(t *testing.T, s *Server, jobID string) {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/queue/local?timeout=1&server_id=local-id&public_key=local-key&fingerprint=local-fingerprint", nil)
+	r.Header.Set("Authorization", "Bearer "+strings.Repeat("l", 32))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("executor poll rejected: %d %s", w.Code, w.Body.String())
+	}
+	var job map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &job); err != nil || firstString(job, "id") != jobID {
+		t.Fatalf("executor did not receive the queued job: %s", w.Body.String())
+	}
+}
+
+func completeLocalJob(t *testing.T, s *Server, jobID string) {
+	t.Helper()
+	dispatchLocalJob(t, s, jobID)
+	r := httptest.NewRequest(http.MethodPost, "/queue/local/result", strings.NewReader(`{"id":"`+jobID+`","result":{"return_code":0,"stdout":"done"}}`))
+	r.Header.Set("Authorization", "Bearer "+strings.Repeat("l", 32))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("executor result rejected: %d %s", w.Code, w.Body.String())
+	}
+}
+
+type runtimeCountersStub struct{ callbacks, outbox int }
+
+func (c runtimeCountersStub) ActiveCallbacks() int { return c.callbacks }
+func (c runtimeCountersStub) OutboxPending() int   { return c.outbox }
+
+func TestNodeDrainRejectsSubmissionsAndKeepsReads(t *testing.T) {
+	var peerCalls atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerCalls.Add(1)
+		io.Copy(io.Discard, r.Body)
+		writeJSON(w, http.StatusOK, map[string]any{"job_id": "peer-job", "status": "running"})
+	}))
+	defer peer.Close()
+	s := drainTestHub(t, map[string]string{"shell:nodeB": peer.URL})
+	drainLocalExecutor(t, s)
+
+	// Before draining both submission paths work: one local job, one peer forward.
+	if w := peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf before"},"background":true}`, "drain-owner", ""); w.Code != 200 {
+		t.Fatalf("local submission failed pre-drain: %d %s", w.Code, w.Body.String())
+	}
+	if w := peerTestCall(s, `{"target":"shell:nodeB","tool":"shell_exec","arguments":{"cmd":"printf before"},"background":true}`, "drain-owner", ""); w.Code != 200 || peerCalls.Load() != 1 {
+		t.Fatalf("peer submission failed pre-drain: %d %s", w.Code, w.Body.String())
+	}
+	s.mu.Lock()
+	localJobID := ""
+	for id := range s.shellJobs {
+		localJobID = id
+	}
+	s.mu.Unlock()
+	if localJobID == "" {
+		t.Fatal("local job was not enqueued")
+	}
+
+	if st := s.NodeDrainStatus(); st.Draining || st.ReadyToStop || st.Counters.UnfinishedExecutions != 0 {
+		t.Fatalf("unexpected pre-drain status: %+v", st)
+	}
+
+	s.EnableNodeDrain("planned update")
+	if st := s.NodeDrainStatus(); !st.Draining || st.Reason != "planned update" || !st.ReadyToStop {
+		t.Fatalf("drain not active after begin: %+v", st)
+	}
+
+	// Local submissions are rejected with a retryable 503; nothing is enqueued.
+	w := peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf during"},"background":true}`, "drain-owner", "")
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"retryable":true`) || !strings.Contains(w.Body.String(), "node is draining; retry after drain completes") {
+		t.Fatalf("local submission not drained: %d %s", w.Code, w.Body.String())
+	}
+	// Peer submissions are rejected before the outbound request exists.
+	w = peerTestCall(s, `{"target":"shell:nodeB","tool":"shell_exec","arguments":{"cmd":"printf during"},"background":true}`, "drain-owner", "")
+	if w.Code != http.StatusServiceUnavailable || peerCalls.Load() != 1 || !strings.Contains(w.Body.String(), `"retryable":true`) {
+		t.Fatalf("peer submission not drained: %d %s", w.Code, w.Body.String())
+	}
+	// /mcp keeps the node peer failure envelope: -32000 with retryable data.
+	// The direct execute facade is retired, so the surviving write-capable
+	// public spelling is the code-mode container.
+	w = peerTestMCPCall(s, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"exec","arguments":{"code":"return 1;"}}}`, "drain-owner")
+	var envelope map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusServiceUnavailable || envelope["id"] != float64(7) {
+		t.Fatalf("drained /mcp envelope wrong: %d %s", w.Code, w.Body.String())
+	}
+	if rpcErr := mapValue(envelope["error"]); rpcErr["code"] != float64(-32000) || !strings.Contains(w.Body.String(), `"retryable":true`) {
+		t.Fatalf("drained /mcp error shape wrong: %s", w.Body.String())
+	}
+	// Receipt reads stay available while draining.
+	w = peerTestMCPCall(s, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_mcp_job","arguments":{"id":"`+localJobID+`"}}}`, "drain-owner")
+	if w.Code != 200 || strings.Contains(w.Body.String(), "retryable") {
+		t.Fatalf("job receipt read blocked by drain: %d %s", w.Code, w.Body.String())
+	}
+
+	s.CancelNodeDrain()
+	if st := s.NodeDrainStatus(); st.Draining || st.Reason != "" || st.Since != "" {
+		t.Fatalf("cancel left drain state: %+v", st)
+	}
+	if w := peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf after"},"background":true}`, "drain-owner", ""); w.Code != 200 {
+		t.Fatalf("submission failed after cancel: %d %s", w.Code, w.Body.String())
+	}
+	s.mu.Lock()
+	count := len(s.shellJobs)
+	s.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("post-cancel submission missing: %d local jobs", count)
+	}
+}
+
+func TestNodeDrainReadyToStopWaitsForInFlightSubmission(t *testing.T) {
+	s := drainTestHub(t, nil)
+	drainLocalExecutor(t, s)
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"sleep 30"},"background":false}`, "drain-owner", "")
+	}()
+	// The real submission path holds the gate: in-flight and unfinished work.
+	waitForDrainCondition(t, s, "in-flight submission", func(st NodeDrainStatus) bool { return st.Counters.ActiveSubmissions >= 1 })
+	waitForDrainCondition(t, s, "durable queued submission", func(st NodeDrainStatus) bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.shellJobs) > 0 })
+	if st := s.NodeDrainStatus(); st.ReadyToStop {
+		t.Fatalf("ready_to_stop true while a submission is in flight: %+v", st)
+	}
+	s.EnableNodeDrain("update while busy")
+	if st := s.NodeDrainStatus(); st.ReadyToStop {
+		t.Fatalf("ready_to_stop true while unfinished work remains: %+v", st)
+	}
+	// Drain closes new admissions but never strands the admitted submission.
+	if w := peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf refused"},"background":true}`, "drain-owner", ""); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("late submission admitted during drain: %d %s", w.Code, w.Body.String())
+	}
+	s.mu.Lock()
+	jobID := ""
+	for id := range s.shellJobs {
+		jobID = id
+	}
+	s.mu.Unlock()
+	completeLocalJob(t, s, jobID)
+	if w := <-responses; w.Code != 200 {
+		t.Fatalf("in-flight submission failed: %d %s", w.Code, w.Body.String())
+	}
+	st := waitForDrainCondition(t, s, "ready to stop", func(st NodeDrainStatus) bool { return st.ReadyToStop })
+	if st.Counters.ActiveSubmissions != 0 || st.Counters.UnfinishedExecutions != 0 {
+		t.Fatalf("counters did not settle: %+v", st)
+	}
+}
+
+func TestNodeDrainCountersTrackRealLocalJob(t *testing.T) {
+	s := drainTestHub(t, nil)
+	drainLocalExecutor(t, s)
+	s.SetNodeRuntimeCounters(runtimeCountersStub{callbacks: 2, outbox: 3})
+	if w := peerTestCall(s, `{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf drain-counter"},"background":true}`, "drain-owner", ""); w.Code != 200 {
+		t.Fatalf("submission failed: %d %s", w.Code, w.Body.String())
+	}
+	s.mu.Lock()
+	jobID := ""
+	for id := range s.shellJobs {
+		jobID = id
+	}
+	s.mu.Unlock()
+	st := waitForDrainCondition(t, s, "runtime callbacks", func(st NodeDrainStatus) bool {
+		return st.Counters.ActiveCallbacks == 2 && st.Counters.UnfinishedExecutions == 0
+	})
+	if st.Counters.ActiveCallbacks != 2 || st.Counters.OutboxPending != 3 {
+		t.Fatalf("runtime counters missing from status: %+v", st)
+	}
+	s.EnableNodeDrain("counter test")
+	if st := s.NodeDrainStatus(); st.ReadyToStop {
+		t.Fatalf("ready_to_stop true with queued work: %+v", st)
+	}
+	completeLocalJob(t, s, jobID)
+	st = waitForDrainCondition(t, s, "counters settled", func(st NodeDrainStatus) bool {
+		return st.Counters.UnfinishedExecutions == 0 && st.Counters.ActiveSubmissions == 0
+	})
+	if st.ReadyToStop {
+		t.Fatalf("ready_to_stop ignores runtime counters: %+v", st)
+	}
+	s.SetNodeRuntimeCounters(runtimeCountersStub{})
+	if st := s.NodeDrainStatus(); !st.ReadyToStop {
+		t.Fatalf("drain never became ready: %+v", st)
+	}
+}
+
+func TestNodeDrainEndpointAuth(t *testing.T) {
+	s := drainTestHub(t, nil)
+	if w := drainAdminGet(s, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status allowed: %d %s", w.Code, w.Body.String())
+	}
+	if w := drainAdminPost(s, `{"action":"begin","reason":"auth test"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated begin allowed: %d %s", w.Code, w.Body.String())
+	}
+	w := drainAdminPost(s, `{"action":"begin","reason":"auth test"}`, "drain-owner")
+	if w.Code != 200 {
+		t.Fatalf("begin failed: %d %s", w.Code, w.Body.String())
+	}
+	var status NodeDrainStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Draining || status.Reason != "auth test" || status.Since == "" {
+		t.Fatalf("begin returned wrong status: %s", w.Body.String())
+	}
+	if w := drainAdminGet(s, "drain-owner"); w.Code != 200 || !strings.Contains(w.Body.String(), `"draining":true`) {
+		t.Fatalf("authenticated status failed: %d %s", w.Code, w.Body.String())
+	}
+	// A second begin is idempotent: only the reason moves.
+	if w := drainAdminPost(s, `{"action":"begin","reason":"second"}`, "drain-owner"); !strings.Contains(w.Body.String(), `"reason":"second"`) {
+		t.Fatalf("second begin not merged: %s", w.Body.String())
+	}
+	if w := drainAdminPost(s, `{"action":"cancel"}`, "drain-owner"); w.Code != 200 || strings.Contains(w.Body.String(), `"draining":true`) {
+		t.Fatalf("cancel failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := drainAdminPost(s, `{}`, "drain-owner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing action accepted: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
+	s := drainTestHub(t, nil)
+	s.mu.Lock()
+	s.relayJobs["catalog"] = &relayJob{ID: "catalog", AgentID: "control:host", Method: "tools/list", Status: "queued", CreatedAt: nowFloat()}
+	s.relayJobs["child-catalog"] = &relayJob{ID: "child-catalog", AgentID: "mcp:shell:host:child", Method: childSchemaMethod, Status: "queued", CreatedAt: nowFloat()}
+	s.mu.Unlock()
+	s.EnableNodeDrain("catalog-only")
+	if st := s.NodeDrainStatus(); !st.ReadyToStop || st.Counters.UnfinishedExecutions != 0 {
+		t.Fatalf("read-only undispatched discovery blocks drain: %+v", st)
+	}
+	s.mu.Lock()
+	if s.relayJobs["catalog"].Status != "queued" {
+		t.Fatal("drain rewrote receipt")
+	}
+	s.mu.Unlock()
+	for _, j := range []*relayJob{
+		{ID: "call", Method: "tools/call", Status: "queued"},
+		{ID: "call", Method: "tools/call", Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "unknown"},
+		{ID: "call", Method: "tools/list", Status: "queued", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "queued", Result: map[string]any{"accepted": true}},
+		{ID: "call", Method: childSchemaMethod, Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "unknown"},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", StartedAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", DoneAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", Result: map[string]any{"accepted": true}},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", Error: map[string]any{"code": "failure"}},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", ParentTaskID: "parent"},
+	} {
+		s.mu.Lock()
+		s.relayJobs["call"] = j
+		s.mu.Unlock()
+		if st := s.NodeDrainStatus(); st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
+			t.Fatalf("unsafe record not blocking: job=%+v state=%+v", j, st)
+		}
+	}
+}
+
+func TestNodeDrainQueuedChildSchemaWithDurableShell(t *testing.T) {
+	s := drainTestHub(t, nil)
+	s.mu.Lock()
+	owner, err := s.ensureTaskOwnerLocked()
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	id := "child-schema"
+	s.relayJobs[id] = &relayJob{ID: id, OwnerID: owner, Method: childSchemaMethod, Status: "queued", CreatedAt: nowFloat()}
+	s.shellJobs[id] = &shellJob{ID: id, OwnerID: owner, Server: "offline", ToolName: "mcp_tools", Status: "queued", CreatedAt: nowFloat(), Arguments: map[string]any{"ref": "child"}}
+	err = s.saveTaskStateLocked(id)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.EnableNodeDrain("undelivered schema")
+	if st := s.NodeDrainStatus(); !st.ReadyToStop {
+		t.Fatalf("durable schema blocks drain: %+v", st)
+	}
+	s.mu.Lock()
+	s.shellJobs[id].Status = "running"
+	s.shellJobs[id].StartedAt = nowFloat()
+	s.mu.Unlock()
+	if st := s.NodeDrainStatus(); st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
+		t.Fatalf("started shell must block drain: %+v", st)
+	}
+}
+
+type drainGateStub struct{ draining bool }
+
+func (g *drainGateStub) ActiveCallbacks() int    { return 0 }
+func (g *drainGateStub) OutboxPending() int      { return 0 }
+func (g *drainGateStub) SetQueueDraining(v bool) { g.draining = v }
+
+func TestNodeDrainSynchronizesExecutorPollGate(t *testing.T) {
+	s := drainTestHub(t, nil)
+	gate := &drainGateStub{}
+	s.SetNodeRuntimeCounters(gate)
+	if gate.draining {
+		t.Fatal("new executor started draining")
+	}
+	s.EnableNodeDrain("update")
+	if !gate.draining {
+		t.Fatal("executor poll gate remained open")
+	}
+	replacement := &drainGateStub{}
+	s.SetNodeRuntimeCounters(replacement)
+	if !replacement.draining {
+		t.Fatal("replacement executor missed existing drain")
+	}
+	s.CancelNodeDrain()
+	if replacement.draining {
+		t.Fatal("poll gate did not reopen")
+	}
+}
+
+func TestNativeMemberDrainWithStaleAuth(t *testing.T) {
+	member, _, _ := membershipMemberNode(t, "member", "http://127.0.0.1:1", "original")
+	for _, test := range []struct {
+		host, remote, header, token string
+		allowed                     bool
+	}{
+		{"127.0.0.1:9001", "127.0.0.1:42123", "", "member-owner", true},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "", "wrong", false},
+		{"127.0.0.1:9001", "192.0.2.2:42123", "", "member-owner", false},
+		{"public.test", "127.0.0.1:42123", "", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "X-Forwarded-For", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "X-GPTAdmin-Quorum-Forwarded", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", nodePeerHopHeader, "member-owner", false},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "http://"+test.host+"/admin/api/node/drain", strings.NewReader(`{"action":"begin"}`))
+		request.RemoteAddr = test.remote
+		request.Header.Set("Authorization", "Bearer "+test.token)
+		if test.header != "" {
+			request.Header.Set(test.header, "1")
+		}
+		response := httptest.NewRecorder()
+		member.Handler().ServeHTTP(response, request)
+		if got := member.NodeDrainStatus().Draining; got != test.allowed || (response.Code == 200) != test.allowed {
+			t.Fatalf("host=%s remote=%s header=%s: HTTP %d drain=%t", test.host, test.remote, test.header, response.Code, got)
+		}
+		member.CancelNodeDrain()
+	}
+}

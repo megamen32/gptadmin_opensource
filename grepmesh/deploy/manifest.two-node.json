@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "project": "grepmesh-mcp",
+  "source": {
+    "repository": "/home/roomhacker/gptadmin",
+    "revision": "5664d9b",
+    "source_paths": [
+      "grepmesh/Cargo.toml",
+      "grepmesh/Cargo.lock",
+      "grepmesh/src"
+    ],
+    "artifact": "grepmesh/target/release/grepmesh-mcp",
+    "install_path": "/usr/local/bin/grepmesh-mcp"
+  },
+  "service": {
+    "unit": "grepmesh/grepmesh-mcp.service",
+    "unit_name": "grepmesh-mcp.service",
+    "config_path": "/etc/grepmesh-mcp/config.json",
+    "state_dir": "/var/lib/grepmesh-mcp",
+    "service_user": "roomhacker-search",
+    "service_group": "roomhacker-search",
+    "supplementary_group": "roomhacker",
+    "search_acl_paths": [
+      "/home/roomhacker/gptadmin"
+    ],
+    "peer_env_path": "/etc/grepmesh-mcp/peer.env",
+    "peer_token_env": "GREPMESH_PEER_TOKEN"
+  },
+  "transport": {
+    "mode": "management-vpn",
+    "scheme": "http",
+    "requires_existing_peer_token": true,
+    "requires_firewall_allowlist": true
+  },
+  "targets": [
+    {
+      "host_id": "server-100",
+      "ssh_alias": "local",
+      "bind": "192.168.2.100:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/roomhacker",
+      "roots": {
+        "home": ["/home/roomhacker"],
+        "opt": ["/opt"],
+        "mobile-browser": ["/opt/mobile-browser"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-88",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.75:9419/mcp"
+        },
+        {
+          "host_id": "server-44",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.5:9419/mcp"
+        }
+      ]
+    },
+    {
+      "host_id": "server-88",
+      "ssh_alias": "88",
+      "bind": "192.168.2.75:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/roomhacker",
+      "roots": {
+        "home": ["/home/roomhacker"],
+        "opt": ["/opt"],
+        "mobile-browser": ["/opt/mobile-browser"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-100",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.100:9419/mcp"
+        },
+        {
+          "host_id": "server-44",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.5:9419/mcp"
+        }
+      ]
+    },
+    {
+      "host_id": "server-44",
+      "ssh_alias": "44",
+      "bind": "192.168.2.5:9419",
+      "local_bind": "127.0.0.1:9419",
+      "root": "/home/roomhacker",
+      "roots": {
+        "home": ["/home/roomhacker"],
+        "opt": ["/opt"],
+        "etc": ["/etc"]
+      },
+      "peers": [
+        {
+          "host_id": "server-100",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.100:9419/mcp"
+        },
+        {
+          "host_id": "server-88",
+          "local_url": "http://127.0.0.1:9419/mcp",
+          "routable_url": "http://192.168.2.75:9419/mcp"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "stage": "M18L5",
+  "base_revision": "5876af6e75cb6a70dddf5556732b6e38320abf1b",
+  "recorded_utc": "2026-11-08T21:23:45.047138+00:00",
+  "scope": "Require nonblank string tool.name before Hub profile filtering and ShellMCP connector allowlist; no other schema validation changes.",
+  "hub_runs": [
+    {
+      "phase": "RED",
+      "command": "go test -v -count=1 -timeout=60s -run ^TestChildSchemaNamesValidatedBeforeProfileFilter$ ./internal/hub",
+      "cwd": "go-hub",
+      "exit_code": 1,
+      "evidence": "schema-name-hub-red.txt"
+    },
+    {
+      "phase": "GREEN",
+      "command": "go test -v -count=1 -timeout=60s -run ^TestChildSchemaNamesValidatedBeforeProfileFilter$ ./internal/hub",
+      "cwd": "go-hub",
+      "exit_code": 0,
+      "evidence": "schema-name-hub-green.txt"
+    },
+    {
+      "phase": "RELATED",
+      "command": "go test -v -count=1 -timeout=60s -run ^(TestMCPSchemaResourcesNativeCataloguesAreComplete|TestChildSchemaInvalidUpstreamIsFailure|TestChildSchemaChildOnlyProfileAndExactHint|TestDirectChildSchemaAndExplicitSchemaNoDurableJobs|TestLegacyChildSchemaCompletesThroughSameIDTransport|TestMCPSchemaResourcesPreserveFullDefinitions)$ ./internal/hub",
+      "cwd": "go-hub",
+      "exit_code": 0,
+      "evidence": "schema-name-hub-related.txt"
+    }
+  ],
+  "shell_checks": "schema-name-shell-checks.json",
+  "diff_check_exit": 0,
+  "native_catalogue_check": "Existing source correctly marks enrolled shell/file/control resource catalogues complete. Focused positive test passes; no production completeness markers added.",
+  "source_sha256": {
+    "go-hub/internal/hub/child_schema_direct.go": "49e2b140647a709e51dad3ba4c366764bf4904fdf8f128a888a820003bb9fe17",
+    "go-hub/internal/hub/child_schema_names_test.go": "de65653088017fa5351efeb4a13e55bc6d8b043ac315b16f8e1664e1940c57ac",
+    "go-hub/internal/hub/mcp_schema_resources_native_test.go": "b40d83f3968d5837685c32494df3dd79616fdca9ab82631d03855f880dc04ce9",
+    "go-shellmcp/internal/mcpclient/pagination.go": "b939064d4177a891bf5288e7f0a80ece06f9ef308c008999103b97ace29211ae",
+    "go-shellmcp/internal/server/mcp_schema_name_test.go": "723d674ebfe87e916a211e5136260c68effd3d315ad966b979d2c9922ae6bf70"
+  },
+  "validation_boundary": "Source and local HTTP fixtures only. No live runtime or external publication was changed."
+}

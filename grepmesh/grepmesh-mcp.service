@@ -1,0 +1,27 @@
+[Unit]
+Description=GrepMesh MCP local and federated file search
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roomhacker-search
+Group=roomhacker-search
+# server-88 keeps /home/roomhacker at 0750; this grants only group-readable project access.
+SupplementaryGroups=roomhacker
+EnvironmentFile=/etc/grepmesh-mcp/peer.env
+ExecStart=/usr/local/bin/grepmesh-mcp --config /etc/grepmesh-mcp/config.json
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Writable only for the persisted peer-topology cache; search roots stay read-only.
+ReadWritePaths=/var/lib/grepmesh-mcp
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=GPTAdmin FRP server watchdog
+After=network-online.target gptadmin-frps.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gptadmin-frp-watchdog --unit gptadmin-frps.service --state /run/gptadmin/frps-watchdog.json

@@ -1,0 +1,19 @@
+[Unit]
+Description=GPTAdmin one-way ingress failover (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/gptadmin/nodes/%i-ingress-probe.env
+ExecStart=/usr/bin/python3 /opt/gptadmin/scripts/gptadmin_ingress_failover.py run --config /etc/gptadmin/nodes/%i-ingress-failover.json
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=143
+TimeoutStopSec=10
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+{
+  "name": "gptadmin",
+  "version": "1.5.0",
+  "description": "GPTAdmin: searchable, profile-scoped tools and compact JavaScript operations.",
+  "author": {
+    "name": "GPTAdmin contributors",
+    "url": "https://github.com/megamen32"
+  },
+  "homepage": "https://github.com/megamen32/gptadmin",
+  "repository": "https://github.com/megamen32/gptadmin",
+  "license": "AGPL-3.0",
+  "keywords": [
+    "mcp",
+    "oauth",
+    "server-administration",
+    "profiles",
+    "memory",
+    "mcp-proxy"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "GPTAdmin",
+    "shortDescription": "OAuth MCP hub with searchable tools and JavaScript operations.",
+    "longDescription": "Installing GPTAdmin adds a remote OAuth-protected MCP server. On first connection the Hub opens a browser consent page where the user enters the admin password; the password and bearer tokens never belong in Codex chat or plugin files. GPTAdmin exposes a client-independent, profile-scoped facade: search visible tools and settings, run short JavaScript operations, manage servers and child MCPs, and inspect operation receipts.",
+    "developerName": "GPTAdmin contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "OAuth remote MCP",
+      "Searchable tool catalog",
+      "JavaScript tool composition",
+      "Profile-scoped administration",
+      "Child MCP proxying",
+      "Memory-directed workflows"
+    ],
+    "defaultPrompt": [
+      "Connect to GPTAdmin through its OAuth browser flow.",
+      "Search caller-visible tools and settings, then use code_exec for operations.",
+      "Use discover and schema only as read-only compatibility tools.",
+      "Install or use a child MCP through GPTAdmin search and code_exec.",
+      "Use the memory MCP named by the active GPTAdmin profile."
+    ]
+  }
+}

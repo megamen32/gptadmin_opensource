@@ -1,0 +1,17 @@
+[Unit]
+Description=GPTAdmin unified node (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/gptadmin/nodes/%i.env
+WorkingDirectory=/var/lib/gptadmin/nodes/%i
+ExecStart=/opt/gptadmin/bin/gptadmin-node
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

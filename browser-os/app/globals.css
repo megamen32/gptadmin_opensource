@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* Tailwind respects .gitignore during automatic source detection. The
+ * application windows live under components/apps, so include them explicitly. */
+@source "../components/apps";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+}
+
+/* Keep the reset in Tailwind's base layer. An unlayered padding reset wins
+ * over utilities and collapses every button and app pane. */
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: #0a0a1a;
+    color: #f8fafc;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Global scrollbar for body */
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Textarea scrollbar */
+textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+textarea::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(67, 97, 238, 0.3);
+}
+
+/* Animation keyframes */
+@keyframes windowOpen {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes dockBounce {
+  0%, 100% { transform: translateY(0); }
+  25% { transform: translateY(-12px); }
+  50% { transform: translateY(-4px); }
+  75% { transform: translateY(-8px); }
+}
+
+/* Prevent text selection on UI elements */
+button, [role="button"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
