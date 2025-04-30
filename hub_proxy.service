@@ -1,0 +1,14 @@
+[Unit]
+Description=Hub Proxy for GPT Server Management (hub_proxy)
+After=network.target
+
+[Service]
+WorkingDirectory=/home/admin/gptadmin
+ExecStart=/home/admin/gptadmin/.venv/bin/python hub_proxy.py
+Environment=CTL_TOKEN=chatgpt_secret
+Restart=always
+RestartSec=5
+User=admin
+
+[Install]
+WantedBy=multi-user.target

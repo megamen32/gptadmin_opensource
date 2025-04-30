@@ -1,0 +1,20 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "GPTAdmin",
+  "name_for_model": "gptadmin",
+  "description_for_human": "Управление вашими серверами через единый интерфейс GPT-плагина",
+  "description_for_model": "Plugin to manage multiple Ubuntu servers via HTTP API. Use the /srv/{server}/{path} endpoints with bearer auth. Do not guess URLs; rely on the manifest.",
+  "auth": {
+    "type": "bearer",
+    "authorization_type": "header",
+    "verification_tokens": { "openai": "<OPTIONAL>" }
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://gptadmin.bezrabotnyi.com/openapi.json",
+    "is_user_authenticated": true
+  },
+  "logo_url": "https://gptadmin.bezrabotnyi.com/logo.png",
+  "contact_email": "admin@bezrabotnyi.com",
+  "legal_info_url": "https://bezrabotnyi.com/legal"
+}

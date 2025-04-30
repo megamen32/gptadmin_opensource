@@ -1,0 +1,18 @@
+[Unit]
+Description=Root Daemon for GPT Control (rootd)
+After=network.target
+
+[Service]
+WorkingDirectory=/home/admin/gptadmin
+ExecStart=/home/admin/gptadmin/.venv/bin/python rootd.py
+Environment=ROOTD_TOKEN=srv_secret
+Environment=ROOTD_URL=http://localhost:25900
+Environment=HUB_URL=http://localhost:9001/heartbeat
+Environment=EXEC_TIMEOUT=300
+Environment=LOG_LIMIT_B=8192
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

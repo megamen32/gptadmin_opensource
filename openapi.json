@@ -1,0 +1,524 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GPTAdmin Hub & Rootd API",
+    "version": "2.0.0",
+    "description": "Полный список proxied rootd-endpoint’ов через hub-proxy"
+  },
+  "servers": [
+    {
+      "url": "https://gptadmin.bezrabotnyi.com"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/servers": {
+      "get": {
+        "operationId": "listServers",
+        "summary": "List registered servers",
+        "responses": {
+          "200": {
+            "description": "List of servers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServersResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/exec": {
+      "post": {
+        "operationId": "execOnServer",
+        "summary": "Execute a shell command on a server",
+        "parameters": [
+          {
+            "name": "server",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Server name"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExecReq" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command execution result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/file": {
+      "get": {
+        "operationId": "readFile",
+        "summary": "Read a file",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "path",   "in": "query", "required": true, "schema": { "type": "string" }, "description": "Absolute file path" }
+        ],
+        "responses": {
+          "200": {
+            "description": "File content",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileReadResponse" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "writeFile",
+        "summary": "Write or overwrite a file",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "path",   "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/FileWrite" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Write result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileWriteResponse" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteFile",
+        "summary": "Delete a file",
+        "parameters": [
+          { "name": "server", "in": "path",  "required": true, "schema": { "type": "string" } },
+          { "name": "path",   "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileDeleteResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/dir": {
+      "get": {
+        "operationId": "listDir",
+        "summary": "List directory entries",
+        "parameters": [
+          { "name": "server", "in": "path",  "required": true,  "schema": { "type": "string" } },
+          { "name": "path",   "in": "query", "required": false, "schema": { "type": "string" }, "description": "Directory path, default: current" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory entries",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DirListResponse" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createDir",
+        "summary": "Create a directory",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true,  "schema": { "type": "string" } },
+          { "name": "path",   "in": "query","required": true,  "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Creation result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DirCreateResponse" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteDir",
+        "summary": "Delete an empty directory",
+        "parameters": [
+          { "name": "server", "in": "path",  "required": true, "schema": { "type": "string" } },
+          { "name": "path",   "in": "query","required": true,  "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DirDeleteResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/systemd/units": {
+      "get": {
+        "operationId": "listServices",
+        "summary": "List systemd service units",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of services",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+   "/srv/{server}/systemd/unit/{name}": {
+    "post": {
+      "operationId": "controlService",
+      "summary": "Control a systemd service",
+      "parameters": [
+        { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } },
+        { "name": "name",   "in": "path", "required": true, "schema": { "type": "string" }, "description": "Service unit name" }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/UnitControl" }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Service control result",
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExecResult" }
+            }
+          }
+        }
+      }
+    }
+  },
+    "/srv/{server}/systemd/log": {
+      "get": {
+        "operationId": "getServiceLogs",
+        "summary": "Get systemd logs for a unit",
+        "parameters": [
+          { "name": "server", "in": "path",   "required": true, "schema": { "type": "string" } },
+          { "name": "unit",   "in": "query",  "required": true, "schema": { "type": "string" }, "description": "Unit name" },
+          { "name": "lines",  "in": "query",  "required": false,"schema": { "type": "integer","format":"int32" }, "description":"Number of lines, default=200" },
+          { "name": "grep",   "in": "query",  "required": false,"schema": { "type": "string" }, "description":"grep filter" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logs",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/venv/create": {
+      "post": {
+        "operationId": "createVenv",
+        "summary": "Create Python virtualenv",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VenvReq" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Venv creation result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/venv/pip": {
+      "post": {
+        "operationId": "manageVenvPip",
+        "summary": "Install/uninstall/list pip packages in a venv",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "path",   "in": "query","required": true, "schema": { "type": "string" }, "description": "Path to venv" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PkgReq" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pip action result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/venv/exec": {
+      "post": {
+        "operationId": "execInVenv",
+        "summary": "Execute a command inside a venv",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VenvExec" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Venv exec result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/{server}/system/info": {
+      "get": {
+        "operationId": "getSysInfo",
+        "summary": "Get basic system info",
+        "parameters": [
+          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "System information",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SysInfo" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    },
+    "schemas": {
+      "ExecReq": {
+        "type": "object",
+        "properties": {
+          "cmd": { "type": "array", "items": { "type": "string" } },
+          "cwd": { "type": "string" },
+          "timeout": { "type": "integer", "format": "int32" }
+        },
+        "required": ["cmd"],
+        "additionalProperties": false
+      },
+      "ExecResult": {
+        "type": "object",
+        "properties": {
+          "returncode": { "type": "integer" },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "FileWrite": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "mode": { "type": "string", "enum": ["w", "a", "wb", "ab"] }
+        },
+        "required": ["content"],
+        "additionalProperties": false
+      },
+      "FileReadResponse": {
+        "type": "object",
+        "properties": { "content": { "type": "string" } },
+        "required": ["content"],
+        "additionalProperties": false
+      },
+      "FileWriteResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "size": { "type": "integer" }
+        },
+        "required": ["ok", "size"],
+        "additionalProperties": false
+      },
+      "FileDeleteResponse": {
+        "type": "object",
+        "properties": { "deleted": { "type": "boolean" } },
+        "required": ["deleted"],
+        "additionalProperties": false
+      },
+      "DirEntry": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "dir": { "type": "boolean" },
+          "size": { "type": "integer" }
+        },
+        "required": ["name", "dir"],
+        "additionalProperties": false
+      },
+      "DirListResponse": {
+        "type": "object",
+        "properties": {
+          "entries": { "type": "array", "items": { "$ref": "#/components/schemas/DirEntry" } }
+        },
+        "required": ["entries"],
+        "additionalProperties": false
+      },
+      "DirCreateResponse": {
+        "type": "object",
+        "properties": { "created": { "type": "boolean" } },
+        "required": ["created"],
+        "additionalProperties": false
+      },
+      "DirDeleteResponse": {
+        "type": "object",
+        "properties": { "deleted": { "type": "boolean" } },
+        "required": ["deleted"],
+        "additionalProperties": false
+      },
+      "UnitControl": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["start", "stop", "restart", "status"]
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false
+    },
+      "SysInfo": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string" },
+          "kernel": { "type": "string" },
+          "cores": { "type": "integer" },
+          "mem_mb": { "type": "integer" },
+          "uptime_s": { "type": "integer" }
+        },
+        "required": ["host", "kernel", "cores", "mem_mb", "uptime_s"],
+        "additionalProperties": false
+      },
+      "VenvReq": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "python": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "PkgReq": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["install", "uninstall", "list"] },
+          "pkgs": { "type": "array", "items": { "type": "string" } },
+          "flags": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      },
+      "VenvExec": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "cmd": { "type": "array", "items": { "type": "string" } },
+          "cwd": { "type": "string" },
+          "timeout": { "type": "integer" }
+        },
+        "required": ["path", "cmd"],
+        "additionalProperties": false
+      },
+      "ServerInfo": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "base_url": { "type": "string" },
+          "rootd_token": { "type": "string" },
+          "time": { "type": "integer" },
+          "cores": { "type": "integer" },
+          "mem_mb": { "type": "integer" },
+          "alive": { "type": "boolean" },
+          "lag_s": { "type": "integer" }
+        },
+        "required": ["name", "base_url", "rootd_token", "time", "alive", "lag_s"],
+        "additionalProperties": false
+      },
+      "ServersResponse": {
+        "type": "object",
+        "properties": {
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerInfo" } }
+        },
+        "required": ["servers"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
