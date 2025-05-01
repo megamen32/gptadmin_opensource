@@ -23,7 +23,18 @@ import psutil, requests
 from fastapi import FastAPI, Body, Query, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+import logging
 
+# --- логирование ---
+logging.basicConfig(
+    level=logging.DEBUG,  # можно поставить INFO если слишком шумно
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("rootd.log"),    # лог в файл
+        logging.StreamHandler()              # лог в stdout (для systemd)
+    ]
+)
+log = logging.getLogger("rootd")
 # ------------------------------------------------------------------
 TOKEN   = os.getenv("ROOTD_TOKEN", "CHANGE_ME")
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
@@ -44,18 +55,24 @@ def _truncate(s: str) -> str:
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
 def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None):
+    log.debug(f"Running command: {' '.join(cmd)} (timeout={timeout}, cwd={cwd})")
     try:
         res = subprocess.run(
             cmd, cwd=cwd, text=True, timeout=timeout or TMO_DEF,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+        log.debug(f"Command finished: return={res.returncode}")
         return {
             "returncode": res.returncode,
             "stdout": _truncate(res.stdout),
             "stderr": _truncate(res.stderr),
         }
     except subprocess.TimeoutExpired as e:
+        log.warning(f"Command timeout after {e.timeout}s: {' '.join(cmd)}")
         return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
+    except Exception as e:
+        log.exception(f"Exception during command: {' '.join(cmd)}")
+        raise
 
 # ------------------------------------------------------------------
 class ExecReq(BaseModel):
@@ -85,7 +102,12 @@ class VenvExec(BaseModel):
 # ---------------- EXEC --------------------------------------------
 @app.post("/exec", dependencies=[Depends(guard)])
 def exec_cmd(body: ExecReq = Body(...)):
-    return _run(body.cmd, body.timeout, body.cwd)
+    log.info(f"EXEC: {body.cmd} (cwd={body.cwd})")
+    try:
+        return _run(body.cmd, body.timeout, body.cwd)
+    except Exception as e:
+        log.exception("Error in /exec")
+        raise
 
 # ---------------- FILES / DIRS ------------------------------------
 @app.get("/file", dependencies=[Depends(guard)])
@@ -126,10 +148,37 @@ def unit_ctl(name: str, action: Literal["start","stop","restart","status"] = Bod
     return _run(["systemctl", action, name])
 
 @app.get("/systemd/log", dependencies=[Depends(guard)])
-def unit_log(unit: str = Query(...), lines: int = Query(200), grep: Optional[str] = Query(None)):
-    cmd = ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]
-    if grep: cmd += ["--grep", grep]
-    return _run(cmd)
+def unit_log(
+    unit: str = Query(...),
+    grep: Optional[str] = Query(None),
+    max_lines: int = Query(100)
+):
+    base_cmd = ["journalctl", "-u", unit, "-n", "5000", "--no-pager"]
+    
+    try:
+        raw = subprocess.run(
+            base_cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10
+        )
+    except subprocess.TimeoutExpired as e:
+        return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
+
+    lines = raw.stdout.splitlines()
+
+    if grep:
+        matching_lines = [line for line in lines if grep in line]
+        output_lines = matching_lines[-max_lines:]  # ← последние N
+    else:
+        output_lines = lines[-max_lines:]  # ← без фильтра тоже последние N
+
+    return {
+        "returncode": raw.returncode,
+        "stdout": _truncate("\n".join(output_lines)),
+        "stderr": _truncate(raw.stderr),
+    }
 
 # ---------------- VENV --------------------------------------------
 @app.post("/venv/create", dependencies=[Depends(guard)])
@@ -166,20 +215,23 @@ def sys_info():
 
 # ---------------- HEARTBEAT ---------------------------------------
 def heartbeat():
-    if not HUB_URL: return
+    if not HUB_URL:
+        log.warning("HUB_URL not set, skipping heartbeat")
+        return
     while True:
         payload = {
-          "name": socket.gethostname(),        # читаемо в UI
-          "base_url": ROOTD_URL or f"http://{socket.gethostname()}:25900",
-          "rootd_token": TOKEN,                # то, что понадобиться Hubу
-          "cores": psutil.cpu_count(),
-          "mem_mb": round(psutil.virtual_memory().total / 2**20),
-          "time": int(time.time()),
-      }
+            "name": socket.gethostname(),
+            "base_url": ROOTD_URL or f"http://{socket.gethostname()}:25900",
+            "rootd_token": TOKEN,
+            "cores": psutil.cpu_count(),
+            "mem_mb": round(psutil.virtual_memory().total / 2**20),
+            "time": int(time.time()),
+        }
         try:
-            requests.post(HUB_URL, json=payload, timeout=3)
-        except Exception:
-            pass
+            res = requests.post(HUB_URL, json=payload, timeout=3)
+            log.debug(f"Heartbeat sent to HUB ({res.status_code})")
+        except Exception as e:
+            log.warning(f"Heartbeat failed: {e}")
         time.sleep(HB_INT)
 
 if HUB_URL:
