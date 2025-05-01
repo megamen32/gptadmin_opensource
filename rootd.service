@@ -4,10 +4,13 @@ After=network.target
 
 [Service]
 WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/.venv/bin/python rootd.py
+# Запуск из вашего .venv
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/rootd.py
+
+# Переменные окружения: агентов регистрируются у Hub по HTTPS
 Environment=ROOTD_TOKEN=srv_secret
-Environment=ROOTD_URL=http://localhost:25900
-Environment=HUB_URL=http://localhost:9001/heartbeat
+Environment=ROOTD_URL=http://$(hostname):25900
+Environment=HUB_URL=https://gptadmin.bezrabotnyi.com/heartbeat
 Environment=EXEC_TIMEOUT=300
 Environment=LOG_LIMIT_B=8192
 Restart=always
