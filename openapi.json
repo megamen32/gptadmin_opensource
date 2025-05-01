@@ -356,7 +356,69 @@
           }
         }
       }
+    },
+"/srv/{server}/system/health": {
+  "get": {
+    "operationId": "getSystemHealth",
+    "summary": "Get extended system health status",
+    "parameters": [
+      { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+    ],
+    "responses": {
+      "200": {
+        "description": "System health details",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "uptime_s": { "type": "integer" },
+                "load_avg": {
+                  "type": "array",
+                  "items": { "type": "number" }
+                },
+                "cpu_usage_pct": { "type": "number" },
+                "memory": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "available": { "type": "integer" },
+                    "used": { "type": "integer" },
+                    "free": { "type": "integer" }
+                  }
+                },
+                "swap": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "used": { "type": "integer" },
+                    "free": { "type": "integer" }
+                  }
+                },
+                "disk": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "number" },
+                    "used": { "type": "number" },
+                    "free": { "type": "number" }
+                  }
+                },
+                "failed_services": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "last_apt_update": { "type": "string" },
+                "cpu_temperature": { "type": "number" },
+                "ip_address": { "type": "string" }
+              },
+              "required": ["uptime_s", "load_avg", "cpu_usage_pct", "memory", "disk"]
+            }
+          }
+        }
+      }
     }
+  }
+}
   },
   "components": {
     "securitySchemes": {

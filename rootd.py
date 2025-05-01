@@ -24,6 +24,7 @@ from fastapi import FastAPI, Body, Query, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import logging
+import shutil
 
 # --- логирование ---
 logging.basicConfig(
@@ -212,6 +213,81 @@ def sys_info():
         "mem_mb": round(psutil.virtual_memory().total/2**20),
         "uptime_s": round(time.time()-psutil.boot_time()),
     }
+# rootd.py
+# ... [existing imports above] ...
+import shutil
+
+@app.get("/system/health", dependencies=[Depends(guard)])
+def health():
+    # Disk usage
+    du = shutil.disk_usage("/")
+
+    # Memory
+    vm = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+
+    # Load average
+    try:
+        load = os.getloadavg()
+    except:
+        load = []
+
+    # Temperature
+    temp = psutil.sensors_temperatures()
+    cpu_temp = None
+    for sensor in temp.values():
+        for entry in sensor:
+            if "cpu" in entry.label.lower() or "package" in entry.label.lower():
+                cpu_temp = entry.current
+                break
+
+    # IP address
+    ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except:
+        ip = "unavailable"
+
+    # Failed services
+    result = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-pager", "--plain", "--no-legend"], text=True, stdout=subprocess.PIPE)
+    failed_services = [line.split()[0] for line in result.stdout.splitlines() if line.strip() and ".service" in line.split()[0]]
+
+    # APT last update
+    apt_time = None
+    stamp = Path("/var/lib/apt/periodic/update-success-stamp")
+    if stamp.exists():
+        apt_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp.stat().st_mtime))
+
+    return {
+        "uptime_s": round(time.time() - psutil.boot_time()),
+        "load_avg": load,
+        "cpu_usage_pct": psutil.cpu_percent(interval=1),
+        "memory": {
+            "total": round(vm.total / 2**20),
+            "available": round(vm.available / 2**20),
+            "used": round(vm.used / 2**20),
+            "free": round(vm.free / 2**20),
+        },
+        "swap": {
+            "total": round(swap.total / 2**20),
+            "used": round(swap.used / 2**20),
+            "free": round(swap.free / 2**20),
+        },
+        "disk": {
+            "total": round(du.total / 2**30, 2),
+            "used": round(du.used / 2**30, 2),
+            "free": round(du.free / 2**30, 2),
+        },
+        "failed_services": failed_services,
+        "last_apt_update": apt_time,
+        "cpu_temperature": cpu_temp,
+        "ip_address": ip
+    }
+
+
 
 # ---------------- HEARTBEAT ---------------------------------------
 def heartbeat():
@@ -229,7 +305,7 @@ def heartbeat():
         }
         try:
             res = requests.post(HUB_URL, json=payload, timeout=3)
-            log.debug(f"Heartbeat sent to HUB ({res.status_code})")
+            #log.debug(f"Heartbeat sent to HUB ({res.status_code})")
         except Exception as e:
             log.warning(f"Heartbeat failed: {e}")
         time.sleep(HB_INT)
