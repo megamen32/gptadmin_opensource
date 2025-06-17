@@ -2,10 +2,6 @@
 """
 Голый root-API без Docker, но с:
  • /exec                             – любая команда
- • /file, /dir                       – файлы/каталоги
- • /systemd/units, /systemd/unit     – статус и управление
- • /systemd/log                      – поиск по journalctl
- • /venv/create, /venv/pip, /venv/exec
  • heartbeat → HUB_URL (если задан)
 
 Env:
@@ -21,12 +17,13 @@ from typing import List, Optional, Literal
 
 import psutil, requests, asyncio
 from fastapi import FastAPI, Body, Query, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import shutil
-
+import traceback
 # --- логирование ---
 logging.basicConfig(
     level=logging.DEBUG,  # можно поставить INFO если слишком шумно
@@ -38,11 +35,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("rootd")
 # ------------------------------------------------------------------
-TOKEN   = os.getenv("ROOTD_TOKEN", "CHANGE_ME")
+TOKEN   = os.getenv("ROOTD_TOKEN", "srv_secret")
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
 
-HUB_URL = os.getenv("HUB_URL")
+HUB_URL = os.getenv("HUB_URL",'https://gptadmin.bezrabotnyi.com/heartbeat')
 ROOTD_URL = os.getenv("ROOTD_URL")
 HB_INT  = int(os.getenv("HB_INTERVAL_S", "60"))
 
@@ -56,8 +53,17 @@ def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
 def _truncate(s: str) -> str:
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
-def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
-    log.debug(f"Running command: {' '.join(cmd)} (timeout={timeout}, cwd={cwd})")
+# ------------------------------------------------------------------
+class ExecReq(BaseModel):
+    cmd: str
+    env: Optional[str] = None
+    cwd: Optional[str] = None
+    timeout: Optional[int] = None
+
+
+# ---------------- EXEC --------------------------------------------
+def _run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
+    log.debug(f"Running command: {cmd} (timeout={timeout}, cwd={cwd})")
     try:
         res = subprocess.run(
             cmd,
@@ -67,6 +73,8 @@ def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None, env
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            shell=True,   # <--- главное отличие!
+            executable="/bin/bash",  # чтобы был bash, а не sh
         )
         log.debug(f"Command finished: return={res.returncode}")
         return {
@@ -75,43 +83,35 @@ def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None, env
             "stderr": _truncate(res.stderr),
         }
     except subprocess.TimeoutExpired as e:
-        log.warning(f"Command timeout after {e.timeout}s: {' '.join(cmd)}")
+        log.warning(f"Command timeout after {e.timeout}s: {cmd}")
         return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
     except Exception as e:
-        log.exception(f"Exception during command: {' '.join(cmd)}")
+        log.exception(f"Exception during command: {cmd}")
         raise
 
-# ------------------------------------------------------------------
-class ExecReq(BaseModel):
-    cmd: str
-    cwd: Optional[str] = None
-    timeout: Optional[int] = None
-
-
 # ---------------- EXEC --------------------------------------------
+
 @app.post("/exec", dependencies=[Depends(guard)])
 def exec_cmd(body: ExecReq = Body(...)):
     log.info(f"EXEC: {body.cmd} (cwd={body.cwd})")
 
-    parts = shlex.split(body.cmd)
-    env_vars = {}
-    cmd_parts = []
-    for p in parts:
-        if not cmd_parts and '=' in p and not p.startswith('='):
-            key, val = p.split('=', 1)
-            env_vars[key] = val
-        else:
-            cmd_parts.append(p)
-
     env = os.environ.copy()
-    if env_vars:
-        env.update(env_vars)
+    if body.env:
+        env.update(body.env)
 
     try:
-        return _run(cmd_parts, body.timeout, body.cwd, env)
+        return _run(body.cmd, body.timeout, body.cwd, env)
     except Exception as e:
         log.exception("Error in /exec")
-        raise
+        # Явно возвращаем JSON с ошибкой и статусом 500
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
 
 
 @app.post("/exec/stream", dependencies=[Depends(guard)])
@@ -178,6 +178,25 @@ def health():
         s.close()
     except:
         ip = "unavailable"
+    
+        # Memory
+    vm = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+
+    # Load average
+    try:
+        load = os.getloadavg()
+    except:
+        load = []
+
+    # Temperature
+    temp = psutil.sensors_temperatures()
+    cpu_temp = None
+    for sensor in temp.values():
+        for entry in sensor:
+            if "cpu" in entry.label.lower() or "package" in entry.label.lower():
+                cpu_temp = entry.current
+                break
 
     # Failed services
     result = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-pager", "--plain", "--no-legend"], text=True, stdout=subprocess.PIPE)
