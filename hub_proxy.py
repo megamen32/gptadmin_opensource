@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request, Body, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from typing import List, Optional
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "CHANGE_ME")
 DEAD_S    = int(os.getenv("DEAD_S", "180"))
@@ -33,6 +34,12 @@ class Beat(BaseModel):
     cores: int | None = None
     mem_mb: int | None = None
 
+class BulkExec(BaseModel):
+    servers: List[str]
+    cmd: str
+    timeout: Optional[int] = None
+    cwd: Optional[str] = None
+
 @app.post("/heartbeat")
 def heartbeat(b: Beat = Body(...)):
     servers[b.name] = b.dict()
@@ -46,6 +53,35 @@ def list_servers():
         alive = (now - d["time"]) < DEAD_S
         out.append({**d, "alive": alive, "lag_s": round(now-d["time"])})
     return {"servers": out}
+
+@app.post("/bulk/exec", dependencies=[Depends(check_ctl_token)])
+async def bulk_exec(req: BulkExec):
+    """Execute a command on multiple servers concurrently."""
+    results: dict[str, dict] = {}
+    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
+        tasks = {}
+        for srv in req.servers:
+            info = servers.get(srv)
+            if not info or time.time() - info["time"] > DEAD_S:
+                results[srv] = {"error": "offline"}
+                continue
+            url = f"{info['base_url'].rstrip('/')}/exec"
+            headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+            payload = {"cmd": req.cmd}
+            if req.timeout is not None:
+                payload["timeout"] = req.timeout
+            if req.cwd is not None:
+                payload["cwd"] = req.cwd
+            tasks[srv] = client.post(url, json=payload, headers=headers)
+
+        for srv, task in tasks.items():
+            try:
+                r = await task
+                results[srv] = r.json()
+            except Exception as e:
+                results[srv] = {"error": str(e)}
+
+    return {"results": results}
 
 # ------------------------- ПРОКСИ -------------------------------------------
 async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)):
