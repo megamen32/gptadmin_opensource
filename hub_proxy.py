@@ -54,6 +54,10 @@ def list_servers():
         out.append({**d, "alive": alive, "lag_s": round(now-d["time"])})
     return {"servers": out}
 
+async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)):
+    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
+        raise HTTPException(401, "bad token")
+    
 @app.post("/bulk/exec", dependencies=[Depends(check_ctl_token)])
 async def bulk_exec(req: BulkExec):
     """Execute a command on multiple servers concurrently."""
@@ -84,9 +88,7 @@ async def bulk_exec(req: BulkExec):
     return {"results": results}
 
 # ------------------------- ПРОКСИ -------------------------------------------
-async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)):
-    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
-        raise HTTPException(401, "bad token")
+
 
 @app.api_route(
     "/srv/{srv}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],

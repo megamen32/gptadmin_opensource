@@ -29,22 +29,12 @@ accepts tokens through environment variables as shown above.
 Basic scripts for manual testing are provided:
 
 ```
+python hub_proxy.py & python rootd.py &
 python test_rootd.py
 python test_hub.py
 ```
 
 ## openapi.json
 
-`openapi.json` documents the API served by `hub_proxy`. It was produced with the
-following snippet:
-
-```
-from fastapi.openapi.utils import get_openapi
-from hub_proxy import app
-openapi = get_openapi(title="GPTAdmin Hub & Rootd API", version="2.0.0", routes=app.routes)
-with open("openapi.json", "w") as f:
-    f.write(json.dumps(openapi, indent=2, ensure_ascii=False))
-```
-
-Run it whenever the API changes to refresh the schema.
+`openapi.json` documents the API served by `hub_proxy`. It was produced manualy, update it whenever the API changes to refresh the schema.
 
