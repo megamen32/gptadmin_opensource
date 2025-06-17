@@ -34,14 +34,14 @@
         }
       }
     },
-    "/srv/{server}/exec": {
+    "/srv/exec": {
       "post": {
         "operationId": "execOnServer",
         "summary": "Execute a shell command on a server",
         "parameters": [
           {
             "name": "server",
-            "in": "path",
+            "in": "query",
             "required": true,
             "schema": { "type": "string" },
             "description": "Server name"
@@ -67,12 +67,12 @@
         }
       }
     },
-    "/srv/{server}/system/info": {
+    "/srv/system/info": {
       "get": {
         "operationId": "getSysInfo",
         "summary": "Get basic system info",
         "parameters": [
-          { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -86,12 +86,12 @@
         }
       }
     },
-"/srv/{server}/system/health": {
+"/srv/system/health": {
   "get": {
     "operationId": "getSystemHealth",
     "summary": "Get extended system health status",
     "parameters": [
-      { "name": "server", "in": "path", "required": true, "schema": { "type": "string" } }
+      { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
     ],
     "responses": {
       "200": {

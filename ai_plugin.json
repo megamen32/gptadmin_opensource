@@ -3,7 +3,7 @@
   "name_for_human": "GPTAdmin",
   "name_for_model": "gptadmin",
   "description_for_human": "Управление вашими серверами через единый интерфейс GPT-плагина",
-  "description_for_model": "Plugin to manage multiple Ubuntu servers via HTTP API. Use the /srv/{server}/{path} endpoints with bearer auth. Do not guess URLs; rely on the manifest.",
+  "description_for_model": "Plugin to manage multiple Ubuntu servers via HTTP API. Use the /srv/{path} endpoint with a 'server' query parameter and bearer auth. Do not guess URLs; rely on the manifest.",
   "auth": {
     "type": "bearer",
     "authorization_type": "header",

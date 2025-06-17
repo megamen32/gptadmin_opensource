@@ -1,7 +1,7 @@
 # hub_proxy.py
 """
 Hub-прокси: принимает heartbeat'ы, держит карту <name → (base_url, rootd_token)>,
-            а все клиентские вызовы /srv/{name}/{path}… проксирует к нужному rootd.
+            а все клиентские вызовы /srv/{path}?server=name проксирует к нужному rootd.
 
 Env:
   CTL_TOKEN   – Bearer-токен для ChatGPT-клиента      (def: CHANGE_ME)
@@ -10,7 +10,8 @@ Env:
 Зависимости: fastapi, uvicorn[standard], httpx, pydantic
 """
 import os, time, httpx, asyncio
-from fastapi import FastAPI, Request, Body, HTTPException, Depends
+from fastapi import FastAPI, Request, Body, HTTPException, Depends, Query
+from urllib.parse import urlencode
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -91,10 +92,11 @@ async def bulk_exec(req: BulkExec):
 
 
 @app.api_route(
-    "/srv/{srv}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    "/srv/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     dependencies=[Depends(check_ctl_token)],
 )
-async def proxy(srv: str, path: str, request: Request):
+async def proxy(path: str, request: Request, srv: str = Query(..., alias="server")):
     info = servers.get(srv)
     if not info:
         raise HTTPException(404, f"server '{srv}' not registered")
@@ -103,8 +105,9 @@ async def proxy(srv: str, path: str, request: Request):
 
     # ---- формируем исходящий запрос -----------------------------------------
     target_url = f"{info['base_url'].rstrip('/')}/{path}"
-    if request.query_params:
-        target_url += "?" + str(request.query_params)
+    q = [(k, v) for k, v in request.query_params.multi_items() if k != "server"]
+    if q:
+        target_url += "?" + urlencode(q, doseq=True)
 
     headers = dict(request.headers)
     # убираем авторизацию клиента; ставим rootd-токен

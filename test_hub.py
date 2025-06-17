@@ -29,8 +29,8 @@ def list_servers():
 
 
 def test_proxy_system_info():
-    r = requests.get(f"{HUB_URL}/srv/local-test/system/info", headers=HEADERS_HUB)
-    print("GET  /srv/local-test/system/info →", r.status_code, r.json())
+    r = requests.get(f"{HUB_URL}/srv/system/info", params={"server": "local-test"}, headers=HEADERS_HUB)
+    print("GET  /srv/system/info?server=local-test →", r.status_code, r.json())
 
 
 def test_bulk_exec():
