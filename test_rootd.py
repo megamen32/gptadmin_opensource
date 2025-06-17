@@ -14,7 +14,7 @@ def test_system_info():
 
 
 def test_exec():
-    payload = {"cmd": ["echo", "hello_rootd"], "timeout": 5}
+    payload = {"cmd": "echo hello_rootd", "timeout": 5}
     r = requests.post(f"{ROOTD_URL}/exec", json=payload, headers=HEADERS)
     print("POST /exec →", r.status_code, r.json())
 
