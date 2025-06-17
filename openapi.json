@@ -428,7 +428,7 @@
       "ExecReq": {
         "type": "object",
         "properties": {
-          "cmd": { "type": "array", "items": { "type": "string" } },
+          "cmd": { "type": "string" },
           "cwd": { "type": "string" },
           "timeout": { "type": "integer", "format": "int32" }
         },
