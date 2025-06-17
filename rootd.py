@@ -19,9 +19,10 @@ import os, subprocess, time, threading, platform, socket, json, shlex
 from pathlib import Path
 from typing import List, Optional, Literal
 
-import psutil, requests
+import psutil, requests, asyncio
 from fastapi import FastAPI, Body, Query, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import shutil
@@ -86,24 +87,6 @@ class ExecReq(BaseModel):
     cwd: Optional[str] = None
     timeout: Optional[int] = None
 
-class FileWrite(BaseModel):
-    content: str
-    mode: Literal["w", "a", "wb", "ab"] = "w"
-
-class PkgReq(BaseModel):
-    action: Literal["install", "uninstall", "list"]
-    pkgs: Optional[List[str]] = None
-    flags: Optional[List[str]] = None
-
-class VenvReq(BaseModel):
-    path: str
-    python: Optional[str] = None  # e.g. /usr/bin/python3.12
-
-class VenvExec(BaseModel):
-    path: str
-    cmd: List[str]
-    timeout: Optional[int] = None
-    cwd: Optional[str] = None
 
 # ---------------- EXEC --------------------------------------------
 @app.post("/exec", dependencies=[Depends(guard)])
@@ -130,101 +113,44 @@ def exec_cmd(body: ExecReq = Body(...)):
         log.exception("Error in /exec")
         raise
 
-# ---------------- FILES / DIRS ------------------------------------
-@app.get("/file", dependencies=[Depends(guard)])
-def file_read(path: str = Query(...)):
-    fp = Path(path)
-    if not fp.exists(): raise HTTPException(404, "no such file")
-    if fp.is_dir():     raise HTTPException(400, "is dir")
-    return {"content": fp.read_text(errors="replace")}
 
-@app.put("/file", dependencies=[Depends(guard)])
-def file_write(path: str = Query(...), body: FileWrite = Body(...)):
-    fp = Path(path); fp.parent.mkdir(parents=True, exist_ok=True)
-    with fp.open(body.mode) as f: f.write(body.content)
-    return {"ok": True, "size": fp.stat().st_size}
+@app.post("/exec/stream", dependencies=[Depends(guard)])
+async def exec_stream(body: ExecReq = Body(...)):
+    """Run command and stream combined stdout/stderr."""
+    log.info(f"EXEC_STREAM: {body.cmd} (cwd={body.cwd})")
 
-@app.delete("/file", dependencies=[Depends(guard)])
-def file_del(path: str = Query(...)):
-    fp = Path(path)
-    if fp.is_file(): fp.unlink(); return {"deleted": True}
-    raise HTTPException(404, "not file")
+    parts = shlex.split(body.cmd)
+    env_vars = {}
+    cmd_parts = []
+    for p in parts:
+        if not cmd_parts and '=' in p and not p.startswith('='):
+            key, val = p.split('=', 1)
+            env_vars[key] = val
+        else:
+            cmd_parts.append(p)
 
-@app.get("/dir", dependencies=[Depends(guard)])
-def dir_ls(path: str = Query(".")):
-    dp = Path(path)
-    if not dp.is_dir(): raise HTTPException(404, "no dir")
-    return {"entries": [
-        {"name": p.name, "dir": p.is_dir(), "size": None if p.is_dir() else p.stat().st_size}
-        for p in dp.iterdir()
-    ]}
+    env = os.environ.copy()
+    if env_vars:
+        env.update(env_vars)
 
-# ---------------- SYSTEMD -----------------------------------------
-@app.get("/systemd/units", dependencies=[Depends(guard)])
-def units():
-    return _run(["systemctl", "list-units", "--type=service", "--no-pager"])
+    proc = await asyncio.create_subprocess_exec(
+        *cmd_parts,
+        cwd=body.cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
 
-class UnitControl(BaseModel):
-    action: Literal["start", "stop", "restart", "status"]
+    async def generator():
+        assert proc.stdout
+        async for chunk in proc.stdout:
+            yield chunk
+        await proc.wait()
 
-@app.post("/systemd/unit/{name}", dependencies=[Depends(guard)])
-def unit_ctl(name: str, body: UnitControl = Body(...)):
-    return _run(["systemctl", body.action, name])
+    return StreamingResponse(generator(), media_type="text/plain")
 
-@app.get("/systemd/log", dependencies=[Depends(guard)])
-def unit_log(
-    unit: str = Query(...),
-    grep: Optional[str] = Query(None),
-    max_lines: int = Query(100)
-):
-    base_cmd = ["journalctl", "-u", unit, "-n", "5000", "--no-pager"]
-    
-    try:
-        raw = subprocess.run(
-            base_cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10
-        )
-    except subprocess.TimeoutExpired as e:
-        return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
 
-    lines = raw.stdout.splitlines()
 
-    if grep:
-        matching_lines = [line for line in lines if grep in line]
-        output_lines = matching_lines[-max_lines:]  # ← последние N
-    else:
-        output_lines = lines[-max_lines:]  # ← без фильтра тоже последние N
-
-    return {
-        "returncode": raw.returncode,
-        "stdout": _truncate("\n".join(output_lines)),
-        "stderr": _truncate(raw.stderr),
-    }
-
-# ---------------- VENV --------------------------------------------
-@app.post("/venv/create", dependencies=[Depends(guard)])
-def venv_create(body: VenvReq = Body(...)):
-    path = Path(body.path)
-    if path.exists(): return {"exists": True}
-    cmd = [body.python or "python3", "-m", "venv", str(path)]
-    return _run(cmd)
-
-@app.post("/venv/pip", dependencies=[Depends(guard)])
-def venv_pip(req: PkgReq = Body(...), path: str = Query(...)):
-    pip = Path(path)/"bin/pip"
-    if not pip.exists(): raise HTTPException(404, "venv not found")
-    cmd = [str(pip), req.action] + (req.pkgs or []) + (req.flags or [])
-    return _run(cmd)
-
-@app.post("/venv/exec", dependencies=[Depends(guard)])
-def venv_exec(body: VenvExec = Body(...)):
-    activate = Path(body.path)/"bin/activate"
-    if not activate.exists(): raise HTTPException(404, "venv not found")
-    sh_cmd = f"source {activate} && {' '.join(map(shlex.quote, body.cmd))}"
-    return _run(["bash","-c",sh_cmd], body.timeout, body.cwd)
 
 # ---------------- INFO --------------------------------------------
 @app.get("/system/info", dependencies=[Depends(guard)])
@@ -245,27 +171,6 @@ def health():
     # Disk usage
     du = shutil.disk_usage("/")
 
-    # Memory
-    vm = psutil.virtual_memory()
-    swap = psutil.swap_memory()
-
-    # Load average
-    try:
-        load = os.getloadavg()
-    except:
-        load = []
-
-    # Temperature
-    temp = psutil.sensors_temperatures()
-    cpu_temp = None
-    for sensor in temp.values():
-        for entry in sensor:
-            if "cpu" in entry.label.lower() or "package" in entry.label.lower():
-                cpu_temp = entry.current
-                break
-
-    # IP address
-    ip = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))

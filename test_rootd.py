@@ -19,29 +19,16 @@ def test_exec():
     print("POST /exec →", r.status_code, r.json())
 
 
-def test_file_crud():
-    test_path = "/tmp/test_rootd.txt"
-    # — write
-    r = requests.put(f"{ROOTD_URL}/file", params={"path": test_path},
-                     json={"content": "abc123", "mode": "w"},
-                     headers=HEADERS)
-    print("PUT  /file (write) →", r.status_code, r.json())
-    # — read
-    r = requests.get(f"{ROOTD_URL}/file", params={"path": test_path}, headers=HEADERS)
-    print("GET  /file (read) →", r.status_code, r.json())
-    # — delete
-    r = requests.delete(f"{ROOTD_URL}/file", params={"path": test_path}, headers=HEADERS)
-    print("DEL  /file →", r.status_code, r.json())
-
-
-def test_dir_list():
-    r = requests.get(f"{ROOTD_URL}/dir", params={"path": "."}, headers=HEADERS)
-    print("GET  /dir →", r.status_code, r.json())
+def test_exec_stream():
+    payload = {"cmd": "echo stream_hello"}
+    r = requests.post(f"{ROOTD_URL}/exec/stream", json=payload, headers=HEADERS, stream=True)
+    print("POST /exec/stream →", r.status_code)
+    print(r.text)
 
 
 if __name__ == "__main__":
     print("=== Testing rootd on", ROOTD_URL, "===\n")
     test_system_info()
     test_exec()
-    test_file_crud()
-    test_dir_list()
+    test_exec_stream()
+

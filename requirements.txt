@@ -3,7 +3,4 @@ uvicorn[standard]
 pydantic
 psutil
 requests
-fastapi
-uvicorn[standard]
-pydantic
 httpx

@@ -33,9 +33,18 @@ def test_proxy_system_info():
     print("GET  /srv/local-test/system/info →", r.status_code, r.json())
 
 
+def test_bulk_exec():
+    payload = {"servers": ["local-test"], "cmd": "echo bulk"}
+    r = requests.post(f"{HUB_URL}/bulk/exec", json=payload, headers=HEADERS_HUB)
+    print("POST /bulk/exec →", r.status_code, r.json())
+
+
 if __name__ == "__main__":
     print("=== Testing hub_proxy on", HUB_URL, "===\n")
     send_heartbeat()
     time.sleep(1)  # даём секунду, чтобы hub зарегистрировал heartbeat
     list_servers()
     test_proxy_system_info()
+    test_bulk_exec()
+
+
