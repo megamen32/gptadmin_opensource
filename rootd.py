@@ -144,9 +144,12 @@ def dir_ls(path: str = Query(".")):
 def units():
     return _run(["systemctl", "list-units", "--type=service", "--no-pager"])
 
+class UnitControl(BaseModel):
+    action: Literal["start", "stop", "restart", "status"]
+
 @app.post("/systemd/unit/{name}", dependencies=[Depends(guard)])
-def unit_ctl(name: str, action: Literal["start","stop","restart","status"] = Body(...)):
-    return _run(["systemctl", action, name])
+def unit_ctl(name: str, body: UnitControl = Body(...)):
+    return _run(["systemctl", body.action, name])
 
 @app.get("/systemd/log", dependencies=[Depends(guard)])
 def unit_log(
