@@ -55,12 +55,17 @@ def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
 def _truncate(s: str) -> str:
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
-def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None):
+def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
     log.debug(f"Running command: {' '.join(cmd)} (timeout={timeout}, cwd={cwd})")
     try:
         res = subprocess.run(
-            cmd, cwd=cwd, text=True, timeout=timeout or TMO_DEF,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd,
+            cwd=cwd,
+            text=True,
+            timeout=timeout or TMO_DEF,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
         )
         log.debug(f"Command finished: return={res.returncode}")
         return {
@@ -77,7 +82,7 @@ def _run(cmd: List[str], timeout: int | None = None, cwd: str | None = None):
 
 # ------------------------------------------------------------------
 class ExecReq(BaseModel):
-    cmd: List[str]
+    cmd: str
     cwd: Optional[str] = None
     timeout: Optional[int] = None
 
@@ -104,8 +109,23 @@ class VenvExec(BaseModel):
 @app.post("/exec", dependencies=[Depends(guard)])
 def exec_cmd(body: ExecReq = Body(...)):
     log.info(f"EXEC: {body.cmd} (cwd={body.cwd})")
+
+    parts = shlex.split(body.cmd)
+    env_vars = {}
+    cmd_parts = []
+    for p in parts:
+        if not cmd_parts and '=' in p and not p.startswith('='):
+            key, val = p.split('=', 1)
+            env_vars[key] = val
+        else:
+            cmd_parts.append(p)
+
+    env = os.environ.copy()
+    if env_vars:
+        env.update(env_vars)
+
     try:
-        return _run(body.cmd, body.timeout, body.cwd)
+        return _run(cmd_parts, body.timeout, body.cwd, env)
     except Exception as e:
         log.exception("Error in /exec")
         raise
