@@ -264,3 +264,11 @@ if HUB_URL:
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("rootd:app", host="0.0.0.0", port=25900)
+
+from fastapi.responses import FileResponse
+
+@app.get("/file")
+def get_file(path: str):
+    if not os.path.isfile(path):
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
