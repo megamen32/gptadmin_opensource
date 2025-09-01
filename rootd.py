@@ -50,7 +50,9 @@ def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
     if not cred or cred.scheme.lower() != "bearer" or cred.credentials != TOKEN:
         raise HTTPException(401, "bad token")
 
-def _truncate(s: str) -> str:
+def _truncate(s) -> str:
+    if isinstance(s, bytes):
+        s = s.decode(errors="ignore")
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
 # ------------------------------------------------------------------
