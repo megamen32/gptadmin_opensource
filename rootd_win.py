@@ -22,15 +22,17 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
             stderr=subprocess.PIPE,
             env=env,
         )
-        return {
-            "returncode": res.returncode,
-            "stdout": _truncate(res.stdout),
-            "stderr": _truncate(res.stderr),
-        }
     except subprocess.TimeoutExpired as e:
         return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        log.exception(f"Exception during command: {cmd}")
+        raise
+
+    return {
+        "returncode": res.returncode,
+        "stdout": _truncate(res.stdout),
+        "stderr": _truncate(res.stderr),
+    }
 
 
 async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
