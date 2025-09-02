@@ -1,4 +1,4 @@
-import os, subprocess, logging, asyncio
+import os, subprocess, logging, asyncio, psutil, socket, time, shutil
 
 log = logging.getLogger("rootd_win")
 
@@ -52,3 +52,56 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
         await proc.wait()
 
     return generator
+
+
+def health():
+    du = shutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\")
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "unavailable"
+
+    vm = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+
+    load = []
+
+    temp = psutil.sensors_temperatures()
+    cpu_temp = None
+    for sensor in temp.values():
+        for entry in sensor:
+            if "cpu" in entry.label.lower() or "package" in entry.label.lower():
+                cpu_temp = entry.current
+                break
+        if cpu_temp is not None:
+            break
+
+    return {
+        "uptime_s": round(time.time() - psutil.boot_time()),
+        "load_avg": load,
+        "cpu_usage_pct": psutil.cpu_percent(interval=1),
+        "memory": {
+            "total": round(vm.total / 2**20),
+            "available": round(vm.available / 2**20),
+            "used": round(vm.used / 2**20),
+            "free": round(vm.free / 2**20),
+        },
+        "swap": {
+            "total": round(swap.total / 2**20),
+            "used": round(swap.used / 2**20),
+            "free": round(swap.free / 2**20),
+        },
+        "disk": {
+            "total": round(du.total / 2**30, 2),
+            "used": round(du.used / 2**30, 2),
+            "free": round(du.free / 2**30, 2),
+        },
+        "failed_services": [],
+        "last_apt_update": None,
+        "cpu_temperature": cpu_temp,
+        "ip_address": ip,
+    }
