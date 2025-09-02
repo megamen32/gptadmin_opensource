@@ -14,7 +14,7 @@ Env:
 import os, subprocess, time, threading, platform, socket, json, shlex
 from pathlib import Path
 from typing import List, Optional, Literal
-
+import sys
 import psutil, requests, asyncio
 from fastapi import FastAPI, Body, Query, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -102,7 +102,11 @@ def exec_cmd(body: ExecReq = Body(...)):
         env.update(body.env)
 
     try:
-        return _run(body.cmd, body.timeout, body.cwd, env)
+        if sys.platform=='linux':
+            return _run(body.cmd, body.timeout, body.cwd, env)
+        else:
+            import rootd_win as backend_win
+            return backend_win.run(body.cmd, body.timeout, body.cwd,env)
     except Exception as e:
         log.exception("Error in /exec")
         # Явно возвращаем JSON с ошибкой и статусом 500
