@@ -10,6 +10,9 @@ Env:
   EXEC_TIMEOUT    таймаут /exec (def: 300)
   HUB_URL         http(s)://hub:9001/heartbeat (def: none)
   HB_INTERVAL_S   период heartbeat (def: 60)
+  QUEUE_URL       если задан – включаем polling и берём HUB_URL с заменой
+                   пути на /queue
+  POLL_INTERVAL_S период опроса QUEUE_URL (def: 5)
 """
 
 import os
@@ -29,6 +32,7 @@ from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import traceback
+from urllib.parse import urlparse, urlunparse
 
 
 # --- логирование ---
@@ -46,6 +50,14 @@ TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
 HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/heartbeat')
 ROOTD_URL = os.getenv("ROOTD_URL")
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
+
+if os.getenv("QUEUE_URL"):
+    parsed = urlparse(HUB_URL)
+    QUEUE_URL = urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
+else:
+    QUEUE_URL = None
+
+POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
 
 app = FastAPI(title="rootd", version="2.0")
 auth = HTTPBearer(auto_error=False)
@@ -138,6 +150,7 @@ def heartbeat():
             "cores": psutil.cpu_count(),
             "mem_mb": round(psutil.virtual_memory().total / 2**20),
             "time": int(time.time()),
+            "mode": "polling" if QUEUE_URL else "webhook",
         }
         try:
             requests.post(HUB_URL, json=payload, timeout=3)
@@ -146,8 +159,46 @@ def heartbeat():
         time.sleep(HB_INT)
 
 
+def poll_loop():
+    if not QUEUE_URL:
+        return
+    while True:
+        try:
+            r = requests.get(
+                f"{QUEUE_URL}/{socket.gethostname()}",
+                params={"token": TOKEN},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                job = r.json()
+                if job.get("cmd"):
+                    log.info(f"POLL: {job['cmd']} (cwd={job.get('cwd')})")
+                    env = os.environ.copy()
+                    if job.get("env"):
+                        env.update(job["env"])
+                    res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
+                    try:
+                        requests.post(
+                            f"{QUEUE_URL}/{socket.gethostname()}/result",
+                            params={"token": TOKEN},
+                            json={"id": job.get("id"), "result": res},
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        log.warning(f"Result send failed: {e}")
+                else:
+                    log.debug("poll: no jobs")
+            else:
+                log.warning(f"Unexpected status {r.status_code}")
+        except Exception as e:
+            log.warning(f"Poll failed: {e}")
+        time.sleep(POLL_INT)
+
+
 if HUB_URL:
     threading.Thread(target=heartbeat, daemon=True).start()
+if QUEUE_URL:
+    threading.Thread(target=poll_loop, daemon=True).start()
 
 
 @app.get("/file")

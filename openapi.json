@@ -196,10 +196,11 @@
           "time": { "type": "integer" },
           "cores": { "type": "integer" },
           "mem_mb": { "type": "integer" },
+          "mode": { "type": "string" },
           "alive": { "type": "boolean" },
           "lag_s": { "type": "integer" }
         },
-        "required": ["name", "base_url", "rootd_token", "time", "alive", "lag_s"],
+        "required": ["name", "base_url", "rootd_token", "time", "mode", "alive", "lag_s"],
         "additionalProperties": false
       },
       "ServersResponse": {
