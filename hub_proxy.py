@@ -77,31 +77,54 @@ async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)
 @app.post("/bulk/exec", dependencies=[Depends(check_ctl_token)])
 async def bulk_exec(req: BulkExec):
     """Execute a command on multiple servers concurrently."""
-    results: dict[str, dict] = {}
+
+    out: dict[str, dict] = {}
+    modes: dict[str, str] = {}
+
+    async def wait_polling(srv: str, payload: dict):
+        tid = str(time.time_ns())
+        queues.setdefault(srv, []).append({"id": tid, **payload})
+        deadline = time.time() + (payload.get("timeout") or 300)
+        while time.time() < deadline:
+            res = results.get(srv, {}).pop(tid, None)
+            if res is not None:
+                return res
+            await asyncio.sleep(0.5)
+        return {"error": "task timeout"}
+
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         tasks = {}
         for srv in req.servers:
             info = servers.get(srv)
             if not info or time.time() - info["time"] > DEAD_S:
-                results[srv] = {"error": "offline"}
+                out[srv] = {"error": "offline"}
                 continue
-            url = f"{info['base_url'].rstrip('/')}/exec"
-            headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+            mode = info.get("mode", "webhook")
+            modes[srv] = mode
             payload = {"cmd": req.cmd}
             if req.timeout is not None:
                 payload["timeout"] = req.timeout
             if req.cwd is not None:
                 payload["cwd"] = req.cwd
-            tasks[srv] = client.post(url, json=payload, headers=headers)
+
+            if mode == "polling":
+                tasks[srv] = asyncio.create_task(wait_polling(srv, payload))
+            else:
+                url = f"{info['base_url'].rstrip('/')}/exec"
+                headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+                tasks[srv] = asyncio.create_task(client.post(url, json=payload, headers=headers))
 
         for srv, task in tasks.items():
             try:
                 r = await task
-                results[srv] = r.json()
+                if modes[srv] == "polling":
+                    out[srv] = r
+                else:
+                    out[srv] = r.json()
             except Exception as e:
-                results[srv] = {"error": str(e)}
+                out[srv] = {"error": str(e)}
 
-    return {"results": results}
+    return {"results": out}
 
 
 # ------------------------- QUEUE / POLL ----------------------------

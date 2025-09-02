@@ -73,6 +73,35 @@ def test_proxy_exec_polling():
     print("POST /srv/exec (polling) →", r.status_code, r.json())
 
 
+def test_bulk_exec_polling():
+    send_heartbeat("polling")
+
+    def worker():
+        while True:
+            r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": ROOTD_TOKEN})
+            job = r.json()
+            if job.get("cmd"):
+                os.system(job["cmd"])
+                res = {"id": job["id"], "result": {"returncode": 0, "stdout": "bulk polled\n", "stderr": ""}}
+                requests.post(
+                    f"{HUB_URL}/queue/{SERVER_NAME}/result",
+                    params={"token": ROOTD_TOKEN},
+                    json=res,
+                )
+                break
+            time.sleep(0.1)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    payload = {"servers": [SERVER_NAME], "cmd": "echo bulk polled"}
+    r = requests.post(
+        f"{HUB_URL}/bulk/exec",
+        json=payload,
+        headers=HEADERS_HUB,
+    )
+    print("POST /bulk/exec (polling) →", r.status_code, r.json())
+
+
 if __name__ == "__main__":
     print("=== Testing hub_proxy on", HUB_URL, "===\n")
     send_heartbeat()
@@ -81,5 +110,6 @@ if __name__ == "__main__":
     test_proxy_system_info()
     test_bulk_exec()
     test_proxy_exec_polling()
+    test_bulk_exec_polling()
 
 
