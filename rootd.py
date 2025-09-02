@@ -138,22 +138,33 @@ async def exec_stream(body: ExecReq = Body(...)):
     env = os.environ.copy()
     if env_vars:
         env.update(env_vars)
+    try:
+        if sys.platform == 'win32':
+            import rootd_win as backend_win
+            generator = await backend_win.run_stream(body.cmd, body.cwd, env)
+            return StreamingResponse(generator(), media_type="text/plain")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd_parts,
-        cwd=body.cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_parts,
+            cwd=body.cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
 
-    async def generator():
-        assert proc.stdout
-        async for chunk in proc.stdout:
-            yield chunk
-        await proc.wait()
+        async def generator():
+            assert proc.stdout
+            async for chunk in proc.stdout:
+                yield chunk
+            await proc.wait()
 
-    return StreamingResponse(generator(), media_type="text/plain")
+        return StreamingResponse(generator(), media_type="text/plain")
+    except Exception as e:
+        log.exception("Error in /exec/stream")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": traceback.format_exc()},
+        )
 
 
 

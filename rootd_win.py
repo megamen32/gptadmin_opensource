@@ -1,9 +1,9 @@
-import subprocess, logging
+import os, subprocess, logging, asyncio
 
 log = logging.getLogger("rootd_win")
 
-TMO_DEF = 60
-LOG_MAX = 8192
+TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
+LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
 
 def _truncate(s):
     if isinstance(s, bytes):
@@ -31,3 +31,24 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
         return {"error": f"timeout {e.timeout}s", "stdout": _truncate(e.stdout or ""), "stderr": _truncate(e.stderr or "")}
     except Exception as e:
         return {"error": str(e)}
+
+
+async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
+    log.debug(f"Running streaming command (Windows): {cmd} (cwd={cwd})")
+    proc = await asyncio.create_subprocess_exec(
+        "powershell",
+        "-Command",
+        cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+
+    async def generator():
+        assert proc.stdout
+        async for chunk in proc.stdout:
+            yield chunk
+        await proc.wait()
+
+    return generator
