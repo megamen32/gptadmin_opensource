@@ -4,3 +4,5 @@
 node_modules/
 requirements.txt.bak*
 logs_config.json
+build/
+*.spec
