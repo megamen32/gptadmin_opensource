@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "CHANGE_ME")
 DEAD_S    = int(os.getenv("DEAD_S", "180"))
@@ -25,6 +25,8 @@ auth_ctl = HTTPBearer(auto_error=False)
 
 # ------ память: name → dict(base_url, rootd_token, last_seen, meta…) ----------
 servers: dict[str, dict] = {}
+queues: Dict[str, List[Dict]] = {}
+results: Dict[str, Dict[str, Dict]] = {}
 
 # ------------------------------------------------------------------------------
 class Beat(BaseModel):
@@ -34,12 +36,25 @@ class Beat(BaseModel):
     time: int          # unixtime
     cores: int | None = None
     mem_mb: int | None = None
+    mode: str = "webhook"
 
 class BulkExec(BaseModel):
     servers: List[str]
     cmd: str
     timeout: Optional[int] = None
     cwd: Optional[str] = None
+
+
+class ExecReq(BaseModel):
+    cmd: str
+    env: Optional[dict] = None
+    cwd: Optional[str] = None
+    timeout: Optional[int] = None
+
+
+class TaskResult(BaseModel):
+    id: str
+    result: dict
 
 @app.post("/heartbeat")
 def heartbeat(b: Beat = Body(...)):
@@ -62,31 +77,75 @@ async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)
 @app.post("/bulk/exec", dependencies=[Depends(check_ctl_token)])
 async def bulk_exec(req: BulkExec):
     """Execute a command on multiple servers concurrently."""
-    results: dict[str, dict] = {}
+
+    out: dict[str, dict] = {}
+    modes: dict[str, str] = {}
+
+    async def wait_polling(srv: str, payload: dict):
+        tid = str(time.time_ns())
+        queues.setdefault(srv, []).append({"id": tid, **payload})
+        deadline = time.time() + (payload.get("timeout") or 300)
+        while time.time() < deadline:
+            res = results.get(srv, {}).pop(tid, None)
+            if res is not None:
+                return res
+            await asyncio.sleep(0.5)
+        return {"error": "task timeout"}
+
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         tasks = {}
         for srv in req.servers:
             info = servers.get(srv)
             if not info or time.time() - info["time"] > DEAD_S:
-                results[srv] = {"error": "offline"}
+                out[srv] = {"error": "offline"}
                 continue
-            url = f"{info['base_url'].rstrip('/')}/exec"
-            headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+            mode = info.get("mode", "webhook")
+            modes[srv] = mode
             payload = {"cmd": req.cmd}
             if req.timeout is not None:
                 payload["timeout"] = req.timeout
             if req.cwd is not None:
                 payload["cwd"] = req.cwd
-            tasks[srv] = client.post(url, json=payload, headers=headers)
+
+            if mode == "polling":
+                tasks[srv] = asyncio.create_task(wait_polling(srv, payload))
+            else:
+                url = f"{info['base_url'].rstrip('/')}/exec"
+                headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+                tasks[srv] = asyncio.create_task(client.post(url, json=payload, headers=headers))
 
         for srv, task in tasks.items():
             try:
                 r = await task
-                results[srv] = r.json()
+                if modes[srv] == "polling":
+                    out[srv] = r
+                else:
+                    out[srv] = r.json()
             except Exception as e:
-                results[srv] = {"error": str(e)}
+                out[srv] = {"error": str(e)}
 
-    return {"results": results}
+    return {"results": out}
+
+
+# ------------------------- QUEUE / POLL ----------------------------
+@app.get("/queue/{srv}")
+def queue_poll(srv: str, token: str = Query(...)):
+    info = servers.get(srv)
+    if not info or info.get("rootd_token") != token:
+        raise HTTPException(401, "bad token")
+    q = queues.get(srv)
+    if not q:
+        return {}
+    return q.pop(0)
+
+
+@app.post("/queue/{srv}/result")
+def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
+    info = servers.get(srv)
+    if not info or info.get("rootd_token") != token:
+        raise HTTPException(401, "bad token")
+    results.setdefault(srv, {})[res.id] = res.result
+    return {"ok": True}
 
 # ------------------------- ПРОКСИ -------------------------------------------
 
@@ -102,6 +161,19 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
         raise HTTPException(404, f"server '{srv}' not registered")
     if time.time() - info["time"] > DEAD_S:
         raise HTTPException(503, f"server '{srv}' appears offline")
+    if info.get("mode") == "polling":
+        if request.method != "POST" or path != "exec":
+            raise HTTPException(501, "polling mode supports only POST /exec")
+        data = ExecReq(**await request.json())
+        tid = str(time.time_ns())
+        queues.setdefault(srv, []).append({"id": tid, **data.dict()})
+        deadline = time.time() + (data.timeout or 300)
+        while time.time() < deadline:
+            res = results.get(srv, {}).pop(tid, None)
+            if res is not None:
+                return res
+            await asyncio.sleep(0.5)
+        raise HTTPException(504, "task timeout")
 
     # ---- формируем исходящий запрос -----------------------------------------
     target_url = f"{info['base_url'].rstrip('/')}/{path}"
