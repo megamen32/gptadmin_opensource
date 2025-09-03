@@ -24,6 +24,19 @@ CTL_TOKEN=chatgpt_secret python hub_proxy.py
 `rootd` can register itself with the hub when `HUB_URL` is set. Each service
 accepts tokens through environment variables as shown above.
 
+## Build & Obfuscation
+
+The repository includes a helper script to create obfuscated, distributable
+executables of both services using [PyArmor](https://github.com/dashingsoft/pyarmor).
+
+```
+./build.sh
+```
+
+Artifacts will be placed in the `build/` directory (packed into
+`gptadmin.tar.gz`).  The script performs a small smoke test to ensure the
+generated binaries start and respond to basic requests.
+
 ## Tests
 
 Basic scripts for manual testing are provided:
