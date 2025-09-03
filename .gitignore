@@ -2,3 +2,5 @@
 /__pycache__
 *.log
 node_modules/
+requirements.txt.bak*
+logs_config.json
