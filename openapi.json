@@ -67,30 +67,6 @@
         }
       }
     },
-    "/bulk/exec": {
-      "post": {
-        "operationId": "bulkExec",
-        "summary": "Execute a command on multiple servers",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/BulkExecReq" }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Execution results per server",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/BulkExecResult" }
-              }
-            }
-          }
-        }
-      }
-    },
     "/srv/system/info": {
       "get": {
         "operationId": "getSysInfo",
@@ -220,43 +196,20 @@
           "time": { "type": "integer" },
           "cores": { "type": "integer" },
           "mem_mb": { "type": "integer" },
-          "mode": { "type": "string" },
           "alive": { "type": "boolean" },
           "lag_s": { "type": "integer" }
         },
-        "required": ["name", "base_url", "rootd_token", "time", "mode", "alive", "lag_s"],
+        "required": ["name", "base_url", "rootd_token", "time", "alive", "lag_s"],
         "additionalProperties": false
       },
-        "ServersResponse": {
-          "type": "object",
-          "properties": {
-            "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerInfo" } }
-          },
-          "required": ["servers"],
-          "additionalProperties": false
+      "ServersResponse": {
+        "type": "object",
+        "properties": {
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerInfo" } }
         },
-        "BulkExecReq": {
-          "type": "object",
-          "properties": {
-            "servers": { "type": "array", "items": { "type": "string" } },
-            "cmd": { "type": "string" },
-            "cwd": { "type": "string" },
-            "timeout": { "type": "integer", "format": "int32" }
-          },
-          "required": ["servers", "cmd"],
-          "additionalProperties": false
-        },
-        "BulkExecResult": {
-          "type": "object",
-          "properties": {
-            "results": {
-              "type": "object",
-              "additionalProperties": { "$ref": "#/components/schemas/ExecResult" }
-            }
-          },
-          "required": ["results"],
-          "additionalProperties": false
-        }
+        "required": ["servers"],
+        "additionalProperties": false
       }
     }
   }
+}

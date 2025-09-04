@@ -7,6 +7,7 @@ Endpoints:
   * /install.sh        – hub installer
   * /install_rootd.sh  – Linux agent installer
   * /install_win.ps1   – Windows agent installer
+  * /openapi.json      – OpenAPI schema
 """
 import logging
 from pathlib import Path
@@ -47,6 +48,11 @@ async def get_install_rootd_sh():
 async def get_install_win_ps1():
     content = load_script("install_win.ps1")
     return Response(content, media_type="text/plain")
+
+@app.get("/openapi.json")
+async def get_openapi_json():
+    content = load_script("openapi.json")
+    return Response(content, media_type="application/json")
 
 app.mount("/", StaticFiles(directory=BASE_DIR / "website", html=True), name="website")
 
