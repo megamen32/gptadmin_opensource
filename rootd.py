@@ -125,7 +125,7 @@ async def exec_stream(body: ExecReq = Body(...)):
 def sys_info():
     return {
         "host": socket.gethostname(),
-        "kernel": platform.release(),
+        "platform": platform.platform(),
         "cores": psutil.cpu_count(),
         "mem_mb": round(psutil.virtual_memory().total / 2**20),
         "uptime_s": round(time.time() - psutil.boot_time()),
@@ -151,6 +151,7 @@ def heartbeat():
             "mem_mb": round(psutil.virtual_memory().total / 2**20),
             "time": int(time.time()),
             "mode": "polling" if QUEUE_URL else "webhook",
+            "os":sys.platform
         }
         try:
             requests.post(HUB_URL, json=payload, timeout=3)
