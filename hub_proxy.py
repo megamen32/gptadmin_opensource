@@ -17,7 +17,7 @@ from starlette.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 
-CTL_TOKEN = os.getenv("CTL_TOKEN", "CHANGE_ME")
+CTL_TOKEN = os.getenv("CTL_TOKEN", "chatgpt_secret")
 DEAD_S    = int(os.getenv("DEAD_S", "180"))
 
 app      = FastAPI(title="root-hub", version="1.0")
@@ -36,6 +36,7 @@ class Beat(BaseModel):
     time: int          # unixtime
     cores: int | None = None
     mem_mb: int | None = None
+    os: str = 'linux'
     mode: str = "webhook"
 
 class BulkExec(BaseModel):
@@ -59,6 +60,7 @@ class TaskResult(BaseModel):
 @app.post("/heartbeat")
 def heartbeat(b: Beat = Body(...)):
     servers[b.name] = b.dict()
+    servers[b.name]["time"]=time.time()
     return {"ok": True}
 
 @app.get("/servers")
@@ -159,8 +161,6 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
     info = servers.get(srv)
     if not info:
         raise HTTPException(404, f"server '{srv}' not registered")
-    if time.time() - info["time"] > DEAD_S:
-        raise HTTPException(503, f"server '{srv}' appears offline")
     if info.get("mode") == "polling":
         if request.method != "POST" or path != "exec":
             raise HTTPException(501, "polling mode supports only POST /exec")

@@ -6,3 +6,5 @@ requirements.txt.bak*
 logs_config.json
 build/
 *.spec
+1.html
+router_cookies.json

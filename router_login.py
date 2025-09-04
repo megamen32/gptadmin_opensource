@@ -1,15 +1,43 @@
 #!/usr/bin/env python3
-import requests, hashlib, base64, json, os
+import requests, base64, json, os, crypt
 
 ROUTER_URL = "http://203.0.113.10"
-COOKIE_FILE = os.path.expanduser("router_cookies.json")
+COOKIE_FILE = "router_cookies.json"
 USERNAME = "admin"
-SERIAL = "5452535223232AB2"  # можно автоматом парсить со страницы, пока хардкод
-PASSWORD = f"${SERIAL}"
+SERIAL = "5452535223232AB2"
 
-# --- PHP_CRYPT_MD5 (эмуляция простая: md5($1$ + password)) ---
-def php_crypt_md5(password: str, salt: str = "$1$") -> str:
-    return hashlib.md5((salt + password).encode()).hexdigest()
+# Пароль начинается со знака $
+PLAIN_PASSWORD = f"${SERIAL}"
+
+
+def calc_post_security_flag(data: dict) -> int:
+    # Сформировать строку inputVal так же, как в JS: name=value&...
+    items = []
+    for k, v in data.items():
+        if k in ("postSecurityFlag", "csrftoken"):
+            continue
+        items.append(f"{k}={v}")
+    inputVal = "&".join(items) + "&"
+
+    csum = 0
+    i = 0
+    while i < len(inputVal):
+        if i + 4 > len(inputVal):
+            if i < len(inputVal):
+                csum += (ord(inputVal[i]) << 24)
+            if i + 1 < len(inputVal):
+                csum += (ord(inputVal[i+1]) << 16)
+            if i + 2 < len(inputVal):
+                csum += (ord(inputVal[i+2]) << 8)
+            break
+        else:
+            csum += (ord(inputVal[i]) << 24) + (ord(inputVal[i+1]) << 16) + (ord(inputVal[i+2]) << 8) + ord(inputVal[i+3])
+            i += 4
+
+    csum = (csum & 0xffff) + (csum >> 16)
+    csum = csum & 0xffff
+    csum = (~csum) & 0xffff
+    return csum
 
 
 def load_cookies():
@@ -25,25 +53,53 @@ def save_cookies(cj):
 
 
 def login():
-    # подготовим пароль
-    md5pass = php_crypt_md5(PASSWORD)
-    encpass = base64.b64encode(md5pass.encode()).decode()
+    # md5-crypt от "$SERIAL"
+    md5hash = crypt.crypt(PLAIN_PASSWORD, "$1$")
+    encpass = base64.b64encode(md5hash.encode()).decode()
+
+    s = requests.Session()
+
+    # 1. Получаем login.asp
+    r1 = s.get(f"{ROUTER_URL}/admin/login.asp")
+    print("GET login.asp status:", r1.status_code)
+
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "ru,en-US;q=0.9,en;q=0.8,ru-RU;q=0.7,zh-CN;q=0.6,zh;q=0.5",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Host": "203.0.113.10",
+        "Origin": "http://203.0.113.10",
+        "Referer": "http://203.0.113.10/admin/login.asp",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    }
 
     data = {
+        "challenge": "",
         "username": USERNAME,
-        "password": PASSWORD,  # оригинальный
+        "save": "Авторизоваться",
         "encodePassword": encpass,
+        "submit-url": "/admin/login.asp",
     }
-    
-    s = requests.Session()
-    r = s.post(f"{ROUTER_URL}/boaform/admin/formLogin", data=data)
-    print("Status:", r.status_code)
-    print("Headers:", r.headers)
-    if r.status_code == 200:
+
+    # посчитать правильный postSecurityFlag
+    data["postSecurityFlag"] = str(calc_post_security_flag(data))
+
+    print("Computed postSecurityFlag:", data["postSecurityFlag"])
+
+    r2 = s.post(f"{ROUTER_URL}/boaform/admin/formLogin", headers=headers, data=data, allow_redirects=True)
+
+    print("POST status:", r2.status_code)
+    print("Final URL:", r2.url)
+    if r2.status_code in (200, 302) and "Ошибка" not in r2.text:
         save_cookies(s.cookies)
-        print("Cookies saved to", COOKIE_FILE)
+        print("✅ Cookies saved to", COOKIE_FILE)
     else:
-        print("Login failed")
+        print("❌ Login failed")
+        print(r2.text[:500])
 
 
 def main():
