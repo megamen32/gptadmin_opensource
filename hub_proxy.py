@@ -9,13 +9,15 @@ Env:
 
 Зависимости: fastapi, uvicorn[standard], httpx, pydantic
 """
-import os, time, httpx, asyncio
+import os, time, httpx, asyncio, json, base64, datetime
 from fastapi import FastAPI, Request, Body, HTTPException, Depends, Query
 from urllib.parse import urlencode
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "chatgpt_secret")
 DEAD_S    = int(os.getenv("DEAD_S", "180"))
@@ -27,6 +29,38 @@ auth_ctl = HTTPBearer(auto_error=False)
 servers: dict[str, dict] = {}
 queues: Dict[str, List[Dict]] = {}
 results: Dict[str, Dict[str, Dict]] = {}
+
+# ------------------------- LICENSE -------------------------------------------
+LICENSE_FILE = os.getenv("LICENSE_FILE", "license.json")
+PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE", "public.pem")
+
+try:
+    with open(PUBLIC_KEY_FILE, "rb") as f:
+        _public_key = serialization.load_pem_public_key(f.read())
+    with open(LICENSE_FILE) as f:
+        _license = json.load(f)
+    _message = json.dumps(_license["data"]).encode()
+    _signature = base64.b64decode(_license["signature"])
+    _public_key.verify(_signature, _message, padding.PKCS1v15(), hashes.SHA256())
+    _expiry = _license["data"].get("expiry")
+    _max_servers = _license["data"].get("max_servers", 1)
+except Exception as e:  # fallback: one server, no expiry
+    print(f"License load failed: {e}")
+    _expiry = None
+    _max_servers = 1
+
+
+def check_license(current_servers: int):
+    if _expiry:
+        exp_date = datetime.datetime.strptime(_expiry, "%Y-%m-%d").date()
+        if datetime.date.today() > exp_date:
+            raise HTTPException(403, "license expired")
+    if _max_servers and _max_servers > 0 and current_servers > _max_servers:
+        raise HTTPException(403, f"too many servers ({current_servers}/{_max_servers})")
+
+
+def ensure_license():
+    check_license(len(servers))
 
 # ------------------------------------------------------------------------------
 class Beat(BaseModel):
@@ -59,11 +93,15 @@ class TaskResult(BaseModel):
 
 @app.post("/heartbeat")
 def heartbeat(b: Beat = Body(...)):
+    current = len(servers)
+    if b.name not in servers:
+        current += 1
+    check_license(current)
     servers[b.name] = b.dict()
-    servers[b.name]["time"]=time.time()
+    servers[b.name]["time"] = time.time()
     return {"ok": True}
 
-@app.get("/servers")
+@app.get("/servers", dependencies=[Depends(ensure_license)])
 def list_servers():
     now = time.time()
     out = []
@@ -76,7 +114,10 @@ async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)
     if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
         raise HTTPException(401, "bad token")
     
-@app.post("/bulk/exec", dependencies=[Depends(check_ctl_token)])
+@app.post(
+    "/bulk/exec",
+    dependencies=[Depends(check_ctl_token), Depends(ensure_license)],
+)
 async def bulk_exec(req: BulkExec):
     """Execute a command on multiple servers concurrently."""
 
@@ -130,7 +171,7 @@ async def bulk_exec(req: BulkExec):
 
 
 # ------------------------- QUEUE / POLL ----------------------------
-@app.get("/queue/{srv}")
+@app.get("/queue/{srv}", dependencies=[Depends(ensure_license)])
 def queue_poll(srv: str, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:
@@ -141,7 +182,7 @@ def queue_poll(srv: str, token: str = Query(...)):
     return q.pop(0)
 
 
-@app.post("/queue/{srv}/result")
+@app.post("/queue/{srv}/result", dependencies=[Depends(ensure_license)])
 def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:
@@ -155,7 +196,7 @@ def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
 @app.api_route(
     "/srv/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    dependencies=[Depends(check_ctl_token)],
+    dependencies=[Depends(check_ctl_token), Depends(ensure_license)],
 )
 async def proxy(path: str, request: Request, srv: str = Query(..., alias="server")):
     info = servers.get(srv)
