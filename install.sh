@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple installer for the hub proxy service.
-# Generates a control token, installs python dependencies and starts the hub.
+PACKAGE_URL=${PACKAGE_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
 
 ROOT_DIR=$(dirname "$0")
 cd "$ROOT_DIR"
 
-if ! command -v python3 >/dev/null; then
-  echo "python3 is required" >&2
+if ! command -v curl >/dev/null; then
+  echo "curl is required" >&2
   exit 1
 fi
 
@@ -18,13 +17,19 @@ print(secrets.token_hex(16))
 PY
 )
 
+TMP_DIR=$(mktemp -d)
+echo "Downloading package..."
+curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
+tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$TMP_DIR"
+HUB_BIN="$TMP_DIR/hub_proxy/dist/hub_proxy"
+chmod +x "$HUB_BIN"
+
 echo "Generated token: $TOKEN"
 
 export CTL_TOKEN="$TOKEN"
-pip3 install -r requirements.txt >/dev/null
 
 # start hub proxy in background
-nohup uvicorn hub_proxy:app --host 0.0.0.0 --port 9001 >/tmp/hub_proxy.log 2>&1 &
+nohup "$HUB_BIN" >/tmp/hub_proxy.log 2>&1 &
 
 IP=$(hostname -I | awk '{print $1}')
 echo "Hub running at http://$IP:9001"
