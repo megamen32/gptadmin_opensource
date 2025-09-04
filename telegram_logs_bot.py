@@ -341,14 +341,8 @@ async def log_watcher():
         has_kw = any(k in text_cmp for k in kws) if kws else False
         has_ign = any(i in text_cmp for i in ign) if ign else False
 
-        # 1) Достаточно критично — отправляем всегда
-        if pri <= threshold:
-            
-            await send_formatted(text_cmp)
-            continue
 
-        # 2) Менее критично — только по ключевым словам и без игнора
-        if has_kw and not has_ign:
+        if (has_kw or pri <= threshold) and not has_ign:
             await send_formatted(text_cmp)
 
 
