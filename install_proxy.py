@@ -11,6 +11,8 @@ Endpoints:
 import logging
 from pathlib import Path
 from fastapi import FastAPI, Response, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger("hub")
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +47,8 @@ async def get_install_rootd_sh():
 async def get_install_win_ps1():
     content = load_script("install_win.ps1")
     return Response(content, media_type="text/plain")
+
+app.mount("/", StaticFiles(directory=BASE_DIR / "website", html=True), name="website")
 
 
 if __name__ == "__main__":
