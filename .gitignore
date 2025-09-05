@@ -8,3 +8,4 @@ build/
 *.spec
 1.html
 router_cookies.json
+.buildcache/

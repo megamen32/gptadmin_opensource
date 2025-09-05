@@ -210,6 +210,9 @@ def get_file(path: str):
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("rootd:app", host="0.0.0.0", port=25900)
+    import uvicorn, os
+    port = int(os.getenv("ROOTD_PORT", "25900"))
+    # Внутри PyInstaller и в обычном питоне одинаково работает:
+    uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
+
 
