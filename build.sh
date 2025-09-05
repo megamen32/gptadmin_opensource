@@ -287,7 +287,27 @@ pushd "$ART_DIR" >/dev/null
 INCLUDE=()
 for d in rootd hub_proxy cli; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
 tar -czf gptadmin.tar.gz "${INCLUDE[@]}"
+
+# NEW: компонентные архивы (если есть соответствующие папки)
+step "Archive: per-component tarballs"
+if [[ -d hub_proxy ]]; then
+  tar -czf gptadmin-hub.tar.gz hub_proxy
+  echo "built: $ART_DIR/gptadmin-hub.tar.gz"
+else
+  echo "WARN: hub_proxy dir not found, skip gptadmin-hub.tar.gz"
+fi
+
+if [[ -d rootd ]]; then
+  tar -czf gptadmin-rootd.tar.gz rootd
+  echo "built: $ART_DIR/gptadmin-rootd.tar.gz"
+else
+  echo "WARN: rootd dir not found, skip gptadmin-rootd.tar.gz"
+fi
+
+# полезно увидеть размеры
+ls -lh gptadmin*.tar.gz 2>/dev/null || true
 popd >/dev/null
+
 
 # ---------- Smoke tests ----------
 wait_for_http() {

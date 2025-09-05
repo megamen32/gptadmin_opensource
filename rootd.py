@@ -8,7 +8,7 @@ Env:
   ROOTD_TOKEN     bearer-токен (def: CHANGE_ME)
   LOG_LIMIT_B     макс. байт stdout/stderr (def: 8192)
   EXEC_TIMEOUT    таймаут /exec (def: 300)
-  HUB_URL         http(s)://hub:9001/heartbeat (def: none)
+  HUB_URL         http(s)://hub:9001/ (def: none)
   HB_INTERVAL_S   период heartbeat (def: 60)
   QUEUE_URL       если задан – включаем polling и берём HUB_URL с заменой
                    пути на /queue
@@ -47,7 +47,8 @@ logging.basicConfig(
 log = logging.getLogger("rootd")
 # ------------------------------------------------------------------
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
-HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/heartbeat')
+HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/')
+HEARTBEAT_URL=HUB_URL+'/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
 ROOTD_URL = os.getenv("ROOTD_URL")
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
 
@@ -139,8 +140,8 @@ def health():
 
 # ---------------- HEARTBEAT ---------------------------------------
 def heartbeat():
-    if not HUB_URL:
-        log.warning("HUB_URL not set, skipping heartbeat")
+    if not HEARTBEAT_URL:
+        log.warning("HEARTBEAT_URL not set, skipping heartbeat")
         return
     while True:
         payload = {
@@ -154,7 +155,7 @@ def heartbeat():
             "os":sys.platform
         }
         try:
-            requests.post(HUB_URL, json=payload, timeout=3)
+            requests.post(HEARTBEAT_URL, json=payload, timeout=3)
         except Exception as e:
             log.warning(f"Heartbeat failed: {e}")
         time.sleep(HB_INT)

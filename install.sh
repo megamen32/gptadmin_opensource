@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Где брать файлы (можно переопределить переменными окружения)
 CLI_URL=${CLI_URL:-https://became.bezrabotnyi.com/gptadmin.py}
 PKG_ALL_URL=${PKG_ALL_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
 PKG_HUB_URL=${PKG_HUB_URL:-https://became.bezrabotnyi.com/gptadmin-hub.tar.gz}
@@ -22,27 +21,27 @@ mkdir -p "$INSTALL_DIR"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# 1) Пытаемся скачать чистый Python‑CLI
+# 1) CLI
 if curl -fsSL "$CLI_URL" -o "$TMP_DIR/gptadmin.py"; then
-  echo "[1/3] Downloaded Python CLI"
+  echo "[1/2] Downloaded Python CLI"
 else
-  echo "[1/3] CLI not found at $CLI_URL — fallback to package"
+  echo "[1/2] CLI not found at $CLI_URL — fallback to package"
   curl -fsSL "$PKG_ALL_URL" -o "$TMP_DIR/pkg.tar.gz"
   mkdir -p "$TMP_DIR/pkg" && tar -xzf "$TMP_DIR/pkg.tar.gz" -C "$TMP_DIR/pkg"
-  # ожидается cli/gptadmin.py внутри архива
   [ -f "$TMP_DIR/pkg/cli/gptadmin.py" ] || err "cli/gptadmin.py not found in package"
   cp "$TMP_DIR/pkg/cli/gptadmin.py" "$TMP_DIR/gptadmin.py"
 fi
-
 install -m 0755 "$TMP_DIR/gptadmin.py" "$CLI_PATH"
 
-# 2) Запуск интерактивной настройки; передаём URL-ы для компонентных архивов
-"$CLI_PATH" setup \
-  --pkg-all "$PKG_ALL_URL" \
-  --pkg-hub "$PKG_HUB_URL" \
-  --pkg-rootd "$PKG_ROOTD_URL" || err "setup failed"
+# 2) Интерактивный мастер (правильный stdin)
+if [ -t 0 ]; then
+  "$CLI_PATH" setup --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" || err "setup failed"
+elif [ -r /dev/tty ]; then
+  "$CLI_PATH" setup --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" < /dev/tty || err "setup failed"
+else
+  err "no TTY available for interactive setup. Run: bash <(curl -fsSL https://.../install.sh)"
+fi
 
-# 3) Краткая памятка
 cat <<EOF
 \n✅ GPTAdmin CLI установлен: $CLI_PATH
 Использование (примеры):
@@ -50,4 +49,5 @@ cat <<EOF
   gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)
   gptadmin logs hub         # логи хаба
   gptadmin port 4555        # смена порта хаба
+
 EOF

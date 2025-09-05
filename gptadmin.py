@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import socket
 import re
+import secrets
 from pathlib import Path
 
 # ===== Paths & constants =====
@@ -35,6 +36,14 @@ PKG_ROOTD_URL_DEFAULT = os.environ.get('PKG_ROOTD_URL', 'https://became.bezrabot
 
 REQUIRED_CMDS = ['curl', 'systemctl']
 
+# ===== FRPC defaults (AUTOMATIC, no questions) =====
+FRPC_VERSION = os.environ.get('FRPC_VERSION', '0.64.0')
+FRPC_SERVER_ADDR_DEFAULT = 't.gptadmin.bezrabotnyi.com'
+FRPC_SERVER_PORT_DEFAULT = '7000'
+FRPC_TOKEN_DEFAULT = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
+FRPC_DOMAIN_DEFAULT = FRPC_SERVER_ADDR_DEFAULT
+FRPC_TLS_ENABLE = True  # always
+
 # ===== Helpers =====
 
 def die(msg: str, code: int = 1):
@@ -58,12 +67,15 @@ def run(cmd, check=True, capture=False):
 def env_read() -> dict:
     d = {}
     if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            if not line.strip() or line.strip().startswith('#'):  
+        for raw in ENV_FILE.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
                 continue
             if '=' in line:
                 k, v = line.split('=', 1)
-                d[k.strip()] = v.strip()
+                k = k.strip()
+                v = v.strip()
+                d[k] = v
     return d
 
 def env_set_many(upd: dict):
@@ -78,11 +90,14 @@ def env_set_many(upd: dict):
 
 def gen_hex(nbytes=16) -> str:
     try:
-        import secrets
         return secrets.token_hex(nbytes)
     except Exception:
         out = run(['openssl', 'rand', '-hex', str(nbytes)], capture=True)
         return out.stdout.strip()
+
+def gen_subdomain() -> str:
+    # u-<8 hex>, например u-2c3b2e4f
+    return f"u-{gen_hex(4)}"
 
 # network
 
@@ -123,7 +138,6 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
-        candidates = []
         if component == 'hub':
             candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
         else:
@@ -181,19 +195,6 @@ ProtectHome=true
 WantedBy=multi-user.target
 """
 
-# frpc
-
-def ensure_frpc_binary() -> str:
-    p = shutil.which('frpc')
-    if p:
-        return p
-    cand = BIN_DIR / 'frpc'
-    if cand.exists():
-        os.chmod(cand, 0o755)
-        return str(cand)
-    die('Не найден frpc. Установи frpc в PATH или положи бинарь в /opt/gptadmin/bin/frpc')
-    return ''
-
 FRPC_UNIT_TPL = """[Unit]
 Description=FRP client for GPTAdmin
 After=network-online.target gptadmin-hub.service
@@ -213,13 +214,73 @@ ProtectHome=true
 WantedBy=multi-user.target
 """
 
-# ===== Interactive setup =====
+# ===== FRP helpers (auto-install) =====
+
+def detect_arch() -> str:
+    m = os.uname().machine
+    if m in ('x86_64', 'amd64'):
+        return 'amd64'
+    if m in ('aarch64', 'arm64'):
+        return 'arm64'
+    if m in ('armv7l', 'armv7'):
+        return 'arm'
+    die(f'Unsupported arch: {m} (expected x86_64/arm64/armv7)')
+
+def ensure_frpc_installed() -> str:
+    """
+    Return full path to frpc. If not found, download v{FRPC_VERSION} for current arch to BIN_DIR.
+    """
+    existing = shutil.which('frpc')
+    if existing:
+        return existing
+
+    arch = detect_arch()
+    tarname = f"frp_{FRPC_VERSION}_linux_{arch}.tar.gz"
+    url = f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/{tarname}"
+
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        pkg = tdp / tarname
+        download(url, pkg)
+        extract_tgz(pkg, tdp)
+        frpc_src = tdp / f"frp_{FRPC_VERSION}_linux_{arch}" / "frpc"
+        if not frpc_src.exists():
+            die('frpc binary not found in downloaded archive')
+        frpc_dst = BIN_DIR / "frpc"
+        shutil.copy2(frpc_src, frpc_dst)
+        os.chmod(frpc_dst, 0o755)
+        return str(frpc_dst)
+
+def write_frpc_conf(env: dict):
+    FRPC_CONF.parent.mkdir(parents=True, exist_ok=True)
+    # ВАЖНО: проксируем локальный порт ХАБа, чтобы он был доступен извне
+    local_port = env.get('HUB_PORT', '9001')
+    content = f"""serverAddr = "{env['FRP_SERVER_ADDR']}"
+serverPort = {env['FRP_SERVER_PORT']}
+
+[auth]
+token = "{env['FRP_TOKEN']}"
+
+[transport.tls]
+enable = true
+serverName = "{env['FRP_DOMAIN']}"
+
+[[proxies]]
+name = "gptadmin-web"
+type = "http"
+localPort = {local_port}
+subdomain = "{env['FRP_SUBDOMAIN']}"
+"""
+    FRPC_CONF.write_text(content)
+    os.chmod(FRPC_CONF, 0o640)
+
+# ===== Interactive setup (FRP part is NON-interactive now) =====
 
 def ask(prompt: str, default: str = '') -> str:
     sfx = f' [{default}]' if default else ''
     val = input(f"{prompt}{sfx}: ").strip()
     return val or default
-
 
 def setup_interactive(args):
     need_root()
@@ -248,39 +309,20 @@ def setup_interactive(args):
     env.setdefault('ROOTD_BIND', '127.0.0.1')
     env.setdefault('ROOTD_PORT', '25900')
 
-    print('\nКак публиковать hub_proxy наружу?')
-    print('  1) Через реверс‑прокси и свой домен (HTTPS)')
-    print('  2) Через FRP‑туннель (subdomain на вашем FRPS)')
-    mode = ask('Ваш выбор', '1')
+    # ---------- FRP MODE: automatic, no questions ----------
+    env['FRP_ENABLE'] = 'true'
+    env['FRP_SERVER_ADDR'] = FRPC_SERVER_ADDR_DEFAULT
+    env['FRP_SERVER_PORT'] = FRPC_SERVER_PORT_DEFAULT
+    env['FRP_DOMAIN'] = FRPC_DOMAIN_DEFAULT
+    env['FRP_SUBDOMAIN'] = gen_subdomain()
+    env['FRP_TOKEN'] = FRPC_TOKEN_DEFAULT
 
-    if mode == '1':
-        # reverse proxy — требуем HTTPS URL
-        env['FRP_ENABLE'] = 'false'
-        env['HUB_PORT'] = ask('Локальный порт хаба', env['HUB_PORT'])
-        public = ask('Публичный HTTPS‑URL (например, https://gptadmin.example.com)', env.get('HUB_PUBLIC_URL',''))
-        ensure_https(public)
-        env['HUB_PUBLIC_URL'] = public
-        # HUB_URL для rootd (если ставим)
-        if install_rootd:
-            env['HUB_URL'] = public
-    else:
-        # FRP — спрашиваем параметры, формируем URL из поддомена
-        env['FRP_ENABLE'] = 'true'
-        env['HUB_PORT'] = ask('Локальный порт хаба', env['HUB_PORT'])  # обычно 9001
-        env.setdefault('FRP_SERVER_ADDR', 't.gptadmin.bezrabotnyi.com')
-        env.setdefault('FRP_SERVER_PORT', '7000')
-        env.setdefault('FRP_DOMAIN', 't.gptadmin.bezrabotnyi.com')
-        env.setdefault('FRP_SUBDOMAIN', f"u-{gen_hex(4)}")
-        env['FRP_SERVER_ADDR'] = ask('FRP serverAddr', env['FRP_SERVER_ADDR'])
-        env['FRP_SERVER_PORT'] = ask('FRP serverPort', env['FRP_SERVER_PORT'])
-        env['FRP_DOMAIN'] = ask('FRP domain (SNI/base)', env['FRP_DOMAIN'])
-        env['FRP_SUBDOMAIN'] = ask('FRP subdomain (без точки)', env['FRP_SUBDOMAIN'])
-        env['FRP_TOKEN'] = ask('FRP token', env.get('FRP_TOKEN',''))
-        if not env['FRP_TOKEN']:
-            die('Нужен FRP token')
-        env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
-        if install_rootd:
-            env['HUB_URL'] = env['HUB_PUBLIC_URL']
+    # Публичный URL для хаба (через FRP)
+    env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
+    if install_rootd:
+        # rootd будет стучаться на хаб через внешний FRP-URL
+        env['HUB_URL'] = env['HUB_PUBLIC_URL']
+    
 
     # persist config (and remember components)
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
@@ -326,23 +368,23 @@ def setup_interactive(args):
     if install_rootd:
         UNIT_PATH_ROOTD.write_text(UNIT_ROOTD)
 
-    # frp unit & config if enabled
-    if env.get('FRP_ENABLE','false') == 'true':
-        frpc_bin = ensure_frpc_binary()
+    # ----- FRP install & unit (AUTOMATIC) -----
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        frpc_bin = ensure_frpc_installed()
         write_frpc_conf(env)
         UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
 
     # enable + restart
-    run(['systemctl','daemon-reload'])
+    run(['systemctl', 'daemon-reload'])
     if install_hub:
-        run(['systemctl','enable', SYSTEMD_HUB])
-        run(['systemctl','restart', SYSTEMD_HUB])
+        run(['systemctl', 'enable', SYSTEMD_HUB])
+        run(['systemctl', 'restart', SYSTEMD_HUB])
     if install_rootd:
-        run(['systemctl','enable', SYSTEMD_ROOTD])
-        run(['systemctl','restart', SYSTEMD_ROOTD])
-    if env.get('FRP_ENABLE','false') == 'true':
-        run(['systemctl','enable', SYSTEMD_FRPC])
-        run(['systemctl','restart', SYSTEMD_FRPC])
+        run(['systemctl', 'enable', SYSTEMD_ROOTD])
+        run(['systemctl', 'restart', SYSTEMD_ROOTD])
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        run(['systemctl', 'enable', SYSTEMD_FRPC])
+        run(['systemctl', 'restart', SYSTEMD_FRPC])
 
     # summary (only CTL_TOKEN is shown)
     env = env_read()
@@ -351,29 +393,8 @@ def setup_interactive(args):
     print(f"CTL_TOKEN: {env['CTL_TOKEN']}")
     if install_rootd:
         print('rootd установлен (токен не отображается).')
-
-# ===== FRP helpers =====
-
-def write_frpc_conf(env: dict):
-    FRPC_CONF.parent.mkdir(parents=True, exist_ok=True)
-    content = f"""serverAddr = "{env['FRP_SERVER_ADDR']}"
-serverPort = {env['FRP_SERVER_PORT']}
-
-[auth]
-token = "{env['FRP_TOKEN']}"
-
-[transport.tls]
-enable = true
-serverName = "{env['FRP_DOMAIN']}"
-
-[[proxies]]
-name = "gptadmin-web"
-type = "http"
-localPort = {env['HUB_PORT']}
-subdomain = "{env['FRP_SUBDOMAIN']}"
-"""
-    FRPC_CONF.write_text(content)
-    os.chmod(FRPC_CONF, 0o640)
+    print(f"FRP subdomain: {env['FRP_SUBDOMAIN']}")
+    print("Сервисы: gptadmin-hub, gptadmin-rootd, gptadmin-frpc")
 
 # ===== Commands =====
 
@@ -384,7 +405,6 @@ def installed_units():
     if UNIT_PATH_FRPC.exists(): res.append(SYSTEMD_FRPC)
     return res
 
-
 def cmd_status(_):
     units = installed_units()
     if not units:
@@ -392,31 +412,25 @@ def cmd_status(_):
         return
     run(['systemctl','--no-pager','status', *units], check=False)
 
-
 def cmd_start(_):
     need_root(); units = installed_units()
     if units: run(['systemctl','start', *units])
-
 
 def cmd_stop(_):
     need_root(); units = installed_units()[::-1]
     if units: run(['systemctl','stop', *units])
 
-
 def cmd_restart(_):
     need_root(); units = installed_units()
     if units: run(['systemctl','restart', *units])
-
 
 def cmd_enable(_):
     need_root(); units = installed_units()
     if units: run(['systemctl','enable', *units])
 
-
 def cmd_disable(_):
     need_root(); units = installed_units()
     if units: run(['systemctl','disable', *units])
-
 
 def cmd_logs(args):
     svc = args.service
@@ -432,12 +446,9 @@ def cmd_logs(args):
         units = installed_units()
         run(['journalctl', *sum([['-u', u] for u in units], []), '-e', '-n', '200', '-f'], check=False)
 
-
 def cmd_tokens(_):
     env = env_read()
     print(f"CTL_TOKEN={env.get('CTL_TOKEN','')}")
-    # ROOTD_TOKEN не печатаем
-
 
 def cmd_rotate(args):
     need_root()
@@ -454,9 +465,8 @@ def cmd_rotate(args):
             run(['systemctl','restart', SYSTEMD_ROOTD])
         print('rootd token rotated (значение не выводится).')
 
-
 def cmd_port(args):
-    # меняем только локальный порт хаба; внешне — всегда HTTPS через reverse‑proxy или FRP
+    # меняем локальный порт хаба; FRP перегенерим и перезапустим
     need_root()
     port = str(args.port)
     env = env_read()
@@ -464,22 +474,23 @@ def cmd_port(args):
     env_set_many(env)
     if UNIT_PATH_HUB.exists():
         run(['systemctl','restart', SYSTEMD_HUB])
-    if UNIT_PATH_FRPC.exists():  # frpc проксирует localPort — его тоже перезапускаем
+    if UNIT_PATH_FRPC.exists():
         env = env_read()
         write_frpc_conf(env)
         run(['systemctl','restart', SYSTEMD_FRPC])
     print(f'Локальный порт хаба изменён на {port}.')
 
-
 def cmd_seturl(args):
-    # только для reverse‑proxy режима (FRP сам формирует URL)
+    # вручную задать публичный URL (если используешь внешний реверс-прокси)
     need_root()
     url = args.url
     ensure_https(url)
     env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false'})
     if UNIT_PATH_ROOTD.exists():
         run(['systemctl','restart', SYSTEMD_ROOTD], check=False)
-    print(f'HUB_PUBLIC_URL/HUB_URL = {url}')
+    if UNIT_PATH_FRPC.exists():
+        run(['systemctl','disable','--now', SYSTEMD_FRPC], check=False)
+    print(f'HUB_PUBLIC_URL/HUB_URL = {url}; FRP отключён.')
 
 # FRP subcommands
 
@@ -487,35 +498,38 @@ def cmd_tunnel_status(_):
     if UNIT_PATH_FRPC.exists():
         run(['systemctl','--no-pager','status', SYSTEMD_FRPC], check=False)
     else:
-        print('FRP не сконфигурирован. Запусти: gptadmin tunnel enable')
-
+        print('FRP не сконфигурирован. Запусти: gptadmin setup')
 
 def cmd_tunnel_logs(_):
     run(['journalctl','-u', SYSTEMD_FRPC, '-e', '-n', '200', '-f'], check=False)
 
-
 def cmd_tunnel_enable(args):
+    # Делает FRP включённым, подставляя дефолты, если их нет
     need_root()
     env = env_read()
     env['FRP_ENABLE'] = 'true'
-    # если переданы параметры — применим
-    if args.server: env['FRP_SERVER_ADDR'] = args.server
-    if args.port: env['FRP_SERVER_PORT'] = str(args.port)
-    if args.domain: env['FRP_DOMAIN'] = args.domain
-    if args.subdomain: env['FRP_SUBDOMAIN'] = args.subdomain
-    if args.token: env['FRP_TOKEN'] = args.token
-    for k in ('FRP_SERVER_ADDR','FRP_SERVER_PORT','FRP_DOMAIN','FRP_SUBDOMAIN','FRP_TOKEN','HUB_PORT'):
-        if k not in env or not env[k]:
-            die(f'Отсутствует {k}. Запусти gptadmin setup или укажи флагами.')
+    env.setdefault('FRP_SERVER_ADDR', FRPC_SERVER_ADDR_DEFAULT)
+    env.setdefault('FRP_SERVER_PORT', FRPC_SERVER_PORT_DEFAULT)
+    env.setdefault('FRP_DOMAIN', FRPC_DOMAIN_DEFAULT)
+    env.setdefault('FRP_SUBDOMAIN', gen_subdomain())
+    env.setdefault('FRP_TOKEN', FRPC_TOKEN_DEFAULT)
+    env.setdefault('HUB_PORT', '9001')
     env_set_many(env)
-    frpc_bin = ensure_frpc_binary()
+
+    frpc_bin = ensure_frpc_installed()
     write_frpc_conf(env)
     UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
     run(['systemctl','daemon-reload'])
     run(['systemctl','enable', SYSTEMD_FRPC])
     run(['systemctl','restart', SYSTEMD_FRPC])
-    print('FRP tunnel enabled.')
 
+    # при включении тянем URL на базовый домен FRP
+    env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
+    env['HUB_URL'] = env['HUB_PUBLIC_URL']
+    env_set_many(env)
+
+    print('FRP tunnel enabled.')
+    print(f"FRP URL: {env['HUB_PUBLIC_URL']}")
 
 def cmd_tunnel_disable(_):
     need_root()
@@ -526,11 +540,11 @@ def cmd_tunnel_disable(_):
 # ===== Main =====
 
 def main():
-    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (HTTPS reverse-proxy or FRP only)')
+    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (FRP auto or reverse-proxy)')
     sub = ap.add_subparsers(dest='cmd')
 
-    # setup (interactive)
-    ap_setup = sub.add_parser('setup', help='Interactive installation & config')
+    # setup (interactive, FRP part is automatic)
+    ap_setup = sub.add_parser('setup', help='Interactive installation & config (FRP auto)')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-rootd')
@@ -554,11 +568,11 @@ def main():
     ap_rot.add_argument('which', choices=['hub','rootd'])
     ap_rot.set_defaults(func=cmd_rotate)
 
-    ap_port = sub.add_parser('port', help='Change local hub port (affects reverse-proxy upstream & FRP localPort)')
+    ap_port = sub.add_parser('port', help='Change local hub port (affects FRP localPort)')
     ap_port.add_argument('port', type=int)
     ap_port.set_defaults(func=cmd_port)
 
-    ap_url = sub.add_parser('set-url', help='Set public HTTPS URL (reverse-proxy mode)')
+    ap_url = sub.add_parser('set-url', help='Set public HTTPS URL and disable FRP')
     ap_url.add_argument('url')
     ap_url.set_defaults(func=cmd_seturl)
 
@@ -566,13 +580,7 @@ def main():
     tun_sub = ap_tun.add_subparsers(dest='tun_cmd')
     tun_sub.add_parser('status').set_defaults(func=cmd_tunnel_status)
     tun_sub.add_parser('logs').set_defaults(func=cmd_tunnel_logs)
-    tun_en = tun_sub.add_parser('enable')
-    tun_en.add_argument('--server')
-    tun_en.add_argument('--port', type=int)
-    tun_en.add_argument('--domain')
-    tun_en.add_argument('--subdomain')
-    tun_en.add_argument('--token')
-    tun_en.set_defaults(func=cmd_tunnel_enable)
+    tun_sub.add_parser('enable').set_defaults(func=cmd_tunnel_enable)
     tun_sub.add_parser('disable').set_defaults(func=cmd_tunnel_disable)
 
     args = ap.parse_args()
