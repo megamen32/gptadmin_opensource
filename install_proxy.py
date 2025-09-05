@@ -12,7 +12,7 @@ Endpoints:
 import logging
 from pathlib import Path
 from fastapi import FastAPI, Response, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger("hub")
@@ -49,10 +49,36 @@ async def get_install_win_ps1():
     content = load_script("install_win.ps1")
     return Response(content, media_type="text/plain")
 
-@app.get("/openapi.json")
+@app.get("/api.json")
 async def get_openapi_json():
     content = load_script("openapi.json")
     return Response(content, media_type="application/json")
+
+def _bin(path: Path, filename: str, media_type: str):
+    if not path.exists():
+        raise HTTPException(404, 'artifact not found')
+    log.info('serve %s', path)
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.get('/gptadmin.tar.gz')
+async def get_all():
+    return _bin(BASE_DIR / 'build' / 'gptadmin.tar.gz', 'gptadmin.tar.gz', 'application/gzip')
+
+
+@app.get('/gptadmin-hub.tar.gz')
+async def get_hub():
+    return _bin(BASE_DIR / 'build' / 'gptadmin-hub.tar.gz', 'gptadmin-hub.tar.gz', 'application/gzip')
+
+
+@app.get('/gptadmin-rootd.tar.gz')
+async def get_rootd():
+    return _bin(BASE_DIR / 'build' / 'gptadmin-rootd.tar.gz', 'gptadmin-rootd.tar.gz', 'application/gzip')
+
+
+@app.get('/gptadmin.py')
+async def get_cli_py():
+    return _bin(BASE_DIR / 'build' / 'cli' / 'gptadmin.py', 'gptadmin.py', 'text/x-python')
 
 app.mount("/", StaticFiles(directory=BASE_DIR / "website", html=True), name="website")
 

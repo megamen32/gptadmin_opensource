@@ -61,6 +61,11 @@ def check_license(current_servers: int):
 
 def ensure_license():
     check_license(len(servers))
+    
+    
+async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)):
+    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
+        raise HTTPException(401, "bad token")
 
 # ------------------------------------------------------------------------------
 class Beat(BaseModel):
@@ -101,18 +106,18 @@ def heartbeat(b: Beat = Body(...)):
     servers[b.name]["time"] = time.time()
     return {"ok": True}
 
-@app.get("/servers", dependencies=[Depends(ensure_license)])
+@app.get("/servers", dependencies=[  Depends(check_ctl_token),Depends(ensure_license)])
 def list_servers():
     now = time.time()
     out = []
     for n, d in servers.items():
         alive = (now - d["time"]) < DEAD_S
+        b=d.copy()
+        b['rootd_token'] = None
         out.append({**d, "alive": alive, "lag_s": round(now-d["time"])})
     return {"servers": out}
 
-async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)):
-    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
-        raise HTTPException(401, "bad token")
+
     
 @app.post(
     "/bulk/exec",
@@ -171,7 +176,7 @@ async def bulk_exec(req: BulkExec):
 
 
 # ------------------------- QUEUE / POLL ----------------------------
-@app.get("/queue/{srv}", dependencies=[Depends(ensure_license)])
+@app.get("/queue/{srv}", dependencies=[Depends(check_ctl_token),Depends(ensure_license)])
 def queue_poll(srv: str, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:
@@ -182,7 +187,7 @@ def queue_poll(srv: str, token: str = Query(...)):
     return q.pop(0)
 
 
-@app.post("/queue/{srv}/result", dependencies=[Depends(ensure_license)])
+@app.post("/queue/{srv}/result", dependencies=[ Depends(check_ctl_token),Depends(ensure_license)])
 def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:
