@@ -366,7 +366,7 @@ async def bulk_exec(req: BulkExec):
 
 # ------------------------- QUEUE / POLL ----------------------------
 
-@app.get("/queue/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+@app.get("/queue/{srv}", dependencies=[ Depends(ensure_license)])
 def queue_poll(srv: str, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:
@@ -382,7 +382,7 @@ def queue_poll(srv: str, token: str = Query(...)):
     return task
 
 
-@app.post("/queue/{srv}/result", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+@app.post("/queue/{srv}/result", dependencies=[ Depends(ensure_license)])
 def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
     info = servers.get(srv)
     if not info or info.get("rootd_token") != token:

@@ -49,5 +49,6 @@ cat <<EOF
   gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)
   gptadmin logs hub         # логи хаба
   gptadmin port 4555        # смена порта хаба
+  gptadmin uninstall        # Полное удаление всего с компьютера
 
 EOF

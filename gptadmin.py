@@ -408,19 +408,35 @@ def setup_interactive(args):
     print('\n=== Готово ===')
     if install_hub:
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
-    if install_rootd:
+        print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
+    if install_rootd and not install_hub:
         print(f"HUB_URL для rootd: {env.get('HUB_URL', '—')}")
-    print(f"CTL_TOKEN: {env['CTL_TOKEN']}")
+    
     if install_rootd:
-        print('rootd установлен (токен не отображается).')
+        print('rootd установлен.')
     if env.get('FRP_ENABLE', 'false') == 'true':
-        print(f"FRP subdomain: {env['FRP_SUBDOMAIN']}")
-        print("Сервис туннеля: gptadmin-frpc")
+        #print(f"FRP subdomain: {env['FRP_SUBDOMAIN']}")
+        #print("Сервис туннеля: gptadmin-frpc")
+        pass
     print("Сервисы: " + ", ".join([n for n, p in [
         ('gptadmin-hub', UNIT_PATH_HUB),
         ('gptadmin-rootd', UNIT_PATH_ROOTD),
         ('gptadmin-frpc', UNIT_PATH_FRPC if env.get('FRP_ENABLE','false')=='true' else None)
     ] if p and p.exists()]))
+
+    if install_hub:
+        print(f'''
+-------------------
+1) Перейдите на chatgpt.com/gpts/editor
+
+2) Нажмите «Создать новое действие».
+
+3) Выберите импорт по URL: https://became.bezrabotnyi.com/api.json
+
+4) Заменитие в "servers": "url": на свой Hub URL {env.get('HUB_URL', '—')}
+
+5) В разделе «Аутентификация» выберите тип API ключ, Bearer и вставьте ключ {env['CTL_TOKEN']}
+---------------------''')
 
 # ===== Commands =====
 
