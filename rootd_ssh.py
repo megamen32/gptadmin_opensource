@@ -136,7 +136,7 @@ def info():
             stdin, stdout, stderr = client.exec_command(cmd)
             return stdout.read().decode().strip()
 
-        host = (_exec("hostname")or "") + SSH_HOST
+        host = (_exec("hostname")or "") + f' IP({SSH_HOST})'
         platform = _exec("uname -a")
 
         try:
