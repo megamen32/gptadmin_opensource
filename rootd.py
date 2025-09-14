@@ -34,18 +34,19 @@ import logging
 import traceback
 from urllib.parse import urlparse, urlunparse
 
-
+port = int(os.getenv("ROOTD_PORT", os.getenv("PORT","25900")))
 # --- логирование ---
 logging.basicConfig(
     level=logging.DEBUG,  # можно поставить INFO если слишком шумно
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("rootd.log"),    # лог в файл
+        logging.FileHandler(f"rootd-{port}.log"),    # лог в файл
         logging.StreamHandler()              # лог в stdout (для systemd)
     ]
 )
 log = logging.getLogger("rootd")
 # ------------------------------------------------------------------
+
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
 HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/')
 HEARTBEAT_URL=HUB_URL+'/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
@@ -214,7 +215,7 @@ def get_file(path: str):
 
 if __name__ == "__main__":
     import uvicorn, os
-    port = int(os.getenv("ROOTD_PORT", "25900"))
+    
     # Внутри PyInstaller и в обычном питоне одинаково работает:
     uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
 
