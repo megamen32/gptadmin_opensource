@@ -18,12 +18,10 @@ Env:
 import os
 import time
 import threading
-import platform
 import socket
 import sys
 from typing import Optional
 
-import psutil
 import requests
 from fastapi import FastAPI, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
@@ -126,13 +124,11 @@ async def exec_stream(body: ExecReq = Body(...)):
 # ---------------- INFO --------------------------------------------
 @app.get("/system/info", dependencies=[Depends(guard)])
 def sys_info():
-    return {
-        "host": socket.gethostname(),
-        "platform": platform.platform(),
-        "cores": psutil.cpu_count(),
-        "mem_mb": round(psutil.virtual_memory().total / 2**20),
-        "uptime_s": round(time.time() - psutil.boot_time()),
-    }
+    try:
+        return backend.info()
+    except Exception as e:
+        log.exception("Error in /system/info")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/system/health", dependencies=[Depends(guard)])
@@ -146,15 +142,20 @@ def heartbeat():
         log.warning("HEARTBEAT_URL not set, skipping heartbeat")
         return
     while True:
+        try:
+            info = backend.info()
+        except Exception as e:
+            log.warning(f"Failed to get system info: {e}")
+            info = {}
         payload = {
-            "name": socket.gethostname(),
+            "name": info.get("host", socket.gethostname()),
             "base_url": ROOTD_URL or f"http://{socket.gethostname()}:25900",
             "rootd_token": TOKEN,
-            "cores": psutil.cpu_count(),
-            "mem_mb": round(psutil.virtual_memory().total / 2**20),
+            "cores": info.get("cores"),
+            "mem_mb": info.get("mem_mb"),
             "time": int(time.time()),
             "mode": "polling" if QUEUE_URL else "webhook",
-            "os":sys.platform
+            "os": info.get("platform", sys.platform)
         }
         try:
             requests.post(HEARTBEAT_URL, json=payload, timeout=3)

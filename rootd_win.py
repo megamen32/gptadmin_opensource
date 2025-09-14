@@ -1,4 +1,4 @@
-import os, subprocess, logging, asyncio, psutil, socket, time, shutil
+import os, subprocess, logging, asyncio, psutil, socket, time, shutil, platform
 
 log = logging.getLogger("rootd_win")
 
@@ -54,6 +54,16 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
         await proc.wait()
 
     return generator
+
+
+def info():
+    return {
+        "host": socket.gethostname(),
+        "platform": platform.platform(),
+        "cores": psutil.cpu_count(),
+        "mem_mb": round(psutil.virtual_memory().total / 2**20),
+        "uptime_s": round(time.time() - psutil.boot_time()),
+    }
 
 
 def health():

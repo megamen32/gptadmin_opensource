@@ -6,6 +6,7 @@ import psutil
 import socket
 import time
 import shutil
+import platform
 from pathlib import Path
 
 log = logging.getLogger("rootd_linux")
@@ -65,6 +66,16 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
         await proc.wait()
 
     return generator
+
+
+def info():
+    return {
+        "host": socket.gethostname(),
+        "platform": platform.platform(),
+        "cores": psutil.cpu_count(),
+        "mem_mb": round(psutil.virtual_memory().total / 2**20),
+        "uptime_s": round(time.time() - psutil.boot_time()),
+    }
 
 
 def health():
