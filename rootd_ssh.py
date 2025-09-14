@@ -129,6 +129,52 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
     return generator
 
 
+def info():
+    client = _connect()
+    try:
+        def _exec(cmd: str) -> str:
+            stdin, stdout, stderr = client.exec_command(cmd)
+            return stdout.read().decode().strip()
+
+        host = _exec("hostname") or SSH_HOST
+        platform = _exec("uname -a")
+
+        try:
+            cores = int(_exec("nproc"))
+        except Exception:
+            cores = None
+
+        try:
+            mem_kb = int(_exec("grep MemTotal /proc/meminfo | awk '{print $2}'"))
+            mem_mb = mem_kb // 1024
+        except Exception:
+            mem_mb = None
+
+        try:
+            uptime_s = int(float(_exec("cat /proc/uptime").split()[0]))
+        except Exception:
+            uptime_s = None
+
+        return {
+            "host": host,
+            "platform": platform,
+            "cores": cores,
+            "mem_mb": mem_mb,
+            "uptime_s": uptime_s,
+        }
+    except Exception as e:
+        log.warning(f"info via SSH failed: {e}")
+        return {
+            "host": SSH_HOST,
+            "platform": None,
+            "cores": None,
+            "mem_mb": None,
+            "uptime_s": None,
+        }
+    finally:
+        client.close()
+
+
 def health():
     client = _connect()
     try:
