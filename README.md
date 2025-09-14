@@ -3,6 +3,8 @@
 This repository contains two small services used to remotely control a machine.
 
 * **rootd.py** – runs as root and exposes low level operations.
+* **rootd_pure.py** – simplified variant of `rootd` that depends only on the
+  Python standard library and works on any Unix-like system including macOS.
 * **hub_proxy.py** – collects heartbeats from multiple `rootd` servers and
   proxies requests to them.
 
@@ -42,6 +44,19 @@ CTL_TOKEN=chatgpt_secret python hub_proxy.py
 
 `rootd` can register itself with the hub when `HUB_URL` is set. Each service
 accepts tokens through environment variables as shown above.
+
+To run the minimal version that requires no external dependencies use:
+
+```
+ROOTD_TOKEN=srv_secret python rootd_pure.py
+```
+
+Set `QUEUE_URL` to enable polling mode. In this mode the daemon polls the
+queue for tasks and does not start an HTTP server:
+
+```
+QUEUE_URL=http://hub:9001/queue ROOTD_TOKEN=srv_secret python rootd_pure.py
+```
 
 ### SSH backend
 
