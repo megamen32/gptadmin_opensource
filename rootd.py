@@ -69,7 +69,9 @@ def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
         raise HTTPException(401, "bad token")
 
 
-if sys.platform.startswith("win"):
+if os.getenv("SSH_HOST"):
+    import rootd_ssh as backend
+elif sys.platform.startswith("win"):
     import rootd_win as backend
 else:
     import rootd_linux as backend
