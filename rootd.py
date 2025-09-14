@@ -136,6 +136,14 @@ def sys_info():
 def health():
     return backend.health()
 
+def get_local_ip():
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))  # можно любой внешний IP
+    ip = s.getsockname()[0]
+    s.close()
+
+    return ip or socket.gethostname()+'.local'
 
 # ---------------- HEARTBEAT ---------------------------------------
 def heartbeat():
@@ -150,7 +158,7 @@ def heartbeat():
             info = {}
         payload = {
             "name": info.get("host", socket.gethostname()),
-            "base_url": ROOTD_URL or f"http://{socket.gethostname()}:25900",
+            "base_url": ROOTD_URL or f"http://{get_local_ip}:{port}",
             "rootd_token": TOKEN,
             "cores": info.get("cores"),
             "mem_mb": info.get("mem_mb"),
