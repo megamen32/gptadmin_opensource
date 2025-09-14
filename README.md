@@ -43,6 +43,13 @@ CTL_TOKEN=chatgpt_secret python hub_proxy.py
 `rootd` can register itself with the hub when `HUB_URL` is set. Each service
 accepts tokens through environment variables as shown above.
 
+### SSH backend
+
+If `rootd` should execute commands on a remote host instead of locally,
+set `SSH_HOST` (and optionally `SSH_PORT`, `SSH_USER`, `SSH_PASSWORD` or
+`SSH_KEY`) before starting the service. The server will connect over SSH and
+run all commands on that host.
+
 ## Build & Obfuscation
 
 The repository includes a helper script to create obfuscated, distributable
