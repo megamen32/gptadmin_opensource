@@ -128,8 +128,11 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
 
     return generator
 
-
+info_cache=None
 def info():
+    global info_cache
+    if info_cache:
+        return info_cache
     client = _connect()
     try:
         def _exec(cmd: str) -> str:
@@ -155,13 +158,14 @@ def info():
         except Exception:
             uptime_s = None
 
-        return {
+        info_cache= {
             "host": host,
             "platform": platform,
             "cores": cores,
             "mem_mb": mem_mb,
             "uptime_s": uptime_s,
         }
+        return info_cache
     except Exception as e:
         log.warning(f"info via SSH failed: {e}")
         return {
