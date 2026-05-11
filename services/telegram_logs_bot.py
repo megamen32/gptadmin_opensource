@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -129,6 +130,60 @@ bot_session = HttpProxySession(TELEGRAM_PROXY_URL) if TELEGRAM_PROXY_URL else Ai
 bot = Bot(token=TOKEN, session=bot_session)
 dp = Dispatcher()
 
+
+async def run_command(*args: str, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    """Run a command in a thread so bot polling is not blocked."""
+    return await asyncio.to_thread(
+        subprocess.run,
+        list(args),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def parse_fail2ban_jails(status_output: str) -> list[str]:
+    """Extract jail names from `fail2ban-client status` output."""
+    match = re.search(r"Jail list:\s*(.+)", status_output)
+    if not match:
+        return []
+    return [jail.strip() for jail in match.group(1).split(",") if jail.strip()]
+
+
+async def unban_ip_from_all_jails(ip: str) -> tuple[list[str], list[str]]:
+    """Unban an IP from every fail2ban jail. Return (unbanned, errors)."""
+    try:
+        normalized_ip = str(ipaddress.ip_address(ip))
+    except ValueError as exc:
+        raise ValueError(f"Некорректный IP: {ip}") from exc
+
+    status = await run_command("sudo", "-n", "fail2ban-client", "status")
+    if status.returncode != 0:
+        details = (status.stderr or status.stdout or "unknown error").strip()
+        raise RuntimeError(f"Не удалось получить список jail: {details}")
+
+    jails = parse_fail2ban_jails(status.stdout)
+    if not jails:
+        raise RuntimeError("Fail2Ban не вернул список jail")
+
+    unbanned: list[str] = []
+    errors: list[str] = []
+    for jail in jails:
+        result = await run_command(
+            "sudo", "-n", "fail2ban-client", "set", jail, "unbanip", normalized_ip
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        # fail2ban returns 1 when IP was actually unbanned, and 0 when it was not in that jail.
+        if result.returncode == 0:
+            continue
+        if result.returncode == 1 and output == "1":
+            unbanned.append(jail)
+            continue
+        errors.append(f"{jail}: {output or 'returncode=' + str(result.returncode)}")
+
+    return unbanned, errors
+
 # === UI ===
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -155,7 +210,12 @@ def main_menu() -> InlineKeyboardMarkup:
 async def cmd_start(message: types.Message):
     if message.chat.id != CHAT_ID:
         return
-    await message.answer("⚙️ Настройки логов", reply_markup=main_menu())
+    await message.answer(
+        "⚙️ Настройки логов\n\n"
+        "Команды:\n"
+        "• /unban <ip> — разбанить IP во всех jail Fail2Ban",
+        reply_markup=main_menu(),
+    )
 
 
 @dp.message(Command("cancel"))
@@ -167,6 +227,37 @@ async def cmd_cancel(message: types.Message):
         cfg["awaiting"] = None
         save_config(cfg)
         await message.answer("❎ Редактирование отменено", reply_markup=main_menu())
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    if message.chat.id != CHAT_ID:
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer("Использование: /unban <ip>\nПример: /unban 45.88.172.243")
+        return
+
+    ip = parts[1].strip()
+    await message.answer(f"🔎 Ищу {ip} во всех jail Fail2Ban и снимаю бан...")
+    try:
+        unbanned, errors = await unban_ip_from_all_jails(ip)
+    except Exception as exc:
+        await message.answer(f"❌ Не удалось выполнить unban: {exc}")
+        return
+
+    if unbanned:
+        text = "✅ Разбанен из jail:\n" + "\n".join(f"• {jail}" for jail in unbanned)
+    else:
+        text = "ℹ️ Этот IP не был найден в активных ban-list Fail2Ban."
+
+    if errors:
+        text += "\n\n⚠️ Ошибки:\n" + "\n".join(errors[:10])
+        if len(errors) > 10:
+            text += f"\n…ещё {len(errors) - 10}"
+
+    await message.answer(text)
 
 
 # Дублируем быстрые команды
