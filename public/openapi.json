@@ -1,0 +1,215 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GPTAdmin Hub & Rootd API",
+    "version": "2.0.0",
+    "description": "Полный список proxied rootd-endpoint’ов через hub-proxy"
+  },
+  "servers": [
+    {
+      "url": "https://gptadmin.bezrabotnyi.com"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/servers": {
+      "get": {
+        "operationId": "listServers",
+        "summary": "List registered servers",
+        "responses": {
+          "200": {
+            "description": "List of servers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServersResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/exec": {
+      "post": {
+        "operationId": "execOnServer",
+        "summary": "Execute a shell command on a server",
+        "parameters": [
+          {
+            "name": "server",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Server name"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExecReq" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command execution result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExecResult" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/srv/system/info": {
+      "get": {
+        "operationId": "getSysInfo",
+        "summary": "Get basic system info",
+        "parameters": [
+          { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "System information",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SysInfo" }
+              }
+            }
+          }
+        }
+      }
+    },
+"/srv/system/health": {
+  "get": {
+    "operationId": "getSystemHealth",
+    "summary": "Get extended system health status",
+    "parameters": [
+      { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
+    ],
+    "responses": {
+      "200": {
+        "description": "System health details",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "uptime_s": { "type": "integer" },
+                "load_avg": {
+                  "type": "array",
+                  "items": { "type": "number" }
+                },
+                "cpu_usage_pct": { "type": "number" },
+                "memory": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "available": { "type": "integer" },
+                    "used": { "type": "integer" },
+                    "free": { "type": "integer" }
+                  }
+                },
+                "swap": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "used": { "type": "integer" },
+                    "free": { "type": "integer" }
+                  }
+                },
+                "disk": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "number" },
+                    "used": { "type": "number" },
+                    "free": { "type": "number" }
+                  }
+                },
+                "failed_services": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "last_apt_update": { "type": "string" },
+                "cpu_temperature": { "type": "number" },
+                "ip_address": { "type": "string" }
+              },
+              "required": ["uptime_s", "load_avg", "cpu_usage_pct", "memory", "disk"]
+            }
+          }
+        }
+      }
+    }
+  }
+}
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    },
+    "schemas": {
+      "ExecReq": {
+        "type": "object",
+        "properties": {
+          "cmd": { "type": "string" },
+          "env": { "type": "string" },
+          "cwd": { "type": "string" },
+          "timeout": { "type": "integer", "format": "int32" }
+        },
+        "required": ["cmd"],
+        "additionalProperties": false
+      },
+      "ExecResult": {
+        "type": "object",
+        "properties": {
+          "returncode": { "type": "integer" },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "SysInfo": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string" },
+          "kernel": { "type": "string" },
+          "cores": { "type": "integer" },
+          "mem_mb": { "type": "integer" },
+          "uptime_s": { "type": "integer" }
+        },
+        "required": ["host", "kernel", "cores", "mem_mb", "uptime_s"],
+        "additionalProperties": false
+      },
+      "ServerInfo": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "base_url": { "type": "string" },
+          "rootd_token": { "type": "string" },
+          "time": { "type": "integer" },
+          "cores": { "type": "integer" },
+          "mem_mb": { "type": "integer" },
+          "alive": { "type": "boolean" },
+          "lag_s": { "type": "integer" }
+        },
+        "required": ["name", "base_url", "rootd_token", "time", "alive", "lag_s"],
+        "additionalProperties": false
+      },
+      "ServersResponse": {
+        "type": "object",
+        "properties": {
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerInfo" } }
+        },
+        "required": ["servers"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

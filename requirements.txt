@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+psutil
+requests
+httpx
+aiogram>=3.0
+cryptography
+paramiko
