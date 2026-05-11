@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import os
 import re
 import subprocess
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, cast
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
+from aiogram.methods import TelegramMethod
+from aiogram.types import InputFile
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 """
 V4 — что добавлено:
@@ -23,9 +29,7 @@ V4 — что добавлено:
 """
 
 # === Настройки ===
-TOKEN = "<TELEGRAM_TOKEN>"
-CHAT_ID = 540308572
-CONFIG_FILE = Path(__file__).parent / "logs_config.json"
+CONFIG_FILE = Path(__file__).resolve().parents[1] / "config" / "logs_config.json"
 
 # === Конфиг по умолчанию ===
 default_config = {
@@ -38,7 +42,32 @@ default_config = {
 }
 
 
-def load_config():
+def require_env(name: str) -> str:
+    """Return a required environment variable or raise a clear startup error."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def require_chat_id(name: str) -> int:
+    """Return a required Telegram chat id from the environment."""
+    raw_value = require_env(name)
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable {name} must be an integer, got: {raw_value!r}"
+        ) from exc
+
+
+TOKEN = require_env("TELEGRAM_BOT_TOKEN")
+CHAT_ID = require_chat_id("TELEGRAM_CHAT_ID")
+TELEGRAM_PROXY_URL = os.environ.get("TELEGRAM_PROXY_URL") or os.environ.get("TELEGRAM_PROXY")
+
+
+def load_config() -> dict:
+    """Load the bot config from disk, creating the default config if needed."""
     if CONFIG_FILE.exists():
         try:
             return json.loads(CONFIG_FILE.read_text())
@@ -48,19 +77,62 @@ def load_config():
     return default_config
 
 
-def save_config(cfg):
+def save_config(cfg: dict) -> None:
+    """Persist the bot config to disk."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
 
 
 config = load_config()
 
 # === Инициализация бота ===
-bot = Bot(token=TOKEN)
+class HttpProxySession(AiohttpSession):
+    """Aiogram session that routes Telegram API requests through an HTTP proxy."""
+
+    def __init__(self, proxy_url: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.proxy_url = proxy_url
+
+    async def make_request(
+        self,
+        bot: Bot,
+        method: TelegramMethod[object],
+        timeout: Optional[int] = None,
+    ) -> object:
+        session = await self.create_session()
+        url = self.api.api_url(token=bot.token, method=method.__api_method__)
+        form = self.build_form_data(bot=bot, method=cast(TelegramMethod[InputFile], method))
+
+        try:
+            async with session.post(
+                url,
+                data=form,
+                timeout=self.timeout if timeout is None else timeout,
+                proxy=self.proxy_url,
+            ) as resp:
+                raw_result = await resp.text()
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Telegram proxy request timeout") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Telegram proxy request failed: {exc}") from exc
+
+        response = self.check_response(
+            bot=bot,
+            method=cast(TelegramMethod[object], method),
+            status_code=resp.status,
+            content=raw_result,
+        )
+        return cast(object, response.result)
+
+
+bot_session = HttpProxySession(TELEGRAM_PROXY_URL) if TELEGRAM_PROXY_URL else AiohttpSession()
+bot = Bot(token=TOKEN, session=bot_session)
 dp = Dispatcher()
 
 # === UI ===
 
-def main_menu():
+def main_menu() -> InlineKeyboardMarkup:
+    """Build the main settings keyboard."""
     cfg = load_config()
     case_txt = "Aa: insens" if cfg.get("case_insensitive") else "Aa: sens"
     kb = InlineKeyboardMarkup(
@@ -112,7 +184,8 @@ async def cmd_ignore(message: types.Message):
     await enter_edit_mode(message, "ignore")
 
 
-async def enter_edit_mode(message: types.Message, field: str):
+async def enter_edit_mode(message: types.Message, field: str) -> None:
+    """Switch the chat into incremental or full-list edit mode."""
     cfg = load_config()
     cfg["awaiting"] = field
     save_config(cfg)

@@ -3,6 +3,10 @@
 
 set -Eeuo pipefail
 
+# Always run from repo root.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_DIR"
+
 # ---------- pretty xtrace ----------
 export PS4='+ [${EPOCHREALTIME}] ${BASH_SOURCE##*/}:${LINENO}: '
 set -x
@@ -70,10 +74,11 @@ need curl; need python; need pip; need tar; need grep; need sed; need awk; need 
 
 # ---------- include CLI ----------
 step "Include gptadmin.py"
-if [[ -f gptadmin.py ]]; then
-  cp gptadmin.py "$ART_DIR/cli/"
+CLI_SRC="cli/gptadmin.py"
+if [[ -f "$CLI_SRC" ]]; then
+  cp "$CLI_SRC" "$ART_DIR/cli/"
 else
-  echo "WARN: gptadmin.py not found; continuing without it"
+  echo "WARN: $CLI_SRC not found; continuing without it"
 fi
 
 # ---------- venv ----------
@@ -179,23 +184,23 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-ROOTD_IMPORTS=$(py_hidden_imports rootd.py)
-HUB_IMPORTS=$(py_hidden_imports hub_proxy.py)
+ROOTD_IMPORTS=$(py_hidden_imports services/rootd.py)
+HUB_IMPORTS=$(py_hidden_imports services/hub_proxy.py)
 ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
-[[ -f rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
+[[ -f services/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
+[[ -f services/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
 ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=pyarmor_runtime"
 echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-ROOTD_SRC=(rootd.py)
-[[ -f rootd_linux.py ]] && ROOTD_SRC+=(rootd_linux.py)
-[[ -f rootd_win.py   ]] && ROOTD_SRC+=(rootd_win.py)
+ROOTD_SRC=(services/rootd.py)
+[[ -f services/rootd_linux.py ]] && ROOTD_SRC+=(services/rootd_linux.py)
+[[ -f services/rootd_win.py   ]] && ROOTD_SRC+=(services/rootd_win.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
 
-HUB_SRC=(hub_proxy.py)
+HUB_SRC=(services/hub_proxy.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
 FP_ROOTD_NEW="$(fingerprint "${ROOTD_SRC[@]}")"
@@ -236,7 +241,7 @@ fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   step "PyArmor: obfuscate hub_proxy"
-  pyarmor gen -O "$ART_DIR/hub_proxy" hub_proxy.py
+  pyarmor gen -O "$ART_DIR/hub_proxy" services/hub_proxy.py
 else
   echo "Skip PyArmor hub_proxy: sources unchanged & dist exists"
 fi

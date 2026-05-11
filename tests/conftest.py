@@ -3,6 +3,7 @@ import time
 import os
 import pytest
 import sys
+from pathlib import Path
 python = sys.executable
 
 @pytest.fixture(scope="session", autouse=True)
@@ -14,10 +15,14 @@ def start_services():
     env_hub = os.environ.copy()
     env_hub["CTL_TOKEN"] = "chatgpt_secret"
 
-    hub = subprocess.Popen([python, "hub_proxy.py"], env=env_hub)
+    repo_dir = Path(__file__).resolve().parents[1]
+    hub_path = repo_dir / "services" / "hub_proxy.py"
+    rootd_path = repo_dir / "services" / "rootd.py"
+
+    hub = subprocess.Popen([python, str(hub_path)], env=env_hub)
     time.sleep(1)  # дать хабу стартовать
 
-    rootd = subprocess.Popen([python, "rootd.py"], env=env_rootd)
+    rootd = subprocess.Popen([python, str(rootd_path)], env=env_rootd)
     time.sleep(1)  # дать rootd подконнектиться
 
     yield  # тесты пойдут после этого

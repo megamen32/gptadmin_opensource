@@ -1,5 +1,5 @@
 /.venv
-/__pycache__
+__pycache__/
 *.log
 node_modules/
 requirements.txt.bak*
@@ -9,3 +9,7 @@ build/
 1.html
 router_cookies.json
 .buildcache/
+config/
+deploy/nginx/became.bezrabotnyi.com.conf
+deploy/systemd/
+*.bak*

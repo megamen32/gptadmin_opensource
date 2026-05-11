@@ -9,8 +9,8 @@ ENV:
   CTL_TOKEN        – Bearer-токен для ChatGPT-клиента            (def: CHANGE_ME)
   DEAD_S           – через сколько секунд считать сервер offline (def: 180)
   HUB_PORT         – порт uvicorn                                (def: 9001)
-  LICENSE_FILE     – путь к подписанному license.json             (def: license.json)
-  PUBLIC_KEY_FILE  – путь к public.pem для проверки подписи       (def: public.pem)
+  LICENSE_FILE     – путь к подписанному license.json             (def: config/license.json)
+  PUBLIC_KEY_FILE  – путь к public.pem для проверки подписи       (def: config/public.pem)
   LOG_LEVEL        – уровень логов (DEBUG/INFO/WARNING/ERROR)     (def: INFO)
 
 Зависимости: fastapi, uvicorn[standard], httpx, pydantic, cryptography
@@ -27,6 +27,7 @@ import datetime
 import logging
 import traceback
 import uuid
+from pathlib import Path
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any
 
@@ -98,8 +99,9 @@ def scrub_payload(obj: Any) -> Any:
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "chatgpt_secret")
 DEAD_S = int(os.getenv("DEAD_S", "180"))
-LICENSE_FILE = os.getenv("LICENSE_FILE", "license.json")
-PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE", "public.pem")
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+LICENSE_FILE = os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json")
+PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.pem")
 
 # ----------------------------- FASTAPI ---------------------------------------
 
@@ -121,14 +123,14 @@ try:
         _public_key = serialization.load_pem_public_key(f.read())
     with open(LICENSE_FILE) as f:
         _license = json.load(f)
-    _message = json.dumps(_license["data"]).encode()
+    _message = json.dumps(_license["data"], sort_keys=True, separators=(",",":")).encode()
     _signature = base64.b64decode(_license["signature"])
     _public_key.verify(_signature, _message, padding.PKCS1v15(), hashes.SHA256())
     _expiry = _license["data"].get("expiry")  # YYYY-MM-DD
     _max_servers = int(_license["data"].get("max_servers", 1))
-    log.info("license: OK (expiry=%s, max_servers=%s)", _expiry, _max_servers)
+    log.info("license: OK file=%s pub=%s (expiry=%s, max_servers=%s)", LICENSE_FILE, PUBLIC_KEY_FILE, _expiry, _max_servers)
 except Exception as e:
-    log.warning("license: load/verify failed (%s). Fallback: max_servers=1, no expiry.", e)
+    log.exception("license: load/verify failed file=%s pub=%s err=%s. Fallback: max_servers=1, no expiry.", LICENSE_FILE, PUBLIC_KEY_FILE, e)
     _expiry = None
     _max_servers = 1
 

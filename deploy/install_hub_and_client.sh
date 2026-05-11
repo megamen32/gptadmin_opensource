@@ -1,6 +1,10 @@
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOTD_UNIT="$SCRIPT_DIR/systemd/rootd.service"
+HUB_UNIT="$SCRIPT_DIR/systemd/hub_proxy.service"
+
 # Копируем юниты
-sudo cp rootd.service /etc/systemd/system/
-sudo cp hub_proxy.service /etc/systemd/system/
+sudo cp "$ROOTD_UNIT" /etc/systemd/system/
+sudo cp "$HUB_UNIT" /etc/systemd/system/
 
 # Перечитываем systemd и запускаем оба
 sudo systemctl daemon-reload

@@ -30,7 +30,8 @@ def collect(path: str):
 
 if __name__ == "__main__":
     import pathlib
-    path = sys.argv[1] if len(sys.argv) > 1 else "hub_proxy.py"
+    default_path = pathlib.Path(__file__).resolve().parents[1] / "services" / "hub_proxy.py"
+    path = sys.argv[1] if len(sys.argv) > 1 else str(default_path)
     mods = collect(path)
     third = [m for m in mods if not is_stdlib(m)]
     print("All imports:", *mods, sep="\n  ")

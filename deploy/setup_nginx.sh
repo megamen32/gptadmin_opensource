@@ -2,7 +2,8 @@
 #set -euo pipefail
 
 DOMAIN="gptadmin.bezrabotnyi.com"
-WEBROOT="/home/admin/gptadmin"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WEBROOT="$REPO_DIR/public"
 CONF_DIR="/etc/nginx/sites-available"
 ENABLED_DIR="/etc/nginx/sites-enabled"
 
