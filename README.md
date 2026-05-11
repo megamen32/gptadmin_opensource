@@ -133,6 +133,35 @@ examples/                    environment examples
 
 ## Quick start
 
+
+### One-command installer
+
+For a real machine, use the interactive installer:
+
+```bash
+curl -sSL https://became.bezrabotnyi.com/install.sh | sudo bash
+```
+
+The installer can set up:
+
+- hub + local rootd on the main machine;
+- rootd-only agents on additional machines;
+- tokens used by the hub and agents;
+- systemd services;
+- an optional public tunnel when you do not have a static IP or domain.
+
+After installation it prints the hub URL and control token that you can use in ChatGPT Actions.
+
+For local development from this repository, you can also run:
+
+```bash
+sudo python cli/gptadmin.py setup
+sudo gptadmin status
+sudo gptadmin logs hub
+sudo gptadmin tokens
+```
+
+
 ### 1. Install dependencies
 
 ```bash
@@ -178,33 +207,6 @@ After every change, verify the result and summarize what changed.
 More details: [`docs/CHATGPT_ACTION.md`](docs/CHATGPT_ACTION.md).
 
 ---
-
-## One-command installer
-
-For a real machine, use the interactive installer:
-
-```bash
-curl -sSL https://became.bezrabotnyi.com/install.sh | sudo bash
-```
-
-The installer can set up:
-
-- hub + local rootd on the main machine;
-- rootd-only agents on additional machines;
-- tokens used by the hub and agents;
-- systemd services;
-- an optional public tunnel when you do not have a static IP or domain.
-
-After installation it prints the hub URL and control token that you can use in ChatGPT Actions.
-
-For local development from this repository, you can also run:
-
-```bash
-sudo python cli/gptadmin.py setup
-sudo gptadmin status
-sudo gptadmin logs hub
-sudo gptadmin tokens
-```
 
 
 ## API examples
