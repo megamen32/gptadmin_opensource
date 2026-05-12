@@ -17,6 +17,12 @@ need_root
 have curl || err "curl required"
 have python3 || err "python3 required"
 
+# When installed via: curl -fsSL .../install.sh | sudo bash
+# preserve the original invoking user's UID for rootd's default non-root exec mode.
+if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-0}" != "0" ]; then
+  export ROOTD_DEFAULT_UID="${ROOTD_DEFAULT_UID:-$SUDO_UID}"
+fi
+
 mkdir -p "$INSTALL_DIR"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT

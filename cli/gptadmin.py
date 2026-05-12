@@ -299,6 +299,9 @@ def setup_interactive(args):
     # tokens (only (re)generate if absent)
     env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('ROOTD_TOKEN', gen_hex())
+    rootd_default_uid = os.environ.get('ROOTD_DEFAULT_UID')
+    if rootd_default_uid and rootd_default_uid.isdigit() and rootd_default_uid != '0':
+        env.setdefault('ROOTD_DEFAULT_UID', rootd_default_uid)
 
     # defaults
     env['HUB_BIND'] = '127.0.0.1'  # всегда локально

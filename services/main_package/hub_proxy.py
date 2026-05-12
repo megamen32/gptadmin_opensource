@@ -32,7 +32,7 @@ from contextvars import ContextVar
 from typing import List, Optional, Dict, Any
 
 import httpx
-from fastapi import FastAPI, Request, Body, HTTPException, Depends, Query
+from fastapi import FastAPI, Request, Body, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from starlette.responses import Response
@@ -112,6 +112,8 @@ auth_ctl = HTTPBearer(auto_error=False)
 servers: Dict[str, Dict[str, Any]] = {}
 queues: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Dict[str, Any]]] = {}
+ws_sessions: Dict[str, WebSocket] = {}
+ws_results: Dict[str, Dict[str, Any]] = {}
 
 # ----------------------------- ЛИЦЕНЗИЯ --------------------------------------
 
@@ -169,7 +171,7 @@ class Beat(BaseModel):
     cores: Optional[int] = None
     mem_mb: Optional[int] = None
     os: str = "linux"
-    mode: str = Field("webhook", pattern="^(webhook|polling)$")
+    mode: str = Field("webhook", pattern="^(webhook|polling|websocket)$")
 
 
 class BulkExec(BaseModel):
@@ -341,6 +343,8 @@ async def bulk_exec(req: BulkExec):
 
             if mode == "polling":
                 tasks[srv] = asyncio.create_task(wait_polling(srv, payload))
+            elif mode == "websocket":
+                tasks[srv] = asyncio.create_task(ws_exec(srv, payload, req.timeout))
             else:
                 url = f"{info['base_url'].rstrip('/')}/exec"
                 headers = {"Authorization": f"Bearer {info['rootd_token']}"}
@@ -364,6 +368,80 @@ async def bulk_exec(req: BulkExec):
 
     log.info("bulk_exec: finished total=%s rid=%s", len(out), rid())
     return {"results": out}
+
+
+# ------------------------- WEBSOCKET AGENT -------------------------
+
+async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
+    """Execute a task through an already connected rootd websocket session."""
+
+    ws = ws_sessions.get(srv)
+    if ws is None:
+        raise HTTPException(503, "websocket session is not connected")
+    tid = str(time.time_ns())
+    ws_results[tid] = {"event": asyncio.Event(), "result": None}
+    try:
+        await ws.send_json({"type": "exec", "id": tid, "payload": payload})
+        wait_s = timeout or payload.get("timeout") or 300
+        await asyncio.wait_for(ws_results[tid]["event"].wait(), timeout=wait_s)
+        return ws_results[tid]["result"] or {"error": "empty websocket result"}
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "websocket task timeout")
+    except RuntimeError as e:
+        ws_sessions.pop(srv, None)
+        raise HTTPException(503, f"websocket send failed: {e}")
+    finally:
+        ws_results.pop(tid, None)
+
+
+@app.websocket("/ws/rootd")
+async def rootd_ws(websocket: WebSocket):
+    await websocket.accept()
+    srv_name = None
+    try:
+        hello = await websocket.receive_json()
+        if hello.get("type") != "hello":
+            await websocket.close(code=1008, reason="expected hello")
+            return
+        beat = Beat(**hello.get("payload", {}))
+        current = len(servers) + (0 if beat.name in servers else 1)
+        _check_license(current)
+        srv_name = beat.name
+        servers[srv_name] = beat.dict()
+        servers[srv_name]["mode"] = "websocket"
+        servers[srv_name]["time"] = time.time()
+        ws_sessions[srv_name] = websocket
+        log.info("ws: connected srv=%s os=%s cores=%s mem_mb=%s", srv_name, beat.os, beat.cores, beat.mem_mb)
+        await websocket.send_json({"type": "hello_ack", "ok": True})
+
+        while True:
+            msg = await websocket.receive_json()
+            msg_type = msg.get("type")
+            if msg_type == "heartbeat":
+                if srv_name in servers:
+                    servers[srv_name]["time"] = time.time()
+                await websocket.send_json({"type": "heartbeat_ack", "time": int(time.time())})
+            elif msg_type == "result":
+                tid = msg.get("id")
+                slot = ws_results.get(tid)
+                if slot is not None:
+                    slot["result"] = msg.get("result")
+                    slot["event"].set()
+            else:
+                log.warning("ws: unknown message srv=%s msg=%s", srv_name, scrub_payload(msg))
+    except WebSocketDisconnect:
+        log.info("ws: disconnected srv=%s", srv_name)
+    except Exception as e:
+        log.error("ws: error srv=%s err=%s\n%s", srv_name, e, traceback.format_exc())
+        try:
+            await websocket.close(code=1011, reason="server error")
+        except Exception:
+            pass
+    finally:
+        if srv_name and ws_sessions.get(srv_name) is websocket:
+            ws_sessions.pop(srv_name, None)
+            if srv_name in servers and servers[srv_name].get("mode") == "websocket":
+                servers[srv_name]["time"] = 0
 
 
 # ------------------------- QUEUE / POLL ----------------------------
@@ -407,6 +485,13 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
     if not info:
         log.warning("proxy: unknown server srv=%s rid=%s", srv, rid())
         raise HTTPException(404, f"server '{srv}' not registered")
+
+    if info.get("mode") == "websocket":
+        if request.method != "POST" or path != "exec":
+            log.error("proxy: websocket supports only POST /exec srv=%s rid=%s", srv, rid())
+            raise HTTPException(501, "websocket mode supports only POST /exec")
+        data = ExecReq(**(await request.json()))
+        return await ws_exec(srv, data.dict(), data.timeout)
 
     if info.get("mode") == "polling":
         if request.method != "POST" or path != "exec":
