@@ -126,6 +126,7 @@ queues: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 ws_sessions: Dict[str, WebSocket] = {}
 ws_results: Dict[str, Dict[str, Any]] = {}
+background_tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 # ----------------------------- ЛИЦЕНЗИЯ --------------------------------------
 
@@ -206,6 +207,13 @@ class ExecReq(BaseModel):
 class TaskResult(BaseModel):
     id: str
     result: dict
+
+
+def _task_slot(srv: str, tid: str):
+    return background_tasks.setdefault(srv, {}).setdefault(tid, {
+        "status": "running",
+        "created_at": int(time.time()),
+    })
 
 
 # -------------------------- MIDDLEWARE ЛОГИ ----------------------------------
@@ -322,18 +330,29 @@ async def bulk_exec(req: BulkExec):
 
     async def wait_polling(srv: str, payload: dict):
         tid = str(time.time_ns())
+        _task_slot(srv, tid)
         queues.setdefault(srv, []).append({"id": tid, **payload})
         log.debug("bulk_exec: queued polling tid=%s srv=%s payload=%s rid=%s",
                   tid, srv, scrub_payload(payload), rid())
         deadline = time.time() + (payload.get("timeout") or 300)
         while time.time() < deadline:
-            res = results.get(srv, {}).pop(tid, None)
+            res = results.get(srv, {}).get(tid)
             if res is not None:
+                background_tasks.setdefault(srv, {})[tid] = {
+                    "status": "completed",
+                    "result": res,
+                    "completed_at": int(time.time()),
+                }
                 log.info("bulk_exec: polling result srv=%s tid=%s ok rid=%s", srv, tid, rid())
                 return res
             await asyncio.sleep(0.5)
         log.warning("bulk_exec: polling timeout srv=%s tid=%s rid=%s", srv, tid, rid())
-        return {"error": "task timeout"}
+        return {
+            "background": True,
+            "task_id": tid,
+            "status": "running",
+            "status_endpoint": f"/tasks/{srv}/{tid}",
+        }
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         tasks: Dict[str, asyncio.Task] = {}
@@ -395,14 +414,26 @@ async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
     if ws is None:
         raise HTTPException(503, "websocket session is not connected")
     tid = str(time.time_ns())
+    _task_slot(srv, tid)
     ws_results[tid] = {"event": asyncio.Event(), "result": None}
     try:
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
         wait_s = timeout or payload.get("timeout") or 300
         await asyncio.wait_for(ws_results[tid]["event"].wait(), timeout=wait_s)
-        return ws_results[tid]["result"] or {"error": "empty websocket result"}
+        result = ws_results[tid]["result"] or {"error": "empty websocket result"}
+        background_tasks.setdefault(srv, {})[tid] = {
+            "status": "completed",
+            "result": result,
+            "completed_at": int(time.time()),
+        }
+        return result
     except asyncio.TimeoutError:
-        raise HTTPException(504, "websocket task timeout")
+        return {
+            "background": True,
+            "task_id": tid,
+            "status": "running",
+            "status_endpoint": f"/tasks/{srv}/{tid}",
+        }
     except RuntimeError as e:
         ws_sessions.pop(srv, None)
         raise HTTPException(503, f"websocket send failed: {e}")
@@ -922,3 +953,25 @@ if __name__ == "__main__":
         port=port,
         log_level=LOG_LEVEL.lower(),
     )
+
+
+@app.get("/tasks/{srv}/{tid}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def get_task_status(srv: str, tid: str):
+    task = background_tasks.get(srv, {}).get(tid)
+    if not task:
+        raise HTTPException(404, "task not found")
+
+    result = results.get(srv, {}).get(tid)
+    if result is not None and task.get("status") != "completed":
+        task = {
+            "status": "completed",
+            "result": result,
+            "completed_at": int(time.time()),
+        }
+        background_tasks.setdefault(srv, {})[tid] = task
+
+    return {
+        "server": srv,
+        "task_id": tid,
+        **task,
+    }
