@@ -23,6 +23,11 @@ if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-0}" != "0" ]; then
   export ROOTD_DEFAULT_UID="${ROOTD_DEFAULT_UID:-$SUDO_UID}"
 fi
 
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  export ROOTD_DEFAULT_USER="${ROOTD_DEFAULT_USER:-$SUDO_USER}"
+  export ROOTD_DEFAULT_HOME="${ROOTD_DEFAULT_HOME:-$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
+fi
+
 mkdir -p "$INSTALL_DIR"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT

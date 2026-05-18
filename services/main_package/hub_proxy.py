@@ -27,6 +27,10 @@ import datetime
 import logging
 import traceback
 import uuid
+import hmac
+import hashlib
+import secrets
+import html
 from pathlib import Path
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any
@@ -37,7 +41,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -102,6 +106,14 @@ DEAD_S = int(os.getenv("DEAD_S", "180"))
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 LICENSE_FILE = os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json")
 PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.pem")
+
+# MCP / ChatGPT Apps OAuth config
+PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
+MCP_RESOURCE = os.getenv("MCP_RESOURCE", PUBLIC_ORIGIN)
+OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", secrets.token_hex(32))
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
+OAUTH_SCOPES = ["gptadmin.read", "gptadmin.exec"]
+_oauth_codes: Dict[str, Dict[str, Any]] = {}
 
 # ----------------------------- FASTAPI ---------------------------------------
 
@@ -170,6 +182,9 @@ class Beat(BaseModel):
     time: int  # unixtime
     cores: Optional[int] = None
     mem_mb: Optional[int] = None
+    default_user: Optional[str] = None
+    default_uid: Optional[int] = None
+    default_home: Optional[str] = None
     os: str = "linux"
     mode: str = Field("webhook", pattern="^(webhook|polling|websocket)$")
 
@@ -270,7 +285,7 @@ def heartbeat(b: Beat = Body(...)):
         # сравним ключевые поля (без токена)
         changed = {
             k: (prev.get(k), servers[b.name].get(k))
-            for k in ("base_url", "mode", "os", "cores", "mem_mb")
+            for k in ("base_url", "mode", "os", "cores", "mem_mb", "default_user", "default_uid", "default_home")
             if prev.get(k) != servers[b.name].get(k)
         }
         log.info(
@@ -359,7 +374,8 @@ async def bulk_exec(req: BulkExec):
                 if modes[srv] == "polling":
                     out[srv] = r
                 else:
-                    out[srv] = r.json()
+                    # websocket backend already returns dict/json payload
+                    out[srv] = r if isinstance(r, dict) else r.json()
                 log.info("bulk_exec: done srv=%s status=ok rid=%s", srv, rid())
             except Exception as e:
                 out[srv] = {"error": str(e)}
@@ -571,6 +587,301 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
         headers=filtered_headers,
         media_type=r.headers.get("content-type"),
     )
+
+
+# ----------------------------- MCP / OAUTH -----------------------------------
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _b64url_json(obj: Any) -> str:
+    return _b64url(json.dumps(obj, separators=(",", ":")).encode())
+
+
+def _sign_jwt(payload: Dict[str, Any]) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    now = int(time.time())
+    body = {
+        **payload,
+        "iss": PUBLIC_ORIGIN,
+        "aud": MCP_RESOURCE,
+        "iat": now,
+        "exp": now + 12 * 3600,
+    }
+    signing_input = f"{_b64url_json(header)}.{_b64url_json(body)}".encode()
+    sig = hmac.new(OAUTH_CLIENT_SECRET.encode(), signing_input, hashlib.sha256).digest()
+    return signing_input.decode() + "." + _b64url(sig)
+
+
+def _verify_jwt(token: str) -> Dict[str, Any]:
+    try:
+        h, p, sig = token.split(".")
+        signing_input = f"{h}.{p}".encode()
+        expected = _b64url(hmac.new(OAUTH_CLIENT_SECRET.encode(), signing_input, hashlib.sha256).digest())
+        if not hmac.compare_digest(expected, sig):
+            raise ValueError("bad signature")
+        padded = p + "=" * (-len(p) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        if payload.get("iss") != PUBLIC_ORIGIN or payload.get("aud") != MCP_RESOURCE:
+            raise ValueError("bad iss/aud")
+        if int(payload.get("exp", 0)) < int(time.time()):
+            raise ValueError("expired")
+        return payload
+    except Exception as e:
+        raise HTTPException(401, "unauthorized") from e
+
+
+def _pkce_ok(verifier: str, challenge: str) -> bool:
+    if not verifier or not challenge:
+        return False
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return hmac.compare_digest(_b64url(digest), challenge)
+
+
+def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
+    if not uri:
+        return False
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(uri)
+        return u.scheme == "https" and (u.hostname == "chatgpt.com" or (u.hostname or "").endswith(".chatgpt.com")) and u.path.startswith("/connector/oauth/")
+    except Exception:
+        return False
+
+
+def _mcp_auth(request: Request) -> Dict[str, Any]:
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "unauthorized")
+    return _verify_jwt(auth.split(None, 1)[1])
+
+
+def _mcp_unauthorized() -> Response:
+    return Response(
+        content=json.dumps({"error": "unauthorized"}),
+        status_code=401,
+        media_type="application/json",
+        headers={
+            "WWW-Authenticate": f'Bearer resource_metadata="{PUBLIC_ORIGIN}/.well-known/oauth-protected-resource", scope="{" ".join(OAUTH_SCOPES)}"'
+        },
+    )
+
+
+@app.get("/.well-known/oauth-protected-resource")
+def oauth_protected_resource():
+    return {
+        "resource": MCP_RESOURCE,
+        "authorization_servers": [PUBLIC_ORIGIN],
+        "scopes_supported": OAUTH_SCOPES,
+        "resource_documentation": f"{PUBLIC_ORIGIN}/",
+    }
+
+
+@app.get("/.well-known/oauth-authorization-server")
+def oauth_authorization_server():
+    return {
+        "issuer": PUBLIC_ORIGIN,
+        "authorization_endpoint": f"{PUBLIC_ORIGIN}/authorize",
+        "token_endpoint": f"{PUBLIC_ORIGIN}/token",
+        "registration_endpoint": f"{PUBLIC_ORIGIN}/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "client_id_metadata_document_supported": True,
+        "scopes_supported": OAUTH_SCOPES,
+    }
+
+
+@app.post("/register")
+async def oauth_register():
+    return {
+        "client_id": "chatgpt-dynamic",
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+
+
+@app.get("/authorize")
+def oauth_authorize_get(request: Request):
+    q = request.query_params
+    redirect_uri = q.get("redirect_uri")
+    resource = q.get("resource") or MCP_RESOURCE
+    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+        raise HTTPException(400, "invalid redirect_uri or resource")
+    fields = {
+        "redirect_uri": redirect_uri,
+        "state": q.get("state", ""),
+        "code_challenge": q.get("code_challenge", ""),
+        "client_id": q.get("client_id", ""),
+        "resource": resource,
+        "scope": q.get("scope", " ".join(OAUTH_SCOPES)),
+    }
+    hidden = "".join(f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v or "")}">' for k, v in fields.items())
+    page = f"""<!doctype html><html><body>
+<h2>GPTAdmin MCP Authorization</h2>
+<p>Scopes: {html.escape(fields['scope'])}</p>
+<form method="POST" action="/authorize">
+{hidden}
+<input type="password" name="password" placeholder="Admin password" autofocus>
+<button type="submit">Authorize</button>
+</form>
+</body></html>"""
+    return Response(page, media_type="text/html")
+
+
+@app.post("/authorize")
+async def oauth_authorize_post(request: Request):
+    body = (await request.body()).decode()
+    params = {k: v[0] for k, v in parse_qs(body).items()}
+    if params.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(403, "invalid password")
+    redirect_uri = params.get("redirect_uri")
+    resource = params.get("resource") or MCP_RESOURCE
+    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+        raise HTTPException(400, "invalid redirect_uri or resource")
+    code = secrets.token_urlsafe(32)
+    _oauth_codes[code] = {
+        "created": time.time(),
+        "challenge": params.get("code_challenge", ""),
+        "client_id": params.get("client_id", ""),
+        "resource": resource,
+        "scope": params.get("scope", " ".join(OAUTH_SCOPES)),
+    }
+    location = redirect_uri + ("&" if "?" in redirect_uri else "?") + urlencode({"code": code, "state": params.get("state", "")})
+    return Response(status_code=302, headers={"Location": location})
+
+
+@app.post("/token")
+async def oauth_token(request: Request):
+    body = (await request.body()).decode()
+    params = {k: v[0] for k, v in parse_qs(body).items()}
+    data = _oauth_codes.pop(params.get("code", ""), None)
+    resource = params.get("resource") or (data or {}).get("resource") or MCP_RESOURCE
+    if not data or time.time() - data.get("created", 0) > 300 or resource != MCP_RESOURCE or resource != data.get("resource"):
+        raise HTTPException(400, "invalid_grant")
+    if not _pkce_ok(params.get("code_verifier", ""), data.get("challenge", "")):
+        raise HTTPException(400, "invalid_grant")
+    token = _sign_jwt({"sub": "admin", "scope": data.get("scope"), "client_id": data.get("client_id")})
+    return {"access_token": token, "token_type": "Bearer", "expires_in": 43200}
+
+
+def _mcp_tools() -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "list_servers",
+            "title": "List servers",
+            "description": "List servers registered in GPTAdmin hub_proxy.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "openai/outputTemplate": "https://widgets-gptadmin.bezrabotnyi.com/admin.html",
+                "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            },
+        },
+        {
+            "name": "exec_command",
+            "title": "Execute command",
+            "description": "Execute a shell command on a server through hub_proxy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "cmd": {"type": "string"},
+                    "timeout": {"type": "number", "default": 300},
+                    "cwd": {"type": ["string", "null"], "default": None},
+                },
+                "required": ["server", "cmd"],
+                "additionalProperties": False,
+            },
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.exec"]}],
+            "_meta": {
+                "openai/outputTemplate": "https://widgets-gptadmin.bezrabotnyi.com/admin.html",
+                "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.exec"]}],
+            },
+        },
+    ]
+
+
+async def _mcp_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if name == "list_servers":
+        data = list_servers()
+        return {
+            "content": [{"type": "text", "text": f"Found {len(data.get('servers', []))} servers"}],
+            "structuredContent": data,
+        }
+    if name == "exec_command":
+        req = BulkExec(
+            servers=[args.get("server")],
+            cmd=args.get("cmd"),
+            timeout=args.get("timeout", 300),
+            cwd=args.get("cwd"),
+        )
+        data = await bulk_exec(req)
+        return {
+            "content": [{"type": "text", "text": f"Executed on {args.get('server')}"}],
+            "structuredContent": data,
+        }
+    raise HTTPException(404, f"unknown tool {name}")
+
+
+@app.options("/mcp")
+def mcp_options():
+    return Response(status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE",
+        "Access-Control-Allow-Headers": "content-type, authorization, mcp-session-id",
+        "Access-Control-Expose-Headers": "Mcp-Session-Id",
+    })
+
+
+@app.get("/mcp")
+def mcp_get(request: Request):
+    try:
+        _mcp_auth(request)
+    except HTTPException:
+        return _mcp_unauthorized()
+    return Response(status_code=405, content=json.dumps({"error": "POST JSON-RPC to this endpoint"}), media_type="application/json")
+
+
+@app.post("/mcp")
+async def mcp_post(request: Request):
+    try:
+        _mcp_auth(request)
+    except HTTPException:
+        return _mcp_unauthorized()
+
+    msg = await request.json()
+    method = msg.get("method")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+
+    try:
+        if method == "initialize":
+            result = {
+                "protocolVersion": params.get("protocolVersion", "2025-06-18"),
+                "capabilities": {"tools": {}, "resources": {}},
+                "serverInfo": {"name": "gptadmin-hub", "version": "1.0.0"},
+            }
+        elif method == "tools/list":
+            result = {"tools": _mcp_tools()}
+        elif method == "tools/call":
+            result = await _mcp_call_tool(params.get("name"), params.get("arguments") or {})
+        elif method == "resources/list":
+            result = {"resources": [{"uri": "https://widgets-gptadmin.bezrabotnyi.com/admin.html", "name": "GPTAdmin widget", "mimeType": "text/html"}]}
+        elif method == "resources/read":
+            widget_path = Path(__file__).resolve().parents[2] / "apps" / "chatgpt-admin-app" / "public" / "admin-widget.html"
+            result = {"contents": [{"uri": params.get("uri"), "mimeType": "text/html", "text": widget_path.read_text() if widget_path.exists() else ""}]}
+        elif method and method.startswith("notifications/"):
+            return Response(status_code=202)
+        else:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+        return {"jsonrpc": "2.0", "id": mid, "result": result}
+    except Exception as e:
+        log.error("mcp error method=%s err=%s rid=%s\n%s", method, e, rid(), traceback.format_exc())
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": str(e)}}
 
 
 # ----------------------------- ОБРАБОТЧИКИ ОШИБОК ---------------------------
