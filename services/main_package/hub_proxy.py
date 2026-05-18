@@ -213,6 +213,7 @@ def _task_slot(srv: str, tid: str):
     return background_tasks.setdefault(srv, {}).setdefault(tid, {
         "status": "running",
         "created_at": int(time.time()),
+        "task_id": tid,
     })
 
 
@@ -329,8 +330,8 @@ async def bulk_exec(req: BulkExec):
     modes: Dict[str, str] = {}
 
     async def wait_polling(srv: str, payload: dict):
-        tid = str(time.time_ns())
-        _task_slot(srv, tid)
+        tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        _task_slot(srv, tid).update({"cmd": payload.get("cmd"), "cwd": payload.get("cwd")}) or _task_slot(srv, tid)
         queues.setdefault(srv, []).append({"id": tid, **payload})
         log.debug("bulk_exec: queued polling tid=%s srv=%s payload=%s rid=%s",
                   tid, srv, scrub_payload(payload), rid())
@@ -350,8 +351,10 @@ async def bulk_exec(req: BulkExec):
         return {
             "background": True,
             "task_id": tid,
+            "gptadmin_task_id": tid,
             "status": "running",
             "status_endpoint": f"/tasks/{srv}/{tid}",
+            "message": f"Command continues in background. Use GET /tasks/{srv}/{tid} to get status or GET /tasks/{srv} to list all tasks.",
         }
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
@@ -413,8 +416,8 @@ async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
     ws = ws_sessions.get(srv)
     if ws is None:
         raise HTTPException(503, "websocket session is not connected")
-    tid = str(time.time_ns())
-    _task_slot(srv, tid)
+    tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    _task_slot(srv, tid).update({"cmd": payload.get("cmd"), "cwd": payload.get("cwd")}) or _task_slot(srv, tid)
     ws_results[tid] = {"event": asyncio.Event(), "result": None}
     try:
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
@@ -431,8 +434,10 @@ async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
         return {
             "background": True,
             "task_id": tid,
+            "gptadmin_task_id": tid,
             "status": "running",
             "status_endpoint": f"/tasks/{srv}/{tid}",
+            "message": f"Command continues in background. Use GET /tasks/{srv}/{tid} to get status or GET /tasks/{srv} to list all tasks.",
         }
     except RuntimeError as e:
         ws_sessions.pop(srv, None)
@@ -545,7 +550,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
             log.error("proxy: polling supports only POST /exec srv=%s rid=%s", srv, rid())
             raise HTTPException(501, "polling mode supports only POST /exec")
         data = ExecReq(**(await request.json()))
-        tid = str(time.time_ns())
+        tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         payload = data.dict()
         queues.setdefault(srv, []).append({"id": tid, **payload})
         log.info("proxy: queued polling srv=%s tid=%s payload=%s rid=%s",
@@ -965,6 +970,7 @@ def get_task_status(srv: str, tid: str):
     if result is not None and task.get("status") != "completed":
         task = {
             "status": "completed",
+            "task_id": tid,
             "result": result,
             "completed_at": int(time.time()),
         }
@@ -974,4 +980,12 @@ def get_task_status(srv: str, tid: str):
         "server": srv,
         "task_id": tid,
         **task,
+    }
+
+
+@app.get("/tasks/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def list_tasks(srv: str):
+    return {
+        "server": srv,
+        "tasks": list(background_tasks.get(srv, {}).values())
     }
