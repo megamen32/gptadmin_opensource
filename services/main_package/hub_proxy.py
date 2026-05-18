@@ -353,8 +353,7 @@ async def bulk_exec(req: BulkExec):
             "task_id": tid,
             "gptadmin_task_id": tid,
             "status": "running",
-            "status_endpoint": f"/tasks/{srv}/{tid}",
-            "message": f"Command continues in background. Use GET /tasks/{srv}/{tid} to get status or GET /tasks/{srv} to list all tasks.",
+            "message": f"Command continues in background. To inspect tasks run: gptadmin_tasks list . To inspect this task run: gptadmin_tasks status {tid}",
         }
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
@@ -372,6 +371,11 @@ async def bulk_exec(req: BulkExec):
 
             mode = info.get("mode", "webhook")
             modes[srv] = mode
+            special = _handle_gptadmin_task_command(srv, req.cmd)
+            if special is not None:
+                out[srv] = special
+                continue
+
             payload = {"cmd": req.cmd}
             if req.timeout is not None:
                 payload["timeout"] = req.timeout
@@ -408,6 +412,34 @@ async def bulk_exec(req: BulkExec):
     return {"results": out}
 
 
+
+
+def _handle_gptadmin_task_command(srv: str, cmd: str):
+    parts = cmd.strip().split()
+    if not parts or parts[0] != "gptadmin_tasks":
+        return None
+
+    if len(parts) >= 2 and parts[1] == "list":
+        return {
+            "ok": True,
+            "tasks": list(background_tasks.get(srv, {}).values())
+        }
+
+    if len(parts) >= 3 and parts[1] == "status":
+        tid = parts[2]
+        task = background_tasks.get(srv, {}).get(tid)
+        if not task:
+            return {"error": f"task not found: {tid}"}
+        return {
+            "ok": True,
+            "task": task,
+        }
+
+    return {
+        "error": "usage: gptadmin_tasks list | gptadmin_tasks status <task_id>"
+    }
+
+
 # ------------------------- WEBSOCKET AGENT -------------------------
 
 async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
@@ -436,8 +468,7 @@ async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
             "task_id": tid,
             "gptadmin_task_id": tid,
             "status": "running",
-            "status_endpoint": f"/tasks/{srv}/{tid}",
-            "message": f"Command continues in background. Use GET /tasks/{srv}/{tid} to get status or GET /tasks/{srv} to list all tasks.",
+            "message": f"Command continues in background. To inspect tasks run: gptadmin_tasks list . To inspect this task run: gptadmin_tasks status {tid}",
         }
     except RuntimeError as e:
         ws_sessions.pop(srv, None)
