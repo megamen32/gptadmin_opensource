@@ -45,6 +45,16 @@ from starlette.responses import Response, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from urllib.parse import urlencode, parse_qs
 
+from gptadmin_security import (
+    NonceCache,
+    load_or_create_ed25519_private_key,
+    load_public_key_b64,
+    public_key_to_b64,
+    fingerprint_public_key_b64,
+    sign_request,
+    verify_signature,
+)
+
 try:
     from gptadmin_build_info import BUILD_VERSION, BUILD_TS, GIT_COMMIT, build_info
 except Exception:
@@ -131,6 +141,9 @@ def _default_artifact_dir() -> Path:
 ARTIFACT_DIR = Path(os.getenv("GPTADMIN_ARTIFACT_DIR", str(_default_artifact_dir())))
 APPROVED_SERVERS_FILE = Path(os.getenv("GPTADMIN_APPROVED_SERVERS_FILE", str(CONFIG_DIR / "approved_servers.json")))
 PENDING_SERVERS_FILE = Path(os.getenv("GPTADMIN_PENDING_SERVERS_FILE", str(CONFIG_DIR / "pending_servers.json")))
+HUB_PRIVATE_KEY_FILE = Path(os.getenv("GPTADMIN_HUB_PRIVATE_KEY_FILE", str(CONFIG_DIR / "hub_ed25519")))
+HUB_PUBLIC_KEY_FILE_ED25519 = Path(os.getenv("GPTADMIN_HUB_PUBLIC_KEY_FILE", str(CONFIG_DIR / "hub_ed25519.pub")))
+HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 # MCP / ChatGPT Apps OAuth config
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
@@ -144,6 +157,14 @@ _oauth_codes: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="root-hub", version=str(BUILD_VERSION))
 auth_ctl = HTTPBearer(auto_error=False)
+
+HUB_PRIVATE_KEY = load_or_create_ed25519_private_key(HUB_PRIVATE_KEY_FILE)
+HUB_PUBLIC_KEY_B64 = public_key_to_b64(HUB_PRIVATE_KEY.public_key())
+HUB_FINGERPRINT = fingerprint_public_key_b64(HUB_PUBLIC_KEY_B64)
+HUB_PUBLIC_KEY_FILE_ED25519.parent.mkdir(parents=True, exist_ok=True)
+HUB_PUBLIC_KEY_FILE_ED25519.write_text(HUB_PUBLIC_KEY_B64 + "\n")
+os.chmod(HUB_PUBLIC_KEY_FILE_ED25519, 0o644)
+SIGNATURE_NONCES = NonceCache(ttl_s=int(os.getenv("GPTADMIN_NONCE_TTL_S", "300")))
 
 # ------ память: name → dict(base_url, rootd_token, last_seen, meta…) ----------
 servers: Dict[str, Dict[str, Any]] = {}
@@ -179,18 +200,19 @@ def _save_json_dict(path: Path, data: Dict[str, Any]) -> None:
 
 
 def _server_fingerprint(d: Dict[str, Any]) -> str:
+    if d.get("public_key"):
+        return fingerprint_public_key_b64(str(d["public_key"]))
     raw = json.dumps({
         "name": d.get("name"),
+        "server_id": d.get("server_id"),
         "base_url": d.get("base_url"),
-        # rootd_token is intentionally excluded: existing approved identity
-        # is bound to stable topology fields until per-server public keys land.
         "backend": d.get("backend"),
         "proxy_via": d.get("proxy_via"),
         "ssh_host": d.get("ssh_host"),
         "ssh_port": d.get("ssh_port"),
         "ssh_user": d.get("ssh_user"),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    return "SHA256:" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode("ascii").rstrip("=")
 
 
 def _sanitize_server(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -228,6 +250,8 @@ def _approve_payload(name: str, payload: Dict[str, Any], approved_by: str = "api
         "approved_at": now,
         "approved_by": approved_by,
         "base_url": payload.get("base_url"),
+        "server_id": payload.get("server_id"),
+        "public_key": payload.get("public_key"),
         "fingerprint": _server_fingerprint(payload),
         "backend": payload.get("backend"),
         "proxy_for": payload.get("proxy_for"),
@@ -298,8 +322,11 @@ async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)
 
 class Beat(BaseModel):
     name: str  # человеко-читаемое
+    server_id: str
+    public_key: str
+    fingerprint: Optional[str] = None
     base_url: str  # http://ip:port  (или https://…)
-    rootd_token: str
+    rootd_token: Optional[str] = None
     time: int  # unixtime
     cores: Optional[int] = None
     mem_mb: Optional[int] = None
@@ -411,10 +438,44 @@ app.add_middleware(AccessLogMiddleware)
 # ------------------------------ ЭНДПОИНТЫ ------------------------------------
 
 
+def _signed_rootd_headers(method: str, path: str, body: bytes, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    signed = sign_request(HUB_PRIVATE_KEY, method, path, body)
+    headers = {
+        "X-GPTAdmin-Hub-ID": HUB_ID,
+        "X-GPTAdmin-Timestamp": signed["timestamp"],
+        "X-GPTAdmin-Nonce": signed["nonce"],
+        "X-GPTAdmin-Signature": signed["signature"],
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _verify_heartbeat_signature(request: Request, b: "Beat", body: bytes) -> None:
+    ts = request.headers.get("X-GPTAdmin-Timestamp")
+    nonce = request.headers.get("X-GPTAdmin-Nonce")
+    sig = request.headers.get("X-GPTAdmin-Signature")
+    server_header = request.headers.get("X-GPTAdmin-Server")
+    server_id_header = request.headers.get("X-GPTAdmin-Server-ID")
+    if server_header != b.name or server_id_header != b.server_id:
+        raise HTTPException(401, "signed heartbeat identity headers mismatch")
+    if not ts or not nonce or not sig:
+        raise HTTPException(401, "missing signed heartbeat headers")
+    pub = b.public_key
+    approved = approved_servers.get(b.name) or {}
+    if approved.get("public_key"):
+        pub = approved["public_key"]
+    try:
+        SIGNATURE_NONCES.check_and_store(f"rootd:{b.name}:{b.server_id}", nonce)
+        verify_signature(pub, request.method, request.url.path, ts, nonce, body, sig)
+    except Exception as e:
+        raise HTTPException(401, f"invalid signed heartbeat: {e}")
+
+
 @app.get("/version")
 def version():
     data = build_info("hub_proxy")
-    data.update({"artifact_dir": str(ARTIFACT_DIR)})
+    data.update({"artifact_dir": str(ARTIFACT_DIR), "hub_id": HUB_ID, "hub_fingerprint": HUB_FINGERPRINT, "hub_public_key": HUB_PUBLIC_KEY_B64})
     return data
 
 
@@ -455,7 +516,11 @@ def rootd_artifact_download():
 
 
 @app.post("/heartbeat")
-def heartbeat(b: Beat = Body(...)):
+async def heartbeat(request: Request, b: Beat = Body(...)):
+    body = await request.body()
+    _verify_heartbeat_signature(request, b, body)
+    if b.fingerprint and b.fingerprint != _server_fingerprint(b.dict()):
+        raise HTTPException(401, "heartbeat fingerprint does not match public key")
     # Existing approved servers may refresh themselves. Unknown names become pending
     # unless explicitly approved, which prevents enrollment-token/name takeover.
     prev = servers.get(b.name)
@@ -472,7 +537,8 @@ def heartbeat(b: Beat = Body(...)):
         approved = approved_servers.get(b.name, {})
         expected_fp = approved.get("fingerprint")
         current_fp = _server_fingerprint(b.dict())
-        if expected_fp and current_fp != expected_fp and prev is None:
+        identity_changed = (approved.get("public_key") and approved.get("public_key") != b.public_key) or (approved.get("server_id") and approved.get("server_id") != b.server_id) or (expected_fp and current_fp != expected_fp)
+        if identity_changed:
             rec = _pending_record(b, reason="fingerprint_changed", existing=approved)
             _remember_pending(rec)
             log.warning("heartbeat: PENDING changed identity name=%s base_url=%s rid=%s", b.name, b.base_url, rid())
@@ -490,7 +556,7 @@ def heartbeat(b: Beat = Body(...)):
     else:
         changed = {
             k: (prev.get(k), servers[b.name].get(k))
-            for k in ("base_url", "mode", "os", "cores", "mem_mb", "default_user", "default_uid", "default_home", "version", "build_version", "build_ts", "git_commit", "backend", "proxy_for", "proxy_via", "ssh_host", "ssh_port", "ssh_user")
+            for k in ("base_url", "mode", "os", "cores", "mem_mb", "default_user", "default_uid", "default_home", "server_id", "public_key", "fingerprint", "version", "build_version", "build_ts", "git_commit", "backend", "proxy_for", "proxy_via", "ssh_host", "ssh_port", "ssh_user")
             if prev.get(k) != servers[b.name].get(k)
         }
         log.info(
@@ -596,7 +662,8 @@ async def bulk_exec(req: BulkExec):
                 tasks[srv] = asyncio.create_task(ws_exec(srv, payload, req.timeout))
             else:
                 url = f"{info['base_url'].rstrip('/')}/exec"
-                headers = {"Authorization": f"Bearer {info['rootd_token']}"}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                headers = _signed_rootd_headers("POST", "/exec", body, {"Content-Type": "application/json"})
                 log.debug("bulk_exec: webhook POST srv=%s url=%s rid=%s", srv, url, rid())
 
                 async def webhook_exec_background(srv=srv, payload=payload, url=url, headers=headers):
@@ -608,7 +675,7 @@ async def bulk_exec(req: BulkExec):
 
                     async def runner():
                         try:
-                            r = await client.post(url, json=payload, headers=headers)
+                            r = await client.post(url, content=body, headers=headers)
                             result = r.json()
                             background_tasks.setdefault(srv, {})[tid] = {
                                 "status": "completed",
@@ -901,12 +968,13 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
     if q:
         target_url += "?" + urlencode(q, doseq=True)
 
-    headers = dict(request.headers)
-    # убираем авторизацию клиента; ставим rootd-токен
-    headers.pop("authorization", None)
-    headers["authorization"] = f"Bearer {info['rootd_token']}"
-
     body = await request.body()
+    headers = dict(request.headers)
+    headers.pop("authorization", None)
+    for hk in list(headers):
+        if hk.lower().startswith("x-gptadmin-"):
+            headers.pop(hk, None)
+    headers.update(_signed_rootd_headers(request.method, "/" + path, body))
 
     log.info(
         "proxy: -> %s %s hdr=%s q=%s body_len=%s srv=%s rid=%s",

@@ -211,8 +211,8 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py)
-HUB_IMPORTS=$(py_hidden_imports services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py)
+ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
+HUB_IMPORTS=$(py_hidden_imports services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
 ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
@@ -222,12 +222,12 @@ echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py)
+ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_SRC+=(services/main_package/client/rootd_linux.py)
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_win.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
 
-HUB_SRC=(services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py)
+HUB_SRC=(services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
 FP_ROOTD_NEW="$(fingerprint "${ROOTD_SRC[@]}")"

@@ -43,7 +43,7 @@ try:
     import websockets
 except Exception:
     websockets = None
-from fastapi import FastAPI, Body, Depends, HTTPException
+from fastapi import FastAPI, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import StreamingResponse
@@ -51,6 +51,14 @@ from pydantic import BaseModel
 import logging
 import traceback
 from urllib.parse import urlparse, urlunparse
+
+from gptadmin_security import (
+    NonceCache,
+    load_or_create_identity,
+    load_public_key_b64,
+    sign_request,
+    verify_signature,
+)
 
 try:
     from gptadmin_build_info import BUILD_VERSION, BUILD_TS, GIT_COMMIT, build_info
@@ -82,6 +90,14 @@ ROOTD_NAME = os.getenv("ROOTD_NAME")
 ROOTD_PROXY_FOR = os.getenv("ROOTD_PROXY_FOR")
 ROOTD_PROXY_VIA = os.getenv("ROOTD_PROXY_VIA")
 ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or ("ssh" if os.getenv("SSH_HOST") else "local")
+ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else str(Path.home() / ".gptadmin"))
+HUB_PUBLIC_KEY_FILE = os.getenv("HUB_PUBLIC_KEY_FILE", str(Path(ROOTD_IDENTITY_DIR) / "hub_ed25519.pub"))
+HUB_PUBLIC_KEY_B64 = os.getenv("HUB_PUBLIC_KEY", "")
+ROOTD_IDENTITY = load_or_create_identity(ROOTD_IDENTITY_DIR, ROOTD_NAME or socket.gethostname(), prefix="rootd")
+ROOTD_SERVER_ID = ROOTD_IDENTITY["identity"]["server_id"]
+ROOTD_PUBLIC_KEY_B64 = ROOTD_IDENTITY["public_key_b64"]
+ROOTD_FINGERPRINT = ROOTD_IDENTITY["fingerprint"]
+NONCES = NonceCache(ttl_s=int(os.getenv("ROOTD_NONCE_TTL_S", "300")))
 TRANSPORT = os.getenv("ROOTD_TRANSPORT", "webhook").lower()
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
 ROOTD_AUTO_UPDATE = os.getenv("ROOTD_AUTO_UPDATE", "0").lower() in {"1", "true", "yes", "on"}
@@ -99,6 +115,18 @@ ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
 def _update_headers() -> dict:
     return {"Authorization": f"Bearer {ROOTD_UPDATE_TOKEN}"} if ROOTD_UPDATE_TOKEN else {}
 
+
+def _signed_json_headers(method: str, path: str, body: bytes) -> dict:
+    signed = sign_request(ROOTD_IDENTITY["private_key"], method, path, body)
+    return {
+        "Content-Type": "application/json",
+        "X-GPTAdmin-Server": ROOTD_NAME or socket.gethostname(),
+        "X-GPTAdmin-Server-ID": ROOTD_SERVER_ID,
+        "X-GPTAdmin-Timestamp": signed["timestamp"],
+        "X-GPTAdmin-Nonce": signed["nonce"],
+        "X-GPTAdmin-Signature": signed["signature"],
+    }
+
 if os.getenv("QUEUE_URL"):
     parsed = urlparse(HUB_URL)
     QUEUE_URL = urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
@@ -111,9 +139,23 @@ app = FastAPI(title="rootd", version=str(BUILD_VERSION))
 auth = HTTPBearer(auto_error=False)
 
 
-def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
-    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != TOKEN:
-        raise HTTPException(401, "bad token")
+async def guard(request: Request):
+    public_key = HUB_PUBLIC_KEY_B64 or (load_public_key_b64(HUB_PUBLIC_KEY_FILE) if Path(HUB_PUBLIC_KEY_FILE).exists() else "")
+    if not public_key:
+        raise HTTPException(500, "hub public key is not configured")
+    ts = request.headers.get("X-GPTAdmin-Timestamp")
+    nonce = request.headers.get("X-GPTAdmin-Nonce")
+    sig = request.headers.get("X-GPTAdmin-Signature")
+    hub_id = request.headers.get("X-GPTAdmin-Hub-ID", "hub")
+    if not ts or not nonce or not sig:
+        raise HTTPException(401, "missing signed request headers")
+    body = await request.body()
+    try:
+        NONCES.check_and_store(f"hub:{hub_id}", nonce)
+        verify_signature(public_key, request.method, request.url.path, ts, nonce, body, sig)
+    except Exception as e:
+        raise HTTPException(401, f"invalid signed request: {e}")
+    return True
 
 
 if os.getenv("SSH_HOST"):
@@ -208,8 +250,10 @@ def _beat_payload(mode: str):
         info = {}
     return {
         "name": ROOTD_NAME or info.get("host", socket.gethostname()),
+        "server_id": ROOTD_SERVER_ID,
+        "public_key": ROOTD_PUBLIC_KEY_B64,
+        "fingerprint": ROOTD_FINGERPRINT,
         "base_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",
-        "rootd_token": TOKEN,
         "cores": info.get("cores"),
         "mem_mb": info.get("mem_mb"),
         "time": int(time.time()),
@@ -287,7 +331,8 @@ def heartbeat():
     while True:
         payload = _beat_payload("polling" if QUEUE_URL else "webhook")
         try:
-            requests.post(HEARTBEAT_URL, json=payload, timeout=3)
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            requests.post(HEARTBEAT_URL, data=body, headers=_signed_json_headers("POST", "/heartbeat", body), timeout=3)
         except Exception as e:
             log.warning(f"Heartbeat failed: {e}")
         time.sleep(HB_INT)
@@ -344,6 +389,9 @@ def version():
         "transport": TRANSPORT,
         "rootd_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",
         "name": ROOTD_NAME or socket.gethostname(),
+        "server_id": ROOTD_SERVER_ID,
+        "fingerprint": ROOTD_FINGERPRINT,
+        "public_key": ROOTD_PUBLIC_KEY_B64,
         "backend": ROOTD_BACKEND,
         "proxy_for": ROOTD_PROXY_FOR,
         "proxy_via": ROOTD_PROXY_VIA,
