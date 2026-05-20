@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "GPTAdmin Hub & Rootd API",
-    "version": "2.0.0",
-    "description": "Полный список proxied rootd-endpoint’ов через hub-proxy"
+    "title": "GPTAdmin Hub API",
+    "version": "2.2.0",
+    "description": "Manage servers through GPTAdmin hub. Pending servers are shown by listServers and can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
   },
   "servers": [
     {
@@ -19,10 +19,22 @@
     "/servers": {
       "get": {
         "operationId": "listServers",
-        "summary": "List registered servers",
+        "summary": "List active and pending servers",
+        "description": "Returns active and pending servers. Pending servers include approve_command and reject_command. To approve a pending server, call execOnServer on any active server with cmd equal to approve_command.",
+        "parameters": [
+          {
+            "name": "include_pending",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "List of servers",
+            "description": "Server list",
             "content": {
               "application/json": {
                 "schema": {
@@ -37,178 +49,500 @@
     "/srv/exec": {
       "post": {
         "operationId": "execOnServer",
-        "summary": "Execute a shell command on a server",
+        "summary": "Execute a command on a server",
+        "description": "Runs a shell command on a selected active server. Hub-internal commands are also supported: gptadmin_pending list, gptadmin_pending approve <name>, gptadmin_pending reject <name>. If a command continues in background, the response includes gptadmin_task_id; use listServerTasks/getServerTask and then ackServerTask when the result is handled.",
         "parameters": [
           {
             "name": "server",
             "in": "query",
             "required": true,
-            "schema": { "type": "string" },
-            "description": "Server name"
+            "description": "Name of an active server from listServers. For gptadmin_pending commands, use any active server.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ExecReq" }
+              "schema": {
+                "$ref": "#/components/schemas/ExecReq"
+              }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Command execution result",
+            "description": "Command result or background task marker",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ExecResult" }
+                "schema": {
+                  "$ref": "#/components/schemas/ExecResult"
+                }
               }
             }
           }
         }
       }
     },
-    "/srv/system/info": {
+    "/srv/system/health": {
       "get": {
-        "operationId": "getSysInfo",
-        "summary": "Get basic system info",
+        "operationId": "getSystemHealth",
+        "summary": "Get system health",
+        "description": "Returns health and basic system information for a server.",
         "parameters": [
-          { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "server",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
-            "description": "System information",
+            "description": "System health",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/SysInfo" }
+                "schema": {
+                  "$ref": "#/components/schemas/SystemHealth"
+                }
               }
             }
           }
         }
       }
     },
-"/srv/system/health": {
-  "get": {
-    "operationId": "getSystemHealth",
-    "summary": "Get extended system health status",
-    "parameters": [
-      { "name": "server", "in": "query", "required": true, "schema": { "type": "string" } }
-    ],
-    "responses": {
-      "200": {
-        "description": "System health details",
-        "content": {
-          "application/json": {
+    "/tasks/{srv}": {
+      "get": {
+        "operationId": "listServerTasks",
+        "summary": "List known background tasks for a server",
+        "description": "Lists running, completed, and failed background tasks tracked by the hub for a server.",
+        "parameters": [
+          {
+            "name": "srv",
+            "in": "path",
+            "required": true,
             "schema": {
-              "type": "object",
-              "properties": {
-                "uptime_s": { "type": "integer" },
-                "load_avg": {
-                  "type": "array",
-                  "items": { "type": "number" }
-                },
-                "cpu_usage_pct": { "type": "number" },
-                "memory": {
-                  "type": "object",
-                  "properties": {
-                    "total": { "type": "integer" },
-                    "available": { "type": "integer" },
-                    "used": { "type": "integer" },
-                    "free": { "type": "integer" }
-                  }
-                },
-                "swap": {
-                  "type": "object",
-                  "properties": {
-                    "total": { "type": "integer" },
-                    "used": { "type": "integer" },
-                    "free": { "type": "integer" }
-                  }
-                },
-                "disk": {
-                  "type": "object",
-                  "properties": {
-                    "total": { "type": "number" },
-                    "used": { "type": "number" },
-                    "free": { "type": "number" }
-                  }
-                },
-                "failed_services": {
-                  "type": "array",
-                  "items": { "type": "string" }
-                },
-                "last_apt_update": { "type": "string" },
-                "cpu_temperature": { "type": "number" },
-                "ip_address": { "type": "string" }
-              },
-              "required": ["uptime_s", "load_avg", "cpu_usage_pct", "memory", "disk"]
+              "type": "string"
+            },
+            "description": "Server name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TasksResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{srv}/{tid}": {
+      "get": {
+        "operationId": "getServerTask",
+        "summary": "Get background task status/result",
+        "description": "Returns a tracked task. If the task is completed or failed and the result has been handled, call ackServerTask.",
+        "parameters": [
+          {
+            "name": "srv",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Server name"
+          },
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Task ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task status/result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{srv}/{tid}/ack": {
+      "post": {
+        "operationId": "ackServerTask",
+        "summary": "Acknowledge and forget a handled background task",
+        "description": "Marks a completed/failed task as handled and removes it from the hub task list. Use this after the model has read and reported the task result.",
+        "parameters": [
+          {
+            "name": "srv",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Server name"
+          },
+          {
+            "name": "tid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Task ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Acknowledgement result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AckTaskResponse"
+                }
+              }
             }
           }
         }
       }
     }
-  }
-}
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer" }
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
     },
     "schemas": {
+      "ServersResponse": {
+        "type": "object",
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerInfo"
+            }
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "servers"
+        ],
+        "additionalProperties": true
+      },
+      "ServerInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "pending"
+            ]
+          },
+          "alive": {
+            "type": "boolean"
+          },
+          "lag_s": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "build_version": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "local or ssh"
+          },
+          "proxy_via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server that proxies this target, if any."
+          },
+          "ssh_host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ssh_port": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ssh_user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pending_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "approve_command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only present for pending servers. Run with execOnServer on any active server."
+          },
+          "reject_command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only present for pending servers. Run with execOnServer on any active server."
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "additionalProperties": true
+      },
       "ExecReq": {
         "type": "object",
         "properties": {
-          "cmd": { "type": "string" },
-          "env": { "type": "string" },
-          "cwd": { "type": "string" },
-          "timeout": { "type": "integer", "format": "int32" }
+          "cmd": {
+            "type": "string"
+          },
+          "env": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
         },
-        "required": ["cmd"],
+        "required": [
+          "cmd"
+        ],
         "additionalProperties": false
       },
       "ExecResult": {
         "type": "object",
         "properties": {
-          "returncode": { "type": "integer" },
-          "stdout": { "type": "string" },
-          "stderr": { "type": "string" },
-          "error": { "type": "string" }
+          "returncode": {
+            "type": "integer"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "background": {
+            "type": "boolean"
+          },
+          "gptadmin_task_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
-      "SysInfo": {
+      "SystemHealth": {
         "type": "object",
         "properties": {
-          "host": { "type": "string" },
-          "kernel": { "type": "string" },
-          "cores": { "type": "integer" },
-          "mem_mb": { "type": "integer" },
-          "uptime_s": { "type": "integer" }
+          "uptime_s": {
+            "type": "integer"
+          },
+          "load_avg": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "cpu_usage_pct": {
+            "type": "number"
+          },
+          "memory": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "swap": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "disk": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "failed_services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ip_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         },
-        "required": ["host", "kernel", "cores", "mem_mb", "uptime_s"],
-        "additionalProperties": false
+        "additionalProperties": true
       },
-      "ServerInfo": {
+      "TasksResponse": {
         "type": "object",
         "properties": {
-          "name": { "type": "string" },
-          "base_url": { "type": "string" },
-          "rootd_token": { "type": "string" },
-          "time": { "type": "integer" },
-          "cores": { "type": "integer" },
-          "mem_mb": { "type": "integer" },
-          "alive": { "type": "boolean" },
-          "lag_s": { "type": "integer" }
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskInfo"
+            }
+          }
         },
-        "required": ["name", "base_url", "rootd_token", "time", "alive", "lag_s"],
-        "additionalProperties": false
+        "required": [
+          "tasks"
+        ],
+        "additionalProperties": true
       },
-      "ServersResponse": {
+      "TaskStatusResponse": {
         "type": "object",
         "properties": {
-          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerInfo" } }
+          "task": {
+            "$ref": "#/components/schemas/TaskInfo"
+          },
+          "error": {
+            "type": "string"
+          }
         },
-        "required": ["servers"],
-        "additionalProperties": false
+        "additionalProperties": true
+      },
+      "TaskInfo": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "cmd": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "integer"
+          },
+          "completed_at": {
+            "type": "integer"
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AckTaskResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "acknowledged",
+              "not_found"
+            ]
+          },
+          "server": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "removed_task": {
+            "type": "boolean"
+          },
+          "removed_result": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "status",
+          "server",
+          "task_id"
+        ],
+        "additionalProperties": true
       }
     }
   }

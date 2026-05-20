@@ -12,6 +12,7 @@ ENV:
   LICENSE_FILE     – путь к подписанному license.json             (def: config/license.json)
   PUBLIC_KEY_FILE  – путь к public.pem для проверки подписи       (def: config/public.pem)
   LOG_LEVEL        – уровень логов (DEBUG/INFO/WARNING/ERROR)     (def: INFO)
+  GPTADMIN_ARTIFACT_DIR – каталог с gptadmin-rootd.tar.gz для автообновления
 
 Зависимости: fastapi, uvicorn[standard], httpx, pydantic, cryptography
 """
@@ -31,6 +32,7 @@ import hmac
 import hashlib
 import secrets
 import html
+import shlex
 from pathlib import Path
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any
@@ -39,9 +41,18 @@ import httpx
 from fastapi import FastAPI, Request, Body, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-from starlette.responses import Response
+from starlette.responses import Response, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from urllib.parse import urlencode, parse_qs
+
+try:
+    from gptadmin_build_info import BUILD_VERSION, BUILD_TS, GIT_COMMIT, build_info
+except Exception:
+    BUILD_VERSION = 0
+    BUILD_TS = "unknown"
+    GIT_COMMIT = "unknown"
+    def build_info(component: str) -> dict:
+        return {"component": component, "build_version": BUILD_VERSION, "build_ts": BUILD_TS, "git_commit": GIT_COMMIT}
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -106,6 +117,20 @@ DEAD_S = int(os.getenv("DEAD_S", "180"))
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 LICENSE_FILE = os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json")
 PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.pem")
+def _default_artifact_dir() -> Path:
+    candidates = [
+        Path.cwd() / "build",
+        Path(__file__).resolve().parents[2] / "build",
+        Path(os.getenv("GPTADMIN_HOME", "/opt/gptadmin")) / "artifacts",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+ARTIFACT_DIR = Path(os.getenv("GPTADMIN_ARTIFACT_DIR", str(_default_artifact_dir())))
+APPROVED_SERVERS_FILE = Path(os.getenv("GPTADMIN_APPROVED_SERVERS_FILE", str(CONFIG_DIR / "approved_servers.json")))
+PENDING_SERVERS_FILE = Path(os.getenv("GPTADMIN_PENDING_SERVERS_FILE", str(CONFIG_DIR / "pending_servers.json")))
 
 # MCP / ChatGPT Apps OAuth config
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
@@ -117,16 +142,111 @@ _oauth_codes: Dict[str, Dict[str, Any]] = {}
 
 # ----------------------------- FASTAPI ---------------------------------------
 
-app = FastAPI(title="root-hub", version="1.1")
+app = FastAPI(title="root-hub", version=str(BUILD_VERSION))
 auth_ctl = HTTPBearer(auto_error=False)
 
 # ------ память: name → dict(base_url, rootd_token, last_seen, meta…) ----------
 servers: Dict[str, Dict[str, Any]] = {}
+approved_servers: Dict[str, Dict[str, Any]] = {}
+pending_servers: Dict[str, Dict[str, Any]] = {}
 queues: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 ws_sessions: Dict[str, WebSocket] = {}
 ws_results: Dict[str, Dict[str, Any]] = {}
 background_tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+
+
+def _load_json_dict(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log.warning("registry: failed to load %s: %s", path, e)
+        return {}
+
+
+def _save_json_dict(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    tmp.replace(path)
+
+
+def _server_fingerprint(d: Dict[str, Any]) -> str:
+    raw = json.dumps({
+        "name": d.get("name"),
+        "base_url": d.get("base_url"),
+        # rootd_token is intentionally excluded: existing approved identity
+        # is bound to stable topology fields until per-server public keys land.
+        "backend": d.get("backend"),
+        "proxy_via": d.get("proxy_via"),
+        "ssh_host": d.get("ssh_host"),
+        "ssh_port": d.get("ssh_port"),
+        "ssh_user": d.get("ssh_user"),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _sanitize_server(d: Dict[str, Any]) -> Dict[str, Any]:
+    safe = dict(d)
+    if "rootd_token" in safe:
+        safe["rootd_token"] = None
+    return safe
+
+
+def _pending_record(b: "Beat", reason: str, existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    now = time.time()
+    payload = b.dict()
+    return {
+        "status": "pending",
+        "reason": reason,
+        "name": b.name,
+        "requested_at": now,
+        "updated_at": now,
+        "fingerprint": _server_fingerprint(payload),
+        "payload": payload,
+        "existing": _sanitize_server(existing or {}) if existing else None,
+    }
+
+
+def _remember_pending(record: Dict[str, Any]) -> None:
+    pending_servers[record["name"]] = record
+    _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
+
+
+def _approve_payload(name: str, payload: Dict[str, Any], approved_by: str = "api") -> Dict[str, Any]:
+    now = time.time()
+    approved_servers[name] = {
+        "name": name,
+        "status": "approved",
+        "approved_at": now,
+        "approved_by": approved_by,
+        "base_url": payload.get("base_url"),
+        "fingerprint": _server_fingerprint(payload),
+        "backend": payload.get("backend"),
+        "proxy_for": payload.get("proxy_for"),
+        "proxy_via": payload.get("proxy_via"),
+        "ssh_host": payload.get("ssh_host"),
+        "ssh_port": payload.get("ssh_port"),
+        "ssh_user": payload.get("ssh_user"),
+    }
+    _save_json_dict(APPROVED_SERVERS_FILE, approved_servers)
+    return approved_servers[name]
+
+
+def _is_approved(name: str) -> bool:
+    return name in approved_servers
+
+
+approved_servers.update(_load_json_dict(APPROVED_SERVERS_FILE))
+pending_servers.update(_load_json_dict(PENDING_SERVERS_FILE))
+log.info("registry: loaded approved=%s pending=%s", len(approved_servers), len(pending_servers))
 
 # ----------------------------- ЛИЦЕНЗИЯ --------------------------------------
 
@@ -188,6 +308,16 @@ class Beat(BaseModel):
     default_home: Optional[str] = None
     os: str = "linux"
     mode: str = Field("webhook", pattern="^(webhook|polling|websocket)$")
+    version: Optional[int] = None
+    build_version: Optional[int] = None
+    build_ts: Optional[str] = None
+    git_commit: Optional[str] = None
+    backend: Optional[str] = None
+    proxy_for: Optional[str] = None
+    proxy_via: Optional[str] = None
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[str] = None
+    ssh_user: Optional[str] = None
 
 
 class BulkExec(BaseModel):
@@ -195,6 +325,11 @@ class BulkExec(BaseModel):
     cmd: str
     timeout: Optional[int] = None
     cwd: Optional[str] = None
+
+
+class PendingApprove(BaseModel):
+    approve: bool = True
+    note: Optional[str] = None
 
 
 class ExecReq(BaseModel):
@@ -275,47 +410,120 @@ app.add_middleware(AccessLogMiddleware)
 
 # ------------------------------ ЭНДПОИНТЫ ------------------------------------
 
+
+@app.get("/version")
+def version():
+    data = build_info("hub_proxy")
+    data.update({"artifact_dir": str(ARTIFACT_DIR)})
+    return data
+
+
+def _rootd_artifact_path() -> Path:
+    return ARTIFACT_DIR / "gptadmin-rootd.tar.gz"
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+@app.get("/artifacts/rootd.json", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def rootd_artifact_manifest(request: Request):
+    artifact = _rootd_artifact_path()
+    if not artifact.is_file():
+        raise HTTPException(404, f"rootd artifact not found: {artifact}")
+    return {
+        "component": "rootd",
+        "build_version": BUILD_VERSION,
+        "build_ts": BUILD_TS,
+        "git_commit": GIT_COMMIT,
+        "sha256": _sha256_file(artifact),
+        "size": artifact.stat().st_size,
+        "url": str(request.url_for("rootd_artifact_download")),
+    }
+
+
+@app.get("/artifacts/rootd.tar.gz", name="rootd_artifact_download", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def rootd_artifact_download():
+    artifact = _rootd_artifact_path()
+    if not artifact.is_file():
+        raise HTTPException(404, f"rootd artifact not found: {artifact}")
+    return FileResponse(str(artifact), media_type="application/gzip", filename="gptadmin-rootd.tar.gz")
+
+
 @app.post("/heartbeat")
 def heartbeat(b: Beat = Body(...)):
-    # лицензию проверяем на потенциальное количество после апдейта
-    current = len(servers) + (0 if b.name in servers else 1)
-    _check_license(current)
-
+    # Existing approved servers may refresh themselves. Unknown names become pending
+    # unless explicitly approved, which prevents enrollment-token/name takeover.
     prev = servers.get(b.name)
+    known = prev is not None or _is_approved(b.name)
+    if not known:
+        current = len(servers) + (0 if b.name in servers else 1)
+        _check_license(current)
+        rec = _pending_record(b, reason="new_server")
+        _remember_pending(rec)
+        log.warning("heartbeat: PENDING new name=%s base_url=%s rid=%s", b.name, b.base_url, rid())
+        return {"ok": False, "status": "pending", "reason": "new_server"}
+
+    if _is_approved(b.name):
+        approved = approved_servers.get(b.name, {})
+        expected_fp = approved.get("fingerprint")
+        current_fp = _server_fingerprint(b.dict())
+        if expected_fp and current_fp != expected_fp and prev is None:
+            rec = _pending_record(b, reason="fingerprint_changed", existing=approved)
+            _remember_pending(rec)
+            log.warning("heartbeat: PENDING changed identity name=%s base_url=%s rid=%s", b.name, b.base_url, rid())
+            return {"ok": False, "status": "pending", "reason": "fingerprint_changed"}
+
     servers[b.name] = b.dict()
     servers[b.name]["time"] = time.time()
+    servers[b.name]["status"] = "active"
 
     if prev is None:
         log.info(
-            "heartbeat: NEW name=%s base_url=%s mode=%s os=%s cores=%s mem_mb=%s rid=%s",
+            "heartbeat: ACTIVE name=%s base_url=%s mode=%s os=%s cores=%s mem_mb=%s rid=%s",
             b.name, b.base_url, b.mode, b.os, b.cores, b.mem_mb, rid()
         )
     else:
-        # сравним ключевые поля (без токена)
         changed = {
             k: (prev.get(k), servers[b.name].get(k))
-            for k in ("base_url", "mode", "os", "cores", "mem_mb", "default_user", "default_uid", "default_home")
+            for k in ("base_url", "mode", "os", "cores", "mem_mb", "default_user", "default_uid", "default_home", "version", "build_version", "build_ts", "git_commit", "backend", "proxy_for", "proxy_via", "ssh_host", "ssh_port", "ssh_user")
             if prev.get(k) != servers[b.name].get(k)
         }
         log.info(
             "heartbeat: UPDATE name=%s lag_s=%s changed=%s rid=%s",
             b.name, round(time.time() - prev.get("time", servers[b.name]["time"])), changed, rid()
         )
-    return {"ok": True}
+    pending_servers.pop(b.name, None)
+    _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
+    return {"ok": True, "status": "active"}
 
 
 @app.get("/servers", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def list_servers():
+def list_servers(include_pending: bool = True):
     now = time.time()
     out = []
     for n, d in servers.items():
         alive = (now - d["time"]) < DEAD_S
         lag = round(now - d["time"])
-        # не возвращаем rootd_token
-        safe = {**d, "alive": alive, "lag_s": lag, "rootd_token": None}
+        safe = {**d, "status": "active", "alive": alive, "lag_s": lag, "rootd_token": None}
         out.append(safe)
-    log.info("servers: list count=%s rid=%s", len(out), rid())
-    return {"servers": out}
+    if include_pending:
+        for n, rec in pending_servers.items():
+            payload = rec.get("payload", {}) or {}
+            safe = {**payload, "status": "pending", "alive": False, "lag_s": None, "rootd_token": None,
+                    "pending_reason": rec.get("reason"), "requested_at": rec.get("requested_at"),
+                    "updated_at": rec.get("updated_at"), "fingerprint": rec.get("fingerprint"),
+                    "approve_command": f"gptadmin_pending approve {shlex.quote(n)}",
+                    "reject_command": f"gptadmin_pending reject {shlex.quote(n)}",
+                    "how_to_approve": f"Run via any active server: gptadmin_pending approve {shlex.quote(n)}"}
+            out.append(safe)
+    log.info("servers: list active=%s pending=%s rid=%s", len(servers), len(pending_servers), rid())
+    return {"servers": out, "pending": list(pending_servers.values())}
+
 
 
 @app.post("/bulk/exec", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -390,9 +598,50 @@ async def bulk_exec(req: BulkExec):
                 url = f"{info['base_url'].rstrip('/')}/exec"
                 headers = {"Authorization": f"Bearer {info['rootd_token']}"}
                 log.debug("bulk_exec: webhook POST srv=%s url=%s rid=%s", srv, url, rid())
-                tasks[srv] = asyncio.create_task(
-                    client.post(url, json=payload, headers=headers)
-                )
+
+                async def webhook_exec_background(srv=srv, payload=payload, url=url, headers=headers):
+                    tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+                    _task_slot(srv, tid).update({
+                        "cmd": payload.get("cmd"),
+                        "cwd": payload.get("cwd"),
+                    })
+
+                    async def runner():
+                        try:
+                            r = await client.post(url, json=payload, headers=headers)
+                            result = r.json()
+                            background_tasks.setdefault(srv, {})[tid] = {
+                                "status": "completed",
+                                "task_id": tid,
+                                "cmd": payload.get("cmd"),
+                                "cwd": payload.get("cwd"),
+                                "result": result,
+                                "completed_at": int(time.time()),
+                            }
+                        except Exception as e:
+                            background_tasks.setdefault(srv, {})[tid] = {
+                                "status": "failed",
+                                "task_id": tid,
+                                "cmd": payload.get("cmd"),
+                                "cwd": payload.get("cwd"),
+                                "error": str(e),
+                                "completed_at": int(time.time()),
+                            }
+
+                    task = asyncio.create_task(runner())
+
+                    try:
+                        return await asyncio.wait_for(asyncio.shield(task), timeout=req.timeout or 300)
+                    except asyncio.TimeoutError:
+                        return {
+                            "background": True,
+                            "task_id": tid,
+                            "gptadmin_task_id": tid,
+                            "status": "running",
+                            "message": f"Command continues in background. To inspect tasks run: gptadmin_tasks list . To inspect this task run: gptadmin_tasks status {tid}",
+                        }
+
+                tasks[srv] = asyncio.create_task(webhook_exec_background())
 
         for srv, task in tasks.items():
             try:
@@ -415,29 +664,71 @@ async def bulk_exec(req: BulkExec):
 
 
 def _handle_gptadmin_task_command(srv: str, cmd: str):
-    parts = cmd.strip().split()
-    if not parts or parts[0] != "gptadmin_tasks":
+    try:
+        parts = shlex.split(cmd.strip())
+    except ValueError as e:
+        return {"error": f"bad command syntax: {e}"}
+    if not parts:
         return None
 
-    if len(parts) >= 2 and parts[1] == "list":
+    if parts[0] == "gptadmin_tasks":
+        if len(parts) >= 2 and parts[1] == "list":
+            return {
+                "ok": True,
+                "tasks": list(background_tasks.get(srv, {}).values())
+            }
+
+        if len(parts) >= 3 and parts[1] == "status":
+            tid = parts[2]
+            task = background_tasks.get(srv, {}).get(tid)
+            if not task:
+                return {"error": f"task not found: {tid}"}
+            return {
+                "ok": True,
+                "task": task,
+            }
+
         return {
-            "ok": True,
-            "tasks": list(background_tasks.get(srv, {}).values())
+            "error": "usage: gptadmin_tasks list | gptadmin_tasks status <task_id>"
         }
 
-    if len(parts) >= 3 and parts[1] == "status":
-        tid = parts[2]
-        task = background_tasks.get(srv, {}).get(tid)
-        if not task:
-            return {"error": f"task not found: {tid}"}
+    if parts[0] == "gptadmin_pending":
+        if len(parts) >= 2 and parts[1] == "list":
+            return {
+                "ok": True,
+                "pending": list(pending_servers.values()),
+                "count": len(pending_servers),
+            }
+
+        if len(parts) >= 3 and parts[1] == "approve":
+            name = parts[2]
+            rec = pending_servers.get(name)
+            if not rec:
+                return {"ok": False, "error": f"no pending server named {name}"}
+            payload = rec.get("payload") or {}
+            approved = _approve_payload(name, payload, approved_by=f"gptadmin_pending via {srv}")
+            payload["time"] = time.time()
+            payload["status"] = "active"
+            servers[name] = payload
+            pending_servers.pop(name, None)
+            _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
+            log.info("pending: approved via internal command actor=%s name=%s base_url=%s rid=%s", srv, name, payload.get("base_url"), rid())
+            return {"ok": True, "status": "approved", "name": name, "server": _sanitize_server(servers[name]), "approved": approved}
+
+        if len(parts) >= 3 and parts[1] == "reject":
+            name = parts[2]
+            rec = pending_servers.pop(name, None)
+            if not rec:
+                return {"ok": False, "error": f"no pending server named {name}"}
+            _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
+            log.info("pending: rejected via internal command actor=%s name=%s rid=%s", srv, name, rid())
+            return {"ok": True, "status": "rejected", "name": name}
+
         return {
-            "ok": True,
-            "task": task,
+            "error": "usage: gptadmin_pending list | gptadmin_pending approve <name> | gptadmin_pending reject <name>"
         }
 
-    return {
-        "error": "usage: gptadmin_tasks list | gptadmin_tasks status <task_id>"
-    }
+    return None
 
 
 # ------------------------- WEBSOCKET AGENT -------------------------
@@ -490,9 +781,16 @@ async def rootd_ws(websocket: WebSocket):
         current = len(servers) + (0 if beat.name in servers else 1)
         _check_license(current)
         srv_name = beat.name
+        if srv_name not in servers and not _is_approved(srv_name):
+            rec = _pending_record(beat, reason="new_websocket_server")
+            _remember_pending(rec)
+            await websocket.send_json({"type": "hello_ack", "ok": False, "status": "pending"})
+            await websocket.close(code=1008, reason="server pending approval")
+            return
         servers[srv_name] = beat.dict()
         servers[srv_name]["mode"] = "websocket"
         servers[srv_name]["time"] = time.time()
+        servers[srv_name]["status"] = "active"
         ws_sessions[srv_name] = websocket
         log.info("ws: connected srv=%s os=%s cores=%s mem_mb=%s", srv_name, beat.os, beat.cores, beat.mem_mb)
         await websocket.send_json({"type": "hello_ack", "ok": True})
@@ -930,7 +1228,7 @@ async def mcp_post(request: Request):
             result = {
                 "protocolVersion": params.get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}, "resources": {}},
-                "serverInfo": {"name": "gptadmin-hub", "version": "1.0.0"},
+                "serverInfo": {"name": "gptadmin-hub", "version": str(BUILD_VERSION)},
             }
         elif method == "tools/list":
             result = {"tools": _mcp_tools()}
@@ -975,22 +1273,6 @@ async def unhandled_exc(request: Request, exc: Exception):
     )
 
 
-# ----------------------------- MAIN ------------------------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.getenv("HUB_PORT", "9001"))
-    log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s)", port, DEAD_S, LOG_LEVEL)
-    # Включаем стандартные access-логи uvicorn + наши middleware-логи
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level=LOG_LEVEL.lower(),
-    )
-
-
 @app.get("/tasks/{srv}/{tid}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def get_task_status(srv: str, tid: str):
     task = background_tasks.get(srv, {}).get(tid)
@@ -1014,9 +1296,67 @@ def get_task_status(srv: str, tid: str):
     }
 
 
+@app.post("/tasks/{srv}/{tid}/ack", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def ack_task(srv: str, tid: str):
+    server_tasks = background_tasks.get(srv, {})
+    task = server_tasks.pop(tid, None)
+    result_removed = False
+    if srv in results and tid in results[srv]:
+        results[srv].pop(tid, None)
+        result_removed = True
+        if not results[srv]:
+            results.pop(srv, None)
+    if not server_tasks and srv in background_tasks:
+        background_tasks.pop(srv, None)
+    if not task and not result_removed:
+        return {
+            "ok": False,
+            "status": "not_found",
+            "server": srv,
+            "task_id": tid,
+        }
+    log.info("tasks: acknowledged srv=%s tid=%s had_task=%s had_result=%s rid=%s", srv, tid, bool(task), result_removed, rid())
+    return {
+        "ok": True,
+        "status": "acknowledged",
+        "server": srv,
+        "task_id": tid,
+        "removed_task": bool(task),
+        "removed_result": result_removed,
+    }
+
+
 @app.get("/tasks/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def list_tasks(srv: str):
     return {
         "server": srv,
         "tasks": list(background_tasks.get(srv, {}).values())
     }
+
+
+
+# ----------------------------- MAIN ------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("HUB_PORT", "9001"))
+    fd_env = os.getenv("SYSTEMD_SOCKET_FD")
+
+    kwargs = {
+        "log_level": LOG_LEVEL.lower(),
+    }
+
+    if fd_env:
+        log.info("starting hub via systemd socket fd=%s (dead_s=%s, log_level=%s)", fd_env, DEAD_S, LOG_LEVEL)
+        kwargs["fd"] = int(fd_env)
+    else:
+        log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s)", port, DEAD_S, LOG_LEVEL)
+        kwargs["host"] = "0.0.0.0"
+        kwargs["port"] = port
+
+    # Включаем стандартные access-логи uvicorn + наши middleware-логи
+    uvicorn.run(
+        app,
+        **kwargs,
+    )

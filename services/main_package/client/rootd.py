@@ -14,6 +14,13 @@ Env:
                    пути на /queue
   POLL_INTERVAL_S период опроса QUEUE_URL (def: 5)
   ROOTD_TRANSPORT websocket|webhook|polling|auto (def: webhook)
+  ROOTD_URL       explicit externally reachable URL sent to hub
+  ROOTD_NAME      explicit server name sent to hub
+  ROOTD_PROXY_FOR/ROOTD_PROXY_VIA/ROOTD_BACKEND optional topology metadata
+  ROOTD_AUTO_UPDATE       1/true to enable safe self-update loop (def: off)
+  ROOTD_UPDATE_MANIFEST_URL manifest URL with build_version, sha256, url
+  ROOTD_UPDATE_TOKEN optional Bearer token for update manifest/artifact
+  ROOTD_UPDATE_INTERVAL_S update check interval (def: 3600)
 """
 
 import os
@@ -23,7 +30,13 @@ import asyncio
 import threading
 import socket
 import sys
+import tempfile
+import tarfile
+import hashlib
+import shutil
+import subprocess
 from typing import Optional
+from pathlib import Path
 
 import requests
 try:
@@ -38,6 +51,15 @@ from pydantic import BaseModel
 import logging
 import traceback
 from urllib.parse import urlparse, urlunparse
+
+try:
+    from gptadmin_build_info import BUILD_VERSION, BUILD_TS, GIT_COMMIT, build_info
+except Exception:
+    BUILD_VERSION = 0
+    BUILD_TS = "unknown"
+    GIT_COMMIT = "unknown"
+    def build_info(component: str) -> dict:
+        return {"component": component, "build_version": BUILD_VERSION, "build_ts": BUILD_TS, "git_commit": GIT_COMMIT}
 
 port = int(os.getenv("ROOTD_PORT", os.getenv("PORT","25900")))
 # --- логирование ---
@@ -56,8 +78,26 @@ TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
 HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/')
 HEARTBEAT_URL=HUB_URL+'/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
 ROOTD_URL = os.getenv("ROOTD_URL")
+ROOTD_NAME = os.getenv("ROOTD_NAME")
+ROOTD_PROXY_FOR = os.getenv("ROOTD_PROXY_FOR")
+ROOTD_PROXY_VIA = os.getenv("ROOTD_PROXY_VIA")
+ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or ("ssh" if os.getenv("SSH_HOST") else "local")
 TRANSPORT = os.getenv("ROOTD_TRANSPORT", "webhook").lower()
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
+ROOTD_AUTO_UPDATE = os.getenv("ROOTD_AUTO_UPDATE", "0").lower() in {"1", "true", "yes", "on"}
+ROOTD_UPDATE_INTERVAL_S = int(os.getenv("ROOTD_UPDATE_INTERVAL_S", "3600"))
+ROOTD_SERVICE_NAME = os.getenv("ROOTD_SERVICE_NAME", "gptadmin-rootd.service")
+
+def _hub_artifact_url(path: str) -> str:
+    base = (HUB_URL or "").rstrip("/")
+    return f"{base}{path}" if base else ""
+
+ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
+ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
+ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
+
+def _update_headers() -> dict:
+    return {"Authorization": f"Bearer {ROOTD_UPDATE_TOKEN}"} if ROOTD_UPDATE_TOKEN else {}
 
 if os.getenv("QUEUE_URL"):
     parsed = urlparse(HUB_URL)
@@ -67,7 +107,7 @@ else:
 
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
 
-app = FastAPI(title="rootd", version="2.0")
+app = FastAPI(title="rootd", version=str(BUILD_VERSION))
 auth = HTTPBearer(auto_error=False)
 
 
@@ -167,14 +207,24 @@ def _beat_payload(mode: str):
         log.warning(f"Failed to get system info: {e}")
         info = {}
     return {
-        "name": info.get("host", socket.gethostname()),
+        "name": ROOTD_NAME or info.get("host", socket.gethostname()),
         "base_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",
         "rootd_token": TOKEN,
         "cores": info.get("cores"),
         "mem_mb": info.get("mem_mb"),
         "time": int(time.time()),
         "mode": mode,
-        "os": info.get("platform", sys.platform)
+        "os": info.get("platform", sys.platform),
+        "version": BUILD_VERSION,
+        "build_version": BUILD_VERSION,
+        "build_ts": BUILD_TS,
+        "git_commit": GIT_COMMIT,
+        "backend": ROOTD_BACKEND,
+        "proxy_for": ROOTD_PROXY_FOR,
+        "proxy_via": ROOTD_PROXY_VIA,
+        "ssh_host": os.getenv("SSH_HOST"),
+        "ssh_port": os.getenv("SSH_PORT"),
+        "ssh_user": os.getenv("SSH_USER"),
     }
 
 
@@ -249,7 +299,7 @@ def poll_loop():
     while True:
         try:
             r = requests.get(
-                f"{QUEUE_URL}/{socket.gethostname()}",
+                f"{QUEUE_URL}/{ROOTD_NAME or socket.gethostname()}",
                 params={"token": TOKEN},
                 timeout=5,
             )
@@ -263,7 +313,7 @@ def poll_loop():
                     res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
                     try:
                         requests.post(
-                            f"{QUEUE_URL}/{socket.gethostname()}/result",
+                            f"{QUEUE_URL}/{ROOTD_NAME or socket.gethostname()}/result",
                             params={"token": TOKEN},
                             json={"id": job.get("id"), "result": res},
                             timeout=5,
@@ -285,6 +335,106 @@ if HUB_URL and (TRANSPORT == "webhook" or QUEUE_URL or websockets is None):
     threading.Thread(target=heartbeat, daemon=True).start()
 if QUEUE_URL or TRANSPORT == "polling":
     threading.Thread(target=poll_loop, daemon=True).start()
+
+
+@app.get("/version")
+def version():
+    data = build_info("rootd")
+    data.update({
+        "transport": TRANSPORT,
+        "rootd_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",
+        "name": ROOTD_NAME or socket.gethostname(),
+        "backend": ROOTD_BACKEND,
+        "proxy_for": ROOTD_PROXY_FOR,
+        "proxy_via": ROOTD_PROXY_VIA,
+        "ssh_host": os.getenv("SSH_HOST"),
+        "ssh_port": os.getenv("SSH_PORT"),
+        "ssh_user": os.getenv("SSH_USER"),
+        "auto_update": ROOTD_AUTO_UPDATE,
+        "update_manifest_url": ROOTD_UPDATE_MANIFEST_URL if ROOTD_AUTO_UPDATE else None,
+    })
+    return data
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _find_rootd_binary(extract_dir: str) -> str:
+    candidates = [
+        Path(extract_dir) / "rootd" / "dist" / "rootd",
+        Path(extract_dir) / "build" / "rootd" / "dist" / "rootd",
+        Path(extract_dir) / "rootd",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    for c in Path(extract_dir).rglob("rootd"):
+        if c.is_file() and c.stat().st_size > 1024 * 1024:
+            return str(c)
+    raise RuntimeError("rootd binary not found in update archive")
+
+
+def rootd_update_once() -> dict:
+    if not ROOTD_UPDATE_MANIFEST_URL:
+        return {"ok": False, "reason": "no manifest url"}
+    manifest = requests.get(ROOTD_UPDATE_MANIFEST_URL, timeout=15, headers=_update_headers()).json()
+    latest = int(manifest.get("build_version") or manifest.get("version") or 0)
+    if latest <= BUILD_VERSION:
+        return {"ok": True, "updated": False, "current": BUILD_VERSION, "latest": latest}
+    url = manifest.get("url") or ROOTD_UPDATE_URL
+    expected_sha = (manifest.get("sha256") or "").lower().strip()
+    if not url or not expected_sha:
+        raise RuntimeError("manifest must include url and sha256")
+    current_exe = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory(prefix="rootd-update-") as td:
+        archive = Path(td) / "rootd.tar.gz"
+        with requests.get(url, timeout=60, stream=True, headers=_update_headers()) as r:
+            r.raise_for_status()
+            with open(archive, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+        actual_sha = _sha256_file(str(archive))
+        if actual_sha.lower() != expected_sha:
+            raise RuntimeError(f"sha256 mismatch: got {actual_sha}, expected {expected_sha}")
+        extract_dir = Path(td) / "x"
+        extract_dir.mkdir()
+        with tarfile.open(archive, "r:gz") as tf:
+            tf.extractall(extract_dir)
+        new_bin = Path(_find_rootd_binary(str(extract_dir)))
+        backup = current_exe.with_name(current_exe.name + f".bak.{BUILD_VERSION}")
+        shutil.copy2(current_exe, backup)
+        shutil.copy2(new_bin, current_exe)
+        current_exe.chmod(0o755)
+    log.info("rootd auto-update installed build %s over %s, backup=%s", latest, BUILD_VERSION, backup)
+    subprocess.Popen(["/bin/sh", "-c", f"sleep 1; systemctl restart {ROOTD_SERVICE_NAME}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "updated": True, "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
+
+
+@app.post("/update/check", dependencies=[Depends(guard)])
+def update_check():
+    return rootd_update_once()
+
+
+def auto_update_loop():
+    if not ROOTD_AUTO_UPDATE:
+        return
+    while True:
+        try:
+            res = rootd_update_once()
+            log.info("auto_update: %s", res)
+        except Exception as e:
+            log.warning("auto_update failed: %s", e)
+        time.sleep(ROOTD_UPDATE_INTERVAL_S)
+
+
+if ROOTD_AUTO_UPDATE:
+    threading.Thread(target=auto_update_loop, daemon=True).start()
 
 
 @app.get("/file")
