@@ -3,7 +3,7 @@
   "info": {
     "title": "GPTAdmin Hub API",
     "version": "2.2.0",
-    "description": "Manage servers through GPTAdmin hub. Pending servers are shown by listServers and can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
+    "description": "Manage servers through GPTAdmin hub. listServers intentionally omits tokens and raw public keys; it returns server_id and fingerprint only. Pending servers are shown by listServers and can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
   },
   "servers": [
     {

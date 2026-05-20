@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Hub-прокси: принимает heartbeat'ы, держит карту <name → (base_url, rootd_token)>,
+Hub-прокси: принимает heartbeat'ы, держит карту <name → (base_url, signed identity)>,
             а все клиентские вызовы /srv/{path}?server=name проксирует к нужному rootd.
 
 ENV:
@@ -166,7 +166,7 @@ HUB_PUBLIC_KEY_FILE_ED25519.write_text(HUB_PUBLIC_KEY_B64 + "\n")
 os.chmod(HUB_PUBLIC_KEY_FILE_ED25519, 0o644)
 SIGNATURE_NONCES = NonceCache(ttl_s=int(os.getenv("GPTADMIN_NONCE_TTL_S", "300")))
 
-# ------ память: name → dict(base_url, rootd_token, last_seen, meta…) ----------
+# ------ память: name → dict(base_url, signed identity, last_seen, meta…) ----------
 servers: Dict[str, Dict[str, Any]] = {}
 approved_servers: Dict[str, Dict[str, Any]] = {}
 pending_servers: Dict[str, Dict[str, Any]] = {}
@@ -217,8 +217,9 @@ def _server_fingerprint(d: Dict[str, Any]) -> str:
 
 def _sanitize_server(d: Dict[str, Any]) -> Dict[str, Any]:
     safe = dict(d)
-    if "rootd_token" in safe:
-        safe["rootd_token"] = None
+    # Never expose secrets or raw identity keys via server registry API.
+    safe.pop("rootd_token", None)
+    safe.pop("public_key", None)
     return safe
 
 
@@ -575,17 +576,17 @@ def list_servers(include_pending: bool = True):
     for n, d in servers.items():
         alive = (now - d["time"]) < DEAD_S
         lag = round(now - d["time"])
-        safe = {**d, "status": "active", "alive": alive, "lag_s": lag, "rootd_token": None}
+        safe = _sanitize_server({**d, "status": "active", "alive": alive, "lag_s": lag})
         out.append(safe)
     if include_pending:
         for n, rec in pending_servers.items():
             payload = rec.get("payload", {}) or {}
-            safe = {**payload, "status": "pending", "alive": False, "lag_s": None, "rootd_token": None,
+            safe = _sanitize_server({**payload, "status": "pending", "alive": False, "lag_s": None,
                     "pending_reason": rec.get("reason"), "requested_at": rec.get("requested_at"),
                     "updated_at": rec.get("updated_at"), "fingerprint": rec.get("fingerprint"),
                     "approve_command": f"gptadmin_pending approve {shlex.quote(n)}",
                     "reject_command": f"gptadmin_pending reject {shlex.quote(n)}",
-                    "how_to_approve": f"Run via any active server: gptadmin_pending approve {shlex.quote(n)}"}
+                    "how_to_approve": f"Run via any active server: gptadmin_pending approve {shlex.quote(n)}"})
             out.append(safe)
     log.info("servers: list active=%s pending=%s rid=%s", len(servers), len(pending_servers), rid())
     return {"servers": out, "pending": list(pending_servers.values())}
