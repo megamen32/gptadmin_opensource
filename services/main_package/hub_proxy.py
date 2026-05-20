@@ -577,6 +577,8 @@ def list_servers(include_pending: bool = True):
         alive = (now - d["time"]) < DEAD_S
         lag = round(now - d["time"])
         safe = _sanitize_server({**d, "status": "active", "alive": alive, "lag_s": lag})
+        # Fingerprint is useful for pending/takeover approval, but noisy for active servers.
+        safe.pop("fingerprint", None)
         out.append(safe)
     if include_pending:
         for n, rec in pending_servers.items():

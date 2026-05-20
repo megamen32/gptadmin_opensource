@@ -3,7 +3,7 @@
   "info": {
     "title": "GPTAdmin Hub API",
     "version": "2.2.0",
-    "description": "Manage servers through GPTAdmin hub. listServers intentionally omits tokens and raw public keys; it returns server_id and fingerprint only. Pending servers are shown by listServers and can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
+    "description": "Manage servers through GPTAdmin hub. listServers intentionally omits tokens and raw public keys; active servers omit fingerprint to reduce context, while pending servers keep fingerprint for approval/takeover review. OS information is returned so the assistant can distinguish Windows, macOS, Ubuntu, and other Linux hosts. Pending servers can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
   },
   "servers": [
     {
@@ -336,6 +336,20 @@
               "null"
             ],
             "description": "Only present for pending servers. Run with execOnServer on any active server."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present for pending servers; omitted for active servers to reduce context."
+          },
+          "os": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operating system/platform string, e.g. Windows, macOS, Ubuntu, or other Linux."
           }
         },
         "required": [
