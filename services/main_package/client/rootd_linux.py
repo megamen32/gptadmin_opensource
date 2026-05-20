@@ -240,10 +240,34 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
     return generator
 
 
+def _read_os_release() -> dict:
+    data = {}
+    try:
+        for line in Path("/etc/os-release").read_text(errors="ignore").splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value.strip().strip('"')
+    except Exception:
+        pass
+    return data
+
+
+def _pretty_platform() -> str:
+    rel = _read_os_release()
+    name = rel.get("PRETTY_NAME") or rel.get("NAME") or platform.system()
+    os_id = rel.get("ID")
+    kernel = platform.release()
+    arch = platform.machine()
+    if os_id and os_id.lower() not in name.lower():
+        return f"{name} ({os_id}) kernel={kernel} arch={arch}"
+    return f"{name} kernel={kernel} arch={arch}"
+
+
 def info():
     return {
         "host": socket.gethostname(),
-        "platform": platform.platform(),
+        "platform": _pretty_platform(),
         "cores": psutil.cpu_count(),
         "mem_mb": round(psutil.virtual_memory().total / 2**20),
         "uptime_s": round(time.time() - psutil.boot_time()),

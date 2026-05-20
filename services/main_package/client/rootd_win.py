@@ -56,10 +56,14 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
     return generator
 
 
+def _pretty_platform() -> str:
+    return f"{platform.system()} {platform.release()} {platform.version()} arch={platform.machine()}"
+
+
 def info():
     return {
         "host": socket.gethostname(),
-        "platform": platform.platform(),
+        "platform": _pretty_platform(),
         "cores": psutil.cpu_count(),
         "mem_mb": round(psutil.virtual_memory().total / 2**20),
         "uptime_s": round(time.time() - psutil.boot_time()),
