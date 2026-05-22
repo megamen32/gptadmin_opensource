@@ -217,6 +217,7 @@ ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
+[[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_mac"
 ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=pyarmor_runtime"
 echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
@@ -225,6 +226,7 @@ echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_SRC+=(services/main_package/client/rootd_linux.py)
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_win.py)
+[[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_mac.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
 
 HUB_SRC=(services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)

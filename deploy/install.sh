@@ -25,7 +25,12 @@ fi
 
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
   export ROOTD_DEFAULT_USER="${ROOTD_DEFAULT_USER:-$SUDO_USER}"
-  export ROOTD_DEFAULT_HOME="${ROOTD_DEFAULT_HOME:-$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
+  if command -v getent >/dev/null 2>&1; then
+    _home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  else
+    _home="$(eval echo ~"$SUDO_USER")"
+  fi
+  export ROOTD_DEFAULT_HOME="${ROOTD_DEFAULT_HOME:-$_home}"
 fi
 
 mkdir -p "$INSTALL_DIR"

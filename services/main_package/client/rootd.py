@@ -162,6 +162,8 @@ if os.getenv("SSH_HOST"):
     import rootd_ssh as backend
 elif sys.platform.startswith("win"):
     import rootd_win as backend
+elif sys.platform == "darwin":
+    import rootd_mac as backend
 else:
     import rootd_linux as backend
 

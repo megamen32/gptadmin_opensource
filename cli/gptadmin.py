@@ -13,36 +13,50 @@ import re
 import secrets
 from pathlib import Path
 
+# ===== Platform =====
+IS_MACOS = sys.platform == 'darwin'
+
 # ===== Paths & constants =====
 INSTALL_DIR = Path('/opt/gptadmin')
 BIN_DIR = INSTALL_DIR / 'bin'
 ETC_DIR = Path('/etc/gptadmin')
 ETC_DIR.mkdir(parents=True, exist_ok=True)
 ENV_FILE = ETC_DIR / 'gptadmin.env'
-FRPC_CONF = ETC_DIR / 'frpc.toml'
 CLI_PATH = Path('/usr/local/bin/gptadmin')  # для uninstall
 
-SYSTEMD_DIR = Path('/etc/systemd/system')
-SYSTEMD_HUB = 'gptadmin-hub.service'
-SYSTEMD_ROOTD = 'gptadmin-rootd.service'
-SYSTEMD_FRPC = 'gptadmin-frpc.service'
-UNIT_PATH_HUB = SYSTEMD_DIR / SYSTEMD_HUB
-UNIT_PATH_ROOTD = SYSTEMD_DIR / SYSTEMD_ROOTD
-UNIT_PATH_FRPC = SYSTEMD_DIR / SYSTEMD_FRPC
+if IS_MACOS:
+    SERVICES_DIR = Path('/Library/LaunchDaemons')
+    LOG_DIR = Path('/var/log/gptadmin')
+    SVC_HUB_LABEL   = 'com.gptadmin.hub'
+    SVC_ROOTD_LABEL = 'com.gptadmin.rootd'
+    SVC_FRPC_LABEL  = 'com.gptadmin.frpc'
+    UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
+    UNIT_PATH_ROOTD = SERVICES_DIR / f'{SVC_ROOTD_LABEL}.plist'
+    UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
+    FRPC_CONF = ETC_DIR / 'frpc.toml'
+else:
+    SYSTEMD_DIR = Path('/etc/systemd/system')
+    SYSTEMD_HUB   = 'gptadmin-hub.service'
+    SYSTEMD_ROOTD = 'gptadmin-rootd.service'
+    SYSTEMD_FRPC  = 'gptadmin-frpc.service'
+    UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
+    UNIT_PATH_ROOTD = SYSTEMD_DIR / SYSTEMD_ROOTD
+    UNIT_PATH_FRPC  = SYSTEMD_DIR / SYSTEMD_FRPC
+    FRPC_CONF = ETC_DIR / 'frpc.toml'
 
 # Package URLs can be overridden by env or args
-PKG_ALL_URL_DEFAULT = os.environ.get('PKG_ALL_URL', 'https://became.bezrabotnyi.com/gptadmin.tar.gz')
-PKG_HUB_URL_DEFAULT = os.environ.get('PKG_HUB_URL', 'https://became.bezrabotnyi.com/gptadmin-hub.tar.gz')
+PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   'https://became.bezrabotnyi.com/gptadmin.tar.gz')
+PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   'https://became.bezrabotnyi.com/gptadmin-hub.tar.gz')
 PKG_ROOTD_URL_DEFAULT = os.environ.get('PKG_ROOTD_URL', 'https://became.bezrabotnyi.com/gptadmin-rootd.tar.gz')
 
-REQUIRED_CMDS = ['curl', 'systemctl']
+REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
 # ===== FRPC defaults =====
-FRPC_VERSION = os.environ.get('FRPC_VERSION', '0.64.0')
+FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
 FRPC_SERVER_ADDR_DEFAULT = 't.gptadmin.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
-FRPC_TOKEN_DEFAULT = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
-FRPC_DOMAIN_DEFAULT = FRPC_SERVER_ADDR_DEFAULT
+FRPC_TOKEN_DEFAULT    = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
+FRPC_DOMAIN_DEFAULT   = FRPC_SERVER_ADDR_DEFAULT
 
 # ===== Helpers =====
 
@@ -94,7 +108,6 @@ def gen_hex(nbytes=16) -> str:
         return out.stdout.strip()
 
 def gen_subdomain() -> str:
-    # u-<8 hex>, например u-2c3b2e4f
     return f"u-{gen_hex(4)}"
 
 # network
@@ -110,7 +123,7 @@ def first_ip() -> str:
         pass
     return '127.0.0.1'
 
-# http(s) URL validator (very light)
+# http(s) URL validator
 HTTPS_RE = re.compile(r'^https://[A-Za-z0-9._\-]+(:\d+)?(/.*)?$')
 
 def ensure_https(url: str):
@@ -129,10 +142,6 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 # package install
 
 def install_component_from_pkg(pkg_tgz: Path, component: str):
-    """
-    component: 'hub' | 'rootd'
-    Accepts structures: hub_proxy/dist/hub_proxy or build/hub_proxy/dist/hub_proxy (same for rootd).
-    """
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
@@ -148,8 +157,115 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
                 return
         die(f'{component} binary not found in package')
 
-# systemd units
-UNIT_HUB = f"""
+# ===== Service management =====
+
+if IS_MACOS:
+    def _plist_path(label: str) -> Path:
+        return SERVICES_DIR / f'{label}.plist'
+
+    def _wrapper_script(name: str, bin_path: Path) -> Path:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        script = BIN_DIR / f'run_{name}.sh'
+        script.write_text(
+            f'#!/bin/sh\n'
+            f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
+            f'exec {bin_path}\n'
+        )
+        os.chmod(script, 0o755)
+        return script
+
+    def _make_plist(label: str, wrapper: Path, log_file: Path) -> str:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+            ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            f'    <key>Label</key><string>{label}</string>\n'
+            '    <key>ProgramArguments</key><array>\n'
+            '        <string>/bin/sh</string>\n'
+            f'        <string>{wrapper}</string>\n'
+            '    </array>\n'
+            '    <key>RunAtLoad</key><true/>\n'
+            '    <key>KeepAlive</key><true/>\n'
+            f'    <key>StandardOutPath</key><string>{log_file}</string>\n'
+            f'    <key>StandardErrorPath</key><string>{log_file}</string>\n'
+            '</dict></plist>\n'
+        )
+
+    def svc_daemon_reload():
+        pass  # launchd has no daemon-reload
+
+    def svc_enable_start(_label: str, unit_path: Path):
+        run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+
+    def svc_restart(_label: str, unit_path: Path):
+        run(['launchctl', 'unload', str(unit_path)], check=False)
+        run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+
+    def svc_disable_stop(_label: str, unit_path: Path):
+        run(['launchctl', 'unload', '-w', str(unit_path)], check=False)
+
+    def svc_status_multi(labels_and_paths):
+        for label, path in labels_and_paths:
+            if path.exists():
+                run(['launchctl', 'list', label], check=False)
+
+    def svc_start_multi(labels_and_paths):
+        for _label, path in labels_and_paths:
+            if path.exists():
+                run(['launchctl', 'load', '-w', str(path)], check=False)
+
+    def svc_stop_multi(labels_and_paths):
+        for _label, path in reversed(labels_and_paths):
+            if path.exists():
+                run(['launchctl', 'unload', str(path)], check=False)
+
+    def svc_logs_one(_label: str, log_file: Path):
+        if log_file.exists():
+            run(['tail', '-n', '200', '-f', str(log_file)], check=False)
+        else:
+            print(f'Лог-файл не найден: {log_file}')
+
+    def svc_logs_all(labels_paths_logs):
+        for _, _, log_file in labels_paths_logs:
+            if log_file and log_file.exists():
+                run(['tail', '-n', '200', '-f', str(log_file)], check=False)
+
+    def write_hub_unit(install_hub: bool, _install_rootd: bool):
+        if not install_hub:
+            return
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = _wrapper_script('hub', BIN_DIR / 'hub_proxy')
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_HUB.write_text(_make_plist(SVC_HUB_LABEL, wrapper, LOG_DIR / 'hub.log'))
+
+    def write_rootd_unit(_install_hub: bool, install_rootd: bool):
+        if not install_rootd:
+            return
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = _wrapper_script('rootd', BIN_DIR / 'rootd')
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_ROOTD.write_text(_make_plist(SVC_ROOTD_LABEL, wrapper, LOG_DIR / 'rootd.log'))
+
+    def write_frpc_unit(frpc_bin: str):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = BIN_DIR / 'run_frpc.sh'
+        wrapper.write_text(
+            f'#!/bin/sh\n'
+            f'exec {frpc_bin} -c {FRPC_CONF}\n'
+        )
+        os.chmod(wrapper, 0o755)
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_FRPC.write_text(_make_plist(SVC_FRPC_LABEL, wrapper, LOG_DIR / 'frpc.log'))
+
+    def svc_hub_name():  return SVC_HUB_LABEL
+    def svc_rootd_name(): return SVC_ROOTD_LABEL
+    def svc_frpc_name():  return SVC_FRPC_LABEL
+
+else:
+    # Linux systemd
+
+    UNIT_HUB = f"""
 [Unit]
 Description=GPTAdmin Hub Proxy
 After=network-online.target
@@ -158,7 +274,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile={ENV_FILE}
-# hub_proxy читает CTL_TOKEN, HUB_BIND, HUB_PORT
 ExecStart={BIN_DIR}/hub_proxy
 Restart=always
 RestartSec=3
@@ -171,7 +286,7 @@ ProtectHome=true
 WantedBy=multi-user.target
 """
 
-UNIT_ROOTD = f"""
+    UNIT_ROOTD = f"""
 [Unit]
 Description=GPTAdmin rootd Agent
 After=network-online.target
@@ -180,7 +295,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile={ENV_FILE}
-# rootd читает ROOTD_TOKEN; HUB_URL — адрес хаба для heartbeat
 ExecStart={BIN_DIR}/rootd
 Restart=always
 RestartSec=3
@@ -193,7 +307,7 @@ ProtectHome=true
 WantedBy=multi-user.target
 """
 
-FRPC_UNIT_TPL = """[Unit]
+    FRPC_UNIT_TPL = """[Unit]
 Description=FRP client for GPTAdmin
 After=network-online.target gptadmin-hub.service
 Wants=network-online.target
@@ -212,6 +326,60 @@ ProtectHome=true
 WantedBy=multi-user.target
 """
 
+    def svc_daemon_reload():
+        run(['systemctl', 'daemon-reload'])
+
+    def svc_enable_start(name: str, _unit_path: Path):
+        run(['systemctl', 'enable', name])
+        run(['systemctl', 'restart', name])
+
+    def svc_restart(name: str, _unit_path: Path):
+        run(['systemctl', 'restart', name])
+
+    def svc_disable_stop(name: str, _unit_path: Path):
+        run(['systemctl', 'disable', '--now', name], check=False)
+
+    def svc_status_multi(names_and_paths):
+        names = [n for n, p in names_and_paths if p.exists()]
+        if names:
+            run(['systemctl', '--no-pager', 'status', *names], check=False)
+
+    def svc_start_multi(names_and_paths):
+        names = [n for n, p in names_and_paths if p.exists()]
+        if names:
+            run(['systemctl', 'start', *names])
+
+    def svc_stop_multi(names_and_paths):
+        names = [n for n, p in reversed(names_and_paths) if p.exists()]
+        if names:
+            run(['systemctl', 'stop', *names])
+
+    def svc_logs_one(name: str, _log_file=None):
+        run(['journalctl', '-u', name, '-e', '-n', '200', '-f'], check=False)
+
+    def svc_logs_all(names_paths_logs):
+        names = [n for n, p, _ in names_paths_logs if p.exists()]
+        if names:
+            run(['journalctl', *sum([['-u', u] for u in names], []), '-e', '-n', '200', '-f'], check=False)
+        else:
+            print('Журналы пусты: сервисы не установлены.')
+
+    def write_hub_unit(install_hub: bool, _install_rootd: bool):
+        if install_hub:
+            UNIT_PATH_HUB.write_text(UNIT_HUB)
+
+    def write_rootd_unit(_install_hub: bool, install_rootd: bool):
+        if install_rootd:
+            UNIT_PATH_ROOTD.write_text(UNIT_ROOTD)
+
+    def write_frpc_unit(frpc_bin: str):
+        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
+
+    def svc_hub_name():   return SYSTEMD_HUB
+    def svc_rootd_name(): return SYSTEMD_ROOTD
+    def svc_frpc_name():  return SYSTEMD_FRPC
+
+
 # ===== FRP helpers =====
 
 def detect_arch() -> str:
@@ -225,15 +393,13 @@ def detect_arch() -> str:
     die(f'Unsupported arch: {m} (expected x86_64/arm64/armv7)')
 
 def ensure_frpc_installed() -> str:
-    """
-    Return full path to frpc. If not found, download v{FRPC_VERSION} for current arch to BIN_DIR.
-    """
     existing = shutil.which('frpc')
     if existing:
         return existing
 
     arch = detect_arch()
-    tarname = f"frp_{FRPC_VERSION}_linux_{arch}.tar.gz"
+    os_name = 'darwin' if IS_MACOS else 'linux'
+    tarname = f"frp_{FRPC_VERSION}_{os_name}_{arch}.tar.gz"
     url = f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/{tarname}"
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -242,7 +408,7 @@ def ensure_frpc_installed() -> str:
         pkg = tdp / tarname
         download(url, pkg)
         extract_tgz(pkg, tdp)
-        frpc_src = tdp / f"frp_{FRPC_VERSION}_linux_{arch}" / "frpc"
+        frpc_src = tdp / f"frp_{FRPC_VERSION}_{os_name}_{arch}" / "frpc"
         if not frpc_src.exists():
             die('frpc binary not found in downloaded archive')
         frpc_dst = BIN_DIR / "frpc"
@@ -296,20 +462,17 @@ def setup_interactive(args):
 
     env = env_read()
 
-    # tokens (only (re)generate if absent)
     env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('ROOTD_TOKEN', gen_hex())
     rootd_default_uid = os.environ.get('ROOTD_DEFAULT_UID')
     if rootd_default_uid and rootd_default_uid.isdigit() and rootd_default_uid != '0':
         env.setdefault('ROOTD_DEFAULT_UID', rootd_default_uid)
 
-    # defaults
-    env['HUB_BIND'] = '127.0.0.1'  # всегда локально
+    env['HUB_BIND'] = '127.0.0.1'
     env.setdefault('HUB_PORT', '9001')
     env.setdefault('ROOTD_BIND', '127.0.0.1')
     env.setdefault('ROOTD_PORT', '25900')
 
-    # ---------- Choose external access mode ----------
     if install_hub:
         print('\nДоступ к хабу из Интернета:')
         print('  1) Авто-туннель через наш FRP (без вашего домена). Быстрый старт.')
@@ -318,7 +481,6 @@ def setup_interactive(args):
         mode = ask('Ваш выбор', '1')
 
         if mode == '1':
-            # Включаем FRP
             env['FRP_ENABLE'] = 'true'
             env['FRP_SERVER_ADDR'] = FRPC_SERVER_ADDR_DEFAULT
             env['FRP_SERVER_PORT'] = FRPC_SERVER_PORT_DEFAULT
@@ -326,33 +488,28 @@ def setup_interactive(args):
             env['FRP_SUBDOMAIN'] = gen_subdomain()
             env['FRP_TOKEN'] = FRPC_TOKEN_DEFAULT
             env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
-            # Если ставим rootd на этой же машине — пусть стучится на внешний URL
             if install_rootd:
                 env['HUB_URL'] = env['HUB_PUBLIC_URL']
         else:
-            # Ручной режим (reverse-proxy), FRP не ставим вовсе
             url = ask('Введите публичный HTTPS URL хаба (например, https://gptadmin.example.com)')
             ensure_https(url)
             env['FRP_ENABLE'] = 'false'
             env['HUB_PUBLIC_URL'] = url
-            env['HUB_URL'] = url  # чтобы rootd (если есть) знал, куда коннектиться
+            env['HUB_URL'] = url
     else:
-        # Ставим только rootd — спросим HUB_URL
         print('\nУстановка только rootd.')
         url = ask('Введите HUB_URL (публичный HTTPS адрес вашего хаба, например, https://gptadmin.example.com)')
         ensure_https(url)
         env['FRP_ENABLE'] = 'false'
         env['HUB_URL'] = url
 
-    # persist config (and remember components)
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_ROOTD'] = 'true' if install_rootd else 'false'
     env_set_many(env)
 
-    # download and install components
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    pkg_all = args.pkg_all or PKG_ALL_URL_DEFAULT
-    pkg_hub = args.pkg_hub or PKG_HUB_URL_DEFAULT
+    pkg_all   = args.pkg_all   or PKG_ALL_URL_DEFAULT
+    pkg_hub   = args.pkg_hub   or PKG_HUB_URL_DEFAULT
     pkg_rootd = args.pkg_rootd or PKG_ROOTD_URL_DEFAULT
 
     with tempfile.TemporaryDirectory() as td:
@@ -382,31 +539,22 @@ def setup_interactive(args):
                 download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'rootd')
 
-    # write units
-    if install_hub:
-        UNIT_PATH_HUB.write_text(UNIT_HUB)
-    if install_rootd:
-        UNIT_PATH_ROOTD.write_text(UNIT_ROOTD)
+    write_hub_unit(install_hub, install_rootd)
+    write_rootd_unit(install_hub, install_rootd)
 
-    # ----- FRP install & unit (only if enabled) -----
     if env.get('FRP_ENABLE', 'false') == 'true':
         frpc_bin = ensure_frpc_installed()
         write_frpc_conf(env)
-        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
+        write_frpc_unit(frpc_bin)
 
-    # enable + restart
-    run(['systemctl', 'daemon-reload'])
+    svc_daemon_reload()
     if install_hub:
-        run(['systemctl', 'enable', SYSTEMD_HUB])
-        run(['systemctl', 'restart', SYSTEMD_HUB])
+        svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
     if install_rootd:
-        run(['systemctl', 'enable', SYSTEMD_ROOTD])
-        run(['systemctl', 'restart', SYSTEMD_ROOTD])
+        svc_enable_start(svc_rootd_name(), UNIT_PATH_ROOTD)
     if env.get('FRP_ENABLE', 'false') == 'true':
-        run(['systemctl', 'enable', SYSTEMD_FRPC])
-        run(['systemctl', 'restart', SYSTEMD_FRPC])
+        svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
 
-    # summary (only CTL_TOKEN is shown)
     env = env_read()
     print('\n=== Готово ===')
     if install_hub:
@@ -414,18 +562,16 @@ def setup_interactive(args):
         print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
     if install_rootd and not install_hub:
         print(f"HUB_URL для rootd: {env.get('HUB_URL', '—')}")
-    
     if install_rootd:
         print('rootd установлен.')
-    if env.get('FRP_ENABLE', 'false') == 'true':
-        #print(f"FRP subdomain: {env['FRP_SUBDOMAIN']}")
-        #print("Сервис туннеля: gptadmin-frpc")
-        pass
-    print("Сервисы: " + ", ".join([n for n, p in [
-        ('gptadmin-hub', UNIT_PATH_HUB),
-        ('gptadmin-rootd', UNIT_PATH_ROOTD),
-        ('gptadmin-frpc', UNIT_PATH_FRPC if env.get('FRP_ENABLE','false')=='true' else None)
-    ] if p and p.exists()]))
+
+    installed = [n for n, p in [
+        ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
+        ('gptadmin-rootd' if not IS_MACOS else SVC_ROOTD_LABEL, UNIT_PATH_ROOTD),
+        ('gptadmin-frpc' if not IS_MACOS else SVC_FRPC_LABEL,
+         UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None)
+    ] if p and Path(p).exists()]
+    print("Сервисы: " + ", ".join(installed))
 
     if install_hub:
         print(f'''
@@ -445,9 +591,9 @@ def setup_interactive(args):
 
 def installed_units():
     res = []
-    if UNIT_PATH_HUB.exists(): res.append(SYSTEMD_HUB)
-    if UNIT_PATH_ROOTD.exists(): res.append(SYSTEMD_ROOTD)
-    if UNIT_PATH_FRPC.exists(): res.append(SYSTEMD_FRPC)
+    if UNIT_PATH_HUB.exists():   res.append((svc_hub_name(),   UNIT_PATH_HUB))
+    if UNIT_PATH_ROOTD.exists(): res.append((svc_rootd_name(), UNIT_PATH_ROOTD))
+    if UNIT_PATH_FRPC.exists():  res.append((svc_frpc_name(),  UNIT_PATH_FRPC))
     return res
 
 def cmd_status(_):
@@ -455,44 +601,60 @@ def cmd_status(_):
     if not units:
         print('Нет установленных сервисов. Запусти: gptadmin setup')
         return
-    run(['systemctl','--no-pager','status', *units], check=False)
+    svc_status_multi(units)
 
 def cmd_start(_):
-    need_root(); units = installed_units()
-    if units: run(['systemctl','start', *units])
+    need_root()
+    svc_start_multi(installed_units())
 
 def cmd_stop(_):
-    need_root(); units = installed_units()[::-1]
-    if units: run(['systemctl','stop', *units])
+    need_root()
+    svc_stop_multi(installed_units())
 
 def cmd_restart(_):
-    need_root(); units = installed_units()
-    if units: run(['systemctl','restart', *units])
+    need_root()
+    for name, path in installed_units():
+        svc_restart(name, path)
 
 def cmd_enable(_):
-    need_root(); units = installed_units()
-    if units: run(['systemctl','enable', *units])
+    need_root()
+    for name, path in installed_units():
+        svc_enable_start(name, path)
 
 def cmd_disable(_):
-    need_root(); units = installed_units()
-    if units: run(['systemctl','disable', *units])
+    need_root()
+    for name, path in installed_units():
+        svc_disable_stop(name, path)
+
+def _log_file(label: str) -> Path:
+    if IS_MACOS:
+        return LOG_DIR / f'{label.split(".")[-1]}.log'
+    return None  # journalctl handles it on Linux
 
 def cmd_logs(args):
     svc = args.service
-    name = {
-        'hub': SYSTEMD_HUB,
-        'rootd': SYSTEMD_ROOTD,
-        'frpc': SYSTEMD_FRPC,
-        'all': None
-    }[svc]
-    if name:
-        run(['journalctl','-u', name, '-e', '-n', '200', '-f'], check=False)
-    else:
-        units = installed_units()
-        if units:
-            run(['journalctl', *sum([['-u', u] for u in units], []), '-e', '-n', '200', '-f'], check=False)
+    if IS_MACOS:
+        mapping = {
+            'hub':   (SVC_HUB_LABEL,   UNIT_PATH_HUB,   _log_file(SVC_HUB_LABEL)),
+            'rootd': (SVC_ROOTD_LABEL, UNIT_PATH_ROOTD, _log_file(SVC_ROOTD_LABEL)),
+            'frpc':  (SVC_FRPC_LABEL,  UNIT_PATH_FRPC,  _log_file(SVC_FRPC_LABEL)),
+        }
+        if svc == 'all':
+            svc_logs_all(list(mapping.values()))
         else:
-            print('Журналы пусты: сервисы не установлены.')
+            label, path, log_file = mapping[svc]
+            svc_logs_one(label, log_file)
+    else:
+        name_map = {
+            'hub':   SYSTEMD_HUB,
+            'rootd': SYSTEMD_ROOTD,
+            'frpc':  SYSTEMD_FRPC,
+        }
+        if svc == 'all':
+            units = installed_units()
+            svc_logs_all([(n, p, None) for n, p in units])
+        else:
+            svc_logs_one(name_map[svc])
 
 def cmd_tokens(_):
     env = env_read()
@@ -505,53 +667,53 @@ def cmd_rotate(args):
     if which == 'hub':
         env_set_many({'CTL_TOKEN': newtok})
         if UNIT_PATH_HUB.exists():
-            run(['systemctl','restart', SYSTEMD_HUB])
+            svc_restart(svc_hub_name(), UNIT_PATH_HUB)
         print(f'New hub CTL_TOKEN: {newtok}')
     else:
         env_set_many({'ROOTD_TOKEN': newtok})
         if UNIT_PATH_ROOTD.exists():
-            run(['systemctl','restart', SYSTEMD_ROOTD])
+            svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
         print('rootd token rotated (значение не выводится).')
 
 def cmd_port(args):
-    # меняем локальный порт хаба; FRP перегенерим и перезапустим при необходимости
     need_root()
     port = str(args.port)
     env = env_read()
     env['HUB_PORT'] = port
     env_set_many(env)
     if UNIT_PATH_HUB.exists():
-        run(['systemctl','restart', SYSTEMD_HUB])
-    if UNIT_PATH_FRPC.exists() and env.get('FRP_ENABLE','false') == 'true':
+        svc_restart(svc_hub_name(), UNIT_PATH_HUB)
+    if UNIT_PATH_FRPC.exists() and env.get('FRP_ENABLE', 'false') == 'true':
         write_frpc_conf(env)
-        run(['systemctl','restart', SYSTEMD_FRPC])
+        svc_restart(svc_frpc_name(), UNIT_PATH_FRPC)
     print(f'Локальный порт хаба изменён на {port}.')
 
 def cmd_seturl(args):
-    # вручную задать публичный URL (если используешь внешний реверс-прокси)
     need_root()
     url = args.url
     ensure_https(url)
     env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false'})
     if UNIT_PATH_ROOTD.exists():
-        run(['systemctl','restart', SYSTEMD_ROOTD], check=False)
+        svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
     if UNIT_PATH_FRPC.exists():
-        run(['systemctl','disable','--now', SYSTEMD_FRPC], check=False)
+        svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
     print(f'HUB_PUBLIC_URL/HUB_URL = {url}; FRP отключён.')
 
 # FRP subcommands
 
 def cmd_tunnel_status(_):
     if UNIT_PATH_FRPC.exists():
-        run(['systemctl','--no-pager','status', SYSTEMD_FRPC], check=False)
+        svc_status_multi([(svc_frpc_name(), UNIT_PATH_FRPC)])
     else:
         print('FRP не сконфигурирован. Запусти: gptadmin setup')
 
 def cmd_tunnel_logs(_):
-    run(['journalctl','-u', SYSTEMD_FRPC, '-e', '-n', '200', '-f'], check=False)
+    if IS_MACOS:
+        svc_logs_one(SVC_FRPC_LABEL, _log_file(SVC_FRPC_LABEL))
+    else:
+        run(['journalctl', '-u', SYSTEMD_FRPC, '-e', '-n', '200', '-f'], check=False)
 
 def cmd_tunnel_enable(args):
-    # Делает FRP включённым, подставляя дефолты, если их нет
     need_root()
     env = env_read()
     env['FRP_ENABLE'] = 'true'
@@ -565,10 +727,9 @@ def cmd_tunnel_enable(args):
 
     frpc_bin = ensure_frpc_installed()
     write_frpc_conf(env)
-    UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
-    run(['systemctl','daemon-reload'])
-    run(['systemctl','enable', SYSTEMD_FRPC])
-    run(['systemctl','restart', SYSTEMD_FRPC])
+    write_frpc_unit(frpc_bin)
+    svc_daemon_reload()
+    svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
 
     env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
     env['HUB_URL'] = env['HUB_PUBLIC_URL']
@@ -579,7 +740,7 @@ def cmd_tunnel_enable(args):
 
 def cmd_tunnel_disable(_):
     need_root()
-    run(['systemctl','disable','--now', SYSTEMD_FRPC], check=False)
+    svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
     env = env_read(); env['FRP_ENABLE'] = 'false'; env_set_many(env)
     print('FRP tunnel disabled.')
 
@@ -596,16 +757,13 @@ def safe_rm(p: Path):
 
 def cmd_uninstall(args):
     need_root()
-    # stop & disable services
-    for name in (SYSTEMD_FRPC, SYSTEMD_ROOTD, SYSTEMD_HUB):
-        run(['systemctl','disable','--now', name], check=False)
-    # remove unit files
-    for p in (UNIT_PATH_FRPC, UNIT_PATH_ROOTD, UNIT_PATH_HUB):
-        safe_rm(p)
-    run(['systemctl','daemon-reload'], check=False)
+    for name, path in [(svc_frpc_name(), UNIT_PATH_FRPC),
+                       (svc_rootd_name(), UNIT_PATH_ROOTD),
+                       (svc_hub_name(), UNIT_PATH_HUB)]:
+        svc_disable_stop(name, path)
+        safe_rm(path)
+    svc_daemon_reload()
 
-    # remove our files
-    # удаляем наш локальный frpc (не системный в PATH вне /opt/gptadmin/bin)
     local_frpc = BIN_DIR / 'frpc'
     if local_frpc.exists():
         safe_rm(local_frpc)
@@ -613,11 +771,9 @@ def cmd_uninstall(args):
     safe_rm(INSTALL_DIR)
     safe_rm(ETC_DIR)
 
-    # попробовать удалить сам CLI
     removed_cli = False
     if CLI_PATH.exists():
         try:
-            # удаление файла CLI не мешает текущему процессу
             CLI_PATH.unlink()
             removed_cli = True
         except Exception as e:
@@ -633,14 +789,12 @@ def main():
     ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (FRP auto or reverse-proxy)')
     sub = ap.add_subparsers(dest='cmd')
 
-    # setup (interactive)
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-rootd')
     ap_setup.set_defaults(func=setup_interactive)
 
-    # basic ops
     sub.add_parser('status').set_defaults(func=cmd_status)
     sub.add_parser('start').set_defaults(func=cmd_start)
     sub.add_parser('stop').set_defaults(func=cmd_stop)
@@ -649,16 +803,16 @@ def main():
     sub.add_parser('disable').set_defaults(func=cmd_disable)
 
     ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все)')
-    ap_logs.add_argument('service', nargs='?', default='all', choices=['hub','rootd','frpc','all'])
+    ap_logs.add_argument('service', nargs='?', default='all', choices=['hub', 'rootd', 'frpc', 'all'])
     ap_logs.set_defaults(func=cmd_logs)
 
     sub.add_parser('tokens').set_defaults(func=cmd_tokens)
 
     ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или rootd')
-    ap_rot.add_argument('which', choices=['hub','rootd'])
+    ap_rot.add_argument('which', choices=['hub', 'rootd'])
     ap_rot.set_defaults(func=cmd_rotate)
 
-    ap_port = sub.add_parser('port', help='Сменить локальный порт хаба (повлияет на FRP localPort)')
+    ap_port = sub.add_parser('port', help='Сменить локальный порт хаба')
     ap_port.add_argument('port', type=int)
     ap_port.set_defaults(func=cmd_port)
 
