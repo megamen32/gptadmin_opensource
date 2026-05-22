@@ -266,6 +266,7 @@ if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
   pyinstaller "services/main_package/client/rootd.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
+    --specpath "$ART_DIR/rootd" \
     "${COLLECT_FLAGS[@]}" \
     $ROOTD_HIDDEN_FLAGS \
     --distpath "$ART_DIR/rootd/dist" \
@@ -280,6 +281,7 @@ if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   pyinstaller "services/main_package/hub_proxy.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
+    --specpath "$ART_DIR/hub_proxy" \
     "${COLLECT_FLAGS[@]}" \
     $HUB_HIDDEN_FLAGS \
     --distpath "$ART_DIR/hub_proxy/dist" \
