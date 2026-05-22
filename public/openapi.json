@@ -1,563 +1,100 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "GPTAdmin Hub API",
-    "version": "2.2.0",
-    "description": "Manage servers through GPTAdmin hub. listServers intentionally omits tokens and raw public keys; active servers omit fingerprint to reduce context, while pending servers keep fingerprint for approval/takeover review. OS information is returned so the assistant can distinguish Windows, macOS, Ubuntu, and other Linux hosts. Pending servers can be approved by running approve_command with execOnServer on any active server. Long-running commands may return a gptadmin_task_id; use task tools to inspect and acknowledge completed tasks."
+    "title": "GPTAdmin Hub",
+    "version": "3.0.0",
+    "description": "Manage remote servers via GPTAdmin hub.\n\nWORKFLOW: listServers → execBulk → if response has background:true, poll getTask until status=completed → ackTask.\n\nTIMEOUT: commands taking >35s return {background:true, task_id}. Use getTask to poll.\n\nPENDING SERVERS: approve by running approve_command value via execBulk on any active server.\n\nBUILT-IN COMMANDS (run via execBulk): gptadmin_pending list | approve <name> | reject <name>; gptadmin_tasks list | status <tid>."
   },
-  "servers": [
-    {
-      "url": "https://gptadmin.bezrabotnyi.com"
-    }
-  ],
-  "security": [
-    {
-      "bearerAuth": []
-    }
-  ],
+  "servers": [{ "url": "https://gptadmin.bezrabotnyi.com" }],
+  "security": [{ "bearerAuth": [] }],
   "paths": {
     "/servers": {
       "get": {
         "operationId": "listServers",
         "summary": "List active and pending servers",
-        "description": "Returns active and pending servers. Pending servers include approve_command and reject_command. To approve a pending server, call execOnServer on any active server with cmd equal to approve_command.",
         "parameters": [
           {
             "name": "include_pending",
             "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true
-            }
+            "schema": { "type": "boolean", "default": true }
           }
         ],
         "responses": {
-          "200": {
-            "description": "Server list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ServersResponse"
-                }
-              }
-            }
-          }
+          "200": { "description": "servers[] and pending[]", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
         }
       }
     },
-    "/srv/exec": {
+    "/bulk/exec": {
       "post": {
-        "operationId": "execOnServer",
-        "summary": "Execute a command on a server",
-        "description": "Runs a shell command on a selected active server. Hub-internal commands are also supported: gptadmin_pending list, gptadmin_pending approve <name>, gptadmin_pending reject <name>. If a command continues in background, the response includes gptadmin_task_id; use listServerTasks/getServerTask and then ackServerTask when the result is handled.",
-        "parameters": [
-          {
-            "name": "server",
-            "in": "query",
-            "required": true,
-            "description": "Name of an active server from listServers. For gptadmin_pending commands, use any active server.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
+        "operationId": "execBulk",
+        "summary": "Run a shell command on one or more servers",
+        "description": "For a single server pass one-element array. Returns {results: {server: {stdout, stderr, returncode}}} or {results: {server: {background:true, task_id}}} if the command exceeded the sync timeout.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ExecReq"
+                "type": "object",
+                "required": ["servers", "cmd"],
+                "properties": {
+                  "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names from listServers" },
+                  "cmd": { "type": "string" },
+                  "cwd": { "type": "string" },
+                  "timeout": { "type": "integer", "description": "Command timeout on the server in seconds (not the hub wait)" }
+                },
+                "additionalProperties": false
               }
             }
           }
         },
         "responses": {
-          "200": {
-            "description": "Command result or background task marker",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExecResult"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/srv/system/health": {
-      "get": {
-        "operationId": "getSystemHealth",
-        "summary": "Get system health",
-        "description": "Returns health and basic system information for a server.",
-        "parameters": [
-          {
-            "name": "server",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "System health",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SystemHealth"
-                }
-              }
-            }
-          }
+          "200": { "description": "Results keyed by server name", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
         }
       }
     },
     "/tasks/{srv}": {
       "get": {
-        "operationId": "listServerTasks",
-        "summary": "List known background tasks for a server",
-        "description": "Lists running, completed, and failed background tasks tracked by the hub for a server.",
+        "operationId": "listTasks",
+        "summary": "List background tasks for a server",
         "parameters": [
-          {
-            "name": "srv",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Server name"
-          }
+          { "name": "srv", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "Task list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TasksResponse"
-                }
-              }
-            }
-          }
+          "200": { "description": "tasks[] with status, cmd, result", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
         }
       }
     },
     "/tasks/{srv}/{tid}": {
       "get": {
-        "operationId": "getServerTask",
-        "summary": "Get background task status/result",
-        "description": "Returns a tracked task. If the task is completed or failed and the result has been handled, call ackServerTask.",
+        "operationId": "getTask",
+        "summary": "Get background task status and result",
         "parameters": [
-          {
-            "name": "srv",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Server name"
-          },
-          {
-            "name": "tid",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Task ID"
-          }
+          { "name": "srv", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tid", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "Task status/result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TaskStatusResponse"
-                }
-              }
-            }
-          }
+          "200": { "description": "Task with status (running/completed/failed) and result", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
         }
       }
     },
     "/tasks/{srv}/{tid}/ack": {
       "post": {
-        "operationId": "ackServerTask",
-        "summary": "Acknowledge and forget a handled background task",
-        "description": "Marks a completed/failed task as handled and removes it from the hub task list. Use this after the model has read and reported the task result.",
+        "operationId": "ackTask",
+        "summary": "Remove a handled task from hub memory",
+        "description": "Call after reading a completed or failed task result.",
         "parameters": [
-          {
-            "name": "srv",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Server name"
-          },
-          {
-            "name": "tid",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Task ID"
-          }
+          { "name": "srv", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tid", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "Acknowledgement result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AckTaskResponse"
-                }
-              }
-            }
-          }
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
         }
       }
     }
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer"
-      }
-    },
-    "schemas": {
-      "ServersResponse": {
-        "type": "object",
-        "properties": {
-          "servers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ServerInfo"
-            }
-          },
-          "pending": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": true
-            }
-          }
-        },
-        "required": [
-          "servers"
-        ],
-        "additionalProperties": true
-      },
-      "ServerInfo": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "pending"
-            ]
-          },
-          "alive": {
-            "type": "boolean"
-          },
-          "lag_s": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "base_url": {
-            "type": "string"
-          },
-          "build_version": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "backend": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "local or ssh"
-          },
-          "proxy_via": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Server that proxies this target, if any."
-          },
-          "ssh_host": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ssh_port": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ssh_user": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "pending_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "approve_command": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Only present for pending servers. Run with execOnServer on any active server."
-          },
-          "reject_command": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Only present for pending servers. Run with execOnServer on any active server."
-          },
-          "fingerprint": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Present for pending servers; omitted for active servers to reduce context."
-          },
-          "os": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Operating system/platform string, e.g. Windows, macOS, Ubuntu, or other Linux."
-          }
-        },
-        "required": [
-          "name",
-          "status"
-        ],
-        "additionalProperties": true
-      },
-      "ExecReq": {
-        "type": "object",
-        "properties": {
-          "cmd": {
-            "type": "string"
-          },
-          "env": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "timeout": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "cmd"
-        ],
-        "additionalProperties": false
-      },
-      "ExecResult": {
-        "type": "object",
-        "properties": {
-          "returncode": {
-            "type": "integer"
-          },
-          "stdout": {
-            "type": "string"
-          },
-          "stderr": {
-            "type": "string"
-          },
-          "error": {
-            "type": "string"
-          },
-          "background": {
-            "type": "boolean"
-          },
-          "gptadmin_task_id": {
-            "type": "string"
-          },
-          "task_id": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": true
-      },
-      "SystemHealth": {
-        "type": "object",
-        "properties": {
-          "uptime_s": {
-            "type": "integer"
-          },
-          "load_avg": {
-            "type": "array",
-            "items": {
-              "type": "number"
-            }
-          },
-          "cpu_usage_pct": {
-            "type": "number"
-          },
-          "memory": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "swap": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "disk": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "failed_services": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "ip_address": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "additionalProperties": true
-      },
-      "TasksResponse": {
-        "type": "object",
-        "properties": {
-          "tasks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TaskInfo"
-            }
-          }
-        },
-        "required": [
-          "tasks"
-        ],
-        "additionalProperties": true
-      },
-      "TaskStatusResponse": {
-        "type": "object",
-        "properties": {
-          "task": {
-            "$ref": "#/components/schemas/TaskInfo"
-          },
-          "error": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": true
-      },
-      "TaskInfo": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string"
-          },
-          "cmd": {
-            "type": "string"
-          },
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "started_at": {
-            "type": "integer"
-          },
-          "completed_at": {
-            "type": "integer"
-          },
-          "result": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "error": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": true
-      },
-      "AckTaskResponse": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "acknowledged",
-              "not_found"
-            ]
-          },
-          "server": {
-            "type": "string"
-          },
-          "task_id": {
-            "type": "string"
-          },
-          "removed_task": {
-            "type": "boolean"
-          },
-          "removed_result": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "ok",
-          "status",
-          "server",
-          "task_id"
-        ],
-        "additionalProperties": true
-      }
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
     }
   }
 }

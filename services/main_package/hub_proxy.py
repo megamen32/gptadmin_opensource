@@ -33,6 +33,8 @@ import hashlib
 import secrets
 import html
 import shlex
+import socket as _socket_module
+from contextlib import asynccontextmanager
 from pathlib import Path
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any
@@ -145,6 +147,12 @@ HUB_PRIVATE_KEY_FILE = Path(os.getenv("GPTADMIN_HUB_PRIVATE_KEY_FILE", str(CONFI
 HUB_PUBLIC_KEY_FILE_ED25519 = Path(os.getenv("GPTADMIN_HUB_PUBLIC_KEY_FILE", str(CONFIG_DIR / "hub_ed25519.pub")))
 HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
+STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))  # 3 days
+SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))  # max synchronous wait before going background
+HUB_SERVERS_STATE_FILE = Path(os.getenv("GPTADMIN_SERVERS_STATE_FILE", str(CONFIG_DIR / "hub_servers_state.json")))
+HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DIR / "hub_tasks_state.json")))
+HUB_MCP_AGENTS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_AGENTS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_agents_state.json")))
+
 # MCP / ChatGPT Apps OAuth config
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
 MCP_RESOURCE = os.getenv("MCP_RESOURCE", PUBLIC_ORIGIN)
@@ -153,9 +161,39 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 OAUTH_SCOPES = ["gptadmin.read", "gptadmin.exec"]
 _oauth_codes: Dict[str, Dict[str, Any]] = {}
 
+# Generic MCP relay: remote agents use long polling to bridge local MCP stdio/http servers.
+# Keep this token separate from CTL_TOKEN and ADMIN_PASSWORD.
+MCP_RELAY_AGENT_TOKEN = os.getenv("MCP_RELAY_AGENT_TOKEN", secrets.token_urlsafe(32))
+MCP_RELAY_DEFAULT_TIMEOUT = int(os.getenv("MCP_RELAY_DEFAULT_TIMEOUT", "30"))
+MCP_RELAY_POLL_MAX_TIMEOUT = int(os.getenv("MCP_RELAY_POLL_MAX_TIMEOUT", "55"))
+
 # ----------------------------- FASTAPI ---------------------------------------
 
-app = FastAPI(title="root-hub", version=str(BUILD_VERSION))
+
+async def _periodic_save() -> None:
+    while True:
+        await asyncio.sleep(30)
+        _prune_state()
+        _save_all_state()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _load_all_state()
+    save_task = asyncio.ensure_future(_periodic_save())
+    _sd_notify("READY=1")
+    try:
+        yield
+    finally:
+        save_task.cancel()
+        try:
+            await save_task
+        except asyncio.CancelledError:
+            pass
+        _save_all_state()
+
+
+app = FastAPI(title="root-hub", version=str(BUILD_VERSION), lifespan=_lifespan)
 auth_ctl = HTTPBearer(auto_error=False)
 
 HUB_PRIVATE_KEY = load_or_create_ed25519_private_key(HUB_PRIVATE_KEY_FILE)
@@ -175,6 +213,11 @@ results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 ws_sessions: Dict[str, WebSocket] = {}
 ws_results: Dict[str, Dict[str, Any]] = {}
 background_tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+# MCP relay in-memory state. Agents own real MCP sessions locally; hub only queues JSON-RPC-like requests.
+mcp_relay_agents: Dict[str, Dict[str, Any]] = {}
+mcp_relay_queues: Dict[str, List[Dict[str, Any]]] = {}
+mcp_relay_results: Dict[str, Dict[str, Any]] = {}
 
 
 
@@ -197,6 +240,87 @@ def _save_json_dict(path: Path, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
     tmp.replace(path)
+
+
+def _sd_notify(msg: str) -> None:
+    notify_sock = os.getenv("NOTIFY_SOCKET")
+    if not notify_sock:
+        return
+    try:
+        sock = _socket_module.socket(_socket_module.AF_UNIX, _socket_module.SOCK_DGRAM)
+        with sock:
+            addr: Any = ("\0" + notify_sock[1:]) if notify_sock.startswith("@") else notify_sock
+            sock.sendto(msg.encode(), addr)
+        log.info("sd_notify: %r", msg)
+    except Exception as e:
+        log.warning("sd_notify: failed: %s", e)
+
+
+def _load_all_state() -> None:
+    now = time.time()
+    cutoff = now - STATE_TTL_S
+
+    raw_srv = _load_json_dict(HUB_SERVERS_STATE_FILE)
+    for name, entry in raw_srv.items():
+        if isinstance(entry, dict) and entry.get("time", 0) >= cutoff:
+            servers[name] = entry
+    log.info("state: loaded servers=%s", len(servers))
+
+    raw_tasks = _load_json_dict(HUB_TASKS_STATE_FILE)
+    for srv, tasks in raw_tasks.items():
+        if not isinstance(tasks, dict):
+            continue
+        kept: Dict[str, Any] = {}
+        for tid, task in tasks.items():
+            if not isinstance(task, dict):
+                continue
+            if task.get("created_at", 0) < cutoff:
+                continue
+            if task.get("status") == "running":
+                task = {**task, "status": "orphaned", "orphaned_at": int(now)}
+            kept[tid] = task
+        if kept:
+            background_tasks[srv] = kept
+    log.info("state: loaded task_servers=%s", len(background_tasks))
+
+    raw_mcp = _load_json_dict(HUB_MCP_AGENTS_STATE_FILE)
+    for agent_id, entry in raw_mcp.items():
+        if isinstance(entry, dict) and entry.get("last_seen", 0) >= cutoff:
+            mcp_relay_agents[agent_id] = entry
+    log.info("state: loaded mcp_agents=%s", len(mcp_relay_agents))
+
+
+def _save_all_state() -> None:
+    try:
+        _save_json_dict(HUB_SERVERS_STATE_FILE, servers)
+        _save_json_dict(HUB_TASKS_STATE_FILE, background_tasks)
+        _save_json_dict(HUB_MCP_AGENTS_STATE_FILE, mcp_relay_agents)
+        log.info("state: saved servers=%s task_servers=%s mcp_agents=%s",
+                 len(servers), len(background_tasks), len(mcp_relay_agents))
+    except Exception as e:
+        log.error("state: save failed: %s", e)
+
+
+def _prune_state() -> None:
+    cutoff = time.time() - STATE_TTL_S
+
+    old_srv = [n for n, d in servers.items() if d.get("time", 0) < cutoff]
+    for n in old_srv:
+        del servers[n]
+
+    for srv in list(background_tasks.keys()):
+        old_t = [tid for tid, t in background_tasks[srv].items() if t.get("created_at", 0) < cutoff]
+        for tid in old_t:
+            del background_tasks[srv][tid]
+        if not background_tasks[srv]:
+            del background_tasks[srv]
+
+    old_mcp = [a for a, d in mcp_relay_agents.items() if d.get("last_seen", 0) < cutoff]
+    for a in old_mcp:
+        del mcp_relay_agents[a]
+
+    if old_srv or old_mcp:
+        log.info("state: pruned servers=%s mcp_agents=%s", len(old_srv), len(old_mcp))
 
 
 def _server_fingerprint(d: Dict[str, Any]) -> str:
@@ -370,6 +494,35 @@ class ExecReq(BaseModel):
 class TaskResult(BaseModel):
     id: str
     result: dict
+
+
+class McpRelayRegister(BaseModel):
+    agent_id: str
+    name: Optional[str] = None
+    transport: str = Field("stdio", pattern="^(stdio|http)$")
+    command: Optional[str] = None
+    capabilities: Optional[List[str]] = None
+    meta: Optional[Dict[str, Any]] = None
+
+
+class McpRelayResult(BaseModel):
+    id: str
+    ok: bool = True
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None
+
+
+class McpRelayCallReq(BaseModel):
+    target: str = "default"
+    tool_name: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    timeout: Optional[int] = None
+
+
+class McpRelayToolsReq(BaseModel):
+    target: str = "default"
+    timeout: Optional[int] = None
+
 
 
 def _task_slot(srv: str, tid: str):
@@ -612,7 +765,7 @@ async def bulk_exec(req: BulkExec):
         queues.setdefault(srv, []).append({"id": tid, **payload})
         log.debug("bulk_exec: queued polling tid=%s srv=%s payload=%s rid=%s",
                   tid, srv, scrub_payload(payload), rid())
-        deadline = time.time() + (payload.get("timeout") or 300)
+        deadline = time.time() + SYNC_TIMEOUT_S
         while time.time() < deadline:
             res = results.get(srv, {}).get(tid)
             if res is not None:
@@ -662,7 +815,7 @@ async def bulk_exec(req: BulkExec):
             if mode == "polling":
                 tasks[srv] = asyncio.create_task(wait_polling(srv, payload))
             elif mode == "websocket":
-                tasks[srv] = asyncio.create_task(ws_exec(srv, payload, req.timeout))
+                tasks[srv] = asyncio.create_task(ws_exec(srv, payload))
             else:
                 url = f"{info['base_url'].rstrip('/')}/exec"
                 body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -701,7 +854,7 @@ async def bulk_exec(req: BulkExec):
                     task = asyncio.create_task(runner())
 
                     try:
-                        return await asyncio.wait_for(asyncio.shield(task), timeout=req.timeout or 300)
+                        return await asyncio.wait_for(asyncio.shield(task), timeout=SYNC_TIMEOUT_S)
                     except asyncio.TimeoutError:
                         return {
                             "background": True,
@@ -803,7 +956,7 @@ def _handle_gptadmin_task_command(srv: str, cmd: str):
 
 # ------------------------- WEBSOCKET AGENT -------------------------
 
-async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
+async def ws_exec(srv: str, payload: dict) -> dict:
     """Execute a task through an already connected rootd websocket session."""
 
     ws = ws_sessions.get(srv)
@@ -814,7 +967,7 @@ async def ws_exec(srv: str, payload: dict, timeout: int | None = None) -> dict:
     ws_results[tid] = {"event": asyncio.Event(), "result": None}
     try:
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
-        wait_s = timeout or payload.get("timeout") or 300
+        wait_s = SYNC_TIMEOUT_S
         await asyncio.wait_for(ws_results[tid]["event"].wait(), timeout=wait_s)
         result = ws_results[tid]["result"] or {"error": "empty websocket result"}
         background_tasks.setdefault(srv, {})[tid] = {
@@ -897,6 +1050,124 @@ async def rootd_ws(websocket: WebSocket):
 
 # ------------------------- QUEUE / POLL ----------------------------
 
+# ------------------------- GENERIC MCP RELAY ---------------------------------
+
+def _mcp_relay_agent_auth(request: Request) -> None:
+    auth = request.headers.get("authorization", "")
+    expected = f"Bearer {MCP_RELAY_AGENT_TOKEN}"
+    if not MCP_RELAY_AGENT_TOKEN or not hmac.compare_digest(auth, expected):
+        log.warning("mcp_relay: bad agent token rid=%s", rid())
+        raise HTTPException(401, "bad relay token")
+
+
+def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "agent_id": agent_id,
+        "name": info.get("name") or agent_id,
+        "transport": info.get("transport", "stdio"),
+        "status": "online" if time.time() - float(info.get("last_seen", 0)) <= DEAD_S else "offline",
+        "last_seen": info.get("last_seen"),
+        "capabilities": info.get("capabilities") or [],
+        "meta": info.get("meta") or {},
+    }
+
+
+def _mcp_relay_select_agent(target: str = "default") -> str:
+    if target and target != "default":
+        if target not in mcp_relay_agents:
+            raise HTTPException(404, f"unknown MCP relay agent {target}")
+        return target
+    online = [
+        (agent_id, info) for agent_id, info in mcp_relay_agents.items()
+        if time.time() - float(info.get("last_seen", 0)) <= DEAD_S
+    ]
+    if not online:
+        raise HTTPException(404, "no online MCP relay agents")
+    online.sort(key=lambda item: float(item[1].get("last_seen", 0)), reverse=True)
+    return online[0][0]
+
+
+async def _mcp_relay_request(agent_id: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[int] = None) -> Dict[str, Any]:
+    info = mcp_relay_agents.get(agent_id)
+    if not info:
+        raise HTTPException(404, f"unknown MCP relay agent {agent_id}")
+    if time.time() - float(info.get("last_seen", 0)) > DEAD_S:
+        raise HTTPException(503, f"MCP relay agent {agent_id} is offline")
+    job_id = f"mcp-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    payload = {
+        "id": job_id,
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params or {},
+        "created_at": int(time.time()),
+    }
+    mcp_relay_queues.setdefault(agent_id, []).append(payload)
+    deadline = time.time() + min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S)
+    while time.time() < deadline:
+        result = mcp_relay_results.pop(job_id, None)
+        if result is not None:
+            if result.get("ok", True):
+                return result.get("result") or {}
+            return {"error": result.get("error") or {"message": "MCP relay job failed"}, "job_id": job_id}
+        await asyncio.sleep(0.25)
+    return {"background": True, "job_id": job_id, "status": "running", "message": "MCP relay job is still running; use mcp_relay_job_status."}
+
+
+@app.post("/mcp-relay/register", dependencies=[Depends(ensure_license)])
+async def mcp_relay_register(req: McpRelayRegister, request: Request):
+    _mcp_relay_agent_auth(request)
+    mcp_relay_agents[req.agent_id] = {
+        "agent_id": req.agent_id,
+        "name": req.name or req.agent_id,
+        "transport": req.transport,
+        "command": req.command,
+        "capabilities": req.capabilities or [],
+        "meta": req.meta or {},
+        "last_seen": time.time(),
+    }
+    log.info("mcp_relay: registered agent=%s transport=%s rid=%s", req.agent_id, req.transport, rid())
+    return {"ok": True, "agent": _mcp_relay_public_agent(req.agent_id, mcp_relay_agents[req.agent_id])}
+
+
+@app.get("/mcp-relay/poll/{agent_id}", dependencies=[Depends(ensure_license)])
+async def mcp_relay_poll(agent_id: str, request: Request, timeout: int = Query(55)):
+    _mcp_relay_agent_auth(request)
+    info = mcp_relay_agents.setdefault(agent_id, {"agent_id": agent_id, "name": agent_id, "transport": "stdio", "capabilities": [], "meta": {}})
+    info["last_seen"] = time.time()
+    deadline = time.time() + min(max(timeout, 1), MCP_RELAY_POLL_MAX_TIMEOUT)
+    while time.time() < deadline:
+        q = mcp_relay_queues.get(agent_id) or []
+        if q:
+            job = q.pop(0)
+            log.info("mcp_relay: poll pop agent=%s id=%s left=%s rid=%s", agent_id, job.get("id"), len(q), rid())
+            return job
+        await asyncio.sleep(0.5)
+    return {}
+
+
+@app.post("/mcp-relay/result/{agent_id}", dependencies=[Depends(ensure_license)])
+async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request):
+    _mcp_relay_agent_auth(request)
+    if agent_id in mcp_relay_agents:
+        mcp_relay_agents[agent_id]["last_seen"] = time.time()
+    mcp_relay_results[res.id] = {"ok": res.ok, "result": res.result, "error": res.error, "completed_at": int(time.time()), "agent_id": agent_id}
+    log.info("mcp_relay: result agent=%s id=%s ok=%s rid=%s", agent_id, res.id, res.ok, rid())
+    return {"ok": True}
+
+
+@app.get("/mcp-relay/agents", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def mcp_relay_agents_list():
+    agents = [_mcp_relay_public_agent(agent_id, info) for agent_id, info in mcp_relay_agents.items()]
+    agents.sort(key=lambda x: x.get("last_seen") or 0, reverse=True)
+    return {"agents": agents, "default_agent": agents[0]["agent_id"] if agents else None}
+
+
+@app.get("/mcp-relay/job/{job_id}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def mcp_relay_job_status(job_id: str):
+    result = mcp_relay_results.get(job_id)
+    return {"job_id": job_id, "status": "completed" if result else "running_or_unknown", "result": result}
+
+
 @app.get("/queue/{srv}", dependencies=[ Depends(ensure_license)])
 def queue_poll(srv: str, token: str = Query(...)):
     info = servers.get(srv)
@@ -942,7 +1213,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
             log.error("proxy: websocket supports only POST /exec srv=%s rid=%s", srv, rid())
             raise HTTPException(501, "websocket mode supports only POST /exec")
         data = ExecReq(**(await request.json()))
-        return await ws_exec(srv, data.dict(), data.timeout)
+        return await ws_exec(srv, data.dict())
 
     if info.get("mode") == "polling":
         if request.method != "POST" or path != "exec":
@@ -955,7 +1226,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
         log.info("proxy: queued polling srv=%s tid=%s payload=%s rid=%s",
                  srv, tid, scrub_payload(payload), rid())
 
-        deadline = time.time() + (data.timeout or 300)
+        deadline = time.time() + SYNC_TIMEOUT_S
         while time.time() < deadline:
             res = results.get(srv, {}).pop(tid, None)
             if res is not None:
@@ -1205,41 +1476,220 @@ async def oauth_token(request: Request):
 
 
 def _mcp_tools() -> List[Dict[str, Any]]:
+    template_uri = "ui://widget/admin-v3.html"
+    widget_domain = "https://widgets-gptadmin.bezrabotnyi.com"
+    widget_csp = {
+        "connectDomains": [PUBLIC_ORIGIN],
+        "resourceDomains": [widget_domain],
+    }
+    legacy_widget_csp = {
+        "connect_domains": [PUBLIC_ORIGIN],
+        "resource_domains": [widget_domain],
+    }
     return [
         {
             "name": "list_servers",
             "title": "List servers",
             "description": "List servers registered in GPTAdmin hub_proxy.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "servers": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                    "pending": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                },
+                "required": ["servers"],
+                "additionalProperties": True,
+            },
+            "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
             "_meta": {
-                "openai/outputTemplate": "https://widgets-gptadmin.bezrabotnyi.com/admin.html",
-                "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+                "ui": {
+                    "resourceUri": template_uri,
+                    "domain": widget_domain,
+                    "csp": widget_csp,
+                },
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
             },
         },
         {
             "name": "exec_command",
             "title": "Execute command",
-            "description": "Execute a shell command on a server through hub_proxy.",
+            "description": (
+                "Execute a shell command on a server. "
+                "If background=true, returns immediately with task_id — use task_status to poll result. "
+                "Use background=true for long-running commands (>30s), deployments, builds, etc."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "server": {"type": "string"},
                     "cmd": {"type": "string"},
-                    "timeout": {"type": "number", "default": 300},
-                    "cwd": {"type": ["string", "null"], "default": None},
+                    "background": {"type": "boolean", "default": False,
+                                   "description": "Return immediately with task_id instead of waiting for result."},
+                    "cwd": {"type": "string", "description": "Working directory on the remote server."},
+                    "timeout": {"type": "integer", "description": "Command timeout on the server in seconds."},
                 },
                 "required": ["server", "cmd"],
                 "additionalProperties": False,
             },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "returncode": {"type": "integer"},
+                    "background": {"type": "boolean"},
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "additionalProperties": True,
+            },
+            "annotations": {"readOnlyHint": False, "openWorldHint": True, "destructiveHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.exec"]}],
             "_meta": {
-                "openai/outputTemplate": "https://widgets-gptadmin.bezrabotnyi.com/admin.html",
-                "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.exec"]}],
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "task_status",
+            "title": "Get task status",
+            "description": "Check status and result of a background task started by exec_command with background=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+                "required": ["server", "task_id"],
+                "additionalProperties": False,
+            },
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "task_list",
+            "title": "List background tasks",
+            "description": "List all background tasks on a server (running, completed, failed, orphaned).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"server": {"type": "string"}},
+                "required": ["server"],
+                "additionalProperties": False,
+            },
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "mcp_relay_agents",
+            "title": "List MCP relay agents",
+            "description": "List remote MCP agents connected to hub_proxy via long polling.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                    "default_agent": {"type": ["string", "null"]},
+                },
+                "required": ["agents"],
+                "additionalProperties": True,
+            },
+            "annotations": {"readOnlyHint": True},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "mcp_relay_tools_list",
+            "title": "List remote MCP tools",
+            "description": "Call tools/list on a remote MCP stdio/http server through a long-polling relay agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "default": "default"},
+                    "timeout": {"type": "integer", "default": MCP_RELAY_DEFAULT_TIMEOUT},
+                },
+                "additionalProperties": False,
+            },
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "mcp_relay_call_tool",
+            "title": "Call remote MCP tool",
+            "description": "Call a tool on a remote MCP stdio/http server through a long-polling relay agent. Use mcp_relay_tools_list first to discover tool names and schemas.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "default": "default"},
+                    "tool_name": {"type": "string"},
+                    "arguments": {"type": "object", "additionalProperties": True, "default": {}},
+                    "timeout": {"type": "integer", "default": MCP_RELAY_DEFAULT_TIMEOUT},
+                },
+                "required": ["tool_name"],
+                "additionalProperties": False,
+            },
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "annotations": {"readOnlyHint": False, "openWorldHint": True, "destructiveHint": False},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.exec"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
+            },
+        },
+        {
+            "name": "mcp_relay_job_status",
+            "title": "Get MCP relay job status",
+            "description": "Check status/result of a background MCP relay job.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "annotations": {"readOnlyHint": True},
+            "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
+            "_meta": {
+                "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+                "openai/outputTemplate": template_uri,
+                "openai/widgetDomain": widget_domain,
+                "openai/widgetCSP": legacy_widget_csp,
             },
         },
     ]
-
 
 async def _mcp_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "list_servers":
@@ -1249,17 +1699,94 @@ async def _mcp_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "structuredContent": data,
         }
     if name == "exec_command":
-        req = BulkExec(
-            servers=[args.get("server")],
-            cmd=args.get("cmd"),
-            timeout=args.get("timeout", 300),
-            cwd=args.get("cwd"),
-        )
+        srv = args.get("server")
+        cmd = args.get("cmd")
+        cwd = args.get("cwd")
+        cmd_timeout = args.get("timeout", 300)
+
+        if args.get("background"):
+            info = servers.get(srv)
+            if not info:
+                raise HTTPException(404, f"server '{srv}' not registered")
+            tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+            payload = {"cmd": cmd, "timeout": cmd_timeout}
+            if cwd:
+                payload["cwd"] = cwd
+            _task_slot(srv, tid).update({"cmd": cmd, "cwd": cwd})
+            mode = info.get("mode", "webhook")
+            if mode == "polling":
+                queues.setdefault(srv, []).append({"id": tid, **payload})
+            elif mode == "websocket":
+                ws = ws_sessions.get(srv)
+                if ws:
+                    asyncio.create_task(ws.send_json({"type": "exec", "id": tid, "payload": payload}))
+                else:
+                    raise HTTPException(503, "websocket not connected")
+            else:
+                url = f"{info['base_url'].rstrip('/')}/exec"
+                body_b = json.dumps(payload, separators=(",", ":")).encode()
+                hdrs = _signed_rootd_headers("POST", "/exec", body_b, {"Content-Type": "application/json"})
+
+                async def _fire(srv=srv, tid=tid, url=url, body_b=body_b, hdrs=hdrs):
+                    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as _c:
+                        try:
+                            r = await _c.post(url, content=body_b, headers=hdrs)
+                            background_tasks.setdefault(srv, {})[tid].update(
+                                {"status": "completed", "result": r.json(), "completed_at": int(time.time())}
+                            )
+                        except Exception as e:
+                            background_tasks.setdefault(srv, {})[tid].update(
+                                {"status": "failed", "error": str(e), "completed_at": int(time.time())}
+                            )
+
+                asyncio.create_task(_fire())
+
+            log.info("mcp exec_command: background tid=%s srv=%s rid=%s", tid, srv, rid())
+            data = {"background": True, "task_id": tid, "server": srv, "status": "running",
+                    "message": "Task queued. Use task_status to poll result."}
+            return {"content": [{"type": "text", "text": f"Task {tid} started on {srv}"}], "structuredContent": data}
+
+        req = BulkExec(servers=[srv], cmd=cmd, timeout=cmd_timeout, cwd=cwd)
         data = await bulk_exec(req)
         return {
-            "content": [{"type": "text", "text": f"Executed on {args.get('server')}"}],
+            "content": [{"type": "text", "text": f"Executed on {srv}"}],
             "structuredContent": data,
         }
+    if name == "task_status":
+        srv = args.get("server")
+        tid = args.get("task_id")
+        task = background_tasks.get(srv, {}).get(tid)
+        if task is None:
+            res = results.get(srv, {}).get(tid)
+            if res is not None:
+                task = {"status": "completed", "task_id": tid, "result": res, "completed_at": int(time.time())}
+        status_str = task.get("status", "unknown") if task else "not_found"
+        data = {"server": srv, "task_id": tid, "found": task is not None, "task": task}
+        return {"content": [{"type": "text", "text": f"Task {tid} on {srv}: {status_str}"}], "structuredContent": data}
+    if name == "task_list":
+        srv = args.get("server")
+        tasks = list(background_tasks.get(srv, {}).values())
+        data = {"server": srv, "count": len(tasks), "tasks": tasks}
+        return {"content": [{"type": "text", "text": f"{len(tasks)} tasks on {srv}"}], "structuredContent": data}
+    if name == "mcp_relay_agents":
+        agents = [_mcp_relay_public_agent(agent_id, info) for agent_id, info in mcp_relay_agents.items()]
+        agents.sort(key=lambda x: x.get("last_seen") or 0, reverse=True)
+        data = {"agents": agents, "default_agent": agents[0]["agent_id"] if agents else None}
+        return {"content": [{"type": "text", "text": f"Found {len(agents)} MCP relay agents"}], "structuredContent": data}
+    if name == "mcp_relay_tools_list":
+        target = _mcp_relay_select_agent(args.get("target") or "default")
+        data = await _mcp_relay_request(target, "tools/list", {}, args.get("timeout"))
+        return {"content": [{"type": "text", "text": f"Listed tools from MCP relay agent {target}"}], "structuredContent": {"agent_id": target, "response": data}}
+    if name == "mcp_relay_call_tool":
+        target = _mcp_relay_select_agent(args.get("target") or "default")
+        params = {"name": args.get("tool_name"), "arguments": args.get("arguments") or {}}
+        data = await _mcp_relay_request(target, "tools/call", params, args.get("timeout"))
+        return {"content": [{"type": "text", "text": f"Called remote MCP tool {args.get('tool_name')} on {target}"}], "structuredContent": {"agent_id": target, "response": data}}
+    if name == "mcp_relay_job_status":
+        job_id = args.get("job_id")
+        result = mcp_relay_results.get(job_id)
+        data = {"job_id": job_id, "status": "completed" if result else "running_or_unknown", "result": result}
+        return {"content": [{"type": "text", "text": f"MCP relay job {job_id}: {data['status']}"}], "structuredContent": data}
     raise HTTPException(404, f"unknown tool {name}")
 
 
@@ -1306,10 +1833,32 @@ async def mcp_post(request: Request):
         elif method == "tools/call":
             result = await _mcp_call_tool(params.get("name"), params.get("arguments") or {})
         elif method == "resources/list":
-            result = {"resources": [{"uri": "https://widgets-gptadmin.bezrabotnyi.com/admin.html", "name": "GPTAdmin widget", "mimeType": "text/html"}]}
+            result = {"resources": [{"uri": "ui://widget/admin-v3.html", "name": "GPTAdmin widget", "mimeType": "text/html;profile=mcp-app"}]}
         elif method == "resources/read":
             widget_path = Path(__file__).resolve().parents[2] / "apps" / "chatgpt-admin-app" / "public" / "admin-widget.html"
-            result = {"contents": [{"uri": params.get("uri"), "mimeType": "text/html", "text": widget_path.read_text() if widget_path.exists() else ""}]}
+            widget_domain = "https://widgets-gptadmin.bezrabotnyi.com"
+            result = {"contents": [{
+                "uri": params.get("uri") or "ui://widget/admin-v3.html",
+                "mimeType": "text/html;profile=mcp-app",
+                "text": widget_path.read_text() if widget_path.exists() else "",
+                "_meta": {
+                    "ui": {
+                        "prefersBorder": True,
+                        "domain": widget_domain,
+                        "csp": {
+                            "connectDomains": [PUBLIC_ORIGIN],
+                            "resourceDomains": [widget_domain],
+                        },
+                    },
+                    "openai/widgetDescription": "GPTAdmin infrastructure control panel",
+                    "openai/widgetPrefersBorder": True,
+                    "openai/widgetDomain": widget_domain,
+                    "openai/widgetCSP": {
+                        "connect_domains": [PUBLIC_ORIGIN],
+                        "resource_domains": [widget_domain],
+                    },
+                },
+            }]}
         elif method and method.startswith("notifications/"):
             return Response(status_code=202)
         else:
@@ -1412,22 +1961,34 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("HUB_PORT", "9001"))
-    fd_env = os.getenv("SYSTEMD_SOCKET_FD")
 
-    kwargs = {
-        "log_level": LOG_LEVEL.lower(),
-    }
+    # Standard systemd socket activation: LISTEN_PID + LISTEN_FDS
+    fd: Optional[int] = None
+    try:
+        listen_pid = int(os.getenv("LISTEN_PID", "0"))
+        listen_fds = int(os.getenv("LISTEN_FDS", "0"))
+        if listen_pid == os.getpid() and listen_fds >= 1:
+            fd = 3  # SD_LISTEN_FDS_START
+    except (ValueError, TypeError):
+        pass
 
-    if fd_env:
-        log.info("starting hub via systemd socket fd=%s (dead_s=%s, log_level=%s)", fd_env, DEAD_S, LOG_LEVEL)
-        kwargs["fd"] = int(fd_env)
+    # Backward compat: custom SYSTEMD_SOCKET_FD env var
+    if fd is None:
+        fd_env = os.getenv("SYSTEMD_SOCKET_FD")
+        if fd_env:
+            try:
+                fd = int(fd_env)
+            except ValueError:
+                pass
+
+    kwargs: Dict[str, Any] = {"log_level": LOG_LEVEL.lower()}
+
+    if fd is not None:
+        log.info("starting hub via systemd socket fd=%s (dead_s=%s, log_level=%s)", fd, DEAD_S, LOG_LEVEL)
+        kwargs["fd"] = fd
     else:
         log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s)", port, DEAD_S, LOG_LEVEL)
         kwargs["host"] = "0.0.0.0"
         kwargs["port"] = port
 
-    # Включаем стандартные access-логи uvicorn + наши middleware-логи
-    uvicorn.run(
-        app,
-        **kwargs,
-    )
+    uvicorn.run(app, **kwargs)
