@@ -122,9 +122,9 @@ python -V
 pip --version || true
 
 # ---------- install deps (verbose) ----------
-step "pip install requirements, pyarmor, pyinstaller"
+step "pip install requirements, pyinstaller"
 pip install -vvv --upgrade pip
-pip install -vvv -r requirements.txt pyarmor pyinstaller
+pip install -vvv -r requirements.txt pyinstaller
 
 step "Tool versions"
 pyinstaller --version || true
@@ -218,7 +218,6 @@ HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
 [[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_mac"
-ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=pyarmor_runtime"
 echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
@@ -257,30 +256,14 @@ fi
 echo "Fingerprint rootd: $FP_ROOTD_NEW (changed=$([[ $NEED_BUILD_ROOTD == 1 ]] && echo yes || echo no))"
 echo "Fingerprint hub   : $FP_HUB_NEW (changed=$([[ $NEED_BUILD_HUB == 1 ]] && echo yes || echo no))"
 
-# ---------- PyArmor obfuscation (incremental) ----------
-export PYARMOR_LOGLEVEL=DEBUG
+# ---------- PyInstaller (incremental, no obfuscation) ----------
 : "${PYTHONPATH:=}"
-
-if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
-  step "PyArmor: obfuscate rootd (+platform)"
-  pyarmor gen -O "$ART_DIR/rootd" "${ROOTD_SRC[@]}"
-else
-  echo "Skip PyArmor rootd: sources unchanged & dist exists"
-fi
-
-if [[ "$NEED_BUILD_HUB" == "1" ]]; then
-  step "PyArmor: obfuscate hub_proxy"
-  pyarmor gen -O "$ART_DIR/hub_proxy" "${HUB_SRC[@]}"
-else
-  echo "Skip PyArmor hub_proxy: sources unchanged & dist exists"
-fi
-
-# ---------- PyInstaller (incremental) ----------
-export PYTHONPATH="$ART_DIR/rootd:$ART_DIR/hub_proxy:$PYTHONPATH"
+export PYTHONPATH="services/main_package/client:services/main_package:$PYTHONPATH"
+mkdir -p "$ART_DIR/rootd" "$ART_DIR/hub_proxy"
 
 if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
   step "PyInstaller: build rootd"
-  pyinstaller "$ART_DIR/rootd/rootd.py" \
+  pyinstaller "services/main_package/client/rootd.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     "${COLLECT_FLAGS[@]}" \
@@ -294,7 +277,7 @@ fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   step "PyInstaller: build hub_proxy"
-  pyinstaller "$ART_DIR/hub_proxy/hub_proxy.py" \
+  pyinstaller "services/main_package/hub_proxy.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     "${COLLECT_FLAGS[@]}" \
