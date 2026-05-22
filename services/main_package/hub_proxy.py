@@ -122,6 +122,18 @@ def scrub_payload(obj: Any) -> Any:
     return obj
 
 
+def _truncate_result(result: Any) -> Any:
+    """Truncate stdout/stderr fields to stay within ChatGPT's 100k char response limit."""
+    if not isinstance(result, dict):
+        return result
+    out = dict(result)
+    for field in ("stdout", "stderr"):
+        val = out.get(field)
+        if isinstance(val, str) and len(val) > RESPONSE_TRUNCATE_CHARS:
+            out[field] = val[:RESPONSE_TRUNCATE_CHARS] + f"\n...[truncated, {len(val)} chars total]"
+    return out
+
+
 # ----------------------------- КОНФИГ ----------------------------------------
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "chatgpt_secret")
@@ -149,6 +161,7 @@ HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))  # 3 days
 SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))  # max synchronous wait before going background
+RESPONSE_TRUNCATE_CHARS = int(os.getenv("HUB_RESPONSE_TRUNCATE_CHARS", "30000"))  # per-field stdout/stderr limit
 HUB_SERVERS_STATE_FILE = Path(os.getenv("GPTADMIN_SERVERS_STATE_FILE", str(CONFIG_DIR / "hub_servers_state.json")))
 HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DIR / "hub_tasks_state.json")))
 HUB_MCP_AGENTS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_AGENTS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_agents_state.json")))
@@ -634,6 +647,22 @@ def version():
     return data
 
 
+@app.get("/actions/openapi.json", include_in_schema=False)
+def actions_openapi_json():
+    path = Path(__file__).resolve().parents[2] / "public" / "openapi.json"
+    if not path.is_file():
+        raise HTTPException(404, "actions openapi.json not found")
+    return Response(path.read_text(encoding="utf-8"), media_type="application/json")
+
+
+@app.get("/actions/openapi.yml", include_in_schema=False)
+def actions_openapi_yml():
+    path = Path(__file__).resolve().parents[2] / "public" / "openapi.yml"
+    if not path.is_file():
+        raise HTTPException(404, "actions openapi.yml not found")
+    return Response(path.read_text(encoding="utf-8"), media_type="application/yaml")
+
+
 def _rootd_artifact_path() -> Path:
     return ARTIFACT_DIR / "gptadmin-rootd.tar.gz"
 
@@ -908,10 +937,9 @@ async def bulk_exec(req: BulkExec):
             try:
                 r = await task
                 if modes[srv] == "polling":
-                    out[srv] = r
+                    out[srv] = _truncate_result(r)
                 else:
-                    # websocket backend already returns dict/json payload
-                    out[srv] = r if isinstance(r, dict) else r.json()
+                    out[srv] = _truncate_result(r if isinstance(r, dict) else r.json())
                 log.info("bulk_exec: done srv=%s status=ok rid=%s", srv, rid())
             except Exception as e:
                 out[srv] = {"error": str(e)}
@@ -1142,7 +1170,7 @@ async def _mcp_relay_request(agent_id: str, method: str, params: Optional[Dict[s
     mcp_relay_queues.setdefault(agent_id, []).append(payload)
     deadline = time.time() + min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S)
     while time.time() < deadline:
-        result = mcp_relay_results.pop(job_id, None)
+        result = mcp_relay_results.get(job_id)
         if result is not None:
             if result.get("ok", True):
                 return result.get("result") or {}
@@ -1198,6 +1226,25 @@ def mcp_relay_agents_list():
     agents = [_mcp_relay_public_agent(agent_id, info) for agent_id, info in mcp_relay_agents.items()]
     agents.sort(key=lambda x: x.get("last_seen") or 0, reverse=True)
     return {"agents": agents, "default_agent": agents[0]["agent_id"] if agents else None}
+
+
+@app.post("/mcp-relay/tools", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def mcp_relay_tools(req: McpRelayToolsReq):
+    target = _mcp_relay_select_agent(req.target or "default")
+    data = await _mcp_relay_request(target, "tools/list", {}, req.timeout)
+    return {"agent_id": target, "response": data}
+
+
+@app.post("/mcp-relay/call", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def mcp_relay_call(req: McpRelayCallReq):
+    target = _mcp_relay_select_agent(req.target or "default")
+    data = await _mcp_relay_request(
+        target,
+        "tools/call",
+        {"name": req.tool_name, "arguments": req.arguments or {}},
+        req.timeout,
+    )
+    return {"agent_id": target, "response": data}
 
 
 @app.get("/mcp-relay/job/{job_id}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
