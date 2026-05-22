@@ -477,6 +477,7 @@ class BulkExec(BaseModel):
     cmd: str
     timeout: Optional[int] = None
     cwd: Optional[str] = None
+    background: bool = False
 
 
 class PendingApprove(BaseModel):
@@ -811,6 +812,41 @@ async def bulk_exec(req: BulkExec):
                 payload["timeout"] = req.timeout
             if req.cwd is not None:
                 payload["cwd"] = req.cwd
+
+            if req.background:
+                tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+                _task_slot(srv, tid).update({"cmd": req.cmd, "cwd": req.cwd})
+                if mode == "polling":
+                    queues.setdefault(srv, []).append({"id": tid, **payload})
+                elif mode == "websocket":
+                    ws = ws_sessions.get(srv)
+                    if ws:
+                        asyncio.create_task(ws.send_json({"type": "exec", "id": tid, "payload": payload}))
+                    else:
+                        out[srv] = {"error": "websocket not connected"}
+                        continue
+                else:
+                    _url = f"{info['base_url'].rstrip('/')}/exec"
+                    _body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                    _hdrs = _signed_rootd_headers("POST", "/exec", _body, {"Content-Type": "application/json"})
+
+                    async def _bg_fire(srv=srv, tid=tid, _url=_url, _body=_body, _hdrs=_hdrs):
+                        async with httpx.AsyncClient(follow_redirects=True, timeout=None) as _c:
+                            try:
+                                r = await _c.post(_url, content=_body, headers=_hdrs)
+                                background_tasks.setdefault(srv, {})[tid].update(
+                                    {"status": "completed", "result": r.json(), "completed_at": int(time.time())}
+                                )
+                            except Exception as e:
+                                background_tasks.setdefault(srv, {})[tid].update(
+                                    {"status": "failed", "error": str(e), "completed_at": int(time.time())}
+                                )
+
+                    asyncio.create_task(_bg_fire())
+
+                log.info("bulk_exec: background tid=%s srv=%s rid=%s", tid, srv, rid())
+                out[srv] = {"background": True, "task_id": tid, "status": "running"}
+                continue
 
             if mode == "polling":
                 tasks[srv] = asyncio.create_task(wait_polling(srv, payload))

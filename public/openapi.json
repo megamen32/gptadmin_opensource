@@ -40,7 +40,8 @@
                   "servers": { "type": "array", "items": { "type": "string" }, "description": "Server names from listServers" },
                   "cmd": { "type": "string" },
                   "cwd": { "type": "string" },
-                  "timeout": { "type": "integer", "description": "Command timeout on the server in seconds (not the hub wait)" }
+                  "timeout": { "type": "integer", "description": "Command timeout on the server in seconds (not the hub wait)" },
+                  "background": { "type": "boolean", "default": false, "description": "Return task_id immediately without waiting for result. Use for long-running commands." }
                 },
                 "additionalProperties": false
               }
