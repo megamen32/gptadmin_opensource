@@ -877,6 +877,7 @@ async def bulk_exec(req: BulkExec):
                                 "result": result,
                                 "completed_at": int(time.time()),
                             }
+                            return result
                         except Exception as e:
                             background_tasks.setdefault(srv, {})[tid] = {
                                 "status": "failed",
@@ -886,6 +887,7 @@ async def bulk_exec(req: BulkExec):
                                 "error": str(e),
                                 "completed_at": int(time.time()),
                             }
+                            return {"error": str(e)}
 
                     task = asyncio.create_task(runner())
 
