@@ -15,7 +15,11 @@ Useful debug flags:
   --verbose     high-level relay/MCP lifecycle logs
   --trace-json  log full JSON-RPC payloads; use carefully, arguments may contain sensitive data
 
-Example:
+Examples:
+  # Short mode: run command directly. Everything after the relay options is the MCP command.
+  python3 generic_stdio_mcp_relay.py npx -y @playwright/mcp@latest --extension
+
+  # Long/config mode: keep the old mcpServers JSON workflow.
   python3 generic_stdio_mcp_relay.py --config page-agent.mcp.json --server page-agent
   python3 generic_stdio_mcp_relay.py --config playwright-plain.mcp.json --server playwright-browser --stdio-format ndjson --verbose
 """
@@ -25,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -537,6 +542,63 @@ def load_server(config_path: Path, server_name: str) -> Dict[str, Any]:
     return spec
 
 
+def slugify(value: str, default: str = "mcp") -> str:
+    value = re.sub(r"^@", "", value.strip().lower())
+    value = value.replace("@", "-").replace("/", "-")
+    value = re.sub(r"[^a-z0-9_.-]+", "-", value).strip("-._")
+    return value or default
+
+
+def infer_short_server_name(command: str, args: list[str]) -> str:
+    all_parts = [command, *args]
+    joined = " ".join(all_parts).lower()
+    if "@playwright/mcp" in joined:
+        return "playwright-browser"
+    if "@page-agent/mcp" in joined or "page-agent" in joined:
+        return "page-agent"
+    if "@peakmojo/applescript-mcp" in joined or "applescript-mcp" in joined:
+        return "macos-applescript"
+    if "macos-automator-mcp" in joined:
+        return "macos-automator"
+
+    # For npx/uvx/npmx wrappers, use the first package-ish argument as the server name.
+    for part in args:
+        if part in {"-y", "--yes", "--package", "-p"}:
+            continue
+        if part.startswith("-"):
+            continue
+        return slugify(part)
+    return slugify(Path(command).name)
+
+
+def resolve_server_spec(args: argparse.Namespace) -> tuple[Dict[str, Any], str]:
+    has_config = bool(args.config or args.server)
+    has_short_cmd = bool(args.cmd)
+
+    if has_config and has_short_cmd:
+        raise SystemExit("use either --config/--server mode or short command mode, not both")
+
+    if has_config:
+        if not args.config or not args.server:
+            raise SystemExit("config mode requires both --config and --server")
+        return load_server(Path(args.config), args.server), args.server
+
+    if not has_short_cmd:
+        raise SystemExit(
+            "usage: either\n"
+            "  generic_stdio_mcp_relay.py --config FILE --server NAME [options]\n"
+            "or\n"
+            "  generic_stdio_mcp_relay.py [options] COMMAND [ARGS...]\n"
+            "example:\n"
+            "  generic_stdio_mcp_relay.py npx -y @playwright/mcp@latest --extension"
+        )
+
+    command = str(args.cmd[0])
+    command_args = [str(x) for x in args.cmd[1:]]
+    server_name = infer_short_server_name(command, command_args)
+    return {"command": command, "args": command_args, "env": {}}, server_name
+
+
 def resolve_requested_stdio_format(args: argparse.Namespace, spec: Dict[str, Any]) -> StdioFormat:
     cli_fmt = normalize_stdio_format(args.stdio_format, "--stdio-format")
     cfg_fmt = normalize_stdio_format(spec.get("stdio_format"), "config stdio_format")
@@ -554,9 +616,11 @@ def masked_env(env: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="JSON file with mcpServers")
-    parser.add_argument("--server", required=True, help="mcpServers key to launch")
+    parser = argparse.ArgumentParser(
+        description="Relay a local stdio MCP server to GPTAdmin. Supports config mode and short command mode."
+    )
+    parser.add_argument("--config", help="JSON file with mcpServers. Requires --server.")
+    parser.add_argument("--server", help="mcpServers key to launch. Requires --config.")
     parser.add_argument("--hub", default=os.getenv("GPTADMIN_MCP_RELAY_HUB", DEFAULT_HUB))
     parser.add_argument("--token", default=os.getenv("GPTADMIN_MCP_RELAY_TOKEN"))
     parser.add_argument("--agent-id", default=os.getenv("GPTADMIN_MCP_RELAY_AGENT_ID"))
@@ -571,19 +635,24 @@ def main() -> int:
         default=None,
         help="stdio message format. Precedence: CLI > config stdio_format > env > auto",
     )
+    parser.add_argument(
+        "cmd",
+        nargs=argparse.REMAINDER,
+        help="Short mode MCP command and args, e.g. npx -y @playwright/mcp@latest --extension",
+    )
     args = parser.parse_args()
 
     if not args.token:
         raise SystemExit("set GPTADMIN_MCP_RELAY_TOKEN or pass --token")
 
-    spec = load_server(Path(args.config), args.server)
+    spec, server_name = resolve_server_spec(args)
     command = str(spec["command"])
     command_args = [str(x) for x in list(spec.get("args") or [])]
     requested_stdio_format = resolve_requested_stdio_format(args, spec)
     effective_stdio_format = resolve_stdio_format([command, *command_args], requested_stdio_format)
 
-    agent_id = args.agent_id or f"{os.uname().nodename}-{args.server}"
-    name = args.name or f"{args.server} via {os.uname().nodename}"
+    agent_id = args.agent_id or f"{os.uname().nodename}-{server_name}"
+    name = args.name or f"{server_name} via {os.uname().nodename}"
 
     if args.print_command:
         print(

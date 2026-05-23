@@ -84,6 +84,11 @@ async def get_rootd():
 async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")
 
+
+@app.get('/rootd_pure.py')
+async def get_rootd_pure_py():
+    return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
+
 app.mount("/", StaticFiles(directory=WEBSITE_DIR, html=True), name="website")
 
 

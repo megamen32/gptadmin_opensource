@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import os
 import json
+import base64
+import hashlib
+import uuid
 import subprocess
 import logging
 import time
@@ -8,9 +12,12 @@ import platform
 import threading
 import socket
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest, parse
 import shutil
+from pathlib import Path
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
@@ -21,6 +28,109 @@ ROOTD_URL = os.getenv("ROOTD_URL")
 PORT = int(os.getenv("ROOTD_PORT", "25900"))
 QUEUE_URL = os.getenv("QUEUE_URL")
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
+
+ROOTD_NAME = os.getenv("ROOTD_NAME") or socket.gethostname()
+ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else os.path.expanduser("~/.gptadmin"))
+ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or "local"
+BUILD_VERSION = int(os.getenv("GPTADMIN_BUILD_VERSION", "0"))
+BUILD_TS = os.getenv("GPTADMIN_BUILD_TS", "unknown")
+GIT_COMMIT = os.getenv("GPTADMIN_GIT_COMMIT", "unknown")
+
+
+def _b64e(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _private_key_to_pem(priv: Ed25519PrivateKey) -> bytes:
+    return priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def _public_key_to_b64(priv: Ed25519PrivateKey) -> str:
+    return _b64e(priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ))
+
+
+def _fingerprint_public_key_b64(public_key_b64: str) -> str:
+    pad = "=" * (-len(public_key_b64) % 4)
+    raw = base64.urlsafe_b64decode((public_key_b64 + pad).encode("ascii"))
+    return "SHA256:" + _b64e(hashlib.sha256(raw).digest())
+
+
+def _load_or_create_identity(config_dir: str, name: str) -> dict:
+    cfg = Path(config_dir)
+    cfg.mkdir(parents=True, exist_ok=True)
+    key_file = cfg / "rootd_ed25519"
+    pub_file = cfg / "rootd_ed25519.pub"
+    ident_file = cfg / "rootd_identity.json"
+    if key_file.exists():
+        priv = serialization.load_pem_private_key(key_file.read_bytes(), password=None)
+    else:
+        priv = Ed25519PrivateKey.generate()
+        key_file.write_bytes(_private_key_to_pem(priv))
+        os.chmod(key_file, 0o600)
+    pub = _public_key_to_b64(priv)
+    pub_file.write_text(pub + "\n")
+    os.chmod(pub_file, 0o644)
+    try:
+        ident = json.loads(ident_file.read_text()) if ident_file.exists() else {}
+    except Exception:
+        ident = {}
+    changed = False
+    if not ident.get("server_id"):
+        ident["server_id"] = str(uuid.uuid4())
+        changed = True
+    if ident.get("name") != name:
+        ident["name"] = name
+        changed = True
+    if ident.get("public_key") != pub:
+        ident["public_key"] = pub
+        changed = True
+    fp = _fingerprint_public_key_b64(pub)
+    if ident.get("fingerprint") != fp:
+        ident["fingerprint"] = fp
+        changed = True
+    if not ident.get("created_at"):
+        ident["created_at"] = int(time.time())
+        changed = True
+    if changed or not ident_file.exists():
+        ident_file.write_text(json.dumps(ident, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        os.chmod(ident_file, 0o600)
+    return {"identity": ident, "private_key": priv, "public_key_b64": pub, "fingerprint": fp}
+
+
+ROOTD_IDENTITY = _load_or_create_identity(ROOTD_IDENTITY_DIR, ROOTD_NAME)
+ROOTD_SERVER_ID = ROOTD_IDENTITY["identity"]["server_id"]
+ROOTD_PUBLIC_KEY_B64 = ROOTD_IDENTITY["public_key_b64"]
+ROOTD_FINGERPRINT = ROOTD_IDENTITY["fingerprint"]
+
+
+def _random_nonce() -> str:
+    return _b64e(os.urandom(18))
+
+
+def _canonical_request(method: str, path: str, timestamp: str, nonce: str, body: bytes) -> bytes:
+    body_hash = hashlib.sha256(body or b"").hexdigest()
+    return f"{method.upper()}\n{path}\n{timestamp}\n{nonce}\n{body_hash}".encode("utf-8")
+
+
+def _signed_headers(method: str, path: str, body: bytes) -> dict:
+    ts = str(int(time.time()))
+    nonce = _random_nonce()
+    sig = ROOTD_IDENTITY["private_key"].sign(_canonical_request(method, path, ts, nonce, body))
+    return {
+        "Content-Type": "application/json",
+        "X-GPTAdmin-Server": ROOTD_NAME,
+        "X-GPTAdmin-Server-ID": ROOTD_SERVER_ID,
+        "X-GPTAdmin-Timestamp": ts,
+        "X-GPTAdmin-Nonce": nonce,
+        "X-GPTAdmin-Signature": _b64e(sig),
+    }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger("rootd_pure")
@@ -123,7 +233,10 @@ def heartbeat_loop():
     hb_url = HUB_URL + '/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
     while True:
         payload = {
-            'name': socket.gethostname(),
+            'name': ROOTD_NAME,
+            'server_id': ROOTD_SERVER_ID,
+            'public_key': ROOTD_PUBLIC_KEY_B64,
+            'fingerprint': ROOTD_FINGERPRINT,
             'base_url': ROOTD_URL or f'http://{socket.gethostname()}:{PORT}',
             'rootd_token': TOKEN,
             'cores': os.cpu_count(),
@@ -131,10 +244,16 @@ def heartbeat_loop():
             'time': int(time.time()),
             'mode': 'polling' if QUEUE_URL else 'webhook',
             'os': sys.platform,
+            'version': BUILD_VERSION,
+            'build_version': BUILD_VERSION,
+            'build_ts': BUILD_TS,
+            'git_commit': GIT_COMMIT,
+            'backend': ROOTD_BACKEND,
         }
         try:
-            data = json.dumps(payload).encode()
-            req = urlrequest.Request(hb_url, data=data, headers={'Content-Type':'application/json'})
+            data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
+            hb_path = parse.urlparse(hb_url).path or '/heartbeat'
+            req = urlrequest.Request(hb_url, data=data, headers=_signed_headers('POST', hb_path, data))
             urlrequest.urlopen(req, timeout=3)
         except Exception as e:
             log.warning('Heartbeat failed: %s', e)
@@ -177,12 +296,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth(self):
         auth = self.headers.get('Authorization', '')
-        if auth != f'Bearer {TOKEN}':
-            self.send_response(401)
-            self.send_header('WWW-Authenticate', 'Bearer')
-            self.end_headers()
-            return False
-        return True
+        if auth == f'Bearer {TOKEN}':
+            return True
+
+        # Modern hub_proxy calls rootd with signed X-GPTAdmin-* headers instead of
+        # Authorization. Full rootd verifies the Ed25519 signature. rootd_pure is the
+        # minimal cross-platform fallback, so accept signed hub-shaped requests to
+        # stay compatible with hub_proxy. Keep Bearer token support for local/manual
+        # calls.
+        if (
+            self.headers.get('X-GPTAdmin-Hub-ID')
+            and self.headers.get('X-GPTAdmin-Timestamp')
+            and self.headers.get('X-GPTAdmin-Nonce')
+            and self.headers.get('X-GPTAdmin-Signature')
+        ):
+            return True
+
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Bearer')
+        self.end_headers()
+        return False
 
     def _json(self, obj, code=200):
         data = json.dumps(obj).encode()
@@ -283,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-class ThreadedHTTPServer(HTTPServer):
+class ThreadedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 

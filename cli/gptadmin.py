@@ -48,6 +48,7 @@ else:
 PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   'https://became.bezrabotnyi.com/gptadmin.tar.gz')
 PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   'https://became.bezrabotnyi.com/gptadmin-hub.tar.gz')
 PKG_ROOTD_URL_DEFAULT = os.environ.get('PKG_ROOTD_URL', 'https://became.bezrabotnyi.com/gptadmin-rootd.tar.gz')
+ROOTD_PURE_URL_DEFAULT = os.environ.get('ROOTD_PURE_URL', 'https://became.bezrabotnyi.com/rootd_pure.py')
 
 REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
@@ -142,6 +143,15 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 # package install
 
 def install_component_from_pkg(pkg_tgz: Path, component: str):
+    if IS_MACOS and component == 'rootd':
+        # Linux PyInstaller rootd cannot run on macOS. Install the cross-platform
+        # Python fallback instead; _wrapper_script will run it with a Python that
+        # has cryptography available.
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        download(ROOTD_PURE_URL_DEFAULT, BIN_DIR / 'rootd')
+        os.chmod(BIN_DIR / 'rootd', 0o755)
+        return
+
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
@@ -160,16 +170,34 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
 # ===== Service management =====
 
 if IS_MACOS:
+    def _mac_python() -> str:
+        candidates = [
+            os.environ.get('GPTADMIN_PYTHON'),
+            '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3',
+            '/opt/homebrew/bin/python3',
+            '/usr/local/bin/python3',
+            sys.executable,
+            '/usr/bin/python3',
+        ]
+        for c in candidates:
+            if c and Path(c).exists():
+                return c
+        return 'python3'
+
     def _plist_path(label: str) -> Path:
         return SERVICES_DIR / f'{label}.plist'
 
     def _wrapper_script(name: str, bin_path: Path) -> Path:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = BIN_DIR / f'run_{name}.sh'
+        if name == 'rootd':
+            exec_line = f'exec {_mac_python()} {bin_path}'
+        else:
+            exec_line = f'exec {bin_path}'
         script.write_text(
             f'#!/bin/sh\n'
             f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
-            f'exec {bin_path}\n'
+            f'{exec_line}\n'
         )
         os.chmod(script, 0o755)
         return script
@@ -445,6 +473,35 @@ def ask(prompt: str, default: str = '') -> str:
     val = input(f"{prompt}{sfx}: ").strip()
     return val or default
 
+
+def configure_rootd_transport(env: dict, install_hub: bool, install_rootd: bool):
+    if not install_rootd or not env.get('HUB_URL'):
+        return
+    print('\nКак rootd будет подключаться к хабу?')
+    print('  1) long-polling / polling — рекомендуется, работает за NAT/firewall')
+    print('  2) webhook — только если хаб может напрямую достучаться до rootd')
+    print('  3) websocket — experimental')
+    default_transport = env.get('ROOTD_TRANSPORT', 'polling')
+    default_choice = {'polling': '1', 'webhook': '2', 'websocket': '3'}.get(default_transport, '1')
+    ch = ask('Ваш выбор', default_choice)
+    hub = env['HUB_URL'].rstrip('/')
+    if ch == '2':
+        env['ROOTD_TRANSPORT'] = 'webhook'
+        env.pop('QUEUE_URL', None)
+        rootd_url_default = env.get('ROOTD_URL') or f"http://{first_ip()}:{env.get('ROOTD_PORT', '25900')}"
+        env['ROOTD_URL'] = ask('Введите ROOTD_URL, доступный хабу', rootd_url_default)
+    elif ch == '3':
+        env['ROOTD_TRANSPORT'] = 'websocket'
+        env.pop('QUEUE_URL', None)
+        env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/rootd'
+        env['ROOTD_URL'] = ''
+    else:
+        env['ROOTD_TRANSPORT'] = 'polling'
+        env['QUEUE_URL'] = hub + '/queue'
+        env['ROOTD_URL'] = ''
+        env.setdefault('ROOTD_BIND', '127.0.0.1')
+
+
 def setup_interactive(args):
     need_root()
     for c in REQUIRED_CMDS:
@@ -502,6 +559,8 @@ def setup_interactive(args):
         ensure_https(url)
         env['FRP_ENABLE'] = 'false'
         env['HUB_URL'] = url
+
+    configure_rootd_transport(env, install_hub, install_rootd)
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_ROOTD'] = 'true' if install_rootd else 'false'
@@ -595,6 +654,45 @@ def installed_units():
     if UNIT_PATH_ROOTD.exists(): res.append((svc_rootd_name(), UNIT_PATH_ROOTD))
     if UNIT_PATH_FRPC.exists():  res.append((svc_frpc_name(),  UNIT_PATH_FRPC))
     return res
+
+def cmd_config_rootd(args):
+    need_root()
+    env = env_read()
+    if args.hub_url:
+        ensure_https(args.hub_url)
+        env['HUB_URL'] = args.hub_url.rstrip('/')
+    if not env.get('HUB_URL'):
+        url = ask('Введите HUB_URL (публичный HTTPS адрес хаба, например, https://gptadmin.example.com)')
+        ensure_https(url)
+        env['HUB_URL'] = url.rstrip('/')
+    transport = args.transport
+    if not transport:
+        configure_rootd_transport(env, install_hub=False, install_rootd=True)
+    else:
+        hub = env['HUB_URL'].rstrip('/')
+        env['ROOTD_TRANSPORT'] = transport
+        if transport == 'polling':
+            env['QUEUE_URL'] = hub + '/queue'
+            env['ROOTD_URL'] = ''
+            env.setdefault('ROOTD_BIND', '127.0.0.1')
+        elif transport == 'webhook':
+            env.pop('QUEUE_URL', None)
+            env['ROOTD_URL'] = args.rootd_url or env.get('ROOTD_URL') or f"http://{first_ip()}:{env.get('ROOTD_PORT', '25900')}"
+        elif transport == 'websocket':
+            env.pop('QUEUE_URL', None)
+            env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/rootd'
+            env['ROOTD_URL'] = ''
+    env_set_many(env)
+    if UNIT_PATH_ROOTD.exists():
+        svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
+    print('rootd transport configured:')
+    print(f"  ROOTD_TRANSPORT={env.get('ROOTD_TRANSPORT', 'polling')}")
+    print(f"  HUB_URL={env.get('HUB_URL', '')}")
+    if env.get('QUEUE_URL'):
+        print(f"  QUEUE_URL={env['QUEUE_URL']}")
+    if env.get('ROOTD_URL'):
+        print(f"  ROOTD_URL={env['ROOTD_URL']}")
+
 
 def cmd_status(_):
     units = installed_units()
@@ -794,6 +892,12 @@ def main():
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-rootd')
     ap_setup.set_defaults(func=setup_interactive)
+
+    ap_conf = sub.add_parser('config-rootd', help='Настроить транспорт rootd: polling/webhook/websocket')
+    ap_conf.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
+    ap_conf.add_argument('--hub-url')
+    ap_conf.add_argument('--rootd-url')
+    ap_conf.set_defaults(func=cmd_config_rootd)
 
     sub.add_parser('status').set_defaults(func=cmd_status)
     sub.add_parser('start').set_defaults(func=cmd_start)
