@@ -152,8 +152,12 @@ def _restore_file_metadata(root: Path | None, snapshot: dict[Path, tuple[int, in
 
 
 def _truncate(s):
+    if s is None:
+        s = ""
     if isinstance(s, bytes):
-        s = s.decode(errors="ignore")
+        s = s.decode(errors="replace")
+    elif not isinstance(s, str):
+        s = str(s)
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
 
@@ -167,7 +171,7 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
         res = subprocess.run(
             exec_cmd,
             cwd=cwd,
-            text=True,
+            text=False,
             timeout=timeout or TMO_DEF,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

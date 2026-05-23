@@ -180,7 +180,13 @@ def _audit_exec(source: str, cmd: str, cwd: str | None, timeout: int | None, res
     _audit_event(event)
 
 
-def _truncate(s: str) -> str:
+def _truncate(s: str | bytes | None) -> str:
+    if s is None:
+        s = ""
+    if isinstance(s, bytes):
+        s = s.decode(errors='replace')
+    elif not isinstance(s, str):
+        s = str(s)
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
 
 
@@ -256,7 +262,7 @@ def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: d
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout or EXEC_TIMEOUT,
-            text=True,
+            text=False,
         )
         return {
             'returncode': res.returncode,
