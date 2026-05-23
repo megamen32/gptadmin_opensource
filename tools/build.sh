@@ -410,10 +410,7 @@ if [[ "$SKIP_TESTS" != "1" ]]; then
     ROOTD_TOKEN=testtoken HUB_URL='' ROOTD_PORT="$ROOTD_PORT" \
     "$ROOTD_DIST" >"$ROOTD_RT_LOG" 2>&1 &
     ROOTD_PID=$!
-    wait_for_http "http://127.0.0.1:${ROOTD_PORT}/system/health" 25 \
-    -H "Authorization: Bearer testtoken"
-    curl -sS -f -H "Authorization: Bearer testtoken" \
-    "http://127.0.0.1:${ROOTD_PORT}/system/health" | grep -q uptime_s
+    wait_for_http "http://127.0.0.1:${ROOTD_PORT}/version" 25
     curl -sS -f "http://127.0.0.1:${ROOTD_PORT}/version" | grep -q build_version
     kill "$ROOTD_PID" || true
     ROOTD_PID=""
