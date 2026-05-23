@@ -20,6 +20,7 @@ ENV:
 from __future__ import annotations
 
 import os
+import sys
 import time
 import json
 import base64
@@ -122,23 +123,106 @@ def scrub_payload(obj: Any) -> Any:
     return obj
 
 
-def _truncate_result(result: Any) -> Any:
-    """Truncate stdout/stderr fields to stay within ChatGPT's 100k char response limit."""
-    if not isinstance(result, dict):
-        return result
-    out = dict(result)
-    for field in ("stdout", "stderr"):
-        val = out.get(field)
-        if isinstance(val, str) and len(val) > RESPONSE_TRUNCATE_CHARS:
-            out[field] = val[:RESPONSE_TRUNCATE_CHARS] + f"\n...[truncated, {len(val)} chars total]"
-    return out
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+def _find_hub_server() -> str:
+    """Return the name of the rootd registered on this hub machine (localhost base_url), or ''."""
+    from urllib.parse import urlparse
+    for name, info in servers.items():
+        try:
+            host = urlparse(info.get("base_url", "")).hostname or ""
+            if host in _LOCAL_HOSTS:
+                return name
+        except Exception:
+            pass
+    return ""
+
+
+def _ensure_output_store() -> None:
+    OUTPUT_STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _rotate_output_store() -> None:
+    """Delete oldest output files until total store size is within OUTPUT_STORE_MAX_BYTES."""
+    try:
+        files = sorted(OUTPUT_STORE_DIR.iterdir(), key=lambda p: p.stat().st_mtime)
+        total = sum(f.stat().st_size for f in files)
+        for f in files:
+            if total <= OUTPUT_STORE_MAX_BYTES:
+                break
+            try:
+                sz = f.stat().st_size
+                f.unlink()
+                total -= sz
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+
+
+def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, returncode: Any) -> dict:
+    """Write field content to OUTPUT_STORE_DIR and return a stub with preview + read hint."""
+    _ensure_output_store()
+    (OUTPUT_STORE_DIR / f"{output_id}.{field}").write_text(content, encoding="utf-8")
+    meta_path = OUTPUT_STORE_DIR / f"{output_id}.meta.json"
+    if not meta_path.exists():
+        meta_path.write_text(json.dumps(
+            {"output_id": output_id, "srv": srv, "cmd": cmd, "returncode": returncode, "ts": int(time.time())}
+        ), encoding="utf-8")
+    _rotate_output_store()
+    file_path = str(OUTPUT_STORE_DIR / f"{output_id}.{field}")
+    lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    stub: Dict[str, Any] = {
+        "_spilled": True,
+        "field": field,
+        "bytes": len(content.encode("utf-8")),
+        "lines": lines,
+        "file_path": file_path,
+        "preview_head": content[:1500],
+        "preview_tail": content[-512:] if len(content) > 1500 else "",
+        "hint": f"Use execBulk on the hub server to read: grep -n PATTERN {file_path}  or  sed -n '1,100p' {file_path}",
+    }
+    hub_srv = _find_hub_server()
+    if hub_srv:
+        stub["hub_server"] = hub_srv
+    return stub
+
+
+def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
+    """
+    If total JSON response exceeds CHATGPT_RESPONSE_LIMIT, spill stdout/stderr fields
+    (> SPILL_FIELD_MIN_CHARS each) to disk and replace them with compact stubs.
+    """
+    raw = json.dumps({"results": out})
+    if len(raw) <= CHATGPT_RESPONSE_LIMIT:
+        return out
+    result = {}
+    for srv, res in out.items():
+        if not isinstance(res, dict) or res.get("background") or "error" in res:
+            result[srv] = res
+            continue
+        output_id = f"out-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        modified = dict(res)
+        returncode = res.get("returncode")
+        for field in ("stdout", "stderr"):
+            val = modified.get(field)
+            if isinstance(val, str) and len(val) > SPILL_FIELD_MIN_CHARS:
+                modified[field] = _spill_field(output_id, srv, cmd, field, val, returncode)
+        result[srv] = modified
+    return result
 
 
 # ----------------------------- КОНФИГ ----------------------------------------
 
 CTL_TOKEN = os.getenv("CTL_TOKEN", "chatgpt_secret")
 DEAD_S = int(os.getenv("DEAD_S", "180"))
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+if os.getenv("GPTADMIN_CONFIG_DIR"):
+    CONFIG_DIR = Path(os.environ["GPTADMIN_CONFIG_DIR"])
+elif getattr(sys, "frozen", False):
+    # PyInstaller bundle: __file__ is inside /tmp/_MEIxxxxx/, use dir next to executable
+    CONFIG_DIR = Path(sys.executable).parent / "config"
+else:
+    CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 LICENSE_FILE = os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json")
 PUBLIC_KEY_FILE = os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.pem")
 def _default_artifact_dir() -> Path:
@@ -161,7 +245,10 @@ HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))  # 3 days
 SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))  # max synchronous wait before going background
-RESPONSE_TRUNCATE_CHARS = int(os.getenv("HUB_RESPONSE_TRUNCATE_CHARS", "30000"))  # per-field stdout/stderr limit
+CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "90000"))
+SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "2000"))
+OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
+OUTPUT_STORE_MAX_BYTES = int(os.getenv("HUB_OUTPUT_STORE_MAX_BYTES", str(500 * 1024 * 1024)))
 HUB_SERVERS_STATE_FILE = Path(os.getenv("GPTADMIN_SERVERS_STATE_FILE", str(CONFIG_DIR / "hub_servers_state.json")))
 HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DIR / "hub_tasks_state.json")))
 HUB_MCP_AGENTS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_AGENTS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_agents_state.json")))
@@ -647,11 +734,11 @@ def version():
     return data
 
 
-@app.get("/actions/openapi.json", include_in_schema=False)
+@app.get("/actions/openapi.yaml", include_in_schema=False)
 def actions_openapi_json():
-    path = Path(__file__).resolve().parents[2] / "public" / "openapi.json"
+    path = Path(__file__).resolve().parents[2] / "public" / "openapi.yaml"
     if not path.is_file():
-        raise HTTPException(404, "actions openapi.json not found")
+        raise HTTPException(404, "actions openapi.yaml not found")
     return Response(path.read_text(encoding="utf-8"), media_type="application/json")
 
 
@@ -936,16 +1023,14 @@ async def bulk_exec(req: BulkExec):
         for srv, task in tasks.items():
             try:
                 r = await task
-                if modes[srv] == "polling":
-                    out[srv] = _truncate_result(r)
-                else:
-                    out[srv] = _truncate_result(r if isinstance(r, dict) else r.json())
+                out[srv] = r if modes[srv] == "polling" else (r if isinstance(r, dict) else r.json())
                 log.info("bulk_exec: done srv=%s status=ok rid=%s", srv, rid())
             except Exception as e:
                 out[srv] = {"error": str(e)}
                 log.error("bulk_exec: fail srv=%s err=%s rid=%s\n%s",
                           srv, e, rid(), traceback.format_exc())
 
+    out = _spill_large_fields(out, req.cmd)
     log.info("bulk_exec: finished total=%s rid=%s", len(out), rid())
     return {"results": out}
 
@@ -2037,7 +2122,6 @@ def list_tasks(srv: str):
         "server": srv,
         "tasks": list(background_tasks.get(srv, {}).values())
     }
-
 
 
 # ----------------------------- MAIN ------------------------------------------
