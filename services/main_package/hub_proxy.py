@@ -735,15 +735,7 @@ def version():
 
 
 @app.get("/actions/openapi.yaml", include_in_schema=False)
-def actions_openapi_json():
-    path = Path(__file__).resolve().parents[2] / "public" / "openapi.yaml"
-    if not path.is_file():
-        raise HTTPException(404, "actions openapi.yaml not found")
-    return Response(path.read_text(encoding="utf-8"), media_type="application/json")
-
-
-@app.get("/actions/openapi.yaml", include_in_schema=False)
-def actions_openapi_yml():
+def actions_openapi_yaml():
     path = Path(__file__).resolve().parents[2] / "public" / "openapi.yaml"
     if not path.is_file():
         raise HTTPException(404, "actions openapi.yaml not found")
