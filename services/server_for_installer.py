@@ -94,6 +94,26 @@ async def get_cli_py():
 async def get_rootd_pure_py():
     return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
 
+
+
+# --- MCP Bridge: userscript + help page ---
+
+@app.get("/userscript.js")
+async def get_userscript():
+    path = PUBLIC_DIR / "mcp-bridge.user.js"
+    if not path.exists():
+        raise HTTPException(404, "userscript not found")
+    c = path.read_text(encoding="utf-8")
+    return Response(c, media_type="text/javascript")
+
+
+@app.get("/mcp-help")
+async def mcp_help_page():
+    html_path = WEBSITE_DIR / "mcp-help.html"
+    if html_path.exists():
+        return Response(html_path.read_text(encoding="utf-8"), media_type="text/html")
+    return Response("<h1>MCP Bridge</h1><a href=/userscript.js>Install</a>", media_type="text/html")
+
 app.mount("/", StaticFiles(directory=WEBSITE_DIR, html=True), name="website")
 
 
