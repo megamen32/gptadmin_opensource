@@ -345,9 +345,11 @@ def poll_loop():
         return
     while True:
         try:
+            srv_name = ROOTD_NAME or socket.gethostname()
+            queue_path = f"/queue/{srv_name}"
             r = requests.get(
-                f"{QUEUE_URL}/{ROOTD_NAME or socket.gethostname()}",
-                params={"token": TOKEN},
+                f"{QUEUE_URL}/{srv_name}",
+                headers=_signed_json_headers("GET", queue_path, b""),
                 timeout=5,
             )
             if r.status_code == 200:
@@ -359,10 +361,12 @@ def poll_loop():
                         env.update(job["env"])
                     res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
                     try:
+                        result_path = f"/queue/{srv_name}/result"
+                        result_body = json.dumps({"id": job.get("id"), "result": res}, separators=(",", ":")).encode("utf-8")
                         requests.post(
-                            f"{QUEUE_URL}/{ROOTD_NAME or socket.gethostname()}/result",
-                            params={"token": TOKEN},
-                            json={"id": job.get("id"), "result": res},
+                            f"{QUEUE_URL}/{srv_name}/result",
+                            data=result_body,
+                            headers=_signed_json_headers("POST", result_path, result_body),
                             timeout=5,
                         )
                     except Exception as e:

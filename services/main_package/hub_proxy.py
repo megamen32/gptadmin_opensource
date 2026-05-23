@@ -59,7 +59,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, WebSo
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import FileResponse, PlainTextResponse, Response
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from gptadmin_security import (
     NonceCache,
@@ -1320,11 +1320,32 @@ async def rootd_ws(websocket: WebSocket):
                 servers[srv_name]["time"] = 0
 
 
+def _verify_queue_signature(request: Request, srv: str, body: bytes) -> None:
+    info = servers.get(srv) or {}
+    approved = approved_servers.get(srv) or {}
+    server_id = info.get("server_id") or approved.get("server_id")
+    pub = info.get("public_key") or approved.get("public_key")
+    ts = request.headers.get("X-GPTAdmin-Timestamp")
+    nonce = request.headers.get("X-GPTAdmin-Nonce")
+    sig = request.headers.get("X-GPTAdmin-Signature")
+    server_header = request.headers.get("X-GPTAdmin-Server")
+    server_id_header = request.headers.get("X-GPTAdmin-Server-ID")
+    if server_header != srv or (server_id and server_id_header != server_id):
+        raise HTTPException(401, "signed queue identity headers mismatch")
+    if not pub:
+        raise HTTPException(401, "missing approved public key")
+    if not ts or not nonce or not sig:
+        raise HTTPException(401, "missing signed queue headers")
+    try:
+        SIGNATURE_NONCES.check_and_store(f"queue:{srv}:{server_id_header}", nonce)
+        verify_signature(pub, request.method, request.url.path, ts, nonce, body, sig)
+    except Exception as e:
+        raise HTTPException(401, f"invalid signed queue request: {e}") from e
+
+
 @app.get("/queue/{srv}", dependencies=[Depends(ensure_license)])
-def queue_poll(srv: str, token: str = Query(...)):
-    info = servers.get(srv)
-    if not info or info.get("rootd_token") != token:
-        raise HTTPException(401, "bad token")
+async def queue_poll(request: Request, srv: str):
+    _verify_queue_signature(request, srv, b"")
     q = queues.get(srv)
     if not q:
         return {}
@@ -1332,10 +1353,9 @@ def queue_poll(srv: str, token: str = Query(...)):
 
 
 @app.post("/queue/{srv}/result", dependencies=[Depends(ensure_license)])
-def queue_result(srv: str, res: TaskResult, token: str = Query(...)):
-    info = servers.get(srv)
-    if not info or info.get("rootd_token") != token:
-        raise HTTPException(401, "bad token")
+async def queue_result(request: Request, srv: str, res: TaskResult):
+    body = await request.body()
+    _verify_queue_signature(request, srv, body)
     results.setdefault(srv, {})[res.id] = res.result
     if res.id in background_tasks.get(srv, {}):
         background_tasks[srv][res.id].update({"status": "completed", "result": res.result, "completed_at": int(time.time())})
@@ -1897,9 +1917,16 @@ def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
         return False
     try:
         u = urlparse(uri)
+        if u.hostname in ("localhost", "127.0.0.1") and u.scheme in ("http", "https"):
+            return True
+    except Exception:
+        pass
+    try:
+        u = urlparse(uri)
         return u.scheme == "https" and (u.hostname == "chatgpt.com" or (u.hostname or "").endswith(".chatgpt.com")) and u.path.startswith("/connector/oauth/")
     except Exception:
         return False
+
 
 
 def _mcp_auth(request: Request) -> Dict[str, Any]:
@@ -1953,9 +1980,9 @@ async def oauth_register():
 def oauth_authorize_get(request: Request):
     q = request.query_params
     redirect_uri = q.get("redirect_uri")
-    resource = q.get("resource") or MCP_RESOURCE
+    resource = (q.get("resource") or MCP_RESOURCE).rstrip("/")
     if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
-        raise HTTPException(400, "invalid redirect_uri or resource")
+        return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     fields = {
         "redirect_uri": redirect_uri,
         "state": q.get("state", ""),
@@ -1982,11 +2009,11 @@ async def oauth_authorize_post(request: Request):
     body = (await request.body()).decode()
     params = {k: v[0] for k, v in parse_qs(body).items()}
     if params.get("password") != ADMIN_PASSWORD:
-        raise HTTPException(403, "invalid password")
+        return JSONResponse({"error": "access_denied", "error_description": "invalid password"}, status_code=403)
     redirect_uri = params.get("redirect_uri")
-    resource = params.get("resource") or MCP_RESOURCE
+    resource = (params.get("resource") or MCP_RESOURCE).rstrip("/")
     if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
-        raise HTTPException(400, "invalid redirect_uri or resource")
+        return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     code = secrets.token_urlsafe(32)
     _oauth_codes[code] = {
         "created": time.time(),
@@ -2004,11 +2031,11 @@ async def oauth_token(request: Request):
     body = (await request.body()).decode()
     params = {k: v[0] for k, v in parse_qs(body).items()}
     data = _oauth_codes.pop(params.get("code", ""), None)
-    resource = params.get("resource") or (data or {}).get("resource") or MCP_RESOURCE
+    resource = params.get("resource") or ((data or {}).get("resource") or MCP_RESOURCE).rstrip("/")
     if not data or time.time() - data.get("created", 0) > 300 or resource != MCP_RESOURCE or resource != data.get("resource"):
-        raise HTTPException(400, "invalid_grant")
+        return JSONResponse({"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"}, status_code=400)
     if not _pkce_ok(params.get("code_verifier", ""), data.get("challenge", "")):
-        raise HTTPException(400, "invalid_grant")
+        return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
     token = _sign_jwt({"sub": "admin", "scope": data.get("scope"), "client_id": data.get("client_id")})
     return {"access_token": token, "token_type": "Bearer", "expires_in": 43200}
 
