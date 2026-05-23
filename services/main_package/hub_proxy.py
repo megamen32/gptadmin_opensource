@@ -49,6 +49,7 @@ import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from logging.handlers import WatchedFileHandler
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -96,6 +97,17 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 log = logging.getLogger("hub")
+audit_log = logging.getLogger("hub.audit")
+audit_log.setLevel(logging.INFO)
+audit_log.propagate = False
+try:
+    _audit_path = Path(os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"))
+    _audit_path.parent.mkdir(parents=True, exist_ok=True)
+    _audit_handler = WatchedFileHandler(_audit_path)
+    _audit_handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_log.addHandler(_audit_handler)
+except Exception as e:
+    log.warning("audit log disabled path=%s err=%s", os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"), e)
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -174,6 +186,8 @@ CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "90000"))
 SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "2000"))
 OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
 OUTPUT_STORE_MAX_BYTES = int(os.getenv("HUB_OUTPUT_STORE_MAX_BYTES", str(500 * 1024 * 1024)))
+AUDIT_LOG_PATH = Path(os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"))
+AUDIT_EXCLUDED_PATH_PREFIXES = ("/heartbeat", "/queue/", "/mcp-relay/poll/")
 
 HUB_SERVERS_STATE_FILE = Path(os.getenv("GPTADMIN_SERVERS_STATE_FILE", str(CONFIG_DIR / "hub_servers_state.json")))
 HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DIR / "hub_tasks_state.json")))
@@ -650,6 +664,51 @@ class McpRelayCallReq(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+
+def _audit_token_id(request: Request) -> Optional[str]:
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if not auth:
+        return None
+    parts = auth.split(None, 1)
+    token = parts[1] if len(parts) == 2 else auth
+    if not token:
+        return None
+    return "sha256:" + hashlib.sha256(token.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _audit_auth_kind(request: Request) -> str:
+    if request.headers.get("x-gptadmin-signature"):
+        return "gptadmin-signature"
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return "bearer"
+    if auth:
+        return "authorization"
+    return "none"
+
+
+def _client_ip(request: Request) -> str:
+    return request.headers.get("x-real-ip") or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "")
+
+
+def _audit_should_skip(path: str) -> bool:
+    return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in AUDIT_EXCLUDED_PATH_PREFIXES)
+
+
+def _audit_event(event: Dict[str, Any]) -> None:
+    if not audit_log.handlers:
+        return
+    event.setdefault("ts", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    try:
+        audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    except Exception as e:
+        log.warning("audit write failed err=%s", e)
+
+
+# ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
@@ -687,6 +746,24 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
         dt = (time.perf_counter() - t0) * 1000
         log.info("RES rid=%s %s %s status=%s dt_ms=%.2f len=%s", rid(), request.method, request.url.path, response.status_code, dt, response.headers.get("content-length", "-"))
+        if not _audit_should_skip(request.url.path):
+            _audit_event({
+                "event": "http_request",
+                "rid": rid(),
+                "method": request.method,
+                "path": request.url.path,
+                "query_keys": sorted(request.query_params.keys()),
+                "status": response.status_code,
+                "dt_ms": round(dt, 2),
+                "body_len": len(body),
+                "content_length": request.headers.get("content-length"),
+                "ip": _client_ip(request),
+                "x_forwarded_for": request.headers.get("x-forwarded-for"),
+                "host": request.headers.get("host"),
+                "user_agent": request.headers.get("user-agent"),
+                "auth_kind": _audit_auth_kind(request),
+                "token_id": _audit_token_id(request),
+            })
         return response
 
 
@@ -1697,6 +1774,13 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
     raise HTTPException(404, f"unknown shell tool {tool_name}")
 
 
+def _mcp_relay_tool_name(method: str, params: Optional[Dict[str, Any]] = None) -> str:
+    params = params or {}
+    if method == "tools/call":
+        return str(params.get("name") or "")
+    return method
+
+
 def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, Any]] = None) -> str:
     info = mcp_relay_agents.get(agent_id)
     if not info:
@@ -1704,34 +1788,58 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
     if time.time() - float(info.get("last_seen", 0)) > DEAD_S:
         raise HTTPException(503, f"MCP relay agent {agent_id} is offline")
     job_id = f"mcp-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    payload = {"id": job_id, "jsonrpc": "2.0", "method": method, "params": params or {}, "created_at": int(time.time())}
+    params = params or {}
+    tool_name = _mcp_relay_tool_name(method, params)
+    payload = {"id": job_id, "jsonrpc": "2.0", "method": method, "params": params, "created_at": int(time.time())}
     mcp_relay_jobs[job_id] = {
         "job_id": job_id,
         "kind": "real_mcp",
         "agent_id": agent_id,
         "method": method,
-        "params": params or {},
+        "tool_name": tool_name,
+        "params": params,
         "status": "queued",
         "created_at": int(time.time()),
     }
     mcp_relay_queues.setdefault(agent_id, []).append(payload)
+    log.info(
+        "mcp_relay: queued target=%s method=%s tool=%s job_id=%s queue_len=%s",
+        agent_id, method, tool_name, job_id, len(mcp_relay_queues.get(agent_id, [])),
+    )
+    _audit_event({"event":"mcp_relay_queued","target":agent_id,"method":method,"tool_name":tool_name,"job_id":job_id,"queue_len":len(mcp_relay_queues.get(agent_id, []))})
     return job_id
 
 
 async def _mcp_relay_wait(job_id: str, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    deadline = time.time() + min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S)
+    wait_s = min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S)
+    deadline = time.time() + wait_s
     job = mcp_relay_jobs.get(job_id)
     if job:
         job["status"] = "running"
+        log.info(
+            "mcp_relay: wait start target=%s method=%s tool=%s job_id=%s timeout_s=%s",
+            job.get("agent_id"), job.get("method"), job.get("tool_name"), job_id, wait_s,
+        )
     while time.time() < deadline:
         result = mcp_relay_results.get(job_id)
         if result is not None:
+            ok = bool(result.get("ok", True))
             if job:
-                job.update({"status": "completed" if result.get("ok", True) else "failed", "result": result, "completed_at": int(time.time())})
-            if result.get("ok", True):
+                job.update({"status": "completed" if ok else "failed", "result": result, "completed_at": int(time.time())})
+                log.info(
+                    "mcp_relay: wait done target=%s method=%s tool=%s job_id=%s ok=%s",
+                    job.get("agent_id"), job.get("method"), job.get("tool_name"), job_id, ok,
+                )
+            if ok:
                 return result.get("result") or {}
             return {"error": result.get("error") or {"message": "MCP relay job failed"}, "job_id": job_id}
         await asyncio.sleep(0.25)
+    if job:
+        log.info(
+            "mcp_relay: wait background target=%s method=%s tool=%s job_id=%s timeout_s=%s",
+            job.get("agent_id"), job.get("method"), job.get("tool_name"), job_id, wait_s,
+        )
+        _audit_event({"event":"mcp_relay_background","target":job.get("agent_id"),"method":job.get("method"),"tool_name":job.get("tool_name"),"job_id":job_id,"timeout_s":wait_s})
     return None
 
 
@@ -1778,8 +1886,17 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
         mcp_relay_agents[agent_id]["last_seen"] = time.time()
     payload = {"ok": res.ok, "result": res.result, "error": res.error, "completed_at": int(time.time()), "agent_id": agent_id}
     mcp_relay_results[res.id] = payload
-    if res.id in mcp_relay_jobs:
-        mcp_relay_jobs[res.id].update({"status": "completed" if res.ok else "failed", "result": payload, "completed_at": int(time.time())})
+    job = mcp_relay_jobs.get(res.id)
+    if job:
+        job.update({"status": "completed" if res.ok else "failed", "result": payload, "completed_at": int(time.time())})
+        log.info(
+            "mcp_relay: result target=%s method=%s tool=%s job_id=%s ok=%s",
+            job.get("agent_id"), job.get("method"), job.get("tool_name"), res.id, res.ok,
+        )
+        _audit_event({"event":"mcp_relay_result","target":job.get("agent_id"),"method":job.get("method"),"tool_name":job.get("tool_name"),"job_id":res.id,"ok":res.ok})
+    else:
+        log.info("mcp_relay: result target=%s job_id=%s ok=%s job=unknown", agent_id, res.id, res.ok)
+        _audit_event({"event":"mcp_relay_result","target":agent_id,"job_id":res.id,"ok":res.ok,"job":"unknown"})
     return {"ok": True}
 
 
@@ -1792,6 +1909,7 @@ def mcp_relay_agents_list():
 @app.post("/mcp-relay/tools", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 async def mcp_relay_tools(req: McpRelayToolsReq):
     target = _mcp_relay_select_agent(req.target)
+    log.info("mcp_relay: tools/list request target=%s background=%s timeout=%s", target, req.background, req.timeout)
     if target == VIRTUAL_HUB_AGENT_ID:
         return {"agent_id": target, "status": "completed", "response": _hub_tools_list()}
     if _is_virtual_shell_agent(target):
@@ -1809,6 +1927,10 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
 @app.post("/mcp-relay/call", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 async def mcp_relay_call(req: McpRelayCallReq):
     target = _mcp_relay_select_agent(req.target)
+    log.info(
+        "mcp_relay: call request target=%s tool=%s background=%s timeout=%s",
+        target, req.tool_name, req.background, req.timeout,
+    )
     if target == VIRTUAL_HUB_AGENT_ID:
         data = await _hub_tool_call(req.tool_name, req.arguments or {})
         return {"agent_id": target, "status": "completed", "response": data}
