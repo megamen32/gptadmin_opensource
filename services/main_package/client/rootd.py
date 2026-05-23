@@ -572,10 +572,18 @@ def get_file(path: str):
     return FileResponse(path)
 
 
+def _polling_foreground_loop() -> None:
+    log.info("rootd polling mode: HTTP listener disabled; waiting for queue jobs")
+    while True:
+        time.sleep(3600)
+
+
 if __name__ == "__main__":
-    import uvicorn, os
-    
-    # Внутри PyInstaller и в обычном питоне одинаково работает:
-    uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
+    if QUEUE_URL or TRANSPORT == "polling":
+        _polling_foreground_loop()
+    else:
+        import uvicorn, os
+        # Внутри PyInstaller и в обычном питоне одинаково работает:
+        uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
 
 

@@ -70,6 +70,10 @@ function Download-And-InstallArtifact {
     if (-not $exe) { throw 'rootd executable not found in package. Expected rootd.exe or rootd_win.exe.' }
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
     if (Test-Path $CurrentExe) {
         Copy-Item $CurrentExe (Join-Path $BinDir "rootd.exe.bak.$stamp") -Force
     }
@@ -142,8 +146,12 @@ Write-Host "RootdUrl: $RootdUrl"
 Write-Host "Transport: $RootdTransport"
 Write-Host "HubPublicKeyFile: $HubPublicKeyFile"
 Write-Host "Token: $RootdToken"
-try {
-    Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$RootdPort/system/info" -Headers @{ Authorization = "Bearer $RootdToken" } | ConvertTo-Json -Compress | Write-Host
-} catch {
-    Write-Warning "Local rootd health check failed. Check $LogDir\rootd.task.log"
+if ($RootdTransport -eq 'polling') {
+    Write-Host 'Polling mode: local HTTP listener is intentionally disabled.'
+} else {
+    try {
+        Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$RootdPort/system/info" -Headers @{ Authorization = "Bearer $RootdToken" } | ConvertTo-Json -Compress | Write-Host
+    } catch {
+        Write-Warning "Local rootd health check failed. Check $LogDir\rootd.task.log"
+    }
 }
