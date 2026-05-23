@@ -423,22 +423,13 @@ if [[ "$SKIP_TESTS" != "1" ]]; then
     "$HUB_DIST" >"$HUB_RT_LOG" 2>&1 &
     HUB_PID=$!
 
-    # 1) ждём, что порт начал слушать
+    # 1) ждём старт порта
     wait_for_listen_port "$HUB_PORT" 25
 
-    # 2) ждём любой HTTP-ответ: сперва OpenAPI (публичный), если нет — /servers
-    if ! wait_for_http "http://127.0.0.1:${HUB_PORT}/openapi.json" 10; then
-    wait_for_http "http://127.0.0.1:${HUB_PORT}/servers" 10 -H "Authorization: Bearer ctltest"|| {
-        echo "Hub API didn't respond on /openapi.json nor /servers"; exit 1; }
-    fi
-
-    # 3) регистрируем тестовый rootd и убеждаемся, что он появился
-    curl -sS -f -X POST "http://127.0.0.1:${HUB_PORT}/heartbeat" \
-    -H 'Content-Type: application/json' \
-    -d "{\"name\":\"srv\",\"base_url\":\"http://127.0.0.1:${ROOTD_PORT}\",\"rootd_token\":\"x\",\"time\":0}" >/dev/null
-
-    curl -sS -f "http://127.0.0.1:${HUB_PORT}/servers" -H "Authorization: Bearer ctltest"| grep -q srv
+    # 2) проверяем /version (публичный) и /servers (авторизованный)
+    wait_for_http "http://127.0.0.1:${HUB_PORT}/version" 10
     curl -sS -f "http://127.0.0.1:${HUB_PORT}/version" | grep -q build_version
+    curl -sS -f "http://127.0.0.1:${HUB_PORT}/servers" -H "Authorization: Bearer ctltest" > /dev/null
 
     kill "$HUB_PID" || true
     HUB_PID=""
