@@ -38,7 +38,7 @@ def slug(value: str) -> str:
 
 
 def load_config(path: Path) -> Dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         die(f"config must be object: {path}")
     for key in ("agent_id", "command"):
