@@ -37,6 +37,7 @@ import shutil
 import subprocess
 from typing import Optional
 from pathlib import Path
+from logging.handlers import WatchedFileHandler
 
 import requests
 try:
@@ -80,6 +81,9 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger("rootd")
+audit_log = logging.getLogger("rootd.audit")
+audit_log.setLevel(logging.INFO)
+audit_log.propagate = False
 # ------------------------------------------------------------------
 
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
@@ -111,6 +115,61 @@ def _hub_artifact_url(path: str) -> str:
 ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
 ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
 ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
+ROOTD_AUDIT_LOG = os.getenv("ROOTD_AUDIT_LOG") or ("/var/log/gptadmin/rootd-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "rootd-audit.log"))
+try:
+    _rootd_audit_path = Path(ROOTD_AUDIT_LOG)
+    _rootd_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    _rootd_audit_handler = WatchedFileHandler(_rootd_audit_path)
+    _rootd_audit_handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_log.addHandler(_rootd_audit_handler)
+except Exception as e:
+    log.warning("rootd audit log disabled path=%s err=%s", ROOTD_AUDIT_LOG, e)
+
+
+def _audit_event(event: dict) -> None:
+    if not audit_log.handlers:
+        return
+    event.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    event.setdefault("server", ROOTD_NAME or socket.gethostname())
+    event.setdefault("server_id", ROOTD_SERVER_ID)
+    event.setdefault("backend", ROOTD_BACKEND)
+    event.setdefault("transport", TRANSPORT)
+    event.setdefault("pid", os.getpid())
+    try:
+        audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    except Exception as e:
+        log.warning("rootd audit write failed: %s", e)
+
+
+def _cmd_sha256(cmd: str) -> str:
+    return hashlib.sha256((cmd or "").encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _request_peer(request: Optional[Request]) -> dict:
+    if not request:
+        return {}
+    return {
+        "ip": request.headers.get("x-real-ip") or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else None),
+        "x_forwarded_for": request.headers.get("x-forwarded-for"),
+        "user_agent": request.headers.get("user-agent"),
+        "auth_kind": "gptadmin-signature" if request.headers.get("x-gptadmin-signature") else "none",
+        "endpoint": request.url.path,
+        "method": request.method,
+    }
+
+
+def _audit_exec(source: str, cmd: str, cwd: Optional[str], timeout: Optional[int], result: Optional[dict] = None, error: Optional[str] = None, job_id: Optional[str] = None, request: Optional[Request] = None, started_at: Optional[float] = None) -> None:
+    event = {"event": "rootd_exec", "source": source, "job_id": job_id, "cmd": cmd, "cmd_sha256": _cmd_sha256(cmd), "cwd": cwd, "timeout": timeout}
+    event.update(_request_peer(request))
+    if started_at is not None:
+        event["dt_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+    if isinstance(result, dict):
+        event["returncode"] = result.get("returncode")
+        event["run_as_user"] = result.get("run_as_user")
+    if error:
+        event["error"] = error
+    _audit_event(event)
+
 
 def _update_headers() -> dict:
     return {"Authorization": f"Bearer {ROOTD_UPDATE_TOKEN}"} if ROOTD_UPDATE_TOKEN else {}
@@ -177,17 +236,21 @@ class ExecReq(BaseModel):
 
 # ---------------- EXEC --------------------------------------------
 @app.post("/exec", dependencies=[Depends(guard)])
-def exec_cmd(body: ExecReq = Body(...)):
+def exec_cmd(request: Request, body: ExecReq = Body(...)):
     log.info(f"EXEC: {body.cmd} (cwd={body.cwd})")
 
     env = os.environ.copy()
     if body.env:
         env.update(body.env)
 
+    started = time.perf_counter()
     try:
-        return backend.run(body.cmd, body.timeout, body.cwd, env)
+        result = backend.run(body.cmd, body.timeout, body.cwd, env)
+        _audit_exec("http", body.cmd, body.cwd, body.timeout, result=result, request=request, started_at=started)
+        return result
     except Exception as e:
         log.exception("Error in /exec")
+        _audit_exec("http", body.cmd, body.cwd, body.timeout, error=str(e), request=request, started_at=started)
         return JSONResponse(
             status_code=500,
             content={"error": str(e), "traceback": traceback.format_exc()},
@@ -195,9 +258,10 @@ def exec_cmd(body: ExecReq = Body(...)):
 
 
 @app.post("/exec/stream", dependencies=[Depends(guard)])
-async def exec_stream(body: ExecReq = Body(...)):
+async def exec_stream(request: Request, body: ExecReq = Body(...)):
     """Run command and stream combined stdout/stderr."""
     log.info(f"EXEC_STREAM: {body.cmd} (cwd={body.cwd})")
+    _audit_exec("http_stream_start", body.cmd, body.cwd, body.timeout, request=request)
 
     env = os.environ.copy()
     if body.env:
@@ -307,11 +371,14 @@ async def websocket_loop():
                         env = os.environ.copy()
                         if payload.get("env"):
                             env.update(payload["env"])
+                        started = time.perf_counter()
                         try:
                             result = backend.run(payload["cmd"], payload.get("timeout"), payload.get("cwd"), env)
+                            _audit_exec("websocket", payload.get("cmd"), payload.get("cwd"), payload.get("timeout"), result=result, job_id=tid, started_at=started)
                         except Exception as e:
                             log.exception("websocket exec failed")
                             result = {"error": str(e), "traceback": traceback.format_exc()}
+                            _audit_exec("websocket", payload.get("cmd"), payload.get("cwd"), payload.get("timeout"), error=str(e), job_id=tid, started_at=started)
                         await ws.send(json.dumps({"type": "result", "id": tid, "result": result}))
                 finally:
                     hb_task.cancel()
@@ -359,7 +426,14 @@ def poll_loop():
                     env = os.environ.copy()
                     if job.get("env"):
                         env.update(job["env"])
-                    res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
+                    started = time.perf_counter()
+                    try:
+                        res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
+                        _audit_exec("polling", job.get("cmd"), job.get("cwd"), job.get("timeout"), result=res, job_id=job.get("id"), started_at=started)
+                    except Exception as e:
+                        log.exception("poll exec failed")
+                        res = {"error": str(e), "traceback": traceback.format_exc()}
+                        _audit_exec("polling", job.get("cmd"), job.get("cwd"), job.get("timeout"), error=str(e), job_id=job.get("id"), started_at=started)
                     try:
                         result_path = f"/queue/{srv_name}/result"
                         result_body = json.dumps({"id": job.get("id"), "result": res}, separators=(",", ":")).encode("utf-8")

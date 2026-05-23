@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest, parse
 import shutil
 from pathlib import Path
+from logging.handlers import WatchedFileHandler
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -134,6 +135,49 @@ def _signed_headers(method: str, path: str, body: bytes) -> dict:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger("rootd_pure")
+audit_log = logging.getLogger("rootd_pure.audit")
+audit_log.setLevel(logging.INFO)
+audit_log.propagate = False
+ROOTD_AUDIT_LOG = os.getenv("ROOTD_AUDIT_LOG") or ("/var/log/gptadmin/rootd-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "rootd-audit.log"))
+try:
+    _audit_path = Path(ROOTD_AUDIT_LOG)
+    _audit_path.parent.mkdir(parents=True, exist_ok=True)
+    _audit_handler = WatchedFileHandler(_audit_path)
+    _audit_handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_log.addHandler(_audit_handler)
+except Exception as e:
+    log.warning("rootd audit log disabled path=%s err=%s", ROOTD_AUDIT_LOG, e)
+
+
+def _audit_event(event: dict) -> None:
+    if not audit_log.handlers:
+        return
+    event.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    event.setdefault("server", ROOTD_NAME)
+    event.setdefault("server_id", ROOTD_SERVER_ID)
+    event.setdefault("backend", ROOTD_BACKEND)
+    event.setdefault("transport", "polling" if QUEUE_URL else "webhook")
+    event.setdefault("pid", os.getpid())
+    try:
+        audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    except Exception as e:
+        log.warning("rootd audit write failed: %s", e)
+
+
+def _cmd_sha256(cmd: str) -> str:
+    return hashlib.sha256((cmd or "").encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _audit_exec(source: str, cmd: str, cwd: str | None, timeout: int | None, result: dict | None = None, error: str | None = None, job_id: str | None = None, started_at: float | None = None) -> None:
+    event = {"event":"rootd_exec","source":source,"job_id":job_id,"cmd":cmd,"cmd_sha256":_cmd_sha256(cmd),"cwd":cwd,"timeout":timeout}
+    if started_at is not None:
+        event["dt_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+    if isinstance(result, dict):
+        event["returncode"] = result.get("returncode")
+        event["run_as_user"] = result.get("run_as_user")
+    if error:
+        event["error"] = error
+    _audit_event(event)
 
 
 def _truncate(s: str) -> str:
@@ -221,6 +265,7 @@ def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: d
         }
     except subprocess.TimeoutExpired as e:
         return {
+            'returncode': -1,
             'error': f'timeout {e.timeout}s',
             'stdout': _truncate(e.stdout or ''),
             'stderr': _truncate(e.stderr or ''),
@@ -274,7 +319,14 @@ def poll_loop():
                         job = {}
                     if job.get('cmd'):
                         log.info("POLL: %s (cwd=%s)", job['cmd'], job.get('cwd'))
-                        res = run_cmd(job.get('cmd', ''), job.get('timeout'), job.get('cwd'), job.get('env'))
+                        started = time.perf_counter()
+                        try:
+                            res = run_cmd(job.get('cmd', ''), job.get('timeout'), job.get('cwd'), job.get('env'))
+                            _audit_exec("polling", job.get('cmd', ''), job.get('cwd'), job.get('timeout'), result=res, job_id=job.get('id'), started_at=started)
+                        except Exception as e:
+                            log.exception("poll exec failed")
+                            res = {"error": str(e), "traceback": str(e)}
+                            _audit_exec("polling", job.get('cmd', ''), job.get('cwd'), job.get('timeout'), error=str(e), job_id=job.get('id'), started_at=started)
                         try:
                             result_url = f"{QUEUE_URL}/{socket.gethostname()}/result?token={TOKEN}"
                             data = json.dumps({'id': job.get('id'), 'result': res}).encode()
@@ -365,7 +417,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         if self.path == '/exec':
-            res = run_cmd(body.get('cmd', ''), body.get('timeout'), body.get('cwd'), body.get('env'))
+            started = time.perf_counter()
+            try:
+                res = run_cmd(body.get('cmd', ''), body.get('timeout'), body.get('cwd'), body.get('env'))
+                _audit_exec('http', body.get('cmd', ''), body.get('cwd'), body.get('timeout'), result=res, started_at=started)
+            except Exception as e:
+                log.exception('http exec failed')
+                res = {'error': str(e), 'traceback': str(e)}
+                _audit_exec('http', body.get('cmd', ''), body.get('cwd'), body.get('timeout'), error=str(e), started_at=started)
             self._json(res)
         elif self.path == '/exec/stream':
             cmd = body.get('cmd', '')
