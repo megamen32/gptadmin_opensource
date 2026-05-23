@@ -1,847 +1,307 @@
 openapi: 3.1.0
+
 info:
-  title: GPTAdmin Hub
-  version: 3.0.1
-  description: "Manage remote servers via GPTAdmin Hub.\n\nWorkflow:\n  1. Call listServers\
-    \ to see active and pending servers.\n  2. Call execBulk to execute shell commands.\n\
-    \  3. If execBulk returns background=true and task_id, call getTask until status\
-    \ is completed or failed.\n  4. After reading a finished task, call ackTask to\
-    \ remove it from hub memory.\n\nLong-running commands:\n  Commands that may exceed\
-    \ 30 seconds should be started with background=true.\n  Synchronous commands may\
-    \ automatically return background=true if they exceed the hub sync window.\n\n\
-    Pending servers:\n  If listServers shows pending servers, approve one by running\
-    \ its approve_command with execBulk on any active server.\n\n\n    MCP relay workflow:\n\
-    \      1. Call listMcpRelayAgents to see remote MCP agents connected by long polling.\n\
-    \      2. Call listMcpRelayTools with target=\"default\" or an agent_id.\n   \
-    \   3. Call callMcpRelayTool with tool_name and arguments from the remote MCP\
-    \ tool schema.\n      4. If response.background=true and job_id is returned, call\
-    \ getMcpRelayJob until completed.\n"
+  title: GPTAdmin MCP Relay
+  version: 4.0.0
+  description: |
+    Universal MCP relay for GPTAdmin.
+
+    Use this API as a single interface for remote tools:
+      1. listMcpAgents — choose an online agent.
+      2. listMcpTools — inspect tools available on that agent.
+      3. callMcpTool — call exactly one tool on exactly one target.
+      4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
+
+    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    The hub itself is exposed as target "hub" for registry and approval tools.
+
 servers:
-- url: https://gptadmin.bezrabotnyi.com
+  - url: https://gptadmin.bezrabotnyi.com
+
 security:
-- bearerAuth: []
+  - bearerAuth: []
+
 paths:
-  /servers:
-    get:
-      operationId: listServers
-      summary: List active and pending servers
-      description: Returns active registered servers and, optionally, pending servers
-        waiting for approval.
-      parameters:
-      - name: include_pending
-        in: query
-        required: false
-        schema:
-          type: boolean
-          default: true
-      responses:
-        '200':
-          description: Server registry
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ListServersResponse'
-  /bulk/exec:
-    post:
-      operationId: execBulk
-      summary: Execute a shell command on one or more servers
-      description: 'Runs a shell command on selected servers.
-
-
-        For one server, pass a one-element servers array.
-
-
-        If background=true, the hub returns immediately with task_id.
-
-        If background=false but the command exceeds the synchronous wait window,
-
-        the hub may still return background=true and task_id.
-
-        '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ExecBulkRequest'
-      responses:
-        '200':
-          description: Command results keyed by server name
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecBulkResponse'
-  /tasks/{srv}:
-    get:
-      operationId: listTasks
-      summary: List background tasks for a server
-      description: Lists running, completed, failed, or orphaned background tasks
-        known to the hub.
-      parameters:
-      - name: srv
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Server name from listServers.
-      responses:
-        '200':
-          description: Background task list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ListTasksResponse'
-  /tasks/{srv}/{tid}:
-    get:
-      operationId: getTask
-      summary: Get background task status and result
-      description: Poll this endpoint until status is completed or failed.
-      parameters:
-      - name: srv
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Server name from listServers.
-      - name: tid
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Task ID returned by execBulk.
-      responses:
-        '200':
-          description: Background task status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TaskStatusResponse'
-        '404':
-          description: Task not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /tasks/{srv}/{tid}/ack:
-    post:
-      operationId: ackTask
-      summary: Acknowledge and remove a handled task
-      description: Call after reading a completed or failed task result.
-      parameters:
-      - name: srv
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Server name from listServers.
-      - name: tid
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Task ID returned by execBulk.
-      responses:
-        '200':
-          description: Acknowledgement result
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AckTaskResponse'
   /mcp-relay/agents:
     get:
-      operationId: listMcpRelayAgents
-      summary: List MCP relay agents
-      description: Lists remote MCP agents connected to hub_proxy via long polling.
-        Agents are usually local stdio/http MCP servers running on a user machine.
+      operationId: listMcpAgents
+      summary: List MCP agents
+      description: Lists real long-polling MCP relay agents, virtual shell agents, and the built-in hub agent.
       responses:
-        '200':
-          description: MCP relay agent registry
+        "200":
+          description: Available MCP agents
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/McpRelayAgentsResponse'
+                $ref: "#/components/schemas/ListMcpAgentsResponse"
+
   /mcp-relay/tools:
     post:
-      operationId: listMcpRelayTools
-      summary: List tools from a remote MCP relay agent
-      description: Requests tools/list from a selected remote MCP server through the
-        long-polling relay. Use target="default" to select the most recently online
-        relay agent. Slow operations may return background=true and job_id.
+      operationId: listMcpTools
+      summary: List tools for one MCP target
+      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/McpRelayToolsRequest'
+              $ref: "#/components/schemas/ListMcpToolsRequest"
       responses:
-        '200':
-          description: Remote MCP tools/list response
+        "200":
+          description: Tool list response or background job reference
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/McpRelayToolResponse'
+                $ref: "#/components/schemas/McpToolResponse"
+
   /mcp-relay/call:
     post:
-      operationId: callMcpRelayTool
-      summary: Call a tool on a remote MCP relay agent
-      description: Calls tools/call on a selected remote MCP server through the long-polling
-        relay. First call listMcpRelayAgents, then listMcpRelayTools, then call this
-        endpoint with tool_name and arguments. Requests are bounded by the hub sync
-        timeout; long work returns background=true and job_id.
+      operationId: callMcpTool
+      summary: Call one tool on one MCP target
+      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several agents must be used.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/McpRelayCallRequest'
+              $ref: "#/components/schemas/CallMcpToolRequest"
       responses:
-        '200':
-          description: Remote MCP tools/call response or background job
+        "200":
+          description: Tool call response or background job reference
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/McpRelayToolResponse'
+                $ref: "#/components/schemas/McpToolResponse"
+
   /mcp-relay/job/{job_id}:
     get:
-      operationId: getMcpRelayJob
-      summary: Get MCP relay background job status
-      description: Poll this endpoint after listMcpRelayTools or callMcpRelayTool
-        returns background=true and job_id.
+      operationId: getMcpJob
+      summary: Get MCP background job status
+      description: Polls a background MCP job. Set ack=true after reading a completed or failed result to remove it from hub memory.
       parameters:
-      - name: job_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Job ID returned by MCP relay operation.
+        - name: job_id
+          in: path
+          required: true
+          description: Job id returned by listMcpTools or callMcpTool.
+          schema:
+            type: string
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema:
+            type: boolean
+            default: false
       responses:
-        '200':
-          description: MCP relay job status/result
+        "200":
+          description: MCP job status and optional result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/McpRelayJobStatusResponse'
+                $ref: "#/components/schemas/McpJobResponse"
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+
   schemas:
-    Server:
-      type: object
-      additionalProperties: false
-      properties:
-        name:
-          type: string
-        server_id:
-          type: string
-        base_url:
-          type: string
-        status:
-          type: string
-          enum:
-          - active
-          - pending
-          - approved
-          - offline
-        alive:
-          type: boolean
-        lag_s:
-          type:
-          - integer
-          - 'null'
-        time:
-          type: number
-        cores:
-          type:
-          - integer
-          - 'null'
-        mem_mb:
-          type:
-          - integer
-          - 'null'
-        default_user:
-          type:
-          - string
-          - 'null'
-        default_uid:
-          type:
-          - integer
-          - 'null'
-        default_home:
-          type:
-          - string
-          - 'null'
-        os:
-          type: string
-        mode:
-          type: string
-          enum:
-          - webhook
-          - polling
-          - websocket
-        version:
-          type:
-          - integer
-          - 'null'
-        build_version:
-          type:
-          - integer
-          - 'null'
-        build_ts:
-          type:
-          - string
-          - 'null'
-        git_commit:
-          type:
-          - string
-          - 'null'
-        backend:
-          type:
-          - string
-          - 'null'
-        proxy_for:
-          type:
-          - string
-          - 'null'
-        proxy_via:
-          type:
-          - string
-          - 'null'
-        ssh_host:
-          type:
-          - string
-          - 'null'
-        ssh_port:
-          type:
-          - integer
-          - 'null'
-        ssh_user:
-          type:
-          - string
-          - 'null'
-        pending_reason:
-          type:
-          - string
-          - 'null'
-        requested_at:
-          type:
-          - number
-          - 'null'
-        updated_at:
-          type:
-          - number
-          - 'null'
-        fingerprint:
-          type:
-          - string
-          - 'null'
-        approve_command:
-          type:
-          - string
-          - 'null'
-        reject_command:
-          type:
-          - string
-          - 'null'
-        how_to_approve:
-          type:
-          - string
-          - 'null'
-    PendingServer:
-      type: object
-      additionalProperties: false
-      properties:
-        status:
-          type: string
-          enum:
-          - pending
-        reason:
-          type: string
-        name:
-          type: string
-        requested_at:
-          type: number
-        updated_at:
-          type: number
-        fingerprint:
-          type: string
-        payload:
-          $ref: '#/components/schemas/ServerIdentityPayload'
-        existing:
-          oneOf:
-          - $ref: '#/components/schemas/Server'
-          - type: 'null'
-    ServerIdentityPayload:
-      type: object
-      additionalProperties: false
-      properties:
-        name:
-          type: string
-        server_id:
-          type: string
-        public_key:
-          type: string
-        fingerprint:
-          type:
-          - string
-          - 'null'
-        base_url:
-          type: string
-        time:
-          type: integer
-        cores:
-          type:
-          - integer
-          - 'null'
-        mem_mb:
-          type:
-          - integer
-          - 'null'
-        default_user:
-          type:
-          - string
-          - 'null'
-        default_uid:
-          type:
-          - integer
-          - 'null'
-        default_home:
-          type:
-          - string
-          - 'null'
-        os:
-          type: string
-        mode:
-          type: string
-          enum:
-          - webhook
-          - polling
-          - websocket
-        version:
-          type:
-          - integer
-          - 'null'
-        build_version:
-          type:
-          - integer
-          - 'null'
-        build_ts:
-          type:
-          - string
-          - 'null'
-        git_commit:
-          type:
-          - string
-          - 'null'
-        backend:
-          type:
-          - string
-          - 'null'
-        proxy_for:
-          type:
-          - string
-          - 'null'
-        proxy_via:
-          type:
-          - string
-          - 'null'
-        ssh_host:
-          type:
-          - string
-          - 'null'
-        ssh_port:
-          type:
-          - integer
-          - 'null'
-        ssh_user:
-          type:
-          - string
-          - 'null'
-    ListServersResponse:
+    ListMcpAgentsResponse:
       type: object
       additionalProperties: false
       required:
-      - servers
-      - pending
+        - agents
       properties:
-        servers:
+        agents:
           type: array
           items:
-            $ref: '#/components/schemas/Server'
-        pending:
-          type: array
-          items:
-            $ref: '#/components/schemas/PendingServer'
-    ExecBulkRequest:
+            $ref: "#/components/schemas/McpAgent"
+
+    McpAgent:
       type: object
       additionalProperties: false
       required:
-      - servers
-      - cmd
-      properties:
-        servers:
-          type: array
-          minItems: 1
-          items:
-            type: string
-          description: Server names from listServers.
-        cmd:
-          type: string
-          description: Shell command to execute.
-        cwd:
-          type:
-          - string
-          - 'null'
-          description: Working directory on the remote server.
-        timeout:
-          type:
-          - integer
-          - 'null'
-          minimum: 1
-          description: Command timeout on the remote server in seconds.
-        background:
-          type: boolean
-          default: false
-          description: Return task_id immediately without waiting for command result.
-    ExecBulkResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - results
-      properties:
-        results:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/ServerCommandResult'
-    ServerCommandResult:
-      oneOf:
-      - $ref: '#/components/schemas/CommandResult'
-      - $ref: '#/components/schemas/BackgroundCommandResult'
-      - $ref: '#/components/schemas/CommandError'
-    CommandResult:
-      type: object
-      additionalProperties: false
-      properties:
-        stdout:
-          type: string
-        stderr:
-          type: string
-        returncode:
-          type: integer
-    BackgroundCommandResult:
-      type: object
-      additionalProperties: false
-      required:
-      - background
-      - task_id
-      - status
-      properties:
-        background:
-          type: boolean
-          const: true
-        task_id:
-          type: string
-        gptadmin_task_id:
-          type:
-          - string
-          - 'null'
-        status:
-          type: string
-          enum:
-          - running
-        message:
-          type:
-          - string
-          - 'null'
-    CommandError:
-      type: object
-      additionalProperties: false
-      required:
-      - error
-      properties:
-        error:
-          type: string
-    Task:
-      type: object
-      additionalProperties: false
-      properties:
-        task_id:
-          type: string
-        status:
-          type: string
-          enum:
-          - running
-          - completed
-          - failed
-          - orphaned
-        cmd:
-          type:
-          - string
-          - 'null'
-        cwd:
-          type:
-          - string
-          - 'null'
-        result:
-          oneOf:
-          - $ref: '#/components/schemas/CommandResult'
-          - $ref: '#/components/schemas/CommandError'
-          - type: 'null'
-        error:
-          type:
-          - string
-          - 'null'
-        created_at:
-          type:
-          - integer
-          - 'null'
-        completed_at:
-          type:
-          - integer
-          - 'null'
-        orphaned_at:
-          type:
-          - integer
-          - 'null'
-    ListTasksResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - server
-      - tasks
-      properties:
-        server:
-          type: string
-        tasks:
-          type: array
-          items:
-            $ref: '#/components/schemas/Task'
-    TaskStatusResponse:
-      allOf:
-      - $ref: '#/components/schemas/Task'
-      - type: object
-        additionalProperties: false
-        required:
-        - server
-        - task_id
+        - agent_id
+        - name
+        - kind
         - status
-        properties:
-          server:
-            type: string
-          task_id:
-            type: string
-    AckTaskResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - ok
-      - status
-      - server
-      - task_id
-      properties:
-        ok:
-          type: boolean
-        status:
-          type: string
-          enum:
-          - acknowledged
-          - not_found
-        server:
-          type: string
-        task_id:
-          type: string
-        removed_task:
-          type:
-          - boolean
-          - 'null'
-        removed_result:
-          type:
-          - boolean
-          - 'null'
-    ErrorResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - detail
-      properties:
-        detail:
-          type: string
-    McpRelayAgent:
-      type: object
-      additionalProperties: false
       properties:
         agent_id:
           type: string
+          description: Target id to use in listMcpTools and callMcpTool.
         name:
           type: string
-        transport:
+        kind:
           type: string
           enum:
-          - stdio
-          - http
+            - real_mcp
+            - virtual_shell
+            - virtual_hub
+        transport:
+          type:
+            - string
+            - "null"
+          description: Agent transport, for example stdio, http, shell, or internal.
         status:
           type: string
           enum:
-          - online
-          - offline
+            - online
+            - offline
         last_seen:
           type:
-          - number
-          - 'null'
+            - number
+            - "null"
         capabilities:
           type: array
           items:
             type: string
         meta:
           type: object
+          properties: {}
           additionalProperties: true
-    McpRelayAgentsResponse:
+
+    ListMcpToolsRequest:
       type: object
       additionalProperties: false
       required:
-      - agents
-      - default_agent
-      properties:
-        agents:
-          type: array
-          items:
-            $ref: '#/components/schemas/McpRelayAgent'
-        default_agent:
-          type:
-          - string
-          - 'null'
-    McpRelayToolsRequest:
-      type: object
-      additionalProperties: false
+        - target
       properties:
         target:
           type: string
-          default: default
-          description: Relay agent id from listMcpRelayAgents, or "default".
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
         timeout:
           type:
-          - integer
-          - 'null'
+            - integer
+            - "null"
           minimum: 1
           maximum: 35
           default: 30
-          description: Synchronous wait timeout in seconds. Keep below the GPT Actions
-            45s limit.
-    McpRelayCallRequest:
+          description: Synchronous wait timeout in seconds.
+        background:
+          type: boolean
+          default: false
+          description: If true, queue tools/list and return job_id immediately.
+
+    CallMcpToolRequest:
       type: object
       additionalProperties: false
       required:
-      - tool_name
+        - target
+        - tool_name
       properties:
         target:
           type: string
-          default: default
-          description: Relay agent id from listMcpRelayAgents, or "default".
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
         tool_name:
           type: string
-          description: Tool name returned by listMcpRelayTools.
+          description: Tool name returned by listMcpTools.
         arguments:
           type: object
+          properties: {}
           additionalProperties: true
           default: {}
-          description: Arguments for the remote MCP tool.
+          description: Arguments matching the selected tool input schema.
         timeout:
           type:
-          - integer
-          - 'null'
+            - integer
+            - "null"
           minimum: 1
           maximum: 35
           default: 30
-          description: Synchronous wait timeout in seconds. Long work returns background=true
-            and job_id.
-    McpRelayToolResponse:
-      oneOf:
-      - $ref: '#/components/schemas/McpRelayImmediateResponse'
-      - $ref: '#/components/schemas/McpRelayBackgroundResponse'
-      - $ref: '#/components/schemas/McpRelayErrorResponse'
-    McpRelayImmediateResponse:
+          description: Synchronous wait timeout in seconds.
+        background:
+          type: boolean
+          default: false
+          description: If true, queue the tool call and return job_id immediately.
+
+    McpToolResponse:
       type: object
       additionalProperties: false
       required:
-      - agent_id
-      - response
+        - agent_id
+        - status
       properties:
         agent_id:
           type: string
+        status:
+          type: string
+          enum:
+            - completed
+            - running
+            - failed
+            - running_or_unknown
         response:
-          type: object
+          type:
+            - object
+            - "null"
+          properties: {}
           additionalProperties: true
-          description: Raw MCP tools/list or tools/call result returned by the remote
-            MCP server.
-    McpRelayBackgroundResponse:
+          description: Tool response. For tools/list this usually contains a tools array.
+        background:
+          type: boolean
+          description: True when the operation continues in background and job_id should be polled.
+        job_id:
+          type:
+            - string
+            - "null"
+        message:
+          type:
+            - string
+            - "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+
+    McpJobResponse:
       type: object
       additionalProperties: false
       required:
-      - agent_id
-      - response
-      properties:
-        agent_id:
-          type: string
-        response:
-          type: object
-          additionalProperties: false
-          required:
-          - background
-          - job_id
-          - status
-          properties:
-            background:
-              type: boolean
-              const: true
-            job_id:
-              type: string
-            status:
-              type: string
-              enum:
-              - running
-            message:
-              type:
-              - string
-              - 'null'
-    McpRelayErrorResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - agent_id
-      - response
-      properties:
-        agent_id:
-          type: string
-        response:
-          type: object
-          additionalProperties: false
-          required:
-          - error
-          properties:
-            error:
-              type: object
-              additionalProperties: true
-            job_id:
-              type:
-              - string
-              - 'null'
-    McpRelayJobStatusResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - job_id
-      - status
+        - job_id
+        - status
       properties:
         job_id:
           type: string
         status:
           type: string
           enum:
-          - completed
-          - running_or_unknown
-        result:
+            - queued
+            - running
+            - completed
+            - failed
+            - orphaned
+            - running_or_unknown
+        agent_id:
           type:
-          - object
-          - 'null'
+            - string
+            - "null"
+        response:
+          type:
+            - object
+            - "null"
+          properties: {}
           additionalProperties: true
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+        acked:
+          type: boolean
+          default: false
+
+    McpError:
+      type: object
+      additionalProperties: true
+      properties:
+        message:
+          type:
+            - string
+            - "null"
+        code:
+          type:
+            - string
+            - integer
+            - "null"
