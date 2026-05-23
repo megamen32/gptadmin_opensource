@@ -6,7 +6,7 @@
 1. **services/rootd.py** – небольшой FastAPI сервер, который запускается от имени root и выполняет низкоуровневые задачи.
 2. **services/hub_proxy.py** – прокси, через который клиенты могут обращаться к нескольким экземплярам rootd. Он хранит их метаданные и маршрутизирует вызовы.
 
-`public/openapi.json` содержит полное описание API hub_proxy (и через него – rootd). Скрипты `deploy/install_*.sh` и systemd‑юниты демонстрируют развёртывание сервисов. `deploy/setup_nginx.sh` настраивает доступ по HTTPS.
+`public/openapi.yaml` содержит полное описание API hub_proxy (и через него – rootd). Скрипты `deploy/install_*.sh` и systemd‑юниты демонстрируют развёртывание сервисов. `deploy/setup_nginx.sh` настраивает доступ по HTTPS.
 
 Тесты (`tests/test_rootd.py`, `tests/test_hub.py`) отправляют простые HTTP‑запросы и служат примером использования.
 

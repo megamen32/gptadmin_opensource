@@ -13,7 +13,7 @@ from urllib import request as urlrequest, parse
 import shutil
 
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
-LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
+LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
 EXEC_TIMEOUT = int(os.getenv("EXEC_TIMEOUT", "300"))
 HUB_URL = os.getenv("HUB_URL")
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))

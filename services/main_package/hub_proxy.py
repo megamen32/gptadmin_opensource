@@ -742,11 +742,11 @@ def actions_openapi_json():
     return Response(path.read_text(encoding="utf-8"), media_type="application/json")
 
 
-@app.get("/actions/openapi.yml", include_in_schema=False)
+@app.get("/actions/openapi.yaml", include_in_schema=False)
 def actions_openapi_yml():
-    path = Path(__file__).resolve().parents[2] / "public" / "openapi.yml"
+    path = Path(__file__).resolve().parents[2] / "public" / "openapi.yaml"
     if not path.is_file():
-        raise HTTPException(404, "actions openapi.yml not found")
+        raise HTTPException(404, "actions openapi.yaml not found")
     return Response(path.read_text(encoding="utf-8"), media_type="application/yaml")
 
 

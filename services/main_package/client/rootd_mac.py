@@ -15,7 +15,7 @@ from typing import Iterable
 log = logging.getLogger("rootd_mac")
 
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
-LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
+LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
 PRESERVE_FILE_METADATA = os.getenv("ROOTD_PRESERVE_FILE_METADATA", "1").lower() not in {"0", "false", "no", "off"}
 PRESERVE_METADATA_MAX_FILES = int(os.getenv("ROOTD_PRESERVE_METADATA_MAX_FILES", "50000"))
 DEFAULT_RUN_USER = os.getenv("ROOTD_DEFAULT_USER", "")

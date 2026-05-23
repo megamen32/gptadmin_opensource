@@ -29,7 +29,7 @@ server {
     }
 
     location / {
-        # статические файлы (openapi.json, ai-plugin.json, логотип)
+        # статические файлы (openapi.yaml, ai-plugin.json, логотип)
                 try_files \$uri @proxy;
     }
 

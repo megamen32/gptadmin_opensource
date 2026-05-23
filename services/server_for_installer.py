@@ -55,7 +55,7 @@ async def get_install_win_ps1():
 
 @app.get("/api.json")
 async def get_openapi_json():
-    content = load_script(PUBLIC_DIR / "openapi.json")
+    content = load_script(PUBLIC_DIR / "openapi.yaml")
     return Response(content, media_type="application/json")
 
 def _bin(path: Path, filename: str, media_type: str):

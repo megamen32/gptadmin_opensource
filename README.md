@@ -102,6 +102,6 @@ python tests/test_rootd.py
 python tests/test_hub.py
 ```
 
-## public/openapi.json
+## public/openapi.yaml
 
-`public/openapi.json` documents the API served by `hub_proxy`. It was produced manualy, update it whenever the API changes to refresh the schema.
+`public/openapi.yaml` documents the API served by `hub_proxy`. It was produced manualy, update it whenever the API changes to refresh the schema.
