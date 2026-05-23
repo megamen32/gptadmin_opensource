@@ -6,6 +6,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import json
 import subprocess
 import shutil
 import socket
@@ -23,6 +24,12 @@ ETC_DIR = Path('/etc/gptadmin')
 ETC_DIR.mkdir(parents=True, exist_ok=True)
 ENV_FILE = ETC_DIR / 'gptadmin.env'
 CLI_PATH = Path('/usr/local/bin/gptadmin')  # для uninstall
+MCP_CONFIG_FILE = ETC_DIR / 'mcp.json'
+MCP_AGENTS_DIR = ETC_DIR / 'mcp-agents.d'
+MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
+MCP_RUNTIME_DIR = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay'
+MCP_MANAGER = MCP_RUNTIME_DIR / 'mcp_agent_manager.py'
+MCP_RELAY = MCP_RUNTIME_DIR / 'generic_stdio_mcp_relay.py'
 
 if IS_MACOS:
     SERVICES_DIR = Path('/Library/LaunchDaemons')
@@ -155,6 +162,12 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
+        agents_src = tdp / 'agents'
+        if agents_src.exists():
+            agents_dst = INSTALL_DIR / 'agents'
+            if agents_dst.exists():
+                shutil.rmtree(agents_dst, ignore_errors=True)
+            shutil.copytree(agents_src, agents_dst)
         if component == 'hub':
             candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
         else:
@@ -648,6 +661,319 @@ def setup_interactive(args):
 
 # ===== Commands =====
 
+# ===== MCP stdio relay manager =====
+
+def _json_read(path: Path, default):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except PermissionError:
+            die(f'permission denied reading {path}; run with sudo')
+    return default
+
+
+def _json_write(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    try:
+        os.chmod(path, 0o640)
+    except Exception:
+        pass
+
+
+def _mcp_default_hub_url() -> str:
+    env = env_read()
+    return (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+
+
+def _mcp_config() -> dict:
+    cfg = _json_read(MCP_CONFIG_FILE, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg.setdefault('gptadmin', {})
+    cfg.setdefault('mcpServers', {})
+    g = cfg['gptadmin']
+    g.setdefault('hub_url', _mcp_default_hub_url())
+    g.setdefault('token_file', str(MCP_TOKEN_FILE))
+    g.setdefault('config_style', 'claude-compatible')
+    return cfg
+
+
+def _mcp_save(cfg: dict):
+    _json_write(MCP_CONFIG_FILE, cfg)
+
+
+def _mcp_slug(name: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_.-]+', '-', name.strip()).strip('-._') or 'mcp'
+
+
+def _mcp_agent_id(name: str, server: dict) -> str:
+    if server.get('agent_id'):
+        return str(server['agent_id'])
+    return f"{socket.gethostname()}-{_mcp_slug(name)}"
+
+
+def _mcp_ensure_token_file():
+    if MCP_TOKEN_FILE.exists():
+        return
+    env = env_read()
+    token = env.get('CTL_TOKEN') or os.environ.get('GPTADMIN_MCP_RELAY_TOKEN') or gen_hex()
+    MCP_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MCP_TOKEN_FILE.write_text(token.strip() + '\n', encoding='utf-8')
+    os.chmod(MCP_TOKEN_FILE, 0o640)
+
+
+def _mcp_agent_config(name: str, cfg: dict) -> dict:
+    servers = cfg.get('mcpServers') or {}
+    if name not in servers:
+        die(f'MCP server not found: {name}')
+    server = dict(servers[name])
+    if 'command' not in server:
+        die(f'MCP server {name!r} has no command')
+    g = cfg.get('gptadmin') or {}
+    out = {
+        'agent_id': _mcp_agent_id(name, server),
+        'name': str(server.get('name') or f'{name} via {socket.gethostname()}'),
+        'hub_url': str(server.get('hub_url') or g.get('hub_url') or _mcp_default_hub_url()),
+        'token_file': str(server.get('token_file') or g.get('token_file') or MCP_TOKEN_FILE),
+        'command': str(server['command']),
+        'args': [str(x) for x in server.get('args', [])],
+        'env': {str(k): str(v) for k, v in (server.get('env') or {}).items()},
+        'cwd': str(server.get('cwd') or ('/Users/' + os.environ.get('SUDO_USER', os.environ.get('USER', 'user')) if IS_MACOS else '/')),
+        'stdio_format': str(server.get('stdio_format') or server.get('transport') or 'auto'),
+        'run_as_user': str(server.get('run_as_user') or server.get('user') or ('root' if os.name != 'nt' else 'SYSTEM')),
+        'auto_start': bool(server.get('auto_start', True)),
+        'mode': 'agent-config',
+    }
+    for k in ('python', 'init_timeout', 'verbose', 'trace_json', 'log_dir'):
+        if k in server:
+            out[k] = server[k]
+    return out
+
+
+def _mcp_write_agent_config(name: str, cfg: dict) -> Path:
+    _mcp_ensure_token_file()
+    MCP_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = MCP_AGENTS_DIR / f'{_mcp_slug(name)}.json'
+    _json_write(path, _mcp_agent_config(name, cfg))
+    return path
+
+
+def _mcp_runtime_candidates() -> list[Path]:
+    here = Path(__file__).resolve()
+    return [
+        MCP_RUNTIME_DIR,
+        here.parent.parent / 'agents' / 'generic_stdio_mcp_relay',
+        here.parent / 'agents' / 'generic_stdio_mcp_relay',
+    ]
+
+
+def _mcp_runtime_dir() -> Path | None:
+    for d in _mcp_runtime_candidates():
+        if (d / 'mcp_agent_manager.py').exists() and (d / 'generic_stdio_mcp_relay.py').exists():
+            return d
+    return None
+
+
+def _mcp_manager_exists():
+    return _mcp_runtime_dir() is not None
+
+
+def _mcp_manager_cmd(action: str, agent_config: Path, backend: str | None = None) -> list:
+    runtime = _mcp_runtime_dir()
+    if not runtime:
+        expected = ', '.join(str(x) for x in _mcp_runtime_candidates())
+        die(f'MCP runtime is not installed. Expected generic_stdio_mcp_relay under one of: {expected}. Install/update GPTAdmin package first.')
+    cmd = [sys.executable or 'python3', str(runtime / 'mcp_agent_manager.py'), action, str(agent_config)]
+    if backend:
+        cmd += ['--backend', backend]
+    return cmd
+
+
+def _mcp_names_from_arg(args, cfg: dict):
+    servers = cfg.get('mcpServers') or {}
+    if getattr(args, 'name', None):
+        return [args.name]
+    return sorted(servers.keys())
+
+
+def cmd_mcp_list(args):
+    cfg = _mcp_config()
+    servers = cfg.get('mcpServers') or {}
+    if args.json:
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        return
+    if not servers:
+        print(f'No MCP servers configured. Add one: gptadmin mcp add gptadminmcp --url https://.../mcp')
+        return
+    for name, spec in sorted(servers.items()):
+        enabled = spec.get('enabled', True)
+        cmd = spec.get('command', '')
+        argv = ' '.join(str(x) for x in spec.get('args', []))
+        fmt = spec.get('stdio_format', spec.get('transport', 'auto'))
+        print(f"{name}\t{'enabled' if enabled else 'disabled'}\t{fmt}\t{cmd} {argv}")
+
+
+
+def _mcp_extract_tail_options(args):
+    # argparse.REMAINDER is used so command tails like "npx -y ..." survive.
+    # That also means "gptadmin mcp add name --url ..." lands in args.command/args.args.
+    tail = []
+    if getattr(args, 'command', None):
+        tail.append(args.command)
+    tail.extend(getattr(args, 'args', None) or [])
+    if not tail:
+        return
+    cleaned = []
+    i = 0
+    known_value_opts = {
+        '--url': 'url',
+        '--stdio-format': 'stdio_format',
+        '--cwd': 'cwd',
+        '--agent-id': 'agent_id',
+        '--run-as-user': 'run_as_user',
+        '--hub-url': 'hub_url',
+    }
+    while i < len(tail):
+        item = tail[i]
+        if item in known_value_opts and i + 1 < len(tail):
+            setattr(args, known_value_opts[item], tail[i + 1])
+            i += 2
+            continue
+        if item == '--env' and i + 1 < len(tail):
+            cur = getattr(args, 'env', None) or []
+            cur.append(tail[i + 1])
+            args.env = cur
+            i += 2
+            continue
+        if item == '--disabled':
+            args.disabled = True
+            i += 1
+            continue
+        if item == '--force':
+            args.force = True
+            i += 1
+            continue
+        cleaned.append(item)
+        i += 1
+    args.command = cleaned[0] if cleaned else None
+    args.args = cleaned[1:] if len(cleaned) > 1 else []
+
+def cmd_mcp_add(args):
+    need_root()
+    _mcp_extract_tail_options(args)
+    cfg = _mcp_config()
+    servers = cfg.setdefault('mcpServers', {})
+    if args.name in servers and not args.force:
+        die(f'MCP server already exists: {args.name}; use --force to overwrite')
+    env = {}
+    for item in args.env or []:
+        if '=' not in item:
+            die(f'--env must be KEY=VALUE, got: {item}')
+        k, v = item.split('=', 1)
+        env[k] = v
+    if args.url:
+        command = args.command or 'npx'
+        cmd_args = args.args or ['-y', 'mcp-remote', args.url]
+        stdio = args.stdio_format or 'framed'
+    else:
+        if not args.command:
+            die('provide --url URL or COMMAND [ARGS...]')
+        command = args.command
+        cmd_args = args.args or []
+        stdio = args.stdio_format or 'auto'
+    servers[args.name] = {
+        'command': command,
+        'args': [str(x) for x in cmd_args],
+        'env': env,
+        'cwd': args.cwd,
+        'stdio_format': stdio,
+        'enabled': not args.disabled,
+    }
+    if args.agent_id:
+        servers[args.name]['agent_id'] = args.agent_id
+    if args.run_as_user:
+        servers[args.name]['run_as_user'] = args.run_as_user
+    if args.hub_url:
+        cfg.setdefault('gptadmin', {})['hub_url'] = args.hub_url.rstrip('/')
+    _mcp_save(cfg)
+    agent_config = _mcp_write_agent_config(args.name, cfg)
+    print(f'Added MCP server {args.name}')
+    print(f'Config: {MCP_CONFIG_FILE}')
+    print(f'Agent config: {agent_config}')
+
+
+def cmd_mcp_remove(args):
+    need_root()
+    cfg = _mcp_config()
+    servers = cfg.get('mcpServers') or {}
+    if args.name not in servers:
+        die(f'MCP server not found: {args.name}')
+    if not args.keep_service:
+        agent_config = MCP_AGENTS_DIR / f'{_mcp_slug(args.name)}.json'
+        if agent_config.exists() and _mcp_manager_exists():
+            run(_mcp_manager_cmd('status', agent_config, args.backend), check=False)
+    servers.pop(args.name)
+    _mcp_save(cfg)
+    try:
+        (MCP_AGENTS_DIR / f'{_mcp_slug(args.name)}.json').unlink(missing_ok=True)
+    except Exception:
+        pass
+    print(f'Removed MCP server {args.name}')
+
+
+def cmd_mcp_edit(args):
+    need_root()
+    cfg = _mcp_config()
+    _mcp_save(cfg)
+    editor = os.environ.get('EDITOR') or ('nano' if have('nano') else 'vi')
+    run([editor, str(MCP_CONFIG_FILE)])
+    # Regenerate per-agent configs after edit.
+    cfg = _mcp_config()
+    for name in sorted((cfg.get('mcpServers') or {}).keys()):
+        _mcp_write_agent_config(name, cfg)
+    print(f'Updated {MCP_CONFIG_FILE}')
+
+
+def cmd_mcp_render(args):
+    cfg = _mcp_config()
+    for name in _mcp_names_from_arg(args, cfg):
+        agent_config = _mcp_write_agent_config(name, cfg)
+        print(f'### {name}: {agent_config}')
+        run(_mcp_manager_cmd('render', agent_config, args.backend), check=False)
+
+
+def cmd_mcp_install(args):
+    need_root()
+    cfg = _mcp_config()
+    names = _mcp_names_from_arg(args, cfg)
+    if not names:
+        die('no MCP servers configured')
+    for name in names:
+        if not (cfg.get('mcpServers') or {}).get(name, {}).get('enabled', True):
+            print(f'Skip disabled MCP server: {name}')
+            continue
+        agent_config = _mcp_write_agent_config(name, cfg)
+        print(f'Installing MCP server {name}: {agent_config}')
+        run(_mcp_manager_cmd('install', agent_config, args.backend))
+
+
+def cmd_mcp_status(args):
+    cfg = _mcp_config()
+    for name in _mcp_names_from_arg(args, cfg):
+        agent_config = _mcp_write_agent_config(name, cfg)
+        print(f'### {name}')
+        run(_mcp_manager_cmd('status', agent_config, args.backend), check=False)
+
+
+def cmd_mcp_cat(args):
+    cfg = _mcp_config()
+    if args.name:
+        print(json.dumps(_mcp_agent_config(args.name, cfg), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+
+
 def installed_units():
     res = []
     if UNIT_PATH_HUB.exists():   res.append((svc_hub_name(),   UNIT_PATH_HUB))
@@ -943,6 +1269,51 @@ def main():
     ap_url.add_argument('url')
     ap_url.set_defaults(func=cmd_seturl)
 
+    ap_mcp = sub.add_parser('mcp', help='Управление stdio MCP relay agents')
+    mcp_sub = ap_mcp.add_subparsers(dest='mcp_cmd')
+
+    ap_mcp_list = mcp_sub.add_parser('list', help='List configured MCP servers')
+    ap_mcp_list.add_argument('--json', action='store_true')
+    ap_mcp_list.set_defaults(func=cmd_mcp_list)
+
+    ap_mcp_add = mcp_sub.add_parser('add', help='Add MCP server, Claude/Codex-style')
+    ap_mcp_add.add_argument('name')
+    ap_mcp_add.add_argument('command', nargs='?', help='Command, e.g. npx')
+    ap_mcp_add.add_argument('args', nargs=argparse.REMAINDER, help='Command args, e.g. -y mcp-remote https://...')
+    ap_mcp_add.add_argument('--url', help='Shortcut for: npx -y mcp-remote URL')
+    ap_mcp_add.add_argument('--stdio-format', choices=['auto', 'framed', 'ndjson', 'jsonl', 'content-length'])
+    ap_mcp_add.add_argument('--cwd')
+    ap_mcp_add.add_argument('--env', action='append', help='KEY=VALUE, repeatable')
+    ap_mcp_add.add_argument('--agent-id')
+    ap_mcp_add.add_argument('--run-as-user')
+    ap_mcp_add.add_argument('--hub-url')
+    ap_mcp_add.add_argument('--disabled', action='store_true')
+    ap_mcp_add.add_argument('--force', action='store_true')
+    ap_mcp_add.set_defaults(func=cmd_mcp_add)
+
+    ap_mcp_rm = mcp_sub.add_parser('remove', aliases=['rm'], help='Remove MCP server from config')
+    ap_mcp_rm.add_argument('name')
+    ap_mcp_rm.add_argument('--keep-service', action='store_true')
+    ap_mcp_rm.add_argument('--backend', choices=['systemd', 'launchd', 'windows-task'])
+    ap_mcp_rm.set_defaults(func=cmd_mcp_remove)
+
+    ap_mcp_edit = mcp_sub.add_parser('edit', help='Edit /etc/gptadmin/mcp.json')
+    ap_mcp_edit.set_defaults(func=cmd_mcp_edit)
+
+    ap_mcp_cat = mcp_sub.add_parser('cat', help='Print GPTAdmin MCP config or generated agent config')
+    ap_mcp_cat.add_argument('name', nargs='?')
+    ap_mcp_cat.set_defaults(func=cmd_mcp_cat)
+
+    for action_name, func, help_text in [
+        ('render', cmd_mcp_render, 'Render supervisor config'),
+        ('install', cmd_mcp_install, 'Install/start MCP service'),
+        ('status', cmd_mcp_status, 'Show MCP service status'),
+    ]:
+        p = mcp_sub.add_parser(action_name, help=help_text)
+        p.add_argument('name', nargs='?')
+        p.add_argument('--backend', choices=['systemd', 'launchd', 'windows-task'])
+        p.set_defaults(func=func)
+
     ap_tun = sub.add_parser('tunnel', help='Управление FRP-туннелем')
     tun_sub = ap_tun.add_subparsers(dest='tun_cmd')
     tun_sub.add_parser('status').set_defaults(func=cmd_tunnel_status)
@@ -955,6 +1326,8 @@ def main():
     args = ap.parse_args()
     if not getattr(args, 'cmd', None):
         ap.print_help(); return
+    if args.cmd == 'mcp' and not getattr(args, 'mcp_cmd', None):
+        ap_mcp.print_help(); return
     args.func(args)
 
 if __name__ == '__main__':

@@ -299,12 +299,18 @@ for f in "$ART_DIR"/rootd/build/rootd/warn-*.txt "$ART_DIR"/hub_proxy/build/hub_
   sed -n '1,200p' "$f"
 done
 
-# ---------- Archive (include CLI) ----------
+# ---------- Copy generic stdio MCP agents ----------
+step "Copy generic stdio MCP agents"
+rm -rf "$ART_DIR/agents"
+mkdir -p "$ART_DIR/agents"
+cp -a agents/generic_stdio_mcp_relay "$ART_DIR/agents/"
+
+# ---------- Archive (include CLI and MCP agents) ----------
 step "Archive: gptadmin.tar.gz"
 # Тарим только существующие папки (на случай первой частичной сборки)
 pushd "$ART_DIR" >/dev/null
 INCLUDE=()
-for d in rootd hub_proxy cli; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
+for d in rootd hub_proxy cli agents; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
 tar -czf gptadmin.tar.gz "${INCLUDE[@]}"
 
 # NEW: компонентные архивы (если есть соответствующие папки)
@@ -317,7 +323,9 @@ else
 fi
 
 if [[ -d rootd ]]; then
-  tar -czf gptadmin-rootd.tar.gz rootd
+  ROOTD_INCLUDE=(rootd)
+  [[ -d agents ]] && ROOTD_INCLUDE+=(agents)
+  tar -czf gptadmin-rootd.tar.gz "${ROOTD_INCLUDE[@]}"
   sha256sum gptadmin-rootd.tar.gz > gptadmin-rootd.sha256
   python - <<PY
 import json, pathlib
