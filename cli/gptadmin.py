@@ -12,7 +12,12 @@ import shutil
 import socket
 import re
 import secrets
+import pwd
 from pathlib import Path
+try:
+    import tomllib
+except Exception:
+    tomllib = None
 
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
@@ -974,6 +979,219 @@ def cmd_mcp_cat(args):
         print(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
+def _user_home(username: str | None) -> Path:
+    if username:
+        try:
+            return Path(pwd.getpwnam(username).pw_dir)
+        except Exception:
+            return Path('/Users' if IS_MACOS else '/home') / username
+    sudo_user = os.environ.get('SUDO_USER') if os.geteuid() == 0 else None
+    if sudo_user and sudo_user != 'root':
+        return _user_home(sudo_user)
+    return Path.home()
+
+
+def _mcp_external_path(kind: str, username: str | None, explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser()
+    home = _user_home(username)
+    if kind == 'claude-desktop':
+        if sys.platform == 'darwin':
+            return home / 'Library' / 'Application Support' / 'Claude' / 'claude_desktop_config.json'
+        if sys.platform.startswith('win'):
+            appdata = os.environ.get('APPDATA')
+            return Path(appdata) / 'Claude' / 'claude_desktop_config.json' if appdata else home / 'AppData' / 'Roaming' / 'Claude' / 'claude_desktop_config.json'
+        return home / '.config' / 'Claude' / 'claude_desktop_config.json'
+    if kind == 'claude-code':
+        return home / '.claude.json'
+    if kind == 'codex':
+        return home / '.codex' / 'config.toml'
+    die(f'unknown MCP config format: {kind}')
+
+
+def _mcp_merge_servers(dst: dict, src_servers: dict, overwrite: bool = False) -> int:
+    dst.setdefault('mcpServers', {})
+    n = 0
+    for name, spec in (src_servers or {}).items():
+        if name in dst['mcpServers'] and not overwrite:
+            continue
+        if isinstance(spec, dict) and spec.get('command'):
+            clean = {
+                'command': spec.get('command'),
+                'args': spec.get('args') or [],
+                'env': spec.get('env') or {},
+            }
+            for k in ('cwd', 'stdio_format', 'transport', 'enabled', 'agent_id', 'run_as_user', 'name'):
+                if k in spec:
+                    clean[k] = spec[k]
+            dst['mcpServers'][name] = clean
+            n += 1
+    return n
+
+
+def _mcp_simple_toml_value(raw: str):
+    raw = raw.strip()
+    if raw.startswith('[') and raw.endswith(']'):
+        body = raw[1:-1].strip()
+        if not body:
+            return []
+        return [_mcp_simple_toml_value(x.strip()) for x in body.split(',') if x.strip()]
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        try:
+            return json.loads(raw) if raw.startswith('"') else raw[1:-1]
+        except Exception:
+            return raw[1:-1]
+    if raw.lower() in ('true', 'false'):
+        return raw.lower() == 'true'
+    return raw
+
+
+def _mcp_simple_codex_toml_read(path: Path) -> dict:
+    out = {'mcpServers': {}}
+    current = None
+    current_env = False
+    section_re = re.compile(r'^\[mcp_servers\.("[^"]+"|[^.\]]+)(\.env)?\]$')
+    for raw in path.read_text(encoding='utf-8').splitlines():
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        m = section_re.match(line)
+        if m:
+            name = _mcp_simple_toml_value(m.group(1))
+            current = str(name)
+            current_env = bool(m.group(2))
+            out['mcpServers'].setdefault(current, {'env': {}})
+            continue
+        if current and '=' in line:
+            k, v = line.split('=', 1)
+            key = _mcp_simple_toml_value(k.strip())
+            val = _mcp_simple_toml_value(v.strip())
+            if current_env:
+                out['mcpServers'][current].setdefault('env', {})[str(key)] = val
+            else:
+                out['mcpServers'][current][str(key)] = val
+    return out
+
+
+def _mcp_codex_read(path: Path) -> dict:
+    if not path.exists():
+        return {'mcpServers': {}}
+    if tomllib:
+        data = tomllib.loads(path.read_text(encoding='utf-8'))
+        servers = data.get('mcp_servers') or data.get('mcpServers') or {}
+        out = {'mcpServers': {}}
+        for name, spec in servers.items():
+            if not isinstance(spec, dict):
+                continue
+            command = spec.get('command') or spec.get('cmd')
+            if not command:
+                continue
+            out['mcpServers'][name] = {
+                'command': command,
+                'args': spec.get('args') or [],
+                'env': spec.get('env') or {},
+            }
+            if spec.get('cwd'):
+                out['mcpServers'][name]['cwd'] = spec.get('cwd')
+        return out
+    out = _mcp_simple_codex_toml_read(path)
+    for name, spec in list(out.get('mcpServers', {}).items()):
+        if not spec.get('command'):
+            out['mcpServers'].pop(name, None)
+    return out
+
+
+def _toml_quote(v) -> str:
+    return json.dumps(str(v), ensure_ascii=False)
+
+
+def _mcp_codex_write(path: Path, cfg: dict):
+    lines = ['# Generated by gptadmin mcp export codex', '']
+    for name, spec in sorted((cfg.get('mcpServers') or {}).items()):
+        lines.append(f'[mcp_servers.{_toml_quote(name)}]')
+        lines.append(f'command = {_toml_quote(spec.get("command", ""))}')
+        args = ', '.join(_toml_quote(x) for x in (spec.get('args') or []))
+        lines.append(f'args = [{args}]')
+        if spec.get('cwd'):
+            lines.append(f'cwd = {_toml_quote(spec.get("cwd"))}')
+        env = spec.get('env') or {}
+        if env:
+            lines.append('[mcp_servers.%s.env]' % _toml_quote(name))
+            for k, v in sorted(env.items()):
+                lines.append(f'{_toml_quote(k)} = {_toml_quote(v)}')
+        lines.append('')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('\n'.join(lines), encoding='utf-8')
+
+
+def _mcp_external_read(kind: str, path: Path) -> dict:
+    if kind == 'codex':
+        return _mcp_codex_read(path)
+    if not path.exists():
+        return {'mcpServers': {}}
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if 'mcpServers' not in data and 'mcp_servers' in data:
+        data['mcpServers'] = data.get('mcp_servers') or {}
+    data.setdefault('mcpServers', {})
+    return data
+
+
+def _mcp_external_write(kind: str, path: Path, cfg: dict, merge: bool = True):
+    if kind == 'codex':
+        _mcp_codex_write(path, cfg)
+        return
+    data = {'mcpServers': {}}
+    if merge and path.exists():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            data = {}
+    data.setdefault('mcpServers', {})
+    data['mcpServers'].update(cfg.get('mcpServers') or {})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def cmd_mcp_import(args):
+    need_root()
+    path = _mcp_external_path(args.format, args.user, args.path)
+    ext = _mcp_external_read(args.format, path)
+    cfg = _mcp_config()
+    n = _mcp_merge_servers(cfg, ext.get('mcpServers') or {}, overwrite=getattr(args, 'force', False))
+    _mcp_save(cfg)
+    for name in sorted((cfg.get('mcpServers') or {}).keys()):
+        _mcp_write_agent_config(name, cfg)
+    print(f'Imported {n} MCP server(s) from {args.format}: {path}')
+    print(f'GPTAdmin config: {MCP_CONFIG_FILE}')
+
+
+def cmd_mcp_export(args):
+    cfg = _mcp_config()
+    path = _mcp_external_path(args.format, args.user, args.path)
+    out = {'mcpServers': {}}
+    names = [args.name] if args.name else sorted((cfg.get('mcpServers') or {}).keys())
+    for name in names:
+        if name not in (cfg.get('mcpServers') or {}):
+            die(f'MCP server not found: {name}')
+        spec = dict(cfg['mcpServers'][name])
+        out['mcpServers'][name] = {
+            'command': spec.get('command'),
+            'args': spec.get('args') or [],
+            'env': spec.get('env') or {},
+        }
+        if spec.get('cwd'):
+            out['mcpServers'][name]['cwd'] = spec.get('cwd')
+    _mcp_external_write(args.format, path, out, merge=not args.no_merge)
+    print(f'Exported {len(out["mcpServers"])} MCP server(s) to {args.format}: {path}')
+
+
+def cmd_mcp_sync(args):
+    # Import first, then export merged config back to the same user-facing file.
+    cmd_mcp_import(args)
+    export_args = argparse.Namespace(format=args.format, user=args.user, path=args.path, name=None, no_merge=False)
+    cmd_mcp_export(export_args)
+
+
 def installed_units():
     res = []
     if UNIT_PATH_HUB.exists():   res.append((svc_hub_name(),   UNIT_PATH_HUB))
@@ -1303,6 +1521,22 @@ def main():
     ap_mcp_cat = mcp_sub.add_parser('cat', help='Print GPTAdmin MCP config or generated agent config')
     ap_mcp_cat.add_argument('name', nargs='?')
     ap_mcp_cat.set_defaults(func=cmd_mcp_cat)
+
+    for action_name, func, help_text in [
+        ('import', cmd_mcp_import, 'Import MCP servers from Claude/Codex config'),
+        ('export', cmd_mcp_export, 'Export MCP servers to Claude/Codex config'),
+        ('sync', cmd_mcp_sync, 'Import then export merged Claude/Codex config'),
+    ]:
+        p = mcp_sub.add_parser(action_name, help=help_text)
+        p.add_argument('format', choices=['claude-desktop', 'claude-code', 'codex'])
+        if action_name == 'export':
+            p.add_argument('name', nargs='?')
+            p.add_argument('--no-merge', action='store_true', help='Replace target file instead of merging')
+        p.add_argument('--path')
+        p.add_argument('--user')
+        if action_name == 'import':
+            p.add_argument('--force', action='store_true', help='Overwrite existing GPTAdmin entries')
+        p.set_defaults(func=func)
 
     for action_name, func, help_text in [
         ('render', cmd_mcp_render, 'Render supervisor config'),
