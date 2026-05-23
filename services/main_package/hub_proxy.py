@@ -2355,6 +2355,256 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP PROMPT BRIDGE — two endpoints only:
+#   GET  /mcp-prompt/prompt?target=all  → compact (open, read-only)
+#   GET  /mcp-prompt/prompt?target=ID   → detailed (open, read-only)
+#   POST /mcp-prompt/call               → execute  (requires MCP_BRIDGE_KEY)
+#
+# /prompt is read-only (tool descriptions) — safe to leave open.
+# /call executes tools — MUST be protected. Set MCP_BRIDGE_KEY env var.
+#   Default: MCP_BRIDGE_KEY = CTL_TOKEN  (locked down by default)
+#   Set MCP_BRIDGE_KEY="" to open (DANGEROUS — anyone can run shell_exec).
+#   Set MCP_BRIDGE_KEY="your-secret" for userscript to pass ?key=your-secret.
+#
+# Uses in-process functions directly — zero HTTP loopback, zero extra imports.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MCP_BRIDGE_KEY: str = os.getenv("MCP_BRIDGE_KEY", CTL_TOKEN)  # default: locked
+MCP_PROMPT_CACHE_TTL: int = int(os.getenv("MCP_PROMPT_CACHE_TTL", "90"))
+
+_bridge_cache: Dict[str, tuple[float, Any]] = {}
+
+
+def _bridge_cached(key: str, factory, ttl: int = MCP_PROMPT_CACHE_TTL) -> Any:
+    now = time.time()
+    if key in _bridge_cache and _bridge_cache[key][0] + ttl > now:
+        return _bridge_cache[key][1]
+    data = factory()
+    _bridge_cache[key] = (now, data)
+    return data
+
+
+async def _bridge_cached_async(key: str, factory, ttl: int = MCP_PROMPT_CACHE_TTL) -> Any:
+    now = time.time()
+    if key in _bridge_cache and _bridge_cache[key][0] + ttl > now:
+        return _bridge_cache[key][1]
+    data = await factory()
+    _bridge_cache[key] = (now, data)
+    return data
+
+
+def _bridge_check_call_key(key: str) -> bool:
+    """Auth for /call — must match MCP_BRIDGE_KEY."""
+    return hmac.compare_digest(key, MCP_BRIDGE_KEY) if MCP_BRIDGE_KEY else True
+
+
+def _tools_from_mcp_response(resp: Any) -> List[Dict[str, Any]]:
+    if not resp:
+        return []
+    if isinstance(resp, dict):
+        if "tools" in resp:
+            return resp["tools"]
+        for nk in ("response", "structuredContent", "result"):
+            inner = resp.get(nk)
+            if isinstance(inner, dict) and "tools" in inner:
+                return inner["tools"]
+    return []
+
+
+# ── Prompt formatters ───────────────────────────────────────────────────────────
+
+def _fmt_compact(tool: Dict[str, Any]) -> str:
+    name = tool.get("name", "?")
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+    props = schema.get("properties", {})
+    req = set(schema.get("required", []))
+    params = []
+    for p, d in props.items():
+        ptype = d.get("type", "any")
+        marker = "*" if p in req else "?"
+        params.append(f"{p}{marker}:{ptype}")
+    return f"{name}({', '.join(params)})" if params else f"{name}()"
+
+
+def _fmt_detail(tool: Dict[str, Any]) -> str:
+    name = tool.get("name", "?")
+    desc = (tool.get("description") or "").split("\n")[0][:150]
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+    props = schema.get("properties", {})
+    req = set(schema.get("required", []))
+    params = []
+    for p, d in props.items():
+        ptype = d.get("type", "any")
+        marker = "" if p in req else "?"
+        params.append(f"{p}{marker}: {ptype}")
+    ps = ", ".join(params) or "no args"
+    return f"- {name}({ps}) — {desc}" if desc else f"- {name}({ps})"
+
+
+# ── Tool fetching ───────────────────────────────────────────────────────────────
+
+_SHELL_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "shell_exec",
+        "description": "Execute a shell command on the server.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string", "description": "Shell command to run"},
+                "cwd": {"type": "string", "description": "Working directory"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds"},
+                "env": {"type": "object", "description": "Environment variables"},
+                "background": {"type": "boolean", "description": "Run in background"},
+            },
+            "required": ["cmd"],
+        },
+    },
+    {
+        "name": "task_status",
+        "description": "Check status of a background task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID"},
+                "ack": {"type": "boolean", "description": "Acknowledge and remove completed task"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "read_spilled_output",
+        "description": "Read large output that was spilled to disk.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to output file"},
+                "pattern": {"type": "string", "description": "Filter lines matching pattern"},
+                "head_lines": {"type": "integer", "description": "Number of lines to return"},
+            },
+            "required": ["file_path"],
+        },
+    },
+]
+
+
+async def _bridge_fetch_tools(agent_id: str) -> List[Dict[str, Any]]:
+    try:
+        if agent_id == VIRTUAL_HUB_AGENT_ID:
+            return _hub_tools_list().get("tools", [])
+        if _is_virtual_shell_agent(agent_id):
+            return _SHELL_TOOLS
+        async def _fetch():
+            job_id = _mcp_relay_enqueue(agent_id, "tools/list", {})
+            result = await _mcp_relay_wait(job_id, timeout=10)
+            return _tools_from_mcp_response(result) if result else []
+        return await _bridge_cached_async(f"bridge_tools:{agent_id}", _fetch)
+    except Exception as e:
+        log.debug("bridge: tools fetch failed for %s: %s", agent_id, e)
+        return []
+
+
+_BRIDGE_CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+}
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.api_route("/mcp-prompt/prompt", methods=["GET", "OPTIONS"])
+async def mcp_prompt(target: str = Query(default="all")):
+    """LLM-usable prompt. Open/read-only — no key required.
+    target=all → compact; target=ID → detailed."""
+    agents = _bridge_cached("bridge_agents", _all_public_agents)
+    online = [a for a in agents if a.get("status") == "online"]
+
+    if target == "all":
+        results = await asyncio.gather(
+            *[_bridge_fetch_tools(a["agent_id"]) for a in online])
+        lines = [
+            "You have MCP tools. To call a tool, output a JSON block "
+            "inside ```mcp code fences like this:",
+            "```mcp",
+            '{"target":"AGENT_ID","tool":"TOOL_NAME","args":{...}}',
+            "```",
+            "Available agents and tools:",
+        ]
+        for a, tools in zip(online, results):
+            aid = a["agent_id"]
+            if tools:
+                compact = ", ".join(_fmt_compact(t) for t in tools)
+                lines.append(f"  {aid}: {compact}")
+            else:
+                lines.append(f"  {aid}: (unavailable)")
+        return PlainTextResponse("\n".join(lines), headers=_BRIDGE_CORS)
+
+    tools = await _bridge_fetch_tools(target)
+    if not tools:
+        return PlainTextResponse(
+            f"No tools found for agent '{target}'. Is it online?",
+            headers=_BRIDGE_CORS)
+    lines = [
+        f'You have MCP agent "{target}". To call a tool, output:',
+        "```mcp",
+        f'{{"target":"{target}","tool":"TOOL_NAME","args":{{...}}}}',
+        "```",
+        "Tools:",
+    ]
+    for t in tools:
+        lines.append(_fmt_detail(t))
+    return PlainTextResponse("\n".join(lines), headers=_BRIDGE_CORS)
+
+
+@app.api_route("/mcp-prompt/call", methods=["POST", "OPTIONS"])
+async def mcp_prompt_call(request: Request):
+    """Execute a tool call. Requires ?key=MCP_BRIDGE_KEY (defaults to CTL_TOKEN).
+    This endpoint hides CTL_TOKEN from the client — userscript only needs BRIDGE_KEY."""
+    if request.method == "OPTIONS":
+        return JSONResponse(status_code=200, headers=_BRIDGE_CORS)
+
+    key = request.query_params.get("key", "")
+    if not _bridge_check_call_key(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_BRIDGE_CORS)
+
+    body = await request.json()
+    target = body.get("target")
+    tool = body.get("tool")
+    args = body.get("args", {})
+    if not target or not tool:
+        return JSONResponse(
+            {"error": "fields 'target' and 'tool' are required"},
+            status_code=400, headers=_BRIDGE_CORS)
+
+    try:
+        validated = _mcp_relay_select_agent(target)
+
+        if validated == VIRTUAL_HUB_AGENT_ID:
+            result = await _hub_tool_call(tool, args)
+        elif _is_virtual_shell_agent(validated):
+            result = await _virtual_shell_tool_call(validated, tool, args)
+        else:
+            job_id = _mcp_relay_enqueue(
+                validated, "tools/call", {"name": tool, "arguments": args})
+            waited = await _mcp_relay_wait(job_id, timeout=MCP_RELAY_DEFAULT_TIMEOUT)
+            if waited is not None:
+                result = waited
+            else:
+                return JSONResponse(
+                    {"status": "running", "job_id": job_id,
+                     "message": "Running in background. Poll /mcp-relay/job/" + job_id},
+                    headers=_BRIDGE_CORS)
+
+        return JSONResponse({"status": "completed", "result": result}, headers=_BRIDGE_CORS)
+
+    except HTTPException as e:
+        return JSONResponse({"error": e.detail}, status_code=e.status_code, headers=_BRIDGE_CORS)
+    except Exception as e:
+        log.error("bridge: call failed target=%s tool=%s err=%s", target, tool, e)
+        return JSONResponse({"error": str(e)}, status_code=500, headers=_BRIDGE_CORS)
+
 if __name__ == "__main__":
     import uvicorn
 

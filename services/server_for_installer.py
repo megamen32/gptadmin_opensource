@@ -80,6 +80,11 @@ async def get_rootd():
     return _bin(BUILD_DIR / "gptadmin-rootd.tar.gz", "gptadmin-rootd.tar.gz", "application/gzip")
 
 
+@app.get('/gptadmin-win.zip')
+async def get_rootd_win():
+    return _bin(PUBLIC_DIR / "gptadmin-win.zip", "gptadmin-win.zip", "application/zip")
+
+
 @app.get('/gptadmin.py')
 async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")
