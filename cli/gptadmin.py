@@ -316,7 +316,7 @@ WantedBy=multi-user.target
 
     UNIT_ROOTD = f"""
 [Unit]
-Description=GPTAdmin Shell MCP Agent
+Description=GPTAdmin TermCP Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -477,9 +477,9 @@ def ask(prompt: str, default: str = '') -> str:
 def configure_rootd_transport(env: dict, install_hub: bool, install_rootd: bool):
     if not install_rootd or not env.get('HUB_URL'):
         return
-    print('\nКак Shell MCP будет подключаться к хабу?')
+    print('\nКак TermCP будет подключаться к хабу?')
     print('  1) long-polling / polling — рекомендуется, работает за NAT/firewall')
-    print('  2) webhook — только если хаб может напрямую достучаться до Shell MCP')
+    print('  2) webhook — только если хаб может напрямую достучаться до TermCP')
     print('  3) websocket — experimental')
     default_transport = env.get('ROOTD_TRANSPORT', 'polling')
     default_choice = {'polling': '1', 'webhook': '2', 'websocket': '3'}.get(default_transport, '1')
@@ -510,9 +510,9 @@ def setup_interactive(args):
 
     print('=== GPTAdmin setup ===')
     print('Что устанавливать?')
-    print('  1) hub_proxy и Shell MCP agent')
+    print('  1) hub_proxy и TermCP agent')
     print('  2) только hub_proxy')
-    print('  3) только Shell MCP agent')
+    print('  3) только TermCP agent')
     ch = ask('Ваш выбор', '1')
     install_hub = ch in ('1', '2')
     install_rootd = ch in ('1', '3')
@@ -554,7 +554,7 @@ def setup_interactive(args):
             env['HUB_PUBLIC_URL'] = url
             env['HUB_URL'] = url
     else:
-        print('\nУстановка только Shell MCP agent.')
+        print('\nУстановка только TermCP agent.')
         url = ask('Введите HUB_URL (публичный HTTPS адрес вашего хаба, например, https://gptadmin.example.com)')
         ensure_https(url)
         env['FRP_ENABLE'] = 'false'
@@ -589,7 +589,7 @@ def setup_interactive(args):
                 download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'hub')
         else:
-            print('\n[Загрузка] Shell MCP agent...')
+            print('\n[Загрузка] TermCP agent...')
             pkg = tdp / 'rootd.tgz'
             try:
                 download(pkg_rootd, pkg)
@@ -620,9 +620,9 @@ def setup_interactive(args):
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
         print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
     if install_rootd and not install_hub:
-        print(f"HUB_URL для Shell MCP: {env.get('HUB_URL', '—')}")
+        print(f"HUB_URL для TermCP: {env.get('HUB_URL', '—')}")
     if install_rootd:
-        print('Shell MCP agent установлен.')
+        print('TermCP agent установлен.')
 
     installed = [n for n, p in [
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
@@ -655,7 +655,7 @@ def installed_units():
     if UNIT_PATH_FRPC.exists():  res.append((svc_frpc_name(),  UNIT_PATH_FRPC))
     return res
 
-def cmd_config_shell(args):
+def cmd_config_termcp(args):
     need_root()
     env = env_read()
     if args.hub_url:
@@ -685,7 +685,7 @@ def cmd_config_shell(args):
     env_set_many(env)
     if UNIT_PATH_ROOTD.exists():
         svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
-    print('Shell MCP transport configured:')
+    print('TermCP transport configured:')
     print(f"  ROOTD_TRANSPORT={env.get('ROOTD_TRANSPORT', 'polling')}")
     print(f"  HUB_URL={env.get('HUB_URL', '')}")
     if env.get('QUEUE_URL'):
@@ -694,7 +694,8 @@ def cmd_config_shell(args):
         print(f"  ROOTD_URL={env['ROOTD_URL']}")
 
 
-cmd_config_rootd = cmd_config_shell  # legacy internal alias
+cmd_config_shell = cmd_config_termcp  # legacy internal alias
+cmd_config_rootd = cmd_config_termcp  # legacy internal alias
 
 def cmd_status(_):
     units = installed_units()
@@ -733,10 +734,10 @@ def _log_file(label: str) -> Path:
 
 def cmd_logs(args):
     svc = args.service
-    if svc in ('shell', 'shell-mcp'):
+    if svc in ('termcp', 'shell', 'shell-mcp'):
         svc = 'rootd'
     if svc not in ('hub', 'rootd', 'frpc', 'all'):
-        die('unknown service. Use: hub, shell, frpc, all')
+        die('unknown service. Use: hub, termcp, frpc, all')
     if IS_MACOS:
         mapping = {
             'hub':   (SVC_HUB_LABEL,   UNIT_PATH_HUB,   _log_file(SVC_HUB_LABEL)),
@@ -763,15 +764,15 @@ def cmd_logs(args):
 def cmd_tokens(_):
     env = env_read()
     print(f"CTL_TOKEN={env.get('CTL_TOKEN','')}  # hub")
-    print('Shell MCP token is stored as ROOTD_TOKEN and is intentionally not printed.')
+    print('TermCP token is stored as ROOTD_TOKEN and is intentionally not printed.')
 
 def cmd_rotate(args):
     need_root()
     which = args.which
-    if which in ('shell', 'shell-mcp'):
+    if which in ('termcp', 'shell', 'shell-mcp'):
         which = 'rootd'
     if which not in ('hub', 'rootd'):
-        die('unknown token target. Use: hub or shell')
+        die('unknown token target. Use: hub or termcp')
     newtok = gen_hex()
     if which == 'hub':
         env_set_many({'CTL_TOKEN': newtok})
@@ -782,7 +783,7 @@ def cmd_rotate(args):
         env_set_many({'ROOTD_TOKEN': newtok})
         if UNIT_PATH_ROOTD.exists():
             svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
-        print('Shell MCP token rotated (значение не выводится).')
+        print('TermCP token rotated (значение не выводится).')
 
 def cmd_port(args):
     need_root()
@@ -895,11 +896,12 @@ def cmd_uninstall(args):
 # ===== Main =====
 
 def main():
-    # Backward-compatible command alias, hidden from help.
-    if len(sys.argv) > 1 and sys.argv[1] == 'config-rootd':
-        sys.argv[1] = 'config-shell'
-
-    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + Shell MCP agents)')
+    # Backward-compatible command aliases, hidden from help.
+    if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-rootd', 'config-termcp'):
+        legacy = sys.argv[1]
+        sys.argv[1:2] = ['config', 'termcp']
+        # Keep old --rootd-url accepted by the TermCP config parser.
+    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + TermCP agents)')
     sub = ap.add_subparsers(dest='cmd')
 
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
@@ -908,11 +910,13 @@ def main():
     ap_setup.add_argument('--pkg-rootd')
     ap_setup.set_defaults(func=setup_interactive)
 
-    ap_conf = sub.add_parser('config-shell', help='Настроить транспорт Shell MCP: polling/webhook/websocket')
+    ap_config = sub.add_parser('config', help='Настроить компоненты GPTAdmin')
+    config_sub = ap_config.add_subparsers(dest='config_target')
+    ap_conf = config_sub.add_parser('termcp', help='Настроить TermCP transport: polling/webhook/websocket')
     ap_conf.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
     ap_conf.add_argument('--hub-url')
-    ap_conf.add_argument('--shell-url', '--rootd-url', dest='rootd_url', help='URL Shell MCP agent для webhook режима')
-    ap_conf.set_defaults(func=cmd_config_shell)
+    ap_conf.add_argument('--termcp-url', '--shell-url', '--rootd-url', dest='rootd_url', help='URL TermCP agent для webhook режима')
+    ap_conf.set_defaults(func=cmd_config_termcp)
 
     sub.add_parser('status').set_defaults(func=cmd_status)
     sub.add_parser('start').set_defaults(func=cmd_start)
@@ -921,14 +925,14 @@ def main():
     sub.add_parser('enable').set_defaults(func=cmd_enable)
     sub.add_parser('disable').set_defaults(func=cmd_disable)
 
-    ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; shell = Shell MCP)')
-    ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
+    ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; termcp = TermCP)')
+    ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | termcp | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
     sub.add_parser('tokens').set_defaults(func=cmd_tokens)
 
-    ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или Shell MCP')
-    ap_rot.add_argument('which', metavar='which', help='hub | shell')
+    ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или TermCP')
+    ap_rot.add_argument('which', metavar='which', help='hub | termcp')
     ap_rot.set_defaults(func=cmd_rotate)
 
     ap_port = sub.add_parser('port', help='Сменить локальный порт хаба')
