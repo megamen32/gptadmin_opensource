@@ -98,21 +98,43 @@ async def get_rootd_pure_py():
 
 # --- MCP Bridge: userscript + help page ---
 
-@app.get("/userscript.js")
-async def get_userscript():
+def _read_mcp_bridge_userscript() -> str:
     path = PUBLIC_DIR / "mcp-bridge.user.js"
     if not path.exists():
         raise HTTPException(404, "userscript not found")
-    c = path.read_text(encoding="utf-8")
-    return Response(c, media_type="text/javascript")
+    return path.read_text(encoding="utf-8")
 
 
-@app.get("/mcp-help")
+def _mcp_bridge_userscript_response() -> Response:
+    # Tampermonkey and iOS Userscripts recognize installable userscripts best
+    # when the URL ends with .user.js and Content-Disposition stays inline.
+    return Response(
+        _read_mcp_bridge_userscript(),
+        media_type="text/javascript",
+        headers={
+            "Content-Disposition": "inline; filename=mcp-bridge.user.js",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.api_route("/mcp-bridge.user.js", methods=["GET", "HEAD"])
+async def get_mcp_bridge_userscript():
+    return _mcp_bridge_userscript_response()
+
+
+@app.api_route("/userscript.js", methods=["GET", "HEAD"])
+async def get_userscript():
+    # Backward-compatible URL; kept installable with the same headers.
+    return _mcp_bridge_userscript_response()
+
+
+@app.api_route("/mcp-help", methods=["GET", "HEAD"])
 async def mcp_help_page():
     html_path = WEBSITE_DIR / "mcp-help.html"
     if html_path.exists():
         return Response(html_path.read_text(encoding="utf-8"), media_type="text/html")
-    return Response("<h1>MCP Bridge</h1><a href=/userscript.js>Install</a>", media_type="text/html")
+    return Response("<h1>MCP Bridge</h1><a href=/mcp-bridge.user.js>Install</a>", media_type="text/html")
 
 app.mount("/", StaticFiles(directory=WEBSITE_DIR, html=True), name="website")
 

@@ -2358,11 +2358,11 @@ async def generic_exception_handler(request: Request, exc: Exception):
 # ═══════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════
 # MCP PROMPT BRIDGE — two endpoints only:
-#   GET  /mcp-prompt/prompt?target=all  → compact (open, read-only)
-#   GET  /mcp-prompt/prompt?target=ID   → detailed (open, read-only)
+#   GET  /mcp-prompt/prompt?target=all  → compact (requires MCP_BRIDGE_KEY)
+#   GET  /mcp-prompt/prompt?target=ID   → detailed (requires MCP_BRIDGE_KEY)
 #   POST /mcp-prompt/call               → execute  (requires MCP_BRIDGE_KEY)
 #
-# /prompt is read-only (tool descriptions) — safe to leave open.
+# /prompt exposes agent/tool inventory and is protected too.
 # /call executes tools — MUST be protected. Set MCP_BRIDGE_KEY env var.
 #   Default: MCP_BRIDGE_KEY = CTL_TOKEN  (locked down by default)
 #   Set MCP_BRIDGE_KEY="" to open (DANGEROUS — anyone can run shell_exec).
@@ -2515,9 +2515,14 @@ _BRIDGE_CORS = {
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.api_route("/mcp-prompt/prompt", methods=["GET", "OPTIONS"])
-async def mcp_prompt(target: str = Query(default="all")):
-    """LLM-usable prompt. Open/read-only — no key required.
+async def mcp_prompt(request: Request, target: str = Query(default="all"), key: str = Query(default="")):
+    """LLM-usable prompt. Requires ?key=MCP_BRIDGE_KEY because it exposes agent/tool inventory.
     target=all → compact; target=ID → detailed."""
+    if request.method == "OPTIONS":
+        return JSONResponse(status_code=200, headers=_BRIDGE_CORS)
+    if not _bridge_check_call_key(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_BRIDGE_CORS)
+
     agents = _bridge_cached("bridge_agents", _all_public_agents)
     online = [a for a in agents if a.get("status") == "online"]
 

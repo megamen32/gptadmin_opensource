@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.0.0
-// @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice
+// @version      2.2.2
+// @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @match        *://chatgpt.com/*
 // @match        *://chat.deepseek.com/*
@@ -33,6 +33,7 @@
   function bridgeKey()   { return GM_getValue('bridge_key', ''); }
   function autoEnter()   { return GM_getValue('auto_enter', false); }
   function compactMode() { return GM_getValue('compact_prompt', true); }
+  function toolbarPosition() { return GM_getValue('toolbar_position', 'top-center'); }
 
   // ═══════════════════════════════════════════════════════════════
   //  SITE-SPECIFIC INPUT SELECTORS
@@ -143,6 +144,14 @@
   // ═══════════════════════════════════════════════════════════════
   //  BRIDGE API (GM_xmlhttpRequest — no CORS issues)
   // ═══════════════════════════════════════════════════════════════
+  function requireBridgeKey(action = 'MCP data') {
+    const key = bridgeKey();
+    if (key) return key;
+    toast(`${action} is locked: set Bridge Key in ⚙ settings`, 5000);
+    openSettings();
+    return null;
+  }
+
   function api(method, path, body) {
     return new Promise((resolve, reject) => {
       const url = bridgeUrl() + path;
@@ -176,22 +185,22 @@
         if ((o.target || o.agent) && o.tool) return normalizeMcpJson(o);
       } catch {}
     }
-    // Slow path: extract first {...} with target/agent + tool
-    const re = /\{[^{}]*"(?:target|agent)"\s*:\s*"[^"]+"\s*,\s*"tool"\s*:\s*"[^"]+"[^{}]*\}/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      try {
-        const o = JSON.parse(m[0]);
-        if ((o.target || o.agent) && o.tool) return normalizeMcpJson(o);
-      } catch {}
-    }
-    // Even slower: find any JSON object
-    const re2 = /\{[\s\S]*?\}/g;
-    while ((m = re2.exec(text)) !== null) {
-      try {
-        const o = JSON.parse(m[0]);
-        if ((o.target || o.agent) && o.tool) return normalizeMcpJson(o);
-      } catch {}
+    // Bracket-counting extraction: find each '{' and its matching '}'
+    // This handles nested JSON like {"args":{"url":"..."}} which regex can't do
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== '{') continue;
+      let depth = 0;
+      for (let j = i; j < text.length; j++) {
+        if (text[j] === '{') depth++;
+        else if (text[j] === '}') depth--;
+        if (depth === 0) {
+          try {
+            const o = JSON.parse(text.substring(i, j + 1));
+            if ((o.target || o.agent) && o.tool) return normalizeMcpJson(o);
+          } catch {}
+          break; // Found matching '}', move to next '{'
+        }
+      }
     }
     return null;
   }
@@ -270,6 +279,8 @@
   function scanAndInjectPlayButtons() {
     // Strategy 1: ChatGPT — <code> inside <pre>
     document.querySelectorAll('pre > code').forEach(block => {
+      // Skip if inside Alisa CodeBlock (Strategy 5 handles it)
+      if (block.closest('div.CodeBlock')) return;
       tryInjectPlay(block, () => block.textContent);
     });
 
@@ -279,16 +290,153 @@
       if (pre) tryInjectPlay(block, () => pre.textContent);
     });
 
-    // Strategy 3: Qwen — .qwen-markdown-code-body (Monaco Editor dirty content)
-    document.querySelectorAll('.qwen-markdown-code-body, [class*="markdown-code-body"]').forEach(block => {
-      tryInjectPlay(block, () => block.textContent);
+    // Strategy 3: Qwen — pre.qwen-markdown-code with Monaco Editor
+    // Structure: pre.qwen-markdown-code > .qwen-markdown-code-header + .qwen-markdown-code-body.mcp
+    // The code-body contains a Monaco Editor whose textContent is polluted with
+    // line numbers, aria labels, etc. We extract clean text from .view-lines instead.
+    document.querySelectorAll('pre.qwen-markdown-code').forEach(pre => {
+      if (processedBlocks.has(pre)) return;
+      const codeBody = pre.querySelector('.qwen-markdown-code-body');
+      if (!codeBody) return;
+
+      // Clean text extractor: use Monaco's .view-lines
+      // innerText respects CSS visibility (excludes line-number gutters),
+      // while textContent includes everything (line numbers, aria labels, etc.)
+      const textExtractor = () => {
+        const viewLines = codeBody.querySelector('.view-lines');
+        if (viewLines) {
+          // Try innerText first (CSS-aware, excludes hidden line numbers)
+          const text = viewLines.innerText;
+          if (text && text.trim()) return text;
+        }
+        // Fallback: build text from mtk* spans line by line
+        const viewLinesEl = codeBody.querySelector('.view-lines');
+        if (viewLinesEl) {
+          const lines = [];
+          viewLinesEl.querySelectorAll('.view-line').forEach(vl => {
+            let lineText = '';
+            vl.querySelectorAll('span[class*="mtk"]').forEach(span => {
+              lineText += span.textContent;
+            });
+            if (lineText.trim()) lines.push(lineText);
+          });
+          if (lines.length > 0) return lines.join('\n');
+        }
+        // Fallback: try textarea.inputarea (Monaco's hidden accessibility textarea)
+        const inputTa = codeBody.querySelector('textarea.inputarea, textarea.ime-text-area');
+        if (inputTa && inputTa.value) return inputTa.value;
+        // Last resort: full code-body textContent (dirty but bracket-counting parser can handle it)
+        return codeBody.textContent;
+      };
+
+      const cmd = extractMcpJson(textExtractor());
+      if (!cmd) return;
+
+      processedBlocks.add(pre);
+      if (pre.querySelector('.mcp-inline-play')) return;
+
+      // Create play button
+      const btn = document.createElement('button');
+      btn.className = 'mcp-inline-play';
+      btn.innerHTML = '▶';
+      btn.title = `Execute: ${cmd.target}/${cmd.tool}`;
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const currentCmd = extractMcpJson(textExtractor()) || cmd;
+        await execMcp(currentCmd, btn);
+      });
+
+      // Inject into Qwen's code header actions (next to copy/download buttons)
+      const headerActions = pre.querySelector('.qwen-markdown-code-header-actions');
+      if (headerActions) {
+        const actionItem = document.createElement('div');
+        actionItem.className = 'qwen-markdown-code-header-action-item';
+        actionItem.style.cssText = 'display:flex;align-items:center;justify-content:center;';
+        actionItem.appendChild(btn);
+        btn.style.width = '22px';
+        btn.style.height = '22px';
+        btn.style.fontSize = '10px';
+        headerActions.insertBefore(actionItem, headerActions.firstChild);
+      } else {
+        // Fallback: absolute position on the pre
+        pre.style.position = 'relative';
+        btn.style.position = 'absolute';
+        btn.style.top = '6px';
+        btn.style.right = '40px';
+        btn.style.zIndex = '10';
+        pre.appendChild(btn);
+      }
+
+      // Subtle highlight
+      pre.style.outline = '1px solid rgba(137,180,250,.25)';
+      pre.style.borderRadius = '6px';
     });
 
     // Strategy 4: Generic <pre> fallback
     document.querySelectorAll('pre').forEach(block => {
       if (block.closest('.md-code-block') || block.querySelector('code')) return;
+      if (block.classList.contains('qwen-markdown-code')) return;  // already handled
       if (block.querySelector('.qwen-markdown-code-body, [class*="markdown-code-body"]')) return;
+      if (block.closest('div.CodeBlock')) return;  // Alisa — Strategy 5
       tryInjectPlay(block, () => block.textContent);
+    });
+
+    // Strategy 5: Yandex Alisa — div.CodeBlock with language-mcp header
+    // Structure: div.CodeBlock > .CodeBlock-Header > .CodeBlock-HeaderTitle="mcp"
+    //            + .CodeBlock-HeaderActions (where we inject the play button)
+    //            + .CodeBlock-Content > pre.CodeBlock-ContentPre > code.language-mcp
+    document.querySelectorAll('div.CodeBlock').forEach(block => {
+      if (processedBlocks.has(block)) return;
+
+      // Check language label
+      const headerTitle = block.querySelector('.CodeBlock-HeaderTitle');
+      if (!headerTitle) return;
+      const lang = headerTitle.textContent.trim().toLowerCase();
+      if (lang !== 'mcp') return;
+
+      const code = block.querySelector('code');
+      if (!code) return;
+
+      const textExtractor = () => code.textContent;
+      const cmd = extractMcpJson(textExtractor());
+      if (!cmd) return;
+
+      processedBlocks.add(block);
+      if (block.querySelector('.mcp-inline-play')) return;
+
+      // Create play button
+      const btn = document.createElement('button');
+      btn.className = 'mcp-inline-play';
+      btn.innerHTML = '▶';
+      btn.title = `Execute: ${cmd.target}/${cmd.tool}`;
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const currentCmd = extractMcpJson(textExtractor()) || cmd;
+        await execMcp(currentCmd, btn);
+      });
+
+      // Inject into CodeBlock-HeaderActions (next to existing Copy/Collapse buttons)
+      const headerActions = block.querySelector('.CodeBlock-HeaderActions');
+      if (headerActions) {
+        btn.style.position = 'relative';
+        btn.style.marginRight = '6px';
+        btn.style.flexShrink = '0';
+        headerActions.insertBefore(btn, headerActions.firstChild);
+      } else {
+        // Fallback: absolute position on the block
+        block.style.position = 'relative';
+        btn.style.position = 'absolute';
+        btn.style.top = '6px';
+        btn.style.right = '40px';
+        btn.style.zIndex = '10';
+        block.appendChild(btn);
+      }
+
+      // Subtle highlight on the block
+      block.style.outline = '1px solid rgba(137,180,250,.25)';
+      block.style.borderRadius = '6px';
     });
   }
 
@@ -358,10 +506,34 @@
   //  STYLES
   // ═══════════════════════════════════════════════════════════════
   const CSS = `
-    /* ── floating toolbar (bottom-right) ── */
+    /* ── floating toolbar ── */
     #mcp-toolbar {
-      position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;
+      position: fixed; z-index: 2147483647;
       display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+    }
+    #mcp-toolbar.mcp-pos-top-center {
+      top: 16px; left: 50%; right: auto; bottom: auto;
+      transform: translateX(-50%); align-items: center;
+    }
+    #mcp-toolbar.mcp-pos-top-left {
+      top: 16px; left: 16px; right: auto; bottom: auto;
+      transform: none; align-items: flex-start;
+    }
+    #mcp-toolbar.mcp-pos-top-right {
+      top: 16px; right: 16px; left: auto; bottom: auto;
+      transform: none; align-items: flex-end;
+    }
+    #mcp-toolbar.mcp-pos-bottom-left {
+      bottom: 16px; left: 16px; right: auto; top: auto;
+      transform: none; align-items: flex-start;
+    }
+    #mcp-toolbar.mcp-pos-bottom-right {
+      bottom: 16px; right: 16px; left: auto; top: auto;
+      transform: none; align-items: flex-end;
+    }
+    #mcp-toolbar.mcp-pos-bottom-center {
+      bottom: 16px; left: 50%; right: auto; top: auto;
+      transform: translateX(-50%); align-items: center;
     }
 
     .mcp-btn {
@@ -369,9 +541,14 @@
       padding: 8px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,.1);
       background: #1e1e2e; color: #cdd6f4;
       font: 600 12px/1 'Inter', system-ui, sans-serif;
-      cursor: pointer; white-space: nowrap; transition: background .15s, transform .1s;
+      cursor: pointer; white-space: nowrap; transition: background .15s, transform .1s, opacity .15s;
       box-shadow: 0 2px 8px rgba(0,0,0,.35); user-select: none;
     }
+    #mcp-toolbar:not(.mcp-open) .mcp-action { display: none; }
+    #mcp-toolbar.mcp-no-key .mcp-secure { display: none; }
+    .mcp-btn-main { border-color: rgba(137,180,250,.4); background: #181825; }
+    .mcp-btn-main .chev { color: #89b4fa; font-size: 10px; transition: transform .15s; }
+    #mcp-toolbar.mcp-open .mcp-btn-main .chev { transform: rotate(180deg); }
     .mcp-btn:hover { background: #313244; }
     .mcp-btn:active { transform: scale(.96); }
     .mcp-btn .icon { font-size: 14px; line-height: 1; }
@@ -452,12 +629,12 @@
       display: block; margin-bottom: 3px; color: #a6adc8; font-size: 11px;
       font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
     }
-    .mcp-field input[type=text], .mcp-field input[type=password] {
+    .mcp-field input[type=text], .mcp-field input[type=password], .mcp-field select {
       width: 100%; padding: 7px 10px; border-radius: 6px;
       border: 1px solid rgba(255,255,255,.1); background: #181825; color: #cdd6f4;
       font: 13px/1.4 'SF Mono', 'Fira Code', monospace; box-sizing: border-box;
     }
-    .mcp-field input:focus {
+    .mcp-field input:focus, .mcp-field select:focus {
       outline: none; border-color: #89b4fa;
       box-shadow: 0 0 0 2px rgba(137,180,250,.2);
     }
@@ -536,6 +713,18 @@
         <span>Compact prompt (fewer tokens)</span>
       </label>
 
+      <div class="mcp-field">
+        <label>Toolbar position</label>
+        <select id="mcp-cfg-position">
+          <option value="top-center" ${toolbarPosition() === 'top-center' ? 'selected' : ''}>Top center (default)</option>
+          <option value="top-left" ${toolbarPosition() === 'top-left' ? 'selected' : ''}>Top left</option>
+          <option value="top-right" ${toolbarPosition() === 'top-right' ? 'selected' : ''}>Top right</option>
+          <option value="bottom-left" ${toolbarPosition() === 'bottom-left' ? 'selected' : ''}>Bottom left</option>
+          <option value="bottom-center" ${toolbarPosition() === 'bottom-center' ? 'selected' : ''}>Bottom center</option>
+          <option value="bottom-right" ${toolbarPosition() === 'bottom-right' ? 'selected' : ''}>Bottom right</option>
+        </select>
+      </div>
+
       <div class="mcp-settings-footer">
         <div class="mcp-key-status">
           Hotkeys: <kbd style="background:#313244;padding:1px 5px;border-radius:3px;font-size:10px">Alt+K</kbd> settings
@@ -552,9 +741,11 @@
       GM_setValue('bridge_key', newKey);
       GM_setValue('auto_enter', document.getElementById('mcp-cfg-autoenter').checked);
       GM_setValue('compact_prompt', document.getElementById('mcp-cfg-compact').checked);
+      GM_setValue('toolbar_position', document.getElementById('mcp-cfg-position').value);
+      applyToolbarPosition();
+      refreshToolbarVisibility();
       panel.classList.remove('open');
-      toast('Settings saved' + (newKey ? '' : ' — key is empty, calls will fail!'));
-      updateKeyDot();
+      toast('Settings saved' + (newKey ? '' : ' — key is empty, MCP actions are hidden'));
     });
   }
 
@@ -563,6 +754,25 @@
     if (!dot) return;
     const key = bridgeKey();
     dot.className = 'key-dot ' + (key ? 'set' : 'unset');
+  }
+
+  function refreshToolbarVisibility() {
+    const toolbar = document.getElementById('mcp-toolbar');
+    if (!toolbar) return;
+    toolbar.classList.toggle('mcp-no-key', !bridgeKey());
+    updateKeyDot();
+  }
+
+  function applyToolbarPosition() {
+    const toolbar = document.getElementById('mcp-toolbar');
+    if (!toolbar) return;
+    toolbar.classList.remove(
+      'mcp-pos-top-left', 'mcp-pos-top-center', 'mcp-pos-top-right',
+      'mcp-pos-bottom-left', 'mcp-pos-bottom-center', 'mcp-pos-bottom-right'
+    );
+    const pos = toolbarPosition();
+    const allowed = new Set(['top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right']);
+    toolbar.classList.add('mcp-pos-' + (allowed.has(pos) ? pos : 'top-center'));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -579,16 +789,26 @@
     // ── Settings panel ──
     createSettingsPanel();
 
+    // ── Folded main button ──
+    const btnMain = document.createElement('button');
+    btnMain.className = 'mcp-btn mcp-btn-main';
+    btnMain.innerHTML = '<span class="icon">🧩</span> MCP <span class="chev">▾</span>';
+    btnMain.title = 'Open MCP Bridge menu';
+    btnMain.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toolbar.classList.toggle('mcp-open');
+    });
+
     // ── MCP All ──
     const btnAll = document.createElement('button');
-    btnAll.className = 'mcp-btn mcp-btn-all';
+    btnAll.className = 'mcp-btn mcp-btn-all mcp-action mcp-secure';
     btnAll.innerHTML = '<span class="icon">📡</span> MCP All';
     btnAll.title = 'Fetch MCP prompt for all agents (Alt+M)';
     btnAll.addEventListener('click', injectAll);
 
     // ── MCP (agent select) ──
     const btnAgent = document.createElement('button');
-    btnAgent.className = 'mcp-btn mcp-btn-agent';
+    btnAgent.className = 'mcp-btn mcp-btn-agent mcp-action mcp-secure';
     btnAgent.innerHTML = '<span class="icon">🔌</span> MCP';
     btnAgent.title = 'Select agent & fetch MCP prompt';
     btnAgent.addEventListener('click', toggleAgentDropdown);
@@ -600,14 +820,14 @@
 
     // ── Exec from clipboard ──
     const btnExec = document.createElement('button');
-    btnExec.className = 'mcp-btn mcp-btn-exec';
+    btnExec.className = 'mcp-btn mcp-btn-exec mcp-action mcp-secure';
     btnExec.innerHTML = '<span class="icon">▶</span> Exec clipboard';
     btnExec.title = 'Execute MCP JSON from clipboard (Alt+E)';
     btnExec.addEventListener('click', execFromClipboard);
 
     // ── Settings gear ──
     const btnGear = document.createElement('button');
-    btnGear.className = 'mcp-btn mcp-btn-gear';
+    btnGear.className = 'mcp-btn mcp-btn-gear mcp-action';
     const key = bridgeKey();
     btnGear.innerHTML = `<span class="icon">⚙</span><span class="key-dot ${key ? 'set' : 'unset'}"></span>`;
     btnGear.title = 'MCP Bridge Settings (Alt+K)';
@@ -618,13 +838,18 @@
       panel.classList.toggle('open');
     });
 
-    toolbar.append(btnAll, btnAgent, btnExec, btnGear);
+    toolbar.append(btnMain, btnAll, btnAgent, btnExec, btnGear);
     document.body.appendChild(toolbar);
+    applyToolbarPosition();
+    refreshToolbarVisibility();
 
     // Close dropdown on outside click
     document.addEventListener('click', (e) => {
       if (!dropdown.contains(e.target) && e.target !== btnAgent) {
         dropdown.classList.remove('open');
+      }
+      if (!toolbar.contains(e.target) && !dropdown.contains(e.target)) {
+        toolbar.classList.remove('mcp-open');
       }
       const panel = document.getElementById('mcp-settings');
       if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btnGear && !btnGear.contains(e.target)) {
@@ -637,13 +862,15 @@
   //  MCP ALL
   // ═══════════════════════════════════════════════════════════════
   async function injectAll() {
+    const key = requireBridgeKey('MCP All');
+    if (!key) return;
     const btn = document.querySelector('.mcp-btn-all');
     const orig = btn.innerHTML;
     btn.innerHTML = '<span class="icon">⏳</span> Loading...';
     btn.disabled = true;
     try {
       const compact = compactMode() ? '1' : '0';
-      const prompt = await api('GET', `/mcp-prompt/prompt?target=all&compact=${compact}`);
+      const prompt = await api('GET', `/mcp-prompt/prompt?target=all&compact=${compact}&key=${encodeURIComponent(key)}`);
       const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
       await copyToClipboard(text);
       const inserted = setInputText(text);
@@ -662,22 +889,30 @@
 
   function toggleAgentDropdown(e) {
     e.stopPropagation();
+    const key = requireBridgeKey('MCP agent list');
+    if (!key) return;
     const dropdown = document.querySelector('.mcp-dropdown');
     if (dropdown.classList.contains('open')) {
       dropdown.classList.remove('open');
       return;
     }
 
-    // Position dropdown above the MCP button
+    // Position dropdown near the MCP button, clamped to viewport.
     const btn = e.currentTarget;
     const rect = btn.getBoundingClientRect();
-    dropdown.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
-    dropdown.style.right = (window.innerWidth - rect.right) + 'px';
+    const dropdownWidth = 280;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
+    const below = rect.bottom + 6;
+    const above = Math.max(8, rect.top - 366);
+    dropdown.style.left = left + 'px';
+    dropdown.style.right = 'auto';
+    dropdown.style.top = (rect.top < window.innerHeight / 2 ? below : above) + 'px';
+    dropdown.style.bottom = 'auto';
 
     dropdown.innerHTML = '<div class="mcp-dropdown-item" style="color:#6c7086">Loading agents...</div>';
     dropdown.classList.add('open');
 
-    loadAgents(dropdown);
+    loadAgents(dropdown, key);
   }
 
   // Parse compact prompt lines — handles agent IDs containing colons
@@ -689,9 +924,14 @@
     return { agent_id: match[1], display: match[1] };
   }
 
-  async function loadAgents(dropdown) {
+  async function loadAgents(dropdown, key) {
+    key = key || requireBridgeKey('MCP agent list');
+    if (!key) {
+      dropdown.classList.remove('open');
+      return;
+    }
     try {
-      const prompt = await api('GET', '/mcp-prompt/prompt?target=all&compact=0');
+      const prompt = await api('GET', `/mcp-prompt/prompt?target=all&compact=0&key=${encodeURIComponent(key)}`);
       const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
 
       // Parse agent IDs from prompt text
@@ -735,10 +975,12 @@
   }
 
   async function injectAgent(agentId) {
+    const key = requireBridgeKey(`MCP ${agentId}`);
+    if (!key) return;
     toast(`Loading ${agentId}...`);
     try {
       const compact = compactMode() ? '1' : '0';
-      const prompt = await api('GET', `/mcp-prompt/prompt?target=${encodeURIComponent(agentId)}&compact=${compact}`);
+      const prompt = await api('GET', `/mcp-prompt/prompt?target=${encodeURIComponent(agentId)}&compact=${compact}&key=${encodeURIComponent(key)}`);
       const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
       await copyToClipboard(text);
       const inserted = setInputText(text);
