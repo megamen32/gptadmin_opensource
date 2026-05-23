@@ -735,6 +735,8 @@ def cmd_logs(args):
     svc = args.service
     if svc in ('shell', 'shell-mcp'):
         svc = 'rootd'
+    if svc not in ('hub', 'rootd', 'frpc', 'all'):
+        die('unknown service. Use: hub, shell, frpc, all')
     if IS_MACOS:
         mapping = {
             'hub':   (SVC_HUB_LABEL,   UNIT_PATH_HUB,   _log_file(SVC_HUB_LABEL)),
@@ -768,6 +770,8 @@ def cmd_rotate(args):
     which = args.which
     if which in ('shell', 'shell-mcp'):
         which = 'rootd'
+    if which not in ('hub', 'rootd'):
+        die('unknown token target. Use: hub or shell')
     newtok = gen_hex()
     if which == 'hub':
         env_set_many({'CTL_TOKEN': newtok})
@@ -891,7 +895,11 @@ def cmd_uninstall(args):
 # ===== Main =====
 
 def main():
-    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (FRP auto or reverse-proxy)')
+    # Backward-compatible command alias, hidden from help.
+    if len(sys.argv) > 1 and sys.argv[1] == 'config-rootd':
+        sys.argv[1] = 'config-shell'
+
+    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + Shell MCP agents)')
     sub = ap.add_subparsers(dest='cmd')
 
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
@@ -906,12 +914,6 @@ def main():
     ap_conf.add_argument('--shell-url', '--rootd-url', dest='rootd_url', help='URL Shell MCP agent для webhook режима')
     ap_conf.set_defaults(func=cmd_config_shell)
 
-    ap_conf_legacy = sub.add_parser('config-rootd', help=argparse.SUPPRESS)
-    ap_conf_legacy.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
-    ap_conf_legacy.add_argument('--hub-url')
-    ap_conf_legacy.add_argument('--rootd-url', dest='rootd_url')
-    ap_conf_legacy.set_defaults(func=cmd_config_shell)
-
     sub.add_parser('status').set_defaults(func=cmd_status)
     sub.add_parser('start').set_defaults(func=cmd_start)
     sub.add_parser('stop').set_defaults(func=cmd_stop)
@@ -920,13 +922,13 @@ def main():
     sub.add_parser('disable').set_defaults(func=cmd_disable)
 
     ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; shell = Shell MCP)')
-    ap_logs.add_argument('service', nargs='?', default='all', choices=['hub', 'shell', 'shell-mcp', 'rootd', 'frpc', 'all'])
+    ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
     sub.add_parser('tokens').set_defaults(func=cmd_tokens)
 
     ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или Shell MCP')
-    ap_rot.add_argument('which', choices=['hub', 'shell', 'shell-mcp', 'rootd'])
+    ap_rot.add_argument('which', metavar='which', help='hub | shell')
     ap_rot.set_defaults(func=cmd_rotate)
 
     ap_port = sub.add_parser('port', help='Сменить локальный порт хаба')
