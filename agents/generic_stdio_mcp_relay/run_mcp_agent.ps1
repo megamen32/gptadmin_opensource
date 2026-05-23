@@ -22,15 +22,7 @@ while ($true) {
     if ($cfg.relay_path) { $relay = [string]$cfg.relay_path }
     $python = "python"
     if ($cfg.python) { $python = [string]$cfg.python }
-    $args = @($relay, "--hub", [string]$cfg.hub_url, "--agent-id", [string]$cfg.agent_id)
-    if ($cfg.name) { $args += @("--name", [string]$cfg.name) }
-    if ($cfg.stdio_format) { $args += @("--stdio-format", [string]$cfg.stdio_format) }
-    if ($cfg.init_timeout) { $args += @("--init-timeout", [string]$cfg.init_timeout) }
-    if ($cfg.verbose) { $args += "--verbose" }
-    if ($cfg.token) { $args += @("--token", [string]$cfg.token) }
-    elseif ($cfg.token_file) { $args += @("--token", (Get-Content -Raw -Path ([string]$cfg.token_file)).Trim()) }
-    $args += [string]$cfg.command
-    foreach ($a in $cfg.args) { $args += [string]$a }
+    $args = @($relay, "--agent-config", $Config)
     if ($cfg.cwd) { Set-Location -Path ([string]$cfg.cwd) }
     if ($cfg.env) { $cfg.env.PSObject.Properties | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process") } }
     [Environment]::SetEnvironmentVariable("PYTHONUNBUFFERED", "1", "Process")

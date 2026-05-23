@@ -16,12 +16,15 @@ Useful debug flags:
   --trace-json  log full JSON-RPC payloads; use carefully, arguments may contain sensitive data
 
 Examples:
-  # Short mode: run command directly. Everything after the relay options is the MCP command.
+  # Compact/manual mode: run command directly. Everything after relay options is the MCP command.
   python3 generic_stdio_mcp_relay.py npx -y @playwright/mcp@latest --extension
+  python3 generic_stdio_mcp_relay.py --stdio-format framed npx -y mcp-remote https://example.com/mcp
 
-  # Long/config mode: keep the old mcpServers JSON workflow.
+  # Service/managed mode: use one GPTAdmin agent JSON config.
+  python3 generic_stdio_mcp_relay.py --agent-config /etc/gptadmin/mcp-agents.d/gptadminmcp.json
+
+  # Claude-style mcpServers JSON compatibility mode.
   python3 generic_stdio_mcp_relay.py --config page-agent.mcp.json --server page-agent
-  python3 generic_stdio_mcp_relay.py --config playwright-plain.mcp.json --server playwright-browser --stdio-format ndjson --verbose
 """
 
 from __future__ import annotations
@@ -542,6 +545,25 @@ def load_server(config_path: Path, server_name: str) -> Dict[str, Any]:
     return spec
 
 
+def load_agent_config(config_path: Path) -> Dict[str, Any]:
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"agent config must be an object: {config_path}")
+    if not cfg.get("command"):
+        raise SystemExit(f"agent config has no command: {config_path}")
+    args = cfg.get("args", [])
+    if args is None:
+        cfg["args"] = []
+    elif not isinstance(args, list):
+        raise SystemExit(f"agent config args must be a list: {config_path}")
+    env = cfg.get("env", {})
+    if env is None:
+        cfg["env"] = {}
+    elif not isinstance(env, dict):
+        raise SystemExit(f"agent config env must be an object: {config_path}")
+    return cfg
+
+
 def slugify(value: str, default: str = "mcp") -> str:
     value = re.sub(r"^@", "", value.strip().lower())
     value = value.replace("@", "-").replace("/", "-")
@@ -572,26 +594,29 @@ def infer_short_server_name(command: str, args: list[str]) -> str:
 
 
 def resolve_server_spec(args: argparse.Namespace) -> tuple[Dict[str, Any], str]:
-    has_config = bool(args.config or args.server)
-    has_short_cmd = bool(args.cmd)
+    has_agent_config = bool(args.agent_config)
+    has_mcpservers_config = bool(args.config or args.server)
+    has_compact_cmd = bool(args.cmd)
+    modes = sum(1 for v in (has_agent_config, has_mcpservers_config, has_compact_cmd) if v)
+    if modes != 1:
+        raise SystemExit("use exactly one mode: --agent-config FILE, --config/--server, or compact COMMAND [ARGS...]")
 
-    if has_config and has_short_cmd:
-        raise SystemExit("use either --config/--server mode or short command mode, not both")
-
-    if has_config:
-        if not args.config or not args.server:
-            raise SystemExit("config mode requires both --config and --server")
-        return load_server(Path(args.config), args.server), args.server
-
-    if not has_short_cmd:
-        raise SystemExit(
-            "usage: either\n"
-            "  generic_stdio_mcp_relay.py --config FILE --server NAME [options]\n"
-            "or\n"
-            "  generic_stdio_mcp_relay.py [options] COMMAND [ARGS...]\n"
-            "example:\n"
-            "  generic_stdio_mcp_relay.py npx -y @playwright/mcp@latest --extension"
+    if has_agent_config:
+        spec = load_agent_config(Path(args.agent_config))
+        command = str(spec["command"])
+        command_args = [str(x) for x in list(spec.get("args") or [])]
+        server_name = str(
+            spec.get("server")
+            or spec.get("server_name")
+            or spec.get("agent_id")
+            or infer_short_server_name(command, command_args)
         )
+        return spec, server_name
+
+    if has_mcpservers_config:
+        if not args.config or not args.server:
+            raise SystemExit("config compatibility mode requires both --config and --server")
+        return load_server(Path(args.config), args.server), args.server
 
     command = str(args.cmd[0])
     command_args = [str(x) for x in args.cmd[1:]]
@@ -617,9 +642,10 @@ def masked_env(env: Dict[str, Any]) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Relay a local stdio MCP server to GPTAdmin. Supports config mode and short command mode."
+        description="Relay a local stdio MCP server to GPTAdmin. Use --agent-config for services and compact command mode for manual starts."
     )
-    parser.add_argument("--config", help="JSON file with mcpServers. Requires --server.")
+    parser.add_argument("--agent-config", help="GPTAdmin MCP agent JSON config. Preferred for services/managed installs.")
+    parser.add_argument("--config", help="Claude-style JSON file with mcpServers. Requires --server.")
     parser.add_argument("--server", help="mcpServers key to launch. Requires --config.")
     parser.add_argument("--hub", default=os.getenv("GPTADMIN_MCP_RELAY_HUB", DEFAULT_HUB))
     parser.add_argument("--token", default=os.getenv("GPTADMIN_MCP_RELAY_TOKEN"))
@@ -638,14 +664,31 @@ def main() -> int:
     parser.add_argument(
         "cmd",
         nargs=argparse.REMAINDER,
-        help="Short mode MCP command and args, e.g. npx -y @playwright/mcp@latest --extension",
+        help="Compact/manual mode MCP command and args, e.g. npx -y @playwright/mcp@latest --extension",
     )
     args = parser.parse_args()
 
-    if not args.token:
-        raise SystemExit("set GPTADMIN_MCP_RELAY_TOKEN or pass --token")
-
     spec, server_name = resolve_server_spec(args)
+    if args.agent_config:
+        args.hub = str(spec.get("hub_url") or spec.get("hub") or args.hub)
+        args.agent_id = str(spec.get("agent_id") or args.agent_id or "")
+        args.name = str(spec.get("name") or args.name or "") or None
+        if not args.token and spec.get("token"):
+            args.token = str(spec.get("token"))
+        if not args.token and spec.get("token_file"):
+            args.token = Path(str(spec.get("token_file"))).read_text(encoding="utf-8").strip()
+        if not args.stdio_format and spec.get("stdio_format"):
+            args.stdio_format = str(spec.get("stdio_format"))
+        if not args.verbose and spec.get("verbose"):
+            args.verbose = True
+        if not args.trace_json and spec.get("trace_json"):
+            args.trace_json = True
+        if spec.get("init_timeout") and args.init_timeout == int(os.getenv("GPTADMIN_MCP_INIT_TIMEOUT", "180")):
+            args.init_timeout = int(spec.get("init_timeout"))
+
+    if not args.token:
+        raise SystemExit("set GPTADMIN_MCP_RELAY_TOKEN, pass --token, or set token/token_file in --agent-config")
+
     command = str(spec["command"])
     command_args = [str(x) for x in list(spec.get("args") or [])]
     requested_stdio_format = resolve_requested_stdio_format(args, spec)
@@ -673,6 +716,7 @@ def main() -> int:
             ),
             flush=True,
         )
+        return 0
 
     client = McpStdioClient(
         command=command,

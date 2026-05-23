@@ -2,6 +2,15 @@
 
 `generic_stdio_mcp_relay.py` is the runtime for one stdio MCP server. `mcp_agent_manager.py` is the install/supervisor layer around it.
 
+Manual starts can use compact command form:
+
+```bash
+generic_stdio_mcp_relay.py --hub ... --agent-id ... npx -y mcp-remote https://example.com/mcp
+```
+
+Managed services use `--agent-config FILE` to avoid service-file quoting problems and to keep env/cwd/token settings in one auditable JSON file.
+The older `--config FILE --server NAME` mode remains only for compatibility with Claude-style `mcpServers` JSON.
+
 Backends:
 
 - Linux: `systemd`

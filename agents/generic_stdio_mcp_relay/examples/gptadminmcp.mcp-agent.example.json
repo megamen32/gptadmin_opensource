@@ -2,6 +2,7 @@
   "agent_id": "HOST-gptadminmcp",
   "name": "gptadminmcp via HOST",
   "hub_url": "https://gptadmin.bezrabotnyi.com",
+  "mode": "agent-config",
   "token_file": "/etc/gptadmin/mcp-relay.token",
   "command": "npx",
   "args": ["-y", "mcp-remote", "https://gptadminmcp.bezrabotnyi.com/mcp"],

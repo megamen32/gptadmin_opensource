@@ -70,18 +70,10 @@ def hub(cfg: Dict[str, Any]) -> str:
     return str(cfg.get("hub_url") or cfg.get("hub") or "https://gptadminmcp.bezrabotnyi.com")
 
 
-def relay_token_args(cfg: Dict[str, Any]) -> List[str]:
-    token = cfg.get("token")
-    token_file = cfg.get("token_file")
-    if token:
-        return ["--token", str(token)]
-    if token_file:
-        return ["--token", f"$(cat {shlex.quote(str(token_file))})"]
-    return []
-
-
-def relay_cmd_list(cfg: Dict[str, Any], python: Optional[str] = None, token_literal: Optional[str] = None) -> List[str]:
+def relay_cmd_list(cfg: Dict[str, Any], python: Optional[str] = None, config_path: Optional[Path] = None) -> List[str]:
     py = python or str(cfg.get("python") or sys.executable or "python3")
+    if config_path is not None:
+        return [py, str(RELAY), "--agent-config", str(config_path)]
     cmd = [py, str(RELAY), "--hub", hub(cfg), "--agent-id", str(cfg["agent_id"])]
     if cfg.get("name"):
         cmd += ["--name", str(cfg["name"])]
@@ -91,22 +83,14 @@ def relay_cmd_list(cfg: Dict[str, Any], python: Optional[str] = None, token_lite
         cmd += ["--init-timeout", str(cfg["init_timeout"])]
     if cfg.get("verbose"):
         cmd += ["--verbose"]
-    if token_literal is not None:
-        cmd += ["--token", token_literal]
-    elif cfg.get("token"):
+    if cfg.get("token"):
         cmd += ["--token", str(cfg["token"])]
     cmd += [str(cfg["command"]), *[str(x) for x in cfg.get("args", [])]]
     return cmd
 
 
-def shell_cmd(cfg: Dict[str, Any], python: Optional[str] = None) -> str:
-    parts = relay_cmd_list(cfg, python=python)
-    if cfg.get("token_file") and not cfg.get("token"):
-        # shell expands command substitution only here; service files use /bin/sh -lc.
-        token_file = shlex.quote(str(cfg["token_file"]))
-        parts = relay_cmd_list(cfg, python=python, token_literal=f"$(cat {token_file})")
-        return " ".join(shlex.quote(p) if not p.startswith("$(cat ") else p for p in parts)
-    return shlex.join(parts)
+def shell_cmd(cfg: Dict[str, Any], python: Optional[str] = None, config_path: Optional[Path] = None) -> str:
+    return shlex.join(relay_cmd_list(cfg, python=python, config_path=config_path))
 
 
 def merged_env(cfg: Dict[str, Any]) -> Dict[str, str]:
@@ -115,12 +99,12 @@ def merged_env(cfg: Dict[str, Any]) -> Dict[str, str]:
     return env
 
 
-def render_systemd(cfg: Dict[str, Any]) -> str:
+def render_systemd(cfg: Dict[str, Any], cfg_path: Optional[Path] = None) -> str:
     name = cfg_name(cfg)
     user = cfg.get("run_as_user") or cfg.get("user") or "root"
     cwd = str(cfg.get("cwd") or "/")
     env_lines = "\n".join(f"Environment={shlex.quote(k)}={shlex.quote(v)}" for k, v in merged_env(cfg).items())
-    cmd = shell_cmd(cfg, python=str(cfg.get("python") or "python3"))
+    cmd = shell_cmd(cfg, python=str(cfg.get("python") or "python3"), config_path=cfg_path)
     return f"""[Unit]
 Description=GPTAdmin MCP stdio relay {name}
 After=network-online.target
@@ -141,13 +125,10 @@ WantedBy=multi-user.target
 """
 
 
-def render_launchd(cfg: Dict[str, Any]) -> bytes:
+def render_launchd(cfg: Dict[str, Any], cfg_path: Optional[Path] = None) -> bytes:
     label = f"com.gptadmin.mcp.{cfg_name(cfg)}"
     py = str(cfg.get("python") or "/usr/bin/python3")
-    args = relay_cmd_list(cfg, python=py)
-    if cfg.get("token_file") and not cfg.get("token"):
-        # launchd has no shell expansion in ProgramArguments; use /bin/sh -lc.
-        args = ["/bin/sh", "-lc", shell_cmd(cfg, python=py)]
+    args = relay_cmd_list(cfg, python=py, config_path=cfg_path)
     env = merged_env(cfg)
     log_dir = str(cfg.get("log_dir") or "/var/log/gptadmin")
     plist = {
@@ -190,15 +171,7 @@ while ($true) {
     if ($cfg.relay_path) { $relay = [string]$cfg.relay_path }
     $python = "python"
     if ($cfg.python) { $python = [string]$cfg.python }
-    $args = @($relay, "--hub", [string]$cfg.hub_url, "--agent-id", [string]$cfg.agent_id)
-    if ($cfg.name) { $args += @("--name", [string]$cfg.name) }
-    if ($cfg.stdio_format) { $args += @("--stdio-format", [string]$cfg.stdio_format) }
-    if ($cfg.init_timeout) { $args += @("--init-timeout", [string]$cfg.init_timeout) }
-    if ($cfg.verbose) { $args += "--verbose" }
-    if ($cfg.token) { $args += @("--token", [string]$cfg.token) }
-    elseif ($cfg.token_file) { $args += @("--token", (Get-Content -Raw -Path ([string]$cfg.token_file)).Trim()) }
-    $args += [string]$cfg.command
-    foreach ($a in $cfg.args) { $args += [string]$a }
+    $args = @($relay, "--agent-config", $Config)
     if ($cfg.cwd) { Set-Location -Path ([string]$cfg.cwd) }
     if ($cfg.env) { $cfg.env.PSObject.Properties | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process") } }
     [Environment]::SetEnvironmentVariable("PYTHONUNBUFFERED", "1", "Process")
@@ -225,9 +198,9 @@ def render_windows_task_command(cfg_path: Path, cfg: Dict[str, Any]) -> str:
 
 def render(cfg_path: Path, cfg: Dict[str, Any], backend: str) -> str:
     if backend == "systemd":
-        return render_systemd(cfg)
+        return render_systemd(cfg, cfg_path)
     if backend == "launchd":
-        return render_launchd(cfg).decode("utf-8")
+        return render_launchd(cfg, cfg_path).decode("utf-8")
     if backend == "windows-task":
         return render_windows_task_command(cfg_path, cfg) + "\n"
     die(f"unknown backend {backend}")
@@ -251,7 +224,7 @@ def install(cfg_path: Path, cfg: Dict[str, Any], backend: str) -> None:
     name = cfg_name(cfg)
     if backend == "systemd":
         unit = Path(f"/etc/systemd/system/gptadmin-mcp-{name}.service")
-        unit.write_text(render_systemd(cfg), encoding="utf-8")
+        unit.write_text(render_systemd(cfg, cfg_path.resolve()), encoding="utf-8")
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "enable", "--now", unit.name])
         return
@@ -259,7 +232,7 @@ def install(cfg_path: Path, cfg: Dict[str, Any], backend: str) -> None:
         log_dir = Path(str(cfg.get("log_dir") or "/var/log/gptadmin"))
         log_dir.mkdir(parents=True, exist_ok=True)
         plist = Path(f"/Library/LaunchDaemons/com.gptadmin.mcp.{name}.plist")
-        plist.write_bytes(render_launchd(cfg))
+        plist.write_bytes(render_launchd(cfg, cfg_path.resolve()))
         run(["launchctl", "bootout", "system", str(plist)])
         run(["launchctl", "bootstrap", "system", str(plist)])
         run(["launchctl", "kickstart", "-k", f"system/com.gptadmin.mcp.{name}"])
