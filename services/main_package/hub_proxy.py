@@ -110,10 +110,16 @@ except Exception as e:
     log.warning("audit log disabled path=%s err=%s", os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"), e)
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
+_audit_request_context: ContextVar[Dict[str, Any]] = ContextVar("audit_request_context", default={})
 
 
 def rid() -> str:
     return _request_id.get("-")
+
+
+def audit_request_context() -> Dict[str, Any]:
+    ctx = _audit_request_context.get({})
+    return dict(ctx) if isinstance(ctx, dict) else {}
 
 
 SENSITIVE_KEYS = {"authorization", "rootd_token", "token", "ctl_token", "password", "client_secret"}
@@ -504,13 +510,27 @@ def _remember_pending(record: Dict[str, Any]) -> None:
     _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
 
 
-def _approve_payload(name: str, payload: Dict[str, Any], approved_by: str = "api") -> Dict[str, Any]:
+def _approve_payload(
+    name: str,
+    payload: Dict[str, Any],
+    approved_by: str = "api",
+    *,
+    approved_via: Optional[str] = None,
+    approved_subject: Optional[str] = None,
+    approval_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     now = time.time()
+    ctx = dict(approval_context or audit_request_context())
+    approved_via = approved_via or ctx.get("path") or "internal"
+    approved_subject = approved_subject or approved_by
     approved_servers[name] = {
         "name": name,
         "status": "approved",
         "approved_at": now,
         "approved_by": approved_by,
+        "approved_via": approved_via,
+        "approved_subject": approved_subject,
+        "approved_request": ctx,
         "base_url": payload.get("base_url"),
         "server_id": payload.get("server_id"),
         "public_key": payload.get("public_key"),
@@ -523,6 +543,17 @@ def _approve_payload(name: str, payload: Dict[str, Any], approved_by: str = "api
         "ssh_user": payload.get("ssh_user"),
     }
     _save_json_dict(APPROVED_SERVERS_FILE, approved_servers)
+    _audit_event({
+        "event": "server_approved",
+        "name": name,
+        "server_id": payload.get("server_id"),
+        "fingerprint": approved_servers[name].get("fingerprint"),
+        "approved_at": now,
+        "approved_by": approved_by,
+        "approved_via": approved_via,
+        "approved_subject": approved_subject,
+        "approval_context": ctx,
+    })
     return approved_servers[name]
 
 
@@ -725,6 +756,18 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             body = b""
 
         q_items = list(request.query_params.multi_items())
+        _audit_request_context.set({
+            "rid": rid(),
+            "method": request.method,
+            "path": request.url.path,
+            "query_keys": sorted(request.query_params.keys()),
+            "ip": _client_ip(request),
+            "x_forwarded_for": request.headers.get("x-forwarded-for"),
+            "host": request.headers.get("host"),
+            "user_agent": request.headers.get("user-agent"),
+            "auth_kind": _audit_auth_kind(request),
+            "token_id": _audit_token_id(request),
+        })
         log.info(
             "REQ rid=%s %s %s%s ip=%s q=%s hdr=%s body_len=%s",
             rid(),
@@ -1170,7 +1213,7 @@ def _handle_gptadmin_task_command(srv: str, cmd: str):
         if len(parts) >= 2 and parts[1] == "list":
             return {"ok": True, "pending": list(pending_servers.values()), "count": len(pending_servers)}
         if len(parts) >= 3 and parts[1] == "approve":
-            return _approve_pending_server(parts[2], approved_by=f"gptadmin_pending via {srv}")
+            return _approve_pending_server(parts[2], approved_by=f"gptadmin_pending via {srv}", approved_via="virtual_shell:gptadmin_pending", approved_subject=srv)
         if len(parts) >= 3 and parts[1] == "reject":
             return _reject_pending_server(parts[2])
         return {"error": "usage: gptadmin_pending list | gptadmin_pending approve <name> | gptadmin_pending reject <name>"}
@@ -1178,12 +1221,12 @@ def _handle_gptadmin_task_command(srv: str, cmd: str):
     return None
 
 
-def _approve_pending_server(name: str, approved_by: str = "api") -> Dict[str, Any]:
+def _approve_pending_server(name: str, approved_by: str = "api", *, approved_via: Optional[str] = None, approved_subject: Optional[str] = None) -> Dict[str, Any]:
     rec = pending_servers.get(name)
     if not rec:
         return {"ok": False, "error": f"no pending server named {name}"}
     payload = rec.get("payload") or {}
-    approved = _approve_payload(name, payload, approved_by=approved_by)
+    approved = _approve_payload(name, payload, approved_by=approved_by, approved_via=approved_via, approved_subject=approved_subject)
     payload["time"] = time.time()
     payload["status"] = "active"
     servers[name] = payload
@@ -1704,7 +1747,13 @@ async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
         return _mcp_envelope_text(f"Found {len(pending_servers)} pending servers", data)
     if tool_name == "approve_pending_server":
         name = str(args.get("name") or "")
-        data = _approve_pending_server(name, approved_by="mcp hub tool")
+        ctx = audit_request_context()
+        data = _approve_pending_server(
+            name,
+            approved_by="mcp hub tool",
+            approved_via="mcp_hub_tool:approve_pending_server",
+            approved_subject=str(args.get("requested_by") or args.get("subject") or ctx.get("token_id") or ctx.get("rid") or "unknown"),
+        )
         return _mcp_envelope_text(f"Approve result for {name}: {data.get('status') or data.get('error')}", data)
     if tool_name == "reject_pending_server":
         name = str(args.get("name") or "")
