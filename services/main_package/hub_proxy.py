@@ -721,8 +721,41 @@ def _audit_auth_kind(request: Request) -> str:
     return "none"
 
 
+def _socket_client(request: Request) -> str:
+    if not request.client:
+        return ""
+    host = request.client.host or ""
+    port = request.client.port
+    return f"{host}:{port}" if port else host
+
+
+def _forwarded_for_chain(request: Request) -> List[str]:
+    raw = request.headers.get("x-forwarded-for") or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _client_ip(request: Request) -> str:
-    return request.headers.get("x-real-ip") or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "")
+    chain = _forwarded_for_chain(request)
+    return request.headers.get("x-real-ip") or (chain[0] if chain else "") or (request.client.host if request.client else "")
+
+
+def _audit_request_fields(request: Request) -> Dict[str, Any]:
+    return {
+        "client_ip": _client_ip(request),
+        "ip": _client_ip(request),  # Backward-compatible alias; prefer client_ip in new code.
+        "socket_client": _socket_client(request),
+        "x_real_ip": request.headers.get("x-real-ip"),
+        "x_forwarded_for": request.headers.get("x-forwarded-for"),
+        "forwarded_for_chain": _forwarded_for_chain(request),
+        "x_forwarded_proto": request.headers.get("x-forwarded-proto"),
+        "host": request.headers.get("host"),
+        "user_agent": request.headers.get("user-agent"),
+        "openai_ephemeral_user_id": request.headers.get("openai-ephemeral-user-id"),
+        "openai_conversation_id": request.headers.get("openai-conversation-id"),
+        "openai_gpt_id": request.headers.get("openai-gpt-id"),
+        "auth_kind": _audit_auth_kind(request),
+        "token_id": _audit_token_id(request),
+    }
 
 
 def _audit_should_skip(path: str) -> bool:
@@ -761,12 +794,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             "method": request.method,
             "path": request.url.path,
             "query_keys": sorted(request.query_params.keys()),
-            "ip": _client_ip(request),
-            "x_forwarded_for": request.headers.get("x-forwarded-for"),
-            "host": request.headers.get("host"),
-            "user_agent": request.headers.get("user-agent"),
-            "auth_kind": _audit_auth_kind(request),
-            "token_id": _audit_token_id(request),
+            **_audit_request_fields(request),
         })
         log.info(
             "REQ rid=%s %s %s%s ip=%s q=%s hdr=%s body_len=%s",
@@ -800,12 +828,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
                 "dt_ms": round(dt, 2),
                 "body_len": len(body),
                 "content_length": request.headers.get("content-length"),
-                "ip": _client_ip(request),
-                "x_forwarded_for": request.headers.get("x-forwarded-for"),
-                "host": request.headers.get("host"),
-                "user_agent": request.headers.get("user-agent"),
-                "auth_kind": _audit_auth_kind(request),
-                "token_id": _audit_token_id(request),
+                **_audit_request_fields(request),
             })
         return response
 
