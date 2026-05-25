@@ -65,6 +65,40 @@ set `SSH_HOST` (and optionally `SSH_PORT`, `SSH_USER`, `SSH_PASSWORD` or
 `SSH_KEY`) before starting the service. The server will connect over SSH and
 run all commands on that host.
 
+
+## Hub watchdog
+
+`services/main_package/hub_watchdog.py` is a dependency-free Python watchdog for
+`hub_proxy`. It has two modes:
+
+* `--check-once` probes `http://127.0.0.1:9001/version` and runs a restart
+  command on failure. Linux deployments use this through
+  `gptadmin-hub-watchdog.service` + `gptadmin-hub-watchdog.timer`.
+* `--supervise -- <command...>` runs the hub under the watchdog and restarts the
+  child when the process exits or the health endpoint fails repeatedly. This mode
+  uses only the Python standard library and is suitable for macOS/Windows/manual
+  runs.
+
+Linux systemd deployment installs:
+
+```
+sudo cp deploy/systemd/gptadmin-hub-watchdog.service /etc/systemd/system/
+sudo cp deploy/systemd/gptadmin-hub-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gptadmin-hub-watchdog.timer
+```
+
+Cross-platform supervised run example:
+
+```
+python services/main_package/hub_watchdog.py --supervise -- \
+  python services/main_package/hub_proxy.py
+```
+
+Watchdog logs default to `/var/log/gptadmin/hub-watchdog.log`. Configure with
+`GPTADMIN_HUB_HEALTH_URL`, `GPTADMIN_HUB_WATCHDOG_INTERVAL`,
+`GPTADMIN_HUB_RESTART_COMMAND`, and related environment variables.
+
 ## Build & Obfuscation
 
 The repository includes a helper script to create obfuscated, distributable
