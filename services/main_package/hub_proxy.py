@@ -188,6 +188,8 @@ HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))
 SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))
+MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
+MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
 CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "90000"))
 SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "2000"))
 OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
@@ -682,7 +684,7 @@ class McpRelayResult(BaseModel):
 
 class McpRelayToolsReq(BaseModel):
     target: str
-    timeout: Optional[int] = Field(default=None, ge=1, le=35)
+    timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
     background: bool = False
 
 
@@ -690,7 +692,7 @@ class McpRelayCallReq(BaseModel):
     target: str
     tool_name: str
     arguments: Dict[str, Any] = Field(default_factory=dict)
-    timeout: Optional[int] = Field(default=None, ge=1, le=35)
+    timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
     background: bool = False
 
 
@@ -1791,7 +1793,12 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         cmd = args.get("cmd")
         if not cmd:
             raise HTTPException(400, "shell_exec requires cmd")
-        background = bool(args.get("background", False) or request_background)
+        requested_timeout = args.get("timeout")
+        try:
+            long_timeout = requested_timeout is not None and int(requested_timeout) > SYNC_TIMEOUT_S
+        except Exception:
+            long_timeout = False
+        background = bool(args.get("background", False) or request_background or long_timeout)
         req = BulkExec(
             servers=[srv],
             cmd=str(cmd),
@@ -1883,7 +1890,7 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
 
 
 async def _mcp_relay_wait(job_id: str, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    wait_s = min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S)
+    wait_s = min(int(timeout or MCP_RELAY_DEFAULT_TIMEOUT), SYNC_TIMEOUT_S, MCP_RELAY_SYNC_WAIT_MAX_S)
     deadline = time.time() + wait_s
     job = mcp_relay_jobs.get(job_id)
     if job:
@@ -1988,7 +1995,7 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
         return {"agent_id": target, "status": "completed", "response": _shell_tools_list()}
 
     job_id = _mcp_relay_enqueue(target, "tools/list", {})
-    if req.background:
+    if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tools/list queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
@@ -2007,13 +2014,19 @@ async def mcp_relay_call(req: McpRelayCallReq):
         data = await _hub_tool_call(req.tool_name, req.arguments or {})
         return {"agent_id": target, "status": "completed", "response": data}
     if _is_virtual_shell_agent(target):
-        data = await _virtual_shell_tool_call(target, req.tool_name, req.arguments or {}, request_background=req.background)
+        args = req.arguments or {}
+        arg_timeout = args.get("timeout") if isinstance(args, dict) else None
+        try:
+            long_timeout = (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S) or (arg_timeout is not None and int(arg_timeout) > SYNC_TIMEOUT_S)
+        except Exception:
+            long_timeout = bool(req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S)
+        data = await _virtual_shell_tool_call(target, req.tool_name, args, request_background=bool(req.background or long_timeout))
         if isinstance(data, dict) and data.get("background"):
             return {"agent_id": target, "status": "running", **data}
         return {"agent_id": target, "status": "completed", "response": data}
 
     job_id = _mcp_relay_enqueue(target, "tools/call", {"name": req.tool_name, "arguments": req.arguments or {}})
-    if req.background:
+    if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tool call queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
