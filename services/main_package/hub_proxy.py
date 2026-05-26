@@ -696,6 +696,15 @@ class TaskResult(BaseModel):
     result: dict
 
 
+class TaskEdit(BaseModel):
+    not_before: Optional[Any] = None
+    expires_at: Optional[Any] = None
+    max_attempts: Optional[int] = None
+    next_attempt_at: Optional[Any] = None
+    action: Optional[str] = Field(default=None, pattern="^(cancel|retry_now|pause)$")
+    reason: Optional[str] = None
+
+
 class McpRelayRegister(BaseModel):
     agent_id: str
     name: Optional[str] = None
@@ -946,6 +955,74 @@ def _queue_deferred_task(srv: str, tid: str, payload: Dict[str, Any], *, cmd: st
         "updated_at": int(now),
     })
     return task
+
+
+TERMINAL_TASK_STATUSES = {"completed", "failed", "expired", "cancelled", "orphaned"}
+QUEUED_TASK_STATUSES = {"queued_offline", "queued_deferred", "queued_ready", "dispatch_failed"}
+
+
+def _resolve_legacy_task_id(srv: str, task_id: str) -> str:
+    if task_id in background_tasks.get(srv, {}):
+        return task_id
+    job = mcp_relay_jobs.get(task_id)
+    if job and job.get("kind") == "virtual_shell_task" and job.get("server") == srv:
+        return str(job.get("task_id") or task_id)
+    return task_id
+
+
+def _edit_task(srv: str, task_id: str, edit: Dict[str, Any]) -> Dict[str, Any]:
+    tid = _resolve_legacy_task_id(srv, task_id)
+    task = background_tasks.get(srv, {}).get(tid)
+    if not task:
+        raise HTTPException(404, f"task not found: {task_id}")
+    now = time.time()
+    old = dict(task)
+    status = str(task.get("status") or "")
+    action = edit.get("action")
+    reason = str(edit.get("reason") or action or "task_edit")
+
+    if status in {"completed", "failed", "expired"} and action != "cancel":
+        raise HTTPException(409, f"cannot edit terminal task status={status}")
+
+    if "not_before" in edit and edit.get("not_before") is not None:
+        task["not_before"] = _parse_time_value(edit.get("not_before"), now) or now
+    if "expires_at" in edit and edit.get("expires_at") is not None:
+        task["expires_at"] = _parse_time_value(edit.get("expires_at"), None)
+    if "next_attempt_at" in edit and edit.get("next_attempt_at") is not None:
+        task["next_attempt_at"] = _parse_time_value(edit.get("next_attempt_at"), now) or now
+    if "max_attempts" in edit and edit.get("max_attempts") is not None:
+        task["max_attempts"] = int(edit.get("max_attempts"))
+
+    if action == "cancel":
+        if status == "completed":
+            raise HTTPException(409, "cannot cancel completed task")
+        task.update({"status": "cancelled", "completed_at": int(now), "cancelled_at": int(now), "cancel_reason": reason})
+    elif action == "retry_now":
+        if status in {"running", "dispatching"}:
+            raise HTTPException(409, f"cannot retry_now while task is {status}")
+        task.update({"status": "queued_ready", "not_before": now, "next_attempt_at": now, "retry_reason": reason})
+    elif action == "pause":
+        if status in {"running", "dispatching"}:
+            raise HTTPException(409, f"cannot pause while task is {status}")
+        task.update({"status": "queued_deferred", "pause_reason": reason})
+
+    if task.get("status") in QUEUED_TASK_STATUSES:
+        nb = float(task.get("not_before") or 0)
+        na = float(task.get("next_attempt_at") or 0)
+        if nb > now or na > now:
+            task["status"] = "queued_deferred"
+        elif task.get("status") not in {"cancelled", "expired"}:
+            task["status"] = "queued_ready"
+    task["updated_at"] = int(now)
+    task.setdefault("edit_history", []).append({
+        "at": int(now),
+        "action": action,
+        "reason": reason,
+        "fields": {k: edit.get(k) for k in ("not_before", "expires_at", "max_attempts", "next_attempt_at") if k in edit},
+        "old_status": old.get("status"),
+        "new_status": task.get("status"),
+    })
+    return {"ok": True, "server": srv, "task_id": tid, "requested_task_id": task_id, "task": {"server": srv, "task_id": tid, **task}}
 
 
 def _polling_due_task(srv: str) -> Optional[Dict[str, Any]]:
@@ -2003,6 +2080,7 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "background": {"type": "boolean", "default": False},
                     "not_before": {"type": ["number", "string", "null"], "description": "Earliest time to run: epoch seconds, relative seconds, or ISO timestamp."},
                     "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time: epoch seconds, relative seconds, or ISO timestamp."},
+                    "max_attempts": {"type": ["integer", "null"], "description": "Maximum deferred dispatch attempts."},
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -2014,6 +2092,24 @@ def _shell_tools_list() -> Dict[str, Any]:
             "inputSchema": {
                 "type": "object",
                 "properties": {"task_id": {"type": "string"}, "ack": {"type": "boolean", "default": False}},
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "task_edit",
+            "description": "Edit a deferred/background task schedule: not_before, expires_at, max_attempts, retry_now, pause or cancel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time: epoch seconds, relative seconds, or ISO timestamp."},
+                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time: epoch seconds, relative seconds, or ISO timestamp."},
+                    "next_attempt_at": {"type": ["number", "string", "null"], "description": "Next retry time: epoch seconds, relative seconds, or ISO timestamp."},
+                    "max_attempts": {"type": ["integer", "null"]},
+                    "action": {"type": ["string", "null"], "enum": ["cancel", "retry_now", "pause", None]},
+                    "reason": {"type": ["string", "null"]},
+                },
                 "required": ["task_id"],
                 "additionalProperties": False,
             },
@@ -2106,10 +2202,21 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
 
     if tool_name == "task_status":
         tid = str(args.get("task_id") or "")
-        task = _legacy_get_task(srv, tid, ack=bool(args.get("ack")))
+        real_tid = _resolve_legacy_task_id(srv, tid)
+        task = _legacy_get_task(srv, real_tid, ack=bool(args.get("ack")))
         if not task:
             return _mcp_envelope_text(f"Task not found: {tid}", {"server": srv, "task_id": tid, "status": "not_found"})
+        if real_tid != tid:
+            task["requested_task_id"] = tid
         return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
+
+    if tool_name == "task_edit":
+        tid = str(args.get("task_id") or "")
+        if not tid:
+            raise HTTPException(400, "task_edit requires task_id")
+        edit = {k: args.get(k) for k in ("not_before", "expires_at", "next_attempt_at", "max_attempts", "action", "reason") if k in args}
+        data = _edit_task(srv, tid, edit)
+        return _mcp_envelope_text(f"Task {tid} edited: {data['task'].get('status')}", data)
 
     raise HTTPException(404, f"unknown shell tool {tool_name}")
 
@@ -2672,6 +2779,11 @@ def ack_task(srv: str, tid: str):
     return {"ok": True, "status": "acknowledged" if removed_task or removed_result else "not_found", "server": srv, "task_id": tid, "removed_task": removed_task, "removed_result": removed_result}
 
 
+@app.post("/tasks/{srv}/{tid}/edit", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def edit_task_endpoint(srv: str, tid: str, edit: TaskEdit):
+    return _edit_task(srv, tid, edit.model_dump(exclude_unset=True))
+
+
 @app.get("/tasks/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def list_tasks(srv: str):
     return {"server": srv, "tasks": list(background_tasks.get(srv, {}).values())}
@@ -2791,35 +2903,7 @@ def _fmt_detail(tool: Dict[str, Any]) -> str:
 
 # ── Tool fetching ───────────────────────────────────────────────────────────────
 
-_SHELL_TOOLS: List[Dict[str, Any]] = [
-    {
-        "name": "shell_exec",
-        "description": "Execute a shell command on the server.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "cmd": {"type": "string", "description": "Shell command to run"},
-                "cwd": {"type": "string", "description": "Working directory"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds"},
-                "env": {"type": "object", "description": "Environment variables"},
-                "background": {"type": "boolean", "description": "Run in background"},
-            },
-            "required": ["cmd"],
-        },
-    },
-    {
-        "name": "task_status",
-        "description": "Check status of a background task.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Task ID"},
-                "ack": {"type": "boolean", "description": "Acknowledge and remove completed task"},
-            },
-            "required": ["task_id"],
-        },
-    },
-]
+_SHELL_TOOLS: List[Dict[str, Any]] = _shell_tools_list().get("tools", [])
 
 
 async def _bridge_fetch_tools(agent_id: str) -> List[Dict[str, Any]]:
