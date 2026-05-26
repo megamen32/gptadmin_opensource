@@ -1310,6 +1310,26 @@ async def _webhook_exec(info: Dict[str, Any], payload: dict) -> dict:
             return {"stdout": r.text, "stderr": "", "returncode": 0 if r.status_code < 400 else r.status_code}
 
 
+async def _webhook_exec_callback(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> Dict[str, Any]:
+    url = f"{str(info['base_url']).rstrip('/')}/exec/callback"
+    callback_payload = dict(payload)
+    callback_payload["job_id"] = tid
+    body = json.dumps(callback_payload, separators=(",", ":")).encode("utf-8")
+    headers = _signed_rootd_headers("POST", "/exec/callback", body, {"Content-Type": "application/json"})
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        r = await client.post(url, content=body, headers=headers)
+        if r.status_code == 404:
+            return {"ok": False, "fallback": "exec_live", "status_code": 404}
+        if r.status_code >= 400:
+            return {"ok": False, "status_code": r.status_code, "error": r.text[:1000]}
+        try:
+            data = r.json()
+        except Exception:
+            data = {"ok": True, "text": r.text[:1000]}
+        data.setdefault("ok", True)
+        return data
+
+
 async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> dict:
     """Run webhook command through rootd /exec/live and update task stdout/stderr while it runs."""
     url = f"{str(info['base_url']).rstrip('/')}/exec/live"
@@ -1382,10 +1402,17 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
 
     async def runner() -> None:
         try:
-            result = await _webhook_exec_live(srv, info, payload, tid)
-            background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
+            started = await _webhook_exec_callback(srv, info, payload, tid)
+            if started.get("fallback") == "exec_live":
+                result = await _webhook_exec_live(srv, info, payload, tid)
+                background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
+                return
+            if not started.get("ok"):
+                background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": started, "completed_at": int(time.time()), "updated_at": int(time.time())})
+                return
+            background_tasks.setdefault(srv, {})[tid].update({"status": "running", "delivery": "callback_outbox", "rootd_start": started, "updated_at": int(time.time())})
         except Exception as e:
-            background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": str(e), "completed_at": int(time.time())})
+            background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": str(e), "completed_at": int(time.time()), "updated_at": int(time.time())})
 
     asyncio.create_task(runner())
 

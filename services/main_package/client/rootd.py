@@ -121,6 +121,16 @@ def _hub_artifact_url(path: str) -> str:
             base = base[: -len("/heartbeat")]
     return f"{base}{path}"
 
+
+def _derive_hub_queue_url(raw_url: str) -> str | None:
+    candidate = raw_url or HUB_URL
+    parsed = urlparse(candidate)
+    if not (parsed.scheme and parsed.netloc) and candidate != HUB_URL:
+        parsed = urlparse(HUB_URL)
+    if parsed.scheme and parsed.netloc:
+        return urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
+    return None
+
 ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
 ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
 ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
@@ -228,12 +238,12 @@ def _outbox_load(path: Path) -> dict:
 
 
 def _queue_post_payload(srv_name: str, endpoint: str, payload: dict, timeout: float = 5.0) -> None:
-    if not QUEUE_URL:
-        raise RuntimeError("QUEUE_URL is not set")
+    if not CALLBACK_QUEUE_URL:
+        raise RuntimeError("CALLBACK_QUEUE_URL is not set")
     queue_path = f"/queue/{srv_name}/{endpoint}"
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     r = requests.post(
-        f"{QUEUE_URL}/{srv_name}/{endpoint}",
+        f"{CALLBACK_QUEUE_URL}/{srv_name}/{endpoint}",
         data=body,
         headers=_signed_json_headers("POST", queue_path, body),
         timeout=timeout,
@@ -269,7 +279,7 @@ def _outbox_backoff(path: Path, entry: dict, err: Exception) -> None:
 
 def _queue_send_or_spool(srv_name: str, endpoint: str, payload: dict, kind: str, job_id: str, timeout: float = 5.0) -> None:
     global _QUEUE_OFFLINE_UNTIL
-    if not QUEUE_URL or not job_id:
+    if not CALLBACK_QUEUE_URL or not job_id:
         return
     now = time.time()
     message_id = f"{int(now * 1000)}-{kind}-{job_id}-{uuid.uuid4().hex[:8]}"
@@ -298,7 +308,7 @@ def _queue_send_or_spool(srv_name: str, endpoint: str, payload: dict, kind: str,
 
 
 def outbox_retry_loop() -> None:
-    if not QUEUE_URL:
+    if not CALLBACK_QUEUE_URL:
         return
     _outbox_init()
     while True:
@@ -324,10 +334,10 @@ def outbox_retry_loop() -> None:
         time.sleep(ROOTD_OUTBOX_SCAN_S)
 
 if os.getenv("QUEUE_URL"):
-    parsed = urlparse(HUB_URL)
-    QUEUE_URL = urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
+    QUEUE_URL = _derive_hub_queue_url(os.getenv("QUEUE_URL") or HUB_URL)
 else:
     QUEUE_URL = None
+CALLBACK_QUEUE_URL = os.getenv("ROOTD_CALLBACK_QUEUE_URL") or QUEUE_URL or _derive_hub_queue_url(HUB_URL)
 
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
 
@@ -371,6 +381,26 @@ class ExecReq(BaseModel):
     timeout: Optional[int] = None
 
 
+class ExecCallbackReq(ExecReq):
+    job_id: str
+
+
+def _callback_job_runner(job_id: str, cmd: str, timeout: Optional[int], cwd: Optional[str], env: dict, request_source: str = "http_callback") -> None:
+    srv_name = ROOTD_NAME or socket.gethostname()
+    started = time.perf_counter()
+    try:
+        if hasattr(backend, "run_live"):
+            res = asyncio.run(_poll_run_live_job(srv_name, {"id": job_id, "cmd": cmd, "timeout": timeout, "cwd": cwd}, env))
+        else:
+            res = backend.run(cmd, timeout, cwd, env)
+        _audit_exec(request_source, cmd, cwd, timeout, result=res, job_id=job_id, started_at=started)
+    except Exception as e:
+        log.exception("callback exec failed")
+        res = {"error": str(e), "traceback": traceback.format_exc()}
+        _audit_exec(request_source, cmd, cwd, timeout, error=str(e), job_id=job_id, started_at=started)
+    _queue_send_or_spool(srv_name, "result", {"id": job_id, "result": res}, kind="result", job_id=job_id, timeout=5)
+
+
 # ---------------- EXEC --------------------------------------------
 @app.post("/exec", dependencies=[Depends(guard)])
 def exec_cmd(request: Request, body: ExecReq = Body(...)):
@@ -392,6 +422,18 @@ def exec_cmd(request: Request, body: ExecReq = Body(...)):
             status_code=500,
             content={"error": str(e), "traceback": traceback.format_exc()},
         )
+
+
+@app.post("/exec/callback", dependencies=[Depends(guard)])
+def exec_callback(request: Request, body: ExecCallbackReq = Body(...)):
+    """Start command and deliver stdout/stderr/result back to hub through durable callback outbox."""
+    log.info(f"EXEC_CALLBACK: job={body.job_id} cmd={body.cmd} (cwd={body.cwd})")
+    _audit_exec("http_callback_start", body.cmd, body.cwd, body.timeout, job_id=body.job_id, request=request)
+    env = os.environ.copy()
+    if body.env:
+        env.update(body.env)
+    threading.Thread(target=_callback_job_runner, args=(body.job_id, body.cmd, body.timeout, body.cwd, env), daemon=True).start()
+    return {"ok": True, "status": "running", "job_id": body.job_id, "delivery": "callback_outbox"}
 
 
 @app.post("/exec/stream", dependencies=[Depends(guard)])
@@ -662,8 +704,9 @@ if HUB_URL and TRANSPORT in {"auto", "websocket"} and not QUEUE_URL:
     start_websocket_thread()
 if HUB_URL and (TRANSPORT == "webhook" or QUEUE_URL or websockets is None):
     threading.Thread(target=heartbeat, daemon=True).start()
-if QUEUE_URL or TRANSPORT == "polling":
+if CALLBACK_QUEUE_URL:
     threading.Thread(target=outbox_retry_loop, daemon=True).start()
+if QUEUE_URL or TRANSPORT == "polling":
     threading.Thread(target=poll_loop, daemon=True).start()
 
 
