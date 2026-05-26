@@ -109,8 +109,16 @@ ROOTD_UPDATE_INTERVAL_S = int(os.getenv("ROOTD_UPDATE_INTERVAL_S", "3600"))
 ROOTD_SERVICE_NAME = os.getenv("ROOTD_SERVICE_NAME", "gptadmin-rootd.service")
 
 def _hub_artifact_url(path: str) -> str:
-    base = (HUB_URL or "").rstrip("/")
-    return f"{base}{path}" if base else ""
+    if not HUB_URL:
+        return ""
+    parsed = urlparse(HUB_URL)
+    if parsed.scheme and parsed.netloc:
+        base = f"{parsed.scheme}://{parsed.netloc}"
+    else:
+        base = HUB_URL.rstrip("/")
+        if base.endswith("/heartbeat"):
+            base = base[: -len("/heartbeat")]
+    return f"{base}{path}"
 
 ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
 ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
@@ -278,6 +286,35 @@ async def exec_stream(request: Request, body: ExecReq = Body(...)):
         )
 
 
+@app.post("/exec/live", dependencies=[Depends(guard)])
+async def exec_live(request: Request, body: ExecReq = Body(...)):
+    """Run command and stream NDJSON events: stdout/stderr chunks and final exit."""
+    log.info(f"EXEC_LIVE: {body.cmd} (cwd={body.cwd})")
+    _audit_exec("http_live_start", body.cmd, body.cwd, body.timeout, request=request)
+
+    env = os.environ.copy()
+    if body.env:
+        env.update(body.env)
+
+    async def ndjson_generator():
+        started = time.perf_counter()
+        try:
+            if not hasattr(backend, "run_live"):
+                yield (json.dumps({"type": "error", "error": "backend does not support live exec"}, ensure_ascii=False) + "\n").encode("utf-8")
+                return
+            generator = await backend.run_live(body.cmd, body.timeout, body.cwd, env)
+            async for event in generator():
+                if event.get("type") == "exit":
+                    _audit_exec("http_live", body.cmd, body.cwd, body.timeout, result=event, request=request, started_at=started)
+                yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+        except Exception as e:
+            log.exception("Error in /exec/live")
+            _audit_exec("http_live", body.cmd, body.cwd, body.timeout, error=str(e), request=request, started_at=started)
+            yield (json.dumps({"type": "error", "error": str(e), "traceback": traceback.format_exc()}, ensure_ascii=False) + "\n").encode("utf-8")
+
+    return StreamingResponse(ndjson_generator(), media_type="application/x-ndjson")
+
+
 # ---------------- INFO --------------------------------------------
 @app.get("/system/info", dependencies=[Depends(guard)])
 def sys_info():
@@ -407,6 +444,49 @@ def heartbeat():
         time.sleep(HB_INT)
 
 
+def _send_queue_progress(srv_name: str, job_id: str, event_type: str, data: str = "", event: Optional[dict] = None) -> None:
+    if not QUEUE_URL or not job_id:
+        return
+    progress_path = f"/queue/{srv_name}/progress"
+    progress_body = json.dumps({"id": job_id, "type": event_type, "data": data, "event": event}, separators=(",", ":")).encode("utf-8")
+    try:
+        requests.post(
+            f"{QUEUE_URL}/{srv_name}/progress",
+            data=progress_body,
+            headers=_signed_json_headers("POST", progress_path, progress_body),
+            timeout=1,
+        )
+    except Exception as e:
+        log.debug("queue progress send failed job=%s type=%s err=%s", job_id, event_type, e)
+
+
+
+async def _poll_run_live_job(srv_name: str, job: dict, env: dict) -> dict:
+    stdout = ""
+    stderr = ""
+    result = {"returncode": None, "stdout": stdout, "stderr": stderr}
+    generator = await backend.run_live(job["cmd"], job.get("timeout"), job.get("cwd"), env)
+    async for event in generator():
+        etype = event.get("type")
+        if etype == "stdout":
+            chunk = str(event.get("data") or "")
+            stdout += chunk
+            _send_queue_progress(srv_name, str(job.get("id") or ""), "stdout", chunk)
+        elif etype == "stderr":
+            chunk = str(event.get("data") or "")
+            stderr += chunk
+            _send_queue_progress(srv_name, str(job.get("id") or ""), "stderr", chunk)
+        elif etype == "exit":
+            result.update(event)
+        elif etype == "error":
+            result.update({"returncode": -1, "error": event.get("error"), "traceback": event.get("traceback")})
+    result["stdout"] = stdout
+    result["stderr"] = stderr
+    if result.get("returncode") is None:
+        result["returncode"] = 0
+    return result
+
+
 def poll_loop():
     if not QUEUE_URL:
         return
@@ -428,7 +508,10 @@ def poll_loop():
                         env.update(job["env"])
                     started = time.perf_counter()
                     try:
-                        res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
+                        if hasattr(backend, "run_live"):
+                            res = asyncio.run(_poll_run_live_job(srv_name, job, env))
+                        else:
+                            res = backend.run(job["cmd"], job.get("timeout"), job.get("cwd"), env)
                         _audit_exec("polling", job.get("cmd"), job.get("cwd"), job.get("timeout"), result=res, job_id=job.get("id"), started_at=started)
                     except Exception as e:
                         log.exception("poll exec failed")
@@ -507,6 +590,83 @@ def _find_rootd_binary(extract_dir: str) -> str:
     raise RuntimeError("rootd binary not found in update archive")
 
 
+def _current_source_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _is_source_install() -> bool:
+    return Path(__file__).suffix == ".py" and "python" in Path(sys.executable).name.lower()
+
+
+def _copy_tree_contents(src: Path, dst: Path) -> None:
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+
+
+def _find_rootd_source_tree(extract_dir: str) -> Path:
+    roots = [Path(extract_dir), Path(extract_dir) / "services" / "main_package" / "client", Path(extract_dir) / "client"]
+    for root in roots:
+        if (root / "rootd.py").is_file():
+            return root
+    for c in Path(extract_dir).rglob("rootd.py"):
+        return c.parent
+    raise RuntimeError("rootd.py source tree not found in update archive")
+
+
+def _validate_source_tree(src: Path) -> None:
+    required = ["rootd.py", "rootd_linux.py", "gptadmin_security.py", "gptadmin_build_info.py"]
+    missing = [name for name in required if not (src / name).is_file()]
+    if missing:
+        raise RuntimeError(f"source update missing files: {missing}")
+    subprocess.run([sys.executable, "-m", "py_compile", *[str(src / name) for name in required]], check=True, timeout=30)
+
+
+def _canary_source_tree(src: Path) -> None:
+    port_probe = str(35000 + (os.getpid() % 10000))
+    env = os.environ.copy()
+    env.update({"PORT": port_probe, "ROOTD_PORT": port_probe, "HUB_URL": "", "ROOTD_AUTO_UPDATE": "0", "ROOTD_TRANSPORT": "webhook"})
+    proc = subprocess.Popen([sys.executable, str(src / "rootd.py")], cwd=str(src), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 10
+        ok = False
+        while time.time() < deadline:
+            try:
+                r = requests.get(f"http://127.0.0.1:{port_probe}/version", timeout=1)
+                if r.status_code == 200:
+                    ok = True
+                    break
+            except Exception:
+                time.sleep(0.2)
+        if not ok:
+            raise RuntimeError("source canary did not pass /version health check")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+
+
+def _install_source_update(extract_dir: str, latest: int) -> dict:
+    src = _find_rootd_source_tree(extract_dir)
+    _validate_source_tree(src)
+    _canary_source_tree(src)
+    dst = _current_source_root()
+    backup = dst.with_name(dst.name + f".bak.{BUILD_VERSION}.{int(time.time())}")
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.log")
+    shutil.copytree(dst, backup, ignore=ignore)
+    _copy_tree_contents(src, dst)
+    log.info("rootd source auto-update staged build %s over %s, backup=%s", latest, BUILD_VERSION, backup)
+    subprocess.Popen(["/bin/sh", "-c", f"sleep 1; systemctl restart {ROOTD_SERVICE_NAME}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "updated": True, "mode": "source", "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
+
+
 def rootd_update_once() -> dict:
     if not ROOTD_UPDATE_MANIFEST_URL:
         return {"ok": False, "reason": "no manifest url"}
@@ -534,14 +694,16 @@ def rootd_update_once() -> dict:
         extract_dir.mkdir()
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(extract_dir)
+        if _is_source_install():
+            return _install_source_update(str(extract_dir), latest)
         new_bin = Path(_find_rootd_binary(str(extract_dir)))
         backup = current_exe.with_name(current_exe.name + f".bak.{BUILD_VERSION}")
         shutil.copy2(current_exe, backup)
         shutil.copy2(new_bin, current_exe)
         current_exe.chmod(0o755)
-    log.info("rootd auto-update installed build %s over %s, backup=%s", latest, BUILD_VERSION, backup)
+    log.info("rootd binary auto-update installed build %s over %s, backup=%s", latest, BUILD_VERSION, backup)
     subprocess.Popen(["/bin/sh", "-c", f"sleep 1; systemctl restart {ROOTD_SERVICE_NAME}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"ok": True, "updated": True, "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
+    return {"ok": True, "updated": True, "mode": "binary", "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
 
 
 @app.post("/update/check", dependencies=[Depends(guard)])

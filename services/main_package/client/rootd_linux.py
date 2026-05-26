@@ -116,7 +116,7 @@ def _wrap_default_user_command(cmd: str, cwd: str | None = None, env: dict | Non
     run_user = _default_run_user(cwd)
     if not run_user:
         return cmd, None
-    return f"sudo -H -u {shlex.quote(run_user)} /bin/bash -lc {shlex.quote(cmd)}", run_user
+    return f"sudo -H -u {shlex.quote(run_user)} /bin/bash -c {shlex.quote(cmd)}", run_user
 
 
 def _snapshot_file_metadata(cwd: str | None):
@@ -240,6 +240,85 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
         async for chunk in proc.stdout:
             yield chunk
         await proc.wait()
+
+    return generator
+
+
+async def run_live(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
+    """Run command and yield live stdout/stderr events plus final exit event."""
+    log.debug(f"Running live command (Linux): {cmd} (timeout={timeout}, cwd={cwd})")
+    exec_cmd, run_as_user = _wrap_default_user_command(cmd, cwd, env)
+    metadata_root, metadata_snapshot = _snapshot_file_metadata(cwd)
+    proc = await asyncio.create_subprocess_shell(
+        exec_cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        executable="/bin/bash",
+    )
+
+    async def generator():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def pump(stream, name: str):
+            try:
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, bytes):
+                        text = chunk.decode(errors="replace")
+                    else:
+                        text = str(chunk)
+                    await queue.put({"type": name, "data": text})
+            except Exception as exc:
+                await queue.put({"type": "stderr", "data": f"\n[live stream read error: {exc}]\n"})
+
+        pumps = []
+        if proc.stdout is not None:
+            pumps.append(asyncio.create_task(pump(proc.stdout, "stdout")))
+        if proc.stderr is not None:
+            pumps.append(asyncio.create_task(pump(proc.stderr, "stderr")))
+
+        timed_out = False
+        wait_task = asyncio.create_task(proc.wait())
+        deadline = time.monotonic() + (timeout or TMO_DEF)
+        try:
+            while True:
+                if wait_task.done() and queue.empty() and all(t.done() for t in pumps):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 and not wait_task.done():
+                    timed_out = True
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await queue.put({"type": "stderr", "data": f"\n[timeout after {timeout or TMO_DEF}s]\n"})
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    yield event
+                except asyncio.TimeoutError:
+                    pass
+            if not wait_task.done():
+                await wait_task
+            if pumps:
+                await asyncio.gather(*pumps, return_exceptions=True)
+            while not queue.empty():
+                yield await queue.get()
+        finally:
+            for t in pumps:
+                if not t.done():
+                    t.cancel()
+        metadata_restore = _restore_file_metadata(metadata_root, metadata_snapshot)
+        yield {
+            "type": "exit",
+            "returncode": -1 if timed_out else proc.returncode,
+            "error": f"timeout {timeout or TMO_DEF}s" if timed_out else None,
+            "metadata_restore": metadata_restore,
+            "run_as_user": run_as_user,
+        }
 
     return generator
 

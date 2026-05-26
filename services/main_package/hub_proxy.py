@@ -15,7 +15,7 @@ Old shell/server endpoints are kept as legacy/internal fallback:
 
 Important architectural decision:
   rootd servers are exposed to GPT as *virtual MCP agents* with tools such as
-  shell_exec, task_status and read_spilled_output. This lets GPT use one mental
+  shell_exec and task_status. This lets GPT use one mental
   model: list agents → list tools → call tool → poll job.
 
 Env highlights:
@@ -190,8 +190,8 @@ STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))
 SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
-CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "90000"))
-SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "2000"))
+CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "350000"))
+SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "120000"))
 OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
 OUTPUT_STORE_MAX_BYTES = int(os.getenv("HUB_OUTPUT_STORE_MAX_BYTES", str(500 * 1024 * 1024)))
 AUDIT_LOG_PATH = Path(os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"))
@@ -437,7 +437,7 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
         "file_path": str(path),
         "preview_head": content[:1500],
         "preview_tail": content[-512:] if len(content) > 1500 else "",
-        "hint": f"Use shell_exec on the hub server to read: sed -n '1,120p' {shlex.quote(str(path))}",
+        "hint": f"Use shell_exec on hub_server with sed/grep/jq, e.g.: sed -n '1,120p' {shlex.quote(str(path))}",
     }
     hub_srv = _find_hub_server()
     if hub_srv:
@@ -447,8 +447,15 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
 
 def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
     raw = json.dumps({"results": out}, ensure_ascii=False)
-    if len(raw) <= CHATGPT_RESPONSE_LIMIT:
+    should_scan = len(raw) > CHATGPT_RESPONSE_LIMIT
+    if not should_scan:
+        for res in out.values():
+            if isinstance(res, dict) and any(isinstance(res.get(field), str) and len(res.get(field) or "") > SPILL_FIELD_MIN_CHARS for field in ("stdout", "stderr")):
+                should_scan = True
+                break
+    if not should_scan:
         return out
+
     result = {}
     for srv, res in out.items():
         if not isinstance(res, dict) or res.get("background") or "error" in res:
@@ -463,6 +470,12 @@ def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
                 modified[field] = _spill_field(output_id, srv, cmd, field, val, returncode)
         result[srv] = modified
     return result
+
+
+def _spill_single_result(srv: str, result: Any, cmd: str) -> Any:
+    if not isinstance(result, dict):
+        return result
+    return _spill_large_fields({srv: result}, cmd).get(srv, result)
 
 
 def _server_fingerprint(d: Dict[str, Any]) -> str:
@@ -889,6 +902,10 @@ def _rootd_artifact_path() -> Path:
     return ARTIFACT_DIR / "gptadmin-rootd.tar.gz"
 
 
+def _rootd_artifact_meta_path() -> Path:
+    return ARTIFACT_DIR / "gptadmin-rootd.json"
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -1112,15 +1129,26 @@ def rootd_artifact_manifest(request: Request):
     artifact = _rootd_artifact_path()
     if not artifact.is_file():
         raise HTTPException(404, f"rootd artifact not found: {artifact}")
-    return {
+    meta = {
         "component": "rootd",
         "build_version": BUILD_VERSION,
         "build_ts": BUILD_TS,
         "git_commit": GIT_COMMIT,
+    }
+    meta_path = _rootd_artifact_meta_path()
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta.update({k: v for k, v in loaded.items() if k not in {"sha256", "size", "url"}})
+        except Exception as e:
+            log.warning("rootd artifact metadata ignored path=%s err=%s", meta_path, e)
+    meta.update({
         "sha256": _sha256_file(artifact),
         "size": artifact.stat().st_size,
         "url": str(request.url_for("rootd_artifact_download")),
-    }
+    })
+    return meta
 
 
 @app.get("/artifacts/rootd.tar.gz", name="rootd_artifact_download", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -1282,6 +1310,60 @@ async def _webhook_exec(info: Dict[str, Any], payload: dict) -> dict:
             return {"stdout": r.text, "stderr": "", "returncode": 0 if r.status_code < 400 else r.status_code}
 
 
+async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> dict:
+    """Run webhook command through rootd /exec/live and update task stdout/stderr while it runs."""
+    url = f"{str(info['base_url']).rstrip('/')}/exec/live"
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = _signed_rootd_headers("POST", "/exec/live", body, {"Content-Type": "application/json"})
+    slot = _task_slot(srv, tid)
+    result: Dict[str, Any] = slot.setdefault("result", {})
+    result.setdefault("stdout", "")
+    result.setdefault("stderr", "")
+    result.setdefault("returncode", None)
+    slot.update({"status": "running", "updated_at": int(time.time())})
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
+        async with client.stream("POST", url, content=body, headers=headers) as r:
+            if r.status_code == 404:
+                # Older rootd without /exec/live; fall back to legacy buffered exec.
+                return await _webhook_exec(info, payload)
+            if r.status_code >= 400:
+                text = await r.aread()
+                return {"returncode": r.status_code, "stdout": "", "stderr": text.decode("utf-8", "replace"), "error": f"/exec/live HTTP {r.status_code}"}
+            saw_exit = False
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    result["stdout"] = str(result.get("stdout") or "") + line + "\n"
+                    slot["updated_at"] = int(time.time())
+                    continue
+                etype = event.get("type")
+                if etype in {"stdout", "stderr"}:
+                    field = etype
+                    result[field] = str(result.get(field) or "") + str(event.get("data") or "")
+                    slot["updated_at"] = int(time.time())
+                elif etype == "exit":
+                    saw_exit = True
+                    result["returncode"] = event.get("returncode")
+                    if event.get("error"):
+                        result["error"] = event.get("error")
+                    result["metadata_restore"] = event.get("metadata_restore")
+                    result["run_as_user"] = event.get("run_as_user")
+                    slot["updated_at"] = int(time.time())
+                elif etype == "error":
+                    result["error"] = event.get("error") or "live exec error"
+                    if event.get("traceback"):
+                        result["traceback"] = event.get("traceback")
+                    result["returncode"] = result.get("returncode") if result.get("returncode") is not None else -1
+                    slot["updated_at"] = int(time.time())
+            if not saw_exit and result.get("returncode") is None:
+                result["returncode"] = 0
+    return result
+
+
 async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> None:
     mode = info.get("mode", "webhook")
     _task_slot(srv, tid).update({"cmd": payload.get("cmd"), "cwd": payload.get("cwd")})
@@ -1300,8 +1382,8 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
 
     async def runner() -> None:
         try:
-            result = await _webhook_exec(info, payload)
-            background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": result, "completed_at": int(time.time())})
+            result = await _webhook_exec_live(srv, info, payload, tid)
+            background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
         except Exception as e:
             background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": str(e), "completed_at": int(time.time())})
 
@@ -1341,7 +1423,7 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
         while time.time() < deadline:
             res = results.get(srv, {}).pop(tid, None)
             if res is not None:
-                background_tasks.setdefault(srv, {})[tid] = {"status": "completed", "task_id": tid, "cmd": req.cmd, "cwd": req.cwd, "result": res, "completed_at": int(time.time())}
+                background_tasks.setdefault(srv, {})[tid] = {"status": "completed", "task_id": tid, "cmd": req.cmd, "cwd": req.cwd, "result": _spill_single_result(srv, res, req.cmd), "completed_at": int(time.time())}
                 return res
             await asyncio.sleep(0.5)
         return {"background": True, "task_id": tid, "status": "running", "message": "Command continues in background."}
@@ -1352,7 +1434,7 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
     task = asyncio.create_task(_webhook_exec(info, payload))
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=SYNC_TIMEOUT_S)
-        background_tasks.setdefault(srv, {})[tid] = {"status": "completed", "task_id": tid, "cmd": req.cmd, "cwd": req.cwd, "result": result, "completed_at": int(time.time())}
+        background_tasks.setdefault(srv, {})[tid] = {"status": "completed", "task_id": tid, "cmd": req.cmd, "cwd": req.cwd, "result": _spill_single_result(srv, result, req.cmd), "completed_at": int(time.time())}
         return result
     except asyncio.TimeoutError:
         _task_slot(srv, tid).update({"cmd": req.cmd, "cwd": req.cwd})
@@ -1360,7 +1442,7 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
         async def finish_later() -> None:
             try:
                 result = await task
-                background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": result, "completed_at": int(time.time())})
+                background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time())})
             except Exception as e:
                 background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": str(e), "completed_at": int(time.time())})
 
@@ -1397,7 +1479,7 @@ async def ws_exec(srv: str, payload: dict) -> dict:
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
         await asyncio.wait_for(ws_results[tid]["event"].wait(), timeout=SYNC_TIMEOUT_S)
         result = ws_results[tid]["result"] or {"error": "empty websocket result"}
-        background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": result, "completed_at": int(time.time())})
+        background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time())})
         return result
     except asyncio.TimeoutError:
         return {"background": True, "task_id": tid, "status": "running", "message": "Command continues in background."}
@@ -1497,13 +1579,40 @@ async def queue_poll(request: Request, srv: str):
     return q.pop(0)
 
 
+@app.post("/queue/{srv}/progress", dependencies=[Depends(ensure_license)])
+async def queue_progress(request: Request, srv: str):
+    body = await request.body()
+    _verify_queue_signature(request, srv, body)
+    try:
+        progress = json.loads(body or b"{}")
+    except Exception as e:
+        raise HTTPException(400, f"invalid progress json: {e}") from e
+    if not isinstance(progress, dict):
+        raise HTTPException(400, "invalid progress payload")
+
+    task_id = str(progress.get("id") or "")
+    event_type = str(progress.get("type") or "")
+    if not task_id:
+        raise HTTPException(400, "missing progress id")
+    task = background_tasks.setdefault(srv, {}).setdefault(task_id, {"status": "running", "task_id": task_id, "created_at": int(time.time())})
+    result = task.setdefault("result", {})
+    result.setdefault("stdout", "")
+    result.setdefault("stderr", "")
+    if event_type in {"stdout", "stderr"}:
+        result[event_type] = str(result.get(event_type) or "") + str(progress.get("data") or "")
+    elif event_type == "event" and isinstance(progress.get("event"), dict):
+        result.update(progress["event"])
+    task.update({"status": "running", "updated_at": int(time.time())})
+    return {"ok": True}
+
+
 @app.post("/queue/{srv}/result", dependencies=[Depends(ensure_license)])
 async def queue_result(request: Request, srv: str, res: TaskResult):
     body = await request.body()
     _verify_queue_signature(request, srv, body)
     results.setdefault(srv, {})[res.id] = res.result
     if res.id in background_tasks.get(srv, {}):
-        background_tasks[srv][res.id].update({"status": "completed", "result": res.result, "completed_at": int(time.time())})
+        background_tasks[srv][res.id].update({"status": "completed", "result": _spill_single_result(srv, res.result, str(background_tasks[srv][res.id].get("cmd") or "")), "completed_at": int(time.time())})
     return {"ok": True}
 
 
@@ -1727,20 +1836,6 @@ def _shell_tools_list() -> Dict[str, Any]:
                 "additionalProperties": False,
             },
         },
-        {
-            "name": "read_spilled_output",
-            "description": "Read a spilled stdout/stderr file created when command output is too large.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "pattern": {"type": ["string", "null"]},
-                    "head_lines": {"type": ["integer", "null"], "default": 120},
-                },
-                "required": ["file_path"],
-                "additionalProperties": False,
-            },
-        },
     ]
     return {"tools": tools}
 
@@ -1830,25 +1925,6 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         if not task:
             return _mcp_envelope_text(f"Task not found: {tid}", {"server": srv, "task_id": tid, "status": "not_found"})
         return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
-
-    if tool_name == "read_spilled_output":
-        file_path = Path(str(args.get("file_path") or ""))
-        if not file_path.is_file():
-            raise HTTPException(404, f"output file not found: {file_path}")
-        # Keep this intentionally simple and safe-ish: only files under output store.
-        try:
-            file_path.resolve().relative_to(OUTPUT_STORE_DIR.resolve())
-        except ValueError as e:
-            raise HTTPException(403, "read_spilled_output can only read files from HUB_OUTPUT_STORE_DIR") from e
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-        pattern = args.get("pattern")
-        if pattern:
-            lines = [line for line in text.splitlines() if str(pattern) in line]
-        else:
-            n = int(args.get("head_lines") or 120)
-            lines = text.splitlines()[:n]
-        data = {"file_path": str(file_path), "lines": lines, "returned_lines": len(lines), "total_bytes": file_path.stat().st_size}
-        return _mcp_envelope_text(f"Read {len(lines)} lines from {file_path.name}", data)
 
     raise HTTPException(404, f"unknown shell tool {tool_name}")
 
@@ -2556,19 +2632,6 @@ _SHELL_TOOLS: List[Dict[str, Any]] = [
                 "ack": {"type": "boolean", "description": "Acknowledge and remove completed task"},
             },
             "required": ["task_id"],
-        },
-    },
-    {
-        "name": "read_spilled_output",
-        "description": "Read large output that was spilled to disk.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to output file"},
-                "pattern": {"type": "string", "description": "Filter lines matching pattern"},
-                "head_lines": {"type": "integer", "description": "Number of lines to return"},
-            },
-            "required": ["file_path"],
         },
     },
 ]
