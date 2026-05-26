@@ -187,6 +187,9 @@ HUB_PUBLIC_KEY_FILE_ED25519 = Path(os.getenv("GPTADMIN_HUB_PUBLIC_KEY_FILE", str
 HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))
+HUB_DEFERRED_DISPATCH_INTERVAL_S = float(os.getenv("HUB_DEFERRED_DISPATCH_INTERVAL_S", "2"))
+HUB_DEFERRED_DEFAULT_TTL_S = int(os.getenv("HUB_DEFERRED_DEFAULT_TTL_S", str(7 * 86400)))
+HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
 SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
@@ -230,19 +233,30 @@ async def _periodic_save() -> None:
         _save_all_state()
 
 
+async def _periodic_dispatch_deferred() -> None:
+    while True:
+        await asyncio.sleep(HUB_DEFERRED_DISPATCH_INTERVAL_S)
+        try:
+            await _dispatch_due_deferred_tasks()
+        except Exception as e:
+            log.warning("deferred: dispatch loop failed: %s", e)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     _load_all_state()
     save_task = asyncio.ensure_future(_periodic_save())
+    dispatch_task = asyncio.ensure_future(_periodic_dispatch_deferred())
     _sd_notify("READY=1")
     try:
         yield
     finally:
-        save_task.cancel()
-        try:
-            await save_task
-        except asyncio.CancelledError:
-            pass
+        for task in (save_task, dispatch_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         _save_all_state()
 
 
@@ -328,8 +342,8 @@ def _load_all_state() -> None:
                 continue
             if float(task.get("created_at", 0)) < cutoff:
                 continue
-            if task.get("status") == "running":
-                task = {**task, "status": "orphaned", "orphaned_at": int(now)}
+            if task.get("status") in {"running", "dispatching"}:
+                task = {**task, "status": "queued_offline", "orphaned_at": int(now), "next_attempt_at": now}
             kept[tid] = task
         if kept:
             background_tasks[srv] = kept
@@ -665,6 +679,9 @@ class BulkExec(BaseModel):
     cwd: Optional[str] = None
     env: Optional[Dict[str, Any]] = None
     background: bool = False
+    not_before: Optional[Any] = None
+    expires_at: Optional[Any] = None
+    max_attempts: Optional[int] = None
 
 
 class ExecReq(BaseModel):
@@ -861,6 +878,118 @@ def _task_slot(srv: str, tid: str) -> Dict[str, Any]:
         tid,
         {"status": "running", "created_at": int(time.time()), "task_id": tid},
     )
+
+
+def _parse_time_value(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        # Small numbers are treated as relative seconds; large numbers as epoch seconds.
+        return time.time() + float(value) if float(value) < 10_000_000 else float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            number = float(text)
+            return time.time() + number if number < 10_000_000 else number
+        except ValueError:
+            pass
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return default
+    return default
+
+
+def _server_alive(srv: str, info: Optional[Dict[str, Any]] = None) -> bool:
+    info = info or servers.get(srv) or {}
+    return bool(info) and time.time() - float(info.get("time", 0)) <= DEAD_S
+
+
+def _task_due(task: Dict[str, Any], now: Optional[float] = None) -> bool:
+    now = now or time.time()
+    return float(task.get("not_before") or 0) <= now and float(task.get("next_attempt_at") or 0) <= now
+
+
+def _task_expired(task: Dict[str, Any], now: Optional[float] = None) -> bool:
+    now = now or time.time()
+    expires_at = task.get("expires_at")
+    return expires_at is not None and float(expires_at) <= now
+
+
+def _deferred_backoff_s(attempts: int) -> float:
+    return min(300.0, 2.0 * (2 ** min(max(attempts - 1, 0), 8)))
+
+
+def _queue_deferred_task(srv: str, tid: str, payload: Dict[str, Any], *, cmd: str, cwd: Any = None, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, reason: str = "queued") -> Dict[str, Any]:
+    now = time.time()
+    nb = _parse_time_value(not_before, now) or now
+    exp = _parse_time_value(expires_at, now + HUB_DEFERRED_DEFAULT_TTL_S) or (now + HUB_DEFERRED_DEFAULT_TTL_S)
+    task = _task_slot(srv, tid)
+    status = "queued_deferred" if nb > now else "queued_offline"
+    task.update({
+        "status": status,
+        "task_id": tid,
+        "server": srv,
+        "cmd": cmd,
+        "cwd": cwd,
+        "payload": payload,
+        "not_before": nb,
+        "expires_at": exp,
+        "attempts": int(task.get("attempts") or 0),
+        "max_attempts": int(max_attempts or task.get("max_attempts") or HUB_DEFERRED_MAX_ATTEMPTS),
+        "next_attempt_at": max(nb, float(task.get("next_attempt_at") or 0)),
+        "queued_reason": reason,
+        "updated_at": int(now),
+    })
+    return task
+
+
+def _polling_due_task(srv: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    for tid, task in list((background_tasks.get(srv) or {}).items()):
+        if task.get("status") not in {"queued_offline", "queued_deferred", "queued_ready", "dispatch_failed"}:
+            continue
+        if _task_expired(task, now):
+            task.update({"status": "expired", "completed_at": int(now), "updated_at": int(now), "error": "deferred task expired"})
+            continue
+        if not _task_due(task, now):
+            continue
+        attempts = int(task.get("attempts") or 0) + 1
+        if attempts > int(task.get("max_attempts") or HUB_DEFERRED_MAX_ATTEMPTS):
+            task.update({"status": "failed", "completed_at": int(now), "updated_at": int(now), "error": "deferred task max attempts exceeded"})
+            continue
+        task.update({"status": "running", "attempts": attempts, "started_at": int(now), "updated_at": int(now)})
+        payload = dict(task.get("payload") or {})
+        return {"id": tid, **payload}
+    return None
+
+
+async def _dispatch_due_deferred_tasks() -> None:
+    now = time.time()
+    for srv, tasks in list(background_tasks.items()):
+        info = servers.get(srv)
+        if not info or info.get("mode") == "polling":
+            continue
+        if not _server_alive(srv, info):
+            continue
+        for tid, task in list(tasks.items()):
+            if task.get("status") not in {"queued_offline", "queued_deferred", "queued_ready", "dispatch_failed"}:
+                continue
+            if _task_expired(task, now):
+                task.update({"status": "expired", "completed_at": int(now), "updated_at": int(now), "error": "deferred task expired"})
+                continue
+            if not _task_due(task, now):
+                continue
+            payload = task.get("payload") or {}
+            if not payload:
+                task.update({"status": "failed", "completed_at": int(now), "updated_at": int(now), "error": "deferred task missing payload"})
+                continue
+            task.update({"status": "dispatching", "updated_at": int(now)})
+            await _queue_or_fire_background(srv, info, dict(payload), tid, from_deferred=True)
 
 
 def _signed_rootd_headers(method: str, path: str, body: bytes, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -1384,19 +1513,31 @@ async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid:
     return result
 
 
-async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> None:
+async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dict, tid: str, *, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, from_deferred: bool = False) -> None:
     mode = info.get("mode", "webhook")
-    _task_slot(srv, tid).update({"cmd": payload.get("cmd"), "cwd": payload.get("cwd")})
+    task = _task_slot(srv, tid)
+    if not from_deferred:
+        _queue_deferred_task(srv, tid, payload, cmd=str(payload.get("cmd") or ""), cwd=payload.get("cwd"), not_before=not_before, expires_at=expires_at, max_attempts=max_attempts, reason="background")
+        task = _task_slot(srv, tid)
+    if not _task_due(task) or _task_expired(task) or not _server_alive(srv, info):
+        if _task_expired(task):
+            task.update({"status": "expired", "completed_at": int(time.time()), "updated_at": int(time.time()), "error": "deferred task expired"})
+        else:
+            task.update({"status": "queued_deferred" if float(task.get("not_before") or 0) > time.time() else "queued_offline", "updated_at": int(time.time())})
+        return
 
     if mode == "polling":
-        queues.setdefault(srv, []).append({"id": tid, **payload})
+        task.update({"status": "queued_ready", "updated_at": int(time.time())})
         return
 
     if mode == "websocket":
         ws = ws_sessions.get(srv)
         if not ws:
-            background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": "websocket not connected", "completed_at": int(time.time())})
+            attempts = int(task.get("attempts") or 0) + 1
+            task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": "websocket not connected", "updated_at": int(time.time())})
             return
+        attempts = int(task.get("attempts") or 0) + 1
+        task.update({"status": "running", "attempts": attempts, "started_at": int(time.time()), "updated_at": int(time.time())})
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
         return
 
@@ -1408,11 +1549,17 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
                 background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
                 return
             if not started.get("ok"):
-                background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": started, "completed_at": int(time.time()), "updated_at": int(time.time())})
+                task = _task_slot(srv, tid)
+                attempts = int(task.get("attempts") or 0) + 1
+                task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": started, "updated_at": int(time.time())})
                 return
-            background_tasks.setdefault(srv, {})[tid].update({"status": "running", "delivery": "callback_outbox", "rootd_start": started, "updated_at": int(time.time())})
+            task = _task_slot(srv, tid)
+            attempts = int(task.get("attempts") or 0) + 1
+            task.update({"status": "running", "attempts": attempts, "delivery": "callback_outbox", "rootd_start": started, "started_at": int(time.time()), "updated_at": int(time.time())})
         except Exception as e:
-            background_tasks.setdefault(srv, {})[tid].update({"status": "failed", "error": str(e), "completed_at": int(time.time()), "updated_at": int(time.time())})
+            task = _task_slot(srv, tid)
+            attempts = int(task.get("attempts") or 0) + 1
+            task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": str(e), "updated_at": int(time.time())})
 
     asyncio.create_task(runner())
 
@@ -1421,9 +1568,6 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
     info = servers.get(srv)
     if not info:
         return {"error": "unknown server"}
-    if time.time() - float(info.get("time", 0)) > DEAD_S:
-        return {"error": "offline"}
-
     special = _handle_gptadmin_task_command(srv, req.cmd)
     if special is not None:
         return special
@@ -1438,10 +1582,14 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
 
     mode = info.get("mode", "webhook")
     tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    not_before_ts = _parse_time_value(req.not_before, time.time()) if req.not_before is not None else None
+    expires_at_ts = _parse_time_value(req.expires_at, None) if req.expires_at is not None else None
+    should_defer = (not_before_ts is not None and not_before_ts > time.time()) or not _server_alive(srv, info)
 
-    if req.background:
-        await _queue_or_fire_background(srv, info, payload, tid)
-        return {"background": True, "task_id": tid, "status": "running"}
+    if req.background or should_defer:
+        await _queue_or_fire_background(srv, info, payload, tid, not_before=not_before_ts, expires_at=expires_at_ts, max_attempts=req.max_attempts)
+        task = _task_slot(srv, tid)
+        return {"background": True, "task_id": tid, "status": task.get("status", "running"), "not_before": task.get("not_before"), "expires_at": task.get("expires_at"), "message": "Command queued for deferred/background execution."}
 
     if mode == "polling":
         _task_slot(srv, tid).update({"cmd": req.cmd, "cwd": req.cwd})
@@ -1601,9 +1749,12 @@ def _verify_queue_signature(request: Request, srv: str, body: bytes) -> None:
 async def queue_poll(request: Request, srv: str):
     _verify_queue_signature(request, srv, b"")
     q = queues.get(srv)
-    if not q:
-        return {}
-    return q.pop(0)
+    if q:
+        return q.pop(0)
+    job = _polling_due_task(srv)
+    if job:
+        return job
+    return {}
 
 
 @app.post("/queue/{srv}/progress", dependencies=[Depends(ensure_license)])
@@ -1850,6 +2001,8 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "timeout": {"type": ["integer", "null"]},
                     "env": {"type": ["object", "null"], "additionalProperties": True},
                     "background": {"type": "boolean", "default": False},
+                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest time to run: epoch seconds, relative seconds, or ISO timestamp."},
+                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time: epoch seconds, relative seconds, or ISO timestamp."},
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -1878,7 +2031,7 @@ def _legacy_get_task(srv: str, tid: str, ack: bool = False) -> Optional[Dict[str
     if task is None:
         return None
     out = {"server": srv, "task_id": tid, **task}
-    if ack and out.get("status") in {"completed", "failed", "orphaned"}:
+    if ack and out.get("status") in {"completed", "failed", "orphaned", "expired", "cancelled"}:
         background_tasks.get(srv, {}).pop(tid, None)
         results.get(srv, {}).pop(tid, None)
         out["acked"] = True
@@ -1930,6 +2083,9 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             timeout=args.get("timeout"),
             env=args.get("env") if isinstance(args.get("env"), dict) else None,
             background=background,
+            not_before=args.get("not_before"),
+            expires_at=args.get("expires_at"),
+            max_attempts=args.get("max_attempts"),
         )
         data = await bulk_exec(req)
         result = (data.get("results") or {}).get(srv, {})
