@@ -220,6 +220,45 @@ def _outbox_init() -> None:
         log.warning("queue outbox disabled path=%s err=%s", ROOTD_OUTBOX_DIR, e)
 
 
+def _outbox_metrics() -> dict:
+    now = time.time()
+    metrics = {
+        "outbox_dir": str(ROOTD_OUTBOX_DIR),
+        "outbox_files": 0,
+        "outbox_bytes": 0,
+        "outbox_oldest_age_s": 0,
+        "outbox_failed_attempts": 0,
+        "outbox_last_error": None,
+    }
+    try:
+        if not ROOTD_OUTBOX_DIR.exists():
+            return metrics
+        oldest = None
+        last_error_at = 0
+        for path in ROOTD_OUTBOX_DIR.glob("*.json"):
+            try:
+                st = path.stat()
+                metrics["outbox_files"] += 1
+                metrics["outbox_bytes"] += st.st_size
+                oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+                try:
+                    entry = _outbox_load(path)
+                    attempts = int(entry.get("attempts") or 0)
+                    metrics["outbox_failed_attempts"] += attempts
+                    if entry.get("last_error") and float(entry.get("updated_at") or st.st_mtime) >= last_error_at:
+                        last_error_at = float(entry.get("updated_at") or st.st_mtime)
+                        metrics["outbox_last_error"] = str(entry.get("last_error"))[:500]
+                except Exception:
+                    pass
+            except FileNotFoundError:
+                continue
+        if oldest is not None:
+            metrics["outbox_oldest_age_s"] = max(0, int(now - oldest))
+    except Exception as e:
+        metrics["outbox_last_error"] = f"metrics failed: {e}"
+    return metrics
+
+
 def _outbox_file(message_id: str) -> Path:
     return ROOTD_OUTBOX_DIR / f"{message_id}.json"
 
@@ -543,6 +582,7 @@ def _beat_payload(mode: str):
         "ssh_host": os.getenv("SSH_HOST"),
         "ssh_port": os.getenv("SSH_PORT"),
         "ssh_user": os.getenv("SSH_USER"),
+        **_outbox_metrics(),
     }
 
 
@@ -615,11 +655,16 @@ def heartbeat():
         time.sleep(HB_INT)
 
 
-def _send_queue_progress(srv_name: str, job_id: str, event_type: str, data: str = "", event: Optional[dict] = None) -> None:
+def _send_queue_progress(srv_name: str, job_id: str, event_type: str, data: str = "", event: Optional[dict] = None, seq: Optional[int] = None, offset: Optional[int] = None) -> None:
+    payload = {"id": job_id, "type": event_type, "data": data, "event": event}
+    if seq is not None:
+        payload["seq"] = int(seq)
+    if offset is not None:
+        payload["offset"] = int(offset)
     _queue_send_or_spool(
         srv_name,
         "progress",
-        {"id": job_id, "type": event_type, "data": data, "event": event},
+        payload,
         kind=f"progress-{event_type}",
         job_id=job_id,
         timeout=1,
@@ -630,18 +675,26 @@ def _send_queue_progress(srv_name: str, job_id: str, event_type: str, data: str 
 async def _poll_run_live_job(srv_name: str, job: dict, env: dict) -> dict:
     stdout = ""
     stderr = ""
+    seq = {"stdout": 0, "stderr": 0}
+    offsets = {"stdout": 0, "stderr": 0}
     result = {"returncode": None, "stdout": stdout, "stderr": stderr}
     generator = await backend.run_live(job["cmd"], job.get("timeout"), job.get("cwd"), env)
     async for event in generator():
         etype = event.get("type")
         if etype == "stdout":
             chunk = str(event.get("data") or "")
+            seq["stdout"] += 1
+            offset = offsets["stdout"]
             stdout += chunk
-            _send_queue_progress(srv_name, str(job.get("id") or ""), "stdout", chunk)
+            offsets["stdout"] += len(chunk)
+            _send_queue_progress(srv_name, str(job.get("id") or ""), "stdout", chunk, seq=seq["stdout"], offset=offset)
         elif etype == "stderr":
             chunk = str(event.get("data") or "")
+            seq["stderr"] += 1
+            offset = offsets["stderr"]
             stderr += chunk
-            _send_queue_progress(srv_name, str(job.get("id") or ""), "stderr", chunk)
+            offsets["stderr"] += len(chunk)
+            _send_queue_progress(srv_name, str(job.get("id") or ""), "stderr", chunk, seq=seq["stderr"], offset=offset)
         elif etype == "exit":
             result.update(event)
         elif etype == "error":
@@ -728,6 +781,7 @@ def version():
         "ssh_user": os.getenv("SSH_USER"),
         "auto_update": ROOTD_AUTO_UPDATE,
         "update_manifest_url": ROOTD_UPDATE_MANIFEST_URL if ROOTD_AUTO_UPDATE else None,
+        **_outbox_metrics(),
     })
     return data
 

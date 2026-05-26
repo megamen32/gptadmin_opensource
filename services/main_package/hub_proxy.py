@@ -670,6 +670,12 @@ class Beat(BaseModel):
     ssh_host: Optional[str] = None
     ssh_port: Optional[str] = None
     ssh_user: Optional[str] = None
+    outbox_dir: Optional[str] = None
+    outbox_files: Optional[int] = None
+    outbox_bytes: Optional[int] = None
+    outbox_oldest_age_s: Optional[int] = None
+    outbox_failed_attempts: Optional[int] = None
+    outbox_last_error: Optional[str] = None
 
 
 class BulkExec(BaseModel):
@@ -1856,7 +1862,36 @@ async def queue_progress(request: Request, srv: str):
     result.setdefault("stdout", "")
     result.setdefault("stderr", "")
     if event_type in {"stdout", "stderr"}:
-        result[event_type] = str(result.get(event_type) or "") + str(progress.get("data") or "")
+        stream_state = task.setdefault("progress_state", {}).setdefault(event_type, {"last_seq": 0, "bytes": 0, "duplicates": 0, "gaps": 0, "offset_mismatches": 0})
+        data = str(progress.get("data") or "")
+        seq = progress.get("seq")
+        offset = progress.get("offset")
+        if seq is not None:
+            try:
+                seq_i = int(seq)
+            except Exception:
+                seq_i = None
+            if seq_i is not None:
+                last_seq = int(stream_state.get("last_seq") or 0)
+                if seq_i <= last_seq:
+                    stream_state["duplicates"] = int(stream_state.get("duplicates") or 0) + 1
+                    task.update({"updated_at": int(time.time())})
+                    return {"ok": True, "duplicate": True, "last_seq": last_seq}
+                if seq_i > last_seq + 1:
+                    stream_state["gaps"] = int(stream_state.get("gaps") or 0) + (seq_i - last_seq - 1)
+                stream_state["last_seq"] = seq_i
+        current_len = len(str(result.get(event_type) or ""))
+        if offset is not None:
+            try:
+                offset_i = int(offset)
+                if offset_i != current_len:
+                    stream_state["offset_mismatches"] = int(stream_state.get("offset_mismatches") or 0) + 1
+                    stream_state["last_offset_mismatch"] = {"expected": current_len, "got": offset_i, "at": int(time.time())}
+            except Exception:
+                pass
+        result[event_type] = str(result.get(event_type) or "") + data
+        stream_state["bytes"] = len(str(result.get(event_type) or ""))
+        stream_state["updated_at"] = int(time.time())
     elif event_type == "event" and isinstance(progress.get("event"), dict):
         result.update(progress["event"])
     task.update({"status": "running", "updated_at": int(time.time())})
@@ -2096,6 +2131,10 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "ack": {"type": "boolean", "default": False},
                     "status": {"type": ["string", "null"], "description": "Optional status filter for list mode."},
                     "limit": {"type": ["integer", "null"], "default": 50},
+                    "sort_by": {"type": ["string", "null"], "default": "updated_at", "description": "Sort field for list mode, e.g. updated_at, created_at, not_before, status."},
+                    "order": {"type": ["string", "null"], "enum": ["asc", "desc", None], "default": "desc"},
+                    "include_result": {"type": "boolean", "default": True},
+                    "include_history": {"type": "boolean", "default": True},
                 },
                 "additionalProperties": False,
             },
@@ -2140,21 +2179,39 @@ def _legacy_get_task(srv: str, tid: str, ack: bool = False) -> Optional[Dict[str
     return out
 
 
-def _legacy_list_tasks(srv: str, status: Optional[str] = None, limit: Optional[int] = 50) -> Dict[str, Any]:
+def _task_public_row(srv: str, tid: str, task: Dict[str, Any], *, include_result: bool = True, include_history: bool = True) -> Dict[str, Any]:
+    row = {"server": srv, "task_id": tid, **task}
+    if not include_result:
+        row.pop("result", None)
+    if not include_history:
+        row.pop("edit_history", None)
+    return row
+
+
+def _legacy_list_tasks(srv: str, status: Optional[str] = None, limit: Optional[int] = 50, sort_by: Optional[str] = "updated_at", order: Optional[str] = "desc", include_result: bool = True, include_history: bool = True) -> Dict[str, Any]:
     items = []
     for tid, task in (background_tasks.get(srv) or {}).items():
-        row = {"server": srv, "task_id": tid, **task}
+        row = _task_public_row(srv, tid, task, include_result=include_result, include_history=include_history)
         if status and row.get("status") != status:
             continue
         items.append(row)
-    items.sort(key=lambda x: int(x.get("updated_at") or x.get("completed_at") or x.get("created_at") or 0), reverse=True)
+    sort_field = sort_by or "updated_at"
+    reverse = (order or "desc") != "asc"
+    def sort_key(row: Dict[str, Any]):
+        value = row.get(sort_field)
+        if value is None and sort_field == "updated_at":
+            value = row.get("completed_at") or row.get("created_at")
+        if isinstance(value, (int, float, str)):
+            return value
+        return str(value)
+    items.sort(key=sort_key, reverse=reverse)
     try:
         n = int(limit or 50)
     except Exception:
         n = 50
     if n > 0:
         items = items[:n]
-    return {"server": srv, "status_filter": status, "count": len(items), "tasks": items}
+    return {"server": srv, "status_filter": status, "sort_by": sort_field, "order": "desc" if reverse else "asc", "count": len(items), "tasks": items}
 
 
 async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2232,7 +2289,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             if real_tid != tid:
                 task["requested_task_id"] = tid
             return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
-        data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"))
+        data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"), sort_by=args.get("sort_by"), order=args.get("order"), include_result=bool(args.get("include_result", True)), include_history=bool(args.get("include_history", True)))
         return _mcp_envelope_text(f"{data['count']} task(s) on {srv}", data)
 
     if tool_name == "task_edit":
@@ -2810,8 +2867,8 @@ def edit_task_endpoint(srv: str, tid: str, edit: TaskEdit):
 
 
 @app.get("/tasks/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def list_tasks(srv: str):
-    return {"server": srv, "tasks": list(background_tasks.get(srv, {}).values())}
+def list_tasks(srv: str, status: Optional[str] = Query(None), limit: Optional[int] = Query(50), sort_by: Optional[str] = Query("updated_at"), order: Optional[str] = Query("desc"), include_result: bool = Query(True), include_history: bool = Query(True)):
+    return _legacy_list_tasks(srv, status=status, limit=limit, sort_by=sort_by, order=order, include_result=include_result, include_history=include_history)
 
 
 # ---------------------------------------------------------------------------
