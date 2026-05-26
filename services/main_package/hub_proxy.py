@@ -39,9 +39,11 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import socket as _socket_module
+import subprocess
 import sys
 import time
 import traceback
@@ -162,6 +164,10 @@ elif getattr(sys, "frozen", False):
     CONFIG_DIR = Path(sys.executable).parent / "config"
 else:
     CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+
+GPTADMIN_REPO_ROOT = Path(__file__).resolve().parents[2]
+GPTADMIN_CLI_PATH = Path(os.getenv("GPTADMIN_CLI_PATH", str(GPTADMIN_REPO_ROOT / "cli" / "gptadmin.py")))
+GPTADMIN_PYTHON = Path(os.getenv("GPTADMIN_PYTHON", sys.executable))
 
 LICENSE_FILE = Path(os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json"))
 PUBLIC_KEY_FILE = Path(os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.pem"))
@@ -2064,6 +2070,139 @@ def _mcp_envelope_text(text: str, structured: Dict[str, Any]) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "structuredContent": structured}
 
 
+def _run_gptadmin_mcp(argv: List[str], timeout: int = 60) -> Dict[str, Any]:
+    cmd = ["sudo", "-n", str(GPTADMIN_PYTHON), str(GPTADMIN_CLI_PATH), "mcp", *[str(x) for x in argv]]
+    try:
+        cp = subprocess.run(cmd, cwd=str(GPTADMIN_REPO_ROOT), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise HTTPException(504, f"gptadmin mcp timed out: {' '.join(shlex.quote(x) for x in cmd)}") from e
+    data: Any = None
+    if cp.stdout.strip().startswith("{") or cp.stdout.strip().startswith("["):
+        try:
+            data = json.loads(cp.stdout)
+        except Exception:
+            data = None
+    result = {"ok": cp.returncode == 0, "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr, "json": data, "argv": ["gptadmin", "mcp", *argv]}
+    if cp.returncode != 0:
+        raise HTTPException(500, result)
+    return result
+
+
+def _mcp_slug(value: str) -> str:
+    out = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-._")
+    return out or "mcp-agent"
+
+
+def _mcp_expected_unit_name(name: str, server: Optional[Dict[str, Any]] = None) -> str:
+    server = server or {}
+    agent_id = str(server.get("agent_id") or f"{_socket_module.gethostname()}-{_mcp_slug(name)}")
+    return f"gptadmin-mcp-{_mcp_slug(agent_id)}.service"
+
+
+def _mcp_stop_systemd_unit(name: str, server: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    unit = _mcp_expected_unit_name(name, server)
+    cmd = ["sudo", "-n", "systemctl", "disable", "--now", unit]
+    cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    rm_cmd = ["sudo", "-n", "rm", "-f", f"/etc/systemd/system/{unit}"]
+    rm = subprocess.run(rm_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    dr = subprocess.run(["sudo", "-n", "systemctl", "daemon-reload"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    return {
+        "unit": unit,
+        "disable_now": {"returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr},
+        "remove_unit": {"returncode": rm.returncode, "stdout": rm.stdout, "stderr": rm.stderr},
+        "daemon_reload": {"returncode": dr.returncode, "stdout": dr.stdout, "stderr": dr.stderr},
+    }
+
+
+def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
+    action = str(args.get("action") or "list")
+    if action not in {"list", "add", "remove", "install", "status", "cat"}:
+        raise HTTPException(400, f"unsupported mcp_tools action: {action}")
+    if action == "list":
+        res = _run_gptadmin_mcp(["list", "--json"])
+        cfg = res.get("json") if isinstance(res.get("json"), dict) else {}
+        return {"action": action, "servers": cfg.get("mcpServers", {}), "config": cfg, "raw": res}
+    if action == "cat":
+        name = str(args.get("name") or "")
+        res = _run_gptadmin_mcp(["cat", name] if name else ["cat"])
+        return {"action": action, "name": name or None, "config": res.get("json"), "raw": res}
+    if action == "status":
+        name = str(args.get("name") or "")
+        argv = ["status"] + ([name] if name else [])
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        return {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv)}
+    if action == "install":
+        name = str(args.get("name") or "")
+        argv = ["install"] + ([name] if name else [])
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        return {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv, timeout=120)}
+    if action == "remove":
+        name = str(args.get("name") or "")
+        if not name:
+            raise HTTPException(400, "mcp_tools remove requires name")
+        before = _run_gptadmin_mcp(["list", "--json"])
+        cfg = before.get("json") if isinstance(before.get("json"), dict) else {}
+        server = (cfg.get("mcpServers") or {}).get(name) or {}
+        stopped = None
+        if not args.get("keep_service") and (args.get("backend") in (None, "systemd")):
+            stopped = _mcp_stop_systemd_unit(name, server)
+        argv = ["remove", name]
+        if args.get("keep_service"):
+            argv.append("--keep-service")
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        raw = _run_gptadmin_mcp(argv)
+        return {"action": action, "name": name, "stopped": stopped, "raw": raw}
+
+    # add
+    name = str(args.get("name") or "")
+    if not name:
+        raise HTTPException(400, "mcp_tools add requires name")
+    argv = ["add", name]
+    if args.get("url"):
+        argv += ["--url", str(args.get("url"))]
+    command = args.get("command")
+    command_args = args.get("args") or []
+    if command:
+        argv.append(str(command))
+        if not isinstance(command_args, list):
+            raise HTTPException(400, "mcp_tools add args must be a list")
+        argv += [str(x) for x in command_args]
+    elif not args.get("url"):
+        raise HTTPException(400, "mcp_tools add requires url or command")
+    if args.get("stdio_format"):
+        argv += ["--stdio-format", str(args.get("stdio_format"))]
+    if args.get("cwd"):
+        argv += ["--cwd", str(args.get("cwd"))]
+    env = args.get("env") or {}
+    if env and not isinstance(env, dict):
+        raise HTTPException(400, "mcp_tools add env must be an object")
+    for k, v in env.items():
+        argv += ["--env", f"{k}={v}"]
+    if args.get("agent_id"):
+        argv += ["--agent-id", str(args.get("agent_id"))]
+    if args.get("run_as_user"):
+        argv += ["--run-as-user", str(args.get("run_as_user"))]
+    if args.get("hub_url"):
+        argv += ["--hub-url", str(args.get("hub_url"))]
+    if args.get("disabled"):
+        argv.append("--disabled")
+    if args.get("force"):
+        argv.append("--force")
+    add_res = _run_gptadmin_mcp(argv)
+    install_res = None
+    if bool(args.get("install", True)) and not args.get("disabled"):
+        install_argv = ["install", name]
+        if args.get("backend"):
+            install_argv += ["--backend", str(args.get("backend"))]
+        install_res = _run_gptadmin_mcp(install_argv, timeout=120)
+    list_res = _run_gptadmin_mcp(["list", "--json"])
+    cfg = list_res.get("json") if isinstance(list_res.get("json"), dict) else {}
+    return {"action": action, "name": name, "added": add_res, "installed": install_res, "server": (cfg.get("mcpServers") or {}).get(name), "config": cfg}
+
+
 def _hub_tools_list() -> Dict[str, Any]:
     tools = [
         {
@@ -2135,6 +2274,32 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "order": {"type": ["string", "null"], "enum": ["asc", "desc", None], "default": "desc"},
                     "include_result": {"type": "boolean", "default": True},
                     "include_history": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "mcp_tools",
+            "description": "Manage configured GPTAdmin stdio/remote MCP tools: list, add, remove, install, status or cat. Under the hood this uses gptadmin.py mcp.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "add", "remove", "install", "status", "cat"], "default": "list"},
+                    "name": {"type": ["string", "null"], "description": "MCP server/tool name."},
+                    "url": {"type": ["string", "null"], "description": "Remote MCP URL shortcut; uses npx -y mcp-remote URL."},
+                    "command": {"type": ["string", "null"], "description": "Local stdio MCP command, e.g. npx."},
+                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Command arguments for local stdio MCP."},
+                    "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+                    "cwd": {"type": ["string", "null"]},
+                    "stdio_format": {"type": ["string", "null"], "enum": ["auto", "framed", "ndjson", "jsonl", "content-length", None]},
+                    "agent_id": {"type": ["string", "null"]},
+                    "run_as_user": {"type": ["string", "null"]},
+                    "hub_url": {"type": ["string", "null"]},
+                    "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None]},
+                    "force": {"type": "boolean", "default": False},
+                    "disabled": {"type": "boolean", "default": False},
+                    "install": {"type": "boolean", "default": True, "description": "After add, install/start the MCP relay service."},
+                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."}
                 },
                 "additionalProperties": False,
             },
@@ -2291,6 +2456,15 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
         data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"), sort_by=args.get("sort_by"), order=args.get("order"), include_result=bool(args.get("include_result", True)), include_history=bool(args.get("include_history", True)))
         return _mcp_envelope_text(f"{data['count']} task(s) on {srv}", data)
+
+    if tool_name == "mcp_tools":
+        data = _mcp_tools_manage(args)
+        action = data.get("action")
+        name = data.get("name")
+        if action == "list":
+            count = len(data.get("servers") or {})
+            return _mcp_envelope_text(f"{count} configured MCP tool(s)", data)
+        return _mcp_envelope_text(f"MCP {action} {name or ''}: ok", data)
 
     if tool_name == "task_edit":
         tid = str(args.get("task_id") or "")
