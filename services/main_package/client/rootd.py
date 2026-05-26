@@ -35,6 +35,7 @@ import tarfile
 import hashlib
 import shutil
 import subprocess
+import uuid
 from typing import Optional
 from pathlib import Path
 from logging.handlers import WatchedFileHandler
@@ -123,6 +124,10 @@ def _hub_artifact_url(path: str) -> str:
 ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
 ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
 ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
+ROOTD_OUTBOX_DIR = Path(os.getenv("ROOTD_OUTBOX_DIR", str(Path(ROOTD_IDENTITY_DIR) / "outbox")))
+ROOTD_OUTBOX_RETRY_MIN_S = float(os.getenv("ROOTD_OUTBOX_RETRY_MIN_S", "2"))
+ROOTD_OUTBOX_RETRY_MAX_S = float(os.getenv("ROOTD_OUTBOX_RETRY_MAX_S", "300"))
+ROOTD_OUTBOX_SCAN_S = float(os.getenv("ROOTD_OUTBOX_SCAN_S", "2"))
 ROOTD_AUDIT_LOG = os.getenv("ROOTD_AUDIT_LOG") or ("/var/log/gptadmin/rootd-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "rootd-audit.log"))
 try:
     _rootd_audit_path = Path(ROOTD_AUDIT_LOG)
@@ -193,6 +198,130 @@ def _signed_json_headers(method: str, path: str, body: bytes) -> dict:
         "X-GPTAdmin-Nonce": signed["nonce"],
         "X-GPTAdmin-Signature": signed["signature"],
     }
+
+
+_QUEUE_OFFLINE_UNTIL = 0.0
+
+
+def _outbox_init() -> None:
+    try:
+        ROOTD_OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log.warning("queue outbox disabled path=%s err=%s", ROOTD_OUTBOX_DIR, e)
+
+
+def _outbox_file(message_id: str) -> Path:
+    return ROOTD_OUTBOX_DIR / f"{message_id}.json"
+
+
+def _outbox_write(entry: dict) -> Path:
+    _outbox_init()
+    path = _outbox_file(str(entry["id"]))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def _outbox_load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _queue_post_payload(srv_name: str, endpoint: str, payload: dict, timeout: float = 5.0) -> None:
+    if not QUEUE_URL:
+        raise RuntimeError("QUEUE_URL is not set")
+    queue_path = f"/queue/{srv_name}/{endpoint}"
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    r = requests.post(
+        f"{QUEUE_URL}/{srv_name}/{endpoint}",
+        data=body,
+        headers=_signed_json_headers("POST", queue_path, body),
+        timeout=timeout,
+    )
+    if r.status_code < 200 or r.status_code >= 300:
+        raise RuntimeError(f"queue {endpoint} HTTP {r.status_code}: {r.text[:200]}")
+
+
+def _outbox_try_send(path: Path) -> bool:
+    entry = _outbox_load(path)
+    _queue_post_payload(str(entry["srv_name"]), str(entry["endpoint"]), dict(entry["payload"]), float(entry.get("timeout") or 5))
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def _outbox_backoff(path: Path, entry: dict, err: Exception) -> None:
+    attempts = int(entry.get("attempts") or 0) + 1
+    delay = min(ROOTD_OUTBOX_RETRY_MAX_S, ROOTD_OUTBOX_RETRY_MIN_S * (2 ** min(attempts - 1, 8)))
+    entry.update({
+        "attempts": attempts,
+        "last_error": str(err),
+        "next_at": time.time() + delay,
+        "updated_at": int(time.time()),
+    })
+    try:
+        _outbox_write(entry)
+    except Exception as write_err:
+        log.warning("queue outbox backoff write failed path=%s err=%s", path, write_err)
+
+
+def _queue_send_or_spool(srv_name: str, endpoint: str, payload: dict, kind: str, job_id: str, timeout: float = 5.0) -> None:
+    global _QUEUE_OFFLINE_UNTIL
+    if not QUEUE_URL or not job_id:
+        return
+    now = time.time()
+    message_id = f"{int(now * 1000)}-{kind}-{job_id}-{uuid.uuid4().hex[:8]}"
+    entry = {
+        "id": message_id,
+        "srv_name": srv_name,
+        "endpoint": endpoint,
+        "kind": kind,
+        "job_id": job_id,
+        "payload": payload,
+        "timeout": timeout,
+        "attempts": 0,
+        "created_at": int(now),
+        "updated_at": int(now),
+        "next_at": now,
+    }
+    path = _outbox_write(entry)
+    if now < _QUEUE_OFFLINE_UNTIL:
+        return
+    try:
+        _outbox_try_send(path)
+    except Exception as e:
+        _QUEUE_OFFLINE_UNTIL = time.time() + min(ROOTD_OUTBOX_RETRY_MAX_S, ROOTD_OUTBOX_RETRY_MIN_S * 2)
+        _outbox_backoff(path, entry, e)
+        log.debug("queue %s spooled job=%s path=%s err=%s", kind, job_id, path, e)
+
+
+def outbox_retry_loop() -> None:
+    if not QUEUE_URL:
+        return
+    _outbox_init()
+    while True:
+        try:
+            now = time.time()
+            for path in sorted(ROOTD_OUTBOX_DIR.glob("*.json")):
+                try:
+                    entry = _outbox_load(path)
+                    if float(entry.get("next_at") or 0) > now:
+                        continue
+                    _outbox_try_send(path)
+                    log.debug("queue outbox delivered path=%s", path)
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    try:
+                        entry = _outbox_load(path)
+                        _outbox_backoff(path, entry, e)
+                    except Exception as e2:
+                        log.warning("queue outbox retry failed path=%s err=%s", path, e2)
+        except Exception as e:
+            log.warning("queue outbox loop failed: %s", e)
+        time.sleep(ROOTD_OUTBOX_SCAN_S)
 
 if os.getenv("QUEUE_URL"):
     parsed = urlparse(HUB_URL)
@@ -445,19 +574,14 @@ def heartbeat():
 
 
 def _send_queue_progress(srv_name: str, job_id: str, event_type: str, data: str = "", event: Optional[dict] = None) -> None:
-    if not QUEUE_URL or not job_id:
-        return
-    progress_path = f"/queue/{srv_name}/progress"
-    progress_body = json.dumps({"id": job_id, "type": event_type, "data": data, "event": event}, separators=(",", ":")).encode("utf-8")
-    try:
-        requests.post(
-            f"{QUEUE_URL}/{srv_name}/progress",
-            data=progress_body,
-            headers=_signed_json_headers("POST", progress_path, progress_body),
-            timeout=1,
-        )
-    except Exception as e:
-        log.debug("queue progress send failed job=%s type=%s err=%s", job_id, event_type, e)
+    _queue_send_or_spool(
+        srv_name,
+        "progress",
+        {"id": job_id, "type": event_type, "data": data, "event": event},
+        kind=f"progress-{event_type}",
+        job_id=job_id,
+        timeout=1,
+    )
 
 
 
@@ -517,17 +641,14 @@ def poll_loop():
                         log.exception("poll exec failed")
                         res = {"error": str(e), "traceback": traceback.format_exc()}
                         _audit_exec("polling", job.get("cmd"), job.get("cwd"), job.get("timeout"), error=str(e), job_id=job.get("id"), started_at=started)
-                    try:
-                        result_path = f"/queue/{srv_name}/result"
-                        result_body = json.dumps({"id": job.get("id"), "result": res}, separators=(",", ":")).encode("utf-8")
-                        requests.post(
-                            f"{QUEUE_URL}/{srv_name}/result",
-                            data=result_body,
-                            headers=_signed_json_headers("POST", result_path, result_body),
-                            timeout=5,
-                        )
-                    except Exception as e:
-                        log.warning(f"Result send failed: {e}")
+                    _queue_send_or_spool(
+                        srv_name,
+                        "result",
+                        {"id": job.get("id"), "result": res},
+                        kind="result",
+                        job_id=str(job.get("id") or ""),
+                        timeout=5,
+                    )
                 else:
                     log.debug("poll: no jobs")
             else:
@@ -542,6 +663,7 @@ if HUB_URL and TRANSPORT in {"auto", "websocket"} and not QUEUE_URL:
 if HUB_URL and (TRANSPORT == "webhook" or QUEUE_URL or websockets is None):
     threading.Thread(target=heartbeat, daemon=True).start()
 if QUEUE_URL or TRANSPORT == "polling":
+    threading.Thread(target=outbox_retry_loop, daemon=True).start()
     threading.Thread(target=poll_loop, daemon=True).start()
 
 

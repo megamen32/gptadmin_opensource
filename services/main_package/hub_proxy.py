@@ -1595,6 +1595,8 @@ async def queue_progress(request: Request, srv: str):
     if not task_id:
         raise HTTPException(400, "missing progress id")
     task = background_tasks.setdefault(srv, {}).setdefault(task_id, {"status": "running", "task_id": task_id, "created_at": int(time.time())})
+    if task.get("status") == "completed":
+        return {"ok": True, "ignored": "completed"}
     result = task.setdefault("result", {})
     result.setdefault("stdout", "")
     result.setdefault("stderr", "")
@@ -1612,7 +1614,7 @@ async def queue_result(request: Request, srv: str, res: TaskResult):
     _verify_queue_signature(request, srv, body)
     results.setdefault(srv, {})[res.id] = res.result
     if res.id in background_tasks.get(srv, {}):
-        background_tasks[srv][res.id].update({"status": "completed", "result": _spill_single_result(srv, res.result, str(background_tasks[srv][res.id].get("cmd") or "")), "completed_at": int(time.time())})
+        background_tasks[srv][res.id].update({"status": "completed", "result": _spill_single_result(srv, res.result, str(background_tasks[srv][res.id].get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
     return {"ok": True}
 
 
