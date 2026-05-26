@@ -15,7 +15,7 @@ Old shell/server endpoints are kept as legacy/internal fallback:
 
 Important architectural decision:
   rootd servers are exposed to GPT as *virtual MCP agents* with tools such as
-  shell_exec and task_status. This lets GPT use one mental
+  shell_exec, tasks and task_edit. This lets GPT use one mental
   model: list agents → list tools → call tool → poll job.
 
 Env highlights:
@@ -2087,12 +2087,16 @@ def _shell_tools_list() -> Dict[str, Any]:
             },
         },
         {
-            "name": "task_status",
-            "description": "Get status/result for a shell background task returned by shell_exec.",
+            "name": "tasks",
+            "description": "List or get shell tasks. If task_id is null/omitted, list tasks. If task_id is set, get that task; ack=true acknowledges/removes terminal tasks after returning them.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"task_id": {"type": "string"}, "ack": {"type": "boolean", "default": False}},
-                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": ["string", "null"]},
+                    "ack": {"type": "boolean", "default": False},
+                    "status": {"type": ["string", "null"], "description": "Optional status filter for list mode."},
+                    "limit": {"type": ["integer", "null"], "default": 50},
+                },
                 "additionalProperties": False,
             },
         },
@@ -2134,6 +2138,23 @@ def _legacy_get_task(srv: str, tid: str, ack: bool = False) -> Optional[Dict[str
     else:
         out["acked"] = False
     return out
+
+
+def _legacy_list_tasks(srv: str, status: Optional[str] = None, limit: Optional[int] = 50) -> Dict[str, Any]:
+    items = []
+    for tid, task in (background_tasks.get(srv) or {}).items():
+        row = {"server": srv, "task_id": tid, **task}
+        if status and row.get("status") != status:
+            continue
+        items.append(row)
+    items.sort(key=lambda x: int(x.get("updated_at") or x.get("completed_at") or x.get("created_at") or 0), reverse=True)
+    try:
+        n = int(limit or 50)
+    except Exception:
+        n = 50
+    if n > 0:
+        items = items[:n]
+    return {"server": srv, "status_filter": status, "count": len(items), "tasks": items}
 
 
 async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2200,15 +2221,19 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             return {"background": True, "job_id": job_id, "status": "running", "message": "Shell command continues in background."}
         return _mcp_envelope_text(f"shell_exec completed on {srv}", {"server": srv, "result": result})
 
-    if tool_name == "task_status":
-        tid = str(args.get("task_id") or "")
-        real_tid = _resolve_legacy_task_id(srv, tid)
-        task = _legacy_get_task(srv, real_tid, ack=bool(args.get("ack")))
-        if not task:
-            return _mcp_envelope_text(f"Task not found: {tid}", {"server": srv, "task_id": tid, "status": "not_found"})
-        if real_tid != tid:
-            task["requested_task_id"] = tid
-        return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
+    if tool_name == "tasks":
+        tid_raw = args.get("task_id")
+        tid = str(tid_raw or "")
+        if tid:
+            real_tid = _resolve_legacy_task_id(srv, tid)
+            task = _legacy_get_task(srv, real_tid, ack=bool(args.get("ack")))
+            if not task:
+                return _mcp_envelope_text(f"Task not found: {tid}", {"server": srv, "task_id": tid, "status": "not_found"})
+            if real_tid != tid:
+                task["requested_task_id"] = tid
+            return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
+        data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"))
+        return _mcp_envelope_text(f"{data['count']} task(s) on {srv}", data)
 
     if tool_name == "task_edit":
         tid = str(args.get("task_id") or "")
