@@ -2226,12 +2226,10 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
         name = str(args.get("name") or "")
         if not name:
             raise HTTPException(400, "mcp_tools remove requires name")
-        before = _run_gptadmin_mcp(["list", "--json"])
-        cfg = before.get("json") if isinstance(before.get("json"), dict) else {}
-        server = (cfg.get("mcpServers") or {}).get(name) or {}
+        # gptadmin.py mcp remove now stops/uninstalls the supervisor service itself.
+        # Do not pre-stop here; pre-stopping races with CLI removal and causes noisy
+        # "unit file does not exist" stderr even when removal succeeds.
         stopped = None
-        if not args.get("keep_service") and (args.get("backend") in (None, "systemd")):
-            stopped = _mcp_stop_systemd_unit(name, server)
         argv = ["remove", name]
         if args.get("keep_service"):
             argv.append("--keep-service")

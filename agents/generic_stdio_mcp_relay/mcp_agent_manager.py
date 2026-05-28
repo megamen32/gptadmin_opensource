@@ -259,9 +259,40 @@ def status(cfg: Dict[str, Any], backend: str) -> int:
     die(f"unknown backend {backend}")
 
 
+
+def uninstall(cfg: Dict[str, Any], backend: str) -> None:
+    name = cfg_name(cfg)
+    if backend == "systemd":
+        unit = f"gptadmin-mcp-{name}.service"
+        run(["systemctl", "disable", "--now", unit])
+        unit_path = Path(f"/etc/systemd/system/{unit}")
+        try:
+            unit_path.unlink()
+        except FileNotFoundError:
+            pass
+        run(["systemctl", "daemon-reload"])
+        return
+    if backend == "launchd":
+        label = f"com.gptadmin.mcp.{name}"
+        plist = Path(f"/Library/LaunchDaemons/{label}.plist")
+        run(["launchctl", "bootout", "system", str(plist)])
+        try:
+            plist.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    if backend == "windows-task":
+        task_name = f"GPTAdmin MCP {name}"
+        cmd = f'schtasks /Delete /TN "{task_name}" /F'
+        print(cmd)
+        if os.name == "nt":
+            subprocess.call(cmd, shell=True)
+        return
+    die(f"unknown backend {backend}")
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Manage generic stdio MCP relay instances")
-    p.add_argument("action", choices=["validate", "render", "install", "status"])
+    p.add_argument("action", choices=["validate", "render", "install", "status", "uninstall"])
     p.add_argument("config", type=Path)
     p.add_argument("--backend", choices=["systemd", "launchd", "windows-task"], default=backend_default())
     args = p.parse_args()
@@ -277,6 +308,9 @@ def main() -> int:
         return 0
     if args.action == "status":
         return status(cfg, args.backend)
+    if args.action == "uninstall":
+        uninstall(cfg, args.backend)
+        return 0
     return 1
 
 

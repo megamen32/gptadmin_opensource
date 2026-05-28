@@ -761,8 +761,41 @@ def _mcp_write_agent_config(name: str, cfg: dict) -> Path:
     MCP_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     path = MCP_AGENTS_DIR / f'{_mcp_slug(name)}.json'
     _json_write(path, _mcp_agent_config(name, cfg))
+    _mcp_fix_access_for_agent_config(path, cfg, name)
     return path
 
+
+
+def _mcp_fix_read_permissions(path: Path, run_as_user: str | None = None):
+    """Make generated MCP files readable by the relay service user."""
+    try:
+        path = Path(path)
+        user = (run_as_user or '').strip()
+        gid = -1
+        if user and user not in ('root', 'SYSTEM') and os.name != 'nt':
+            try:
+                gid = pwd.getpwnam(user).pw_gid
+            except Exception:
+                gid = -1
+        if os.name != 'nt':
+            try:
+                os.chown(path, 0, gid if gid >= 0 else -1)
+            except PermissionError:
+                raise
+            except Exception:
+                pass
+        os.chmod(path, 0o640)
+    except Exception as e:
+        print(f'WARNING: failed to adjust permissions for {path}: {e}', file=sys.stderr)
+
+
+def _mcp_fix_access_for_agent_config(agent_config: Path, cfg: dict, name: str):
+    spec = _mcp_agent_config(name, cfg)
+    run_as_user = str(spec.get('run_as_user') or 'root')
+    _mcp_fix_read_permissions(agent_config, run_as_user)
+    token_file = Path(str(spec.get('token_file') or MCP_TOKEN_FILE))
+    if token_file.exists():
+        _mcp_fix_read_permissions(token_file, run_as_user)
 
 def _mcp_runtime_candidates() -> list[Path]:
     here = Path(__file__).resolve()
@@ -916,7 +949,7 @@ def cmd_mcp_remove(args):
     if not args.keep_service:
         agent_config = MCP_AGENTS_DIR / f'{_mcp_slug(args.name)}.json'
         if agent_config.exists() and _mcp_manager_exists():
-            run(_mcp_manager_cmd('status', agent_config, args.backend), check=False)
+            run(_mcp_manager_cmd('uninstall', agent_config, args.backend), check=False)
     servers.pop(args.name)
     _mcp_save(cfg)
     try:
