@@ -208,6 +208,7 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
             "stderr": _truncate(e.stderr or ""),
             "metadata_restore": metadata_restore,
             "run_as_user": run_as_user,
+            "cwd_effective": str(Path(cwd).resolve()) if cwd else os.getcwd(),
         }
     except Exception:
         _restore_file_metadata(metadata_root, metadata_snapshot)
@@ -221,6 +222,7 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
         "stderr": _truncate(res.stderr),
         "metadata_restore": metadata_restore,
         "run_as_user": run_as_user,
+        "cwd_effective": str(Path(cwd).resolve()) if cwd else os.getcwd(),
     }
 
 

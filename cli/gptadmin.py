@@ -907,7 +907,6 @@ def cmd_mcp_add(args):
     print(f'Config: {MCP_CONFIG_FILE}')
     print(f'Agent config: {agent_config}')
 
-
 def cmd_mcp_remove(args):
     need_root()
     cfg = _mcp_config()
@@ -1445,7 +1444,7 @@ def main():
         legacy = sys.argv[1]
         sys.argv[1:2] = ['config', 'termcp']
         # Keep old --rootd-url accepted by the TermCP config parser.
-    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + TermCP agents)')
+    ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + shell agents)')
     sub = ap.add_subparsers(dest='cmd')
 
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
@@ -1466,17 +1465,30 @@ def main():
     sub.add_parser('start').set_defaults(func=cmd_start)
     sub.add_parser('stop').set_defaults(func=cmd_stop)
     sub.add_parser('restart').set_defaults(func=cmd_restart)
+
+    hub = sub.add_parser('hub')
+    hub_sub = hub.add_subparsers(dest='hub_cmd')
+    hub_sub.add_parser('status').set_defaults(func=cmd_status)
+    hub_sub.add_parser('start').set_defaults(func=cmd_start)
+    hub_sub.add_parser('stop').set_defaults(func=cmd_stop)
+    hub_sub.add_parser('restart').set_defaults(func=cmd_restart)
+
+    for alias in ('shell','termcp','rootd'):
+        rp = sub.add_parser(alias)
+        rs = rp.add_subparsers(dest='svc_cmd')
+        rs.add_parser('status').set_defaults(func=cmd_status)
+
     sub.add_parser('enable').set_defaults(func=cmd_enable)
     sub.add_parser('disable').set_defaults(func=cmd_disable)
 
-    ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; termcp = TermCP)')
-    ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | termcp | frpc | all')
+    ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; shell = shell agent)')
+    ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
     sub.add_parser('tokens').set_defaults(func=cmd_tokens)
 
-    ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или TermCP')
-    ap_rot.add_argument('which', metavar='which', help='hub | termcp')
+    ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или shell agent')
+    ap_rot.add_argument('which', metavar='which', help='hub | shell')
     ap_rot.set_defaults(func=cmd_rotate)
 
     ap_port = sub.add_parser('port', help='Сменить локальный порт хаба')

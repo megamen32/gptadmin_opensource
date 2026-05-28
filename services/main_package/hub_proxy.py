@@ -570,6 +570,7 @@ def _approve_payload(
         "server_id": payload.get("server_id"),
         "public_key": payload.get("public_key"),
         "fingerprint": _server_fingerprint(payload),
+        "default_cwd": payload.get("default_cwd"),
         "backend": payload.get("backend"),
         "proxy_for": payload.get("proxy_for"),
         "proxy_via": payload.get("proxy_via"),
@@ -664,6 +665,7 @@ class Beat(BaseModel):
     default_user: Optional[str] = None
     default_uid: Optional[int] = None
     default_home: Optional[str] = None
+    default_cwd: Optional[str] = None
     os: str = "linux"
     mode: str = Field("webhook", pattern="^(webhook|polling|websocket)$")
     version: Optional[int] = None
@@ -2087,6 +2089,76 @@ def _run_gptadmin_mcp(argv: List[str], timeout: int = 60) -> Dict[str, Any]:
         raise HTTPException(500, result)
     return result
 
+def _compact_cli_result(res: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if res is None:
+        return None
+    out: Dict[str, Any] = {"ok": bool(res.get("ok")), "returncode": res.get("returncode")}
+    stderr = str(res.get("stderr") or "").strip()
+    if stderr:
+        out["stderr_tail"] = stderr[-1000:]
+    stdout = str(res.get("stdout") or "").strip()
+    if stdout and not isinstance(res.get("json"), (dict, list)):
+        out["stdout_tail"] = stdout[-1000:]
+    return out
+
+
+def _mcp_server_summary(name: str, server: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "enabled": bool(server.get("enabled", True)),
+        "agent_id": server.get("agent_id"),
+        "command": server.get("command"),
+        "args": server.get("args") or [],
+        "stdio_format": server.get("stdio_format"),
+        "cwd": server.get("cwd"),
+        "run_as_user": server.get("run_as_user"),
+    }
+
+
+def _mcp_servers_summary(servers_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(servers_obj, dict):
+        return []
+    return [_mcp_server_summary(name, srv if isinstance(srv, dict) else {}) for name, srv in sorted(servers_obj.items())]
+
+
+def _mcp_tools_compact(data: Dict[str, Any], *, verbose: bool = False) -> Dict[str, Any]:
+    if verbose:
+        return data
+    action = data.get("action")
+    out: Dict[str, Any] = {"action": action}
+    if data.get("name") is not None:
+        out["name"] = data.get("name")
+    if action == "list":
+        servers = data.get("servers") or {}
+        out["count"] = len(servers) if isinstance(servers, dict) else 0
+        out["servers"] = _mcp_servers_summary(servers if isinstance(servers, dict) else {})
+        return out
+    if action == "cat":
+        cfg = data.get("config")
+        if isinstance(cfg, dict) and data.get("name"):
+            out["server"] = _mcp_server_summary(str(data.get("name")), cfg)
+        else:
+            servers = (cfg or {}).get("mcpServers", {}) if isinstance(cfg, dict) else {}
+            out["count"] = len(servers) if isinstance(servers, dict) else 0
+            out["servers"] = _mcp_servers_summary(servers if isinstance(servers, dict) else {})
+        return out
+    if action == "add":
+        server = data.get("server") or {}
+        out["server"] = _mcp_server_summary(str(data.get("name") or ""), server if isinstance(server, dict) else {})
+        out["added"] = _compact_cli_result(data.get("added"))
+        out["installed"] = _compact_cli_result(data.get("installed"))
+        return out
+    if action in {"install", "status"}:
+        out["result"] = _compact_cli_result(data.get("raw"))
+        return out
+    if action == "remove":
+        out["removed"] = _compact_cli_result(data.get("raw"))
+        stopped = data.get("stopped") or {}
+        if isinstance(stopped, dict) and stopped:
+            out["unit"] = stopped.get("unit")
+        return out
+    return out
+
 
 def _mcp_slug(value: str) -> str:
     out = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-._")
@@ -2118,26 +2190,31 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
     action = str(args.get("action") or "list")
     if action not in {"list", "add", "remove", "install", "status", "cat"}:
         raise HTTPException(400, f"unsupported mcp_tools action: {action}")
+    verbose = bool(args.get("verbose") or args.get("include_raw"))
     if action == "list":
         res = _run_gptadmin_mcp(["list", "--json"])
         cfg = res.get("json") if isinstance(res.get("json"), dict) else {}
-        return {"action": action, "servers": cfg.get("mcpServers", {}), "config": cfg, "raw": res}
+        data = {"action": action, "servers": cfg.get("mcpServers", {}), "config": cfg, "raw": res}
+        return _mcp_tools_compact(data, verbose=verbose)
     if action == "cat":
         name = str(args.get("name") or "")
         res = _run_gptadmin_mcp(["cat", name] if name else ["cat"])
-        return {"action": action, "name": name or None, "config": res.get("json"), "raw": res}
+        data = {"action": action, "name": name or None, "config": res.get("json"), "raw": res}
+        return _mcp_tools_compact(data, verbose=verbose)
     if action == "status":
         name = str(args.get("name") or "")
         argv = ["status"] + ([name] if name else [])
         if args.get("backend"):
             argv += ["--backend", str(args.get("backend"))]
-        return {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv)}
+        data = {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv)}
+        return _mcp_tools_compact(data, verbose=verbose)
     if action == "install":
         name = str(args.get("name") or "")
         argv = ["install"] + ([name] if name else [])
         if args.get("backend"):
             argv += ["--backend", str(args.get("backend"))]
-        return {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv, timeout=120)}
+        data = {"action": action, "name": name or None, "raw": _run_gptadmin_mcp(argv, timeout=120)}
+        return _mcp_tools_compact(data, verbose=verbose)
     if action == "remove":
         name = str(args.get("name") or "")
         if not name:
@@ -2154,24 +2231,18 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
         if args.get("backend"):
             argv += ["--backend", str(args.get("backend"))]
         raw = _run_gptadmin_mcp(argv)
-        return {"action": action, "name": name, "stopped": stopped, "raw": raw}
+        data = {"action": action, "name": name, "stopped": stopped, "raw": raw}
+        return _mcp_tools_compact(data, verbose=verbose)
 
     # add
     name = str(args.get("name") or "")
     if not name:
         raise HTTPException(400, "mcp_tools add requires name")
+    # IMPORTANT: gptadmin.py mcp add uses argparse.REMAINDER for command args.
+    # Therefore every gptadmin option must be placed BEFORE positional command/args.
     argv = ["add", name]
     if args.get("url"):
         argv += ["--url", str(args.get("url"))]
-    command = args.get("command")
-    command_args = args.get("args") or []
-    if command:
-        argv.append(str(command))
-        if not isinstance(command_args, list):
-            raise HTTPException(400, "mcp_tools add args must be a list")
-        argv += [str(x) for x in command_args]
-    elif not args.get("url"):
-        raise HTTPException(400, "mcp_tools add requires url or command")
     if args.get("stdio_format"):
         argv += ["--stdio-format", str(args.get("stdio_format"))]
     if args.get("cwd"):
@@ -2191,6 +2262,15 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
         argv.append("--disabled")
     if args.get("force"):
         argv.append("--force")
+    command = args.get("command")
+    command_args = args.get("args") or []
+    if command:
+        argv.append(str(command))
+        if not isinstance(command_args, list):
+            raise HTTPException(400, "mcp_tools add args must be a list")
+        argv += [str(x) for x in command_args]
+    elif not args.get("url"):
+        raise HTTPException(400, "mcp_tools add requires url or command")
     add_res = _run_gptadmin_mcp(argv)
     install_res = None
     if bool(args.get("install", True)) and not args.get("disabled"):
@@ -2200,7 +2280,8 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
         install_res = _run_gptadmin_mcp(install_argv, timeout=120)
     list_res = _run_gptadmin_mcp(["list", "--json"])
     cfg = list_res.get("json") if isinstance(list_res.get("json"), dict) else {}
-    return {"action": action, "name": name, "added": add_res, "installed": install_res, "server": (cfg.get("mcpServers") or {}).get(name), "config": cfg}
+    data = {"action": action, "name": name, "added": add_res, "installed": install_res, "server": (cfg.get("mcpServers") or {}).get(name), "config": cfg}
+    return _mcp_tools_compact(data, verbose=verbose)
 
 
 def _hub_tools_list() -> Dict[str, Any]:
@@ -2235,8 +2316,114 @@ def _hub_tools_list() -> Dict[str, Any]:
                 "additionalProperties": False,
             },
         },
+        {
+            "name": "mcp_tools",
+            "description": "Manage GPTAdmin stdio/remote MCP servers on the hub host: list, add, remove, install, status or cat. Backend is auto-detected by host unless explicitly overridden.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "add", "remove", "install", "status", "cat"], "default": "list"},
+                    "name": {"type": ["string", "null"], "description": "MCP server/tool name."},
+                    "url": {"type": ["string", "null"], "description": "Remote MCP URL shortcut; uses npx -y mcp-remote URL."},
+                    "command": {"type": ["string", "null"], "description": "Local stdio MCP command, e.g. npx."},
+                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Command arguments for local stdio MCP."},
+                    "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+                    "cwd": {"type": ["string", "null"]},
+                    "stdio_format": {"type": ["string", "null"], "enum": ["auto", "framed", "ndjson", "jsonl", "content-length", None]},
+                    "agent_id": {"type": ["string", "null"]},
+                    "run_as_user": {"type": ["string", "null"]},
+                    "hub_url": {"type": ["string", "null"]},
+                    "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None], "description": "Optional override. If omitted, mcp_agent_manager auto-detects backend from host OS."},
+                    "force": {"type": "boolean", "default": False},
+                    "disabled": {"type": "boolean", "default": False},
+                    "install": {"type": "boolean", "default": True, "description": "After add, install/start the MCP relay service."},
+                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."},
+                    "verbose": {"type": "boolean", "default": False, "description": "Return full raw CLI stdout/json/argv/config. Default is compact."},
+                    "include_raw": {"type": "boolean", "default": False, "description": "Alias for verbose."}
+                },
+                "additionalProperties": False,
+            },
+        },
     ]
     return {"tools": tools}
+
+
+def _mask_secret_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:8]
+    masked = f"{text[:3]}...{text[-3:]}" if len(text) > 8 else f"{text[:1]}...{text[-1:]}"
+    return f"{masked} len={len(text)} sha256={digest}"
+
+
+def _configured_secret_names() -> List[str]:
+    names = ["CTL_TOKEN", "MCP_RELAY_AGENT_TOKEN", "OAUTH_CLIENT_SECRET", "ADMIN_PASSWORD", "OPENAI_API_KEY", "LITELLM_API_KEY"]
+    return [name for name in names if os.getenv(name)]
+
+
+def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    section = str(args.get("section") or "all").lower()
+    verbose = bool(args.get("verbose") or args.get("include_raw"))
+    info = servers.get(srv) or {}
+    agent_id = _virtual_shell_agent_id(srv)
+    is_hub_host = srv == _socket_module.gethostname() or srv == "admin-server-100"
+    proxy_for = info.get("proxy_for")
+    proxy_via = info.get("proxy_via")
+    default_cwd = info.get("default_cwd") or "not reported"
+    out: Dict[str, Any] = {"agent": agent_id, "kind": "GPTAdmin virtual shell MCP agent", "host": srv}
+    if section in {"all", "summary", "routing"}:
+        if is_hub_host:
+            role = ["hub host", "shell executor", "MCP router host"]
+            path = "ChatGPT/OpenAI Actions -> local public hub -> virtual shell agent -> shell on this host"
+        elif proxy_for or proxy_via:
+            role = ["proxied shell agent"]
+            path = f"ChatGPT/OpenAI Actions -> public hub -> {agent_id} -> proxy host {proxy_via or 'unknown'} -> SSH target {proxy_for or srv}"
+        else:
+            role = ["shell executor"]
+            path = f"ChatGPT/OpenAI Actions -> public hub -> {agent_id} -> shell on {srv}"
+        out["summary"] = _omit_none({"role": role, "path": path, "hub_on_this_host": bool(is_hub_host), "mode": info.get("mode"), "backend": info.get("backend"), "cwd": default_cwd})
+    if section in {"all", "params"}:
+        out["parameter_notes"] = {
+            "shell_exec": {
+                "cmd": "shell command; quote carefully; avoid printing full secrets",
+                "cwd": "optional; if omitted hub uses cached default_cwd when known, otherwise shell process cwd",
+                "timeout": f"seconds; >{SYNC_TIMEOUT_S}s auto-switches to background",
+                "background": "true returns job_id for getMcpJob polling",
+                "env": "per-command env object; not persisted",
+                "deferred": "not_before, expires_at and max_attempts control delayed or offline delivery; small numbers mean relative seconds",
+            },
+            "tasks/task_edit": {
+                "task_id": "task id or mcp-shell job id; ack=true removes terminal task after reading",
+                "include_result": "for task lists, set false to avoid large output",
+                "control": "task_edit can retry_now, pause or cancel deferred/background work",
+            },
+            "mcp_tools": {
+                "scope": "manages real stdio or remote MCP servers in hub config, not packages on this shell host",
+                "url": "remote MCP shortcut via npx -y mcp-remote URL",
+                "command_args": "stdio MCP process command and arguments",
+                "stdio_format": "auto usually works; chrome-devtools uses ndjson here",
+                "install": "add can also install and start the generated service",
+                "pitfall": "GPTAdmin options must be before command args; hub tool handles that ordering",
+            },
+        }
+    if section in {"all", "config"}:
+        cfg = _omit_none({"version": info.get("version") or info.get("build_version"), "build": info.get("git_commit"), "public_hub": PUBLIC_ORIGIN, "openapi": "/actions/openapi.yaml", "mcp_relay": "/mcp-relay/*", "cwd": default_cwd, "outbox": info.get("outbox_dir")})
+        if is_hub_host:
+            cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d"})
+        if proxy_for or proxy_via:
+            cfg["proxy"] = _omit_none({"proxy_for": proxy_for, "proxy_via": proxy_via, "ssh_host": info.get("ssh_host"), "ssh_port": info.get("ssh_port"), "ssh_user": info.get("ssh_user")})
+        out["config"] = cfg
+    if section in {"all", "secrets"}:
+        configured = _configured_secret_names()
+        out["secrets"] = {"policy": "never print full secrets", "configured": configured, "mask_format": "abc...xyz len=N sha256=xxxxxxxx"}
+        if verbose:
+            out["secrets"]["masked"] = {name: _mask_secret_value(os.getenv(name)) for name in configured}
+    if section in {"all", "architecture"}:
+        out["architecture"] = {"hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host", "shell": "per-host executor registered as virtual MCP agent shell:<server>", "real_mcp": "stdio or remote MCP services registered into hub as separate MCP agents", "polling_vs_webhook": "webhook receives callbacks directly; polling agents fetch queued jobs from hub"}
+    return _omit_none(out)
 
 
 def _shell_tools_list() -> Dict[str, Any]:
@@ -2299,7 +2486,22 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "force": {"type": "boolean", "default": False},
                     "disabled": {"type": "boolean", "default": False},
                     "install": {"type": "boolean", "default": True, "description": "After add, install/start the MCP relay service."},
-                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."}
+                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."},
+                    "verbose": {"type": "boolean", "default": False, "description": "Return full raw CLI stdout/json/argv/config. Default is compact."},
+                    "include_raw": {"type": "boolean", "default": False, "description": "Alias for verbose."}
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "help",
+            "description": "Self-reflection for this GPTAdmin shell agent: routing, non-obvious parameters, config and safe secret fingerprints.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "section": {"type": ["string", "null"], "enum": ["all", "summary", "params", "config", "secrets", "architecture", None], "default": "all"},
+                    "verbose": {"type": "boolean", "default": False},
+                    "include_raw": {"type": "boolean", "default": False}
                 },
                 "additionalProperties": False,
             },
@@ -2400,6 +2602,14 @@ async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
         name = str(args.get("name") or "")
         data = _reject_pending_server(name)
         return _mcp_envelope_text(f"Reject result for {name}: {data.get('status') or data.get('error')}", data)
+    if tool_name == "mcp_tools":
+        data = _mcp_tools_manage(args)
+        action = data.get("action")
+        name = data.get("name")
+        if action == "list":
+            count = len(data.get("servers") or {})
+            return _mcp_envelope_text(f"{count} configured MCP tool(s) on hub host", data)
+        return _mcp_envelope_text(f"MCP {action} {name or ''}: ok", data)
     raise HTTPException(404, f"unknown hub tool {tool_name}")
 
 
@@ -2440,7 +2650,18 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
                 "created_at": int(time.time()),
                 "tool_name": tool_name,
             }
-            return {"background": True, "job_id": job_id, "status": "running", "message": "Shell command continues in background."}
+            task = background_tasks.get(srv, {}).get(result["task_id"], {})
+            return _omit_none({
+                "background": True,
+                "job_id": job_id,
+                "status": "running",
+                "agent": agent_id,
+                "task_id": result["task_id"],
+                "timing": _compact_timing("running", started_at=task.get("started_at") or time.time()),
+                "command": str(cmd),
+                "cwd": str(args.get("cwd")) if args.get("cwd") else str((servers.get(srv) or {}).get("default_cwd") or "agent process cwd (default cwd not reported by this rootd yet)"),
+                "message": "Shell command continues in background.",
+            })
         return _mcp_envelope_text(f"shell_exec completed on {srv}", {"server": srv, "result": result})
 
     if tool_name == "tasks":
@@ -2465,6 +2686,10 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             count = len(data.get("servers") or {})
             return _mcp_envelope_text(f"{count} configured MCP tool(s)", data)
         return _mcp_envelope_text(f"MCP {action} {name or ''}: ok", data)
+
+    if tool_name == "help":
+        data = _shell_help(srv, args)
+        return _mcp_envelope_text(f"GPTAdmin shell help for {srv}", data)
 
     if tool_name == "task_edit":
         tid = str(args.get("task_id") or "")
@@ -2658,17 +2883,155 @@ async def mcp_relay_call(req: McpRelayCallReq):
     return {"agent_id": target, "status": "completed", "response": data}
 
 
+
+def _fmt_ts(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        ts = float(value)
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    # Hub timezone is the server local timezone; currently MSK on admin-server-100.
+    return datetime.datetime.fromtimestamp(ts).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _fmt_duration(seconds: Optional[float]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        s = max(0.0, float(seconds))
+    except Exception:
+        return None
+    if s < 1:
+        return f"{int(round(s * 1000))}ms"
+    if s < 10:
+        return f"{s:.1f}s"
+    if s < 60:
+        return f"{int(round(s))}s"
+    m, sec = divmod(int(round(s)), 60)
+    if m < 60:
+        return f"{m}m {sec}s" if sec else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def _compact_timing(status: str, created_at: Any = None, started_at: Any = None, completed_at: Any = None) -> Dict[str, Any]:
+    now_ts = time.time()
+    timing: Dict[str, Any] = {}
+    if started_at:
+        timing["started"] = _fmt_ts(started_at)
+        if completed_at:
+            timing["elapsed"] = _fmt_duration(float(completed_at) - float(started_at))
+        else:
+            timing["running"] = _fmt_duration(now_ts - float(started_at))
+    elif created_at:
+        timing["created"] = _fmt_ts(created_at)
+        timing["queued"] = _fmt_duration(now_ts - float(created_at))
+    return _omit_none(timing)
+
+
+def _omit_none(obj: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in obj.items() if v is not None}
+
+
+def _task_result_fields(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"response": result} if result is not None else {}
+    out: Dict[str, Any] = {}
+    for key in (
+        "returncode", "stdout", "stderr", "error",
+        "_spilled", "file_path", "preview_head", "preview_tail",
+        "stdout_spilled", "stderr_spilled", "stdout_file", "stderr_file",
+        "stdout_preview_head", "stdout_preview_tail", "stderr_preview_head", "stderr_preview_tail",
+        "cwd_effective", "run_as_user",
+    ):
+        if key in result and result.get(key) is not None:
+            out[key] = result.get(key)
+    return out
+
+
+def _resolve_cwd(srv: Optional[str], task: Dict[str, Any], result_fields: Dict[str, Any]) -> Tuple[str, str]:
+    if task.get("cwd"):
+        return str(task.get("cwd")), "request.cwd"
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    if payload.get("cwd"):
+        return str(payload.get("cwd")), "payload.cwd"
+    if result_fields.get("cwd_effective"):
+        return str(result_fields.get("cwd_effective")), "result.cwd_effective"
+    info = servers.get(str(srv or "")) or {}
+    if info.get("default_cwd"):
+        return str(info.get("default_cwd")), "heartbeat.default_cwd"
+    return "agent process cwd (default cwd not reported by this rootd yet)", "unknown"
+
+
+def _compact_virtual_shell_task(job_id: str, job: Dict[str, Any], task: Optional[Dict[str, Any]], *, acked: bool) -> Dict[str, Any]:
+    now_ts = time.time()
+    task = task or {}
+    status = str(task.get("status") or job.get("status") or "running_or_unknown")
+    result_fields = _task_result_fields(task.get("result"))
+    created_at = task.get("created_at") or job.get("created_at")
+    started_at = task.get("started_at") or job.get("started_at")
+    completed_at = task.get("completed_at") or job.get("completed_at")
+    cwd, cwd_source = _resolve_cwd(str(job.get("server") or ""), task, result_fields)
+    base = {
+        "status": status,
+        "agent": job.get("agent_id"),
+        "task_id": job.get("task_id") or task.get("task_id"),
+        "timing": _compact_timing(status, created_at=created_at, started_at=started_at, completed_at=completed_at),
+        "command": task.get("cmd") or (task.get("payload") or {}).get("cmd"),
+        "cwd": cwd,
+        "acked": bool(acked),
+    }
+    result_fields.pop("cwd_effective", None)
+    base.update(result_fields)
+    return _omit_none(base)
+
+
+def _compact_real_mcp_job(job_id: str, job: Optional[Dict[str, Any]], result: Optional[Dict[str, Any]], *, acked: bool) -> Dict[str, Any]:
+    now_ts = time.time()
+    job = job or {}
+    result = result or {}
+    status = "completed" if result.get("ok", True) else "failed" if result else str(job.get("status") or "running_or_unknown")
+    created_at = job.get("created_at") or result.get("created_at")
+    completed_at = job.get("completed_at") or result.get("completed_at")
+    out = {
+        "status": status,
+        "agent": result.get("agent_id") or job.get("agent_id"),
+        "tool": job.get("tool_name") or job.get("method"),
+        "timing": _compact_timing(status, created_at=created_at, completed_at=completed_at),
+        "acked": bool(acked),
+    }
+    if result:
+        if result.get("ok", True):
+            out["response"] = result.get("result")
+        else:
+            out["error"] = result.get("error") or {"message": "MCP relay job failed"}
+    else:
+        out["response"] = job.get("result")
+        out["error"] = job.get("error")
+    return _omit_none(out)
+
+
+def _compact_mcp_job_response(job_id: str, *, job: Optional[Dict[str, Any]], task: Optional[Dict[str, Any]] = None, result: Optional[Dict[str, Any]] = None, acked: bool = False, verbose: bool = False, legacy_response: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if verbose:
+        return legacy_response or {"job_id": job_id, "job": job, "task": task, "result": result, "acked": acked}
+    if job and job.get("kind") == "virtual_shell_task":
+        return _compact_virtual_shell_task(job_id, job, task, acked=acked)
+    return _compact_real_mcp_job(job_id, job, result, acked=acked)
+
 @app.get("/mcp-relay/job/{job_id}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def mcp_relay_job_status(job_id: str, ack: bool = Query(False)):
+def mcp_relay_job_status(job_id: str, ack: bool = Query(False), verbose: bool = Query(False), include_raw: bool = Query(False)):
     job = mcp_relay_jobs.get(job_id)
     acked = False
+    want_verbose = bool(verbose or include_raw)
 
     if job and job.get("kind") == "virtual_shell_task":
         srv = str(job.get("server"))
         tid = str(job.get("task_id"))
         task = _legacy_get_task(srv, tid, ack=ack)
         status = task.get("status") if task else "running_or_unknown"
-        response = task
         if task and status in {"completed", "failed", "orphaned"}:
             job["status"] = status
             job["result"] = task
@@ -2676,7 +3039,8 @@ def mcp_relay_job_status(job_id: str, ack: bool = Query(False)):
             if ack:
                 mcp_relay_jobs.pop(job_id, None)
                 acked = True
-        return {"job_id": job_id, "status": status, "agent_id": job.get("agent_id"), "response": response, "error": None, "acked": acked}
+        legacy = {"job_id": job_id, "status": status, "agent_id": job.get("agent_id"), "response": task, "error": None, "acked": acked}
+        return _compact_mcp_job_response(job_id, job=job, task=task, acked=acked, verbose=want_verbose, legacy_response=legacy)
 
     result = mcp_relay_results.get(job_id)
     if result is not None:
@@ -2688,12 +3052,17 @@ def mcp_relay_job_status(job_id: str, ack: bool = Query(False)):
             mcp_relay_results.pop(job_id, None)
             mcp_relay_jobs.pop(job_id, None)
             acked = True
-        return {"job_id": job_id, "status": status, "agent_id": agent_id, "response": response, "error": error, "acked": acked}
+        legacy = {"job_id": job_id, "status": status, "agent_id": agent_id, "response": response, "error": error, "acked": acked}
+        return _compact_mcp_job_response(job_id, job=job, result=result, acked=acked, verbose=want_verbose, legacy_response=legacy)
 
     if job:
-        return {"job_id": job_id, "status": job.get("status", "running"), "agent_id": job.get("agent_id"), "response": job.get("result"), "error": job.get("error"), "acked": False}
+        legacy = {"job_id": job_id, "status": job.get("status", "running"), "agent_id": job.get("agent_id"), "response": job.get("result"), "error": job.get("error"), "acked": False}
+        return _compact_mcp_job_response(job_id, job=job, result=None, acked=False, verbose=want_verbose, legacy_response=legacy)
 
-    return {"job_id": job_id, "status": "running_or_unknown", "agent_id": None, "response": None, "error": None, "acked": False}
+    legacy = {"job_id": job_id, "status": "running_or_unknown", "agent_id": None, "response": None, "error": None, "acked": False}
+    if want_verbose:
+        return legacy
+    return {"status": "running_or_unknown", "acked": False}
 
 
 # ---------------------------------------------------------------------------
@@ -2934,7 +3303,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
             "name": "get_mcp_job",
             "title": "Get job",
             "description": "Get status/result for a background MCP job.",
-            "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "ack": {"type": "boolean", "default": False}}, "required": ["job_id"], "additionalProperties": False},
+            "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "ack": {"type": "boolean", "default": False}, "verbose": {"type": "boolean", "default": False}, "include_raw": {"type": "boolean", "default": False}}, "required": ["job_id"], "additionalProperties": False},
             "outputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "status": {"type": "string"}, "response": {"type": ["object", "null"], "additionalProperties": True}, "error": {"type": ["object", "string", "null"]}}, "required": ["job_id", "status"], "additionalProperties": True},
             "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
@@ -2968,7 +3337,7 @@ async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]
             )
         )
     if name == "get_mcp_job":
-        return mcp_relay_job_status(str(args.get("job_id") or ""), ack=bool(args.get("ack", False)))
+        return mcp_relay_job_status(str(args.get("job_id") or ""), ack=bool(args.get("ack", False)), verbose=bool(args.get("verbose", False)), include_raw=bool(args.get("include_raw", False)))
     raise HTTPException(404, f"unknown tool {name}")
 
 

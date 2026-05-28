@@ -576,6 +576,7 @@ def _beat_payload(mode: str):
         "build_version": BUILD_VERSION,
         "build_ts": BUILD_TS,
         "git_commit": GIT_COMMIT,
+        "default_cwd": os.getcwd(),
         "backend": ROOTD_BACKEND,
         "proxy_for": ROOTD_PROXY_FOR,
         "proxy_via": ROOTD_PROXY_VIA,
