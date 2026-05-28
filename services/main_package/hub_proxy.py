@@ -196,7 +196,7 @@ STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))
 HUB_DEFERRED_DISPATCH_INTERVAL_S = float(os.getenv("HUB_DEFERRED_DISPATCH_INTERVAL_S", "2"))
 HUB_DEFERRED_DEFAULT_TTL_S = int(os.getenv("HUB_DEFERRED_DEFAULT_TTL_S", str(7 * 86400)))
 HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
-SYNC_TIMEOUT_S = int(os.getenv("HUB_SYNC_TIMEOUT_S", "35"))
+SYNC_TIMEOUT_S = max(15, int(os.getenv("HUB_SYNC_TIMEOUT_S", "35")))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
 CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "350000"))
@@ -284,6 +284,7 @@ queues: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 ws_sessions: Dict[str, WebSocket] = {}
 ws_results: Dict[str, Dict[str, Any]] = {}
+sync_waiters: Dict[str, float] = {}
 background_tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 # Real relay agents: laptops/local MCP bridges. Virtual shell agents are derived from `servers`.
@@ -1699,6 +1700,7 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
 
     task = asyncio.create_task(_webhook_exec(info, payload))
     try:
+        sync_waiters[tid]=time.time()
         result = await asyncio.wait_for(asyncio.shield(task), timeout=SYNC_TIMEOUT_S)
         background_tasks.setdefault(srv, {})[tid] = {"status": "completed", "task_id": tid, "cmd": req.cmd, "cwd": req.cwd, "result": _spill_single_result(srv, result, req.cmd), "completed_at": int(time.time())}
         return result
@@ -1716,6 +1718,8 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
         return {"background": True, "task_id": tid, "status": "running", "message": "Command continues in background."}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        sync_waiters.pop(tid, None)
 
 
 @app.post("/bulk/exec", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -1743,6 +1747,7 @@ async def ws_exec(srv: str, payload: dict) -> dict:
     ws_results[tid] = {"event": asyncio.Event(), "result": None}
     try:
         await ws.send_json({"type": "exec", "id": tid, "payload": payload})
+        sync_waiters[tid]=time.time()
         await asyncio.wait_for(ws_results[tid]["event"].wait(), timeout=SYNC_TIMEOUT_S)
         result = ws_results[tid]["result"] or {"error": "empty websocket result"}
         background_tasks.setdefault(srv, {})[tid].update({"status": "completed", "result": _spill_single_result(srv, result, str(payload.get("cmd") or "")), "completed_at": int(time.time())})
@@ -1753,6 +1758,7 @@ async def ws_exec(srv: str, payload: dict) -> dict:
         ws_sessions.pop(srv, None)
         raise HTTPException(503, f"websocket send failed: {e}") from e
     finally:
+        sync_waiters.pop(tid, None)
         ws_results.pop(tid, None)
 
 
@@ -1912,6 +1918,7 @@ async def queue_result(request: Request, srv: str, res: TaskResult):
     _verify_queue_signature(request, srv, body)
     results.setdefault(srv, {})[res.id] = res.result
     if res.id in background_tasks.get(srv, {}):
+        sync_waiters.pop(res.id, None)
         background_tasks[srv][res.id].update({"status": "completed", "result": _spill_single_result(srv, res.result, str(background_tasks[srv][res.id].get("cmd") or "")), "completed_at": int(time.time()), "updated_at": int(time.time())})
     return {"ok": True}
 
@@ -2364,6 +2371,37 @@ def _configured_secret_names() -> List[str]:
     return [name for name in names if os.getenv(name)]
 
 
+def _hub_proxy_install_info(verbose: bool = False) -> Dict[str, Any]:
+    unit = "hub_proxy.service"
+    info: Dict[str, Any] = {
+        "unit": unit,
+        "file": "/etc/systemd/system/hub_proxy.service",
+        "working_dir": str(GPTADMIN_REPO_ROOT),
+        "python": str(GPTADMIN_PYTHON),
+        "script": str(GPTADMIN_REPO_ROOT / "services" / "main_package" / "hub_proxy.py"),
+        "user": "admin",
+        "public_origin": PUBLIC_ORIGIN,
+        "mcp_relay": "/mcp-relay/*",
+        "openapi": "/actions/openapi.yaml",
+    }
+    if verbose:
+        try:
+            cp = subprocess.run(["systemctl", "show", unit, "-p", "FragmentPath", "-p", "DropInPaths", "-p", "WorkingDirectory", "-p", "ExecStart", "-p", "User", "-p", "ActiveState", "--no-pager"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if cp.returncode == 0:
+                shown: Dict[str, str] = {}
+                for line in cp.stdout.splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        if v:
+                            shown[k] = v
+                info["systemd"] = shown
+        except Exception:
+            pass
+    env_names = ["CTL_TOKEN", "MCP_RELAY_AGENT_TOKEN", "PUBLIC_ORIGIN", "MCP_RESOURCE", "MCP_RELAY_DEFAULT_TIMEOUT", "MCP_RELAY_POLL_MAX_TIMEOUT", "OAUTH_CLIENT_SECRET", "ADMIN_PASSWORD"]
+    info["env"] = {name: (_mask_secret_value(os.getenv(name)) if name in SENSITIVE_KEYS or "TOKEN" in name or "SECRET" in name or "PASSWORD" in name else os.getenv(name)) for name in env_names if os.getenv(name)}
+    return _omit_none(info)
+
+
 def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
     section = str(args.get("section") or "all").lower()
     verbose = bool(args.get("verbose") or args.get("include_raw"))
@@ -2412,7 +2450,7 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if section in {"all", "config"}:
         cfg = _omit_none({"version": info.get("version") or info.get("build_version"), "build": info.get("git_commit"), "public_hub": PUBLIC_ORIGIN, "openapi": "/actions/openapi.yaml", "mcp_relay": "/mcp-relay/*", "cwd": default_cwd, "outbox": info.get("outbox_dir")})
         if is_hub_host:
-            cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d"})
+            cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d", "hub_proxy": _hub_proxy_install_info(verbose)})
         if proxy_for or proxy_via:
             cfg["proxy"] = _omit_none({"proxy_for": proxy_for, "proxy_via": proxy_via, "ssh_host": info.get("ssh_host"), "ssh_port": info.get("ssh_port"), "ssh_user": info.get("ssh_user")})
         out["config"] = cfg
