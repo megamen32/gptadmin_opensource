@@ -2371,6 +2371,44 @@ def _configured_secret_names() -> List[str]:
     return [name for name in names if os.getenv(name)]
 
 
+def _shell_cli_info(srv: str, info: Dict[str, Any], verbose: bool = False) -> Dict[str, Any]:
+    os_text = str(info.get("os") or "").lower()
+    backend = str(info.get("backend") or "")
+    is_macos = "darwin" in os_text or "mac" in os_text
+    service = "com.gptadmin.rootd" if is_macos else "gptadmin-rootd.service"
+    service_manager = "launchctl" if is_macos else "systemctl"
+    status_cmd = "gptadmin status"
+    logs_cmd = "gptadmin logs shell"
+    if is_macos:
+        service_status = f"sudo launchctl print system/{service}"
+        service_restart = f"sudo launchctl kickstart -k system/{service}"
+    else:
+        service_status = f"systemctl status {service} --no-pager"
+        service_restart = f"sudo systemctl restart {service}"
+    info_out: Dict[str, Any] = {
+        "cli": "/usr/local/bin/gptadmin",
+        "status": status_cmd,
+        "logs": logs_cmd,
+        "install_dir": "/opt/gptadmin",
+        "config": "/etc/gptadmin/gptadmin.env",
+        "service_manager": service_manager,
+        "shell_service": service,
+        "shell_service_status": service_status,
+        "shell_service_restart": service_restart,
+        "mcp_config": "/etc/gptadmin/mcp.json",
+        "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d",
+        "mcp_add_remote": "sudo gptadmin mcp add NAME --install --status --url https://example.com/mcp",
+        "mcp_add_stdio": "sudo gptadmin mcp add NAME --install --status -- npx -y some-mcp-package --flag value",
+        "mcp_status": "gptadmin mcp status NAME",
+        "mcp_list": "gptadmin mcp list",
+    }
+    if backend == "ssh":
+        info_out["note"] = "this shell is proxied; run local service commands on proxy host, not necessarily on the SSH target"
+    if srv == "admin-server-100":
+        info_out["repo_helper"] = "/home/admin/gptadmin/mcp-add NAME -- npx -y package"
+    return info_out
+
+
 def _hub_proxy_install_info(verbose: bool = False) -> Dict[str, Any]:
     unit = "hub_proxy.service"
     info: Dict[str, Any] = {
@@ -2448,7 +2486,7 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
     if section in {"all", "config"}:
-        cfg = _omit_none({"version": info.get("version") or info.get("build_version"), "build": info.get("git_commit"), "public_hub": PUBLIC_ORIGIN, "openapi": "/actions/openapi.yaml", "mcp_relay": "/mcp-relay/*", "cwd": default_cwd, "outbox": info.get("outbox_dir")})
+        cfg = _omit_none({"version": info.get("version") or info.get("build_version"), "build": info.get("git_commit"), "public_hub": PUBLIC_ORIGIN, "openapi": "/actions/openapi.yaml", "mcp_relay": "/mcp-relay/*", "cwd": default_cwd, "outbox": info.get("outbox_dir"), "shell_cli": _shell_cli_info(srv, info, verbose)})
         if is_hub_host:
             cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d", "hub_proxy": _hub_proxy_install_info(verbose)})
         if proxy_for or proxy_via:
