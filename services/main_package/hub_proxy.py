@@ -2587,6 +2587,19 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
             out["secrets"]["masked"] = {name: _mask_secret_value(os.getenv(name)) for name in configured}
     if section in {"all", "architecture"}:
         out["architecture"] = {"hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host", "shell": "per-host executor registered as virtual MCP agent shell:<server>", "real_mcp": "stdio or remote MCP services registered into hub as separate MCP agents", "polling_vs_webhook": "webhook receives callbacks directly; polling agents fetch queued jobs from hub"}
+    if section in {"all", "rescue"}:
+        out["rescue"] = {
+            "principle": "If a shell agent on the hub host is broken, use hub.mcp_tools to add a temporary real MCP rescue shell on that same host, fix shellmcp/rootd, then remove the rescue MCP.",
+            "safe_migration_rule": "Never stop/restart the current shell agent from a plain nohup/background command inside its own systemd cgroup; systemd may kill the migration with the old service. Use systemd-run transient units for self-migration.",
+            "systemd_run_pattern": "sudo systemd-run --unit=gptadmin-shellmcp-migrate --collect /bin/bash /path/to/migrate.sh",
+            "private_tmp_note": "If systemd-run cannot see /tmp script paths, put the script in a durable path visible outside the service namespace, e.g. /opt/gptadmin/migrate.sh.",
+            "rescue_mcp_flow": [
+                "hub.mcp_tools add name=rescue-shell-<host> command=python3 args=[minimal stdio MCP exposing shell_exec] agent_id=RescueShell<Host> run_as_user=root backend=systemd install=true",
+                "call RescueShell<Host>.shell_exec to run systemctl start shellmcp.service || systemctl start rootd.service and inspect logs",
+                "after normal shell:<host> works, hub.mcp_tools remove name=rescue-shell-<host> backend=systemd",
+            ],
+            "ssh_jump_fallback": "If the broken host is not the hub host, use a live shell agent with SSH/LAN reachability to run: sudo systemctl start shellmcp.service || sudo systemctl start rootd.service || sudo systemctl start gptadmin-rootd.service.",
+        }
     return _omit_none(out)
 
 
@@ -2663,7 +2676,7 @@ def _shell_tools_list() -> Dict[str, Any]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "section": {"type": ["string", "null"], "enum": ["all", "summary", "params", "config", "secrets", "architecture", None], "default": "all"},
+                    "section": {"type": ["string", "null"], "enum": ["all", "summary", "params", "config", "secrets", "architecture", "rescue", None], "default": "all"},
                     "verbose": {"type": "boolean", "default": False},
                     "include_raw": {"type": "boolean", "default": False}
                 },
