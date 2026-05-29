@@ -193,6 +193,8 @@ HUB_PUBLIC_KEY_FILE_ED25519 = Path(os.getenv("GPTADMIN_HUB_PUBLIC_KEY_FILE", str
 HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
 
 STATE_TTL_S = int(os.getenv("HUB_STATE_TTL_S", str(3 * 86400)))
+MCP_RELAY_STALE_TTL_S = int(os.getenv("MCP_RELAY_STALE_TTL_S", str(3 * 86400)))
+MCP_RELAY_STALE_RETENTION_S = int(os.getenv("MCP_RELAY_STALE_RETENTION_S", str(30 * 86400)))
 HUB_DEFERRED_DISPATCH_INTERVAL_S = float(os.getenv("HUB_DEFERRED_DISPATCH_INTERVAL_S", "2"))
 HUB_DEFERRED_DEFAULT_TTL_S = int(os.getenv("HUB_DEFERRED_DEFAULT_TTL_S", str(7 * 86400)))
 HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
@@ -356,8 +358,9 @@ def _load_all_state() -> None:
             background_tasks[srv] = kept
     log.info("state: loaded task_servers=%s", len(background_tasks))
 
+    mcp_agent_cutoff = now - max(MCP_RELAY_STALE_RETENTION_S, MCP_RELAY_STALE_TTL_S, DEAD_S)
     for agent_id, entry in _load_json_dict(HUB_MCP_AGENTS_STATE_FILE).items():
-        if isinstance(entry, dict) and float(entry.get("last_seen", 0)) >= cutoff:
+        if isinstance(entry, dict) and float(entry.get("last_seen", 0)) >= mcp_agent_cutoff:
             mcp_relay_agents[agent_id] = entry
     log.info("state: loaded mcp_agents=%s", len(mcp_relay_agents))
 
@@ -398,7 +401,8 @@ def _prune_state() -> None:
         if not background_tasks[srv]:
             background_tasks.pop(srv, None)
 
-    for agent_id in [a for a, d in mcp_relay_agents.items() if float(d.get("last_seen", 0)) < cutoff]:
+    mcp_agent_cutoff = time.time() - max(MCP_RELAY_STALE_RETENTION_S, MCP_RELAY_STALE_TTL_S, DEAD_S)
+    for agent_id in [a for a, d in mcp_relay_agents.items() if float(d.get("last_seen", 0)) < mcp_agent_cutoff]:
         mcp_relay_agents.pop(agent_id, None)
 
     for job_id in [j for j, d in mcp_relay_jobs.items() if float(d.get("created_at", 0)) < cutoff]:
@@ -1260,7 +1264,7 @@ components:
               name: { type: string }
               kind: { type: string, enum: [real_mcp, virtual_shell, virtual_hub] }
               transport: { type: string }
-              status: { type: string, enum: [online, offline, pending] }
+              status: { type: string, enum: [online, offline, stale, pending] }
               last_seen: { type: [number, "null"] }
               capabilities:
                 type: array
@@ -1987,16 +1991,35 @@ def _server_from_virtual_shell_agent(agent_id: str) -> str:
     return agent_id[len(VIRTUAL_SHELL_PREFIX) :]
 
 
-def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
+def _mcp_relay_agent_age_s(info: Dict[str, Any], now: Optional[float] = None) -> float:
+    try:
+        return max(0.0, float(now if now is not None else time.time()) - float(info.get("last_seen", 0)))
+    except Exception:
+        return float("inf")
+
+
+def _mcp_relay_agent_status(info: Dict[str, Any], now: Optional[float] = None) -> str:
+    age = _mcp_relay_agent_age_s(info, now)
+    if age <= DEAD_S:
+        return "online"
+    if age <= MCP_RELAY_STALE_TTL_S:
+        return "offline"
+    return "stale"
+
+
+def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    status = _mcp_relay_agent_status(info, now)
+    meta = dict(info.get("meta") or {})
+    meta.setdefault("age_s", int(_mcp_relay_agent_age_s(info, now)))
     return {
         "agent_id": agent_id,
         "name": info.get("name") or agent_id,
         "kind": "real_mcp",
         "transport": info.get("transport", "stdio"),
-        "status": "online" if time.time() - float(info.get("last_seen", 0)) <= DEAD_S else "offline",
+        "status": status,
         "last_seen": info.get("last_seen"),
         "capabilities": info.get("capabilities") or [],
-        "meta": info.get("meta") or {},
+        "meta": meta,
     }
 
 
@@ -2033,12 +2056,53 @@ def _virtual_shell_agents() -> List[Dict[str, Any]]:
     return agents
 
 
-def _all_public_agents() -> List[Dict[str, Any]]:
-    agents = [_virtual_hub_agent()]
-    agents.extend(_virtual_shell_agents())
-    agents.extend(_mcp_relay_public_agent(agent_id, info) for agent_id, info in mcp_relay_agents.items())
-    agents.sort(key=lambda x: (x.get("status") != "online", str(x.get("agent_id"))))
+def _all_public_agents(*, include_stale: bool = False, only_stale: bool = False) -> List[Dict[str, Any]]:
+    now = time.time()
+    agents = [] if only_stale else [_virtual_hub_agent()]
+    if not only_stale:
+        agents.extend(_virtual_shell_agents())
+    for agent_id, info in mcp_relay_agents.items():
+        item = _mcp_relay_public_agent(agent_id, info, now)
+        if item.get("status") == "stale":
+            if include_stale or only_stale:
+                agents.append(item)
+        elif not only_stale:
+            agents.append(item)
+    rank = {"online": 0, "offline": 1, "stale": 2}
+    agents.sort(key=lambda x: (rank.get(str(x.get("status")), 9), str(x.get("agent_id"))))
     return agents
+
+
+def _stale_mcp_relay_agents() -> List[Dict[str, Any]]:
+    return [a for a in _all_public_agents(include_stale=True, only_stale=True) if a.get("kind") == "real_mcp"]
+
+
+def _purge_stale_mcp_relay_agents() -> Dict[str, Any]:
+    stale = _stale_mcp_relay_agents()
+    removed = []
+    for item in stale:
+        agent_id = str(item.get("agent_id") or "")
+        if agent_id:
+            mcp_relay_agents.pop(agent_id, None)
+            mcp_relay_queues.pop(agent_id, None)
+            removed.append(agent_id)
+    _save_json_dict(HUB_MCP_AGENTS_STATE_FILE, mcp_relay_agents)
+    return {"removed": removed, "count": len(removed), "stale": stale}
+
+
+def _forget_mcp_relay_agent(agent_id: Optional[str]) -> bool:
+    if not agent_id:
+        return False
+    removed = False
+    if agent_id in mcp_relay_agents:
+        mcp_relay_agents.pop(agent_id, None)
+        removed = True
+    if agent_id in mcp_relay_queues:
+        mcp_relay_queues.pop(agent_id, None)
+        removed = True
+    if removed:
+        _save_json_dict(HUB_MCP_AGENTS_STATE_FILE, mcp_relay_agents)
+    return removed
 
 
 def _mcp_relay_select_agent(target: Optional[str] = None) -> str:
@@ -2079,7 +2143,7 @@ def _mcp_envelope_text(text: str, structured: Dict[str, Any]) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "structuredContent": structured}
 
 
-def _run_gptadmin_mcp(argv: List[str], timeout: int = 60) -> Dict[str, Any]:
+def _run_gptadmin_mcp(argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
     cmd = ["sudo", "-n", str(GPTADMIN_PYTHON), str(GPTADMIN_CLI_PATH), "mcp", *[str(x) for x in argv]]
     try:
         cp = subprocess.run(cmd, cwd=str(GPTADMIN_REPO_ROOT), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -2092,8 +2156,8 @@ def _run_gptadmin_mcp(argv: List[str], timeout: int = 60) -> Dict[str, Any]:
         except Exception:
             data = None
     result = {"ok": cp.returncode == 0, "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr, "json": data, "argv": ["gptadmin", "mcp", *argv]}
-    if cp.returncode != 0:
-        raise HTTPException(500, result)
+    if check and cp.returncode != 0:
+        raise HTTPException(500, detail=result)
     return result
 
 def _compact_cli_result(res: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -2226,6 +2290,10 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
         name = str(args.get("name") or "")
         if not name:
             raise HTTPException(400, "mcp_tools remove requires name")
+        before = _run_gptadmin_mcp(["list", "--json"])
+        cfg = before.get("json") if isinstance(before.get("json"), dict) else {}
+        server_cfg = (cfg.get("mcpServers") or {}).get(name) or {}
+        agent_id = str(server_cfg.get("agent_id") or "")
         # gptadmin.py mcp remove now stops/uninstalls the supervisor service itself.
         # Do not pre-stop here; pre-stopping races with CLI removal and causes noisy
         # "unit file does not exist" stderr even when removal succeeds.
@@ -2235,8 +2303,9 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
             argv.append("--keep-service")
         if args.get("backend"):
             argv += ["--backend", str(args.get("backend"))]
-        raw = _run_gptadmin_mcp(argv)
-        data = {"action": action, "name": name, "stopped": stopped, "raw": raw}
+        raw = _run_gptadmin_mcp(argv, timeout=120, check=False)
+        registry_removed = _forget_mcp_relay_agent(agent_id)
+        data = {"action": action, "name": name, "agent_id": agent_id or None, "registry_removed": registry_removed, "stopped": stopped, "raw": raw}
         return _mcp_tools_compact(data, verbose=verbose)
 
     # add
@@ -2320,6 +2389,16 @@ def _hub_tools_list() -> Dict[str, Any]:
                 "required": ["name"],
                 "additionalProperties": False,
             },
+        },
+        {
+            "name": "list_stale_mcp_agents",
+            "description": "List real MCP relay agents that have been offline longer than MCP_RELAY_STALE_TTL_S (default 3 days).",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "purge_stale_mcp_agents",
+            "description": "Remove stale real MCP relay agents from hub registry state. Does not uninstall configured services; use mcp_tools remove for configured agents.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "mcp_tools",
@@ -2676,6 +2755,12 @@ async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
         name = str(args.get("name") or "")
         data = _reject_pending_server(name)
         return _mcp_envelope_text(f"Reject result for {name}: {data.get('status') or data.get('error')}", data)
+    if tool_name == "list_stale_mcp_agents":
+        data = {"agents": _stale_mcp_relay_agents(), "count": len(_stale_mcp_relay_agents()), "stale_ttl_s": MCP_RELAY_STALE_TTL_S}
+        return _mcp_envelope_text(f"{data['count']} stale MCP agent(s)", data)
+    if tool_name == "purge_stale_mcp_agents":
+        data = _purge_stale_mcp_relay_agents()
+        return _mcp_envelope_text(f"Purged {data['count']} stale MCP agent(s)", data)
     if tool_name == "mcp_tools":
         data = _mcp_tools_manage(args)
         action = data.get("action")
@@ -2903,8 +2988,11 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
 
 
 @app.get("/mcp-relay/agents", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def mcp_relay_agents_list():
-    agents = _all_public_agents()
+def mcp_relay_agents_list(include_stale: bool = Query(False), only_stale: bool = Query(False), purge_stale: bool = Query(False)):
+    if purge_stale:
+        purged = _purge_stale_mcp_relay_agents()
+        return {"agents": _all_public_agents(include_stale=include_stale, only_stale=only_stale), "purged": purged}
+    agents = _all_public_agents(include_stale=include_stale, only_stale=only_stale)
     return {"agents": agents}
 
 
@@ -3330,8 +3418,8 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
         {
             "name": "list_mcp_agents",
             "title": "List MCP agents",
-            "description": "List real relay agents and virtual shell agents.",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "description": "List real relay agents and virtual shell agents. Stale real MCP agents older than MCP_RELAY_STALE_TTL_S are hidden by default.",
+            "inputSchema": {"type": "object", "properties": {"include_stale": {"type": "boolean", "default": False, "description": "Include stale real MCP agents older than MCP_RELAY_STALE_TTL_S."}, "only_stale": {"type": "boolean", "default": False, "description": "Return only stale real MCP agents."}, "purge_stale": {"type": "boolean", "default": False, "description": "Remove stale real MCP agents from registry state."}}, "additionalProperties": False},
             "outputSchema": {"type": "object", "properties": {"agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}}}, "required": ["agents"], "additionalProperties": False},
             "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
@@ -3388,7 +3476,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
 
 async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "list_mcp_agents":
-        return mcp_relay_agents_list()
+        return mcp_relay_agents_list(include_stale=bool(args.get("include_stale", False)), only_stale=bool(args.get("only_stale", False)), purge_stale=bool(args.get("purge_stale", False)))
     if name == "list_mcp_tools":
         target = args.get("target")
         if not isinstance(target, str) or not target:
