@@ -2056,17 +2056,32 @@ def _virtual_shell_agents() -> List[Dict[str, Any]]:
     return agents
 
 
-def _all_public_agents(*, include_stale: bool = False, only_stale: bool = False) -> List[Dict[str, Any]]:
+def _normalize_agent_statuses(statuses: Optional[Any]) -> set[str]:
+    if statuses is None:
+        return {"online", "offline"}
+    if isinstance(statuses, str):
+        raw = [x.strip() for x in statuses.split(",")]
+    elif isinstance(statuses, list):
+        raw = [str(x).strip() for x in statuses]
+    else:
+        raw = []
+    aliases = {"active": "online", "live": "online", "dead": "offline"}
+    out = {aliases.get(x.lower(), x.lower()) for x in raw if x}
+    if "all" in out:
+        return {"online", "offline", "stale"}
+    return out or {"online", "offline"}
+
+
+def _all_public_agents(*, statuses: Optional[Any] = None) -> List[Dict[str, Any]]:
+    wanted = _normalize_agent_statuses(statuses)
     now = time.time()
-    agents = [] if only_stale else [_virtual_hub_agent()]
-    if not only_stale:
-        agents.extend(_virtual_shell_agents())
+    agents = []
+    for item in [_virtual_hub_agent(), *_virtual_shell_agents()]:
+        if str(item.get("status")) in wanted:
+            agents.append(item)
     for agent_id, info in mcp_relay_agents.items():
         item = _mcp_relay_public_agent(agent_id, info, now)
-        if item.get("status") == "stale":
-            if include_stale or only_stale:
-                agents.append(item)
-        elif not only_stale:
+        if str(item.get("status")) in wanted:
             agents.append(item)
     rank = {"online": 0, "offline": 1, "stale": 2}
     agents.sort(key=lambda x: (rank.get(str(x.get("status")), 9), str(x.get("agent_id"))))
@@ -2074,7 +2089,13 @@ def _all_public_agents(*, include_stale: bool = False, only_stale: bool = False)
 
 
 def _stale_mcp_relay_agents() -> List[Dict[str, Any]]:
-    return [a for a in _all_public_agents(include_stale=True, only_stale=True) if a.get("kind") == "real_mcp"]
+    now = time.time()
+    out = []
+    for agent_id, info in mcp_relay_agents.items():
+        item = _mcp_relay_public_agent(agent_id, info, now)
+        if item.get("status") == "stale":
+            out.append(item)
+    return out
 
 
 def _purge_stale_mcp_relay_agents() -> Dict[str, Any]:
@@ -2389,16 +2410,6 @@ def _hub_tools_list() -> Dict[str, Any]:
                 "required": ["name"],
                 "additionalProperties": False,
             },
-        },
-        {
-            "name": "list_stale_mcp_agents",
-            "description": "List real MCP relay agents that have been offline longer than MCP_RELAY_STALE_TTL_S (default 3 days).",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-        {
-            "name": "purge_stale_mcp_agents",
-            "description": "Remove stale real MCP relay agents from hub registry state. Does not uninstall configured services; use mcp_tools remove for configured agents.",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "mcp_tools",
@@ -2755,12 +2766,6 @@ async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
         name = str(args.get("name") or "")
         data = _reject_pending_server(name)
         return _mcp_envelope_text(f"Reject result for {name}: {data.get('status') or data.get('error')}", data)
-    if tool_name == "list_stale_mcp_agents":
-        data = {"agents": _stale_mcp_relay_agents(), "count": len(_stale_mcp_relay_agents()), "stale_ttl_s": MCP_RELAY_STALE_TTL_S}
-        return _mcp_envelope_text(f"{data['count']} stale MCP agent(s)", data)
-    if tool_name == "purge_stale_mcp_agents":
-        data = _purge_stale_mcp_relay_agents()
-        return _mcp_envelope_text(f"Purged {data['count']} stale MCP agent(s)", data)
     if tool_name == "mcp_tools":
         data = _mcp_tools_manage(args)
         action = data.get("action")
@@ -2988,12 +2993,13 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
 
 
 @app.get("/mcp-relay/agents", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def mcp_relay_agents_list(include_stale: bool = Query(False), only_stale: bool = Query(False), purge_stale: bool = Query(False)):
-    if purge_stale:
-        purged = _purge_stale_mcp_relay_agents()
-        return {"agents": _all_public_agents(include_stale=include_stale, only_stale=only_stale), "purged": purged}
-    agents = _all_public_agents(include_stale=include_stale, only_stale=only_stale)
-    return {"agents": agents}
+def mcp_relay_agents_list(statuses: Optional[List[str]] = Query(default=None), purge_stale: bool = Query(False)):
+    purged = _purge_stale_mcp_relay_agents() if purge_stale else None
+    agents = _all_public_agents(statuses=statuses)
+    out = {"agents": agents}
+    if purged is not None:
+        out["purged"] = purged
+    return out
 
 
 @app.post("/mcp-relay/tools", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -3418,8 +3424,8 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
         {
             "name": "list_mcp_agents",
             "title": "List MCP agents",
-            "description": "List real relay agents and virtual shell agents. Stale real MCP agents older than MCP_RELAY_STALE_TTL_S are hidden by default.",
-            "inputSchema": {"type": "object", "properties": {"include_stale": {"type": "boolean", "default": False, "description": "Include stale real MCP agents older than MCP_RELAY_STALE_TTL_S."}, "only_stale": {"type": "boolean", "default": False, "description": "Return only stale real MCP agents."}, "purge_stale": {"type": "boolean", "default": False, "description": "Remove stale real MCP agents from registry state."}}, "additionalProperties": False},
+            "description": "List MCP agents. Real MCP statuses default to online/offline; pass statuses=stale or statuses=all to include stale agents.",
+            "inputSchema": {"type": "object", "properties": {"statuses": {"type": "array", "items": {"type": "string", "enum": ["online", "active", "offline", "stale", "all"]}, "default": ["online", "offline"], "description": "Real MCP statuses to include. active is accepted as alias for online."}, "purge_stale": {"type": "boolean", "default": False, "description": "Remove stale real MCP agents from registry before listing."}}, "additionalProperties": False},
             "outputSchema": {"type": "object", "properties": {"agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}}}, "required": ["agents"], "additionalProperties": False},
             "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
@@ -3476,7 +3482,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
 
 async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "list_mcp_agents":
-        return mcp_relay_agents_list(include_stale=bool(args.get("include_stale", False)), only_stale=bool(args.get("only_stale", False)), purge_stale=bool(args.get("purge_stale", False)))
+        return mcp_relay_agents_list(statuses=args.get("statuses"), purge_stale=bool(args.get("purge_stale", False)))
     if name == "list_mcp_tools":
         target = args.get("target")
         if not isinstance(target, str) or not target:
