@@ -1,0 +1,26 @@
+[Unit]
+Description=GPTAdmin Shell MCP agent
+After=network.target
+
+[Service]
+WorkingDirectory=/home/admin/gptadmin
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/services/main_package/client/rootd.py
+Environment=SHELL_TOKEN=srv_secret
+Environment=ROOTD_TOKEN=srv_secret
+Environment=SHELL_URL=http://203.0.113.10:25900
+Environment=ROOTD_URL=http://203.0.113.10:25900
+Environment=SHELL_NAME=admin-server-100
+Environment=ROOTD_NAME=admin-server-100
+Environment=SHELL_IDENTITY_DIR=/etc/gptadmin
+Environment=ROOTD_IDENTITY_DIR=/etc/gptadmin
+Environment=HUB_URL=https://gptadmin.bezrabotnyi.com/heartbeat
+Environment=EXEC_TIMEOUT=300
+Environment=LOG_LIMIT_B=8192
+Environment=SHELL_TRANSPORT=webhook
+Environment=ROOTD_TRANSPORT=webhook
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

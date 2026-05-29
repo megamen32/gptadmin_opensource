@@ -1,4 +1,4 @@
-# rootd.py
+# shellmcp.py / rootd.py compatibility entrypoint
 """
 Голый root-API без Docker, но с:
  • /exec                             – любая команда
@@ -71,31 +71,37 @@ except Exception:
     def build_info(component: str) -> dict:
         return {"component": component, "build_version": BUILD_VERSION, "build_ts": BUILD_TS, "git_commit": GIT_COMMIT}
 
-port = int(os.getenv("ROOTD_PORT", os.getenv("PORT","25900")))
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """New shell MCP env names with ROOTD_* compatibility fallback."""
+    return os.getenv(f"SHELL_{name}", os.getenv(f"ROOTD_{name}", default))
+
+
+port = int(_env("PORT", os.getenv("PORT", "25900")))
 # --- логирование ---
 logging.basicConfig(
     level=logging.DEBUG,  # можно поставить INFO если слишком шумно
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(f"rootd-{port}.log"),    # лог в файл
+        logging.FileHandler(f"shellmcp-{port}.log"),    # лог в файл
         logging.StreamHandler()              # лог в stdout (для systemd)
     ]
 )
 log = logging.getLogger("rootd")
-audit_log = logging.getLogger("rootd.audit")
+audit_log = logging.getLogger("shellmcp.audit")
 audit_log.setLevel(logging.INFO)
 audit_log.propagate = False
 # ------------------------------------------------------------------
 
-TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
+TOKEN = _env("TOKEN", "srv_secret")
 HUB_URL = os.getenv("HUB_URL", 'https://gptadmin.bezrabotnyi.com/')
 HEARTBEAT_URL=HUB_URL+'/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
-ROOTD_URL = os.getenv("ROOTD_URL")
-ROOTD_NAME = os.getenv("ROOTD_NAME")
-ROOTD_PROXY_FOR = os.getenv("ROOTD_PROXY_FOR")
-ROOTD_PROXY_VIA = os.getenv("ROOTD_PROXY_VIA")
-ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or ("ssh" if os.getenv("SSH_HOST") else "local")
-ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else str(Path.home() / ".gptadmin"))
+ROOTD_URL = _env("URL")
+ROOTD_NAME = _env("NAME")
+ROOTD_PROXY_FOR = _env("PROXY_FOR")
+ROOTD_PROXY_VIA = _env("PROXY_VIA")
+ROOTD_BACKEND = _env("BACKEND") or ("ssh" if os.getenv("SSH_HOST") else "local")
+ROOTD_IDENTITY_DIR = _env("IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else str(Path.home() / ".gptadmin"))
 HUB_PUBLIC_KEY_FILE = os.getenv("HUB_PUBLIC_KEY_FILE", str(Path(ROOTD_IDENTITY_DIR) / "hub_ed25519.pub"))
 HUB_PUBLIC_KEY_B64 = os.getenv("HUB_PUBLIC_KEY", "")
 ROOTD_IDENTITY = load_or_create_identity(ROOTD_IDENTITY_DIR, ROOTD_NAME or socket.gethostname(), prefix="rootd")
@@ -103,11 +109,11 @@ ROOTD_SERVER_ID = ROOTD_IDENTITY["identity"]["server_id"]
 ROOTD_PUBLIC_KEY_B64 = ROOTD_IDENTITY["public_key_b64"]
 ROOTD_FINGERPRINT = ROOTD_IDENTITY["fingerprint"]
 NONCES = NonceCache(ttl_s=int(os.getenv("ROOTD_NONCE_TTL_S", "300")))
-TRANSPORT = os.getenv("ROOTD_TRANSPORT", "webhook").lower()
+TRANSPORT = _env("TRANSPORT", "webhook").lower()
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
-ROOTD_AUTO_UPDATE = os.getenv("ROOTD_AUTO_UPDATE", "0").lower() in {"1", "true", "yes", "on"}
-ROOTD_UPDATE_INTERVAL_S = int(os.getenv("ROOTD_UPDATE_INTERVAL_S", "3600"))
-ROOTD_SERVICE_NAME = os.getenv("ROOTD_SERVICE_NAME", "gptadmin-rootd.service")
+ROOTD_AUTO_UPDATE = _env("AUTO_UPDATE", "0").lower() in {"1", "true", "yes", "on"}
+ROOTD_UPDATE_INTERVAL_S = int(_env("UPDATE_INTERVAL_S", "3600"))
+ROOTD_SERVICE_NAME = _env("SERVICE_NAME", "shellmcp.service")
 
 def _hub_artifact_url(path: str) -> str:
     if not HUB_URL:
@@ -131,14 +137,14 @@ def _derive_hub_queue_url(raw_url: str) -> str | None:
         return urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
     return None
 
-ROOTD_UPDATE_MANIFEST_URL = os.getenv("ROOTD_UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
-ROOTD_UPDATE_URL = os.getenv("ROOTD_UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
-ROOTD_UPDATE_TOKEN = os.getenv("ROOTD_UPDATE_TOKEN", "")
-ROOTD_OUTBOX_DIR = Path(os.getenv("ROOTD_OUTBOX_DIR", str(Path(ROOTD_IDENTITY_DIR) / "outbox")))
-ROOTD_OUTBOX_RETRY_MIN_S = float(os.getenv("ROOTD_OUTBOX_RETRY_MIN_S", "2"))
-ROOTD_OUTBOX_RETRY_MAX_S = float(os.getenv("ROOTD_OUTBOX_RETRY_MAX_S", "300"))
-ROOTD_OUTBOX_SCAN_S = float(os.getenv("ROOTD_OUTBOX_SCAN_S", "2"))
-ROOTD_AUDIT_LOG = os.getenv("ROOTD_AUDIT_LOG") or ("/var/log/gptadmin/rootd-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "rootd-audit.log"))
+ROOTD_UPDATE_MANIFEST_URL = _env("UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
+ROOTD_UPDATE_URL = _env("UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
+ROOTD_UPDATE_TOKEN = _env("UPDATE_TOKEN", "")
+ROOTD_OUTBOX_DIR = Path(_env("OUTBOX_DIR", str(Path(ROOTD_IDENTITY_DIR) / "outbox")))
+ROOTD_OUTBOX_RETRY_MIN_S = float(_env("OUTBOX_RETRY_MIN_S", "2"))
+ROOTD_OUTBOX_RETRY_MAX_S = float(_env("OUTBOX_RETRY_MAX_S", "300"))
+ROOTD_OUTBOX_SCAN_S = float(_env("OUTBOX_SCAN_S", "2"))
+ROOTD_AUDIT_LOG = _env("AUDIT_LOG") or ("/var/log/gptadmin/shellmcp-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "shellmcp-audit.log"))
 try:
     _rootd_audit_path = Path(ROOTD_AUDIT_LOG)
     _rootd_audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +152,7 @@ try:
     _rootd_audit_handler.setFormatter(logging.Formatter("%(message)s"))
     audit_log.addHandler(_rootd_audit_handler)
 except Exception as e:
-    log.warning("rootd audit log disabled path=%s err=%s", ROOTD_AUDIT_LOG, e)
+    log.warning("shellmcp audit log disabled path=%s err=%s", ROOTD_AUDIT_LOG, e)
 
 
 def _audit_event(event: dict) -> None:
@@ -161,7 +167,7 @@ def _audit_event(event: dict) -> None:
     try:
         audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     except Exception as e:
-        log.warning("rootd audit write failed: %s", e)
+        log.warning("shellmcp audit write failed: %s", e)
 
 
 def _cmd_sha256(cmd: str) -> str:
@@ -182,7 +188,7 @@ def _request_peer(request: Optional[Request]) -> dict:
 
 
 def _audit_exec(source: str, cmd: str, cwd: Optional[str], timeout: Optional[int], result: Optional[dict] = None, error: Optional[str] = None, job_id: Optional[str] = None, request: Optional[Request] = None, started_at: Optional[float] = None) -> None:
-    event = {"event": "rootd_exec", "source": source, "job_id": job_id, "cmd": cmd, "cmd_sha256": _cmd_sha256(cmd), "cwd": cwd, "timeout": timeout}
+    event = {"event": "shell_exec", "source": source, "job_id": job_id, "cmd": cmd, "cmd_sha256": _cmd_sha256(cmd), "cwd": cwd, "timeout": timeout}
     event.update(_request_peer(request))
     if started_at is not None:
         event["dt_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
@@ -899,7 +905,7 @@ def rootd_update_once() -> dict:
     if not url or not expected_sha:
         raise RuntimeError("manifest must include url and sha256")
     current_exe = Path(sys.executable).resolve()
-    with tempfile.TemporaryDirectory(prefix="rootd-update-") as td:
+    with tempfile.TemporaryDirectory(prefix="shellmcp-update-") as td:
         archive = Path(td) / "rootd.tar.gz"
         with requests.get(url, timeout=60, stream=True, headers=_update_headers()) as r:
             r.raise_for_status()
