@@ -79,8 +79,9 @@ def _env(name: str, default: str | None = None) -> str | None:
 
 port = int(_env("PORT", os.getenv("PORT", "25900")))
 # --- логирование ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,  # можно поставить INFO если слишком шумно
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(f"shellmcp-{port}.log"),    # лог в файл
