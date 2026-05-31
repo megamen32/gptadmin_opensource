@@ -493,8 +493,19 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
     return stub
 
 
+def _spill_json_field(output_id: str, srv: str, cmd: str, field: str, value: Any, returncode: Any = None) -> dict:
+    try:
+        content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception:
+        content = str(value)
+    stub = _spill_field(output_id, srv, cmd, f"{field}.json", content, returncode)
+    stub["field"] = field
+    stub["content_type"] = "application/json"
+    return stub
+
+
 def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
-    raw = json.dumps({"results": out}, ensure_ascii=False)
+    raw = json.dumps({"results": out}, ensure_ascii=False, default=str)
     should_scan = len(raw) > CHATGPT_RESPONSE_LIMIT
     if not should_scan:
         for res in out.values():
@@ -512,10 +523,42 @@ def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
         output_id = f"out-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         modified = dict(res)
         returncode = res.get("returncode")
+        changed = False
         for field in ("stdout", "stderr"):
             val = modified.get(field)
             if isinstance(val, str) and len(val) > SPILL_FIELD_MIN_CHARS:
                 modified[field] = _spill_field(output_id, srv, cmd, field, val, returncode)
+                changed = True
+        # Legacy/special commands and task APIs can return large structured JSON
+        # without stdout/stderr. Spill those bulky fields too, otherwise the MCP
+        # response itself can exceed the ChatGPT tool transport limit.
+        for field in ("tasks", "servers", "pending", "response", "result"):
+            if field not in modified:
+                continue
+            val = modified.get(field)
+            try:
+                val_len = len(json.dumps(val, ensure_ascii=False, default=str))
+            except Exception:
+                val_len = len(str(val))
+            if val_len > SPILL_FIELD_MIN_CHARS:
+                if isinstance(val, list):
+                    modified[f"{field}_count"] = len(val)
+                elif isinstance(val, dict):
+                    modified[f"{field}_keys"] = sorted(str(k) for k in val.keys())[:50]
+                modified[field] = _spill_json_field(output_id, srv, cmd, field, val, returncode)
+                changed = True
+        if not changed:
+            try:
+                res_len = len(json.dumps(modified, ensure_ascii=False, default=str))
+            except Exception:
+                res_len = len(str(modified))
+            if res_len > CHATGPT_RESPONSE_LIMIT:
+                result[srv] = {
+                    "_spilled": True,
+                    "result": _spill_json_field(output_id, srv, cmd, "result", modified, returncode),
+                    "summary": {k: v for k, v in modified.items() if k not in {"tasks", "servers", "pending", "response", "result"}},
+                }
+                continue
         result[srv] = modified
     return result
 
@@ -524,6 +567,13 @@ def _spill_single_result(srv: str, result: Any, cmd: str) -> Any:
     if not isinstance(result, dict):
         return result
     return _spill_large_fields({srv: result}, cmd).get(srv, result)
+
+
+def _spill_mcp_structured(srv: str, data: Dict[str, Any], cmd: str) -> Dict[str, Any]:
+    """Apply the same long-output policy to direct MCP tool structuredContent."""
+    if not isinstance(data, dict):
+        return data
+    return _spill_large_fields({srv: data}, cmd).get(srv, data)
 
 
 def _server_fingerprint(d: Dict[str, Any]) -> str:
@@ -1501,12 +1551,20 @@ def list_servers(include_pending: bool = True):
 
 
 def _handle_gptadmin_task_command(srv: str, cmd: str):
+    # This legacy shim only owns two synthetic commands. Do not run shlex over
+    # arbitrary shell scripts: large heredocs (JS/HTML/etc.) may legally contain
+    # unmatched quotes inside the heredoc body, and shlex would reject them before
+    # the command ever reaches bash.
+    stripped = (cmd or "").strip()
+    if not stripped:
+        return None
+    head = stripped.split(None, 1)[0]
+    if head not in {"gptadmin_tasks", "gptadmin_pending"}:
+        return None
     try:
-        parts = shlex.split(cmd.strip())
+        parts = shlex.split(stripped)
     except ValueError as e:
         return {"error": f"bad command syntax: {e}"}
-    if not parts:
-        return None
 
     if parts[0] == "gptadmin_tasks":
         if len(parts) >= 2 and parts[1] == "list":
@@ -2886,9 +2944,11 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
                 return _mcp_envelope_text(f"Task not found: {tid}", {"server": srv, "task_id": tid, "status": "not_found"})
             if real_tid != tid:
                 task["requested_task_id"] = tid
+            task = _spill_mcp_structured(srv, task, f"tasks status {real_tid}")
             return _mcp_envelope_text(f"Task {tid}: {task.get('status')}", task)
         data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"), sort_by=args.get("sort_by"), order=args.get("order"), include_result=bool(args.get("include_result", True)), include_history=bool(args.get("include_history", True)))
-        return _mcp_envelope_text(f"{data['count']} task(s) on {srv}", data)
+        data = _spill_mcp_structured(srv, data, "tasks list")
+        return _mcp_envelope_text(f"{data.get('count', 0)} task(s) on {srv}", data)
 
     if tool_name == "mcp_tools":
         data = _mcp_tools_manage(args)
