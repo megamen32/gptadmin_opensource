@@ -201,8 +201,10 @@ HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
 SYNC_TIMEOUT_S = max(15, int(os.getenv("HUB_SYNC_TIMEOUT_S", "35")))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
-CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "350000"))
-SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "8192"))
+CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "24000"))
+SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "4096"))
+SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "1200"))
+SPILL_PREVIEW_TAIL_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_TAIL_CHARS", "400"))
 OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
 OUTPUT_STORE_MAX_BYTES = int(os.getenv("HUB_OUTPUT_STORE_MAX_BYTES", str(500 * 1024 * 1024)))
 AUDIT_LOG_PATH = Path(os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"))
@@ -333,13 +335,34 @@ def _sd_notify(msg: str) -> None:
         log.warning("sd_notify: failed: %s", e)
 
 
+def _reconcile_approved_server_record(name: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep live/state server identity aligned with approved registry.
+
+    A reinstall can legitimately rotate server_id/public_key/fingerprint. Once that
+    new identity is approved, stale hub_servers_state.json must not keep the old
+    identity, otherwise signed /queue requests are checked against the old key.
+    """
+    approved = approved_servers.get(name) or {}
+    if not approved:
+        return entry
+    out = dict(entry)
+    for key in ("server_id", "public_key", "fingerprint"):
+        if approved.get(key):
+            out[key] = approved[key]
+    if approved.get("base_url"):
+        out["base_url"] = approved["base_url"]
+    if approved.get("backend"):
+        out["backend"] = approved["backend"]
+    return out
+
+
 def _load_all_state() -> None:
     now = time.time()
     cutoff = now - STATE_TTL_S
 
     for name, entry in _load_json_dict(HUB_SERVERS_STATE_FILE).items():
         if isinstance(entry, dict) and float(entry.get("time", 0)) >= cutoff:
-            servers[name] = entry
+            servers[name] = _reconcile_approved_server_record(name, entry)
     log.info("state: loaded servers=%s", len(servers))
 
     for srv, tasks in _load_json_dict(HUB_TASKS_STATE_FILE).items():
@@ -460,8 +483,8 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
         "bytes": len(content.encode("utf-8")),
         "lines": lines,
         "file_path": str(path),
-        "preview_head": content[:1500],
-        "preview_tail": content[-512:] if len(content) > 1500 else "",
+        "preview_head": content[:SPILL_PREVIEW_HEAD_CHARS],
+        "preview_tail": content[-SPILL_PREVIEW_TAIL_CHARS:] if len(content) > SPILL_PREVIEW_HEAD_CHARS else "",
         "hint": f"Use shell_exec on hub_server with sed/grep/jq, e.g.: sed -n '1,120p' {shlex.quote(str(path))}",
     }
     hub_srv = _find_hub_server()
@@ -1112,15 +1135,24 @@ def _verify_heartbeat_signature(request: Request, b: Beat, body: bytes) -> None:
     if not ts or not nonce or not sig:
         raise HTTPException(401, "missing signed heartbeat headers")
 
-    pub = b.public_key
     approved = approved_servers.get(b.name) or {}
+    candidate_keys: List[str] = []
     if approved.get("public_key"):
-        pub = approved["public_key"]
-    try:
-        SIGNATURE_NONCES.check_and_store(f"rootd:{b.name}:{b.server_id}", nonce)
-        verify_signature(pub, request.method, request.url.path, ts, nonce, body, sig)
-    except Exception as e:
-        raise HTTPException(401, f"invalid signed heartbeat: {e}") from e
+        candidate_keys.append(str(approved["public_key"]))
+    if b.public_key and b.public_key not in candidate_keys:
+        candidate_keys.append(b.public_key)
+    if not candidate_keys:
+        raise HTTPException(401, "missing heartbeat public key")
+
+    last_error: Optional[Exception] = None
+    for pub in candidate_keys:
+        try:
+            verify_signature(pub, request.method, request.url.path, ts, nonce, body, sig)
+            SIGNATURE_NONCES.check_and_store(f"rootd:{b.name}:{b.server_id}", nonce)
+            return
+        except Exception as e:
+            last_error = e
+    raise HTTPException(401, f"invalid signed heartbeat: {last_error}")
 
 
 def _rootd_artifact_path() -> Path:
@@ -1416,7 +1448,7 @@ async def heartbeat(request: Request, b: Beat = Body(...)):
             log.warning("heartbeat: PENDING changed identity name=%s base_url=%s rid=%s", b.name, b.base_url, rid())
             return {"ok": False, "status": "pending", "reason": "fingerprint_changed"}
 
-    servers[b.name] = b.dict()
+    servers[b.name] = _reconcile_approved_server_record(b.name, b.dict())
     servers[b.name]["time"] = time.time()
     servers[b.name]["status"] = "active"
     pending_servers.pop(b.name, None)
@@ -1507,9 +1539,10 @@ def _approve_pending_server(name: str, approved_by: str = "api", *, approved_via
     approved = _approve_payload(name, payload, approved_by=approved_by, approved_via=approved_via, approved_subject=approved_subject)
     payload["time"] = time.time()
     payload["status"] = "active"
-    servers[name] = payload
+    servers[name] = _reconcile_approved_server_record(name, payload)
     pending_servers.pop(name, None)
     _save_json_dict(PENDING_SERVERS_FILE, pending_servers)
+    _save_json_dict(HUB_SERVERS_STATE_FILE, servers)
     log.info("pending: approved name=%s by=%s rid=%s", name, approved_by, rid())
     return {"ok": True, "status": "approved", "name": name, "server": _sanitize_server(servers[name]), "approved": approved}
 
@@ -2815,6 +2848,8 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         )
         data = await bulk_exec(req)
         result = (data.get("results") or {}).get(srv, {})
+        if not (isinstance(result, dict) and result.get("background")):
+            result = _spill_single_result(srv, result, str(cmd))
         if isinstance(result, dict) and result.get("background") and result.get("task_id"):
             job_id = f"mcp-shell-{int(time.time())}-{uuid.uuid4().hex[:8]}"
             mcp_relay_jobs[job_id] = {

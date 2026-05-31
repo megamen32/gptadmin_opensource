@@ -10,6 +10,7 @@ Endpoints:
   * /api.json          – OpenAPI schema
 """
 import logging
+import hashlib
 from pathlib import Path
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.responses import FileResponse
@@ -26,6 +27,44 @@ BUILD_DIR = REPO_DIR / "build"
 WEBSITE_DIR = REPO_DIR / "website"
 
 app = FastAPI(title="hub-install-proxy", version="1.0")
+
+
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _artifact_meta(path: Path, route: str) -> dict:
+    if not path.exists():
+        raise HTTPException(404, "artifact not found")
+    return {
+        "name": path.name,
+        "size": path.stat().st_size,
+        "sha256": _sha256_file(path),
+        "url": route,
+    }
+
+
+def _artifact_manifest() -> dict:
+    candidates = {
+        "gptadmin.py": (BUILD_DIR / "cli" / "gptadmin.py", "/gptadmin.py"),
+        "rootd.py": (REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "/rootd.py"),
+        "rootd_pure.py": (REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "/rootd_pure.py"),
+        "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
+        "gptadmin-hub.tar.gz": (BUILD_DIR / "gptadmin-hub.tar.gz", "/gptadmin-hub.tar.gz"),
+        "gptadmin-rootd.tar.gz": (BUILD_DIR / "gptadmin-rootd.tar.gz", "/gptadmin-rootd.tar.gz"),
+        "gptadmin-win.zip": (PUBLIC_DIR / "gptadmin-win.zip", "/gptadmin-win.zip"),
+    }
+    artifacts = {}
+    for name, (path, route) in candidates.items():
+        if path.exists():
+            artifacts[name] = _artifact_meta(path, route)
+    return {"artifacts": artifacts}
 
 
 def load_script(path: Path) -> str:
@@ -94,6 +133,25 @@ async def get_cli_py():
 async def get_rootd_pure_py():
     return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
 
+
+@app.get('/rootd.py')
+async def get_rootd_py():
+    return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "rootd.py", "text/x-python")
+
+
+@app.get('/rootd.py.json')
+async def get_rootd_py_meta():
+    return _artifact_meta(REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "/rootd.py")
+
+
+@app.get('/rootd_pure.py.json')
+async def get_rootd_pure_py_meta():
+    return _artifact_meta(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "/rootd_pure.py")
+
+
+@app.get('/manifest.json')
+async def get_manifest_json():
+    return _artifact_manifest()
 
 
 # --- MCP Bridge: userscript + help page ---

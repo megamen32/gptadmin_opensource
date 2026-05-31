@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 import os
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("GPTADMIN_INTEGRATION_TESTS") != "1",
+    reason="legacy live-service integration test; set GPTADMIN_INTEGRATION_TESTS=1",
+)
+
 import time
 import requests
 import socket

@@ -316,8 +316,10 @@ def poll_loop():
         return
     while True:
         try:
-            url = f"{QUEUE_URL}/{socket.gethostname()}?token={TOKEN}"
-            with urlrequest.urlopen(url, timeout=5) as r:
+            queue_path = f"/queue/{ROOTD_NAME}"
+            url = f"{QUEUE_URL}/{ROOTD_NAME}"
+            req = urlrequest.Request(url, headers=_signed_headers('GET', queue_path, b''))
+            with urlrequest.urlopen(req, timeout=5) as r:
                 if r.getcode() == 200:
                     try:
                         job = json.loads(r.read() or b'{}')
@@ -334,9 +336,12 @@ def poll_loop():
                             res = {"error": str(e), "traceback": str(e)}
                             _audit_exec("polling", job.get('cmd', ''), job.get('cwd'), job.get('timeout'), error=str(e), job_id=job.get('id'), started_at=started)
                         try:
-                            result_url = f"{QUEUE_URL}/{socket.gethostname()}/result?token={TOKEN}"
+                            result_path = f"/queue/{ROOTD_NAME}/result"
+                            result_url = f"{QUEUE_URL}/{ROOTD_NAME}/result"
                             data = json.dumps({'id': job.get('id'), 'result': res}).encode()
-                            req = urlrequest.Request(result_url, data=data, headers={'Content-Type': 'application/json'})
+                            headers = {'Content-Type': 'application/json'}
+                            headers.update(_signed_headers('POST', result_path, data))
+                            req = urlrequest.Request(result_url, data=data, headers=headers)
                             urlrequest.urlopen(req, timeout=5)
                         except Exception as e:
                             log.warning('Result send failed: %s', e)
