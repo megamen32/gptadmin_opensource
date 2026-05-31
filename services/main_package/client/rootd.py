@@ -386,6 +386,10 @@ else:
 CALLBACK_QUEUE_URL = os.getenv("ROOTD_CALLBACK_QUEUE_URL") or QUEUE_URL or _derive_hub_queue_url(HUB_URL)
 
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
+QUEUE_TRANSPORT = os.getenv("QUEUE_TRANSPORT", "long_poll").strip().lower()
+QUEUE_LONG_POLL_TIMEOUT_S = int(os.getenv("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
+QUEUE_HTTP_TIMEOUT_S = int(os.getenv("QUEUE_HTTP_TIMEOUT_S", str(QUEUE_LONG_POLL_TIMEOUT_S + 10 if QUEUE_TRANSPORT in {"long_poll", "long-poll", "longpoll"} else 5)))
+QUEUE_IS_LONG_POLL = QUEUE_TRANSPORT in {"long_poll", "long-poll", "longpoll"}
 
 app = FastAPI(title="rootd", version=str(BUILD_VERSION))
 auth = HTTPBearer(auto_error=False)
@@ -577,7 +581,8 @@ def _beat_payload(mode: str):
         "cores": info.get("cores"),
         "mem_mb": info.get("mem_mb"),
         "time": int(time.time()),
-        "mode": mode,
+        "mode": "long_poll" if mode == "polling" and QUEUE_IS_LONG_POLL else mode,
+        "queue_transport": QUEUE_TRANSPORT if mode == "polling" else None,
         "os": info.get("platform", sys.platform),
         "version": BUILD_VERSION,
         "build_version": BUILD_VERSION,
@@ -721,10 +726,13 @@ def poll_loop():
         try:
             srv_name = ROOTD_NAME or socket.gethostname()
             queue_path = f"/queue/{srv_name}"
+            queue_url = f"{QUEUE_URL}/{srv_name}"
+            if QUEUE_IS_LONG_POLL:
+                queue_url += f"?timeout={max(1, QUEUE_LONG_POLL_TIMEOUT_S)}"
             r = requests.get(
-                f"{QUEUE_URL}/{srv_name}",
+                queue_url,
                 headers=_signed_json_headers("GET", queue_path, b""),
-                timeout=5,
+                timeout=QUEUE_HTTP_TIMEOUT_S,
             )
             if r.status_code == 200:
                 job = r.json()
@@ -758,7 +766,10 @@ def poll_loop():
                 log.warning(f"Unexpected status {r.status_code}")
         except Exception as e:
             log.warning(f"Poll failed: {e}")
-        time.sleep(POLL_INT)
+            time.sleep(POLL_INT)
+            continue
+        if not QUEUE_IS_LONG_POLL:
+            time.sleep(POLL_INT)
 
 
 if HUB_URL and TRANSPORT in {"auto", "websocket"} and not QUEUE_URL:
@@ -776,6 +787,8 @@ def version():
     data = build_info("rootd")
     data.update({
         "transport": TRANSPORT,
+        "queue_transport": QUEUE_TRANSPORT if QUEUE_URL else None,
+        "queue_long_poll_timeout_s": QUEUE_LONG_POLL_TIMEOUT_S if QUEUE_URL and QUEUE_IS_LONG_POLL else None,
         "rootd_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",
         "name": ROOTD_NAME or socket.gethostname(),
         "server_id": ROOTD_SERVER_ID,

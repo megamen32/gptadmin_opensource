@@ -293,7 +293,8 @@ def heartbeat_loop():
             'cores': os.cpu_count(),
             'mem_mb': _get_mem_mb(),
             'time': int(time.time()),
-            'mode': 'polling' if QUEUE_URL else 'webhook',
+            'mode': 'long_poll' if QUEUE_URL and QUEUE_IS_LONG_POLL else ('polling' if QUEUE_URL else 'webhook'),
+            'queue_transport': QUEUE_TRANSPORT if QUEUE_URL else None,
             'os': sys.platform,
             'version': BUILD_VERSION,
             'build_version': BUILD_VERSION,
@@ -318,8 +319,10 @@ def poll_loop():
         try:
             queue_path = f"/queue/{ROOTD_NAME}"
             url = f"{QUEUE_URL}/{ROOTD_NAME}"
+            if QUEUE_IS_LONG_POLL:
+                url += f"?timeout={max(1, QUEUE_LONG_POLL_TIMEOUT_S)}"
             req = urlrequest.Request(url, headers=_signed_headers('GET', queue_path, b''))
-            with urlrequest.urlopen(req, timeout=5) as r:
+            with urlrequest.urlopen(req, timeout=QUEUE_HTTP_TIMEOUT_S) as r:
                 if r.getcode() == 200:
                     try:
                         job = json.loads(r.read() or b'{}')
@@ -349,7 +352,10 @@ def poll_loop():
                     log.warning('Unexpected status %s', r.getcode())
         except Exception as e:
             log.warning('Poll failed: %s', e)
-        time.sleep(POLL_INT)
+            time.sleep(POLL_INT)
+            continue
+        if not QUEUE_IS_LONG_POLL:
+            time.sleep(POLL_INT)
 
 
 class Handler(BaseHTTPRequestHandler):

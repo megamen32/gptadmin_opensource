@@ -234,6 +234,8 @@ _oauth_codes: Dict[str, Dict[str, Any]] = {}
 MCP_RELAY_AGENT_TOKEN = os.getenv("MCP_RELAY_AGENT_TOKEN", secrets.token_urlsafe(32))
 MCP_RELAY_DEFAULT_TIMEOUT = int(os.getenv("MCP_RELAY_DEFAULT_TIMEOUT", "30"))
 MCP_RELAY_POLL_MAX_TIMEOUT = int(os.getenv("MCP_RELAY_POLL_MAX_TIMEOUT", "55"))
+QUEUE_LONG_POLL_MAX_TIMEOUT = int(os.getenv("QUEUE_LONG_POLL_MAX_TIMEOUT", "55"))
+QUEUE_LONG_POLL_SLEEP_S = float(os.getenv("QUEUE_LONG_POLL_SLEEP_S", "0.5"))
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 VIRTUAL_SHELL_PREFIX = "shell:"
@@ -2009,15 +2011,19 @@ def _verify_queue_signature(request: Request, srv: str, body: bytes) -> None:
 
 
 @app.get("/queue/{srv}", dependencies=[Depends(ensure_license)])
-async def queue_poll(request: Request, srv: str):
+async def queue_poll(request: Request, srv: str, timeout: int = Query(0, ge=0, le=QUEUE_LONG_POLL_MAX_TIMEOUT)):
     _verify_queue_signature(request, srv, b"")
-    q = queues.get(srv)
-    if q:
-        return q.pop(0)
-    job = _polling_due_task(srv)
-    if job:
-        return job
-    return {}
+    deadline = time.time() + min(max(int(timeout or 0), 0), QUEUE_LONG_POLL_MAX_TIMEOUT)
+    while True:
+        q = queues.get(srv)
+        if q:
+            return q.pop(0)
+        job = _polling_due_task(srv)
+        if job:
+            return job
+        if time.time() >= deadline:
+            return {}
+        await asyncio.sleep(QUEUE_LONG_POLL_SLEEP_S)
 
 
 @app.post("/queue/{srv}/progress", dependencies=[Depends(ensure_license)])
