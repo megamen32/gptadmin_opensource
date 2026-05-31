@@ -108,7 +108,12 @@ function Write-Config {
         "ROOTD_NAME=$RootdName",
         "QUEUE_URL=1",
         "HUB_PUBLIC_KEY_FILE=$HubPublicKeyFile",
-        "ROOTD_SERVICE_NAME=$TaskName"
+        "ROOTD_SERVICE_NAME=$TaskName",
+        "ROOTD_SERVICE_SCOPE=$(if ($UserMode) { 'user' } else { 'system' })",
+        "ROOTD_AUTO_UPDATE=1",
+        "ROOTD_UPDATE_INTERVAL_S=3600",
+        "ROOTD_UPDATE_MANIFEST_URL=$HubUrl/artifacts/rootd.json",
+        "ROOTD_UPDATE_TOKEN=$RootdToken"
     ) | Set-Content -Path $EnvFile -Encoding ASCII
 
     @"
@@ -123,6 +128,11 @@ function Write-Config {
 `$env:QUEUE_URL = '1'
 `$env:HUB_PUBLIC_KEY_FILE = '$HubPublicKeyFile'
 `$env:ROOTD_SERVICE_NAME = '$TaskName'
+`$env:ROOTD_SERVICE_SCOPE = '$(if ($UserMode) { 'user' } else { 'system' })'
+`$env:ROOTD_AUTO_UPDATE = '1'
+`$env:ROOTD_UPDATE_INTERVAL_S = '3600'
+`$env:ROOTD_UPDATE_MANIFEST_URL = '$HubUrl/artifacts/rootd.json'
+`$env:ROOTD_UPDATE_TOKEN = '$RootdToken'
 Set-Location '$InstallDir'
 & '$CurrentExe' *> '$LogDir\rootd.task.log'
 "@ | Set-Content -Path $RunScript -Encoding UTF8

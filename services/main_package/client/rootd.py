@@ -52,7 +52,7 @@ from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import traceback
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urljoin
 
 from gptadmin_security import (
     NonceCache,
@@ -138,9 +138,24 @@ def _derive_hub_queue_url(raw_url: str) -> str | None:
         return urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
     return None
 
+def _resolve_update_url(value: str | None, fallback: str | None = None) -> str:
+    raw = (value or fallback or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return raw
+    base = ROOTD_UPDATE_MANIFEST_URL or _hub_artifact_url("/") or HUB_URL
+    if base and not base.endswith("/"):
+        base = base.rsplit("/", 1)[0] + "/"
+    return urljoin(base, raw)
+
+
 ROOTD_UPDATE_MANIFEST_URL = _env("UPDATE_MANIFEST_URL") or _hub_artifact_url("/artifacts/rootd.json")
 ROOTD_UPDATE_URL = _env("UPDATE_URL") or _hub_artifact_url("/artifacts/rootd.tar.gz")
 ROOTD_UPDATE_TOKEN = _env("UPDATE_TOKEN", "")
+ROOTD_SERVICE_SCOPE = _env("SERVICE_SCOPE", "system" if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0 else "user").lower()
+ROOTD_RESTART_CMD = _env("RESTART_CMD", "")
 ROOTD_OUTBOX_DIR = Path(_env("OUTBOX_DIR", str(Path(ROOTD_IDENTITY_DIR) / "outbox")))
 ROOTD_OUTBOX_RETRY_MIN_S = float(_env("OUTBOX_RETRY_MIN_S", "2"))
 ROOTD_OUTBOX_RETRY_MAX_S = float(_env("OUTBOX_RETRY_MAX_S", "300"))
@@ -907,6 +922,27 @@ def _install_source_update(extract_dir: str, latest: int) -> dict:
     return {"ok": True, "updated": True, "mode": "source", "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
 
 
+def _schedule_restart_after_update() -> None:
+    if ROOTD_RESTART_CMD:
+        cmd = f"sleep 1; {ROOTD_RESTART_CMD}"
+    elif sys.platform == "darwin":
+        label = ROOTD_SERVICE_NAME or "com.gptadmin.rootd"
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        if ROOTD_SERVICE_SCOPE == "user":
+            cmd = f"sleep 1; launchctl kickstart -k gui/{uid}/{label} || launchctl unload ~/Library/LaunchAgents/{label}.plist; launchctl load -w ~/Library/LaunchAgents/{label}.plist"
+        else:
+            cmd = f"sleep 1; launchctl kickstart -k system/{label} || launchctl unload /Library/LaunchDaemons/{label}.plist; launchctl load -w /Library/LaunchDaemons/{label}.plist"
+    elif os.name == "nt":
+        # Windows package normally restarts via Scheduled Task wrapper after process exit.
+        cmd = "ping -n 2 127.0.0.1 >NUL & exit"
+    else:
+        if ROOTD_SERVICE_SCOPE == "user":
+            cmd = f"sleep 1; systemctl --user restart {ROOTD_SERVICE_NAME} || kill -TERM {os.getpid()}"
+        else:
+            cmd = f"sleep 1; systemctl restart {ROOTD_SERVICE_NAME} || kill -TERM {os.getpid()}"
+    subprocess.Popen(["/bin/sh", "-c", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def rootd_update_once() -> dict:
     if not ROOTD_UPDATE_MANIFEST_URL:
         return {"ok": False, "reason": "no manifest url"}
@@ -914,7 +950,7 @@ def rootd_update_once() -> dict:
     latest = int(manifest.get("build_version") or manifest.get("version") or 0)
     if latest <= BUILD_VERSION:
         return {"ok": True, "updated": False, "current": BUILD_VERSION, "latest": latest}
-    url = manifest.get("url") or ROOTD_UPDATE_URL
+    url = _resolve_update_url(manifest.get("url"), ROOTD_UPDATE_URL)
     expected_sha = (manifest.get("sha256") or "").lower().strip()
     if not url or not expected_sha:
         raise RuntimeError("manifest must include url and sha256")
@@ -935,15 +971,15 @@ def rootd_update_once() -> dict:
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(extract_dir)
         if _is_source_install():
-            return _install_source_update(str(extract_dir), latest)
+            raise RuntimeError("source-installed rootd cannot self-update from public artifacts; reinstall the binary package")
         new_bin = Path(_find_rootd_binary(str(extract_dir)))
         backup = current_exe.with_name(current_exe.name + f".bak.{BUILD_VERSION}")
         shutil.copy2(current_exe, backup)
         shutil.copy2(new_bin, current_exe)
         current_exe.chmod(0o755)
     log.info("rootd binary auto-update installed build %s over %s, backup=%s", latest, BUILD_VERSION, backup)
-    subprocess.Popen(["/bin/sh", "-c", f"sleep 1; systemctl restart {ROOTD_SERVICE_NAME}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"ok": True, "updated": True, "mode": "binary", "previous": BUILD_VERSION, "latest": latest, "backup": str(backup)}
+    _schedule_restart_after_update()
+    return {"ok": True, "updated": True, "mode": "binary", "previous": BUILD_VERSION, "latest": latest, "backup": str(backup), "restart": "scheduled"}
 
 
 @app.post("/update/check", dependencies=[Depends(guard)])

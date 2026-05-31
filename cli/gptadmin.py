@@ -590,6 +590,13 @@ def setup_interactive(args):
 
     env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('ROOTD_TOKEN', gen_hex())
+    if install_rootd:
+        env.setdefault('ROOTD_AUTO_UPDATE', '1')
+        env.setdefault('ROOTD_UPDATE_INTERVAL_S', '3600')
+        env.setdefault('ROOTD_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
+        env.setdefault('ROOTD_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/rootd.json')
+        env.setdefault('ROOTD_SERVICE_NAME', svc_rootd_name())
+        env.setdefault('ROOTD_SERVICE_SCOPE', INSTALL_SCOPE)
     rootd_default_uid = os.environ.get('ROOTD_DEFAULT_UID')
     if rootd_default_uid and rootd_default_uid.isdigit() and rootd_default_uid != '0':
         env.setdefault('ROOTD_DEFAULT_UID', rootd_default_uid)
@@ -630,6 +637,12 @@ def setup_interactive(args):
         env['HUB_URL'] = url
 
     configure_rootd_transport(env, install_hub, install_rootd)
+    if install_rootd:
+        hub_for_update = (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+        env['ROOTD_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/rootd.json'
+        env['ROOTD_UPDATE_TOKEN'] = env.get('ROOTD_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        env['ROOTD_SERVICE_NAME'] = svc_rootd_name()
+        env['ROOTD_SERVICE_SCOPE'] = INSTALL_SCOPE
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_ROOTD'] = 'true' if install_rootd else 'false'
