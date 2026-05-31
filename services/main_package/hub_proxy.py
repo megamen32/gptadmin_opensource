@@ -202,6 +202,14 @@ SYNC_TIMEOUT_S = max(15, int(os.getenv("HUB_SYNC_TIMEOUT_S", "35")))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
 MCP_RELAY_RUNNING_REQUEUE_S = int(os.getenv("MCP_RELAY_RUNNING_REQUEUE_S", "300"))
+MCP_RELAY_NO_RETRY_TTL_S = int(os.getenv("MCP_RELAY_NO_RETRY_TTL_S", "300"))
+RETRY_POLICIES = {"none", "offline_queue", "at_least_once"}
+DEFAULT_RETRY_POLICY = os.getenv("HUB_DEFAULT_RETRY_POLICY", "none").strip().lower()
+if DEFAULT_RETRY_POLICY not in RETRY_POLICIES:
+    DEFAULT_RETRY_POLICY = "none"
+MCP_RELAY_DEFAULT_RETRY_POLICY = os.getenv("MCP_RELAY_DEFAULT_RETRY_POLICY", DEFAULT_RETRY_POLICY).strip().lower()
+if MCP_RELAY_DEFAULT_RETRY_POLICY not in RETRY_POLICIES:
+    MCP_RELAY_DEFAULT_RETRY_POLICY = DEFAULT_RETRY_POLICY
 CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "24000"))
 SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "4096"))
 SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "1200"))
@@ -376,7 +384,10 @@ def _load_all_state() -> None:
             if float(task.get("created_at", 0)) < cutoff:
                 continue
             if task.get("status") in {"running", "dispatching"}:
-                task = {**task, "status": "queued_offline", "orphaned_at": int(now), "next_attempt_at": now}
+                if _retry_policy_redelivers(task.get("retry_policy") or "at_least_once"):
+                    task = {**task, "status": "queued_offline", "orphaned_at": int(now), "next_attempt_at": now, "updated_at": int(now)}
+                else:
+                    task = {**task, "status": "orphaned", "orphaned_at": int(now), "updated_at": int(now), "error": "hub restarted before result and retry_policy does not allow redelivery"}
             kept[tid] = task
         if kept:
             background_tasks[srv] = kept
@@ -391,9 +402,9 @@ def _load_all_state() -> None:
     for job_id, job in _load_json_dict(HUB_MCP_JOBS_STATE_FILE).items():
         if isinstance(job, dict) and float(job.get("created_at", 0)) >= cutoff:
             if job.get("status") == "running":
-                if job.get("kind") == "real_mcp":
+                if job.get("kind") == "real_mcp" and _retry_policy_redelivers(job.get("retry_policy") or "at_least_once"):
                     # Hub restart may happen after dispatch but before result. Requeue real MCP jobs
-                    # instead of orphaning them so reconnecting relay agents can receive them.
+                    # only when the caller explicitly asked for at-least-once redelivery.
                     job = {**job, "status": "queued_offline", "orphaned_at": int(now), "updated_at": int(now)}
                 else:
                     job = {**job, "status": "orphaned", "orphaned_at": int(now), "updated_at": int(now)}
@@ -419,24 +430,33 @@ def _save_all_state() -> None:
 
 
 def _prune_state() -> None:
-    cutoff = time.time() - STATE_TTL_S
+    now = time.time()
+    cutoff = now - STATE_TTL_S
 
     for name in [n for n, d in servers.items() if float(d.get("time", 0)) < cutoff]:
         servers.pop(name, None)
 
     for srv in list(background_tasks.keys()):
-        for tid in [t for t, d in background_tasks[srv].items() if float(d.get("created_at", 0)) < cutoff]:
-            background_tasks[srv].pop(tid, None)
+        for tid, task in list(background_tasks[srv].items()):
+            if task.get("status") in QUEUED_TASK_STATUSES and _task_expired(task, now):
+                task.update({"status": "expired", "completed_at": int(now), "updated_at": int(now), "error": "deferred task expired"})
+            if float(task.get("created_at", 0)) < cutoff:
+                background_tasks[srv].pop(tid, None)
         if not background_tasks[srv]:
             background_tasks.pop(srv, None)
 
-    mcp_agent_cutoff = time.time() - max(MCP_RELAY_STALE_RETENTION_S, MCP_RELAY_STALE_TTL_S, DEAD_S)
+    mcp_agent_cutoff = now - max(MCP_RELAY_STALE_RETENTION_S, MCP_RELAY_STALE_TTL_S, DEAD_S)
     for agent_id in [a for a, d in mcp_relay_agents.items() if float(d.get("last_seen", 0)) < mcp_agent_cutoff]:
         mcp_relay_agents.pop(agent_id, None)
 
-    for job_id in [j for j, d in mcp_relay_jobs.items() if float(d.get("created_at", 0)) < cutoff]:
-        mcp_relay_jobs.pop(job_id, None)
-        mcp_relay_results.pop(job_id, None)
+    for job_id, job in list(mcp_relay_jobs.items()):
+        if isinstance(job, dict):
+            expires_at = job.get("expires_at")
+            if job.get("status") in MCP_RELAY_QUEUED_STATUSES and expires_at is not None and float(expires_at) <= now:
+                job.update({"status": "expired", "completed_at": int(now), "updated_at": int(now), "error": {"message": "MCP relay job expired before delivery"}})
+        if float((job or {}).get("created_at", 0)) < cutoff:
+            mcp_relay_jobs.pop(job_id, None)
+            mcp_relay_results.pop(job_id, None)
 
 
 def _ensure_output_store() -> None:
@@ -780,6 +800,7 @@ class BulkExec(BaseModel):
     not_before: Optional[Any] = None
     expires_at: Optional[Any] = None
     max_attempts: Optional[int] = None
+    retry_policy: str = Field(DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
 
 
 class ExecReq(BaseModel):
@@ -823,6 +844,7 @@ class McpRelayToolsReq(BaseModel):
     target: str
     timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
     background: bool = False
+    retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
 
 
 class McpRelayCallReq(BaseModel):
@@ -831,6 +853,7 @@ class McpRelayCallReq(BaseModel):
     arguments: Dict[str, Any] = Field(default_factory=dict)
     timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
     background: bool = False
+    retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1039,25 @@ def _server_alive(srv: str, info: Optional[Dict[str, Any]] = None) -> bool:
     return bool(info) and time.time() - float(info.get("time", 0)) <= DEAD_S
 
 
+def _normalize_retry_policy(value: Any, default: Optional[str] = None) -> str:
+    policy = str(value or default or DEFAULT_RETRY_POLICY).strip().lower()
+    return policy if policy in RETRY_POLICIES else DEFAULT_RETRY_POLICY
+
+
+def _retry_policy_queues_offline(policy: Any) -> bool:
+    return _normalize_retry_policy(policy) in {"offline_queue", "at_least_once"}
+
+
+def _retry_policy_redelivers(policy: Any) -> bool:
+    return _normalize_retry_policy(policy) == "at_least_once"
+
+
+def _retry_policy_max_attempts(policy: Any, explicit: Optional[int], existing: Any = None) -> int:
+    if _retry_policy_redelivers(policy):
+        return int(explicit or existing or HUB_DEFERRED_MAX_ATTEMPTS)
+    return 1
+
+
 def _task_due(task: Dict[str, Any], now: Optional[float] = None) -> bool:
     now = now or time.time()
     return float(task.get("not_before") or 0) <= now and float(task.get("next_attempt_at") or 0) <= now
@@ -1031,8 +1073,9 @@ def _deferred_backoff_s(attempts: int) -> float:
     return min(300.0, 2.0 * (2 ** min(max(attempts - 1, 0), 8)))
 
 
-def _queue_deferred_task(srv: str, tid: str, payload: Dict[str, Any], *, cmd: str, cwd: Any = None, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, reason: str = "queued") -> Dict[str, Any]:
+def _queue_deferred_task(srv: str, tid: str, payload: Dict[str, Any], *, cmd: str, cwd: Any = None, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, reason: str = "queued", retry_policy: Any = None) -> Dict[str, Any]:
     now = time.time()
+    policy = _normalize_retry_policy(retry_policy)
     nb = _parse_time_value(not_before, now) or now
     exp = _parse_time_value(expires_at, now + HUB_DEFERRED_DEFAULT_TTL_S) or (now + HUB_DEFERRED_DEFAULT_TTL_S)
     task = _task_slot(srv, tid)
@@ -1047,7 +1090,8 @@ def _queue_deferred_task(srv: str, tid: str, payload: Dict[str, Any], *, cmd: st
         "not_before": nb,
         "expires_at": exp,
         "attempts": int(task.get("attempts") or 0),
-        "max_attempts": int(max_attempts or task.get("max_attempts") or HUB_DEFERRED_MAX_ATTEMPTS),
+        "max_attempts": _retry_policy_max_attempts(policy, max_attempts, task.get("max_attempts")),
+        "retry_policy": policy,
         "next_attempt_at": max(nb, float(task.get("next_attempt_at") or 0)),
         "queued_reason": reason,
         "updated_at": int(now),
@@ -1164,7 +1208,7 @@ async def _dispatch_due_deferred_tasks() -> None:
                 task.update({"status": "failed", "completed_at": int(now), "updated_at": int(now), "error": "deferred task missing payload"})
                 continue
             task.update({"status": "dispatching", "updated_at": int(now)})
-            await _queue_or_fire_background(srv, info, dict(payload), tid, from_deferred=True)
+            await _queue_or_fire_background(srv, info, dict(payload), tid, retry_policy=task.get("retry_policy"), from_deferred=True)
 
 
 def _signed_rootd_headers(method: str, path: str, body: bytes, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -1706,15 +1750,20 @@ async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid:
     return result
 
 
-async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dict, tid: str, *, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, from_deferred: bool = False) -> None:
+async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dict, tid: str, *, not_before: Any = None, expires_at: Any = None, max_attempts: Optional[int] = None, retry_policy: Any = None, from_deferred: bool = False) -> None:
     mode = info.get("mode", "webhook")
+    policy = _normalize_retry_policy(retry_policy)
     task = _task_slot(srv, tid)
     if not from_deferred:
-        _queue_deferred_task(srv, tid, payload, cmd=str(payload.get("cmd") or ""), cwd=payload.get("cwd"), not_before=not_before, expires_at=expires_at, max_attempts=max_attempts, reason="background")
+        _queue_deferred_task(srv, tid, payload, cmd=str(payload.get("cmd") or ""), cwd=payload.get("cwd"), not_before=not_before, expires_at=expires_at, max_attempts=max_attempts, reason="background", retry_policy=policy)
         task = _task_slot(srv, tid)
+    else:
+        policy = _normalize_retry_policy(task.get("retry_policy"), policy)
     if not _task_due(task) or _task_expired(task) or not _server_alive(srv, info):
         if _task_expired(task):
             task.update({"status": "expired", "completed_at": int(time.time()), "updated_at": int(time.time()), "error": "deferred task expired"})
+        elif not _server_alive(srv, info) and not _retry_policy_queues_offline(policy):
+            task.update({"status": "failed", "completed_at": int(time.time()), "updated_at": int(time.time()), "error": "server offline and retry_policy=none"})
         else:
             task.update({"status": "queued_deferred" if float(task.get("not_before") or 0) > time.time() else "queued_offline", "updated_at": int(time.time())})
         return
@@ -1727,7 +1776,10 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
         ws = ws_sessions.get(srv)
         if not ws:
             attempts = int(task.get("attempts") or 0) + 1
-            task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": "websocket not connected", "updated_at": int(time.time())})
+            if _retry_policy_redelivers(policy):
+                task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": "websocket not connected", "updated_at": int(time.time())})
+            else:
+                task.update({"status": "failed", "attempts": attempts, "completed_at": int(time.time()), "last_error": "websocket not connected", "error": "websocket not connected and retry_policy does not allow retry", "updated_at": int(time.time())})
             return
         attempts = int(task.get("attempts") or 0) + 1
         task.update({"status": "running", "attempts": attempts, "started_at": int(time.time()), "updated_at": int(time.time())})
@@ -1744,7 +1796,10 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
             if not started.get("ok"):
                 task = _task_slot(srv, tid)
                 attempts = int(task.get("attempts") or 0) + 1
-                task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": started, "updated_at": int(time.time())})
+                if _retry_policy_redelivers(policy):
+                    task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": started, "updated_at": int(time.time())})
+                else:
+                    task.update({"status": "failed", "attempts": attempts, "completed_at": int(time.time()), "last_error": started, "error": "callback start failed and retry_policy does not allow retry", "updated_at": int(time.time())})
                 return
             task = _task_slot(srv, tid)
             attempts = int(task.get("attempts") or 0) + 1
@@ -1752,7 +1807,10 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
         except Exception as e:
             task = _task_slot(srv, tid)
             attempts = int(task.get("attempts") or 0) + 1
-            task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": str(e), "updated_at": int(time.time())})
+            if _retry_policy_redelivers(policy):
+                task.update({"status": "queued_offline", "attempts": attempts, "next_attempt_at": time.time() + _deferred_backoff_s(attempts), "last_error": str(e), "updated_at": int(time.time())})
+            else:
+                task.update({"status": "failed", "attempts": attempts, "completed_at": int(time.time()), "last_error": str(e), "error": "dispatch exception and retry_policy does not allow retry", "updated_at": int(time.time())})
 
     asyncio.create_task(runner())
 
@@ -1775,14 +1833,21 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
 
     mode = info.get("mode", "webhook")
     tid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-    not_before_ts = _parse_time_value(req.not_before, time.time()) if req.not_before is not None else None
+    retry_policy = _normalize_retry_policy(req.retry_policy)
+    now = time.time()
+    not_before_ts = _parse_time_value(req.not_before, now) if req.not_before is not None else None
     expires_at_ts = _parse_time_value(req.expires_at, None) if req.expires_at is not None else None
-    should_defer = (not_before_ts is not None and not_before_ts > time.time()) or not _server_alive(srv, info)
+    should_delay = not_before_ts is not None and not_before_ts > now
+    is_offline = not _server_alive(srv, info)
+    should_defer = should_delay or is_offline
+
+    if is_offline and not should_delay and not _retry_policy_queues_offline(retry_policy):
+        return {"error": "server offline", "status": "offline", "retry_policy": retry_policy, "message": "Pass retry_policy=offline_queue or at_least_once to queue for reconnect."}
 
     if req.background or should_defer:
-        await _queue_or_fire_background(srv, info, payload, tid, not_before=not_before_ts, expires_at=expires_at_ts, max_attempts=req.max_attempts)
+        await _queue_or_fire_background(srv, info, payload, tid, not_before=not_before_ts, expires_at=expires_at_ts, max_attempts=req.max_attempts, retry_policy=retry_policy)
         task = _task_slot(srv, tid)
-        return {"background": True, "task_id": tid, "status": task.get("status", "running"), "not_before": task.get("not_before"), "expires_at": task.get("expires_at"), "message": "Command queued for deferred/background execution."}
+        return {"background": True, "task_id": tid, "status": task.get("status", "running"), "retry_policy": task.get("retry_policy", retry_policy), "not_before": task.get("not_before"), "expires_at": task.get("expires_at"), "message": "Command queued for deferred/background execution."}
 
     if mode == "polling":
         _task_slot(srv, tid).update({"cmd": req.cmd, "cwd": req.cwd})
@@ -2916,6 +2981,7 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "background": "true returns job_id for getMcpJob polling",
                 "env": "per-command env object; not persisted",
                 "deferred": "not_before, expires_at and max_attempts control delayed or offline delivery; small numbers mean relative seconds",
+                "retry_policy": "none (default, no offline queue), offline_queue (deliver once when reconnected), at_least_once (redeliver/retry until terminal/expired/max_attempts)",
             },
             "tasks/task_edit": {
                 "task_id": "task id or mcp-shell job id; ack=true removes terminal task after reading",
@@ -2977,6 +3043,7 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
                     "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
                     "max_attempts": {"type": ["integer", "null"], "description": "Maximum deferred dispatch attempts."},
+                    "retry_policy": {"type": "string", "enum": ["none", "offline_queue", "at_least_once"], "default": DEFAULT_RETRY_POLICY, "description": "none: fail if offline/no redelivery; offline_queue: hold until reconnect and deliver once; at_least_once: retry/redeliver until terminal/expired/max_attempts."},
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -3170,6 +3237,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             not_before=args.get("not_before"),
             expires_at=args.get("expires_at"),
             max_attempts=args.get("max_attempts"),
+            retry_policy=str(args.get("retry_policy") or DEFAULT_RETRY_POLICY),
         )
         data = await bulk_exec(req)
         result = (data.get("results") or {}).get(srv, {})
@@ -3273,7 +3341,7 @@ def _mcp_relay_job_deliverable(job: Dict[str, Any], now: float) -> bool:
     status = str(job.get("status") or "")
     if status in MCP_RELAY_QUEUED_STATUSES:
         return True
-    if status == "running":
+    if status == "running" and _retry_policy_redelivers(job.get("retry_policy")):
         started = float(job.get("started_at") or job.get("updated_at") or job.get("created_at") or 0)
         return started > 0 and (now - started) >= MCP_RELAY_RUNNING_REQUEUE_S
     return False
@@ -3311,14 +3379,17 @@ def _mcp_relay_next_queued_job(agent_id: str) -> Optional[Dict[str, Any]]:
     return _mcp_relay_payload_from_job(job)
 
 
-def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, Any]] = None) -> str:
+def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, Any]] = None, *, retry_policy: Any = None) -> str:
     info = mcp_relay_agents.get(agent_id)
     if not info:
         raise HTTPException(404, f"unknown MCP relay agent {agent_id}")
+    policy = _normalize_retry_policy(retry_policy, MCP_RELAY_DEFAULT_RETRY_POLICY)
     job_id = f"mcp-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     params = params or {}
     tool_name = _mcp_relay_tool_name(method, params)
     alive = _mcp_relay_agent_alive(agent_id, info)
+    if not alive and not _retry_policy_queues_offline(policy):
+        raise HTTPException(503, f"MCP relay agent {agent_id} is offline; pass retry_policy=offline_queue or at_least_once to queue for reconnect")
     status = "queued" if alive else "queued_offline"
     mcp_relay_jobs[job_id] = {
         "job_id": job_id,
@@ -3331,7 +3402,8 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
         "queued_reason": "online" if alive else "offline",
-        "expires_at": int(time.time()) + HUB_DEFERRED_DEFAULT_TTL_S,
+        "retry_policy": policy,
+        "expires_at": int(time.time()) + (HUB_DEFERRED_DEFAULT_TTL_S if _retry_policy_queues_offline(policy) else MCP_RELAY_NO_RETRY_TTL_S),
     }
     log.info(
         "mcp_relay: queued target=%s method=%s tool=%s job_id=%s status=%s",
@@ -3461,7 +3533,7 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
     if _is_virtual_shell_agent(target):
         return {"agent_id": target, "status": "completed", "response": _shell_tools_list()}
 
-    job_id = _mcp_relay_enqueue(target, "tools/list", {})
+    job_id = _mcp_relay_enqueue(target, "tools/list", {}, retry_policy=req.retry_policy)
     job = mcp_relay_jobs.get(job_id) or {}
     if job.get("status") == "queued_offline":
         return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tools/list queued for delivery when MCP relay agent reconnects"}
@@ -3484,7 +3556,9 @@ async def mcp_relay_call(req: McpRelayCallReq):
         data = await _hub_tool_call(req.tool_name, req.arguments or {})
         return {"agent_id": target, "status": "completed", "response": data}
     if _is_virtual_shell_agent(target):
-        args = req.arguments or {}
+        args = dict(req.arguments or {})
+        if req.retry_policy and "retry_policy" not in args:
+            args["retry_policy"] = req.retry_policy
         arg_timeout = args.get("timeout") if isinstance(args, dict) else None
         try:
             long_timeout = (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S) or (arg_timeout is not None and int(arg_timeout) > SYNC_TIMEOUT_S)
@@ -3493,9 +3567,17 @@ async def mcp_relay_call(req: McpRelayCallReq):
         data = await _virtual_shell_tool_call(target, req.tool_name, args, request_background=bool(req.background or long_timeout))
         if isinstance(data, dict) and data.get("background"):
             return {"agent_id": target, "status": "running", **data}
-        return {"agent_id": target, "status": "completed", "response": data}
+        status = "completed"
+        if isinstance(data, dict):
+            sc = data.get("structuredContent") if isinstance(data.get("structuredContent"), dict) else {}
+            res = sc.get("result") if isinstance(sc.get("result"), dict) else {}
+            if res.get("status") in {"offline", "expired", "cancelled"}:
+                status = str(res.get("status"))
+            elif res.get("error"):
+                status = "failed"
+        return {"agent_id": target, "status": status, "response": data}
 
-    job_id = _mcp_relay_enqueue(target, "tools/call", {"name": req.tool_name, "arguments": req.arguments or {}})
+    job_id = _mcp_relay_enqueue(target, "tools/call", {"name": req.tool_name, "arguments": req.arguments or {}}, retry_policy=req.retry_policy)
     job = mcp_relay_jobs.get(job_id) or {}
     if job.get("status") == "queued_offline":
         return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tool call queued for delivery when MCP relay agent reconnects"}
@@ -3893,7 +3975,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
             "description": "List tools available on a selected agent.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"target": {"type": "string", "description": "Explicit agent id from list_mcp_agents. There is no default target."}},
+                "properties": {"target": {"type": "string", "description": "Explicit agent id from list_mcp_agents. There is no default target."}, "retry_policy": {"type": "string", "enum": ["none", "offline_queue", "at_least_once"], "default": MCP_RELAY_DEFAULT_RETRY_POLICY}},
                 "required": ["target"],
                 "additionalProperties": False,
             },
@@ -3914,6 +3996,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
                     "arguments": {"type": "object", "additionalProperties": True},
                     "background": {"type": "boolean", "default": False},
                     "timeout": {"type": ["integer", "null"]},
+                    "retry_policy": {"type": "string", "enum": ["none", "offline_queue", "at_least_once"], "default": MCP_RELAY_DEFAULT_RETRY_POLICY},
                 },
                 "required": ["target", "tool_name"],
                 "additionalProperties": False,
@@ -3943,7 +4026,7 @@ async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]
         target = args.get("target")
         if not isinstance(target, str) or not target:
             raise HTTPException(400, "Explicit MCP target is required. Call list_mcp_agents first and pass one returned agent_id.")
-        return await mcp_relay_tools(McpRelayToolsReq(target=target))
+        return await mcp_relay_tools(McpRelayToolsReq(target=target, retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY)))
     if name == "call_mcp_tool":
         target = args.get("target")
         if not isinstance(target, str) or not target:
@@ -3958,6 +4041,7 @@ async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]
                 arguments=args.get("arguments") or {},
                 background=bool(args.get("background", False)),
                 timeout=args.get("timeout"),
+                retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY),
             )
         )
     if name == "get_mcp_job":
@@ -4162,7 +4246,7 @@ async def _bridge_fetch_tools(agent_id: str) -> List[Dict[str, Any]]:
         if _is_virtual_shell_agent(agent_id):
             return _SHELL_TOOLS
         async def _fetch():
-            job_id = _mcp_relay_enqueue(agent_id, "tools/list", {})
+            job_id = _mcp_relay_enqueue(agent_id, "tools/list", {}, retry_policy="none")
             result = await _mcp_relay_wait(job_id, timeout=10)
             return _tools_from_mcp_response(result) if result else []
         return await _bridge_cached_async(f"bridge_tools:{agent_id}", _fetch)
@@ -4258,7 +4342,7 @@ async def mcp_prompt_call(request: Request):
             result = await _virtual_shell_tool_call(validated, tool, args)
         else:
             job_id = _mcp_relay_enqueue(
-                validated, "tools/call", {"name": tool, "arguments": args})
+                validated, "tools/call", {"name": tool, "arguments": args}, retry_policy=str(body.get("retry_policy") or "none"))
             waited = await _mcp_relay_wait(job_id, timeout=MCP_RELAY_DEFAULT_TIMEOUT)
             if waited is not None:
                 result = waited
