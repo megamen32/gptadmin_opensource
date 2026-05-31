@@ -6,14 +6,29 @@ PKG_ALL_URL=${PKG_ALL_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
 PKG_HUB_URL=${PKG_HUB_URL:-https://became.bezrabotnyi.com/gptadmin-hub.tar.gz}
 PKG_ROOTD_URL=${PKG_ROOTD_URL:-https://became.bezrabotnyi.com/gptadmin-rootd.tar.gz}
 
-INSTALL_DIR="/opt/gptadmin"
-CLI_PATH="/usr/local/bin/gptadmin"
-
 err(){ echo "ERROR: $*" >&2; exit 1; }
-need_root(){ [ "$(id -u)" -eq 0 ] || err "run as root (sudo)"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
-need_root
+if [ "$(id -u)" -eq 0 ] && [ "${GPTADMIN_INSTALL_MODE:-system}" != "user" ]; then
+  INSTALL_MODE="system"
+  INSTALL_DIR="${GPTADMIN_HOME:-/opt/gptadmin}"
+  CLI_PATH="${GPTADMIN_CLI_PATH:-/usr/local/bin/gptadmin}"
+else
+  INSTALL_MODE="user"
+  export GPTADMIN_INSTALL_MODE=user
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    if command -v getent >/dev/null 2>&1; then
+      USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    else
+      USER_HOME="$(eval echo ~"$SUDO_USER")"
+    fi
+  else
+    USER_HOME="$HOME"
+  fi
+  INSTALL_DIR="${GPTADMIN_HOME:-$USER_HOME/.local/share/gptadmin}"
+  CLI_PATH="${GPTADMIN_CLI_PATH:-$USER_HOME/.local/bin/gptadmin}"
+fi
+
 have curl || err "curl required"
 have python3 || err "python3 required"
 
@@ -33,7 +48,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
   export ROOTD_DEFAULT_HOME="${ROOTD_DEFAULT_HOME:-$_home}"
 fi
 
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" "$(dirname "$CLI_PATH")"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -48,18 +63,20 @@ else
   cp "$TMP_DIR/pkg/cli/gptadmin.py" "$TMP_DIR/gptadmin.py"
 fi
 install -m 0755 "$TMP_DIR/gptadmin.py" "$CLI_PATH"
+export GPTADMIN_HOME="$INSTALL_DIR"
 
 # 2) Интерактивный мастер (правильный stdin)
 if [ -t 0 ]; then
-  "$CLI_PATH" setup --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" || err "setup failed"
+  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" || err "setup failed"
 elif [ -r /dev/tty ]; then
-  "$CLI_PATH" setup --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" < /dev/tty || err "setup failed"
+  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" < /dev/tty || err "setup failed"
 else
   err "no TTY available for interactive setup. Run: bash <(curl -fsSL https://.../install.sh)"
 fi
 
 cat <<EOF
 \n✅ GPTAdmin CLI установлен: $CLI_PATH
+Режим установки: $INSTALL_MODE
 Использование (примеры):
   gptadmin status
   gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)

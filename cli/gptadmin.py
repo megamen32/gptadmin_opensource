@@ -23,13 +23,55 @@ except Exception:
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
 
+# ===== Install mode & paths =====
+def _early_install_mode_user() -> bool:
+    mode = os.environ.get('GPTADMIN_INSTALL_MODE', '').strip().lower()
+    if mode in {'user', 'userspace', 'local', 'nonroot'}:
+        return True
+    if mode in {'system', 'root', 'admin'}:
+        return False
+    if '--user' in sys.argv:
+        return True
+    if '--system' in sys.argv:
+        return False
+    try:
+        return os.geteuid() != 0
+    except Exception:
+        return False
+
+
+def _install_user_home() -> Path:
+    if os.environ.get('GPTADMIN_USER_HOME'):
+        return Path(os.environ['GPTADMIN_USER_HOME']).expanduser()
+    try:
+        if os.geteuid() == 0:
+            sudo_user = os.environ.get('SUDO_USER')
+            if sudo_user and sudo_user != 'root':
+                try:
+                    return Path(pwd.getpwnam(sudo_user).pw_dir)
+                except Exception:
+                    return Path('/Users' if IS_MACOS else '/home') / sudo_user
+    except Exception:
+        pass
+    return Path.home()
+
+
+IS_USER_INSTALL = _early_install_mode_user()
+INSTALL_SCOPE = 'user' if IS_USER_INSTALL else 'system'
+USER_HOME = _install_user_home()
+
+if IS_USER_INSTALL:
+    INSTALL_DIR = Path(os.environ.get('GPTADMIN_HOME', str(USER_HOME / '.local' / 'share' / 'gptadmin'))).expanduser()
+    ETC_DIR = Path(os.environ.get('GPTADMIN_CONFIG_DIR', str(USER_HOME / '.config' / 'gptadmin'))).expanduser()
+    CLI_PATH = Path(os.environ.get('GPTADMIN_CLI_PATH', str(USER_HOME / '.local' / 'bin' / 'gptadmin'))).expanduser()
+else:
+    INSTALL_DIR = Path(os.environ.get('GPTADMIN_HOME', '/opt/gptadmin'))
+    ETC_DIR = Path(os.environ.get('GPTADMIN_CONFIG_DIR', '/etc/gptadmin'))
+    CLI_PATH = Path(os.environ.get('GPTADMIN_CLI_PATH', '/usr/local/bin/gptadmin'))
+
 # ===== Paths & constants =====
-INSTALL_DIR = Path('/opt/gptadmin')
 BIN_DIR = INSTALL_DIR / 'bin'
-ETC_DIR = Path('/etc/gptadmin')
-ETC_DIR.mkdir(parents=True, exist_ok=True)
 ENV_FILE = ETC_DIR / 'gptadmin.env'
-CLI_PATH = Path('/usr/local/bin/gptadmin')  # для uninstall
 MCP_CONFIG_FILE = ETC_DIR / 'mcp.json'
 MCP_AGENTS_DIR = ETC_DIR / 'mcp-agents.d'
 MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
@@ -38,8 +80,8 @@ MCP_MANAGER = MCP_RUNTIME_DIR / 'mcp_agent_manager.py'
 MCP_RELAY = MCP_RUNTIME_DIR / 'generic_stdio_mcp_relay.py'
 
 if IS_MACOS:
-    SERVICES_DIR = Path('/Library/LaunchDaemons')
-    LOG_DIR = Path('/var/log/gptadmin')
+    SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
+    LOG_DIR = USER_HOME / 'Library' / 'Logs' / 'gptadmin' if IS_USER_INSTALL else Path('/var/log/gptadmin')
     SVC_HUB_LABEL   = 'com.gptadmin.hub'
     SVC_ROOTD_LABEL = 'com.gptadmin.rootd'
     SVC_FRPC_LABEL  = 'com.gptadmin.frpc'
@@ -48,7 +90,7 @@ if IS_MACOS:
     UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 else:
-    SYSTEMD_DIR = Path('/etc/systemd/system')
+    SYSTEMD_DIR = USER_HOME / '.config' / 'systemd' / 'user' if IS_USER_INSTALL else Path('/etc/systemd/system')
     SYSTEMD_HUB   = 'gptadmin-hub.service'
     SYSTEMD_ROOTD = 'gptadmin-rootd.service'
     SYSTEMD_FRPC  = 'gptadmin-frpc.service'
@@ -79,8 +121,10 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 def need_root():
+    if IS_USER_INSTALL:
+        return
     if os.geteuid() != 0:
-        die('run as root (sudo)')
+        die('run as root (sudo), or use --user / GPTADMIN_INSTALL_MODE=user')
 
 def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
@@ -168,6 +212,12 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
+        cli_src = tdp / 'cli'
+        if cli_src.exists():
+            cli_dst = INSTALL_DIR / 'cli'
+            if cli_dst.exists():
+                shutil.rmtree(cli_dst, ignore_errors=True)
+            shutil.copytree(cli_src, cli_dst)
         agents_src = tdp / 'agents'
         if agents_src.exists():
             agents_dst = INSTALL_DIR / 'agents'
@@ -310,7 +360,9 @@ if IS_MACOS:
     def svc_frpc_name():  return SVC_FRPC_LABEL
 
 else:
-    # Linux systemd
+    # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
+    LINUX_WANTED_BY = 'default.target' if IS_USER_INSTALL else 'multi-user.target'
+    LINUX_HARDENING = '' if IS_USER_INSTALL else 'NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectHome=true\n'
 
     UNIT_HUB = f"""
 [Unit]
@@ -324,18 +376,14 @@ EnvironmentFile={ENV_FILE}
 ExecStart={BIN_DIR}/hub_proxy
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-
+{LINUX_HARDENING}
 [Install]
-WantedBy=multi-user.target
+WantedBy={LINUX_WANTED_BY}
 """
 
     UNIT_ROOTD = f"""
 [Unit]
-Description=GPTAdmin TermCP Agent
+Description=GPTAdmin Shell MCP Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -345,13 +393,9 @@ EnvironmentFile={ENV_FILE}
 ExecStart={BIN_DIR}/rootd
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-
+{LINUX_HARDENING}
 [Install]
-WantedBy=multi-user.target
+WantedBy={LINUX_WANTED_BY}
 """
 
     FRPC_UNIT_TPL = """[Unit]
@@ -364,63 +408,68 @@ Type=simple
 ExecStart={frpc_bin} -c {frpc_conf}
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-
+{hardening}
 [Install]
-WantedBy=multi-user.target
+WantedBy={wanted_by}
 """
 
+    def _systemctl_cmd(*args: str) -> list[str]:
+        return ['systemctl', '--user', *args] if IS_USER_INSTALL else ['systemctl', *args]
+
+    def _journalctl_cmd(*args: str) -> list[str]:
+        return ['journalctl', '--user', *args] if IS_USER_INSTALL else ['journalctl', *args]
+
     def svc_daemon_reload():
-        run(['systemctl', 'daemon-reload'])
+        run(_systemctl_cmd('daemon-reload'))
 
     def svc_enable_start(name: str, _unit_path: Path):
-        run(['systemctl', 'enable', name])
-        run(['systemctl', 'restart', name])
+        run(_systemctl_cmd('enable', name))
+        run(_systemctl_cmd('restart', name))
 
     def svc_restart(name: str, _unit_path: Path):
-        run(['systemctl', 'restart', name])
+        run(_systemctl_cmd('restart', name))
 
     def svc_disable_stop(name: str, _unit_path: Path):
-        run(['systemctl', 'disable', '--now', name], check=False)
+        run(_systemctl_cmd('disable', '--now', name), check=False)
 
     def svc_status_multi(names_and_paths):
         names = [n for n, p in names_and_paths if p.exists()]
         if names:
-            run(['systemctl', '--no-pager', 'status', *names], check=False)
+            run(_systemctl_cmd('--no-pager', 'status', *names), check=False)
 
     def svc_start_multi(names_and_paths):
         names = [n for n, p in names_and_paths if p.exists()]
         if names:
-            run(['systemctl', 'start', *names])
+            run(_systemctl_cmd('start', *names))
 
     def svc_stop_multi(names_and_paths):
         names = [n for n, p in reversed(names_and_paths) if p.exists()]
         if names:
-            run(['systemctl', 'stop', *names])
+            run(_systemctl_cmd('stop', *names))
 
     def svc_logs_one(name: str, _log_file=None):
-        run(['journalctl', '-u', name, '-e', '-n', '200', '-f'], check=False)
+        run(_journalctl_cmd('-u', name, '-e', '-n', '200', '-f'), check=False)
 
     def svc_logs_all(names_paths_logs):
         names = [n for n, p, _ in names_paths_logs if p.exists()]
         if names:
-            run(['journalctl', *sum([['-u', u] for u in names], []), '-e', '-n', '200', '-f'], check=False)
+            run(_journalctl_cmd(*sum([['-u', u] for u in names], []), '-e', '-n', '200', '-f'), check=False)
         else:
             print('Журналы пусты: сервисы не установлены.')
 
     def write_hub_unit(install_hub: bool, _install_rootd: bool):
         if install_hub:
+            UNIT_PATH_HUB.parent.mkdir(parents=True, exist_ok=True)
             UNIT_PATH_HUB.write_text(UNIT_HUB)
 
     def write_rootd_unit(_install_hub: bool, install_rootd: bool):
         if install_rootd:
+            UNIT_PATH_ROOTD.parent.mkdir(parents=True, exist_ok=True)
             UNIT_PATH_ROOTD.write_text(UNIT_ROOTD)
 
     def write_frpc_unit(frpc_bin: str):
-        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
+        UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF, hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
 
     def svc_hub_name():   return SYSTEMD_HUB
     def svc_rootd_name(): return SYSTEMD_ROOTD
@@ -528,6 +577,7 @@ def setup_interactive(args):
             die(f'required: {c}')
 
     print('=== GPTAdmin setup ===')
+    print(f'Install mode: {INSTALL_SCOPE}  install_dir={INSTALL_DIR}  config_dir={ETC_DIR}')
     print('Что устанавливать?')
     print('  1) hub_proxy и TermCP agent')
     print('  2) только hub_proxy')
@@ -586,6 +636,7 @@ def setup_interactive(args):
     env_set_many(env)
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
+    CLI_PATH.parent.mkdir(parents=True, exist_ok=True)
     pkg_all   = args.pkg_all   or PKG_ALL_URL_DEFAULT
     pkg_hub   = args.pkg_hub   or PKG_HUB_URL_DEFAULT
     pkg_rootd = args.pkg_rootd or PKG_ROOTD_URL_DEFAULT
@@ -650,6 +701,8 @@ def setup_interactive(args):
          UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None)
     ] if p and Path(p).exists()]
     print("Сервисы: " + ", ".join(installed))
+    if IS_USER_INSTALL and str(CLI_PATH.parent) not in os.environ.get('PATH', '').split(os.pathsep):
+        print(f'Добавьте CLI в PATH: export PATH="{CLI_PATH.parent}:$PATH"')
 
     if install_hub:
         print(f'''
@@ -747,7 +800,7 @@ def _mcp_agent_config(name: str, cfg: dict) -> dict:
         'env': {str(k): str(v) for k, v in (server.get('env') or {}).items()},
         'cwd': str(server.get('cwd') or ('/Users/' + os.environ.get('SUDO_USER', os.environ.get('USER', 'user')) if IS_MACOS else '/')),
         'stdio_format': str(server.get('stdio_format') or server.get('transport') or 'auto'),
-        'run_as_user': str(server.get('run_as_user') or server.get('user') or ('root' if os.name != 'nt' else 'SYSTEM')),
+        'run_as_user': str(server.get('run_as_user') or server.get('user') or (os.environ.get('USER') if IS_USER_INSTALL and os.name != 'nt' else ('root' if os.name != 'nt' else 'SYSTEM'))),
         'auto_start': bool(server.get('auto_start', True)),
         'mode': 'agent-config',
     }
@@ -1479,12 +1532,16 @@ def main():
         sys.argv[1:2] = ['config', 'termcp']
         # Keep old --rootd-url accepted by the TermCP config parser.
     ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + shell agents)')
+    ap.add_argument('--user', action='store_true', help='Use per-user install paths/services (default when not root)')
+    ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
     sub = ap.add_subparsers(dest='cmd')
 
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-rootd')
+    ap_setup.add_argument('--user', action='store_true', help='Use per-user install paths/services')
+    ap_setup.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_setup.set_defaults(func=setup_interactive)
 
     ap_config = sub.add_parser('config', help='Настроить компоненты GPTAdmin')

@@ -26,19 +26,36 @@ param(
     [string]$RootdTransport = $(if ($env:ROOTD_TRANSPORT) { $env:ROOTD_TRANSPORT } else { 'polling' }),
     [string]$HubPublicKey = $(if ($env:HUB_PUBLIC_KEY) { $env:HUB_PUBLIC_KEY } else { 'mEhYDiOc9ZxY54dXelDTsVD2Wjew3f6R0f2dVW2qKPQ' }),
     [string]$TaskName = $env:ROOTD_TASK_NAME,
+    [switch]$User,
+    [switch]$System,
     [switch]$Uninstall,
     [switch]$NoStart
 )
 
 $ErrorActionPreference = 'Stop'
 
+function Test-Admin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($id)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+$IsAdmin = Test-Admin
+$UserMode = $User -or ((-not $System) -and (-not $IsAdmin))
+
 if (-not $PackageUrl) { $PackageUrl = 'https://became.bezrabotnyi.com/gptadmin-win.zip' }
-if (-not $InstallDir) { $InstallDir = Join-Path $env:ProgramData 'gptadmin' }
+if (-not $InstallDir) {
+    if ($UserMode) { $InstallDir = Join-Path $env:LOCALAPPDATA 'gptadmin' }
+    else { $InstallDir = Join-Path $env:ProgramData 'gptadmin' }
+}
 if (-not $HubUrl) { $HubUrl = 'https://gptadmin.bezrabotnyi.com' }
 if (-not $RootdToken) { $RootdToken = ([System.Guid]::NewGuid().ToString('n')) }
 if (-not $RootdName) { $RootdName = $env:COMPUTERNAME }
 if (-not $RootdUrl) { $RootdUrl = "http://$RootdName`:$RootdPort" }
-if (-not $TaskName) { $TaskName = 'gptadmin-rootd' }
+if (-not $TaskName) {
+    if ($UserMode) { $TaskName = "gptadmin-rootd-$env:USERNAME" }
+    else { $TaskName = 'gptadmin-rootd' }
+}
 
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $BinDir = Join-Path $InstallDir 'bin'
@@ -49,10 +66,8 @@ $HubPublicKeyFile = Join-Path $InstallDir 'hub_ed25519.pub'
 $CurrentExe = Join-Path $BinDir 'rootd.exe'
 
 function Require-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($id)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'Run PowerShell as Administrator.'
+    if (-not $IsAdmin) {
+        throw 'Run PowerShell as Administrator, or use -User for per-user install.'
     }
 }
 
@@ -115,13 +130,18 @@ Set-Location '$InstallDir'
 
 function Install-Task {
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`""
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+    if ($UserMode) {
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    } else {
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    }
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 }
 
-Require-Admin
+if (-not $UserMode) { Require-Admin }
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -136,6 +156,7 @@ if (-not $NoStart) { Start-ScheduledTask -TaskName $TaskName }
 Start-Sleep -Seconds 3
 
 Write-Host "Installed GPT Admin rootd"
+Write-Host "InstallMode: $(if ($UserMode) { 'user' } else { 'system' })"
 Write-Host "TaskName: $TaskName"
 Write-Host "InstallDir: $InstallDir"
 Write-Host "PackageUrl: $PackageUrl"
