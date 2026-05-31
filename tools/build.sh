@@ -323,9 +323,14 @@ else
 fi
 
 if [[ -d rootd ]]; then
+  rm -rf client
+  mkdir -p client
+  cp -a ../services/main_package/client/. client/
+  find client -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' | xargs -r rm -rf
   ROOTD_INCLUDE=(rootd)
   [[ -d cli ]] && ROOTD_INCLUDE+=(cli)
   [[ -d agents ]] && ROOTD_INCLUDE+=(agents)
+  [[ -d client ]] && ROOTD_INCLUDE+=(client)
   tar -czf gptadmin-rootd.tar.gz "${ROOTD_INCLUDE[@]}"
   sha256sum gptadmin-rootd.tar.gz > gptadmin-rootd.sha256
   python - <<PY
@@ -338,8 +343,9 @@ pathlib.Path("gptadmin-rootd.json").write_text(json.dumps({
     "git_commit": "$GIT_COMMIT",
     "platform": "linux",
     "arch": "x86_64",
-    "artifact_type": "binary-runtime",
-    "runtime_payload": ["rootd/dist/rootd", "cli", "agents/generic_stdio_mcp_relay"],
+    "artifact_type": "binary-runtime+source",
+    "runtime_payload": ["rootd/dist/rootd", "cli", "agents/generic_stdio_mcp_relay", "client"],
+    "source_payload": ["client/rootd.py", "client/rootd_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
     "sha256": sha,
     "url": "/artifacts/rootd.tar.gz",
 }, ensure_ascii=False, indent=2)+"\n")

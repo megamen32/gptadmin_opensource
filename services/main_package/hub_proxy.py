@@ -773,7 +773,7 @@ class Beat(BaseModel):
     default_home: Optional[str] = None
     default_cwd: Optional[str] = None
     os: str = "linux"
-    mode: str = Field("webhook", pattern="^(webhook|polling|websocket)$")
+    mode: str = Field("webhook", pattern="^(webhook|polling|long_poll|websocket)$")
     version: Optional[int] = None
     build_version: Optional[int] = None
     build_ts: Optional[str] = None
@@ -1193,7 +1193,7 @@ async def _dispatch_due_deferred_tasks() -> None:
     now = time.time()
     for srv, tasks in list(background_tasks.items()):
         info = servers.get(srv)
-        if not info or info.get("mode") == "polling":
+        if not info or info.get("mode") in {"polling", "long_poll"}:
             continue
         if not _server_alive(srv, info):
             continue
@@ -1770,7 +1770,7 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
             task.update({"status": "queued_deferred" if float(task.get("not_before") or 0) > time.time() else "queued_offline", "updated_at": int(time.time())})
         return
 
-    if mode == "polling":
+    if mode in {"polling", "long_poll"}:
         task.update({"status": "queued_ready", "updated_at": int(time.time())})
         return
 
@@ -1851,7 +1851,7 @@ async def _exec_single_server(srv: str, req: BulkExec) -> Dict[str, Any]:
         task = _task_slot(srv, tid)
         return {"background": True, "task_id": tid, "status": task.get("status", "running"), "retry_policy": task.get("retry_policy", retry_policy), "not_before": task.get("not_before"), "expires_at": task.get("expires_at"), "message": "Command queued for deferred/background execution."}
 
-    if mode == "polling":
+    if mode in {"polling", "long_poll"}:
         _task_slot(srv, tid).update({"cmd": req.cmd, "cwd": req.cwd})
         queues.setdefault(srv, []).append({"id": tid, **payload})
         deadline = time.time() + SYNC_TIMEOUT_S
@@ -2104,7 +2104,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
     info = servers.get(srv)
     if not info:
         raise HTTPException(404, f"server '{srv}' not registered")
-    if info.get("mode") in {"polling", "websocket"}:
+    if info.get("mode") in {"polling", "long_poll", "websocket"}:
         if request.method != "POST" or path != "exec":
             raise HTTPException(501, f"{info.get('mode')} mode supports only POST /exec")
         data = ExecReq(**(await request.json()))
