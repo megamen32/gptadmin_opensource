@@ -201,6 +201,7 @@ HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
 SYNC_TIMEOUT_S = max(15, int(os.getenv("HUB_SYNC_TIMEOUT_S", "35")))
 MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
+MCP_RELAY_RUNNING_REQUEUE_S = int(os.getenv("MCP_RELAY_RUNNING_REQUEUE_S", "300"))
 CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "24000"))
 SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "4096"))
 SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "1200"))
@@ -390,7 +391,12 @@ def _load_all_state() -> None:
     for job_id, job in _load_json_dict(HUB_MCP_JOBS_STATE_FILE).items():
         if isinstance(job, dict) and float(job.get("created_at", 0)) >= cutoff:
             if job.get("status") == "running":
-                job = {**job, "status": "orphaned", "orphaned_at": int(now)}
+                if job.get("kind") == "real_mcp":
+                    # Hub restart may happen after dispatch but before result. Requeue real MCP jobs
+                    # instead of orphaning them so reconnecting relay agents can receive them.
+                    job = {**job, "status": "queued_offline", "orphaned_at": int(now), "updated_at": int(now)}
+                else:
+                    job = {**job, "status": "orphaned", "orphaned_at": int(now), "updated_at": int(now)}
             mcp_relay_jobs[job_id] = job
     log.info("state: loaded mcp_jobs=%s", len(mcp_relay_jobs))
 
@@ -2098,10 +2104,30 @@ def _mcp_relay_agent_status(info: Dict[str, Any], now: Optional[float] = None) -
     return "stale"
 
 
+def _mcp_relay_job_counts(agent_id: str) -> Dict[str, int]:
+    counts = {"queued_jobs": 0, "running_jobs": 0, "completed_jobs": 0, "failed_jobs": 0}
+    for job in mcp_relay_jobs.values():
+        if not isinstance(job, dict) or job.get("kind") != "real_mcp" or job.get("agent_id") != agent_id:
+            continue
+        status = str(job.get("status") or "")
+        if status in MCP_RELAY_QUEUED_STATUSES:
+            counts["queued_jobs"] += 1
+        elif status == "running":
+            counts["running_jobs"] += 1
+        elif status == "completed":
+            counts["completed_jobs"] += 1
+        elif status in {"failed", "expired", "orphaned"}:
+            counts["failed_jobs"] += 1
+    return counts
+
+
 def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
     status = _mcp_relay_agent_status(info, now)
     meta = dict(info.get("meta") or {})
     meta.setdefault("age_s", int(_mcp_relay_agent_age_s(info, now)))
+    for k, v in _mcp_relay_job_counts(agent_id).items():
+        if v:
+            meta[k] = v
     return {
         "agent_id": agent_id,
         "name": info.get("name") or agent_id,
@@ -3225,16 +3251,75 @@ def _mcp_relay_tool_name(method: str, params: Optional[Dict[str, Any]] = None) -
     return method
 
 
+MCP_RELAY_QUEUED_STATUSES = {"queued", "queued_offline", "queued_ready", "dispatch_failed"}
+
+
+def _mcp_relay_agent_alive(agent_id: str, info: Optional[Dict[str, Any]] = None) -> bool:
+    info = info or mcp_relay_agents.get(agent_id) or {}
+    return bool(info) and time.time() - float(info.get("last_seen", 0)) <= DEAD_S
+
+
+def _mcp_relay_payload_from_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": job.get("job_id"),
+        "jsonrpc": "2.0",
+        "method": job.get("method"),
+        "params": job.get("params") or {},
+        "created_at": int(job.get("created_at") or time.time()),
+    }
+
+
+def _mcp_relay_job_deliverable(job: Dict[str, Any], now: float) -> bool:
+    status = str(job.get("status") or "")
+    if status in MCP_RELAY_QUEUED_STATUSES:
+        return True
+    if status == "running":
+        started = float(job.get("started_at") or job.get("updated_at") or job.get("created_at") or 0)
+        return started > 0 and (now - started) >= MCP_RELAY_RUNNING_REQUEUE_S
+    return False
+
+
+def _mcp_relay_next_queued_job(agent_id: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    candidates = []
+    for job_id, job in mcp_relay_jobs.items():
+        if not isinstance(job, dict) or job.get("agent_id") != agent_id:
+            continue
+        if not _mcp_relay_job_deliverable(job, now):
+            continue
+        expires_at = job.get("expires_at")
+        if expires_at is not None and float(expires_at) <= now:
+            job.update({"status": "expired", "completed_at": int(now), "updated_at": int(now), "error": {"message": "MCP relay job expired before delivery"}})
+            continue
+        candidates.append((float(job.get("created_at") or 0), job_id, job))
+    if not candidates:
+        # Compatibility with pre-durable in-memory queue entries that may exist before
+        # a hub restart. New jobs are persisted in mcp_relay_jobs and do not use this.
+        q = mcp_relay_queues.get(agent_id) or []
+        if q:
+            return q.pop(0)
+        return None
+    _, job_id, job = sorted(candidates, key=lambda x: (x[0], x[1]))[0]
+    attempts = int(job.get("delivery_attempts") or 0) + 1
+    previous_status = job.get("status")
+    job.update({"status": "running", "delivery_attempts": attempts, "started_at": int(now), "updated_at": int(now)})
+    if previous_status == "running":
+        job.setdefault("redeliveries", 0)
+        job["redeliveries"] = int(job.get("redeliveries") or 0) + 1
+        job["redelivered_at"] = int(now)
+    _audit_event({"event":"mcp_relay_dispatch","target":agent_id,"method":job.get("method"),"tool_name":job.get("tool_name"),"job_id":job_id,"attempts":attempts,"previous_status":previous_status})
+    return _mcp_relay_payload_from_job(job)
+
+
 def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, Any]] = None) -> str:
     info = mcp_relay_agents.get(agent_id)
     if not info:
         raise HTTPException(404, f"unknown MCP relay agent {agent_id}")
-    if time.time() - float(info.get("last_seen", 0)) > DEAD_S:
-        raise HTTPException(503, f"MCP relay agent {agent_id} is offline")
     job_id = f"mcp-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     params = params or {}
     tool_name = _mcp_relay_tool_name(method, params)
-    payload = {"id": job_id, "jsonrpc": "2.0", "method": method, "params": params, "created_at": int(time.time())}
+    alive = _mcp_relay_agent_alive(agent_id, info)
+    status = "queued" if alive else "queued_offline"
     mcp_relay_jobs[job_id] = {
         "job_id": job_id,
         "kind": "real_mcp",
@@ -3242,15 +3327,21 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
         "method": method,
         "tool_name": tool_name,
         "params": params,
-        "status": "queued",
+        "status": status,
         "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "queued_reason": "online" if alive else "offline",
+        "expires_at": int(time.time()) + HUB_DEFERRED_DEFAULT_TTL_S,
     }
-    mcp_relay_queues.setdefault(agent_id, []).append(payload)
     log.info(
-        "mcp_relay: queued target=%s method=%s tool=%s job_id=%s queue_len=%s",
-        agent_id, method, tool_name, job_id, len(mcp_relay_queues.get(agent_id, [])),
+        "mcp_relay: queued target=%s method=%s tool=%s job_id=%s status=%s",
+        agent_id, method, tool_name, job_id, status,
     )
-    _audit_event({"event":"mcp_relay_queued","target":agent_id,"method":method,"tool_name":tool_name,"job_id":job_id,"queue_len":len(mcp_relay_queues.get(agent_id, []))})
+    _audit_event({"event":"mcp_relay_queued","target":agent_id,"method":method,"tool_name":tool_name,"job_id":job_id,"status":status})
+    try:
+        _save_all_state()
+    except Exception as e:
+        log.warning("mcp_relay: immediate state save failed job_id=%s err=%s", job_id, e)
     return job_id
 
 
@@ -3259,10 +3350,9 @@ async def _mcp_relay_wait(job_id: str, timeout: Optional[int] = None) -> Optiona
     deadline = time.time() + wait_s
     job = mcp_relay_jobs.get(job_id)
     if job:
-        job["status"] = "running"
         log.info(
-            "mcp_relay: wait start target=%s method=%s tool=%s job_id=%s timeout_s=%s",
-            job.get("agent_id"), job.get("method"), job.get("tool_name"), job_id, wait_s,
+            "mcp_relay: wait start target=%s method=%s tool=%s job_id=%s timeout_s=%s status=%s",
+            job.get("agent_id"), job.get("method"), job.get("tool_name"), job_id, wait_s, job.get("status"),
         )
     while time.time() < deadline:
         result = mcp_relay_results.get(job_id)
@@ -3313,11 +3403,12 @@ async def mcp_relay_poll(agent_id: str, request: Request, timeout: int = Query(5
     info["last_seen"] = time.time()
     deadline = time.time() + min(max(timeout, 1), MCP_RELAY_POLL_MAX_TIMEOUT)
     while time.time() < deadline:
-        q = mcp_relay_queues.get(agent_id) or []
-        if q:
-            job = q.pop(0)
-            if job.get("id") in mcp_relay_jobs:
-                mcp_relay_jobs[job["id"]]["status"] = "running"
+        job = _mcp_relay_next_queued_job(agent_id)
+        if job:
+            try:
+                _save_all_state()
+            except Exception as e:
+                log.warning("mcp_relay: state save after dispatch failed agent=%s job=%s err=%s", agent_id, job.get("id"), e)
             return job
         await asyncio.sleep(0.5)
     return {}
@@ -3332,7 +3423,10 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
     mcp_relay_results[res.id] = payload
     job = mcp_relay_jobs.get(res.id)
     if job:
-        job.update({"status": "completed" if res.ok else "failed", "result": payload, "completed_at": int(time.time())})
+        if job.get("status") in {"completed", "failed"}:
+            job.setdefault("duplicate_results", 0)
+            job["duplicate_results"] = int(job.get("duplicate_results") or 0) + 1
+        job.update({"status": "completed" if res.ok else "failed", "result": payload, "completed_at": int(time.time()), "updated_at": int(time.time())})
         log.info(
             "mcp_relay: result target=%s method=%s tool=%s job_id=%s ok=%s",
             job.get("agent_id"), job.get("method"), job.get("tool_name"), res.id, res.ok,
@@ -3341,6 +3435,10 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
     else:
         log.info("mcp_relay: result target=%s job_id=%s ok=%s job=unknown", agent_id, res.id, res.ok)
         _audit_event({"event":"mcp_relay_result","target":agent_id,"job_id":res.id,"ok":res.ok,"job":"unknown"})
+    try:
+        _save_all_state()
+    except Exception as e:
+        log.warning("mcp_relay: state save after result failed job_id=%s err=%s", res.id, e)
     return {"ok": True}
 
 
@@ -3364,6 +3462,9 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
         return {"agent_id": target, "status": "completed", "response": _shell_tools_list()}
 
     job_id = _mcp_relay_enqueue(target, "tools/list", {})
+    job = mcp_relay_jobs.get(job_id) or {}
+    if job.get("status") == "queued_offline":
+        return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tools/list queued for delivery when MCP relay agent reconnects"}
     if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tools/list queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
@@ -3395,6 +3496,9 @@ async def mcp_relay_call(req: McpRelayCallReq):
         return {"agent_id": target, "status": "completed", "response": data}
 
     job_id = _mcp_relay_enqueue(target, "tools/call", {"name": req.tool_name, "arguments": req.arguments or {}})
+    job = mcp_relay_jobs.get(job_id) or {}
+    if job.get("status") == "queued_offline":
+        return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tool call queued for delivery when MCP relay agent reconnects"}
     if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tool call queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
