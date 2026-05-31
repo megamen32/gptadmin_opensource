@@ -331,7 +331,18 @@ if [[ -d rootd ]]; then
   python - <<PY
 import json, pathlib
 sha = pathlib.Path("gptadmin-rootd.sha256").read_text().split()[0]
-pathlib.Path("gptadmin-rootd.json").write_text(json.dumps({"component":"rootd","build_version": int("$BUILD_VERSION"), "build_ts":"$BUILD_TS", "git_commit":"$GIT_COMMIT", "sha256": sha, "url":"/artifacts/rootd.tar.gz"}, ensure_ascii=False, indent=2)+"\n")
+pathlib.Path("gptadmin-rootd.json").write_text(json.dumps({
+    "component": "rootd",
+    "build_version": int("$BUILD_VERSION"),
+    "build_ts": "$BUILD_TS",
+    "git_commit": "$GIT_COMMIT",
+    "platform": "linux",
+    "arch": "x86_64",
+    "artifact_type": "binary-runtime",
+    "runtime_payload": ["rootd/dist/rootd", "cli", "agents/generic_stdio_mcp_relay"],
+    "sha256": sha,
+    "url": "/artifacts/rootd.tar.gz",
+}, ensure_ascii=False, indent=2)+"\n")
 PY
   echo "built: $ART_DIR/gptadmin-rootd.tar.gz"
 else

@@ -36,6 +36,7 @@ import hashlib
 import shutil
 import subprocess
 import uuid
+import platform
 from typing import Optional
 from pathlib import Path
 from logging.handlers import WatchedFileHandler
@@ -137,6 +138,21 @@ def _derive_hub_queue_url(raw_url: str) -> str | None:
     if parsed.scheme and parsed.netloc:
         return urlunparse((parsed.scheme, parsed.netloc, "/queue", "", "", ""))
     return None
+
+def _platform_id() -> str:
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "darwin"
+    if os.name == "nt" or sys.platform.startswith("win"):
+        return "windows"
+    return sys.platform
+
+
+def _arch_id() -> str:
+    arch = platform.machine().lower()
+    return {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(arch, arch)
+
 
 def _resolve_update_url(value: str | None, fallback: str | None = None) -> str:
     raw = (value or fallback or "").strip()
@@ -950,6 +966,12 @@ def rootd_update_once() -> dict:
     latest = int(manifest.get("build_version") or manifest.get("version") or 0)
     if latest <= BUILD_VERSION:
         return {"ok": True, "updated": False, "current": BUILD_VERSION, "latest": latest}
+    target_platform = str(manifest.get("platform") or "linux").lower()
+    target_arch = str(manifest.get("arch") or "x86_64").lower()
+    current_platform = _platform_id()
+    current_arch = _arch_id()
+    if target_platform != current_platform or target_arch != current_arch:
+        return {"ok": False, "updated": False, "current": BUILD_VERSION, "latest": latest, "reason": "no compatible binary artifact", "artifact_platform": target_platform, "artifact_arch": target_arch, "platform": current_platform, "arch": current_arch}
     url = _resolve_update_url(manifest.get("url"), ROOTD_UPDATE_URL)
     expected_sha = (manifest.get("sha256") or "").lower().strip()
     if not url or not expected_sha:
