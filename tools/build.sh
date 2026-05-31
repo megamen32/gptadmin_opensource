@@ -324,6 +324,7 @@ fi
 
 if [[ -d rootd ]]; then
   ROOTD_INCLUDE=(rootd)
+  [[ -d cli ]] && ROOTD_INCLUDE+=(cli)
   [[ -d agents ]] && ROOTD_INCLUDE+=(agents)
   tar -czf gptadmin-rootd.tar.gz "${ROOTD_INCLUDE[@]}"
   sha256sum gptadmin-rootd.tar.gz > gptadmin-rootd.sha256

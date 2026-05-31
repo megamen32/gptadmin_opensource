@@ -2272,6 +2272,213 @@ def _run_gptadmin_mcp(argv: List[str], timeout: int = 60, check: bool = True) ->
         raise HTTPException(500, detail=result)
     return result
 
+
+def _server_os_text(srv: str) -> str:
+    return str((servers.get(srv) or {}).get("os") or "")
+
+
+def _server_is_windows(srv: str) -> bool:
+    os_text = _server_os_text(srv).lower()
+    return ("win" in os_text or "mingw" in os_text or "msys" in os_text) and "darwin" not in os_text
+
+
+def _ps_quote(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _target_gptadmin_mcp_command(srv: str, argv: List[str]) -> str:
+    """Build a shell command that runs gptadmin mcp locally on the selected shell host.
+
+    The hub should not guess how to install a service for another OS. It sends a
+    normal shell job to that host, then the local gptadmin CLI/mcp_agent_manager
+    chooses systemd, launchd, or Windows Scheduled Task.
+    """
+    mcp_args = ["mcp", *[str(x) for x in argv]]
+    if _server_is_windows(srv):
+        ps_args = "@(" + ", ".join(_ps_quote(x) for x in mcp_args) + ")"
+        candidates = "@($env:ProgramFiles + '\\GPTAdmin\\gptadmin.py', $env:USERPROFILE + '\\gptadmin\\cli\\gptadmin.py', '.\\cli\\gptadmin.py')"
+        return "\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            f"$mcpArgs = {ps_args}",
+            "$cmd = Get-Command gptadmin -ErrorAction SilentlyContinue",
+            "if ($cmd) { & $cmd.Source @mcpArgs; exit $LASTEXITCODE }",
+            f"foreach ($p in {candidates}) {{ if ($p -and (Test-Path $p)) {{ & python $p @mcpArgs; exit $LASTEXITCODE }} }}",
+            "Write-Error 'gptadmin CLI not found on this host; install/update GPTAdmin package first'",
+            "exit 127",
+        ])
+    tail = shlex.join(mcp_args)
+    return "\n".join([
+        "set -e",
+        "if [ \"$(id -u)\" -eq 0 ]; then ADMIN=\"\"; elif command -v sudo >/dev/null 2>&1; then ADMIN=\"sudo -n\"; else echo 'sudo required for gptadmin mcp service management' >&2; exit 126; fi",
+        f"if command -v gptadmin >/dev/null 2>&1; then exec $ADMIN \"$(command -v gptadmin)\" {tail}; fi",
+        f"if [ -x /usr/local/bin/gptadmin ]; then exec $ADMIN /usr/local/bin/gptadmin {tail}; fi",
+        f"if [ -f ./cli/gptadmin.py ]; then exec $ADMIN python3 ./cli/gptadmin.py {tail}; fi",
+        f"if [ -f \"$HOME/gptadmin/cli/gptadmin.py\" ]; then exec $ADMIN python3 \"$HOME/gptadmin/cli/gptadmin.py\" {tail}; fi",
+        "echo 'gptadmin CLI not found on this host; install/update GPTAdmin package first' >&2",
+        "exit 127",
+    ])
+
+
+def _mcp_json_from_stdout(stdout: str) -> Any:
+    text = (stdout or "").strip()
+    if text.startswith("{") or text.startswith("["):
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+    return None
+
+
+async def _run_target_gptadmin_mcp(srv: str, argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
+    cmd = _target_gptadmin_mcp_command(srv, argv)
+    req = BulkExec(servers=[srv], cmd=cmd, timeout=timeout, background=False)
+    res = await _exec_single_server(srv, req)
+    if not isinstance(res, dict):
+        result = {"ok": False, "returncode": None, "stdout": "", "stderr": "", "json": None, "argv": ["gptadmin", "mcp", *argv], "target_server": srv, "response": res}
+    else:
+        result = {
+            "ok": res.get("returncode") == 0 and not res.get("error"),
+            "returncode": res.get("returncode"),
+            "stdout": res.get("stdout") or "",
+            "stderr": res.get("stderr") or "",
+            "json": _mcp_json_from_stdout(str(res.get("stdout") or "")),
+            "argv": ["gptadmin", "mcp", *argv],
+            "target_server": srv,
+            "run_as_user": res.get("run_as_user"),
+            "cwd_effective": res.get("cwd_effective"),
+        }
+        if res.get("background"):
+            result.update({"background": True, "task_id": res.get("task_id"), "status": res.get("status")})
+        if res.get("error"):
+            result["error"] = res.get("error")
+    if check and not result.get("ok"):
+        raise HTTPException(500, detail=result)
+    return result
+
+
+def _mcp_tools_add_argv(args: Dict[str, Any]) -> List[str]:
+    name = str(args.get("name") or "")
+    if not name:
+        raise HTTPException(400, "mcp_tools add requires name")
+    argv = ["add", name]
+    if args.get("url"):
+        argv += ["--url", str(args.get("url"))]
+    if args.get("stdio_format"):
+        argv += ["--stdio-format", str(args.get("stdio_format"))]
+    if args.get("cwd"):
+        argv += ["--cwd", str(args.get("cwd"))]
+    env = args.get("env") or {}
+    if env and not isinstance(env, dict):
+        raise HTTPException(400, "mcp_tools add env must be an object")
+    for k, v in env.items():
+        argv += ["--env", f"{k}={v}"]
+    if args.get("agent_id"):
+        argv += ["--agent-id", str(args.get("agent_id"))]
+    if args.get("run_as_user"):
+        argv += ["--run-as-user", str(args.get("run_as_user"))]
+    if args.get("hub_url"):
+        argv += ["--hub-url", str(args.get("hub_url"))]
+    if args.get("disabled"):
+        argv.append("--disabled")
+    if args.get("force"):
+        argv.append("--force")
+    command = args.get("command")
+    command_args = args.get("args") or []
+    if command:
+        argv.append(str(command))
+        if not isinstance(command_args, list):
+            raise HTTPException(400, "mcp_tools add args must be a list")
+        argv += [str(x) for x in command_args]
+    elif not args.get("url"):
+        raise HTTPException(400, "mcp_tools add requires url or command")
+    return argv
+
+
+async def _mcp_tools_manage_on_shell(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    action = str(args.get("action") or "list")
+    if action not in {"list", "add", "remove", "install", "status", "cat"}:
+        raise HTTPException(400, f"unsupported mcp_tools action: {action}")
+    verbose = bool(args.get("verbose") or args.get("include_raw"))
+    target = {"target_server": srv, "target_agent": _virtual_shell_agent_id(srv), "target_os": _server_os_text(srv)}
+
+    if action == "list":
+        res = await _run_target_gptadmin_mcp(srv, ["list", "--json"], check=False)
+        if not res.get("ok"):
+            out = {"action": action, "count": 0, "servers": [], "result": _compact_cli_result(res), **target}
+            return out
+        cfg = res.get("json") if isinstance(res.get("json"), dict) else {}
+        data = {"action": action, "servers": cfg.get("mcpServers", {}), "config": cfg, "raw": res, **target}
+        out = _mcp_tools_compact(data, verbose=verbose)
+        out.update(target)
+        return out
+
+    if action == "cat":
+        name = str(args.get("name") or "")
+        res = await _run_target_gptadmin_mcp(srv, ["cat", name] if name else ["cat"], check=False)
+        if not res.get("ok"):
+            return {"action": action, "name": name or None, "result": _compact_cli_result(res), **target}
+        data = {"action": action, "name": name or None, "config": res.get("json"), "raw": res, **target}
+        out = _mcp_tools_compact(data, verbose=verbose)
+        out.update(target)
+        return out
+
+    if action == "status":
+        name = str(args.get("name") or "")
+        argv = ["status"] + ([name] if name else [])
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        data = {"action": action, "name": name or None, "raw": await _run_target_gptadmin_mcp(srv, argv, check=False), **target}
+        out = _mcp_tools_compact(data, verbose=verbose)
+        out.update(target)
+        return out
+
+    if action == "install":
+        name = str(args.get("name") or "")
+        argv = ["install"] + ([name] if name else [])
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        data = {"action": action, "name": name or None, "raw": await _run_target_gptadmin_mcp(srv, argv, timeout=120, check=False), **target}
+        out = _mcp_tools_compact(data, verbose=verbose)
+        out.update(target)
+        return out
+
+    if action == "remove":
+        name = str(args.get("name") or "")
+        if not name:
+            raise HTTPException(400, "mcp_tools remove requires name")
+        before = await _run_target_gptadmin_mcp(srv, ["list", "--json"], check=False)
+        cfg = before.get("json") if isinstance(before.get("json"), dict) else {}
+        server_cfg = (cfg.get("mcpServers") or {}).get(name) or {}
+        agent_id = str(server_cfg.get("agent_id") or "")
+        argv = ["remove", name]
+        if args.get("keep_service"):
+            argv.append("--keep-service")
+        if args.get("backend"):
+            argv += ["--backend", str(args.get("backend"))]
+        raw = await _run_target_gptadmin_mcp(srv, argv, timeout=120, check=False)
+        registry_removed = _forget_mcp_relay_agent(agent_id)
+        data = {"action": action, "name": name, "agent_id": agent_id or None, "registry_removed": registry_removed, "stopped": None, "raw": raw, **target}
+        out = _mcp_tools_compact(data, verbose=verbose)
+        out.update(target)
+        return out
+
+    # add
+    name = str(args.get("name") or "")
+    add_res = await _run_target_gptadmin_mcp(srv, _mcp_tools_add_argv(args), timeout=120)
+    install_res = None
+    if bool(args.get("install", True)) and not args.get("disabled"):
+        install_argv = ["install", name]
+        if args.get("backend"):
+            install_argv += ["--backend", str(args.get("backend"))]
+        install_res = await _run_target_gptadmin_mcp(srv, install_argv, timeout=120)
+    list_res = await _run_target_gptadmin_mcp(srv, ["list", "--json"], check=False)
+    cfg = list_res.get("json") if isinstance(list_res.get("json"), dict) else {}
+    data = {"action": action, "name": name, "added": add_res, "installed": install_res, "server": (cfg.get("mcpServers") or {}).get(name), "config": cfg, **target}
+    out = _mcp_tools_compact(data, verbose=verbose)
+    out.update(target)
+    return out
+
+
 def _compact_cli_result(res: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if res is None:
         return None
@@ -2735,7 +2942,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_tools",
-            "description": "Manage configured GPTAdmin stdio/remote MCP tools: list, add, remove, install, status or cat. Under the hood this uses gptadmin.py mcp.",
+            "description": "Manage GPTAdmin stdio/remote MCP tools on this shell host: list, add, remove, install, status or cat. The local gptadmin CLI/rootd path chooses systemd, launchd or Windows task service handling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2951,13 +3158,16 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         return _mcp_envelope_text(f"{data.get('count', 0)} task(s) on {srv}", data)
 
     if tool_name == "mcp_tools":
-        data = _mcp_tools_manage(args)
+        data = await _mcp_tools_manage_on_shell(srv, args)
         action = data.get("action")
         name = data.get("name")
         if action == "list":
+            result = data.get("result") if isinstance(data.get("result"), dict) else None
+            if result and not result.get("ok", True):
+                return _mcp_envelope_text(f"MCP list on {srv}: failed", data)
             count = len(data.get("servers") or {})
-            return _mcp_envelope_text(f"{count} configured MCP tool(s)", data)
-        return _mcp_envelope_text(f"MCP {action} {name or ''}: ok", data)
+            return _mcp_envelope_text(f"{count} configured MCP tool(s) on {srv}", data)
+        return _mcp_envelope_text(f"MCP {action} {name or ''} on {srv}: ok", data)
 
     if tool_name == "help":
         data = _shell_help(srv, args)
