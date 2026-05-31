@@ -2286,35 +2286,69 @@ def _ps_quote(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+_MCP_RUNTIME_BOOTSTRAP_PY = "import hashlib\nimport json\nimport os\nimport pathlib\nimport stat\nimport sys\nimport tarfile\nimport tempfile\nimport urllib.parse\nimport urllib.request\n\n\ndef log(message):\n    print('gptadmin mcp bootstrap: ' + str(message), file=sys.stderr)\n\n\ndef hub_base():\n    raw = (os.environ.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://gptadmin.bezrabotnyi.com').strip()\n    for suffix in ('/heartbeat', '/queue'):\n        if raw.endswith(suffix):\n            raw = raw[:-len(suffix)]\n    return raw.rstrip('/')\n\n\ndef headers():\n    token = (os.environ.get('ROOTD_UPDATE_TOKEN') or os.environ.get('SHELL_UPDATE_TOKEN') or os.environ.get('GPTADMIN_UPDATE_TOKEN') or os.environ.get('CTL_TOKEN') or '').strip()\n    return {'Authorization': 'Bearer ' + token} if token else {}\n\n\ndef artifact_url(base, value):\n    value = (value or '/artifacts/rootd.tar.gz').strip()\n    if value.startswith('/'):\n        return base + value\n    parsed = urllib.parse.urlparse(value)\n    b = urllib.parse.urlparse(base)\n    if parsed.scheme == 'http' and b.scheme == 'https' and parsed.netloc == b.netloc:\n        return urllib.parse.urlunparse(('https', parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))\n    return value\n\n\ndef read_json(url, hdrs):\n    req = urllib.request.Request(url, headers=hdrs)\n    with urllib.request.urlopen(req, timeout=30) as r:\n        return json.loads(r.read().decode('utf-8'))\n\n\ndef download(url, hdrs, path):\n    req = urllib.request.Request(url, headers=hdrs)\n    h = hashlib.sha256(); total = 0\n    with urllib.request.urlopen(req, timeout=120) as r, open(path, 'wb') as f:\n        while True:\n            chunk = r.read(1024 * 1024)\n            if not chunk:\n                break\n            h.update(chunk); f.write(chunk); total += len(chunk)\n    return h.hexdigest(), total\n\n\ndef install_dir():\n    candidates = []\n    for key in ('GPTADMIN_HOME', 'ROOTD_HOME'):\n        val = os.environ.get(key)\n        if val:\n            candidates.append(pathlib.Path(val))\n    candidates += [pathlib.Path.cwd(), pathlib.Path.home() / 'gptadmin', pathlib.Path('/opt/gptadmin')]\n    for c in candidates:\n        try:\n            if c.exists() and ((c / 'rootd.py').exists() or (c / 'requirements.txt').exists() or c == pathlib.Path.cwd()):\n                return c.resolve()\n        except Exception:\n            pass\n    return pathlib.Path.cwd().resolve()\n\n\ndef safe_members(tf, dst):\n    root = dst.resolve()\n    for member in tf.getmembers():\n        name = member.name.replace('\\\\', '/')\n        if name.startswith('/') or '..' in pathlib.PurePosixPath(name).parts:\n            continue\n        wanted = name == 'cli' or name.startswith('cli/') or name == 'agents' or name.startswith('agents/generic_stdio_mcp_relay/')\n        if not wanted:\n            continue\n        target = (dst / name).resolve()\n        if target != root and not str(target).startswith(str(root) + os.sep):\n            continue\n        member.name = name\n        yield member\n\n\ndef chmod_runtime(dst):\n    for rel in ('cli/gptadmin.py', 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py', 'agents/generic_stdio_mcp_relay/generic_stdio_mcp_relay.py'):\n        path = dst / rel\n        if path.exists():\n            try:\n                path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)\n            except Exception:\n                pass\n\n\ndef main():\n    dst = install_dir(); base = hub_base(); hdrs = headers()\n    manifest = read_json(base + '/artifacts/rootd.json', hdrs)\n    url = artifact_url(base, manifest.get('url'))\n    expected = (manifest.get('sha256') or '').lower().strip()\n    with tempfile.TemporaryDirectory(prefix='gptadmin-mcp-runtime-') as td:\n        archive = pathlib.Path(td) / 'rootd.tar.gz'\n        actual, total = download(url, hdrs, archive)\n        if expected and actual.lower() != expected:\n            raise SystemExit('sha256 mismatch for rootd artifact: got %s expected %s' % (actual, expected))\n        with tarfile.open(archive, 'r:gz') as tf:\n            members = list(safe_members(tf, dst))\n            names = {m.name for m in members}\n            if 'cli/gptadmin.py' not in names or 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py' not in names:\n                raise SystemExit('rootd artifact does not contain cli/gptadmin.py and generic_stdio_mcp_relay runtime')\n            tf.extractall(dst, members)\n    chmod_runtime(dst)\n    if not (dst / 'cli' / 'gptadmin.py').exists():\n        raise SystemExit('bootstrap finished but cli/gptadmin.py is still missing')\n    log(json.dumps({'ok': True, 'install_dir': str(dst), 'artifact_build_version': manifest.get('build_version'), 'artifact_size': manifest.get('size') or total, 'runtime_payload': manifest.get('runtime_payload')}, ensure_ascii=False, sort_keys=True))\n\n\nif __name__ == '__main__':\n    main()\n"
+
+
+def _mcp_runtime_bootstrap_b64() -> str:
+    return base64.b64encode(_MCP_RUNTIME_BOOTSTRAP_PY.encode("utf-8")).decode("ascii")
+
+
 def _target_gptadmin_mcp_command(srv: str, argv: List[str]) -> str:
     """Build a shell command that runs gptadmin mcp locally on the selected shell host.
 
     The hub should not guess how to install a service for another OS. It sends a
     normal shell job to that host, then the local gptadmin CLI/mcp_agent_manager
-    chooses systemd, launchd, or Windows Scheduled Task.
+    chooses systemd, launchd, or Windows Scheduled Task. If the local MCP runtime
+    is missing, the same command bootstraps cli/ + agents/ from the rootd update
+    artifact first, using ROOTD_UPDATE_TOKEN like rootd auto-update.
     """
     mcp_args = ["mcp", *[str(x) for x in argv]]
+    bootstrap_b64 = _mcp_runtime_bootstrap_b64()
     if _server_is_windows(srv):
         ps_args = "@(" + ", ".join(_ps_quote(x) for x in mcp_args) + ")"
-        candidates = "@($env:ProgramFiles + '\\GPTAdmin\\gptadmin.py', $env:USERPROFILE + '\\gptadmin\\cli\\gptadmin.py', '.\\cli\\gptadmin.py')"
+        bootstrap_ps = _ps_quote(bootstrap_b64)
+        candidates = "@($env:ProgramFiles + '\\GPTAdmin\\gptadmin.py', $env:USERPROFILE + '\\gptadmin\\cli\\gptadmin.py', (Join-Path (Get-Location) 'cli\\gptadmin.py'))"
         return "\n".join([
             "$ErrorActionPreference = 'Stop'",
             f"$mcpArgs = {ps_args}",
-            "$cmd = Get-Command gptadmin -ErrorAction SilentlyContinue",
-            "if ($cmd) { & $cmd.Source @mcpArgs; exit $LASTEXITCODE }",
-            f"foreach ($p in {candidates}) {{ if ($p -and (Test-Path $p)) {{ & python $p @mcpArgs; exit $LASTEXITCODE }} }}",
-            "Write-Error 'gptadmin CLI not found on this host; install/update GPTAdmin package first'",
+            f"$bootstrapB64 = {bootstrap_ps}",
+            "function Invoke-GptAdminMcp {",
+            "  $cmd = Get-Command gptadmin -ErrorAction SilentlyContinue",
+            "  if ($cmd) { & $cmd.Source @mcpArgs; exit $LASTEXITCODE }",
+            f"  foreach ($p in {candidates}) {{ if ($p -and (Test-Path $p)) {{ & python $p @mcpArgs; exit $LASTEXITCODE }} }}",
+            "  return $false",
+            "}",
+            "Invoke-GptAdminMcp | Out-Null",
+            "$py = Get-Command python -ErrorAction SilentlyContinue",
+            "if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }",
+            "if (-not $py) { Write-Error 'python/python3 required to bootstrap GPTAdmin MCP runtime'; exit 127 }",
+            "$code = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($bootstrapB64))",
+            "$tmp = Join-Path $env:TEMP ('gptadmin-mcp-bootstrap-' + [Guid]::NewGuid().ToString() + '.py')",
+            "Set-Content -Path $tmp -Value $code -Encoding UTF8",
+            "& $py.Source $tmp",
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            "Invoke-GptAdminMcp | Out-Null",
+            "Write-Error 'gptadmin CLI not found after bootstrap'",
             "exit 127",
         ])
     tail = shlex.join(mcp_args)
+    bootstrap_q = shlex.quote(bootstrap_b64)
     return "\n".join([
         "set -e",
-        "if [ \"$(id -u)\" -eq 0 ]; then ADMIN=\"\"; elif command -v sudo >/dev/null 2>&1; then ADMIN=\"sudo -n\"; else echo 'sudo required for gptadmin mcp service management' >&2; exit 126; fi",
-        f"if command -v gptadmin >/dev/null 2>&1; then exec $ADMIN \"$(command -v gptadmin)\" {tail}; fi",
-        f"if [ -x /usr/local/bin/gptadmin ]; then exec $ADMIN /usr/local/bin/gptadmin {tail}; fi",
-        f"if [ -f ./cli/gptadmin.py ]; then exec $ADMIN python3 ./cli/gptadmin.py {tail}; fi",
-        f"if [ -f \"$HOME/gptadmin/cli/gptadmin.py\" ]; then exec $ADMIN python3 \"$HOME/gptadmin/cli/gptadmin.py\" {tail}; fi",
-        "echo 'gptadmin CLI not found on this host; install/update GPTAdmin package first' >&2",
+        "PYBIN=$(command -v python3 || command -v python || true)",
+        "if [ -z \"$PYBIN\" ]; then echo 'python3/python required to bootstrap GPTAdmin MCP runtime' >&2; exit 127; fi",
+        "if [ \"$(id -u)\" -eq 0 ]; then ADMIN=\"\"; elif command -v sudo >/dev/null 2>&1; then ADMIN=\"sudo -n\"; else ADMIN=\"\"; fi",
+        "run_gptadmin_mcp() {",
+        f"  if command -v gptadmin >/dev/null 2>&1; then exec $ADMIN \"$(command -v gptadmin)\" {tail}; fi",
+        f"  if [ -x /usr/local/bin/gptadmin ]; then exec $ADMIN /usr/local/bin/gptadmin {tail}; fi",
+        f"  if [ -f ./cli/gptadmin.py ]; then exec $ADMIN \"$PYBIN\" ./cli/gptadmin.py {tail}; fi",
+        f"  if [ -f \"$HOME/gptadmin/cli/gptadmin.py\" ]; then exec $ADMIN \"$PYBIN\" \"$HOME/gptadmin/cli/gptadmin.py\" {tail}; fi",
+        "  return 1",
+        "}",
+        "if run_gptadmin_mcp; then exit $?; fi",
+        f"printf %s {bootstrap_q} | $ADMIN \"$PYBIN\" -c 'import base64,sys; exec(base64.b64decode(sys.stdin.read()).decode(\"utf-8\"))'",
+        "if run_gptadmin_mcp; then exit $?; fi",
+        "echo 'gptadmin CLI not found after bootstrap' >&2",
         "exit 127",
     ])
 
