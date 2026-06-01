@@ -198,8 +198,8 @@ MCP_RELAY_STALE_RETENTION_S = int(os.getenv("MCP_RELAY_STALE_RETENTION_S", str(3
 HUB_DEFERRED_DISPATCH_INTERVAL_S = float(os.getenv("HUB_DEFERRED_DISPATCH_INTERVAL_S", "2"))
 HUB_DEFERRED_DEFAULT_TTL_S = int(os.getenv("HUB_DEFERRED_DEFAULT_TTL_S", str(7 * 86400)))
 HUB_DEFERRED_MAX_ATTEMPTS = int(os.getenv("HUB_DEFERRED_MAX_ATTEMPTS", "1000"))
-SYNC_TIMEOUT_S = max(15, int(os.getenv("HUB_SYNC_TIMEOUT_S", "35")))
-MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 25))))
+SYNC_TIMEOUT_S = max(1, int(os.getenv("HUB_SYNC_TIMEOUT_S", "15")))
+MCP_RELAY_SYNC_WAIT_MAX_S = int(os.getenv("MCP_RELAY_SYNC_WAIT_MAX_S", str(min(SYNC_TIMEOUT_S, 15))))
 MCP_RELAY_REQUEST_TIMEOUT_MAX_S = int(os.getenv("MCP_RELAY_REQUEST_TIMEOUT_MAX_S", "3600"))
 MCP_RELAY_RUNNING_REQUEUE_S = int(os.getenv("MCP_RELAY_RUNNING_REQUEUE_S", "300"))
 MCP_RELAY_NO_RETRY_TTL_S = int(os.getenv("MCP_RELAY_NO_RETRY_TTL_S", "300"))
@@ -3227,12 +3227,10 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         cmd = args.get("cmd")
         if not cmd:
             raise HTTPException(400, "shell_exec requires cmd")
-        requested_timeout = args.get("timeout")
-        try:
-            long_timeout = requested_timeout is not None and int(requested_timeout) > SYNC_TIMEOUT_S
-        except Exception:
-            long_timeout = False
-        background = bool(args.get("background", False) or request_background or long_timeout)
+        # The command timeout is the subprocess limit on the agent, not a reason
+        # to skip the hub's synchronous wait window.  A call becomes background
+        # only when requested explicitly or after the sync wait expires.
+        background = bool(args.get("background", False) or request_background)
         req = BulkExec(
             servers=[srv],
             cmd=str(cmd),
@@ -3543,7 +3541,7 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
     job = mcp_relay_jobs.get(job_id) or {}
     if job.get("status") == "queued_offline":
         return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tools/list queued for delivery when MCP relay agent reconnects"}
-    if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
+    if req.background:
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tools/list queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
@@ -3565,12 +3563,7 @@ async def mcp_relay_call(req: McpRelayCallReq):
         args = dict(req.arguments or {})
         if req.retry_policy and "retry_policy" not in args:
             args["retry_policy"] = req.retry_policy
-        arg_timeout = args.get("timeout") if isinstance(args, dict) else None
-        try:
-            long_timeout = (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S) or (arg_timeout is not None and int(arg_timeout) > SYNC_TIMEOUT_S)
-        except Exception:
-            long_timeout = bool(req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S)
-        data = await _virtual_shell_tool_call(target, req.tool_name, args, request_background=bool(req.background or long_timeout))
+        data = await _virtual_shell_tool_call(target, req.tool_name, args, request_background=bool(req.background))
         if isinstance(data, dict) and data.get("background"):
             return {"agent_id": target, "status": "running", **data}
         status = "completed"
@@ -3587,7 +3580,7 @@ async def mcp_relay_call(req: McpRelayCallReq):
     job = mcp_relay_jobs.get(job_id) or {}
     if job.get("status") == "queued_offline":
         return {"agent_id": target, "status": "queued_offline", "background": True, "job_id": job_id, "message": "tool call queued for delivery when MCP relay agent reconnects"}
-    if req.background or (req.timeout is not None and req.timeout > MCP_RELAY_SYNC_WAIT_MAX_S):
+    if req.background:
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tool call queued"}
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
