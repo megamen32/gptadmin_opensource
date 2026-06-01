@@ -29,3 +29,14 @@ def test_windows_truncate_regression_none_result():
     # Regression for subprocess implementations that may return None stdout/stderr.
     assert rootd_win._truncate(None) == ""
     assert rootd_win._truncate(b"abc") == "abc"
+
+def test_rootd_pure_declares_long_poll_queue_vars():
+    import rootd_pure
+
+    assert isinstance(rootd_pure.QUEUE_TRANSPORT, str)
+    assert isinstance(rootd_pure.QUEUE_LONG_POLL_TIMEOUT_S, int)
+    assert isinstance(rootd_pure.QUEUE_HTTP_TIMEOUT_S, int)
+    assert rootd_pure.QUEUE_IS_LONG_POLL == (
+        rootd_pure.QUEUE_TRANSPORT in {"long_poll", "long-poll", "longpoll"}
+    )
+

@@ -29,6 +29,27 @@ ROOTD_URL = os.getenv("ROOTD_URL")
 PORT = int(os.getenv("ROOTD_PORT", "25900"))
 QUEUE_URL = os.getenv("QUEUE_URL")
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
+QUEUE_TRANSPORT = os.getenv("QUEUE_TRANSPORT", "long_poll").strip().lower()
+QUEUE_LONG_POLL_TIMEOUT_S = int(os.getenv("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
+QUEUE_IS_LONG_POLL = QUEUE_TRANSPORT in {"long_poll", "long-poll", "longpoll"}
+QUEUE_HTTP_TIMEOUT_S = int(os.getenv(
+    "QUEUE_HTTP_TIMEOUT_S",
+    str(QUEUE_LONG_POLL_TIMEOUT_S + 10 if QUEUE_IS_LONG_POLL else 5),
+))
+
+def _queue_is_long_poll() -> bool:
+    # Defensive guard for partially updated/source-patched installs: older code
+    # crashed in heartbeat/poll when QUEUE_IS_LONG_POLL was referenced before it
+    # existed. Keep the default safe for queue transports.
+    return bool(globals().get("QUEUE_IS_LONG_POLL", bool(QUEUE_URL)))
+
+
+def _queue_http_timeout_s() -> int:
+    return int(globals().get("QUEUE_HTTP_TIMEOUT_S", 65 if _queue_is_long_poll() else 5))
+
+
+def _queue_long_poll_timeout_s() -> int:
+    return int(globals().get("QUEUE_LONG_POLL_TIMEOUT_S", 55))
 
 ROOTD_NAME = os.getenv("ROOTD_NAME") or socket.gethostname()
 ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else os.path.expanduser("~/.gptadmin"))
@@ -293,7 +314,7 @@ def heartbeat_loop():
             'cores': os.cpu_count(),
             'mem_mb': _get_mem_mb(),
             'time': int(time.time()),
-            'mode': 'long_poll' if QUEUE_URL and QUEUE_IS_LONG_POLL else ('polling' if QUEUE_URL else 'webhook'),
+            'mode': 'long_poll' if QUEUE_URL and _queue_is_long_poll() else ('polling' if QUEUE_URL else 'webhook'),
             'queue_transport': QUEUE_TRANSPORT if QUEUE_URL else None,
             'os': sys.platform,
             'version': BUILD_VERSION,
@@ -319,10 +340,10 @@ def poll_loop():
         try:
             queue_path = f"/queue/{ROOTD_NAME}"
             url = f"{QUEUE_URL}/{ROOTD_NAME}"
-            if QUEUE_IS_LONG_POLL:
-                url += f"?timeout={max(1, QUEUE_LONG_POLL_TIMEOUT_S)}"
+            if _queue_is_long_poll():
+                url += f"?timeout={max(1, _queue_long_poll_timeout_s())}"
             req = urlrequest.Request(url, headers=_signed_headers('GET', queue_path, b''))
-            with urlrequest.urlopen(req, timeout=QUEUE_HTTP_TIMEOUT_S) as r:
+            with urlrequest.urlopen(req, timeout=_queue_http_timeout_s()) as r:
                 if r.getcode() == 200:
                     try:
                         job = json.loads(r.read() or b'{}')
@@ -354,7 +375,7 @@ def poll_loop():
             log.warning('Poll failed: %s', e)
             time.sleep(POLL_INT)
             continue
-        if not QUEUE_IS_LONG_POLL:
+        if not _queue_is_long_poll():
             time.sleep(POLL_INT)
 
 

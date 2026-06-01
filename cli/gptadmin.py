@@ -191,7 +191,25 @@ def ensure_https(url: str):
 # download & extract
 
 def download(url: str, dest: Path):
-    run(['curl', '-fsSL', url, '-o', str(dest)])
+    """Download a file with curl's progress meter visible.
+
+    curl's default meter shows total size, received bytes, average speed,
+    elapsed time, estimated time left and current speed when Content-Length is
+    available. Set GPTADMIN_DOWNLOAD_QUIET=1 to keep the old silent behavior.
+    """
+    quiet = os.environ.get('GPTADMIN_DOWNLOAD_QUIET', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    if quiet:
+        cmd = ['curl', '-fsSL', url, '-o', str(dest)]
+    else:
+        print(f'  URL: {url}', flush=True)
+        cmd = ['curl', '-fL', url, '-o', str(dest)]
+    run(cmd)
+    try:
+        size = dest.stat().st_size
+    except OSError:
+        size = 0
+    if size:
+        print(f'  Готово: {size / (1024 * 1024):.1f} MiB -> {dest}', flush=True)
 
 def extract_tgz(tgz_path: Path, target_dir: Path):
     with tarfile.open(tgz_path, 'r:gz') as tar:
@@ -299,8 +317,54 @@ if IS_MACOS:
         run(['launchctl', 'unload', str(unit_path)], check=False)
         run(['launchctl', 'load', '-w', str(unit_path)], check=False)
 
-    def svc_disable_stop(_label: str, unit_path: Path):
-        run(['launchctl', 'unload', '-w', str(unit_path)], check=False)
+    def _launchd_uid() -> str:
+        if IS_USER_INSTALL:
+            sudo_uid = os.environ.get('SUDO_UID')
+            if sudo_uid and sudo_uid != '0':
+                return sudo_uid
+            try:
+                return str(os.getuid())
+            except Exception:
+                return '0'
+        return ''
+
+    def _launchd_domain() -> str:
+        return f'gui/{_launchd_uid()}' if IS_USER_INSTALL else 'system'
+
+    def _launchctl_capture(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(args, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def _launchd_service_target(label: str) -> str:
+        return f'{_launchd_domain()}/{label}'
+
+    def _launchd_is_loaded(label: str) -> bool:
+        return _launchctl_capture(['launchctl', 'print', _launchd_service_target(label)]).returncode == 0
+
+    def _launchd_stop(label: str, unit_path: Path) -> tuple[bool, list[str]]:
+        attempts = [
+            ['launchctl', 'bootout', _launchd_service_target(label)],
+            ['launchctl', 'remove', label],
+        ]
+        if unit_path.exists():
+            attempts.insert(1, ['launchctl', 'bootout', _launchd_domain(), str(unit_path)])
+            attempts.append(['launchctl', 'unload', '-w', str(unit_path)])
+        messages: list[str] = []
+        for cmd in attempts:
+            res = _launchctl_capture(cmd)
+            if res.returncode != 0 and res.stdout.strip():
+                messages.append('$ ' + ' '.join(cmd) + '\n' + res.stdout.strip())
+        loaded = _launchd_is_loaded(label)
+        if loaded and not messages:
+            messages.append(f'launchd service is still loaded: {_launchd_service_target(label)}')
+        return (not loaded), messages
+
+    def svc_disable_stop(label: str, unit_path: Path):
+        ok, messages = _launchd_stop(label, unit_path)
+        if not ok:
+            print(f'WARN: не удалось выгрузить launchd service {label}', file=sys.stderr)
+            for msg in messages[-3:]:
+                print(msg, file=sys.stderr)
+        return ok
 
     def svc_status_multi(labels_and_paths):
         for label, path in labels_and_paths:
@@ -313,9 +377,9 @@ if IS_MACOS:
                 run(['launchctl', 'load', '-w', str(path)], check=False)
 
     def svc_stop_multi(labels_and_paths):
-        for _label, path in reversed(labels_and_paths):
-            if path.exists():
-                run(['launchctl', 'unload', str(path)], check=False)
+        for label, path in reversed(labels_and_paths):
+            if path.exists() or _launchd_is_loaded(label):
+                svc_disable_stop(label, path)
 
     def svc_logs_one(_label: str, log_file: Path):
         if log_file.exists():
@@ -1510,10 +1574,13 @@ def safe_rm(p: Path):
 
 def cmd_uninstall(args):
     need_root()
+    failures = []
     for name, path in [(svc_frpc_name(), UNIT_PATH_FRPC),
                        (svc_rootd_name(), UNIT_PATH_ROOTD),
                        (svc_hub_name(), UNIT_PATH_HUB)]:
-        svc_disable_stop(name, path)
+        stopped = svc_disable_stop(name, path)
+        if stopped is False:
+            failures.append(f'не удалось остановить service {name}')
         safe_rm(path)
     svc_daemon_reload()
 
@@ -1531,6 +1598,15 @@ def cmd_uninstall(args):
             removed_cli = True
         except Exception as e:
             print(f'WARN: не удалось удалить {CLI_PATH}: {e}', file=sys.stderr)
+            failures.append(f'не удалось удалить CLI {CLI_PATH}: {e}')
+
+    if failures:
+        print('GPTAdmin удалён частично, но остались ошибки:', file=sys.stderr)
+        for failure in failures:
+            print(f' - {failure}', file=sys.stderr)
+        if not removed_cli and CLI_PATH.exists():
+            print(f'Чтобы удалить CLI, выполните: rm -f {CLI_PATH}', file=sys.stderr)
+        raise SystemExit(1)
 
     print('GPTAdmin полностью удалён: службы, конфиги и бинарники.')
     if not removed_cli and CLI_PATH.exists():

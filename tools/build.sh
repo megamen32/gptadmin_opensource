@@ -211,7 +211,7 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
+ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
 HUB_IMPORTS=$(py_hidden_imports services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
 ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
@@ -222,7 +222,7 @@ echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
+ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py cli/gptadmin.py)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_SRC+=(services/main_package/client/rootd_linux.py)
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_win.py)
 [[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_mac.py)
@@ -345,7 +345,7 @@ pathlib.Path("gptadmin-rootd.json").write_text(json.dumps({
     "arch": "x86_64",
     "artifact_type": "binary-runtime+source",
     "runtime_payload": ["rootd/dist/rootd", "cli", "agents/generic_stdio_mcp_relay", "client"],
-    "source_payload": ["client/rootd.py", "client/rootd_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
+    "source_payload": ["client/rootd.py", "client/rootd_pure.py", "client/rootd_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
     "sha256": sha,
     "url": "/artifacts/rootd.tar.gz",
 }, ensure_ascii=False, indent=2)+"\n")

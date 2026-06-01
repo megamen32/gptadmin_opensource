@@ -9,6 +9,23 @@ PKG_ROOTD_URL=${PKG_ROOTD_URL:-https://became.bezrabotnyi.com/gptadmin-rootd.tar
 err(){ echo "ERROR: $*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
+download_file(){
+  local url="$1" dest="$2"
+  if [ "${GPTADMIN_DOWNLOAD_QUIET:-}" = "1" ]; then
+    curl -fsSL "$url" -o "$dest"
+  else
+    echo "  URL: $url"
+    curl -fL "$url" -o "$dest"
+    if [ -f "$dest" ]; then
+      python3 - "$dest" <<'PY_SIZE'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+print(f"  Готово: {p.stat().st_size / (1024 * 1024):.1f} MiB -> {p}")
+PY_SIZE
+    fi
+  fi
+}
+
 if [ "$(id -u)" -eq 0 ] && [ "${GPTADMIN_INSTALL_MODE:-system}" != "user" ]; then
   INSTALL_MODE="system"
   INSTALL_DIR="${GPTADMIN_HOME:-/opt/gptadmin}"
@@ -53,11 +70,11 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 # 1) CLI
-if curl -fsSL "$CLI_URL" -o "$TMP_DIR/gptadmin.py"; then
+if download_file "$CLI_URL" "$TMP_DIR/gptadmin.py"; then
   echo "[1/2] Downloaded Python CLI"
 else
   echo "[1/2] CLI not found at $CLI_URL — fallback to package"
-  curl -fsSL "$PKG_ALL_URL" -o "$TMP_DIR/pkg.tar.gz"
+  download_file "$PKG_ALL_URL" "$TMP_DIR/pkg.tar.gz"
   mkdir -p "$TMP_DIR/pkg" && tar -xzf "$TMP_DIR/pkg.tar.gz" -C "$TMP_DIR/pkg"
   [ -f "$TMP_DIR/pkg/cli/gptadmin.py" ] || err "cli/gptadmin.py not found in package"
   cp "$TMP_DIR/pkg/cli/gptadmin.py" "$TMP_DIR/gptadmin.py"
