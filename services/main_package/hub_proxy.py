@@ -2502,6 +2502,43 @@ def _mcp_json_from_stdout(stdout: str) -> Any:
     return None
 
 
+async def _rootd_get_json(srv: str, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Dict[str, Any]:
+    """Call a rootd read endpoint directly with the same signed transport as /exec."""
+    info = servers.get(srv)
+    if not info:
+        return {"ok": False, "error": "unknown server", "server": srv}
+    base_url = str(info.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return {"ok": False, "error": "server has no base_url", "server": srv}
+    if not path.startswith("/"):
+        path = "/" + path
+    url = f"{base_url}{path}"
+    headers = _signed_rootd_headers("GET", path, b"")
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+            r = await client.get(url, params=params or {}, headers=headers)
+    except httpx.RequestError as e:
+        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    if r.status_code == 404:
+        return {"ok": False, "error": "rootd endpoint not found", "status_code": 404, "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    if r.status_code >= 400:
+        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    try:
+        data = r.json()
+    except Exception as e:
+        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    if isinstance(data, dict):
+        data.setdefault("ok", True)
+        data.setdefault("transport", "direct_signed_rootd")
+        data.setdefault("server", srv)
+        return data
+    return {"ok": True, "data": data, "transport": "direct_signed_rootd", "server": srv}
+
+
+async def _capability_registry_via_rootd(srv: str, *, include_status: bool = True) -> Dict[str, Any]:
+    return await _rootd_get_json(srv, "/capabilities", {"include_status": str(bool(include_status)).lower()}, timeout=15)
+
+
 async def _run_target_gptadmin_mcp(srv: str, argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
     cmd = _target_gptadmin_mcp_command(srv, argv)
     req = BulkExec(servers=[srv], cmd=cmd, timeout=timeout, background=False)
@@ -3351,6 +3388,12 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
 
     if tool_name == "capability_registry":
         include_status = bool(args.get("include_status", True))
+        registry = await _capability_registry_via_rootd(srv, include_status=include_status)
+        if registry.get("ok"):
+            if args.get("include_raw"):
+                registry["include_raw"] = True
+            return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
+        direct_error = dict(registry)
         py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("ROOTD_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"rootd","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; rootd_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"rootd_transport_layer","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
         py = py.replace("INCLUDE_STATUS", "True" if include_status else "False")
         req = BulkExec(servers=[srv], cmd="python3 - <<'PY'\n" + py + "\nPY", timeout=20, background=False)
@@ -3361,6 +3404,8 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             registry = json.loads(stdout or "{}")
         except Exception:
             registry = {"ok": False, "error": "failed to parse capability registry JSON", "raw": result}
+        registry.setdefault("transport", "fallback_shell_exec")
+        registry["fallback_from"] = direct_error
         if args.get("include_raw"):
             registry["raw_result"] = result
         return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
