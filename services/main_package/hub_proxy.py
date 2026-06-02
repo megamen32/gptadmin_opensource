@@ -3122,6 +3122,18 @@ def _shell_tools_list() -> Dict[str, Any]:
             },
         },
         {
+            "name": "capability_registry",
+            "description": "Read the rootd capability registry for this shell host. Shows shell/system/log/task capabilities and MCP capabilities that should be supervised behind rootd.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_status": {"type": "boolean", "default": True, "description": "Include supervisor status for MCP capabilities."},
+                    "include_raw": {"type": "boolean", "default": False, "description": "Include raw command result used to build the registry."},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "mcp_tools",
             "description": "Manage GPTAdmin stdio/remote MCP tools on this shell host: list, add, remove, install, status or cat. The local gptadmin CLI/rootd path chooses systemd, launchd or Windows task service handling.",
             "inputSchema": {
@@ -3336,6 +3348,22 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         data = _legacy_list_tasks(srv, status=args.get("status"), limit=args.get("limit"), sort_by=args.get("sort_by"), order=args.get("order"), include_result=bool(args.get("include_result", True)), include_history=bool(args.get("include_history", True)))
         data = _spill_mcp_structured(srv, data, "tasks list")
         return _mcp_envelope_text(f"{data.get('count', 0)} task(s) on {srv}", data)
+
+    if tool_name == "capability_registry":
+        include_status = bool(args.get("include_status", True))
+        py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("ROOTD_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"rootd","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; rootd_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"rootd_transport_layer","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
+        py = py.replace("INCLUDE_STATUS", "True" if include_status else "False")
+        req = BulkExec(servers=[srv], cmd="python3 - <<'PY'\n" + py + "\nPY", timeout=20, background=False)
+        data = await bulk_exec(req)
+        result = (data.get("results") or {}).get(srv, {})
+        stdout = (result or {}).get("stdout") if isinstance(result, dict) else None
+        try:
+            registry = json.loads(stdout or "{}")
+        except Exception:
+            registry = {"ok": False, "error": "failed to parse capability registry JSON", "raw": result}
+        if args.get("include_raw"):
+            registry["raw_result"] = result
+        return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
 
     if tool_name == "mcp_tools":
         data = await _mcp_tools_manage_on_shell(srv, args)

@@ -581,6 +581,135 @@ def sys_info():
 def health():
     return backend.health()
 
+# ---------------- CAPABILITIES -------------------------------------
+def _redact_public(value):
+    secret_words = ("token", "secret", "password", "passwd", "api_key", "apikey", "authorization", "bearer", "x-api-key")
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = str(k)
+            out[key] = "***MASKED***" if any(w in key.lower() for w in secret_words) else _redact_public(v)
+        return out
+    if isinstance(value, list):
+        out = []
+        skip_next = False
+        for item in value:
+            if skip_next:
+                out.append("***MASKED***")
+                skip_next = False
+                continue
+            if isinstance(item, str) and item.lower() in {"--header", "--token", "--api-key", "--password", "--secret"}:
+                out.append(item)
+                skip_next = True
+                continue
+            out.append(_redact_public(item))
+        return out
+    if isinstance(value, str):
+        lowered = value.lower()
+        if "authorization:" in lowered or lowered.startswith(("bearer ", "apikey ", "basic ")):
+            parts = value.split(None, 1)
+            return (parts[0] + " ***MASKED***") if parts else "***MASKED***"
+    return value
+
+
+def _load_json_file(path: Path) -> dict:
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log.warning("capability registry: failed to read %s: %s", path, e)
+    return {}
+
+
+def _systemd_unit_state(unit: str) -> dict:
+    if not sys.platform.startswith("linux"):
+        return {"backend": "unsupported", "unit": unit, "active": None}
+    try:
+        cp = subprocess.run(
+            ["systemctl", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "--value"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+        )
+        vals = [x.strip() for x in cp.stdout.splitlines()]
+        return {
+            "backend": "systemd",
+            "unit": unit,
+            "load_state": vals[0] if len(vals) > 0 else None,
+            "active_state": vals[1] if len(vals) > 1 else None,
+            "sub_state": vals[2] if len(vals) > 2 else None,
+            "active": (vals[1] == "active") if len(vals) > 1 else False,
+        }
+    except Exception as e:
+        return {"backend": "systemd", "unit": unit, "active": False, "error": str(e)}
+
+
+def _mcp_capabilities(include_status: bool = True) -> list:
+    cfg_path = Path(os.getenv("GPTADMIN_MCP_CONFIG", os.getenv("ROOTD_MCP_CONFIG", "/etc/gptadmin/mcp.json")))
+    agents_dir = Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR", os.getenv("ROOTD_MCP_AGENTS_DIR", "/etc/gptadmin/mcp-agents.d")))
+    cfg = _load_json_file(cfg_path)
+    servers = cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"), dict) else {}
+    out = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict):
+            continue
+        agent_id = str(spec.get("agent_id") or spec.get("name") or name)
+        item = {
+            "id": f"mcp:{agent_id}",
+            "name": name,
+            "agent_id": agent_id,
+            "kind": "mcp",
+            "role": "capability_executor",
+            "hosted_by": ROOTD_NAME or socket.gethostname(),
+            "supervised_by": "rootd",
+            "legacy_service": f"gptadmin-mcp-{agent_id}.service",
+            "enabled": bool(spec.get("enabled", True)),
+            "transport": "stdio_or_remote",
+            "command": spec.get("command"),
+            "args": _redact_public(spec.get("args") or []),
+            "cwd": spec.get("cwd"),
+            "run_as_user": spec.get("run_as_user") or spec.get("user"),
+            "stdio_format": spec.get("stdio_format") or spec.get("transport") or "auto",
+            "config_file": str(agents_dir / f"{name}.json"),
+            "migration_state": "legacy_relay_supervised; rootd_registry_visible",
+        }
+        if include_status:
+            item["supervisor"] = _systemd_unit_state(f"gptadmin-mcp-{agent_id}.service")
+        out.append(item)
+    return out
+
+
+def _capability_registry(include_status: bool = True) -> dict:
+    mcp = _mcp_capabilities(include_status=include_status)
+    return {
+        "ok": True,
+        "schema_version": 1,
+        "host": ROOTD_NAME or socket.gethostname(),
+        "server_id": ROOTD_SERVER_ID,
+        "transport_role": "rootd_transport_layer",
+        "capability_host": True,
+        "capabilities": [
+            {"id": "shell", "kind": "shell", "role": "local_executor", "hosted_by": ROOTD_NAME or socket.gethostname()},
+            {"id": "tasks", "kind": "task_store", "role": "durable_queue_view", "hosted_by": ROOTD_NAME or socket.gethostname()},
+            {"id": "logs", "kind": "logs", "role": "diagnostics", "hosted_by": ROOTD_NAME or socket.gethostname()},
+            {"id": "system", "kind": "system", "role": "host_introspection", "hosted_by": ROOTD_NAME or socket.gethostname()},
+            *mcp,
+        ],
+        "summary": {"mcp_count": len(mcp), "enabled_mcp_count": sum(1 for x in mcp if x.get("enabled"))},
+    }
+
+
+@app.get("/capabilities", dependencies=[Depends(guard)])
+def capabilities(include_status: bool = True):
+    return _capability_registry(include_status=include_status)
+
+
+@app.get("/capabilities/mcp", dependencies=[Depends(guard)])
+def capabilities_mcp(include_status: bool = True):
+    return {"ok": True, "host": ROOTD_NAME or socket.gethostname(), "capabilities": _mcp_capabilities(include_status=include_status)}
+
 def get_local_ip():
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -618,6 +747,7 @@ def _beat_payload(mode: str):
         "capability_host": True,
         "capability_model": "rootd transports hub jobs to local executors/capabilities",
         "local_capabilities": ["shell", "tasks", "logs", "system", "mcp_supervision"],
+        "capability_registry": _capability_registry(include_status=False).get("summary"),
         "os": info.get("platform", sys.platform),
         "version": BUILD_VERSION,
         "build_version": BUILD_VERSION,
