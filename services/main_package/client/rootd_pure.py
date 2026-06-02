@@ -265,6 +265,118 @@ def system_health():
     return info
 
 
+def _redact_public(value):
+    secret_words = ("token", "secret", "password", "passwd", "api_key", "apikey", "authorization", "bearer", "x-api-key")
+    if isinstance(value, dict):
+        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in secret_words) else _redact_public(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        out, skip = [], False
+        for item in value:
+            if skip:
+                out.append("***MASKED***"); skip = False; continue
+            if isinstance(item, str) and item.lower() in {"--header", "--token", "--api-key", "--password", "--secret"}:
+                out.append(item); skip = True; continue
+            out.append(_redact_public(item))
+        return out
+    if isinstance(value, str):
+        lowered = value.lower()
+        if "authorization:" in lowered or lowered.startswith(("bearer ", "apikey ", "basic ")):
+            parts = value.split(None, 1)
+            return (parts[0] + " ***MASKED***") if parts else "***MASKED***"
+    return value
+
+
+def _load_json_file(path):
+    try:
+        p = Path(path)
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log.warning("capability registry: failed to read %s: %s", path, e)
+    return {}
+
+
+def _mcp_cfg_paths():
+    home = Path.home()
+    cfg_path = Path(os.getenv("GPTADMIN_MCP_CONFIG") or os.getenv("ROOTD_MCP_CONFIG") or str(home / ".config/gptadmin/mcp.json"))
+    agents_dir = Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR") or os.getenv("ROOTD_MCP_AGENTS_DIR") or str(home / ".config/gptadmin/mcp-agents.d"))
+    if not cfg_path.exists() and Path("/etc/gptadmin/mcp.json").exists(): cfg_path = Path("/etc/gptadmin/mcp.json")
+    if not agents_dir.exists() and Path("/etc/gptadmin/mcp-agents.d").exists(): agents_dir = Path("/etc/gptadmin/mcp-agents.d")
+    return cfg_path, agents_dir
+
+
+def _mcp_supervisor_backend():
+    override = os.getenv("ROOTD_MCP_SUPERVISOR_BACKEND") or os.getenv("GPTADMIN_MCP_BACKEND")
+    if override: return override.strip().lower()
+    if sys.platform == "darwin": return "launchd"
+    if sys.platform.startswith("win"): return "windows-task"
+    return "systemd"
+
+
+def _mcp_service_name(agent_id, backend=None):
+    backend = backend or _mcp_supervisor_backend()
+    if backend == "launchd": return f"com.gptadmin.mcp.{agent_id}"
+    if backend == "windows-task": return f"GPTAdmin MCP {agent_id}"
+    return f"gptadmin-mcp-{agent_id}.service"
+
+
+def _mcp_service_file(agent_id, backend=None):
+    backend = backend or _mcp_supervisor_backend()
+    if backend == "launchd": return f"/Library/LaunchDaemons/com.gptadmin.mcp.{agent_id}.plist"
+    if backend == "systemd": return f"/etc/systemd/system/gptadmin-mcp-{agent_id}.service"
+    return None
+
+
+def _run_lifecycle_cmd(argv, timeout=30):
+    try:
+        cp = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        return {"returncode": cp.returncode, "stdout": cp.stdout[-4000:], "stderr": cp.stderr[-4000:], "argv": argv}
+    except Exception as e:
+        return {"returncode": None, "stdout": "", "stderr": str(e), "argv": argv}
+
+
+def _mcp_supervisor_state(agent_id, backend=None):
+    backend = backend or _mcp_supervisor_backend(); name = _mcp_service_name(agent_id, backend); service_file = _mcp_service_file(agent_id, backend)
+    if backend == "systemd":
+        if not sys.platform.startswith("linux"):
+            return {"backend": backend, "service_name": name, "active": None, "supported": False, "error": "systemd is only available on linux"}
+        cp = _run_lifecycle_cmd(["systemctl", "show", name, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "--value"], 3)
+        vals = [x.strip() for x in (cp.get("stdout") or "").splitlines()]
+        return {"backend": backend, "unit": name, "service_name": name, "service_file": service_file, "load_state": vals[0] if len(vals)>0 else None, "active_state": vals[1] if len(vals)>1 else None, "sub_state": vals[2] if len(vals)>2 else None, "active": (vals[1] == "active") if len(vals)>1 else False, "supported": True, "result": cp}
+    if backend == "launchd":
+        if sys.platform != "darwin":
+            return {"backend": backend, "service_name": name, "active": None, "supported": False, "error": "launchd is only available on macOS"}
+        cp = _run_lifecycle_cmd(["launchctl", "print", f"gui/{os.getuid()}/{name}"], 5)
+        if cp.get("returncode") != 0: cp = _run_lifecycle_cmd(["launchctl", "print", f"system/{name}"], 5)
+        active = cp.get("returncode") == 0
+        return {"backend": backend, "label": name, "service_name": name, "service_file": service_file, "active": active, "load_state": "loaded" if active else "not-loaded", "sub_state": "running" if active else "unknown", "supported": True, "result": cp}
+    if backend == "windows-task":
+        if not sys.platform.startswith("win"):
+            return {"backend": backend, "service_name": name, "active": None, "supported": False, "error": "windows-task is only available on Windows"}
+        cp = _run_lifecycle_cmd(["schtasks", "/Query", "/TN", name, "/V", "/FO", "LIST"], 10)
+        out = (cp.get("stdout") or "") + "\n" + (cp.get("stderr") or "")
+        exists = cp.get("returncode") == 0; active = exists and ("Status: Running" in out or "State: Running" in out)
+        return {"backend": backend, "task_name": name, "service_name": name, "active": active if exists else False, "load_state": "loaded" if exists else "not-found", "sub_state": "running" if active else ("ready" if exists else "not-found"), "supported": True, "result": cp}
+    return {"backend": backend, "service_name": name, "active": None, "supported": False, "error": f"unknown MCP supervisor backend: {backend}"}
+
+
+def _mcp_capabilities(include_status=True):
+    cfg_path, agents_dir = _mcp_cfg_paths(); cfg = _load_json_file(cfg_path)
+    servers = cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"), dict) else {}; out = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict): continue
+        agent_id = str(spec.get("agent_id") or spec.get("name") or name)
+        item = {"id": f"mcp:{agent_id}", "name": name, "agent_id": agent_id, "kind": "mcp", "role": "capability_executor", "hosted_by": ROOTD_NAME, "supervised_by": "rootd", "legacy_service": _mcp_service_name(agent_id), "supervisor_backend": _mcp_supervisor_backend(), "service_file": _mcp_service_file(agent_id), "enabled": bool(spec.get("enabled", True)), "transport": "stdio_or_remote", "command": spec.get("command"), "args": _redact_public(spec.get("args") or []), "cwd": spec.get("cwd"), "run_as_user": spec.get("run_as_user") or spec.get("user"), "stdio_format": spec.get("stdio_format") or spec.get("transport") or "auto", "config_file": str(agents_dir / f"{name}.json"), "migration_state": "legacy_relay_supervised; rootd_registry_visible"}
+        if include_status: item["supervisor"] = _mcp_supervisor_state(agent_id)
+        out.append(item)
+    return out
+
+
+def _capability_registry(include_status=True):
+    mcp = _mcp_capabilities(include_status=include_status)
+    return {"ok": True, "schema_version": 1, "host": ROOTD_NAME, "server_id": ROOTD_SERVER_ID, "transport_role": "rootd_transport_layer", "capability_host": True, "capabilities": [{"id":"shell","kind":"shell","role":"local_executor","hosted_by":ROOTD_NAME},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":ROOTD_NAME},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":ROOTD_NAME},{"id":"system","kind":"system","role":"host_introspection","hosted_by":ROOTD_NAME}, *mcp], "summary": {"mcp_count": len(mcp), "enabled_mcp_count": sum(1 for x in mcp if x.get("enabled"))}}
+
 def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
     log.info("EXEC: %s (cwd=%s)", cmd, cwd)
     env_full = os.environ.copy()
@@ -316,6 +428,11 @@ def heartbeat_loop():
             'time': int(time.time()),
             'mode': 'long_poll' if QUEUE_URL and _queue_is_long_poll() else ('polling' if QUEUE_URL else 'webhook'),
             'queue_transport': QUEUE_TRANSPORT if QUEUE_URL else None,
+            'transport_role': 'rootd_transport_layer',
+            'capability_host': True,
+            'capability_model': 'rootd transports hub jobs to local executors/capabilities',
+            'local_capabilities': ['shell', 'tasks', 'logs', 'system', 'mcp_supervision'],
+            'capability_registry': _capability_registry(include_status=False).get('summary'),
             'os': sys.platform,
             'version': BUILD_VERSION,
             'build_version': BUILD_VERSION,
@@ -423,6 +540,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(system_info())
         elif parsed.path == '/system/health':
             self._json(system_health())
+        elif parsed.path == '/capabilities':
+            params = parse.parse_qs(parsed.query)
+            include_status = params.get('include_status', ['true'])[0].lower() not in {'0', 'false', 'no'}
+            self._json(_capability_registry(include_status=include_status))
+        elif parsed.path == '/capabilities/mcp':
+            params = parse.parse_qs(parsed.query)
+            include_status = params.get('include_status', ['true'])[0].lower() not in {'0', 'false', 'no'}
+            self._json({'ok': True, 'host': ROOTD_NAME, 'capabilities': _mcp_capabilities(include_status=include_status)})
         elif parsed.path == '/file':
             params = parse.parse_qs(parsed.query)
             path = params.get('path', [None])[0]
