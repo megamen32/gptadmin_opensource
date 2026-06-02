@@ -622,29 +622,117 @@ def _load_json_file(path: Path) -> dict:
     return {}
 
 
-def _systemd_unit_state(unit: str) -> dict:
-    if not sys.platform.startswith("linux"):
-        return {"backend": "unsupported", "unit": unit, "active": None}
-    try:
-        cp = subprocess.run(
-            ["systemctl", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "--value"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=3,
-        )
-        vals = [x.strip() for x in cp.stdout.splitlines()]
-        return {
-            "backend": "systemd",
-            "unit": unit,
-            "load_state": vals[0] if len(vals) > 0 else None,
-            "active_state": vals[1] if len(vals) > 1 else None,
-            "sub_state": vals[2] if len(vals) > 2 else None,
-            "active": (vals[1] == "active") if len(vals) > 1 else False,
-        }
-    except Exception as e:
-        return {"backend": "systemd", "unit": unit, "active": False, "error": str(e)}
+def _mcp_supervisor_backend() -> str:
+    override = os.getenv("ROOTD_MCP_SUPERVISOR_BACKEND") or os.getenv("GPTADMIN_MCP_BACKEND")
+    if override:
+        return override.strip().lower()
+    if sys.platform == "darwin":
+        return "launchd"
+    if sys.platform.startswith("win"):
+        return "windows-task"
+    return "systemd"
 
+
+def _mcp_service_name(agent_id: str, *, backend: Optional[str] = None) -> str:
+    backend = backend or _mcp_supervisor_backend()
+    if backend == "launchd":
+        return f"com.gptadmin.mcp.{agent_id}"
+    if backend == "windows-task":
+        return f"GPTAdmin MCP {agent_id}"
+    return f"gptadmin-mcp-{agent_id}.service"
+
+
+def _mcp_service_file(agent_id: str, *, backend: Optional[str] = None) -> Optional[str]:
+    backend = backend or _mcp_supervisor_backend()
+    if backend == "launchd":
+        return f"/Library/LaunchDaemons/com.gptadmin.mcp.{agent_id}.plist"
+    if backend == "systemd":
+        return f"/etc/systemd/system/gptadmin-mcp-{agent_id}.service"
+    return None
+
+
+def _run_lifecycle_cmd(argv: list, timeout: int = 30) -> dict:
+    try:
+        cp = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        return {"returncode": cp.returncode, "stdout": cp.stdout[-4000:], "stderr": cp.stderr[-4000:], "argv": argv}
+    except Exception as e:
+        return {"returncode": None, "stdout": "", "stderr": str(e), "argv": argv}
+
+
+def _mcp_supervisor_state(agent_id: str, *, backend: Optional[str] = None) -> dict:
+    backend = backend or _mcp_supervisor_backend()
+    name = _mcp_service_name(agent_id, backend=backend)
+    service_file = _mcp_service_file(agent_id, backend=backend)
+    if backend == "systemd":
+        if not sys.platform.startswith("linux"):
+            return {"backend": backend, "unit": name, "active": None, "supported": False, "error": "systemd is only available on linux"}
+        try:
+            cp = subprocess.run(["systemctl", "show", name, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "--value"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+            vals = [x.strip() for x in cp.stdout.splitlines()]
+            return {"backend": backend, "unit": name, "service_name": name, "service_file": service_file, "load_state": vals[0] if len(vals)>0 else None, "active_state": vals[1] if len(vals)>1 else None, "sub_state": vals[2] if len(vals)>2 else None, "active": (vals[1] == "active") if len(vals)>1 else False, "supported": True}
+        except Exception as e:
+            return {"backend": backend, "unit": name, "service_name": name, "service_file": service_file, "active": False, "supported": True, "error": str(e)}
+    if backend == "launchd":
+        if sys.platform != "darwin":
+            return {"backend": backend, "label": name, "service_name": name, "service_file": service_file, "active": None, "supported": False, "error": "launchd is only available on macOS"}
+        cp = _run_lifecycle_cmd(["launchctl", "print", f"system/{name}"], timeout=5)
+        active = cp.get("returncode") == 0
+        return {"backend": backend, "label": name, "service_name": name, "service_file": service_file, "active": active, "load_state": "loaded" if active else "not-loaded", "sub_state": "running" if active else "unknown", "supported": True, "result": cp}
+    if backend == "windows-task":
+        if not sys.platform.startswith("win"):
+            return {"backend": backend, "task_name": name, "service_name": name, "active": None, "supported": False, "error": "windows-task is only available on Windows"}
+        cp = _run_lifecycle_cmd(["schtasks", "/Query", "/TN", name, "/V", "/FO", "LIST"], timeout=10)
+        out = (cp.get("stdout") or "") + "\n" + (cp.get("stderr") or "")
+        exists = cp.get("returncode") == 0
+        active = exists and ("Status: Running" in out or "Status:  Running" in out or "State: Running" in out)
+        return {"backend": backend, "task_name": name, "service_name": name, "active": active if exists else False, "load_state": "loaded" if exists else "not-found", "sub_state": "running" if active else ("ready" if exists else "not-found"), "supported": True, "result": cp}
+    return {"backend": backend, "service_name": name, "active": None, "supported": False, "error": f"unknown MCP supervisor backend: {backend}"}
+
+
+def _mcp_supervisor_action(agent_id: str, action: str, *, backend: Optional[str] = None) -> dict:
+    action = (action or "status").strip().lower()
+    allowed = {"status", "start", "stop", "restart"}
+    if action not in allowed:
+        raise HTTPException(400, f"unsupported action: {action}; expected one of {sorted(allowed)}")
+    backend = backend or _mcp_supervisor_backend()
+    name = _mcp_service_name(agent_id, backend=backend)
+    service_file = _mcp_service_file(agent_id, backend=backend)
+    before = _mcp_supervisor_state(agent_id, backend=backend)
+    result = None
+    if action != "status":
+        if backend == "systemd":
+            result = _run_lifecycle_cmd(["systemctl", action, name], timeout=30) if sys.platform.startswith("linux") else {"returncode": None, "stdout": "", "stderr": "systemd is only available on linux"}
+        elif backend == "launchd":
+            if sys.platform != "darwin":
+                result = {"returncode": None, "stdout": "", "stderr": "launchd is only available on macOS"}
+            elif action == "start":
+                result = _run_lifecycle_cmd(["launchctl", "bootstrap", "system", service_file or f"/Library/LaunchDaemons/{name}.plist"], timeout=30)
+            elif action == "stop":
+                result = _run_lifecycle_cmd(["launchctl", "bootout", "system", service_file or f"/Library/LaunchDaemons/{name}.plist"], timeout=30)
+            else:
+                stop_res = _run_lifecycle_cmd(["launchctl", "bootout", "system", service_file or f"/Library/LaunchDaemons/{name}.plist"], timeout=30)
+                start_res = _run_lifecycle_cmd(["launchctl", "bootstrap", "system", service_file or f"/Library/LaunchDaemons/{name}.plist"], timeout=30)
+                result = {"returncode": start_res.get("returncode"), "stdout": (stop_res.get("stdout") or "") + (start_res.get("stdout") or ""), "stderr": (stop_res.get("stderr") or "") + (start_res.get("stderr") or ""), "steps": {"stop": stop_res, "start": start_res}}
+        elif backend == "windows-task":
+            if not sys.platform.startswith("win"):
+                result = {"returncode": None, "stdout": "", "stderr": "windows-task is only available on Windows"}
+            elif action == "start":
+                result = _run_lifecycle_cmd(["schtasks", "/Run", "/TN", name], timeout=30)
+            elif action == "stop":
+                result = _run_lifecycle_cmd(["schtasks", "/End", "/TN", name], timeout=30)
+            else:
+                stop_res = _run_lifecycle_cmd(["schtasks", "/End", "/TN", name], timeout=30)
+                start_res = _run_lifecycle_cmd(["schtasks", "/Run", "/TN", name], timeout=30)
+                result = {"returncode": start_res.get("returncode"), "stdout": (stop_res.get("stdout") or "") + (start_res.get("stdout") or ""), "stderr": (stop_res.get("stderr") or "") + (start_res.get("stderr") or ""), "steps": {"stop": stop_res, "start": start_res}}
+        else:
+            result = {"returncode": None, "stdout": "", "stderr": f"unknown MCP supervisor backend: {backend}"}
+    after = _mcp_supervisor_state(agent_id, backend=backend)
+    ok = True if action == "status" else (bool(after.get("active")) if action in {"start", "restart"} else not bool(after.get("active")))
+    if result and result.get("returncode") not in {0, None}:
+        ok = False
+    if result and result.get("returncode") is None and action != "status":
+        ok = False
+    return {"ok": ok, "action": action, "backend": backend, "service_name": name, "service_file": service_file, "before": before, "after": after, "result": result, "supervisor": "rootd_cross_platform_facade"}
 
 def _mcp_capabilities(include_status: bool = True) -> list:
     cfg_path = Path(os.getenv("GPTADMIN_MCP_CONFIG", os.getenv("ROOTD_MCP_CONFIG", "/etc/gptadmin/mcp.json")))
@@ -664,7 +752,9 @@ def _mcp_capabilities(include_status: bool = True) -> list:
             "role": "capability_executor",
             "hosted_by": ROOTD_NAME or socket.gethostname(),
             "supervised_by": "rootd",
-            "legacy_service": f"gptadmin-mcp-{agent_id}.service",
+            "legacy_service": _mcp_service_name(agent_id),
+            "supervisor_backend": _mcp_supervisor_backend(),
+            "service_file": _mcp_service_file(agent_id),
             "enabled": bool(spec.get("enabled", True)),
             "transport": "stdio_or_remote",
             "command": spec.get("command"),
@@ -676,7 +766,7 @@ def _mcp_capabilities(include_status: bool = True) -> list:
             "migration_state": "legacy_relay_supervised; rootd_registry_visible",
         }
         if include_status:
-            item["supervisor"] = _systemd_unit_state(f"gptadmin-mcp-{agent_id}.service")
+            item["supervisor"] = _mcp_supervisor_state(agent_id)
         out.append(item)
     return out
 
@@ -756,8 +846,8 @@ def capabilities_mcp_lifecycle(mcp_ref: str, payload: dict = Body(default_factor
     cap = _find_mcp_capability(mcp_ref)
     if not cap:
         raise HTTPException(404, f"MCP capability not found: {mcp_ref}")
-    unit = str(cap.get("legacy_service") or f"gptadmin-mcp-{cap.get('agent_id')}.service")
-    res = _systemd_unit_action(unit, action)
+    backend = str((payload or {}).get("backend") or cap.get("supervisor_backend") or _mcp_supervisor_backend()).strip().lower()
+    res = _mcp_supervisor_action(str(cap.get("agent_id")), action, backend=backend)
     res.update({"capability": cap, "host": ROOTD_NAME or socket.gethostname(), "server_id": ROOTD_SERVER_ID})
     return res
 

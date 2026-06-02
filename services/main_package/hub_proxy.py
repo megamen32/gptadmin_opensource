@@ -2570,9 +2570,12 @@ async def _rootd_post_json(srv: str, path: str, payload: Optional[Dict[str, Any]
     return {"ok": True, "data": data, "transport": "direct_signed_rootd", "server": srv}
 
 
-async def _mcp_lifecycle_via_rootd(srv: str, mcp_ref: str, action: str) -> Dict[str, Any]:
+async def _mcp_lifecycle_via_rootd(srv: str, mcp_ref: str, action: str, backend: Optional[str] = None) -> Dict[str, Any]:
     safe_ref = quote(str(mcp_ref or ""), safe="")
-    return await _rootd_post_json(srv, f"/capabilities/mcp/{safe_ref}/lifecycle", {"action": action}, timeout=45)
+    payload = {"action": action}
+    if backend:
+        payload["backend"] = backend
+    return await _rootd_post_json(srv, f"/capabilities/mcp/{safe_ref}/lifecycle", payload, timeout=45)
 
 
 async def _run_target_gptadmin_mcp(srv: str, argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
@@ -3214,6 +3217,7 @@ def _shell_tools_list() -> Dict[str, Any]:
                 "properties": {
                     "name": {"type": "string", "description": "MCP capability name, agent_id, id or legacy service name."},
                     "action": {"type": "string", "enum": ["status", "start", "stop", "restart"], "default": "status"},
+                    "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None], "default": None, "description": "Override rootd supervisor backend; default is chosen by target OS."},
                     "include_raw": {"type": "boolean", "default": False}
                 },
                 "required": ["name"],
@@ -3465,7 +3469,9 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         if not mcp_ref:
             raise HTTPException(400, "mcp_lifecycle requires name")
         action = str(args.get("action") or "status").strip().lower()
-        data = await _mcp_lifecycle_via_rootd(srv, mcp_ref, action)
+        backend = args.get("backend")
+        backend = str(backend).strip().lower() if backend else None
+        data = await _mcp_lifecycle_via_rootd(srv, mcp_ref, action, backend=backend)
         if not args.get("include_raw"):
             data.pop("body", None)
         unit = ((data.get("capability") or {}).get("legacy_service") or data.get("unit") or mcp_ref) if isinstance(data, dict) else mcp_ref
