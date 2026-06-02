@@ -53,7 +53,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from logging.handlers import WatchedFileHandler
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -2539,6 +2539,42 @@ async def _capability_registry_via_rootd(srv: str, *, include_status: bool = Tru
     return await _rootd_get_json(srv, "/capabilities", {"include_status": str(bool(include_status)).lower()}, timeout=15)
 
 
+async def _rootd_post_json(srv: str, path: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
+    """POST JSON to rootd directly with the same signed transport as /exec."""
+    info = servers.get(srv)
+    if not info:
+        return {"ok": False, "error": "unknown server", "server": srv}
+    base_url = str(info.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return {"ok": False, "error": "server has no base_url", "server": srv}
+    if not path.startswith("/"):
+        path = "/" + path
+    body = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = _signed_rootd_headers("POST", path, body, {"Content-Type": "application/json"})
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+            r = await client.post(f"{base_url}{path}", content=body, headers=headers)
+    except httpx.RequestError as e:
+        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    if r.status_code >= 400:
+        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    try:
+        data = r.json()
+    except Exception as e:
+        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+    if isinstance(data, dict):
+        data.setdefault("ok", True)
+        data.setdefault("transport", "direct_signed_rootd")
+        data.setdefault("server", srv)
+        return data
+    return {"ok": True, "data": data, "transport": "direct_signed_rootd", "server": srv}
+
+
+async def _mcp_lifecycle_via_rootd(srv: str, mcp_ref: str, action: str) -> Dict[str, Any]:
+    safe_ref = quote(str(mcp_ref or ""), safe="")
+    return await _rootd_post_json(srv, f"/capabilities/mcp/{safe_ref}/lifecycle", {"action": action}, timeout=45)
+
+
 async def _run_target_gptadmin_mcp(srv: str, argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
     cmd = _target_gptadmin_mcp_command(srv, argv)
     req = BulkExec(servers=[srv], cmd=cmd, timeout=timeout, background=False)
@@ -3171,6 +3207,20 @@ def _shell_tools_list() -> Dict[str, Any]:
             },
         },
         {
+            "name": "mcp_lifecycle",
+            "description": "Control an MCP capability through rootd supervisor facade on this shell host: status, start, stop or restart. Uses signed rootd /capabilities/mcp/{ref}/lifecycle.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "MCP capability name, agent_id, id or legacy service name."},
+                    "action": {"type": "string", "enum": ["status", "start", "stop", "restart"], "default": "status"},
+                    "include_raw": {"type": "boolean", "default": False}
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "mcp_tools",
             "description": "Manage GPTAdmin stdio/remote MCP tools on this shell host: list, add, remove, install, status or cat. The local gptadmin CLI/rootd path chooses systemd, launchd or Windows task service handling.",
             "inputSchema": {
@@ -3409,6 +3459,17 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         if args.get("include_raw"):
             registry["raw_result"] = result
         return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
+
+    if tool_name == "mcp_lifecycle":
+        mcp_ref = str(args.get("name") or "").strip()
+        if not mcp_ref:
+            raise HTTPException(400, "mcp_lifecycle requires name")
+        action = str(args.get("action") or "status").strip().lower()
+        data = await _mcp_lifecycle_via_rootd(srv, mcp_ref, action)
+        if not args.get("include_raw"):
+            data.pop("body", None)
+        unit = ((data.get("capability") or {}).get("legacy_service") or data.get("unit") or mcp_ref) if isinstance(data, dict) else mcp_ref
+        return _mcp_envelope_text(f"MCP lifecycle {action} {unit}: {'ok' if data.get('ok') else 'failed'}", data)
 
     if tool_name == "mcp_tools":
         data = await _mcp_tools_manage_on_shell(srv, args)

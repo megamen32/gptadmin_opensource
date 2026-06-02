@@ -710,6 +710,57 @@ def capabilities(include_status: bool = True):
 def capabilities_mcp(include_status: bool = True):
     return {"ok": True, "host": ROOTD_NAME or socket.gethostname(), "capabilities": _mcp_capabilities(include_status=include_status)}
 
+def _find_mcp_capability(ref: str) -> Optional[dict]:
+    ref_norm = (ref or "").strip()
+    if not ref_norm:
+        return None
+    if ref_norm.startswith("mcp:"):
+        ref_norm = ref_norm[4:]
+    for item in _mcp_capabilities(include_status=False):
+        if ref_norm in {str(item.get("name")), str(item.get("agent_id")), str(item.get("id")), str(item.get("legacy_service"))}:
+            return item
+    return None
+
+
+def _systemd_unit_action(unit: str, action: str) -> dict:
+    action = (action or "status").strip().lower()
+    allowed = {"status", "start", "stop", "restart"}
+    if action not in allowed:
+        raise HTTPException(400, f"unsupported action: {action}; expected one of {sorted(allowed)}")
+    if not sys.platform.startswith("linux"):
+        return {"ok": False, "error": "systemd lifecycle is supported only on linux for now", "unit": unit, "action": action}
+    before = _systemd_unit_state(unit)
+    result = None
+    if action != "status":
+        try:
+            cp = subprocess.run(
+                ["systemctl", action, unit],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            result = {"returncode": cp.returncode, "stdout": cp.stdout[-4000:], "stderr": cp.stderr[-4000:]}
+        except Exception as e:
+            result = {"returncode": None, "stdout": "", "stderr": str(e)}
+    after = _systemd_unit_state(unit)
+    ok = bool(after.get("active")) if action in {"start", "restart"} else (not bool(after.get("active")) if action == "stop" else True)
+    if result and result.get("returncode") not in {0, None}:
+        ok = False
+    return {"ok": ok, "action": action, "unit": unit, "before": before, "after": after, "result": result, "supervisor": "rootd_systemd_facade"}
+
+
+@app.post("/capabilities/mcp/{mcp_ref}/lifecycle", dependencies=[Depends(guard)])
+def capabilities_mcp_lifecycle(mcp_ref: str, payload: dict = Body(default_factory=dict)):
+    action = str((payload or {}).get("action") or "status").strip().lower()
+    cap = _find_mcp_capability(mcp_ref)
+    if not cap:
+        raise HTTPException(404, f"MCP capability not found: {mcp_ref}")
+    unit = str(cap.get("legacy_service") or f"gptadmin-mcp-{cap.get('agent_id')}.service")
+    res = _systemd_unit_action(unit, action)
+    res.update({"capability": cap, "host": ROOTD_NAME or socket.gethostname(), "server_id": ROOTD_SERVER_ID})
+    return res
+
 def get_local_ip():
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
