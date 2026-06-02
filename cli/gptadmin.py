@@ -218,15 +218,6 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 # package install
 
 def install_component_from_pkg(pkg_tgz: Path, component: str):
-    if IS_MACOS and component == 'rootd':
-        # Linux PyInstaller rootd cannot run on macOS. Install the cross-platform
-        # Python fallback instead; _wrapper_script will run it with a Python that
-        # has cryptography available.
-        BIN_DIR.mkdir(parents=True, exist_ok=True)
-        download(ROOTD_PURE_URL_DEFAULT, BIN_DIR / 'rootd')
-        os.chmod(BIN_DIR / 'rootd', 0o755)
-        return
-
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
@@ -244,14 +235,26 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
             shutil.copytree(agents_src, agents_dst)
         if component == 'hub':
             candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
+        elif IS_MACOS:
+            # Linux PyInstaller rootd cannot run on macOS. Install bundled
+            # pure-Python long-poll rootd from this package, while still copying
+            # cli/agents runtime needed for MCP relay management.
+            candidates = [tdp / 'client' / 'rootd_pure.py']
         else:
             candidates = [tdp / 'rootd' / 'dist' / 'rootd', tdp / 'build' / 'rootd' / 'dist' / 'rootd']
         for c in candidates:
             if c.exists():
                 BIN_DIR.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(c, BIN_DIR / c.name)
-                os.chmod(BIN_DIR / c.name, 0o755)
+                dst_name = 'rootd' if (component == 'rootd' and IS_MACOS) else c.name
+                shutil.copy2(c, BIN_DIR / dst_name)
+                os.chmod(BIN_DIR / dst_name, 0o755)
                 return
+        if component == 'rootd' and IS_MACOS:
+            # Backward compatibility with old archives.
+            BIN_DIR.mkdir(parents=True, exist_ok=True)
+            download(ROOTD_PURE_URL_DEFAULT, BIN_DIR / 'rootd')
+            os.chmod(BIN_DIR / 'rootd', 0o755)
+            return
         die(f'{component} binary not found in package')
 
 # ===== Service management =====
@@ -758,6 +761,7 @@ def setup_interactive(args):
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
     if install_rootd:
         svc_enable_start(svc_rootd_name(), UNIT_PATH_ROOTD)
+        maybe_import_and_install_mcp_from_desktop_clients()
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
 
@@ -1353,6 +1357,47 @@ def cmd_mcp_sync(args):
     cmd_mcp_import(args)
     export_args = argparse.Namespace(format=args.format, user=args.user, path=args.path, name=None, no_merge=False)
     cmd_mcp_export(export_args)
+
+
+def maybe_import_and_install_mcp_from_desktop_clients():
+    """Offer to import existing Claude MCP servers during setup and install them.
+
+    Best-effort: a failure here must not break the main rootd install.
+    """
+    if os.environ.get('GPTADMIN_SKIP_MCP_IMPORT', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
+        return
+    if not _mcp_manager_exists():
+        return
+    candidates = []
+    try:
+        p = _mcp_external_path('claude', None, None)
+        if p.exists():
+            candidates.append(('claude', p))
+    except Exception:
+        pass
+    if not candidates:
+        return
+    default = os.environ.get('GPTADMIN_MCP_AUTO_IMPORT', '').strip().lower()
+    do_it = default in {'1', 'true', 'yes', 'on'}
+    if not do_it:
+        try:
+            do_it = ask('Найдены MCP servers в Claude. Импортировать и запустить через GPTAdmin/rootd?', 'y').lower().startswith('y')
+        except Exception:
+            do_it = False
+    if not do_it:
+        return
+    for fmt, path in candidates:
+        try:
+            import_args = argparse.Namespace(format=fmt, user=None, path=str(path), force=True)
+            cmd_mcp_import(import_args)
+        except Exception as e:
+            print(f'WARN: не удалось импортировать MCP из {fmt}: {e}', file=sys.stderr)
+    try:
+        backend = 'launchd' if IS_MACOS else ('windows-task' if IS_WINDOWS else 'systemd')
+        install_args = argparse.Namespace(name=None, backend=backend)
+        cmd_mcp_install(install_args)
+    except Exception as e:
+        print(f'WARN: не удалось установить MCP services: {e}', file=sys.stderr)
 
 
 def installed_units():
