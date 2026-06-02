@@ -4577,8 +4577,9 @@ if __name__ == "__main__":
         log.info("starting hub via systemd socket fd=%s (dead_s=%s, log_level=%s)", fd, DEAD_S, LOG_LEVEL)
         kwargs["fd"] = fd
     else:
-        log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s)", port, DEAD_S, LOG_LEVEL)
-        kwargs["host"] = "0.0.0.0"
+        host = os.getenv("HUB_BIND") or os.getenv("HUB_HOST") or "0.0.0.0"
+        log.info("starting hub on %s:%s (dead_s=%s, log_level=%s)", host, port, DEAD_S, LOG_LEVEL)
+        kwargs["host"] = host
         kwargs["port"] = port
 
     uvicorn.run(app, **kwargs)

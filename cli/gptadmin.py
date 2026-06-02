@@ -78,6 +78,8 @@ MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
 MCP_RUNTIME_DIR = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay'
 MCP_MANAGER = MCP_RUNTIME_DIR / 'mcp_agent_manager.py'
 MCP_RELAY = MCP_RUNTIME_DIR / 'generic_stdio_mcp_relay.py'
+HUB_SOURCE_DIR = INSTALL_DIR / 'hub_source'
+HUB_VENV_DIR = INSTALL_DIR / 'hub_venv'
 
 if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
@@ -217,6 +219,37 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 
 # package install
 
+def _install_macos_hub_from_pkg(tdp: Path):
+    src_candidates = [tdp / 'hub_source', tdp / 'hub', tdp / 'services' / 'main_package']
+    src = next((x for x in src_candidates if (x / 'hub_proxy.py').exists()), None)
+    if src is None:
+        die('macOS hub source not found in package: expected hub_source/hub_proxy.py')
+    if HUB_SOURCE_DIR.exists():
+        shutil.rmtree(HUB_SOURCE_DIR, ignore_errors=True)
+    HUB_SOURCE_DIR.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, HUB_SOURCE_DIR)
+    # Install a small dedicated venv for source-mode hub on macOS.
+    py = _mac_python() if IS_MACOS else (sys.executable or 'python3')
+    if not (HUB_VENV_DIR / 'bin' / 'python').exists():
+        run([py, '-m', 'venv', str(HUB_VENV_DIR)])
+    vpy = HUB_VENV_DIR / 'bin' / 'python'
+    vpip = HUB_VENV_DIR / 'bin' / 'pip'
+    req = HUB_SOURCE_DIR / 'requirements-hub.txt'
+    if not req.exists():
+        req.write_text('fastapi\nuvicorn[standard]\nhttpx\npydantic\ncryptography\npsutil\nrequests\n', encoding='utf-8')
+    run([str(vpy), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
+    run([str(vpip), 'install', '-r', str(req)])
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    wrapper = BIN_DIR / 'hub_proxy'
+    wrapper.write_text(
+        '#!/bin/sh\n'
+        f'cd {HUB_SOURCE_DIR}\n'
+        f'exec {vpy} hub_proxy.py\n',
+        encoding='utf-8',
+    )
+    os.chmod(wrapper, 0o755)
+
+
 def install_component_from_pkg(pkg_tgz: Path, component: str):
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -233,6 +266,9 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
             if agents_dst.exists():
                 shutil.rmtree(agents_dst, ignore_errors=True)
             shutil.copytree(agents_src, agents_dst)
+        if component == 'hub' and IS_MACOS:
+            _install_macos_hub_from_pkg(tdp)
+            return
         if component == 'hub':
             candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
         elif IS_MACOS:
@@ -668,6 +704,9 @@ def setup_interactive(args):
     if rootd_default_uid and rootd_default_uid.isdigit() and rootd_default_uid != '0':
         env.setdefault('ROOTD_DEFAULT_UID', rootd_default_uid)
 
+    env.setdefault('GPTADMIN_HOME', str(INSTALL_DIR))
+    env.setdefault('GPTADMIN_CONFIG_DIR', str(ETC_DIR))
+    env.setdefault('GPTADMIN_AUDIT_LOG', str(LOG_DIR / 'audit.log'))
     env['HUB_BIND'] = '127.0.0.1'
     env.setdefault('HUB_PORT', '9001')
     env.setdefault('ROOTD_BIND', '127.0.0.1')
