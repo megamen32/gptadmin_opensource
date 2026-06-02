@@ -2192,10 +2192,52 @@ def _mcp_relay_job_counts(agent_id: str) -> Dict[str, int]:
     return counts
 
 
+_SECRET_KEY_RE = re.compile(r"(token|secret|password|passwd|api[_-]?key|authorization|bearer|x-api-key)", re.I)
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)(Authorization\s*:\s*(?:Bearer|ApiKey|Basic)\s+)[^\s,'\"\]]+|"
+    r"((?:Bearer|ApiKey|Basic)\s+)[^\s,'\"\]]+|"
+    r"((?:token|secret|password|passwd|api[_-]?key)\s*[=:]\s*)[^\s,'\"\]]+"
+)
+
+
+def _redact_secret_value(value: Any) -> Any:
+    """Return a public-safe copy with obvious secrets redacted.
+
+    Hub registry/meta is user-visible via listMcpAgents. Never expose bearer
+    headers, API keys, passwords or token-like values there; rootd/relay may
+    still keep the real values in local config files with filesystem ACLs.
+    """
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            key = str(k)
+            out[key] = "***MASKED***" if _SECRET_KEY_RE.search(key) else _redact_secret_value(v)
+        return out
+    if isinstance(value, list):
+        redacted = []
+        skip_next = False
+        for item in value:
+            if skip_next:
+                redacted.append("***MASKED***")
+                skip_next = False
+                continue
+            if isinstance(item, str) and item.lower() in {"--header", "--token", "--api-key", "--password", "--secret"}:
+                redacted.append(item)
+                skip_next = True
+                continue
+            redacted.append(_redact_secret_value(item))
+        return redacted
+    if isinstance(value, str):
+        return _SECRET_VALUE_RE.sub(lambda m: (m.group(1) or m.group(2) or m.group(3) or "") + "***MASKED***", value)
+    return value
+
+
 def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
     status = _mcp_relay_agent_status(info, now)
-    meta = dict(info.get("meta") or {})
+    meta = _redact_secret_value(dict(info.get("meta") or {}))
     meta.setdefault("age_s", int(_mcp_relay_agent_age_s(info, now)))
+    meta.setdefault("transport_role", "capability_executor")
+    meta.setdefault("rootd_transport_ready", True)
     for k, v in _mcp_relay_job_counts(agent_id).items():
         if v:
             meta[k] = v
@@ -3016,7 +3058,13 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if verbose:
             out["secrets"]["masked"] = {name: _mask_secret_value(os.getenv(name)) for name in configured}
     if section in {"all", "architecture"}:
-        out["architecture"] = {"hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host", "shell": "per-host executor registered as virtual MCP agent shell:<server>", "real_mcp": "stdio or remote MCP services registered into hub as separate MCP agents", "polling_vs_webhook": "webhook receives callbacks directly; polling agents fetch queued jobs from hub"}
+        out["architecture"] = {
+            "hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host",
+            "rootd": "durable transport layer between hub and local capabilities on every platform",
+            "shell": "local executor capability exposed through rootd as virtual MCP agent shell:<server>",
+            "real_mcp": "stdio or remote MCP capability; migration target is supervision/transport behind rootd",
+            "polling_vs_webhook": "transport detail owned by rootd; capabilities should not implement their own fragile hub transport",
+        }
     if section in {"all", "rescue"}:
         out["rescue"] = {
             "principle": "If a shell agent on the hub host is broken, use hub.mcp_tools to add a temporary real MCP rescue shell on that same host, fix shellmcp/rootd, then remove the rescue MCP.",

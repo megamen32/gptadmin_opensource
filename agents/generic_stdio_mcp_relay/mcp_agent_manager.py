@@ -118,7 +118,12 @@ WorkingDirectory={cwd}
 ExecStart=/bin/sh -lc {shlex.quote(cmd)}
 Restart=always
 RestartSec={int(cfg.get('restart_sec', 5))}
+TimeoutStopSec=10
+KillMode=mixed
+SendSIGKILL=yes
 KillSignal=SIGTERM
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Install]
 WantedBy=multi-user.target
