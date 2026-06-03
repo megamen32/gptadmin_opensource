@@ -212,8 +212,13 @@ if MCP_RELAY_DEFAULT_RETRY_POLICY not in RETRY_POLICIES:
     MCP_RELAY_DEFAULT_RETRY_POLICY = DEFAULT_RETRY_POLICY
 CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "24000"))
 SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "4096"))
-SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "1200"))
-SPILL_PREVIEW_TAIL_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_TAIL_CHARS", "400"))
+SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "600"))
+SPILL_PREVIEW_TAIL_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_TAIL_CHARS", "160"))
+SPILL_HINT_STYLE = os.getenv("HUB_SPILL_HINT_STYLE", "compact").strip().lower()
+HEADROOM_SPILL_ENABLED = os.getenv("HUB_HEADROOM_SPILL_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+HEADROOM_SPILL_MAX_CHARS = int(os.getenv("HUB_HEADROOM_SPILL_MAX_CHARS", "200000"))
+HEADROOM_SPILL_PREVIEW_CHARS = int(os.getenv("HUB_HEADROOM_SPILL_PREVIEW_CHARS", "1200"))
+HEADROOM_SITE_PACKAGES = os.getenv("HUB_HEADROOM_SITE_PACKAGES", "").strip()
 OUTPUT_STORE_DIR = Path(os.getenv("HUB_OUTPUT_STORE_DIR", str(CONFIG_DIR / "outputs")))
 OUTPUT_STORE_MAX_BYTES = int(os.getenv("HUB_OUTPUT_STORE_MAX_BYTES", str(500 * 1024 * 1024)))
 AUDIT_LOG_PATH = Path(os.getenv("GPTADMIN_AUDIT_LOG", "/var/log/gptadmin/audit.log"))
@@ -493,6 +498,64 @@ def _find_hub_server() -> str:
     return ""
 
 
+def _maybe_add_headroom_path() -> None:
+    """Make an optional standalone Headroom venv importable by the hub process."""
+
+    candidates = []
+    if HEADROOM_SITE_PACKAGES:
+        candidates.append(Path(HEADROOM_SITE_PACKAGES))
+    candidates.extend(Path("/home/admin/.venvs/headroom/lib").glob("python*/site-packages"))
+
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                path = str(candidate)
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+                return
+        except Exception:
+            continue
+
+
+def _headroom_spill_summary(content: str) -> Optional[Dict[str, Any]]:
+    """Return compact Headroom summary for a spilled field, best-effort only."""
+
+    if not HEADROOM_SPILL_ENABLED or not content:
+        return None
+    try:
+        _maybe_add_headroom_path()
+        from headroom.compress import compress  # type: ignore
+
+        source = content[:HEADROOM_SPILL_MAX_CHARS]
+        result = compress([{"role": "tool", "content": source}], model=os.getenv("HUB_HEADROOM_MODEL", "claude-sonnet-4-5-20250929"))
+        compressed = result.messages[0].get("content", source)
+        if not isinstance(compressed, str):
+            compressed = json.dumps(compressed, ensure_ascii=False, default=str)
+        compressed = compressed.strip()
+        if not compressed or compressed == source.strip():
+            return None
+        if len(compressed) > HEADROOM_SPILL_PREVIEW_CHARS:
+            compressed = compressed[:HEADROOM_SPILL_PREVIEW_CHARS].rstrip() + "…"
+        return _omit_none({
+            "summary": compressed,
+            "tokens_before": getattr(result, "tokens_before", None),
+            "tokens_after": getattr(result, "tokens_after", None),
+            "transforms": getattr(result, "transforms_applied", None),
+            "truncated_input": len(content) > len(source),
+        })
+    except Exception as exc:
+        log.debug("headroom spill summary failed: %s", exc, exc_info=True)
+        return None
+
+
+def _spill_hint(path: Path) -> str:
+    if SPILL_HINT_STYLE in {"none", "off", "0"}:
+        return ""
+    if SPILL_HINT_STYLE in {"full", "verbose"}:
+        return f"Read full output from file_path. Example: sed -n '1,120p' {shlex.quote(str(path))}"
+    return "Full output is in file_path."
+
+
 def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, returncode: Any) -> dict:
     _ensure_output_store()
     path = OUTPUT_STORE_DIR / f"{output_id}.{field}"
@@ -513,8 +576,13 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
         "file_path": str(path),
         "preview_head": content[:SPILL_PREVIEW_HEAD_CHARS],
         "preview_tail": content[-SPILL_PREVIEW_TAIL_CHARS:] if len(content) > SPILL_PREVIEW_HEAD_CHARS else "",
-        "hint": f"Use shell_exec on hub_server with sed/grep/jq, e.g.: sed -n '1,120p' {shlex.quote(str(path))}",
     }
+    hint = _spill_hint(path)
+    if hint:
+        stub["hint"] = hint
+    headroom = _headroom_spill_summary(content)
+    if headroom:
+        stub["headroom"] = headroom
     hub_srv = _find_hub_server()
     if hub_srv:
         stub["hub_server"] = _virtual_shell_agent_id(hub_srv)
