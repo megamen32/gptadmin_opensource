@@ -188,6 +188,11 @@ def _default_artifact_dir() -> Path:
 ARTIFACT_DIR = Path(os.getenv("GPTADMIN_ARTIFACT_DIR", str(_default_artifact_dir())))
 APPROVED_SERVERS_FILE = Path(os.getenv("GPTADMIN_APPROVED_SERVERS_FILE", str(CONFIG_DIR / "approved_servers.json")))
 PENDING_SERVERS_FILE = Path(os.getenv("GPTADMIN_PENDING_SERVERS_FILE", str(CONFIG_DIR / "pending_servers.json")))
+HUB_TRANSFERS_DIR = Path(os.getenv("GPTADMIN_TRANSFERS_DIR", str(CONFIG_DIR / "transfers")))
+TRANSFERS_DIR = HUB_TRANSFERS_DIR
+HUB_PORT_FORWARDS_FILE = Path(os.getenv("GPTADMIN_PORT_FORWARDS_FILE", str(CONFIG_DIR / "port_forwards.json")))
+PORT_FORWARDS_FILE = HUB_PORT_FORWARDS_FILE
+HUB_HUB_FILE_TRANSFER_MAX_INLINE_BYTES = int(os.getenv("GPTADMIN_FILE_TRANSFER_MAX_INLINE_BYTES", "52428800"))
 HUB_PRIVATE_KEY_FILE = Path(os.getenv("GPTADMIN_HUB_PRIVATE_KEY_FILE", str(CONFIG_DIR / "hub_ed25519")))
 HUB_PUBLIC_KEY_FILE_ED25519 = Path(os.getenv("GPTADMIN_HUB_PUBLIC_KEY_FILE", str(CONFIG_DIR / "hub_ed25519.pub")))
 HUB_ID = os.getenv("GPTADMIN_HUB_ID", "main-hub")
@@ -2994,6 +2999,251 @@ def _mcp_tools_manage(args: Dict[str, Any]) -> Dict[str, Any]:
     return _mcp_tools_compact(data, verbose=verbose)
 
 
+
+def _hub_job_id(prefix: str) -> str:
+    return f"{prefix}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _canonical_shell_agent(agent: str) -> str:
+    agent = str(agent or "")
+    if not agent:
+        raise HTTPException(400, "agent is required")
+    if agent.startswith(VIRTUAL_SHELL_PREFIX):
+        _server_from_virtual_shell_agent(agent)
+        return agent
+    if agent in servers:
+        return _virtual_shell_agent_id(agent)
+    raise HTTPException(404, f"unknown shell agent/server: {agent}")
+
+
+def _hub_task(status: str, tool: str, args: Dict[str, Any], *, job_id: Optional[str] = None, result: Optional[Dict[str, Any]] = None, error: Optional[str] = None) -> Dict[str, Any]:
+    jid = job_id or _hub_job_id(tool.replace("_", "-"))
+    now = time.time()
+    job = {"kind": "hub_tool_task", "job_id": jid, "tool": tool, "args": args, "status": status, "created_at": now, "updated_at": now, "created_at_iso": _now_iso(), "updated_at_iso": _now_iso()}
+    if result is not None:
+        job["result"] = result
+    if error:
+        job["error"] = error
+    mcp_relay_jobs[jid] = job
+    try:
+        _save_all_state()
+    except Exception:
+        pass
+    return job
+
+
+def _hub_task_update(job_id: str, **updates: Any) -> Dict[str, Any]:
+    job = mcp_relay_jobs.get(job_id) or {"kind": "hub_tool_task", "job_id": job_id}
+    job.update(updates)
+    job["updated_at"] = time.time()
+    job["updated_at_iso"] = _now_iso()
+    mcp_relay_jobs[job_id] = job
+    try:
+        _save_all_state()
+    except Exception:
+        pass
+    return job
+
+
+async def _shell_tool(agent: str, tool_name: str, args: Dict[str, Any], *, background: bool = False) -> Dict[str, Any]:
+    return await _virtual_shell_tool_call(_canonical_shell_agent(agent), tool_name, args, request_background=background)
+
+
+def _extract_shell_result(envelope: Dict[str, Any], agent: str) -> Dict[str, Any]:
+    sc = envelope.get("structuredContent") if isinstance(envelope, dict) else None
+    if not isinstance(sc, dict):
+        return {"returncode": None, "stdout": "", "stderr": "", "raw": envelope}
+    if "result" in sc:
+        return sc["result"] if isinstance(sc.get("result"), dict) else sc
+    results = sc.get("results")
+    if isinstance(results, dict):
+        srv = _server_from_virtual_shell_agent(_canonical_shell_agent(agent))
+        val = results.get(srv) or results.get(agent) or {}
+        if isinstance(val, dict):
+            return val
+    return sc
+
+
+def _stdout_text(result: Dict[str, Any]) -> str:
+    out = result.get("stdout") if isinstance(result, dict) else ""
+    if isinstance(out, dict):
+        if out.get("_spilled"):
+            fp = str(out.get("file_path") or "")
+            try:
+                return Path(fp).read_text(errors="replace") if fp else str(out)
+            except Exception:
+                return str(out.get("preview_head") or "") + str(out.get("preview_tail") or "")
+        return json.dumps(out, ensure_ascii=False)
+    return str(out or "")
+
+
+def _stderr_text(result: Dict[str, Any]) -> str:
+    err = result.get("stderr") if isinstance(result, dict) else ""
+    return json.dumps(err, ensure_ascii=False) if isinstance(err, (dict, list)) else str(err or "")
+
+
+async def _hub_file_transfer(args: Dict[str, Any]) -> Dict[str, Any]:
+    source_agent = _canonical_shell_agent(str(args.get("source_agent") or args.get("from_agent") or ""))
+    target_agent = _canonical_shell_agent(str(args.get("target_agent") or args.get("to_agent") or ""))
+    source_path = str(args.get("source_path") or "")
+    target_path = str(args.get("target_path") or "")
+    if not source_path or not target_path:
+        raise HTTPException(400, "file_transfer requires source_path and target_path")
+    overwrite = bool(args.get("overwrite", False))
+    mkdirs = bool(args.get("mkdirs", True))
+    verify_sha256 = bool(args.get("verify_sha256", True))
+    job = _hub_task("running", "file_transfer", args)
+    job_id = job["job_id"]
+    HUB_TRANSFERS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        qsrc = shlex.quote(source_path)
+        src_cmd = "set -euo pipefail\n" + f"test -f {qsrc}\n" + f"stat -c '%s' {qsrc} 2>/dev/null || stat -f '%z' {qsrc}\n" + f"sha256sum {qsrc} 2>/dev/null | awk '{{print $1}}' || shasum -a 256 {qsrc} | awk '{{print $1}}'\n" + f"base64 < {qsrc}"
+        src_env = await _shell_tool(source_agent, "shell_exec", {"cmd": src_cmd, "timeout": int(args.get("source_timeout") or 120)})
+        src_res = _extract_shell_result(src_env, source_agent)
+        if int(src_res.get("returncode") or 0) != 0:
+            raise RuntimeError(f"source read failed rc={src_res.get('returncode')}: {_stderr_text(src_res)[:1000]}")
+        lines = _stdout_text(src_res).splitlines()
+        if len(lines) < 3:
+            raise RuntimeError("source output too short; expected size, sha256, base64")
+        size = int(lines[0].strip())
+        source_sha = lines[1].strip()
+        b64 = "\n".join(lines[2:]).strip()
+        if len(b64) > int(args.get("max_inline_b64") or 48_000_000):
+            raise RuntimeError("file too large for MVP inline relay; add chunked rootd transfer next")
+        calc_sha = hashlib.sha256(base64.b64decode(b64.encode("ascii"))).hexdigest()
+        if verify_sha256 and calc_sha != source_sha:
+            raise RuntimeError(f"hub sha256 mismatch source={source_sha} hub={calc_sha}")
+        qdst = shlex.quote(target_path)
+        qdir = shlex.quote(str(Path(target_path).parent))
+        exists_guard = "" if overwrite else f"test ! -e {qdst}\n"
+        mkdir_cmd = f"mkdir -p {qdir}\n" if mkdirs else ""
+        target_script = "set -euo pipefail\n" + mkdir_cmd + exists_guard + f"tmp={qdst}.gptadmin-tmp-{job_id}\n" + "cat > \"$tmp.b64\" <<'GPTADMIN_B64_EOF'\n" + b64 + "\nGPTADMIN_B64_EOF\n" + "base64 -d < \"$tmp.b64\" > \"$tmp\"\nrm -f \"$tmp.b64\"\n" + "sha256sum \"$tmp\" 2>/dev/null | awk '{print $1}' || shasum -a 256 \"$tmp\" | awk '{print $1}'\n" + f"mv \"$tmp\" {qdst}\n" + f"stat -c '%s' {qdst} 2>/dev/null || stat -f '%z' {qdst}\n"
+        dst_env = await _shell_tool(target_agent, "shell_exec", {"cmd": target_script, "timeout": int(args.get("target_timeout") or 120)})
+        dst_res = _extract_shell_result(dst_env, target_agent)
+        if int(dst_res.get("returncode") or 0) != 0:
+            raise RuntimeError(f"target write failed rc={dst_res.get('returncode')}: {_stderr_text(dst_res)[:1000]} {_stdout_text(dst_res)[:1000]}")
+        dst_lines = _stdout_text(dst_res).splitlines()
+        target_sha = (dst_lines[0].strip() if dst_lines else "")
+        target_size = int(dst_lines[1].strip()) if len(dst_lines) > 1 and dst_lines[1].strip().isdigit() else None
+        if verify_sha256 and target_sha != source_sha:
+            raise RuntimeError(f"target sha256 mismatch source={source_sha} target={target_sha}")
+        result = {"job_id": job_id, "source_agent": source_agent, "target_agent": target_agent, "source_path": source_path, "target_path": target_path, "bytes": size, "target_bytes": target_size, "sha256": source_sha, "verified": bool(verify_sha256)}
+        _hub_task_update(job_id, status="completed", completed_at=time.time(), result=result)
+        return _mcp_envelope_text(f"Transferred {size} bytes {source_agent}:{source_path} -> {target_agent}:{target_path}", result)
+    except Exception as e:
+        _hub_task_update(job_id, status="failed", error=str(e), failed_at=time.time())
+        raise
+
+
+async def _hub_port_forward(args: Dict[str, Any]) -> Dict[str, Any]:
+    action = str(args.get("action") or "start")
+    registry = _load_json_dict(HUB_PORT_FORWARDS_FILE)
+    def _parse_dt_ts(value: Any) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return None
+
+    def _prune_and_filter_forwards(show_stopped: bool = False, stopped_ttl_sec: Optional[int] = None) -> tuple[Dict[str, Any], int]:
+        now = time.time()
+        ttl = int(stopped_ttl_sec if stopped_ttl_sec is not None else os.getenv("GPTADMIN_PORT_FORWARD_STOPPED_TTL_SEC", "86400"))
+        changed = False
+        visible: Dict[str, Any] = {}
+        for fid, item in list(registry.items()):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") == "stopped":
+                stopped_ts = _parse_dt_ts(item.get("stopped_at"))
+                if ttl >= 0 and stopped_ts and now - stopped_ts > ttl:
+                    registry.pop(fid, None)
+                    changed = True
+                    continue
+                if not show_stopped:
+                    continue
+            visible[fid] = item
+        if changed:
+            _save_json_dict(HUB_PORT_FORWARDS_FILE, registry)
+        return visible, len(registry)
+
+    if action == "list":
+        visible, total = _prune_and_filter_forwards(bool(args.get("show_stopped", False)), args.get("stopped_ttl_sec"))
+        return _mcp_envelope_text(f"{len(visible)} port forward(s)", {"forwards": visible, "count": len(visible), "total_count": total, "show_stopped": bool(args.get("show_stopped", False))})
+    if action in {"stop", "status"}:
+        forward_id = str(args.get("forward_id") or args.get("id") or "")
+        if not forward_id:
+            raise HTTPException(400, f"port_forward action={action} requires forward_id")
+        item = registry.get(forward_id)
+        if not item:
+            raise HTTPException(404, f"unknown forward_id {forward_id}")
+        if action == "stop":
+            pid = str(item.get("pid") or "")
+            pattern = str(item.get("pattern") or forward_id)
+            cmd = f"[ -n {shlex.quote(pid)} ] && kill {shlex.quote(pid)} 2>/dev/null || true\npkill -f {shlex.quote(pattern)} 2>/dev/null || true\ntrue"
+            await _shell_tool(str(item.get("from_agent")), "shell_exec", {"cmd": cmd, "timeout": 15})
+            item["status"] = "stopped"; item["stopped_at"] = _now_iso(); registry[forward_id] = item; _save_json_dict(HUB_PORT_FORWARDS_FILE, registry)
+            return _mcp_envelope_text(f"Stopped port forward {forward_id}", item)
+        check_env = await _shell_tool(str(item.get("to_agent") or item.get("from_agent")), "shell_exec", {"cmd": str(item.get("check_cmd") or "true"), "timeout": 15})
+        res = _extract_shell_result(check_env, str(item.get("to_agent") or item.get("from_agent")))
+        item["last_check"] = {"returncode": res.get("returncode"), "stdout": _stdout_text(res), "stderr": _stderr_text(res), "at": _now_iso()}
+        return _mcp_envelope_text(f"Port forward {forward_id} status rc={res.get('returncode')}", item)
+    if action != "start":
+        raise HTTPException(400, "port_forward action must be start, list, status or stop")
+    from_agent = _canonical_shell_agent(str(args.get("from_agent") or ""))
+    to_agent = _canonical_shell_agent(str(args.get("to_agent") or args.get("check_agent") or from_agent))
+    kind = str(args.get("kind") or "reverse")
+    local_host = str(args.get("local_host") or "localhost")
+    local_port = int(args.get("local_port") or 0)
+    remote_port = int(args.get("remote_port") or args.get("listen_port") or 0)
+    bind_host = str(args.get("bind_host") or "127.0.0.1")
+    ssh_host = str(args.get("ssh_host") or args.get("ssh_alias") or "")
+    if kind not in {"reverse", "local"} or not local_port or not ssh_host:
+        raise HTTPException(400, "port_forward requires kind reverse/local, local_port and ssh_host")
+    forward_id = str(args.get("forward_id") or f"pf_{kind}_{uuid.uuid4().hex[:8]}")
+    if kind == "reverse":
+        if not remote_port: raise HTTPException(400, "reverse port_forward requires remote_port")
+        spec = f"{bind_host}:{remote_port}:{local_host}:{local_port}" if bind_host else f"{remote_port}:{local_host}:{local_port}"
+        flag = "-R"; check_agent = to_agent; check_port = remote_port
+    else:
+        check_port = int(args.get("listen_port") or remote_port or 0)
+        if not check_port: raise HTTPException(400, "local port_forward requires listen_port or remote_port")
+        spec = f"{bind_host}:{check_port}:{local_host}:{local_port}" if bind_host else f"{check_port}:{local_host}:{local_port}"
+        flag = "-L"; check_agent = from_agent
+    check_cmd = f"ss -ltn 2>/dev/null | grep -E '(:|\\]){check_port}\\b' || lsof -nP -iTCP:{check_port} -sTCP:LISTEN 2>/dev/null || nc -zv {shlex.quote(bind_host or '127.0.0.1')} {check_port}"
+    pattern = f"gptadmin-port-forward-{forward_id}"
+    extra = str(args.get("ssh_extra") or "")
+    identity = str(args.get("identity_file") or "")
+    ident = f"-i {shlex.quote(identity)} " if identity else ""
+    restart = f"pkill -f {shlex.quote(pattern)} 2>/dev/null || true\n" if bool(args.get("restart_existing", True)) else ""
+    cmd = "set -euo pipefail\n" + restart + f"nohup ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 {extra} {ident}{flag} {shlex.quote(spec)} {shlex.quote(ssh_host)} >/tmp/{forward_id}.log 2>&1 &\n" + "pid=$!\nsleep 1\nkill -0 $pid\necho $pid\n"
+    job = _hub_task("running", "port_forward", args); job_id = job["job_id"]
+    try:
+        env = await _shell_tool(from_agent, "shell_exec", {"cmd": cmd, "timeout": 20})
+        res = _extract_shell_result(env, from_agent)
+        if int(res.get("returncode") or 0) != 0:
+            raise RuntimeError(f"ssh tunnel start failed rc={res.get('returncode')}: {_stdout_text(res)} {_stderr_text(res)}")
+        pid_line = (_stdout_text(res).splitlines() or [""])[-1].strip(); pid = int(pid_line) if pid_line.isdigit() else None
+        check_env = await _shell_tool(check_agent, "shell_exec", {"cmd": check_cmd, "timeout": 15})
+        check_res = _extract_shell_result(check_env, check_agent)
+        item = {"forward_id": forward_id, "job_id": job_id, "status": "running" if int(check_res.get("returncode") or 0) == 0 else "started_unverified", "kind": kind, "from_agent": from_agent, "to_agent": to_agent, "ssh_host": ssh_host, "spec": spec, "pid": pid, "pattern": pattern, "check_cmd": check_cmd, "created_at": _now_iso(), "last_check": {"returncode": check_res.get("returncode"), "stdout": _stdout_text(check_res), "stderr": _stderr_text(check_res), "at": _now_iso()}}
+        registry[forward_id] = item; _save_json_dict(HUB_PORT_FORWARDS_FILE, registry); _hub_task_update(job_id, status="completed", completed_at=time.time(), result=item)
+        return _mcp_envelope_text(f"Port forward {forward_id}: {item['status']}", item)
+    except Exception as e:
+        _hub_task_update(job_id, status="failed", error=str(e), failed_at=time.time())
+        raise
+
 def _hub_tools_list() -> Dict[str, Any]:
     tools = [
         {
@@ -3055,6 +3305,45 @@ def _hub_tools_list() -> Dict[str, Any]:
             },
         },
     ]
+    tools.extend([
+        {
+            "name": "file_transfer",
+            "description": "Hub-orchestrated file copy between two shell agents. Uses existing shell_exec and returns a normal hub task/result.",
+            "inputSchema": {"type": "object", "properties": {
+                "source_agent": {"type": "string"},
+                "source_path": {"type": "string"},
+                "target_agent": {"type": "string"},
+                "target_path": {"type": "string"},
+                "overwrite": {"type": "boolean", "default": False},
+                "mkdirs": {"type": "boolean", "default": True},
+                "verify_sha256": {"type": "boolean", "default": True},
+                "keep_relay_file": {"type": "boolean", "default": False}
+            }, "required": ["source_agent", "source_path", "target_agent", "target_path"], "additionalProperties": False},
+        },
+        {
+            "name": "port_forward",
+            "description": "Hub-orchestrated SSH port forward between shell agents. Actions: start/list/status/stop.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["start", "list", "status", "stop"], "default": "start"},
+                "kind": {"type": "string", "enum": ["reverse", "local"], "default": "reverse"},
+                "from_agent": {"type": "string"},
+                "to_agent": {"type": "string"},
+                "ssh_host": {"type": "string"},
+                "ssh_alias": {"type": "string"},
+                "local_host": {"type": "string", "default": "localhost"},
+                "local_port": {"type": "integer"},
+                "remote_port": {"type": "integer"},
+                "listen_port": {"type": "integer"},
+                "bind_host": {"type": "string", "default": "127.0.0.1"},
+                "identity_file": {"type": "string"},
+                "ssh_extra": {"type": "string"},
+                "restart_existing": {"type": "boolean", "default": True},
+                "forward_id": {"type": "string"},
+                "show_stopped": {"type": "boolean", "default": False},
+                "stopped_ttl_sec": {"type": "integer", "default": 86400}
+            }, "additionalProperties": False},
+        },
+    ])
     return {"tools": tools}
 
 
@@ -3409,6 +3698,10 @@ def _legacy_list_tasks(srv: str, status: Optional[str] = None, limit: Optional[i
 
 
 async def _hub_tool_call(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_name == "file_transfer":
+        return await _hub_file_transfer(args)
+    if tool_name == "port_forward":
+        return await _hub_port_forward(args)
     if tool_name == "list_servers":
         data = list_servers(include_pending=True)
         return _mcp_envelope_text(f"Found {len(data.get('servers', []))} servers", data)
@@ -4133,8 +4426,30 @@ def oauth_authorization_server():
 
 
 @app.post("/register")
-async def oauth_register():
-    return {"client_id": "chatgpt-dynamic", "token_endpoint_auth_method": "none", "grant_types": ["authorization_code"], "response_types": ["code"]}
+async def oauth_register(request: Request):
+    # RFC 7591 dynamic client registration. Echo the client's submitted metadata
+    # (redirect_uris especially) and include client_id_issued_at — strict OAuth
+    # clients (e.g. Codex's rmcp client) reject a response missing these.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    redirect_uris = body.get("redirect_uris") or []
+    resp = {
+        "client_id": "chatgpt-dynamic",
+        "client_id_issued_at": int(time.time()),
+        "token_endpoint_auth_method": "none",
+        "grant_types": body.get("grant_types") or ["authorization_code"],
+        "response_types": body.get("response_types") or ["code"],
+        "redirect_uris": redirect_uris,
+    }
+    if body.get("client_name"):
+        resp["client_name"] = body["client_name"]
+    if body.get("scope"):
+        resp["scope"] = body["scope"]
+    return resp
 
 
 @app.get("/authorize")
@@ -4192,7 +4507,10 @@ async def oauth_token(request: Request):
     body = (await request.body()).decode()
     params = {k: v[0] for k, v in parse_qs(body).items()}
     data = _oauth_codes.pop(params.get("code", ""), None)
-    resource = params.get("resource") or ((data or {}).get("resource") or MCP_RESOURCE).rstrip("/")
+    # Normalize trailing slash: the stored resource (authorize step) was rstrip'd,
+    # but a client (e.g. Claude Code) may send resource with a trailing slash in
+    # the token request. Without rstrip here the comparison spuriously mismatches.
+    resource = (params.get("resource") or (data or {}).get("resource") or MCP_RESOURCE).rstrip("/")
     if not data or time.time() - data.get("created", 0) > 300 or resource != MCP_RESOURCE or resource != data.get("resource"):
         return JSONResponse({"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"}, status_code=400)
     if not _pkce_ok(params.get("code_verifier", ""), data.get("challenge", "")):
@@ -4219,7 +4537,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
             "title": "List MCP agents",
             "description": "List MCP agents. Real MCP statuses default to online/offline; pass statuses=stale or statuses=all to include stale agents.",
             "inputSchema": {"type": "object", "properties": {"statuses": {"type": "array", "items": {"type": "string", "enum": ["online", "active", "offline", "stale", "all"]}, "default": ["online", "offline"], "description": "Real MCP statuses to include. active is accepted as alias for online."}, "purge_stale": {"type": "boolean", "default": False, "description": "Remove stale real MCP agents from registry before listing."}}, "additionalProperties": False},
-            "outputSchema": {"type": "object", "properties": {"agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}}}, "required": ["agents"], "additionalProperties": False},
+            "outputSchema": {"type": "object", "properties": {"agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}}}, "required": ["agents"], "additionalProperties": True},
             "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
             "_meta": base_meta,
@@ -4336,7 +4654,20 @@ async def mcp_post(request: Request):
         elif method == "tools/call":
             tool_name = params.get("name")
             args = params.get("arguments") or {}
-            result = await _apps_sdk_call_tool(tool_name, args)
+            tool_result = await _apps_sdk_call_tool(tool_name, args)
+            # MCP tools/call results must carry a `content` array; clients (e.g.
+            # Claude Code) render that, not a bare dict — without it the call
+            # succeeds end-to-end but shows empty. Wrap the tool's dict as JSON
+            # text content and keep it as structuredContent too.
+            if isinstance(tool_result, dict) and isinstance(tool_result.get("content"), list):
+                result = tool_result
+            else:
+                text = json.dumps(tool_result, ensure_ascii=False, indent=2, default=str)
+                result = {
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": tool_result if isinstance(tool_result, dict) else {"result": tool_result},
+                    "isError": bool(isinstance(tool_result, dict) and tool_result.get("status") in {"failed", "offline", "expired", "cancelled"}),
+                }
         else:
             return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"unknown method {method}"}}
         return {"jsonrpc": "2.0", "id": req_id, "result": result}
