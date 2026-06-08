@@ -527,14 +527,59 @@ def main():
     import uvicorn
 
     port = int(os.getenv("HUB_PORT", "9001"))
-    log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s)", port, DEAD_S, LOG_LEVEL)
-    # Включаем стандартные access-логи uvicorn + наши middleware-логи
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level=LOG_LEVEL.lower(),
-    )
+    tunnel_type = os.getenv("TUNNEL_TYPE", "none").lower()
+    
+    log.info("starting hub on 0.0.0.0:%s (dead_s=%s, log_level=%s, tunnel=%s)", 
+             port, DEAD_S, LOG_LEVEL, tunnel_type)
+    
+    # Start tunnel if requested
+    tunnel_info = None
+    if tunnel_type != "none":
+        try:
+            from .tunnels import CloudflareTunnel, NgrokTunnel, FrpTunnel
+            
+            if tunnel_type == "cloudflare":
+                tunnel = CloudflareTunnel()
+            elif tunnel_type == "ngrok":
+                tunnel = NgrokTunnel()
+            elif tunnel_type == "frp":
+                # FRP requires config from environment
+                tunnel = FrpTunnel(
+                    server_addr=os.getenv("FRP_SERVER_ADDR", ""),
+                    server_port=int(os.getenv("FRP_SERVER_PORT", "7000")),
+                    token=os.getenv("FRP_TOKEN", ""),
+                    subdomain=os.getenv("FRP_SUBDOMAIN", "gptadmin"),
+                    domain=os.getenv("FRP_DOMAIN", ""),
+                )
+            else:
+                log.warning(f"Unknown tunnel type: {tunnel_type}")
+                tunnel = None
+            
+            if tunnel and tunnel.is_available():
+                log.info(f"Starting {tunnel.name}...")
+                tunnel_info = tunnel.start(port)
+                log.info(f"✓ Hub is publicly accessible at: {tunnel_info.public_url}/mcp")
+                print(f"\n{'='*70}")
+                print(f"Hub public URL: {tunnel_info.public_url}/mcp")
+                print(f"Add this to your LLM client (Qwen, ChatGPT, etc.)")
+                print(f"{'='*70}\n")
+            elif tunnel:
+                log.error(f"{tunnel.name} is not available")
+        except Exception as e:
+            log.error(f"Failed to start tunnel: {e}")
+    
+    try:
+        # Start uvicorn
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=port,
+            log_level=LOG_LEVEL.lower(),
+        )
+    finally:
+        # Clean up tunnel on shutdown
+        if tunnel_info:
+            tunnel_info.stop()
 
 if __name__ == "__main__":
     main()
