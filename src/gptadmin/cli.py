@@ -16,10 +16,21 @@ from pathlib import Path
 # ===== Paths & constants =====
 INSTALL_DIR = Path('/opt/gptadmin')
 BIN_DIR = INSTALL_DIR / 'bin'
-ETC_DIR = Path('/etc/gptadmin')
-ETC_DIR.mkdir(parents=True, exist_ok=True)
-ENV_FILE = ETC_DIR / 'gptadmin.env'
-FRPC_CONF = ETC_DIR / 'frpc.toml'
+def get_config_dir() -> Path:
+    if env_dir := os.getenv('GPTADMIN_CONFIG_DIR'):
+        p = Path(env_dir)
+    elif os.geteuid() == 0:
+        p = Path('/etc/gptadmin')
+    else:
+        p = Path.home() / '.config' / 'gptadmin'
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def get_env_file() -> Path:
+    return get_config_dir() / 'gptadmin.env'
+
+def get_frpc_conf() -> Path:
+    return get_config_dir() / 'frpc.toml'
 CLI_PATH = Path('/usr/local/bin/gptadmin')  # для uninstall
 
 SYSTEMD_DIR = Path('/etc/systemd/system')
@@ -66,8 +77,8 @@ def run(cmd, check=True, capture=False):
 
 def env_read() -> dict:
     d = {}
-    if ENV_FILE.exists():
-        for raw in ENV_FILE.read_text().splitlines():
+    if get_env_file().exists():
+        for raw in get_env_file().read_text().splitlines():
             line = raw.strip()
             if not line or line.startswith('#'):
                 continue
@@ -80,9 +91,9 @@ def env_set_many(upd: dict):
     cur = env_read()
     cur.update(upd)
     lines = [f'{k}={cur[k]}' for k in sorted(cur.keys())]
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ENV_FILE.write_text('\n'.join(lines) + '\n')
-    os.chmod(ENV_FILE, 0o640)
+    get_env_file().parent.mkdir(parents=True, exist_ok=True)
+    get_env_file().write_text('\n'.join(lines) + '\n')
+    os.chmod(get_env_file(), 0o640)
 
 # tokens
 
@@ -157,7 +168,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile={ENV_FILE}
+EnvironmentFile={get_env_file()}
 # hub_proxy читает CTL_TOKEN, HUB_BIND, HUB_PORT
 ExecStart={BIN_DIR}/hub_proxy
 Restart=always
@@ -179,7 +190,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile={ENV_FILE}
+EnvironmentFile={get_env_file()}
 # rootd читает ROOTD_TOKEN; HUB_URL — адрес хаба для heartbeat
 ExecStart={BIN_DIR}/rootd
 Restart=always
@@ -251,7 +262,7 @@ def ensure_frpc_installed() -> str:
         return str(frpc_dst)
 
 def write_frpc_conf(env: dict):
-    FRPC_CONF.parent.mkdir(parents=True, exist_ok=True)
+    get_frpc_conf().parent.mkdir(parents=True, exist_ok=True)
     local_port = env.get('HUB_PORT', '9001')
     content = f"""serverAddr = "{env['FRP_SERVER_ADDR']}"
 serverPort = {env['FRP_SERVER_PORT']}
@@ -269,8 +280,8 @@ type = "http"
 localPort = {local_port}
 subdomain = "{env['FRP_SUBDOMAIN']}"
 """
-    FRPC_CONF.write_text(content)
-    os.chmod(FRPC_CONF, 0o640)
+    get_frpc_conf().write_text(content)
+    os.chmod(get_frpc_conf(), 0o640)
 
 # ===== Interactive setup =====
 
@@ -389,7 +400,7 @@ def setup_interactive(args):
     if env.get('FRP_ENABLE', 'false') == 'true':
         frpc_bin = ensure_frpc_installed()
         write_frpc_conf(env)
-        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
+        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=get_frpc_conf()))
 
     # enable + restart
     run(['systemctl', 'daemon-reload'])
@@ -562,7 +573,7 @@ def cmd_tunnel_enable(args):
 
     frpc_bin = ensure_frpc_installed()
     write_frpc_conf(env)
-    UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF))
+    UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=get_frpc_conf()))
     run(['systemctl','daemon-reload'])
     run(['systemctl','enable', SYSTEMD_FRPC])
     run(['systemctl','restart', SYSTEMD_FRPC])
@@ -608,7 +619,7 @@ def cmd_uninstall(args):
         safe_rm(local_frpc)
 
     safe_rm(INSTALL_DIR)
-    safe_rm(ETC_DIR)
+    safe_rm(get_config_dir())
 
     # попробовать удалить сам CLI
     removed_cli = False

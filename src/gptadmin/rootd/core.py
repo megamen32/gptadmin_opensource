@@ -36,19 +36,20 @@ port = int(os.getenv("ROOTD_PORT", os.getenv("PORT","25900")))
 # --- логирование ---
 from logging.handlers import RotatingFileHandler
 
-# Determine log file name based on service name
-service_name = os.getenv("ROOTD_SERVICE_NAME", "rootd").replace(".service", "")
-log_file = f"{service_name}-{port}.log"
-
-logging.basicConfig(
-    level=logging.DEBUG,  # можно поставить INFO если слишком шумно
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
-        logging.StreamHandler()              # лог в stdout (для systemd)
-    ]
-)
 log = logging.getLogger("rootd")
+
+def setup_logging():
+    # Determine log file name based on service name
+    service_name = os.getenv("ROOTD_SERVICE_NAME", "rootd").replace(".service", "")
+    log_file = f"{service_name}-{port}.log"
+    logging.basicConfig(
+        level=logging.DEBUG,  # можно поставить INFO если слишком шумно
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
+            logging.StreamHandler()              # лог в stdout (для systemd)
+        ]
+    )
 # ------------------------------------------------------------------
 
 TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
@@ -230,6 +231,7 @@ def get_file(path: str):
 
 
 def main():
+    setup_logging()
     import uvicorn, os
     
     # Внутри PyInstaller и в обычном питоне одинаково работает:

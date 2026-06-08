@@ -46,19 +46,20 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from logging.handlers import RotatingFileHandler
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-port = int(os.getenv("HUB_PORT", "9001"))
-log_file = f"hub-{port}.log"
-
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    handlers=[
-        RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
-        logging.StreamHandler()  # лог в stdout (для systemd)
-    ]
-)
 log = logging.getLogger("hub")
+
+def setup_logging():
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+    port = int(os.getenv("HUB_PORT", "9001"))
+    log_file = f"hub-{port}.log"
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        handlers=[
+            RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
+            logging.StreamHandler()  # лог в stdout (для systemd)
+        ]
+    )
 
 # request-id для корреляции
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
@@ -522,6 +523,7 @@ async def unhandled_exc(request: Request, exc: Exception):
 # ----------------------------- MAIN ------------------------------------------
 
 def main():
+    setup_logging()
     import uvicorn
 
     port = int(os.getenv("HUB_PORT", "9001"))
