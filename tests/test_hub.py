@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
+"""Integration tests for hub_proxy (requires running hub server)"""
 import os
 import time
-import requests
 import socket
 import threading
+import pytest
+import requests
 
-# Параметры (можно задать через экспорт переменных)
+# Skip all tests if hub is not running
 HUB_URL      = os.getenv("HUB_URL", "http://localhost:9001")
 CTL_TOKEN    = os.getenv("CTL_TOKEN", "chatgpt_secret")
 ROOTD_URL    = os.getenv("ROOTD_URL", "http://localhost:25900")
@@ -13,6 +15,19 @@ ROOTD_TOKEN  = os.getenv("ROOTD_TOKEN", "srv_secret")
 SERVER_NAME  = socket.gethostname()
 
 HEADERS_HUB  = {"Authorization": f"Bearer {CTL_TOKEN}"}
+
+
+def is_hub_running():
+    """Check if hub server is accessible"""
+    try:
+        r = requests.get(f"{HUB_URL}/servers", timeout=2)
+        return r.status_code == 200
+    except:
+        return False
+
+
+# Skip all tests in this module if hub is not running
+pytestmark = pytest.mark.skipif(not is_hub_running(), reason="hub server not running")
 
 
 def send_heartbeat(mode="webhook"):
@@ -24,30 +39,40 @@ def send_heartbeat(mode="webhook"):
         "mode":        mode,
     }
     r = requests.post(f"{HUB_URL}/heartbeat", json=payload)
-    print("POST /heartbeat →", r.status_code, r.json())
-
-
-def list_servers():
-    r = requests.get(f"{HUB_URL}/servers")
-    print("GET  /servers →", r.status_code, r.json())
+    return r.status_code == 200
 
 
 def test_proxy_system_info():
+    """Test proxying /system/info through hub"""
+    # First send heartbeat to register server
+    send_heartbeat()
+    time.sleep(0.5)
+    
     r = requests.get(f"{HUB_URL}/srv/system/info", params={"server": SERVER_NAME}, headers=HEADERS_HUB)
-    print(f"GET  /srv/system/info?server={SERVER_NAME} →", r.status_code, r.json())
+    assert r.status_code == 200
+    data = r.json()
+    assert 'host' in data or 'platform' in data
 
 
 def test_bulk_exec():
+    """Test bulk exec through hub"""
+    send_heartbeat()
+    time.sleep(0.5)
+    
     payload = {"servers": [SERVER_NAME], "cmd": "echo bulk"}
     r = requests.post(f"{HUB_URL}/bulk/exec", json=payload, headers=HEADERS_HUB)
-    print("POST /bulk/exec →", r.status_code, r.json())
+    assert r.status_code == 200
+    data = r.json()
+    assert SERVER_NAME in data or 'results' in data
 
 
 def test_proxy_exec_polling():
+    """Test exec with polling mode"""
     send_heartbeat("polling")
+    time.sleep(0.5)
 
     def worker():
-        while True:
+        for _ in range(50):  # Try for 5 seconds
             r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": ROOTD_TOKEN})
             job = r.json()
             if job.get("cmd"):
@@ -70,14 +95,18 @@ def test_proxy_exec_polling():
         json=payload,
         headers=HEADERS_HUB,
     )
-    print("POST /srv/exec (polling) →", r.status_code, r.json())
+    assert r.status_code == 200
+    data = r.json()
+    assert 'id' in data or 'result' in data
 
 
 def test_bulk_exec_polling():
+    """Test bulk exec with polling mode"""
     send_heartbeat("polling")
+    time.sleep(0.5)
 
     def worker():
-        while True:
+        for _ in range(50):  # Try for 5 seconds
             r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": ROOTD_TOKEN})
             job = r.json()
             if job.get("cmd"):
@@ -94,22 +123,11 @@ def test_bulk_exec_polling():
     threading.Thread(target=worker, daemon=True).start()
 
     payload = {"servers": [SERVER_NAME], "cmd": "echo bulk polled"}
-    r = requests.post(
-        f"{HUB_URL}/bulk/exec",
-        json=payload,
-        headers=HEADERS_HUB,
-    )
-    print("POST /bulk/exec (polling) →", r.status_code, r.json())
+    r = requests.post(f"{HUB_URL}/bulk/exec", json=payload, headers=HEADERS_HUB)
+    assert r.status_code == 200
+    data = r.json()
+    assert SERVER_NAME in data or 'results' in data
 
 
 if __name__ == "__main__":
-    print("=== Testing hub_proxy on", HUB_URL, "===\n")
-    send_heartbeat()
-    time.sleep(1)  # даём секунду, чтобы hub зарегистрировал heartbeat
-    list_servers()
-    test_proxy_system_info()
-    test_bulk_exec()
-    test_proxy_exec_polling()
-    test_bulk_exec_polling()
-
-
+    pytest.main([__file__, "-v"])
