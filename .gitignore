@@ -9,3 +9,20 @@ build/
 1.html
 router_cookies.json
 .buildcache/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime data and config
+config/
+logs/
+
+# Backup files
+*.bak*
+services/main_package/client.bak.*/
+
+# Apps (separate projects)
+apps/
