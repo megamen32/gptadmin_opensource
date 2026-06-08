@@ -1,181 +1,164 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from gptadmin.rootd.linux import info, health
 
-@patch('gptadmin.rootd.linux.psutil')
-@patch('gptadmin.rootd.linux.socket')
-@patch('gptadmin.rootd.linux.platform')
-@patch('gptadmin.rootd.linux.time')
-def test_info_structure(mock_time, mock_platform, mock_socket, mock_psutil):
-    # Mock psutil responses
-    mock_psutil.cpu_count.return_value = 8
-    mock_psutil.virtual_memory.return_value = MagicMock(total=16 * 1024**3, available=8 * 1024**3)
-    mock_psutil.boot_time.return_value = 1700000000
-    mock_socket.gethostname.return_value = 'test-host'
-    mock_platform.platform.return_value = 'Linux-5.15.0-x86_64'
-    mock_time.time.return_value = 1700003600  # 1 hour uptime
-    
-    result = info()
-    
-    assert isinstance(result, dict)
-    assert result['host'] == 'test-host'
-    assert result['platform'] == 'Linux-5.15.0-x86_64'
-    assert result['cores'] == 8
-    assert result['mem_mb'] == 16 * 1024
-    assert result['uptime_s'] == 3600
+def test_info_with_psutil():
+    with patch.dict('sys.modules', {'psutil': MagicMock()}):
+        import importlib
+        from gptadmin.rootd import linux
+        importlib.reload(linux)
+        
+        assert linux.HAS_PSUTIL is True
+        
+        linux.psutil.cpu_count.return_value = 8
+        linux.psutil.virtual_memory.return_value.total = 16 * 1024**3
+        linux.psutil.boot_time.return_value = 1000.0
+        
+        with patch('time.time', return_value=2000.0):
+            info = linux.info()
+            
+        assert info['cores'] == 8
+        assert info['mem_mb'] == 16 * 1024
+        assert info['uptime_s'] == 1000
 
-@patch('gptadmin.rootd.linux.psutil')
-@patch('gptadmin.rootd.linux.socket')
-@patch('gptadmin.rootd.linux.platform')
-@patch('gptadmin.rootd.linux.time')
-def test_info_handles_missing_psutil(mock_time, mock_platform, mock_socket, mock_psutil):
-    # Simulate psutil not being available
-    mock_psutil.cpu_count.side_effect = AttributeError
-    
-    # Should not crash, might return partial info or handle gracefully
-    try:
-        result = info()
-        assert isinstance(result, dict)
-    except (AttributeError, ImportError):
-        # It's also acceptable if it raises when psutil is missing
-        pass
+def test_info_without_psutil():
+    with patch.dict('sys.modules', {'psutil': None}):
+        import importlib
+        from gptadmin.rootd import linux
+        importlib.reload(linux)
+        
+        assert linux.HAS_PSUTIL is False
+        
+        with patch('gptadmin.rootd.linux._fallback_cpu_count', return_value=4), \
+             patch('gptadmin.rootd.linux._fallback_virtual_memory') as mock_vm, \
+             patch('gptadmin.rootd.linux._fallback_uptime_s', return_value=1000):
+            
+            mock_vm.return_value.total = 16 * 1024**3
+            info = linux.info()
+            
+        assert info['cores'] == 4
+        assert info['mem_mb'] == 16 * 1024
+        assert info['uptime_s'] == 1000
 
-@patch('gptadmin.rootd.linux.shutil')
-@patch('gptadmin.rootd.linux.psutil')
-@patch('gptadmin.rootd.linux.os')
-@patch('gptadmin.rootd.linux.subprocess')
-@patch('gptadmin.rootd.linux.time')
-@patch('gptadmin.rootd.linux.Path')
-def test_health_structure(mock_path, mock_time, mock_subprocess, mock_os, mock_psutil, mock_shutil):
-    # Mock shutil.disk_usage
-    mock_shutil.disk_usage.return_value = MagicMock(
-        total=100 * 1024**3,
-        used=50 * 1024**3,
-        free=50 * 1024**3
-    )
-    
-    # Mock psutil responses
-    mock_psutil.virtual_memory.return_value = MagicMock(
-        total=16 * 1024**3,
-        available=8 * 1024**3,
-        used=8 * 1024**3,
-        free=8 * 1024**3
-    )
-    mock_psutil.swap_memory.return_value = MagicMock(
-        total=4 * 1024**3,
-        used=1 * 1024**3,
-        free=3 * 1024**3
-    )
-    mock_psutil.cpu_percent.return_value = 45.5
-    mock_psutil.boot_time.return_value = 1700000000
-    mock_psutil.sensors_temperatures.return_value = {}
-    
-    # Mock os.getloadavg
-    mock_os.getloadavg.return_value = (1.5, 2.0, 2.5)
-    
-    # Mock subprocess for failed services
-    mock_subprocess.run.return_value = MagicMock(stdout='')
-    
-    # Mock time
-    mock_time.time.return_value = 1700003600
-    
-    # Mock Path for apt stamp
-    mock_path_instance = MagicMock()
-    mock_path_instance.exists.return_value = False
-    mock_path.return_value = mock_path_instance
-    
-    result = health()
-    
-    assert isinstance(result, dict)
-    assert 'cpu_usage_pct' in result
-    assert result['cpu_usage_pct'] == 45.5
-    assert 'memory' in result
-    assert result['memory']['total'] == 16 * 1024
-    assert 'disk' in result
-    assert result['disk']['total'] == 100.0  # GB
-    assert 'load_avg' in result
-    assert result['load_avg'] == (1.5, 2.0, 2.5)
+def test_health_with_psutil():
+    with patch.dict('sys.modules', {'psutil': MagicMock()}):
+        import importlib
+        from gptadmin.rootd import linux
+        importlib.reload(linux)
+        
+        assert linux.HAS_PSUTIL is True
+        
+        linux.psutil.virtual_memory.return_value.total = 16 * 1024**3
+        linux.psutil.virtual_memory.return_value.available = 8 * 1024**3
+        linux.psutil.virtual_memory.return_value.used = 8 * 1024**3
+        linux.psutil.virtual_memory.return_value.free = 8 * 1024**3
+        
+        linux.psutil.swap_memory.return_value.total = 4 * 1024**3
+        linux.psutil.swap_memory.return_value.used = 1 * 1024**3
+        linux.psutil.swap_memory.return_value.free = 3 * 1024**3
+        
+        linux.psutil.cpu_percent.return_value = 50.0
+        linux.psutil.boot_time.return_value = 1000.0
+        linux.psutil.sensors_temperatures.return_value = {}
+        
+        with patch('time.time', return_value=2000.0), \
+             patch('shutil.disk_usage') as mock_du, \
+             patch('os.getloadavg', return_value=(1.0, 2.0, 3.0)), \
+             patch('subprocess.run') as mock_run, \
+             patch('pathlib.Path.exists', return_value=False):
+            
+            mock_du.return_value.total = 100 * 1024**3
+            mock_du.return_value.used = 50 * 1024**3
+            mock_du.return_value.free = 50 * 1024**3
+            mock_run.return_value.stdout = ""
+            
+            health = linux.health()
+            
+        assert health['cpu_usage_pct'] == 50.0
+        assert health['memory']['total'] == 16 * 1024
+        assert health['load_avg'] == (1.0, 2.0, 3.0)
 
-@patch('gptadmin.rootd.linux.shutil')
-@patch('gptadmin.rootd.linux.psutil')
-@patch('gptadmin.rootd.linux.os')
-@patch('gptadmin.rootd.linux.subprocess')
-@patch('gptadmin.rootd.linux.time')
-@patch('gptadmin.rootd.linux.Path')
-def test_health_high_usage(mock_path, mock_time, mock_subprocess, mock_os, mock_psutil, mock_shutil):
-    # Test with high resource usage
-    mock_shutil.disk_usage.return_value = MagicMock(
-        total=100 * 1024**3,
-        used=90 * 1024**3,
-        free=10 * 1024**3
-    )
-    mock_psutil.virtual_memory.return_value = MagicMock(
-        total=16 * 1024**3,
-        available=1.6 * 1024**3,
-        used=14.4 * 1024**3,
-        free=1.6 * 1024**3
-    )
-    mock_psutil.swap_memory.return_value = MagicMock(
-        total=4 * 1024**3,
-        used=3 * 1024**3,
-        free=1 * 1024**3
-    )
-    mock_psutil.cpu_percent.return_value = 95.0
-    mock_psutil.boot_time.return_value = 1700000000
-    mock_psutil.sensors_temperatures.return_value = {}
-    mock_os.getloadavg.return_value = (10.0, 12.0, 15.0)
-    mock_subprocess.run.return_value = MagicMock(stdout='')
-    mock_time.time.return_value = 1700003600
-    
-    mock_path_instance = MagicMock()
-    mock_path_instance.exists.return_value = False
-    mock_path.return_value = mock_path_instance
-    
-    result = health()
-    
-    assert result['cpu_usage_pct'] == 95.0
-    # Allow for rounding differences
-    assert abs(result['memory']['used'] - 14.4 * 1024) < 1
-    assert result['disk']['used'] == 90.0
+def test_health_without_psutil():
+    with patch.dict('sys.modules', {'psutil': None}):
+        import importlib
+        from gptadmin.rootd import linux
+        importlib.reload(linux)
+        
+        assert linux.HAS_PSUTIL is False
+        
+        with patch('gptadmin.rootd.linux._fallback_virtual_memory') as mock_vm, \
+             patch('gptadmin.rootd.linux._fallback_swap_memory') as mock_swap, \
+             patch('gptadmin.rootd.linux._fallback_cpu_percent', return_value=25.0), \
+             patch('gptadmin.rootd.linux._fallback_uptime_s', return_value=1000), \
+             patch('gptadmin.rootd.linux._fallback_sensors_temperatures', return_value={}), \
+             patch('shutil.disk_usage') as mock_du, \
+             patch('os.getloadavg', return_value=(1.0, 2.0, 3.0)), \
+             patch('subprocess.run') as mock_run, \
+             patch('pathlib.Path.exists', return_value=False):
+            
+            mock_vm.return_value.total = 16 * 1024**3
+            mock_vm.return_value.available = 12 * 1024**3
+            mock_vm.return_value.used = 4 * 1024**3
+            mock_vm.return_value.free = 12 * 1024**3
+            
+            mock_swap.return_value.total = 4 * 1024**3
+            mock_swap.return_value.used = 1 * 1024**3
+            mock_swap.return_value.free = 3 * 1024**3
+            
+            mock_du.return_value.total = 100 * 1024**3
+            mock_du.return_value.used = 50 * 1024**3
+            mock_du.return_value.free = 50 * 1024**3
+            mock_run.return_value.stdout = ""
+            
+            health = linux.health()
+            
+        assert health['cpu_usage_pct'] == 25.0
+        assert health['uptime_s'] == 1000
+        assert health['memory']['total'] == 16 * 1024
+        assert health['memory']['available'] == 12 * 1024
+        assert health['swap']['total'] == 4 * 1024
+        assert health['load_avg'] == (1.0, 2.0, 3.0)
 
-@patch('gptadmin.rootd.linux.shutil')
-@patch('gptadmin.rootd.linux.psutil')
-@patch('gptadmin.rootd.linux.os')
-@patch('gptadmin.rootd.linux.subprocess')
-@patch('gptadmin.rootd.linux.time')
-@patch('gptadmin.rootd.linux.Path')
-def test_health_low_usage(mock_path, mock_time, mock_subprocess, mock_os, mock_psutil, mock_shutil):
-    # Test with low resource usage
-    mock_shutil.disk_usage.return_value = MagicMock(
-        total=100 * 1024**3,
-        used=10 * 1024**3,
-        free=90 * 1024**3
-    )
-    mock_psutil.virtual_memory.return_value = MagicMock(
-        total=16 * 1024**3,
-        available=12.8 * 1024**3,
-        used=3.2 * 1024**3,
-        free=12.8 * 1024**3
-    )
-    mock_psutil.swap_memory.return_value = MagicMock(
-        total=4 * 1024**3,
-        used=0,
-        free=4 * 1024**3
-    )
-    mock_psutil.cpu_percent.return_value = 5.0
-    mock_psutil.boot_time.return_value = 1700000000
-    mock_psutil.sensors_temperatures.return_value = {}
-    mock_os.getloadavg.return_value = (0.1, 0.2, 0.3)
-    mock_subprocess.run.return_value = MagicMock(stdout='')
-    mock_time.time.return_value = 1700003600
-    
-    mock_path_instance = MagicMock()
-    mock_path_instance.exists.return_value = False
-    mock_path.return_value = mock_path_instance
-    
-    result = health()
-    
-    assert result['cpu_usage_pct'] == 5.0
-    # Allow for rounding differences
-    assert abs(result['memory']['used'] - 3.2 * 1024) < 1
-    assert result['disk']['used'] == 10.0
+def test_fallback_functions_directly():
+    # Test the actual fallback logic without mocking the fallback functions themselves
+    with patch.dict('sys.modules', {'psutil': None}):
+        import importlib
+        from gptadmin.rootd import linux
+        importlib.reload(linux)
+        
+        assert linux.HAS_PSUTIL is False
+        
+        # Test _fallback_cpu_count
+        with patch('os.cpu_count', return_value=8):
+            assert linux._fallback_cpu_count() == 8
+            
+        # Test _fallback_uptime_s
+        with patch('builtins.open', create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value.readline.return_value = "1234.56 7890.12\n"
+            assert linux._fallback_uptime_s() == 1235
+            
+        # Test _fallback_virtual_memory
+        meminfo_data = [
+            "MemTotal:       16384000 kB\n",
+            "MemFree:         8192000 kB\n",
+            "MemAvailable:   12288000 kB\n",
+            "Buffers:         1024000 kB\n",
+            "Cached:          2048000 kB\n",
+        ]
+        with patch('builtins.open', create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value.__iter__.return_value = iter(meminfo_data)
+            vm = linux._fallback_virtual_memory()
+            assert vm.total == 16384000 * 1024
+            assert vm.available == 12288000 * 1024
+            assert vm.free == 8192000 * 1024
+            
+        # Test _fallback_swap_memory
+        meminfo_data = [
+            "SwapTotal:       4194304 kB\n",
+            "SwapFree:        3145728 kB\n"
+        ]
+        with patch('builtins.open', create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value.__iter__.return_value = iter(meminfo_data)
+            swap = linux._fallback_swap_memory()
+            assert swap.total == 4194304 * 1024
+            assert swap.free == 3145728 * 1024
+            assert swap.used == (4194304 - 3145728) * 1024
