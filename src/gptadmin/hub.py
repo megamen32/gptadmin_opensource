@@ -512,7 +512,7 @@ async def unhandled_exc(request: Request, exc: Exception):
 
 # ----------------------------- MAIN ------------------------------------------
 
-if __name__ == "__main__":
+def main():
     import uvicorn
 
     port = int(os.getenv("HUB_PORT", "9001"))
@@ -524,3 +524,6 @@ if __name__ == "__main__":
         port=port,
         log_level=LOG_LEVEL.lower(),
     )
+
+if __name__ == "__main__":
+    main()

@@ -90,13 +90,12 @@ python -V
 pip --version || true
 
 # ---------- install deps (verbose) ----------
-step "pip install requirements, pyarmor, pyinstaller"
-pip install -vvv --upgrade pip
-pip install -vvv -r requirements.txt pyarmor pyinstaller
+step "uv sync (install dependencies including pyarmor, pyinstaller)"
+uv sync --all-groups
 
 step "Tool versions"
-pyinstaller --version || true
-pyarmor --version || true
+uv run pyinstaller --version || true
+uv run pyarmor --version || true
 
 # ---------- incremental helpers ----------
 fingerprint() {
@@ -179,23 +178,25 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-ROOTD_IMPORTS=$(py_hidden_imports rootd.py)
-HUB_IMPORTS=$(py_hidden_imports hub_proxy.py)
+ROOTD_IMPORTS=$(uv run py_hidden_imports src/gptadmin/rootd/core.py)
+HUB_IMPORTS=$(uv run py_hidden_imports src/gptadmin/hub.py)
 ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
-[[ -f rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
+[[ -f src/gptadmin/rootd/linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.linux"
+[[ -f src/gptadmin/rootd/win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.win"
+[[ -f src/gptadmin/rootd/ssh.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.ssh"
 ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=pyarmor_runtime"
 echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-ROOTD_SRC=(rootd.py)
-[[ -f rootd_linux.py ]] && ROOTD_SRC+=(rootd_linux.py)
-[[ -f rootd_win.py   ]] && ROOTD_SRC+=(rootd_win.py)
+ROOTD_SRC=(src/gptadmin/rootd/core.py)
+[[ -f src/gptadmin/rootd/linux.py ]] && ROOTD_SRC+=(src/gptadmin/rootd/linux.py)
+[[ -f src/gptadmin/rootd/win.py   ]] && ROOTD_SRC+=(src/gptadmin/rootd/win.py)
+[[ -f src/gptadmin/rootd/ssh.py   ]] && ROOTD_SRC+=(src/gptadmin/rootd/ssh.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
 
-HUB_SRC=(hub_proxy.py)
+HUB_SRC=(src/gptadmin/hub.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
 FP_ROOTD_NEW="$(fingerprint "${ROOTD_SRC[@]}")"
@@ -229,24 +230,48 @@ export PYARMOR_LOGLEVEL=DEBUG
 
 if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
   step "PyArmor: obfuscate rootd (+platform)"
-  pyarmor gen -O "$ART_DIR/rootd" "${ROOTD_SRC[@]}"
+  # Obfuscate the whole gptadmin package
+  uv run pyarmor gen -O "$ART_DIR/src" src/gptadmin
+  
+  # Create wrapper script for PyInstaller
+  mkdir -p "$ART_DIR/bin"
+  cat > "$ART_DIR/bin/rootd.py" << 'WRAPPER'
+#!/usr/bin/env python3
+from gptadmin.rootd.core import main
+if __name__ == "__main__":
+    main()
+WRAPPER
+  chmod +x "$ART_DIR/bin/rootd.py"
 else
   echo "Skip PyArmor rootd: sources unchanged & dist exists"
 fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   step "PyArmor: obfuscate hub_proxy"
-  pyarmor gen -O "$ART_DIR/hub_proxy" hub_proxy.py
+  # Obfuscate the whole gptadmin package (if not already done)
+  if [[ ! -d "$ART_DIR/src/gptadmin" ]]; then
+    uv run pyarmor gen -O "$ART_DIR/src" src/gptadmin
+  fi
+  
+  # Create wrapper script for PyInstaller
+  mkdir -p "$ART_DIR/bin"
+  cat > "$ART_DIR/bin/hub_proxy.py" << 'WRAPPER'
+#!/usr/bin/env python3
+from gptadmin.hub import main
+if __name__ == "__main__":
+    main()
+WRAPPER
+  chmod +x "$ART_DIR/bin/hub_proxy.py"
 else
   echo "Skip PyArmor hub_proxy: sources unchanged & dist exists"
 fi
 
 # ---------- PyInstaller (incremental) ----------
-export PYTHONPATH="$ART_DIR/rootd:$ART_DIR/hub_proxy:$PYTHONPATH"
+export PYTHONPATH="$ART_DIR/src:$PYTHONPATH"
 
 if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
   step "PyInstaller: build rootd"
-  pyinstaller "$ART_DIR/rootd/rootd.py" \
+  uv run pyinstaller --paths="$ART_DIR/src" "$ART_DIR/bin/rootd.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     "${COLLECT_FLAGS[@]}" \
@@ -260,7 +285,7 @@ fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   step "PyInstaller: build hub_proxy"
-  pyinstaller "$ART_DIR/hub_proxy/hub_proxy.py" \
+  uv run pyinstaller --paths="$ART_DIR/src" "$ART_DIR/bin/hub_proxy.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     "${COLLECT_FLAGS[@]}" \

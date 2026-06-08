@@ -69,11 +69,11 @@ def guard(cred: HTTPAuthorizationCredentials = Depends(auth)):
 
 
 if os.getenv("SSH_HOST"):
-    import rootd_ssh as backend
+    from . import ssh as backend
 elif sys.platform.startswith("win"):
-    import rootd_win as backend
+    from . import win as backend
 else:
-    import rootd_linux as backend
+    from . import linux as backend
 
 
 class ExecReq(BaseModel):
@@ -222,10 +222,13 @@ def get_file(path: str):
     return FileResponse(path)
 
 
-if __name__ == "__main__":
+
+def main():
     import uvicorn, os
     
     # Внутри PyInstaller и в обычном питоне одинаково работает:
     uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
 
 
+if __name__ == "__main__":
+    main()
