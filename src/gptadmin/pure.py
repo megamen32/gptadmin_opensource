@@ -22,7 +22,19 @@ PORT = int(os.getenv("ROOTD_PORT", "25900"))
 QUEUE_URL = os.getenv("QUEUE_URL")
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+from logging.handlers import RotatingFileHandler
+
+port = int(os.getenv("ROOTD_PORT", os.getenv("PORT", "25900")))
+log_file = f"rootd-pure-{port}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
+        logging.StreamHandler()  # лог в stdout (для systemd)
+    ]
+)
 log = logging.getLogger("rootd_pure")
 
 

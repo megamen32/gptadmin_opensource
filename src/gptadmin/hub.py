@@ -44,10 +44,19 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 # ----------------------------- ЛОГИРОВАНИЕ -----------------------------------
 
+from logging.handlers import RotatingFileHandler
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+port = int(os.getenv("HUB_PORT", "9001"))
+log_file = f"hub-{port}.log"
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    handlers=[
+        RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5),  # 10 MB, 5 backups
+        logging.StreamHandler()  # лог в stdout (для systemd)
+    ]
 )
 log = logging.getLogger("hub")
 
