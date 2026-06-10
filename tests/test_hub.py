@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Integration tests for hub_proxy (requires running hub server)"""
 import os
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("GPTADMIN_INTEGRATION_TESTS") != "1",
+    reason="legacy live-service integration test; set GPTADMIN_INTEGRATION_TESTS=1",
+)
+
 import time
 import socket
 import threading
