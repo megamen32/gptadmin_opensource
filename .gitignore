@@ -10,6 +10,7 @@ build/
 router_cookies.json
 .buildcache/
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 # Python bytecode
 __pycache__/
@@ -28,8 +29,13 @@ services/main_package/client.bak.*/
 # Apps (separate projects)
 apps/
 =======
+=======
+>>>>>>> headroom-spill-integration
 config/
 deploy/nginx/became.bezrabotnyi.com.conf
 deploy/systemd/
 *.bak*
+<<<<<<< HEAD
+>>>>>>> headroom-spill-integration
+=======
 >>>>>>> headroom-spill-integration

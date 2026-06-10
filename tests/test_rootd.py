@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 <<<<<<< HEAD
+<<<<<<< HEAD
 """Integration tests for rootd (requires running rootd server)"""
 import os
 import pytest
@@ -7,6 +8,8 @@ import requests
 
 # Skip all tests if rootd is not running
 =======
+=======
+>>>>>>> headroom-spill-integration
 import os
 
 import pytest
@@ -19,12 +22,16 @@ pytestmark = pytest.mark.skipif(
 import requests
 
 # Параметры (можно задать через экспорт переменных)
+<<<<<<< HEAD
+>>>>>>> headroom-spill-integration
+=======
 >>>>>>> headroom-spill-integration
 ROOTD_URL = os.getenv("ROOTD_URL", "http://localhost:25900")
 TOKEN     = os.getenv("ROOTD_TOKEN", "srv_secret")
 HEADERS   = {"Authorization": f"Bearer {TOKEN}"}
 
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 def is_rootd_running():
     """Check if rootd server is accessible"""
@@ -92,6 +99,8 @@ def test_exec_with_timeout():
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 =======
+=======
+>>>>>>> headroom-spill-integration
 def test_system_info():
     r = requests.get(f"{ROOTD_URL}/system/info", headers=HEADERS)
     print("GET /system/info →", r.status_code, r.json())
@@ -116,4 +125,7 @@ if __name__ == "__main__":
     test_exec()
     test_exec_stream()
 
+<<<<<<< HEAD
+>>>>>>> headroom-spill-integration
+=======
 >>>>>>> headroom-spill-integration
