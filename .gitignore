@@ -39,3 +39,4 @@ deploy/systemd/
 >>>>>>> headroom-spill-integration
 =======
 >>>>>>> headroom-spill-integration
+*.db

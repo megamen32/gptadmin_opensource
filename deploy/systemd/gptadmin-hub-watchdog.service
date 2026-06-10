@@ -7,4 +7,4 @@ After=network-online.target hub_proxy.service
 [Service]
 Type=oneshot
 WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/services/main_package/hub_watchdog.py --check-once
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/hub_watchdog.py --check-once

@@ -1,5 +1,5 @@
 import pytest
-from gptadmin.hub import _mask, scrub_headers, scrub_query, scrub_payload
+from hub_proxy import _mask, scrub_headers, scrub_query, scrub_payload
 
 def test_mask_none():
     assert _mask(None) is None

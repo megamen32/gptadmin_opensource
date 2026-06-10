@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Unit tests for gptadmin.pure (dependency-free rootd)"""
-import os
+"""Unit tests for rootd_pure (dependency-free rootd)"""
 import sys
 import pytest
+from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from gptadmin.pure import _truncate, system_info, system_health, run_cmd
+from client.rootd_pure import _truncate, system_info, system_health, run_cmd
 
 
 def test_truncate_short_string():
@@ -21,7 +22,7 @@ def test_truncate_short_string():
 def test_truncate_long_string():
     """Test that long strings are truncated with marker"""
     # Set LOG_MAX to a small value for testing
-    import gptadmin.pure as pure_module
+    import client.rootd_pure as pure_module
     original_max = pure_module.LOG_MAX
     pure_module.LOG_MAX = 10
     

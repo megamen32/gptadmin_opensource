@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory=/home/admin/gptadmin
 # Запуск из вашего .venv
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/services/main_package/client/rootd.py
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/rootd.py
 
 # Переменные окружения: агентов регистрируются у Hub по HTTPS
 Environment=ROOTD_TOKEN=srv_secret

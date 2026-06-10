@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/services/main_package/client/rootd.py
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/rootd.py
 Environment=SHELL_TOKEN=srv_secret
 Environment=ROOTD_TOKEN=srv_secret
 Environment=SHELL_URL=http://203.0.113.10:25900

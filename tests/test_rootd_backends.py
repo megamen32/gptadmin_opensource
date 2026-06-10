@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT = ROOT / "services" / "main_package" / "client"
+CLIENT = ROOT / "client"
 if str(CLIENT) not in sys.path:
     sys.path.insert(0, str(CLIENT))
 

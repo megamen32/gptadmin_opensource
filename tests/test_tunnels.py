@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 import subprocess
 
-from gptadmin.tunnels import CloudflareTunnel, NgrokTunnel, FrpTunnel
-from gptadmin.tunnels.base import TunnelInfo
+from tunnels import CloudflareTunnel, NgrokTunnel, FrpTunnel
+from tunnels.base import TunnelInfo
 
 
 class TestCloudflareTunnel:

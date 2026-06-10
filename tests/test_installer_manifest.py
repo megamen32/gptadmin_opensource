@@ -2,7 +2,7 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from services import server_for_installer
+import server_for_installer
 
 
 def test_manifest_includes_hashes_for_python_rootd_artifacts():

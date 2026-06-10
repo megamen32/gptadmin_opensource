@@ -1,10 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -c ' *)",
-      "Bash(sudo systemctl *)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:9001/version)",
-      "Bash(sudo journalctl *)"
+      "Bash(systemctl --user list-units --state=failed)",
+      "Bash(systemctl --user list-units --state=activating)",
+      "Bash(systemctl --user list-unit-files --type=service)",
+      "Bash(find /etc/systemd/system /home/admin/.config/systemd/user -name \"*.service\" 2>/dev/null | xargs grep -l \"gptadmin\\\\|hub_proxy\\\\|shellmcp\\\\|rootd\" 2>/dev/null)",
+      "Read(//etc/systemd/system/**)",
+      "Bash(rtk git *)"
     ]
   }
 }

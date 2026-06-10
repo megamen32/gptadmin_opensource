@@ -20,7 +20,7 @@ log = logging.getLogger("hub")
 logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = Path(__file__).resolve().parent
-REPO_DIR = BASE_DIR.parent
+REPO_DIR = BASE_DIR
 DEPLOY_DIR = REPO_DIR / "deploy"
 PUBLIC_DIR = REPO_DIR / "public"
 BUILD_DIR = REPO_DIR / "build"
@@ -53,8 +53,8 @@ def _artifact_meta(path: Path, route: str) -> dict:
 def _artifact_manifest() -> dict:
     candidates = {
         "gptadmin.py": (BUILD_DIR / "cli" / "gptadmin.py", "/gptadmin.py"),
-        "rootd.py": (REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "/rootd.py"),
-        "rootd_pure.py": (REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "/rootd_pure.py"),
+        "rootd.py": (REPO_DIR / "client" / "rootd.py", "/rootd.py"),
+        "rootd_pure.py": (REPO_DIR / "client" / "rootd_pure.py", "/rootd_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
         "gptadmin-hub.tar.gz": (BUILD_DIR / "gptadmin-hub.tar.gz", "/gptadmin-hub.tar.gz"),
         "gptadmin-rootd.tar.gz": (BUILD_DIR / "gptadmin-rootd.tar.gz", "/gptadmin-rootd.tar.gz"),
@@ -131,22 +131,22 @@ async def get_cli_py():
 
 @app.get('/rootd_pure.py')
 async def get_rootd_pure_py():
-    return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
+    return _bin(REPO_DIR / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
 
 
 @app.get('/rootd.py')
 async def get_rootd_py():
-    return _bin(REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "rootd.py", "text/x-python")
+    return _bin(REPO_DIR / "client" / "rootd.py", "rootd.py", "text/x-python")
 
 
 @app.get('/rootd.py.json')
 async def get_rootd_py_meta():
-    return _artifact_meta(REPO_DIR / "services" / "main_package" / "client" / "rootd.py", "/rootd.py")
+    return _artifact_meta(REPO_DIR / "client" / "rootd.py", "/rootd.py")
 
 
 @app.get('/rootd_pure.py.json')
 async def get_rootd_pure_py_meta():
-    return _artifact_meta(REPO_DIR / "services" / "main_package" / "client" / "rootd_pure.py", "/rootd_pure.py")
+    return _artifact_meta(REPO_DIR / "client" / "rootd_pure.py", "/rootd_pure.py")
 
 
 @app.get('/manifest.json')

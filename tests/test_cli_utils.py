@@ -1,6 +1,6 @@
 import pytest
 import sys
-from gptadmin.cli import gen_hex, gen_subdomain, ensure_https, detect_arch
+from cli import gen_hex, gen_subdomain, ensure_https, detect_arch
 
 def test_gen_hex_length():
     assert len(gen_hex(8)) == 16  # 8 bytes = 16 hex chars

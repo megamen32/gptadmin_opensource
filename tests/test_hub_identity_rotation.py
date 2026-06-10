@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "services" / "main_package"))
+sys.path.insert(0, str(REPO))
 os.environ.setdefault("GPTADMIN_AUDIT_LOG", "/tmp/gptadmin-test-audit.log")
 
 import hub_proxy  # noqa: E402

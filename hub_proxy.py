@@ -163,10 +163,10 @@ if os.getenv("GPTADMIN_CONFIG_DIR"):
 elif getattr(sys, "frozen", False):
     CONFIG_DIR = Path(sys.executable).parent / "config"
 else:
-    CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+    CONFIG_DIR = Path(__file__).resolve().parent / "config"
 
-GPTADMIN_REPO_ROOT = Path(__file__).resolve().parents[2]
-GPTADMIN_CLI_PATH = Path(os.getenv("GPTADMIN_CLI_PATH", str(GPTADMIN_REPO_ROOT / "cli" / "gptadmin.py")))
+GPTADMIN_REPO_ROOT = Path(__file__).resolve().parent
+GPTADMIN_CLI_PATH = Path(os.getenv("GPTADMIN_CLI_PATH", str(GPTADMIN_REPO_ROOT / "cli.py")))
 GPTADMIN_PYTHON = Path(os.getenv("GPTADMIN_PYTHON", sys.executable))
 
 LICENSE_FILE = Path(os.getenv("LICENSE_FILE") or str(CONFIG_DIR / "license.json"))
@@ -176,7 +176,7 @@ PUBLIC_KEY_FILE = Path(os.getenv("PUBLIC_KEY_FILE") or str(CONFIG_DIR / "public.
 def _default_artifact_dir() -> Path:
     candidates = [
         Path.cwd() / "build",
-        Path(__file__).resolve().parents[2] / "build",
+        Path(__file__).resolve().parent / "build",
         Path(os.getenv("GPTADMIN_HOME", "/opt/gptadmin")) / "artifacts",
     ]
     for candidate in candidates:
