@@ -2,7 +2,6 @@ import os
 import subprocess
 import logging
 import asyncio
-import psutil
 import socket
 import time
 import shutil
@@ -11,6 +10,13 @@ import shlex
 import pwd
 from pathlib import Path
 from typing import Iterable
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    psutil = None  # type: ignore[assignment]
+    HAS_PSUTIL = False
 
 log = logging.getLogger("rootd_linux")
 
@@ -104,6 +110,121 @@ def _default_run_user(cwd: str | None) -> str | None:
         if user:
             return user
     return _cwd_owner_user(cwd) or _install_owner_user()
+
+
+# --- Fallback functions for when psutil is not installed ---
+
+def _fallback_cpu_count() -> int:
+    return os.cpu_count() or 1
+
+
+def _fallback_uptime_s() -> int:
+    try:
+        with open("/proc/uptime") as f:
+            return round(float(f.readline().split()[0]))
+    except Exception:
+        return 0
+
+
+def _fallback_boot_time() -> float:
+    return time.time() - _fallback_uptime_s()
+
+
+def _fallback_virtual_memory():
+    meminfo: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    except Exception:
+        pass
+    total = meminfo.get("MemTotal", 0)
+    free = meminfo.get("MemFree", 0)
+    available = meminfo.get("MemAvailable", free)
+    buffers = meminfo.get("Buffers", 0)
+    cached = meminfo.get("Cached", 0)
+    used = total - free - buffers - cached
+
+    class MemInfo:
+        def __init__(self, t: int, a: int, u: int, fr: int) -> None:
+            self.total = t
+            self.available = a
+            self.used = u
+            self.free = fr
+            self.percent = round((t - a) / t * 100, 1) if t > 0 else 0.0
+
+    return MemInfo(total, available, used, free)
+
+
+def _fallback_swap_memory():
+    meminfo: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    except Exception:
+        pass
+    total = meminfo.get("SwapTotal", 0)
+    free = meminfo.get("SwapFree", 0)
+    used = total - free
+
+    class SwapInfo:
+        def __init__(self, t: int, u: int, fr: int) -> None:
+            self.total = t
+            self.used = u
+            self.free = fr
+            self.percent = round(u / t * 100, 1) if t > 0 else 0.0
+
+    return SwapInfo(total, used, free)
+
+
+def _fallback_cpu_percent(interval: float = 1) -> float:
+    def _read_stat() -> tuple[int, int]:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()
+        idle = int(parts[4]) + int(parts[5])
+        total = sum(int(x) for x in parts[1:])
+        return idle, total
+
+    try:
+        idle1, total1 = _read_stat()
+        time.sleep(interval)
+        idle2, total2 = _read_stat()
+        delta_total = total2 - total1
+        if delta_total == 0:
+            return 0.0
+        return round((1.0 - (idle2 - idle1) / delta_total) * 100, 1)
+    except Exception:
+        return 0.0
+
+
+def _fallback_sensors_temperatures() -> dict:
+    temps: dict = {}
+    try:
+        for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+            try:
+                temp_file = zone / "temp"
+                type_file = zone / "type"
+                if not temp_file.exists() or not type_file.exists():
+                    continue
+                t = int(temp_file.read_text().strip()) / 1000.0
+                label = type_file.read_text().strip()
+
+                class TempEntry:
+                    def __init__(self, lbl: str, cur: float) -> None:
+                        self.label = lbl
+                        self.current = cur
+
+                temps.setdefault(label, []).append(TempEntry(label, t))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return temps
 
 
 def _wrap_default_user_command(cmd: str, cwd: str | None = None, env: dict | None = None) -> tuple[str, str | None]:
@@ -350,12 +471,20 @@ def _pretty_platform() -> str:
 
 
 def info():
+    if HAS_PSUTIL:
+        cores = psutil.cpu_count()
+        mem_mb = round(psutil.virtual_memory().total / 2**20)
+        uptime_s = round(time.time() - psutil.boot_time())
+    else:
+        cores = _fallback_cpu_count()
+        mem_mb = round(_fallback_virtual_memory().total / 2**20)
+        uptime_s = _fallback_uptime_s()
     return {
         "host": socket.gethostname(),
         "platform": _pretty_platform(),
-        "cores": psutil.cpu_count(),
-        "mem_mb": round(psutil.virtual_memory().total / 2**20),
-        "uptime_s": round(time.time() - psutil.boot_time()),
+        "cores": cores,
+        "mem_mb": mem_mb,
+        "uptime_s": uptime_s,
     }
 
 
@@ -370,15 +499,24 @@ def health():
     except Exception:
         ip = "unavailable"
 
-    vm = psutil.virtual_memory()
-    swap = psutil.swap_memory()
+    if HAS_PSUTIL:
+        vm = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        cpu_pct = psutil.cpu_percent(interval=1)
+        uptime_s = round(time.time() - psutil.boot_time())
+        temp = psutil.sensors_temperatures()
+    else:
+        vm = _fallback_virtual_memory()
+        swap = _fallback_swap_memory()
+        cpu_pct = _fallback_cpu_percent(interval=1)
+        uptime_s = _fallback_uptime_s()
+        temp = _fallback_sensors_temperatures()
 
     try:
         load = os.getloadavg()
     except Exception:
         load = []
 
-    temp = psutil.sensors_temperatures()
     cpu_temp = None
     for sensor in temp.values():
         for entry in sensor:
@@ -405,9 +543,9 @@ def health():
         apt_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp.stat().st_mtime))
 
     return {
-        "uptime_s": round(time.time() - psutil.boot_time()),
+        "uptime_s": uptime_s,
         "load_avg": load,
-        "cpu_usage_pct": psutil.cpu_percent(interval=1),
+        "cpu_usage_pct": cpu_pct,
         "memory": {
             "total": round(vm.total / 2**20),
             "available": round(vm.available / 2**20),

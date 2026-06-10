@@ -6,7 +6,8 @@
       "Bash(systemctl --user list-unit-files --type=service)",
       "Bash(find /etc/systemd/system /home/admin/.config/systemd/user -name \"*.service\" 2>/dev/null | xargs grep -l \"gptadmin\\\\|hub_proxy\\\\|shellmcp\\\\|rootd\" 2>/dev/null)",
       "Read(//etc/systemd/system/**)",
-      "Bash(rtk git *)"
+      "Bash(rtk git *)",
+      "Bash(rtk pytest *)"
     ]
   }
 }
