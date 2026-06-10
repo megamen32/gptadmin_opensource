@@ -21,6 +21,31 @@ SSH_PASSWORD = os.getenv("SSH_PASSWORD")
 SSH_KEY = os.getenv("SSH_KEY") or os.getenv("SSH_KEY_PATH")
 
 
+
+def _parse_os_release(text: str) -> Dict[str, str]:
+    data = {}
+    for line in (text or "").splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip().strip('"')
+    return data
+
+
+def _pretty_platform(client) -> str:
+    def _exec(cmd: str) -> str:
+        stdin, stdout, stderr = client.exec_command(cmd)
+        return stdout.read().decode(errors="ignore").strip()
+
+    rel = _parse_os_release(_exec("cat /etc/os-release 2>/dev/null || true"))
+    name = rel.get("PRETTY_NAME") or rel.get("NAME") or "Linux"
+    os_id = rel.get("ID")
+    kernel = _exec("uname -r 2>/dev/null || true")
+    arch = _exec("uname -m 2>/dev/null || true")
+    if os_id and os_id.lower() not in name.lower():
+        return f"{name} ({os_id}) kernel={kernel} arch={arch}"
+    return f"{name} kernel={kernel} arch={arch}"
+
 def _truncate(s: bytes | str) -> str:
     if isinstance(s, bytes):
         s = s.decode(errors="ignore")
@@ -140,7 +165,7 @@ def info():
             return stdout.read().decode().strip()
 
         host = (_exec("hostname")or "") + f' IP({SSH_HOST})'
-        platform = _exec("uname -a")
+        platform = _pretty_platform(client)
 
         try:
             cores = int(_exec("nproc"))

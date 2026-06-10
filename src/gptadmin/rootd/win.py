@@ -3,12 +3,17 @@ import os, subprocess, logging, asyncio, psutil, socket, time, shutil, platform
 log = logging.getLogger("rootd_win")
 
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
-LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))
+LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
 
 def _truncate(s):
+    if s is None:
+        s = ""
     if isinstance(s, bytes):
-        s = s.decode(errors="ignore")
+        s = s.decode(errors="replace")
+    elif not isinstance(s, str):
+        s = str(s)
     return s[:LOG_MAX] + f"\n…<truncated to {LOG_MAX}B>…" if len(s) > LOG_MAX else s
+
 
 def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
     log.debug(f"Running command (Windows): {cmd} (timeout={timeout}, cwd={cwd})")
@@ -16,7 +21,7 @@ def run(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict 
         res = subprocess.run(
             ["powershell", "-Command", cmd],
             cwd=cwd,
-            text=True,
+            text=False,
             timeout=timeout or TMO_DEF,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -56,10 +61,14 @@ async def run_stream(cmd: str, cwd: str | None = None, env: dict | None = None):
     return generator
 
 
+def _pretty_platform() -> str:
+    return f"{platform.system()} {platform.release()} {platform.version()} arch={platform.machine()}"
+
+
 def info():
     return {
         "host": socket.gethostname(),
-        "platform": platform.platform(),
+        "platform": _pretty_platform(),
         "cores": psutil.cpu_count(),
         "mem_mb": round(psutil.virtual_memory().total / 2**20),
         "uptime_s": round(time.time() - psutil.boot_time()),

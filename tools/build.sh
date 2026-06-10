@@ -122,24 +122,13 @@ python -V
 pip --version || true
 
 # ---------- install deps (verbose) ----------
-<<<<<<< HEAD
-<<<<<<< HEAD:build.sh
-step "uv sync (install dependencies including pyarmor, pyinstaller)"
-uv sync --all-groups
-=======
 step "pip install requirements, pyinstaller"
 pip install -vvv --upgrade pip
 pip install -vvv -r requirements.txt pyinstaller
->>>>>>> headroom-spill-integration:tools/build.sh
-=======
-step "pip install requirements, pyinstaller"
-pip install -vvv --upgrade pip
-pip install -vvv -r requirements.txt pyinstaller
->>>>>>> headroom-spill-integration
 
 step "Tool versions"
-uv run pyinstaller --version || true
-uv run pyarmor --version || true
+pyinstaller --version || true
+pyarmor --version || true
 
 # ---------- incremental helpers ----------
 fingerprint() {
@@ -222,17 +211,6 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-<<<<<<< HEAD
-<<<<<<< HEAD:build.sh
-ROOTD_IMPORTS=$(uv run py_hidden_imports src/gptadmin/rootd/core.py)
-HUB_IMPORTS=$(uv run py_hidden_imports src/gptadmin/hub.py)
-ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
-HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f src/gptadmin/rootd/linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.linux"
-[[ -f src/gptadmin/rootd/win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.win"
-[[ -f src/gptadmin/rootd/ssh.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=gptadmin.rootd.ssh"
-ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=pyarmor_runtime"
-=======
 ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
 HUB_IMPORTS=$(py_hidden_imports services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
 ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
@@ -240,30 +218,10 @@ HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
 [[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_mac"
->>>>>>> headroom-spill-integration:tools/build.sh
-=======
-ROOTD_IMPORTS=$(py_hidden_imports services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py)
-HUB_IMPORTS=$(py_hidden_imports services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
-ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
-HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
-[[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
-[[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_mac"
->>>>>>> headroom-spill-integration
 echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-<<<<<<< HEAD
-<<<<<<< HEAD:build.sh
-ROOTD_SRC=(src/gptadmin/rootd/core.py)
-[[ -f src/gptadmin/rootd/linux.py ]] && ROOTD_SRC+=(src/gptadmin/rootd/linux.py)
-[[ -f src/gptadmin/rootd/win.py   ]] && ROOTD_SRC+=(src/gptadmin/rootd/win.py)
-[[ -f src/gptadmin/rootd/ssh.py   ]] && ROOTD_SRC+=(src/gptadmin/rootd/ssh.py)
-[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
-
-HUB_SRC=(src/gptadmin/hub.py)
-=======
 ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py cli/gptadmin.py)
 [[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_SRC+=(services/main_package/client/rootd_linux.py)
 [[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_win.py)
@@ -271,16 +229,6 @@ ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/ro
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
 
 HUB_SRC=(services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
->>>>>>> headroom-spill-integration:tools/build.sh
-=======
-ROOTD_SRC=(services/main_package/client/rootd.py services/main_package/client/rootd_pure.py services/main_package/client/gptadmin_build_info.py services/main_package/client/gptadmin_security.py cli/gptadmin.py)
-[[ -f services/main_package/client/rootd_linux.py ]] && ROOTD_SRC+=(services/main_package/client/rootd_linux.py)
-[[ -f services/main_package/client/rootd_win.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_win.py)
-[[ -f services/main_package/client/rootd_mac.py   ]] && ROOTD_SRC+=(services/main_package/client/rootd_mac.py)
-[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
-
-HUB_SRC=(services/main_package/hub_proxy.py services/main_package/gptadmin_build_info.py services/main_package/gptadmin_security.py)
->>>>>>> headroom-spill-integration
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
 FP_ROOTD_NEW="$(fingerprint "${ROOTD_SRC[@]}")"
@@ -310,69 +258,12 @@ echo "Fingerprint hub   : $FP_HUB_NEW (changed=$([[ $NEED_BUILD_HUB == 1 ]] && e
 
 # ---------- PyInstaller (incremental, no obfuscation) ----------
 : "${PYTHONPATH:=}"
-<<<<<<< HEAD
-<<<<<<< HEAD:build.sh
-
-if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
-  step "PyArmor: obfuscate rootd (+platform)"
-  # Obfuscate the whole gptadmin package
-  uv run pyarmor gen -O "$ART_DIR/src" src/gptadmin
-  
-  # Create wrapper script for PyInstaller
-  mkdir -p "$ART_DIR/bin"
-  cat > "$ART_DIR/bin/rootd.py" << 'WRAPPER'
-#!/usr/bin/env python3
-from gptadmin.rootd.core import main
-if __name__ == "__main__":
-    main()
-WRAPPER
-  chmod +x "$ART_DIR/bin/rootd.py"
-else
-  echo "Skip PyArmor rootd: sources unchanged & dist exists"
-fi
-
-if [[ "$NEED_BUILD_HUB" == "1" ]]; then
-  step "PyArmor: obfuscate hub_proxy"
-  # Obfuscate the whole gptadmin package (if not already done)
-  if [[ ! -d "$ART_DIR/src/gptadmin" ]]; then
-    uv run pyarmor gen -O "$ART_DIR/src" src/gptadmin
-  fi
-  
-  # Create wrapper script for PyInstaller
-  mkdir -p "$ART_DIR/bin"
-  cat > "$ART_DIR/bin/hub_proxy.py" << 'WRAPPER'
-#!/usr/bin/env python3
-from gptadmin.hub import main
-if __name__ == "__main__":
-    main()
-WRAPPER
-  chmod +x "$ART_DIR/bin/hub_proxy.py"
-else
-  echo "Skip PyArmor hub_proxy: sources unchanged & dist exists"
-fi
-
-# ---------- PyInstaller (incremental) ----------
-export PYTHONPATH="$ART_DIR/src:$PYTHONPATH"
-
-if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
-  step "PyInstaller: build rootd"
-  uv run pyinstaller --paths="$ART_DIR/src" "$ART_DIR/bin/rootd.py" \
-=======
 export PYTHONPATH="services/main_package/client:services/main_package:$PYTHONPATH"
 mkdir -p "$ART_DIR/rootd" "$ART_DIR/hub_proxy"
 
 if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
   step "PyInstaller: build rootd"
   pyinstaller "services/main_package/client/rootd.py" \
->>>>>>> headroom-spill-integration:tools/build.sh
-=======
-export PYTHONPATH="services/main_package/client:services/main_package:$PYTHONPATH"
-mkdir -p "$ART_DIR/rootd" "$ART_DIR/hub_proxy"
-
-if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
-  step "PyInstaller: build rootd"
-  pyinstaller "services/main_package/client/rootd.py" \
->>>>>>> headroom-spill-integration
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     --specpath "$ART_DIR/rootd" \
@@ -387,15 +278,7 @@ fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
   step "PyInstaller: build hub_proxy"
-<<<<<<< HEAD
-<<<<<<< HEAD:build.sh
-  uv run pyinstaller --paths="$ART_DIR/src" "$ART_DIR/bin/hub_proxy.py" \
-=======
   pyinstaller "services/main_package/hub_proxy.py" \
->>>>>>> headroom-spill-integration:tools/build.sh
-=======
-  pyinstaller "services/main_package/hub_proxy.py" \
->>>>>>> headroom-spill-integration
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
     --specpath "$ART_DIR/hub_proxy" \
