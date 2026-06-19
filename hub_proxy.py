@@ -1397,7 +1397,7 @@ paths:
     post:
       operationId: listMcpTools
       summary: List tools available on one MCP target
-      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
+      description: SECOND STEP. List tools for an explicit agent_id returned by listMcpAgents; no default target.
       requestBody:
         required: true
         content:
@@ -1406,7 +1406,7 @@ paths:
               $ref: "#/components/schemas/ListMcpToolsRequest"
       responses:
         "200":
-          description: Tool list or background job
+          description: Tool list or job
           content:
             application/json:
               schema:
@@ -1423,7 +1423,7 @@ paths:
               $ref: "#/components/schemas/CallMcpToolRequest"
       responses:
         "200":
-          description: Tool response or background job
+          description: Tool response or job
           content:
             application/json:
               schema:
@@ -1441,7 +1441,7 @@ paths:
           in: query
           required: false
           schema: { type: boolean, default: false }
-          description: If true, remove completed/failed job result after reading.
+          description: Clear terminal job after reading.
       responses:
         "200":
           description: Job status/result
@@ -1486,7 +1486,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Agent id from listMcpAgents; required; never use default.
         timeout:
           type: [integer, "null"]
           minimum: 1
@@ -1502,7 +1502,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Agent id from listMcpAgents; required; never use default.
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
@@ -3283,10 +3283,10 @@ def _hub_tools_list() -> Dict[str, Any]:
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "add", "remove", "install", "status", "cat"], "default": "list"},
-                    "name": {"type": ["string", "null"], "description": "MCP server/tool name."},
-                    "url": {"type": ["string", "null"], "description": "Remote MCP URL shortcut; uses npx -y mcp-remote URL."},
-                    "command": {"type": ["string", "null"], "description": "Local stdio MCP command, e.g. npx."},
-                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Command arguments for local stdio MCP."},
+                    "name": {"type": ["string", "null"], "description": "MCP server name."},
+                    "url": {"type": ["string", "null"], "description": "Remote MCP URL; wraps npx -y mcp-remote URL."},
+                    "command": {"type": ["string", "null"], "description": "Local stdio command, e.g. npx."},
+                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Args for local stdio command."},
                     "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
                     "cwd": {"type": ["string", "null"]},
                     "stdio_format": {"type": ["string", "null"], "enum": ["auto", "framed", "ndjson", "jsonl", "content-length", None]},
@@ -3296,10 +3296,10 @@ def _hub_tools_list() -> Dict[str, Any]:
                     "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None], "description": "Optional override. If omitted, mcp_agent_manager auto-detects backend from host OS."},
                     "force": {"type": "boolean", "default": False},
                     "disabled": {"type": "boolean", "default": False},
-                    "install": {"type": "boolean", "default": True, "description": "After add, install/start the MCP relay service."},
-                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."},
-                    "verbose": {"type": "boolean", "default": False, "description": "Return full raw CLI stdout/json/argv/config. Default is compact."},
-                    "include_raw": {"type": "boolean", "default": False, "description": "Alias for verbose."}
+                    "install": {"type": "boolean", "default": True, "description": "After add, install/start relay service."},
+                    "keep_service": {"type": "boolean", "default": False, "description": "Remove registry entry only; keep service/config files."},
+                    "verbose": {"type": "boolean", "default": False, "description": "Return raw CLI stdout/json/config; default compact."},
+                    "include_raw": {"type": "boolean", "default": False, "description": "Same as verbose."}
                 },
                 "additionalProperties": False,
             },
@@ -3518,7 +3518,7 @@ def _shell_tools_list() -> Dict[str, Any]:
     tools = [
         {
             "name": "shell_exec",
-            "description": "Execute a shell command on this server. Use background=true for long commands.",
+            "description": "RUN FIRST for shell work. Execute a command on this host; use background=true for long jobs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3527,10 +3527,10 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "timeout": {"type": ["integer", "null"]},
                     "env": {"type": ["object", "null"], "additionalProperties": True},
                     "background": {"type": "boolean", "default": False},
-                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
-                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
+                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time: seconds from now, ISO, or epoch."},
+                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiry time: seconds from now, ISO, or epoch."},
                     "max_attempts": {"type": ["integer", "null"], "description": "Maximum deferred dispatch attempts."},
-                    "retry_policy": {"type": "string", "enum": ["none", "offline_queue", "at_least_once"], "default": DEFAULT_RETRY_POLICY, "description": "none: fail if offline/no redelivery; offline_queue: hold until reconnect and deliver once; at_least_once: retry/redeliver until terminal/expired/max_attempts."},
+                    "retry_policy": {"type": "string", "enum": ["none", "offline_queue", "at_least_once"], "default": DEFAULT_RETRY_POLICY, "description": "none=no retry; offline_queue=run once after reconnect; at_least_once=retry until terminal/expired/max_attempts."},
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -3538,7 +3538,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "tasks",
-            "description": "List or get shell tasks. If task_id is null/omitted, list tasks. If task_id is set, get that task; ack=true acknowledges/removes terminal tasks after returning them.",
+            "description": "List/get shell jobs. task_id omitted=list; set task_id=get; ack=true clears terminal jobs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3556,7 +3556,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "capability_registry",
-            "description": "Read the rootd capability registry for this shell host. Shows shell/system/log/task capabilities and MCP capabilities that should be supervised behind rootd.",
+            "description": "Show host capabilities and supervised MCP services behind rootd.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3568,13 +3568,13 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_lifecycle",
-            "description": "Control an MCP capability through rootd supervisor facade on this shell host: status, start, stop or restart. Uses signed rootd /capabilities/mcp/{ref}/lifecycle.",
+            "description": "Start/stop/restart/status a supervised MCP service on this host via rootd.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "MCP capability name, agent_id, id or legacy service name."},
+                    "name": {"type": "string", "description": "Capability name, agent_id, id, or legacy service name."},
                     "action": {"type": "string", "enum": ["status", "start", "stop", "restart"], "default": "status"},
-                    "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None], "default": None, "description": "Override rootd supervisor backend; default is chosen by target OS."},
+                    "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None], "default": None, "description": "Override supervisor backend; default follows OS."},
                     "include_raw": {"type": "boolean", "default": False}
                 },
                 "required": ["name"],
@@ -3583,15 +3583,15 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_tools",
-            "description": "Manage GPTAdmin stdio/remote MCP tools on this shell host: list, add, remove, install, status or cat. The local gptadmin CLI/rootd path chooses systemd, launchd or Windows task service handling.",
+            "description": "Manage MCP servers on this host: list/add/remove/install/status/cat. Uses local GPTAdmin/rootd service backend.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "add", "remove", "install", "status", "cat"], "default": "list"},
-                    "name": {"type": ["string", "null"], "description": "MCP server/tool name."},
-                    "url": {"type": ["string", "null"], "description": "Remote MCP URL shortcut; uses npx -y mcp-remote URL."},
-                    "command": {"type": ["string", "null"], "description": "Local stdio MCP command, e.g. npx."},
-                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Command arguments for local stdio MCP."},
+                    "name": {"type": ["string", "null"], "description": "MCP server name."},
+                    "url": {"type": ["string", "null"], "description": "Remote MCP URL; wraps npx -y mcp-remote URL."},
+                    "command": {"type": ["string", "null"], "description": "Local stdio command, e.g. npx."},
+                    "args": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Args for local stdio command."},
                     "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
                     "cwd": {"type": ["string", "null"]},
                     "stdio_format": {"type": ["string", "null"], "enum": ["auto", "framed", "ndjson", "jsonl", "content-length", None]},
@@ -3601,17 +3601,17 @@ def _shell_tools_list() -> Dict[str, Any]:
                     "backend": {"type": ["string", "null"], "enum": ["systemd", "launchd", "windows-task", None]},
                     "force": {"type": "boolean", "default": False},
                     "disabled": {"type": "boolean", "default": False},
-                    "install": {"type": "boolean", "default": True, "description": "After add, install/start the MCP relay service."},
-                    "keep_service": {"type": "boolean", "default": False, "description": "For remove, keep existing service/config files."},
-                    "verbose": {"type": "boolean", "default": False, "description": "Return full raw CLI stdout/json/argv/config. Default is compact."},
-                    "include_raw": {"type": "boolean", "default": False, "description": "Alias for verbose."}
+                    "install": {"type": "boolean", "default": True, "description": "After add, install/start relay service."},
+                    "keep_service": {"type": "boolean", "default": False, "description": "Remove registry entry only; keep service/config files."},
+                    "verbose": {"type": "boolean", "default": False, "description": "Return raw CLI stdout/json/config; default compact."},
+                    "include_raw": {"type": "boolean", "default": False, "description": "Same as verbose."}
                 },
                 "additionalProperties": False,
             },
         },
         {
             "name": "help",
-            "description": "Self-reflection for this GPTAdmin shell agent: routing, non-obvious parameters, config and safe secret fingerprints.",
+            "description": "Agent help: routing, key params, config paths, architecture, rescue hints, safe fingerprints.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3624,13 +3624,13 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "task_edit",
-            "description": "Edit a deferred/background task schedule: not_before, expires_at, max_attempts, retry_now, pause or cancel.",
+            "description": "Edit queued/background job: schedule, retry_now, pause, cancel, expiry, attempts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string"},
-                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
-                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiration time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
+                    "not_before": {"type": ["number", "string", "null"], "description": "Earliest run time: seconds from now, ISO, or epoch."},
+                    "expires_at": {"type": ["number", "string", "null"], "description": "Expiry time: seconds from now, ISO, or epoch."},
                     "next_attempt_at": {"type": ["number", "string", "null"], "description": "Next retry time. Prefer relative seconds from now; ISO timestamp is also accepted. Epoch seconds are accepted for machine callers."},
                     "max_attempts": {"type": ["integer", "null"]},
                     "action": {"type": ["string", "null"], "enum": ["cancel", "retry_now", "pause", None]},
@@ -4535,8 +4535,8 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
         {
             "name": "list_mcp_agents",
             "title": "List MCP agents",
-            "description": "List MCP agents. Real MCP statuses default to online/offline; pass statuses=stale or statuses=all to include stale agents.",
-            "inputSchema": {"type": "object", "properties": {"statuses": {"type": "array", "items": {"type": "string", "enum": ["online", "active", "offline", "stale", "all"]}, "default": ["online", "offline"], "description": "Real MCP statuses to include. active is accepted as alias for online."}, "purge_stale": {"type": "boolean", "default": False, "description": "Remove stale real MCP agents from registry before listing."}}, "additionalProperties": False},
+            "description": "FIRST STEP. List MCP agents and statuses; choose explicit agent_id for later calls.",
+            "inputSchema": {"type": "object", "properties": {"statuses": {"type": "array", "items": {"type": "string", "enum": ["online", "active", "offline", "stale", "all"]}, "default": ["online", "offline"], "description": "Real MCP statuses to include. active is accepted as alias for online."}, "purge_stale": {"type": "boolean", "default": False, "description": "Drop stale registry entries before listing."}}, "additionalProperties": False},
             "outputSchema": {"type": "object", "properties": {"agents": {"type": "array", "items": {"type": "object", "additionalProperties": True}}}, "required": ["agents"], "additionalProperties": True},
             "annotations": {"readOnlyHint": True},
             "securitySchemes": [{"type": "oauth2", "scopes": ["gptadmin.read"]}],
@@ -4560,7 +4560,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
         {
             "name": "call_mcp_tool",
             "title": "Call tool",
-            "description": "Call a tool on one explicitly selected agent. Use background=true for long operations.",
+            "description": "THIRD STEP. Call a tool on an explicit agent_id; use background=true for long jobs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4582,7 +4582,7 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
         {
             "name": "get_mcp_job",
             "title": "Get job",
-            "description": "Get status/result for a background MCP job.",
+            "description": "Poll/read a background MCP job result; ack=true clears terminal result.",
             "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "ack": {"type": "boolean", "default": False}, "verbose": {"type": "boolean", "default": False}, "include_raw": {"type": "boolean", "default": False}}, "required": ["job_id"], "additionalProperties": False},
             "outputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "status": {"type": "string"}, "response": {"type": ["object", "null"], "additionalProperties": True}, "error": {"type": ["object", "string", "null"]}}, "required": ["job_id", "status"], "additionalProperties": True},
             "annotations": {"readOnlyHint": True},
