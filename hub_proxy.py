@@ -1385,7 +1385,8 @@ paths:
   /mcp-relay/agents:
     get:
       operationId: listMcpAgents
-      summary: List real MCP relay agents and virtual shell agents
+      summary: List MCP agents
+      description: FIRST STEP. Choose explicit agent_id for later calls.
       responses:
         "200":
           description: Available agents
@@ -1414,7 +1415,8 @@ paths:
   /mcp-relay/call:
     post:
       operationId: callMcpTool
-      summary: Call a tool on one MCP target
+      summary: Call one tool on one MCP target
+      description: THIRD STEP. Use target and tool_name from previous steps.
       requestBody:
         required: true
         content:
