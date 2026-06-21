@@ -113,6 +113,7 @@ except Exception as e:
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
 _audit_request_context: ContextVar[Dict[str, Any]] = ContextVar("audit_request_context", default={})
+_response_budget: ContextVar[Dict[str, Any]] = ContextVar("response_budget", default={})
 
 
 def rid() -> str:
@@ -149,6 +150,117 @@ def scrub_payload(obj: Any) -> Any:
     if isinstance(obj, list):
         return [scrub_payload(x) for x in obj]
     return obj
+
+
+def _safe_int(value: Any, default: int, *, min_value: int = 1, max_value: int = 10_000_000) -> int:
+    try:
+        n = int(str(value).strip())
+    except Exception:
+        return default
+    return max(min_value, min(max_value, n))
+
+
+def _header_int(headers: Any, names: List[str], default: int, *, min_value: int = 1, max_value: int = 10_000_000) -> int:
+    for name in names:
+        try:
+            value = headers.get(name)
+        except Exception:
+            value = None
+        if value not in (None, ""):
+            return _safe_int(value, default, min_value=min_value, max_value=max_value)
+    return default
+
+
+def _detect_response_client(request: Request) -> str:
+    explicit = (
+        request.headers.get("x-gptadmin-client")
+        or request.headers.get("x-gptadmin-response-client")
+        or request.headers.get("x-client-name")
+        or ""
+    ).strip().lower()
+    if explicit:
+        return re.sub(r"[^a-z0-9_.:-]+", "-", explicit)[:64] or DEFAULT_RESPONSE_CLIENT
+    ua = (request.headers.get("user-agent") or "").lower()
+    if request.headers.get("openai-conversation-id") or request.headers.get("openai-gpt-id") or "chatgpt" in ua or "openai" in ua:
+        return "chatgpt"
+    return DEFAULT_RESPONSE_CLIENT
+
+
+def _response_budget_from_request(request: Request) -> Dict[str, Any]:
+    client = _detect_response_client(request)
+    default_tokens = CHATGPT_RESPONSE_TOKEN_LIMIT if client == "chatgpt" else _safe_int(os.getenv("HUB_GENERIC_RESPONSE_TOKEN_LIMIT", CHATGPT_RESPONSE_TOKEN_LIMIT), CHATGPT_RESPONSE_TOKEN_LIMIT)
+    token_limit = _header_int(
+        request.headers,
+        ["x-gptadmin-response-token-limit", "x-gptadmin-max-response-tokens", "x-response-token-limit"],
+        default_tokens,
+        min_value=256,
+        max_value=2_000_000,
+    )
+    default_chars = CHATGPT_RESPONSE_LIMIT if client == "chatgpt" else int(token_limit * RESPONSE_CHARS_PER_TOKEN)
+    char_limit = _header_int(
+        request.headers,
+        ["x-gptadmin-response-char-limit", "x-gptadmin-max-response-chars", "x-response-char-limit"],
+        default_chars,
+        min_value=1024,
+        max_value=10_000_000,
+    )
+    if not any(request.headers.get(h) for h in ("x-gptadmin-response-char-limit", "x-gptadmin-max-response-chars", "x-response-char-limit")):
+        char_limit = int(token_limit * RESPONSE_CHARS_PER_TOKEN)
+    spill_field_min = _header_int(
+        request.headers,
+        ["x-gptadmin-spill-field-min-chars", "x-gptadmin-spill-threshold-chars"],
+        min(SPILL_FIELD_MIN_CHARS, char_limit),
+        min_value=1024,
+        max_value=10_000_000,
+    )
+    spill_field_min = min(spill_field_min, char_limit)
+    return {
+        "client": client,
+        "token_limit": token_limit,
+        "char_limit": char_limit,
+        "spill_field_min_chars": spill_field_min,
+        "chars_per_token": RESPONSE_CHARS_PER_TOKEN,
+    }
+
+
+def _current_response_budget() -> Dict[str, Any]:
+    budget = dict(_response_budget.get({}) or {})
+    if not budget:
+        budget = {
+            "client": DEFAULT_RESPONSE_CLIENT,
+            "token_limit": CHATGPT_RESPONSE_TOKEN_LIMIT,
+            "char_limit": CHATGPT_RESPONSE_LIMIT,
+            "spill_field_min_chars": min(SPILL_FIELD_MIN_CHARS, CHATGPT_RESPONSE_LIMIT),
+            "chars_per_token": RESPONSE_CHARS_PER_TOKEN,
+        }
+    return budget
+
+
+def _response_char_limit() -> int:
+    return _safe_int(_current_response_budget().get("char_limit"), CHATGPT_RESPONSE_LIMIT, min_value=1024)
+
+
+def _spill_field_min_chars() -> int:
+    budget = _current_response_budget()
+    return min(
+        _safe_int(budget.get("spill_field_min_chars"), SPILL_FIELD_MIN_CHARS, min_value=1024),
+        _safe_int(budget.get("char_limit"), CHATGPT_RESPONSE_LIMIT, min_value=1024),
+    )
+
+
+def _estimate_tokens_from_chars(chars: int) -> int:
+    cpt = RESPONSE_CHARS_PER_TOKEN or 4.0
+    return int((chars + cpt - 1) // cpt)
+
+
+def _response_budget_summary() -> Dict[str, Any]:
+    b = _current_response_budget()
+    return {
+        "client": b.get("client"),
+        "token_limit": b.get("token_limit"),
+        "char_limit": b.get("char_limit"),
+        "spill_field_min_chars": b.get("spill_field_min_chars"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -215,12 +327,20 @@ if DEFAULT_RETRY_POLICY not in RETRY_POLICIES:
 MCP_RELAY_DEFAULT_RETRY_POLICY = os.getenv("MCP_RELAY_DEFAULT_RETRY_POLICY", DEFAULT_RETRY_POLICY).strip().lower()
 if MCP_RELAY_DEFAULT_RETRY_POLICY not in RETRY_POLICIES:
     MCP_RELAY_DEFAULT_RETRY_POLICY = DEFAULT_RETRY_POLICY
-CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", "24000"))
-SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", "4096"))
+# Per-client response budget. ChatGPT action transport was experimentally
+# tested on 2026-06-21: real MCP responses around 57 KB passed, while a
+# 176 KB OpenMemory response produced ResponseTooLargeError. Repeated-character
+# shell output is not representative because downstream layers truncate/compress
+# it; use the conservative token budget below for ChatGPT.
+RESPONSE_CHARS_PER_TOKEN = float(os.getenv("HUB_RESPONSE_CHARS_PER_TOKEN", "4"))
+CHATGPT_RESPONSE_TOKEN_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_TOKEN_LIMIT", "12000"))
+CHATGPT_RESPONSE_LIMIT = int(os.getenv("HUB_CHATGPT_RESPONSE_LIMIT", str(int(CHATGPT_RESPONSE_TOKEN_LIMIT * RESPONSE_CHARS_PER_TOKEN))))
+SPILL_FIELD_MIN_CHARS = int(os.getenv("HUB_SPILL_FIELD_MIN_CHARS", str(CHATGPT_RESPONSE_LIMIT)))
+DEFAULT_RESPONSE_CLIENT = os.getenv("HUB_DEFAULT_RESPONSE_CLIENT", "chatgpt").strip().lower() or "chatgpt"
 SPILL_PREVIEW_HEAD_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_HEAD_CHARS", "600"))
 SPILL_PREVIEW_TAIL_CHARS = int(os.getenv("HUB_SPILL_PREVIEW_TAIL_CHARS", "160"))
 SPILL_HINT_STYLE = os.getenv("HUB_SPILL_HINT_STYLE", "compact").strip().lower()
-HEADROOM_SPILL_ENABLED = os.getenv("HUB_HEADROOM_SPILL_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+HEADROOM_SPILL_ENABLED = os.getenv("HUB_HEADROOM_SPILL_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
 HEADROOM_SPILL_MAX_CHARS = int(os.getenv("HUB_HEADROOM_SPILL_MAX_CHARS", "200000"))
 HEADROOM_SPILL_PREVIEW_CHARS = int(os.getenv("HUB_HEADROOM_SPILL_PREVIEW_CHARS", "1200"))
 HEADROOM_SITE_PACKAGES = os.getenv("HUB_HEADROOM_SITE_PACKAGES", "").strip()
@@ -556,9 +676,12 @@ def _headroom_spill_summary(content: str) -> Optional[Dict[str, Any]]:
 def _spill_hint(path: Path) -> str:
     if SPILL_HINT_STYLE in {"none", "off", "0"}:
         return ""
-    if SPILL_HINT_STYLE in {"full", "verbose"}:
-        return f"Read full output from file_path. Example: sed -n '1,120p' {shlex.quote(str(path))}"
-    return "Full output is in file_path."
+    quoted = shlex.quote(str(path))
+    return (
+        f"Output is too large and was saved to file_path={quoted}. "
+        f"Read it like a normal file, for example: sed -n '1,160p' {quoted}; "
+        f"tail -n 120 {quoted}"
+    )
 
 
 def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, returncode: Any) -> dict:
@@ -585,6 +708,8 @@ def _spill_field(output_id: str, srv: str, cmd: str, field: str, content: str, r
     hint = _spill_hint(path)
     if hint:
         stub["hint"] = hint
+    stub["estimated_tokens"] = _estimate_tokens_from_chars(len(content))
+    stub["budget"] = _response_budget_summary()
     headroom = _headroom_spill_summary(content)
     if headroom:
         stub["headroom"] = headroom
@@ -607,10 +732,12 @@ def _spill_json_field(output_id: str, srv: str, cmd: str, field: str, value: Any
 
 def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
     raw = json.dumps({"results": out}, ensure_ascii=False, default=str)
-    should_scan = len(raw) > CHATGPT_RESPONSE_LIMIT
+    response_limit = _response_char_limit()
+    field_min = _spill_field_min_chars()
+    should_scan = len(raw) > response_limit
     if not should_scan:
         for res in out.values():
-            if isinstance(res, dict) and any(isinstance(res.get(field), str) and len(res.get(field) or "") > SPILL_FIELD_MIN_CHARS for field in ("stdout", "stderr")):
+            if isinstance(res, dict) and any(isinstance(res.get(field), str) and len(res.get(field) or "") > field_min for field in ("stdout", "stderr")):
                 should_scan = True
                 break
     if not should_scan:
@@ -627,7 +754,7 @@ def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
         changed = False
         for field in ("stdout", "stderr"):
             val = modified.get(field)
-            if isinstance(val, str) and len(val) > SPILL_FIELD_MIN_CHARS:
+            if isinstance(val, str) and len(val) > field_min:
                 modified[field] = _spill_field(output_id, srv, cmd, field, val, returncode)
                 changed = True
         # Legacy/special commands and task APIs can return large structured JSON
@@ -641,7 +768,7 @@ def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
                 val_len = len(json.dumps(val, ensure_ascii=False, default=str))
             except Exception:
                 val_len = len(str(val))
-            if val_len > SPILL_FIELD_MIN_CHARS:
+            if val_len > field_min:
                 if isinstance(val, list):
                     modified[f"{field}_count"] = len(val)
                 elif isinstance(val, dict):
@@ -653,7 +780,7 @@ def _spill_large_fields(out: Dict[str, Any], cmd: str) -> Dict[str, Any]:
                 res_len = len(json.dumps(modified, ensure_ascii=False, default=str))
             except Exception:
                 res_len = len(str(modified))
-            if res_len > CHATGPT_RESPONSE_LIMIT:
+            if res_len > response_limit:
                 result[srv] = {
                     "_spilled": True,
                     "result": _spill_json_field(output_id, srv, cmd, "result", modified, returncode),
@@ -675,6 +802,67 @@ def _spill_mcp_structured(srv: str, data: Dict[str, Any], cmd: str) -> Dict[str,
     if not isinstance(data, dict):
         return data
     return _spill_large_fields({srv: data}, cmd).get(srv, data)
+
+
+def _spill_large_mcp_response(target: str, method: str, data: Any) -> Any:
+    """Persist oversized real-MCP responses and return compact file pointers."""
+
+    try:
+        raw_len = len(json.dumps(data, ensure_ascii=False, default=str))
+    except Exception:
+        raw_len = len(str(data))
+
+    response_limit = _response_char_limit()
+    field_min = _spill_field_min_chars()
+    if raw_len <= min(field_min, response_limit):
+        return data
+
+    output_id = f"mcp-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    if not isinstance(data, dict):
+        return {
+            "_spilled": True,
+            "response": _spill_json_field(output_id, target, method, "response", data),
+            "budget": _response_budget_summary(),
+            "estimated_tokens": _estimate_tokens_from_chars(raw_len),
+            "message": "Large MCP response was saved to response.file_path; read it with sed/tail as a normal file.",
+        }
+
+    modified = dict(data)
+    changed = False
+    for field in ("content", "structuredContent", "result", "response"):
+        if field not in modified:
+            continue
+        val = modified.get(field)
+        try:
+            val_len = len(json.dumps(val, ensure_ascii=False, default=str))
+        except Exception:
+            val_len = len(str(val))
+        if val_len > field_min:
+            if isinstance(val, list):
+                modified[f"{field}_count"] = len(val)
+            elif isinstance(val, dict):
+                modified[f"{field}_keys"] = sorted(str(k) for k in val.keys())[:50]
+            modified[field] = _spill_json_field(output_id, target, method, field, val)
+            changed = True
+
+    if changed:
+        modified["_spilled"] = True
+        modified.setdefault("message", "Large MCP response fields were saved to *.file_path; read them with sed/tail as normal files.")
+        try:
+            compact_len = len(json.dumps(modified, ensure_ascii=False, default=str))
+        except Exception:
+            compact_len = len(str(modified))
+        if compact_len <= response_limit:
+            return modified
+
+    return {
+        "_spilled": True,
+        "response": _spill_json_field(output_id, target, method, "response", data),
+        "summary": {"keys": sorted(str(k) for k in data.keys())[:50]},
+        "budget": _response_budget_summary(),
+        "estimated_tokens": _estimate_tokens_from_chars(raw_len),
+        "message": "Large MCP response was saved to response.file_path; read it with sed/tail as a normal file.",
+    }
 
 
 def _server_fingerprint(d: Dict[str, Any]) -> str:
@@ -1026,11 +1214,16 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             body = b""
 
         q_items = list(request.query_params.multi_items())
+        budget = _response_budget_from_request(request)
+        _response_budget.set(budget)
         _audit_request_context.set({
             "rid": rid(),
             "method": request.method,
             "path": request.url.path,
             "query_keys": sorted(request.query_params.keys()),
+            "response_client": budget.get("client"),
+            "response_token_limit": budget.get("token_limit"),
+            "response_char_limit": budget.get("char_limit"),
             **_audit_request_fields(request),
         })
         log.info(
@@ -1377,6 +1570,12 @@ info:
       4. If response has background:true and job_id, poll getMcpJob until completed/failed.
 
     Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+
+    Optional response-budget headers:
+      X-GPTAdmin-Client: chatgpt|opencode|cli|custom (default/autodetected: chatgpt for OpenAI requests)
+      X-GPTAdmin-Response-Token-Limit: approximate output token budget before spilling to file_path
+      X-GPTAdmin-Response-Char-Limit: explicit serialized response char budget
+      X-GPTAdmin-Spill-Field-Min-Chars: per-field spill threshold; capped by response char limit
 servers:
   - url: https://gptadmin.bezrabotnyi.com
 security:
@@ -1399,6 +1598,25 @@ paths:
       operationId: listMcpTools
       summary: List tools available on one MCP target
       description: SECOND STEP. List tools for an explicit agent_id returned by listMcpAgents; no default target.
+      parameters:
+        - in: header
+          name: X-GPTAdmin-Client
+          required: false
+          schema: {type: string, default: chatgpt}
+          description: Response budget profile. Default/autodetected ChatGPT.
+        - in: header
+          name: X-GPTAdmin-Response-Token-Limit
+          required: false
+          schema: {type: integer, default: 12000}
+          description: Approximate output token budget before spilling to file_path.
+        - in: header
+          name: X-GPTAdmin-Response-Char-Limit
+          required: false
+          schema: {type: integer}
+        - in: header
+          name: X-GPTAdmin-Spill-Field-Min-Chars
+          required: false
+          schema: {type: integer}
       requestBody:
         required: true
         content:
@@ -1417,6 +1635,25 @@ paths:
       operationId: callMcpTool
       summary: Call one tool on one MCP target
       description: THIRD STEP. Use target and tool_name from previous steps.
+      parameters:
+        - in: header
+          name: X-GPTAdmin-Client
+          required: false
+          schema: {type: string, default: chatgpt}
+          description: Response budget profile. Default/autodetected ChatGPT.
+        - in: header
+          name: X-GPTAdmin-Response-Token-Limit
+          required: false
+          schema: {type: integer, default: 12000}
+          description: Approximate output token budget before spilling to file_path.
+        - in: header
+          name: X-GPTAdmin-Response-Char-Limit
+          required: false
+          schema: {type: integer}
+        - in: header
+          name: X-GPTAdmin-Spill-Field-Min-Chars
+          required: false
+          schema: {type: integer}
       requestBody:
         required: true
         content:
@@ -1435,6 +1672,22 @@ paths:
       operationId: getMcpJob
       summary: Get MCP background job status and optionally consume it
       parameters:
+        - in: header
+          name: X-GPTAdmin-Client
+          required: false
+          schema: {type: string, default: chatgpt}
+        - in: header
+          name: X-GPTAdmin-Response-Token-Limit
+          required: false
+          schema: {type: integer, default: 12000}
+        - in: header
+          name: X-GPTAdmin-Response-Char-Limit
+          required: false
+          schema: {type: integer}
+        - in: header
+          name: X-GPTAdmin-Spill-Field-Min-Chars
+          required: false
+          schema: {type: integer}
         - name: job_id
           in: path
           required: true
@@ -3958,6 +4211,7 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
         "updated_at": int(time.time()),
         "queued_reason": "online" if alive else "offline",
         "retry_policy": policy,
+        "response_budget": _current_response_budget(),
         "expires_at": int(time.time()) + (HUB_DEFERRED_DEFAULT_TTL_S if _retry_policy_queues_offline(policy) else MCP_RELAY_NO_RETRY_TTL_S),
     }
     log.info(
@@ -4046,9 +4300,21 @@ async def mcp_relay_result(agent_id: str, res: McpRelayResult, request: Request)
     _mcp_relay_agent_auth(request)
     if agent_id in mcp_relay_agents:
         mcp_relay_agents[agent_id]["last_seen"] = time.time()
-    payload = {"ok": res.ok, "result": res.result, "error": res.error, "completed_at": int(time.time()), "agent_id": agent_id}
-    mcp_relay_results[res.id] = payload
     job = mcp_relay_jobs.get(res.id)
+    method = str((job or {}).get("method") or "mcp-result")
+    tool_name = str((job or {}).get("tool_name") or "")
+    spill_method = f"{method}:{tool_name}" if tool_name else method
+    saved_budget = (job or {}).get("response_budget")
+    budget_token = None
+    if isinstance(saved_budget, dict):
+        budget_token = _response_budget.set(saved_budget)
+    try:
+        compact_result = _spill_large_mcp_response(agent_id, spill_method, res.result) if res.ok else res.result
+    finally:
+        if budget_token is not None:
+            _response_budget.reset(budget_token)
+    payload = {"ok": res.ok, "result": compact_result, "error": res.error, "completed_at": int(time.time()), "agent_id": agent_id}
+    mcp_relay_results[res.id] = payload
     if job:
         if job.get("status") in {"completed", "failed"}:
             job.setdefault("duplicate_results", 0)
@@ -4097,6 +4363,7 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "tools/list still running"}
+    data = _spill_large_mcp_response(target, "tools/list", data)
     return {"agent_id": target, "status": "completed", "response": data}
 
 
@@ -4136,6 +4403,7 @@ async def mcp_relay_call(req: McpRelayCallReq):
     data = await _mcp_relay_wait(job_id, req.timeout)
     if data is None:
         return {"agent_id": target, "status": "running", "background": True, "job_id": job_id, "message": "MCP relay job is still running"}
+    data = _spill_large_mcp_response(target, f"tools/call:{req.tool_name}", data)
     return {"agent_id": target, "status": "completed", "response": data}
 
 
@@ -4261,7 +4529,11 @@ def _compact_real_mcp_job(job_id: str, job: Optional[Dict[str, Any]], result: Op
     }
     if result:
         if result.get("ok", True):
-            out["response"] = result.get("result")
+            out["response"] = _spill_large_mcp_response(
+                str(result.get("agent_id") or job.get("agent_id") or "mcp"),
+                str(job.get("tool_name") or job.get("method") or "mcp-job"),
+                result.get("result"),
+            )
         else:
             out["error"] = result.get("error") or {"message": "MCP relay job failed"}
     else:
