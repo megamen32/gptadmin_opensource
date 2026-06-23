@@ -43,3 +43,15 @@ curl -H 'Authorization: Bearer test' -H 'Content-Type: application/json' \
 curl -H 'Authorization: Bearer test' -H 'Content-Type: application/json' \
   -d '{"cmd":"echo live"}' http://127.0.0.1:25990/exec/live
 ```
+
+## Tests
+
+```bash
+go test ./...
+./scripts/cross-build.sh
+go test -tags=stress ./internal/server -run TestStressExecHTTP -count=1
+REQUESTS=120 WORKERS=20 ./scripts/stress-local.sh
+```
+
+`cross-build.sh` verifies Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 builds.
+`stress-local.sh` starts a local rootd-go process, runs concurrent `/exec` requests, checks background jobs, and verifies large stdout spill files.

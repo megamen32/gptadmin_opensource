@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -90,17 +88,6 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	cmd.Env = env
 	setProcessGroup(cmd)
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
-		return res, err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
-		return res, err
-	}
-
 	spillDir := req.SpillDir
 	if spillDir == "" {
 		spillDir = filepath.Join(os.TempDir(), "rootd-go-spool")
@@ -121,21 +108,18 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	}
 	defer stderr.Close()
 
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
 	if err := cmd.Start(); err != nil {
 		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
 		return res, err
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(stdout, stdoutPipe) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(stderr, stderrPipe) }()
-
 	waitErr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
 		killProcessGroup(cmd)
 	}
-	wg.Wait()
 
 	rc := 0
 	if waitErr != nil {
@@ -257,20 +241,4 @@ func shellArg() string {
 		return "/C"
 	}
 	return "-c"
-}
-
-func setProcessGroup(cmd *exec.Cmd) {
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
-}
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	if runtime.GOOS != "windows" {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	} else {
-		_ = cmd.Process.Kill()
-	}
 }
