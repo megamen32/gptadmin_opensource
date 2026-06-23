@@ -39,6 +39,9 @@ type Config struct {
 	QueueTimeout      int
 	Mode              string
 	OutboxDir         string
+	DefaultUser       string
+	DefaultHome       string
+	DefaultCwd        string
 	HubPublicKeyFile  string
 	HubPublicKey      string
 }
@@ -62,7 +65,10 @@ func FromEnv() Config {
 		}
 	}
 	outbox := env("SHELL_OUTBOX_DIR", env("ROOTD_OUTBOX_DIR", filepath.Join(spill, "outbox")))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
+	defaultUser := env("SHELL_DEFAULT_USER", env("ROOTD_DEFAULT_USER", ""))
+	defaultHome := env("SHELL_DEFAULT_HOME", env("ROOTD_DEFAULT_HOME", ""))
+	defaultCwd := env("SHELL_DEFAULT_CWD", env("ROOTD_DEFAULT_CWD", defaultHome))
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
 }
 
 func env(k, d string) string {
@@ -167,7 +173,7 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode})
+	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": BuildVersion})
@@ -179,14 +185,24 @@ func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Reque
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return req, false
 	}
+	s.applyDefaults(&req)
+	return req, true
+}
+func (s *Server) applyDefaults(req *shell.Request) {
 	if req.Timeout == 0 {
 		req.Timeout = s.cfg.ExecTimeout
 	}
 	if req.SpillDir == "" {
 		req.SpillDir = s.cfg.SpillDir
 	}
-	return req, true
+	if req.DefaultUser == "" {
+		req.DefaultUser = s.cfg.DefaultUser
+	}
+	if req.DefaultCwd == "" {
+		req.DefaultCwd = s.cfg.DefaultCwd
+	}
 }
+
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
@@ -222,12 +238,7 @@ func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := body.Request
-	if req.Timeout == 0 {
-		req.Timeout = s.cfg.ExecTimeout
-	}
-	if req.SpillDir == "" {
-		req.SpillDir = s.cfg.SpillDir
-	}
+	s.applyDefaults(&req)
 	jobID := body.JobID
 	if jobID == "" {
 		j := s.jobs.Start(req)
@@ -340,6 +351,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 		}
 		if ok {
 			req := shell.Request{Cmd: q.Cmd, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: s.cfg.SpillDir}
+			s.applyDefaults(&req)
 			go s.runCallbackJob(q.ID, req)
 		}
 	}

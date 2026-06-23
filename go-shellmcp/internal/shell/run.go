@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sync"
 	"time"
@@ -19,12 +20,16 @@ const DefaultSpillThresholdBytes int64 = 1024 * 1024
 const DefaultTimeout = 300 * time.Second
 
 type Request struct {
-	Cmd        string            `json:"cmd"`
-	Env        map[string]string `json:"env,omitempty"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Timeout    int               `json:"timeout,omitempty"`
-	SpillDir   string            `json:"spill_dir,omitempty"`
-	Background bool              `json:"background,omitempty"`
+	Cmd         string            `json:"cmd"`
+	Env         map[string]string `json:"env,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	Timeout     int               `json:"timeout,omitempty"`
+	SpillDir    string            `json:"spill_dir,omitempty"`
+	Background  bool              `json:"background,omitempty"`
+	RunAsUser   string            `json:"run_as_user,omitempty"`
+	User        string            `json:"user,omitempty"`
+	DefaultUser string            `json:"-"`
+	DefaultCwd  string            `json:"-"`
 }
 
 type Result struct {
@@ -35,6 +40,7 @@ type Result struct {
 	TimedOut   bool     `json:"timed_out,omitempty"`
 	DurationMS int64    `json:"duration_ms"`
 	Cwd        string   `json:"cwd_effective,omitempty"`
+	RunAsUser  string   `json:"run_as_user,omitempty"`
 	Spilled    bool     `json:"_spilled,omitempty"`
 	StdoutPath string   `json:"stdout_path,omitempty"`
 	StderrPath string   `json:"stderr_path,omitempty"`
@@ -77,9 +83,11 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd)
+	cmd, runAsUser := buildCommand(ctx, req)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
+	} else if req.DefaultCwd != "" {
+		cmd.Dir = req.DefaultCwd
 	}
 	env := os.Environ()
 	for k, v := range req.Env {
@@ -130,13 +138,13 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 			rc = -1
 		}
 	}
-	cwd := req.Cwd
+	cwd := cmd.Dir
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	} else if abs, err := filepath.Abs(cwd); err == nil {
 		cwd = abs
 	}
-	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd}
+	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd, RunAsUser: runAsUser}
 	files := make([]string, 0, 2)
 	if stdout.Spilled() {
 		res.Spilled = true
@@ -228,6 +236,33 @@ func (c *capture) Close() error {
 		return c.file.Close()
 	}
 	return nil
+}
+
+var sudoTokenRE = regexp.MustCompile(`(^|[^A-Za-z0-9_./-])sudo([^A-Za-z0-9_-]|$)`)
+
+func commandMentionsSudo(cmd string) bool {
+	return sudoTokenRE.MatchString(cmd)
+}
+
+func targetRunUser(req Request) (string, bool) {
+	if req.RunAsUser != "" {
+		return req.RunAsUser, true
+	}
+	if req.User != "" {
+		return req.User, true
+	}
+	if req.DefaultUser != "" && !commandMentionsSudo(req.Cmd) {
+		return req.DefaultUser, false
+	}
+	return "", false
+}
+
+func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
+	user, explicit := targetRunUser(req)
+	if runtime.GOOS != "windows" && user != "" && user != "root" && (explicit || os.Geteuid() == 0) {
+		return exec.CommandContext(ctx, "sudo", "-H", "-u", user, "--", shellName(), shellArg(), req.Cmd), user
+	}
+	return exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd), ""
 }
 
 func shellName() string {

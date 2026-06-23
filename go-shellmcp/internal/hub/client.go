@@ -41,6 +41,9 @@ type Beat struct {
 	OS            string `json:"os"`
 	BuildVersion  int    `json:"build_version"`
 	GitCommit     string `json:"git_commit"`
+	DefaultUser   string `json:"default_user,omitempty"`
+	DefaultHome   string `json:"default_home,omitempty"`
+	DefaultCwd    string `json:"default_cwd,omitempty"`
 }
 
 type QueueJob struct {
