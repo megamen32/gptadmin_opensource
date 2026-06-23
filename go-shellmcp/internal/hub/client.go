@@ -23,7 +23,7 @@ type Client struct {
 }
 
 func New(base string, id *security.Identity) *Client {
-	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, HTTP: &http.Client{Timeout: 90 * time.Second}}
 }
 
 type Beat struct {
