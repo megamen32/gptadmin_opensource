@@ -10,7 +10,9 @@ Implemented in this prototype:
 - `/system/info`
 - `/system/health`
 - `/exec`
-- bounded stdout/stderr in RAM; tail is kept, not full unbounded output
+- `/exec/live` NDJSON streaming
+- background jobs via `{"background": true}` + `GET /tasks/<job_id>`
+- stdout/stderr spooled to disk with bounded tail in RAM
 - timeout + process-group kill on Linux/macOS
 - token auth compatibility bootstrap
 
@@ -20,6 +22,7 @@ Not implemented yet:
 - heartbeat/register
 - long-poll queue transport
 - durable callback outbox
+- callback delivery to hub
 - MCP stdio adapter
 - auto-update
 
@@ -31,4 +34,7 @@ SHELL_PORT=25990 SHELL_TOKEN=test go run ./cmd/rootd-go
 curl -H 'Authorization: Bearer test' http://127.0.0.1:25990/system/health
 curl -H 'Authorization: Bearer test' -H 'Content-Type: application/json' \
   -d '{"cmd":"printf hello"}' http://127.0.0.1:25990/exec
+
+curl -H 'Authorization: Bearer test' -H 'Content-Type: application/json' \
+  -d '{"cmd":"echo live"}' http://127.0.0.1:25990/exec/live
 ```

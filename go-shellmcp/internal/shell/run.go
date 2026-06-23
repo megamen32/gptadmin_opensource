@@ -3,7 +3,9 @@ package shell
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,32 +17,60 @@ import (
 )
 
 const DefaultLimitBytes int64 = 8192
+const DefaultSpillThresholdBytes int64 = 1024 * 1024
 const DefaultTimeout = 300 * time.Second
 
 type Request struct {
-	Cmd     string            `json:"cmd"`
-	Env     map[string]string `json:"env,omitempty"`
-	Cwd     string            `json:"cwd,omitempty"`
-	Timeout int               `json:"timeout,omitempty"`
+	Cmd        string            `json:"cmd"`
+	Env        map[string]string `json:"env,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
+	Timeout    int               `json:"timeout,omitempty"`
+	SpillDir   string            `json:"spill_dir,omitempty"`
+	Background bool              `json:"background,omitempty"`
 }
 
 type Result struct {
-	ReturnCode int    `json:"returncode"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
+	ReturnCode int      `json:"returncode"`
+	Stdout     string   `json:"stdout"`
+	Stderr     string   `json:"stderr"`
+	Error      string   `json:"error,omitempty"`
+	TimedOut   bool     `json:"timed_out,omitempty"`
+	DurationMS int64    `json:"duration_ms"`
+	Cwd        string   `json:"cwd_effective,omitempty"`
+	Spilled    bool     `json:"_spilled,omitempty"`
+	StdoutPath string   `json:"stdout_path,omitempty"`
+	StderrPath string   `json:"stderr_path,omitempty"`
+	Files      []string `json:"files,omitempty"`
+}
+
+type Event struct {
+	Type       string `json:"type"`
+	Stream     string `json:"stream,omitempty"`
+	Data       string `json:"data,omitempty"`
+	ReturnCode int    `json:"returncode,omitempty"`
 	Error      string `json:"error,omitempty"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	Cwd        string `json:"cwd_effective,omitempty"`
+	Seq        int64  `json:"seq,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
 }
 
 func Run(ctx context.Context, req Request, limitBytes int64) Result {
+	res, _ := runInternal(ctx, req, limitBytes, nil)
+	return res
+}
+
+func RunLive(ctx context.Context, req Request, limitBytes int64, emit func(Event)) Result {
+	res, _ := runInternal(ctx, req, limitBytes, emit)
+	return res
+}
+
+func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(Event)) (Result, error) {
 	started := time.Now()
 	if limitBytes <= 0 {
 		limitBytes = DefaultLimitBytes
 	}
 	if req.Cmd == "" {
-		return Result{ReturnCode: -1, Error: "empty cmd", DurationMS: time.Since(started).Milliseconds()}
+		return Result{ReturnCode: -1, Error: "empty cmd", DurationMS: time.Since(started).Milliseconds()}, errors.New("empty cmd")
 	}
 	timeout := DefaultTimeout
 	if req.Timeout > 0 {
@@ -62,24 +92,44 @@ func Run(ctx context.Context, req Request, limitBytes int64) Result {
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
 	}
 
-	var stdout, stderr tailBuffer
-	stdout.limit = limitBytes
-	stderr.limit = limitBytes
+	spillDir := req.SpillDir
+	if spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "rootd-go-spool")
+	}
+	spoolID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+	stdoutPath := filepath.Join(spillDir, spoolID+".stdout")
+	stderrPath := filepath.Join(spillDir, spoolID+".stderr")
+	stdout, err := newCapture(limitBytes, stdoutPath, emit, "stdout")
+	if err != nil {
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
+	}
+	defer stdout.Close()
+	stderr, err := newCapture(limitBytes, stderrPath, emit, "stderr")
+	if err != nil {
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
+	}
+	defer stderr.Close()
+
 	if err := cmd.Start(); err != nil {
-		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
+		return res, err
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(&stdout, stdoutPipe) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(&stderr, stderrPipe) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(stdout, stdoutPipe) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(stderr, stderrPipe) }()
 
 	waitErr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -102,7 +152,19 @@ func Run(ctx context.Context, req Request, limitBytes int64) Result {
 	} else if abs, err := filepath.Abs(cwd); err == nil {
 		cwd = abs
 	}
-	res := Result{ReturnCode: rc, Stdout: stdout.String(), Stderr: stderr.String(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd}
+	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd}
+	files := make([]string, 0, 2)
+	if stdout.Spilled() {
+		res.Spilled = true
+		res.StdoutPath = stdout.Path()
+		files = append(files, stdout.Path())
+	}
+	if stderr.Spilled() {
+		res.Spilled = true
+		res.StderrPath = stderr.Path()
+		files = append(files, stderr.Path())
+	}
+	res.Files = files
 	if ctx.Err() == context.DeadlineExceeded {
 		res.Error = "timeout"
 		res.TimedOut = true
@@ -112,36 +174,77 @@ func Run(ctx context.Context, req Request, limitBytes int64) Result {
 	} else if waitErr != nil && rc == -1 {
 		res.Error = waitErr.Error()
 	}
-	return res
+	if emit != nil {
+		b, _ := json.Marshal(res)
+		emit(Event{Type: "exit", ReturnCode: res.ReturnCode, Error: res.Error, TimedOut: res.TimedOut, Data: string(b)})
+	}
+	return res, nil
 }
 
-type tailBuffer struct {
+type capture struct {
 	limit int64
 	buf   bytes.Buffer
+	path  string
+	file  *os.File
+	total int64
+	seq   int64
+	emit  func(Event)
+	name  string
+	mu    sync.Mutex
 }
 
-func (r *tailBuffer) Write(p []byte) (int, error) {
+func newCapture(limit int64, path string, emit func(Event), name string) (*capture, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &capture{limit: limit, path: path, file: f, emit: emit, name: name}, nil
+}
+
+func (c *capture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	n := len(p)
-	if r.limit <= 0 {
-		return n, nil
+	_, err := c.file.Write(p)
+	c.total += int64(n)
+	if c.limit > 0 {
+		if int64(len(p)) >= c.limit {
+			c.buf.Reset()
+			c.buf.Write(p[int64(len(p))-c.limit:])
+		} else {
+			c.buf.Write(p)
+			over := int64(c.buf.Len()) - c.limit
+			if over > 0 {
+				b := c.buf.Bytes()
+				kept := append([]byte(nil), b[over:]...)
+				c.buf.Reset()
+				c.buf.Write(kept)
+			}
+		}
 	}
-	if int64(len(p)) >= r.limit {
-		r.buf.Reset()
-		r.buf.Write(p[int64(len(p))-r.limit:])
-		return n, nil
+	if c.emit != nil && n > 0 {
+		c.seq++
+		c.emit(Event{Type: "chunk", Stream: c.name, Data: string(p), Seq: c.seq, Offset: c.total})
 	}
-	r.buf.Write(p)
-	over := int64(r.buf.Len()) - r.limit
-	if over > 0 {
-		b := r.buf.Bytes()
-		kept := append([]byte(nil), b[over:]...)
-		r.buf.Reset()
-		r.buf.Write(kept)
-	}
-	return n, nil
+	return n, err
 }
 
-func (r *tailBuffer) String() string { return r.buf.String() }
+func (c *capture) Tail() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+func (c *capture) Path() string  { return c.path }
+func (c *capture) Spilled() bool { return c.total > c.limit }
+func (c *capture) Close() error {
+	if c.file != nil {
+		return c.file.Close()
+	}
+	return nil
+}
 
 func shellName() string {
 	if runtime.GOOS == "windows" {
