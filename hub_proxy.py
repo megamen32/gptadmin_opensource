@@ -359,6 +359,8 @@ MCP_RESOURCE = os.getenv("MCP_RESOURCE", PUBLIC_ORIGIN)
 OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", secrets.token_hex(32))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 OAUTH_SCOPES = ["gptadmin.read", "gptadmin.exec"]
+OAUTH_PERMISSIVE_REDIRECTS = os.getenv("OAUTH_PERMISSIVE_REDIRECTS", "0").lower() in ("1", "true", "yes", "on", "all")
+OAUTH_PERMISSIVE_RESOURCES = os.getenv("OAUTH_PERMISSIVE_RESOURCES", "0").lower() in ("1", "true", "yes", "on", "all")
 _oauth_codes: Dict[str, Dict[str, Any]] = {}
 
 MCP_RELAY_AGENT_TOKEN = os.getenv("MCP_RELAY_AGENT_TOKEN", secrets.token_urlsafe(32))
@@ -4640,21 +4642,37 @@ def _pkce_ok(verifier: str, challenge: str) -> bool:
     return hmac.compare_digest(_b64url(digest), challenge)
 
 
+def _normalize_oauth_resource(resource: Optional[str]) -> str:
+    return (resource or MCP_RESOURCE).rstrip("/")
+
+
+def _is_allowed_oauth_resource(resource: Optional[str]) -> bool:
+    if OAUTH_PERMISSIVE_RESOURCES:
+        return True
+    return _normalize_oauth_resource(resource) == _normalize_oauth_resource(MCP_RESOURCE)
+
+
 def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
+    # OAUTH_PERMISSIVE_REDIRECTS=1 intentionally allows dynamic OAuth clients.
+    if OAUTH_PERMISSIVE_REDIRECTS:
+        return bool(uri)
     if not uri:
         return False
     try:
         u = urlparse(uri)
-        if u.hostname in ("localhost", "127.0.0.1") and u.scheme in ("http", "https"):
+        host = (u.hostname or "").lower()
+        path = u.path or ""
+        if host in ("localhost", "127.0.0.1") and u.scheme in ("http", "https"):
+            return True
+        if u.scheme != "https":
+            return False
+        if (host == "chatgpt.com" or host.endswith(".chatgpt.com")) and path.startswith("/connector/oauth/"):
+            return True
+        if host == "opencode.bezrabotnyi.com" and path == "/mcp/oauth/callback":
             return True
     except Exception:
-        pass
-    try:
-        u = urlparse(uri)
-        return u.scheme == "https" and (u.hostname == "chatgpt.com" or (u.hostname or "").endswith(".chatgpt.com")) and u.path.startswith("/connector/oauth/")
-    except Exception:
         return False
-
+    return False
 
 
 def _mcp_auth(request: Request) -> Dict[str, Any]:
@@ -4730,8 +4748,8 @@ async def oauth_register(request: Request):
 def oauth_authorize_get(request: Request):
     q = request.query_params
     redirect_uri = q.get("redirect_uri")
-    resource = (q.get("resource") or MCP_RESOURCE).rstrip("/")
-    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+    resource = _normalize_oauth_resource(q.get("resource"))
+    if not _is_chatgpt_redirect(redirect_uri) or not _is_allowed_oauth_resource(resource):
         return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     fields = {
         "redirect_uri": redirect_uri,
@@ -4761,8 +4779,8 @@ async def oauth_authorize_post(request: Request):
     if params.get("password") != ADMIN_PASSWORD:
         return JSONResponse({"error": "access_denied", "error_description": "invalid password"}, status_code=403)
     redirect_uri = params.get("redirect_uri")
-    resource = (params.get("resource") or MCP_RESOURCE).rstrip("/")
-    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+    resource = _normalize_oauth_resource(params.get("resource"))
+    if not _is_chatgpt_redirect(redirect_uri) or not _is_allowed_oauth_resource(resource):
         return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     code = secrets.token_urlsafe(32)
     _oauth_codes[code] = {
@@ -4784,8 +4802,8 @@ async def oauth_token(request: Request):
     # Normalize trailing slash: the stored resource (authorize step) was rstrip'd,
     # but a client (e.g. Claude Code) may send resource with a trailing slash in
     # the token request. Without rstrip here the comparison spuriously mismatches.
-    resource = (params.get("resource") or (data or {}).get("resource") or MCP_RESOURCE).rstrip("/")
-    if not data or time.time() - data.get("created", 0) > 300 or resource != MCP_RESOURCE or resource != data.get("resource"):
+    resource = _normalize_oauth_resource(params.get("resource") or (data or {}).get("resource"))
+    if not data or time.time() - data.get("created", 0) > 300 or not _is_allowed_oauth_resource(resource) or resource != _normalize_oauth_resource(data.get("resource")):
         return JSONResponse({"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"}, status_code=400)
     if not _pkce_ok(params.get("code_verifier", ""), data.get("challenge", "")):
         return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
