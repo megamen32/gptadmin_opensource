@@ -59,6 +59,14 @@ func LoadIdentity(dir, name string) (*Identity, error) {
 	return &ident, nil
 }
 
+func LoadPublicKey(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 func B64(b []byte) string { return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=") }
 func B64Decode(s string) ([]byte, error) {
 	if m := len(s) % 4; m != 0 {
@@ -81,5 +89,37 @@ func (i *Identity) Sign(method, path string, body []byte) map[string]string {
 	sig := ed25519.Sign(i.PrivateKey, Canonical(method, path, ts, nonce, body))
 	return map[string]string{"X-GPTAdmin-Timestamp": ts, "X-GPTAdmin-Nonce": nonce, "X-GPTAdmin-Signature": B64(sig), "X-GPTAdmin-Server": i.Name, "X-GPTAdmin-Server-ID": i.ServerID}
 }
+
+func Verify(publicKeyB64, method, path, ts, nonce string, body []byte, sigB64 string, maxSkew time.Duration) error {
+	if publicKeyB64 == "" || ts == "" || nonce == "" || sigB64 == "" {
+		return fmt.Errorf("missing signed request fields")
+	}
+	tsInt, err := strconvParseInt(ts)
+	if err != nil {
+		return fmt.Errorf("bad timestamp: %w", err)
+	}
+	if maxSkew > 0 && time.Since(time.Unix(tsInt, 0)) > maxSkew || maxSkew > 0 && time.Until(time.Unix(tsInt, 0)) > maxSkew {
+		return fmt.Errorf("signature timestamp outside allowed skew")
+	}
+	pubBytes, err := B64Decode(publicKeyB64)
+	if err != nil {
+		return err
+	}
+	sig, err := B64Decode(sigB64)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), Canonical(method, path, ts, nonce, body), sig) {
+		return fmt.Errorf("invalid signature")
+	}
+	return nil
+}
+
+func strconvParseInt(s string) (int64, error) {
+	var n int64
+	_, err := fmt.Sscan(s, &n)
+	return n, err
+}
+
 func randomBytes(n int) []byte { b := make([]byte, n); _, _ = rand.Read(b); return b }
 func randomHex(n int) string   { return hex.EncodeToString(randomBytes(n)) }

@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -35,6 +37,8 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	QueueEnabled      bool
 	QueueTimeout      int
+	HubPublicKeyFile  string
+	HubPublicKey      string
 }
 
 func FromEnv() Config {
@@ -47,7 +51,7 @@ func FromEnv() Config {
 	baseURL := env("SHELL_URL", env("ROOTD_URL", "http://127.0.0.1:"+port))
 	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "60"))
 	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
 }
 
 func env(k, d string) string {
@@ -122,12 +126,30 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.Token != "" && r.Header.Get("Authorization") != "Bearer "+s.cfg.Token {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		body, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if s.authorized(r, body) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 	}
+}
+
+func (s *Server) authorized(r *http.Request, body []byte) bool {
+	if s.cfg.Token != "" && r.Header.Get("Authorization") == "Bearer "+s.cfg.Token {
+		return true
+	}
+	if r.Header.Get("X-GPTAdmin-Signature") == "" {
+		return false
+	}
+	pub := s.cfg.HubPublicKey
+	if pub == "" && s.cfg.HubPublicKeyFile != "" {
+		if loaded, err := security.LoadPublicKey(s.cfg.HubPublicKeyFile); err == nil {
+			pub = loaded
+		}
+	}
+	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"component": "rootd-go", "build_version": BuildVersion, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
