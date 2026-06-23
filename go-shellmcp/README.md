@@ -16,6 +16,8 @@ Implemented in this prototype:
 - timeout + process-group kill on Linux/macOS
 - token auth compatibility bootstrap
 - optional signed long-poll queue runner
+- durable queue result outbox under `SHELL_OUTBOX_DIR`
+- `SHELL_MODE=long_poll|webhook` heartbeat mode
 - optional signed heartbeat to GPTAdmin hub
 - `/file?path=...` for authenticated spool file retrieval
 

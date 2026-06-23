@@ -37,6 +37,8 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	QueueEnabled      bool
 	QueueTimeout      int
+	Mode              string
+	OutboxDir         string
 	HubPublicKeyFile  string
 	HubPublicKey      string
 }
@@ -51,7 +53,16 @@ func FromEnv() Config {
 	baseURL := env("SHELL_URL", env("ROOTD_URL", "http://127.0.0.1:"+port))
 	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "60"))
 	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
+	mode := env("SHELL_MODE", env("ROOTD_MODE", ""))
+	if mode == "" {
+		if truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))) {
+			mode = "long_poll"
+		} else {
+			mode = "webhook"
+		}
+	}
+	outbox := env("SHELL_OUTBOX_DIR", env("ROOTD_OUTBOX_DIR", filepath.Join(spill, "outbox")))
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
 }
 
 func env(k, d string) string {
@@ -156,7 +167,7 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled})
+	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": BuildVersion})
@@ -305,7 +316,7 @@ func (s *Server) sendHeartbeat(ctx context.Context) {
 	if s.hub == nil {
 		return
 	}
-	resp, body, err := s.hub.Heartbeat(ctx, hub.NewBeat(s.identity, s.cfg.BaseURL, "webhook", BuildVersion))
+	resp, body, err := s.hub.Heartbeat(ctx, hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, BuildVersion))
 	if err != nil {
 		log.Printf("heartbeat failed: %v", err)
 		return
@@ -320,6 +331,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 		return
 	}
 	for {
+		s.flushOutbox(ctx)
 		q, ok, err := s.hub.PollQueue(ctx, s.cfg.Name, s.cfg.QueueTimeout)
 		if err != nil {
 			log.Printf("queue poll failed: %v", err)
@@ -337,10 +349,55 @@ func (s *Server) runCallbackJob(jobID string, req shell.Request) {
 	if s.hub == nil {
 		return
 	}
-	if err := s.hub.PostResult(context.Background(), s.cfg.Name, hub.TaskResult{ID: jobID, Result: res}); err != nil {
+	payload := hub.TaskResult{ID: jobID, Result: res}
+	if err := s.hub.PostResult(context.Background(), s.cfg.Name, payload); err != nil {
 		log.Printf("callback result failed job=%s err=%v", jobID, err)
+		s.spoolOutbox(jobID, payload, err)
 	}
 }
+
+func (s *Server) spoolOutbox(jobID string, payload hub.TaskResult, cause error) {
+	if s.cfg.OutboxDir == "" {
+		return
+	}
+	_ = os.MkdirAll(s.cfg.OutboxDir, 0o700)
+	path := filepath.Join(s.cfg.OutboxDir, jobID+".json")
+	entry := map[string]any{"job_id": jobID, "payload": payload, "created_at": time.Now().Unix(), "last_error": cause.Error()}
+	b, _ := json.Marshal(entry)
+	_ = os.WriteFile(path, b, 0o600)
+}
+
+func (s *Server) flushOutbox(ctx context.Context) {
+	if s.hub == nil || s.cfg.OutboxDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(s.cfg.OutboxDir)
+	if err != nil {
+		return
+	}
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.cfg.OutboxDir, ent.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var entry struct {
+			Payload hub.TaskResult `json:"payload"`
+		}
+		if json.Unmarshal(b, &entry) != nil || entry.Payload.ID == "" {
+			continue
+		}
+		if err := s.hub.PostResult(ctx, s.cfg.Name, entry.Payload); err == nil {
+			_ = os.Remove(path)
+		} else {
+			log.Printf("outbox retry failed file=%s err=%v", path, err)
+		}
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
