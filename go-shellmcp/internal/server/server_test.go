@@ -74,3 +74,27 @@ func TestUnauthorized(t *testing.T) {
 		t.Fatalf("want 401 got %d", rec.Code)
 	}
 }
+
+func TestFileEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{Token: "t", LogLimit: 4, ExecTimeout: 5, SpillDir: dir})
+	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewBufferString(`{"cmd":"printf 123456789"}`))
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := got["stdout_path"].(string)
+	if p == "" {
+		t.Fatalf("missing stdout_path: %s", rec.Body.String())
+	}
+	r2 := httptest.NewRequest(http.MethodGet, "/file?path="+p, nil)
+	r2.Header.Set("Authorization", "Bearer t")
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, r2)
+	if rec2.Code != 200 || rec2.Body.String() != "123456789" {
+		t.Fatalf("file code=%d body=%q", rec2.Code, rec2.Body.String())
+	}
+}

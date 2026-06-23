@@ -9,27 +9,45 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/job"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
 )
 
+const BuildVersion = 3
+
 type Config struct {
-	Addr        string
-	Token       string
-	LogLimit    int64
-	ExecTimeout int
-	SpillDir    string
+	Addr              string
+	Token             string
+	LogLimit          int64
+	ExecTimeout       int
+	SpillDir          string
+	Name              string
+	BaseURL           string
+	HubURL            string
+	IdentityDir       string
+	HeartbeatEnabled  bool
+	HeartbeatInterval time.Duration
+	QueueEnabled      bool
+	QueueTimeout      int
 }
 
 func FromEnv() Config {
 	port := env("SHELL_PORT", env("ROOTD_PORT", env("PORT", "25900")))
+	host := env("SHELL_HOST", env("ROOTD_HOST", ""))
 	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", "8192"), 10, 64)
 	timeout, _ := strconv.Atoi(env("EXEC_TIMEOUT", "300"))
 	spill := env("SHELL_SPOOL_DIR", env("ROOTD_SPOOL_DIR", filepath.Join(os.TempDir(), "rootd-go-spool")))
-	return Config{Addr: ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill}
+	name := env("SHELL_NAME", env("ROOTD_NAME", ""))
+	baseURL := env("SHELL_URL", env("ROOTD_URL", "http://127.0.0.1:"+port))
+	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "60"))
+	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout}
 }
 
 func env(k, d string) string {
@@ -38,51 +56,88 @@ func env(k, d string) string {
 	}
 	return d
 }
-
-type Server struct {
-	cfg  Config
-	jobs *job.Manager
+func truthy(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func New(cfg Config) *Server { return &Server{cfg: cfg, jobs: job.New(cfg.LogLimit)} }
+type Server struct {
+	cfg      Config
+	jobs     *job.Manager
+	identity *security.Identity
+	hub      *hub.Client
+}
+
+func New(cfg Config) *Server {
+	var ident *security.Identity
+	if cfg.IdentityDir != "" {
+		if id, err := security.LoadIdentity(cfg.IdentityDir, cfg.Name); err == nil {
+			ident = id
+		} else {
+			log.Printf("identity disabled: %v", err)
+		}
+	}
+	if cfg.Name == "" {
+		if ident != nil && ident.Name != "" {
+			cfg.Name = ident.Name
+		} else if h, err := os.Hostname(); err == nil {
+			cfg.Name = h
+		}
+	}
+	var hc *hub.Client
+	if cfg.HubURL != "" {
+		hc = hub.New(cfg.HubURL, ident)
+	}
+	return &Server{cfg: cfg, jobs: job.New(cfg.LogLimit), identity: ident, hub: hc}
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/system/info", s.authed(s.systemInfo))
 	mux.HandleFunc("/system/health", s.authed(s.health))
+	mux.HandleFunc("/capabilities", s.authed(s.capabilities))
 	mux.HandleFunc("/exec", s.authed(s.exec))
 	mux.HandleFunc("/exec/live", s.authed(s.execLive))
+	mux.HandleFunc("/exec/callback", s.authed(s.execCallback))
 	mux.HandleFunc("/jobs", s.authed(s.jobsList))
 	mux.HandleFunc("/jobs/", s.authed(s.jobGet))
+	mux.HandleFunc("/file", s.authed(s.fileGet))
 	return mux
 }
 
 func (s *Server) ListenAndServe() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if s.cfg.HeartbeatEnabled {
+		go s.heartbeatLoop(ctx)
+	}
+	if s.cfg.QueueEnabled {
+		go s.queueLoop(ctx)
+	}
 	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("rootd-go listening addr=%s", s.cfg.Addr)
+	log.Printf("rootd-go listening addr=%s name=%s heartbeat=%v queue=%v", s.cfg.Addr, s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
 	return srv.ListenAndServe()
 }
 
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.Token != "" {
-			if r.Header.Get("Authorization") != "Bearer "+s.cfg.Token {
-				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-				return
-			}
+		if s.cfg.Token != "" && r.Header.Get("Authorization") != "Bearer "+s.cfg.Token {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
 		}
 		next(w, r)
 	}
 }
-
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "rootd-go", "build_version": 2, "status": "prototype"})
+	writeJSON(w, 200, map[string]any{"component": "rootd-go", "build_version": BuildVersion, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
 }
-
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix()})
+	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled})
+}
+func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": BuildVersion})
 }
 
 func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Request, bool) {
@@ -99,10 +154,9 @@ func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Reque
 	}
 	return req, true
 }
-
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
 	req, ok := s.decodeExec(w, r)
@@ -121,10 +175,38 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, res)
 }
-
+func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		shell.Request
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	req := body.Request
+	if req.Timeout == 0 {
+		req.Timeout = s.cfg.ExecTimeout
+	}
+	if req.SpillDir == "" {
+		req.SpillDir = s.cfg.SpillDir
+	}
+	jobID := body.JobID
+	if jobID == "" {
+		j := s.jobs.Start(req)
+		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID, "delivery": "local_job"})
+		return
+	}
+	go s.runCallbackJob(jobID, req)
+	writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": jobID, "delivery": "hub_queue_result"})
+}
 func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
 	req, ok := s.decodeExec(w, r)
@@ -133,6 +215,7 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	emit := func(e shell.Event) {
@@ -145,18 +228,16 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	}
 	shell.RunLive(r.Context(), req, s.cfg.LogLimit, emit)
 }
-
 func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"jobs": s.jobs.List()})
 }
-
 func (s *Server) jobGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
 	id := filepath.Base(r.URL.Path)
@@ -167,7 +248,77 @@ func (s *Server) jobGet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, j)
 }
+func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		writeJSON(w, 400, map[string]any{"error": "missing path"})
+		return
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	root, _ := filepath.Abs(s.cfg.SpillDir)
+	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		writeJSON(w, 403, map[string]any{"error": "path outside spool dir"})
+		return
+	}
+	http.ServeFile(w, r, abs)
+}
 
+func (s *Server) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		s.sendHeartbeat(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+func (s *Server) sendHeartbeat(ctx context.Context) {
+	if s.hub == nil {
+		return
+	}
+	resp, body, err := s.hub.Heartbeat(ctx, hub.NewBeat(s.identity, s.cfg.BaseURL, "webhook", BuildVersion))
+	if err != nil {
+		log.Printf("heartbeat failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("heartbeat HTTP %d: %s", resp.StatusCode, string(body))
+	}
+}
+func (s *Server) queueLoop(ctx context.Context) {
+	if s.hub == nil {
+		return
+	}
+	for {
+		q, ok, err := s.hub.PollQueue(ctx, s.cfg.Name, s.cfg.QueueTimeout)
+		if err != nil {
+			log.Printf("queue poll failed: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if ok {
+			req := shell.Request{Cmd: q.Cmd, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: s.cfg.SpillDir}
+			go s.runCallbackJob(q.ID, req)
+		}
+	}
+}
+func (s *Server) runCallbackJob(jobID string, req shell.Request) {
+	res := shell.Run(context.Background(), req, s.cfg.LogLimit)
+	if s.hub == nil {
+		return
+	}
+	if err := s.hub.PostResult(context.Background(), s.cfg.Name, hub.TaskResult{ID: jobID, Result: res}); err != nil {
+		log.Printf("callback result failed job=%s err=%v", jobID, err)
+	}
+}
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -11,10 +11,13 @@ Implemented in this prototype:
 - `/system/health`
 - `/exec`
 - `/exec/live` NDJSON streaming
-- background jobs via `{"background": true}` + `GET /tasks/<job_id>`
+- background jobs via `{"background": true}` + `GET /jobs/<job_id>`
 - stdout/stderr spooled to disk with bounded tail in RAM
 - timeout + process-group kill on Linux/macOS
 - token auth compatibility bootstrap
+- optional signed long-poll queue runner
+- optional signed heartbeat to GPTAdmin hub
+- `/file?path=...` for authenticated spool file retrieval
 
 Not implemented yet:
 
