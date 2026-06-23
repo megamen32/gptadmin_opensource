@@ -327,7 +327,11 @@ func (s *Server) sendHeartbeat(ctx context.Context) {
 	if s.hub == nil {
 		return
 	}
-	resp, body, err := s.hub.Heartbeat(ctx, hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, BuildVersion))
+	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, BuildVersion)
+	beat.DefaultUser = s.cfg.DefaultUser
+	beat.DefaultHome = s.cfg.DefaultHome
+	beat.DefaultCwd = s.cfg.DefaultCwd
+	resp, body, err := s.hub.Heartbeat(ctx, beat)
 	if err != nil {
 		log.Printf("heartbeat failed: %v", err)
 		return
