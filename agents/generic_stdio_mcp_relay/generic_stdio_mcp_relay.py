@@ -449,6 +449,13 @@ class McpStdioClient:
             raise ValueError("tools/call requires params.name")
         return self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
 
+    def mcp_request(self, method: str, params: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
+        if not method:
+            raise ValueError("MCP method is required")
+        if not isinstance(params, dict):
+            params = {}
+        return self.request(method, params, timeout=timeout)
+
 
 class Relay:
     def __init__(
@@ -474,7 +481,7 @@ class Relay:
             "agent_id": self.agent_id,
             "name": self.name,
             "transport": "stdio",
-            "capabilities": ["tools/list", "tools/call", "generic-stdio-mcp"],
+            "capabilities": ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/list", "prompts/get", "generic-stdio-mcp", "generic-mcp-request"],
             "meta": {
                 "command": self.server_spec.get("command"),
                 "args": self.server_spec.get("args", []),
@@ -511,6 +518,12 @@ class Relay:
                         result = self.client.tools_list()
                     elif method == "tools/call":
                         result = self.client.tools_call(params.get("name"), params.get("arguments") or {}, timeout=180)
+                    elif isinstance(method, str) and method:
+                        # Forward other MCP request methods, e.g. resources/list,
+                        # resources/read, prompts/list, prompts/get. Unsupported
+                        # methods are reported by the underlying MCP server and
+                        # posted back to the hub instead of leaving jobs stuck.
+                        result = self.client.mcp_request(method, params, timeout=180)
                     else:
                         raise ValueError(f"unsupported relay MCP method: {method}")
                     elapsed = time.time() - started

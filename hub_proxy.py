@@ -353,12 +353,15 @@ HUB_SERVERS_STATE_FILE = Path(os.getenv("GPTADMIN_SERVERS_STATE_FILE", str(CONFI
 HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DIR / "hub_tasks_state.json")))
 HUB_MCP_AGENTS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_AGENTS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_agents_state.json")))
 HUB_MCP_JOBS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_JOBS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_jobs_state.json")))
+HUB_AUTH_CLIENTS_STATE_FILE = Path(os.getenv("GPTADMIN_AUTH_CLIENTS_STATE_FILE", str(CONFIG_DIR / "hub_auth_clients_state.json")))
 
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
 MCP_RESOURCE = os.getenv("MCP_RESOURCE", PUBLIC_ORIGIN)
 OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", secrets.token_hex(32))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 OAUTH_SCOPES = ["gptadmin.read", "gptadmin.exec"]
+OAUTH_PERMISSIVE_REDIRECTS = os.getenv("OAUTH_PERMISSIVE_REDIRECTS", "0").lower() in ("1", "true", "yes", "on", "all")
+OAUTH_PERMISSIVE_RESOURCES = os.getenv("OAUTH_PERMISSIVE_RESOURCES", "0").lower() in ("1", "true", "yes", "on", "all")
 _oauth_codes: Dict[str, Dict[str, Any]] = {}
 
 MCP_RELAY_AGENT_TOKEN = os.getenv("MCP_RELAY_AGENT_TOKEN", secrets.token_urlsafe(32))
@@ -437,6 +440,7 @@ mcp_relay_agents: Dict[str, Dict[str, Any]] = {}
 mcp_relay_queues: Dict[str, List[Dict[str, Any]]] = {}
 mcp_relay_results: Dict[str, Dict[str, Any]] = {}
 mcp_relay_jobs: Dict[str, Dict[str, Any]] = {}
+authorized_clients: Dict[str, Dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +547,11 @@ def _load_all_state() -> None:
             mcp_relay_jobs[job_id] = job
     log.info("state: loaded mcp_jobs=%s", len(mcp_relay_jobs))
 
+    for key, entry in _load_json_dict(HUB_AUTH_CLIENTS_STATE_FILE).items():
+        if isinstance(entry, dict) and float(entry.get("last_seen", 0)) >= cutoff:
+            authorized_clients[key] = entry
+    log.info("state: loaded auth_clients=%s", len(authorized_clients))
+
 
 def _save_all_state() -> None:
     try:
@@ -550,12 +559,14 @@ def _save_all_state() -> None:
         _save_json_dict(HUB_TASKS_STATE_FILE, background_tasks)
         _save_json_dict(HUB_MCP_AGENTS_STATE_FILE, mcp_relay_agents)
         _save_json_dict(HUB_MCP_JOBS_STATE_FILE, mcp_relay_jobs)
+        _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
         log.info(
-            "state: saved servers=%s task_servers=%s mcp_agents=%s mcp_jobs=%s",
+            "state: saved servers=%s task_servers=%s mcp_agents=%s mcp_jobs=%s auth_clients=%s",
             len(servers),
             len(background_tasks),
             len(mcp_relay_agents),
             len(mcp_relay_jobs),
+            len(authorized_clients),
         )
     except Exception as e:
         log.error("state: save failed: %s", e)
@@ -589,6 +600,9 @@ def _prune_state() -> None:
         if float((job or {}).get("created_at", 0)) < cutoff:
             mcp_relay_jobs.pop(job_id, None)
             mcp_relay_results.pop(job_id, None)
+
+    for key in [k for k, d in authorized_clients.items() if float((d or {}).get("last_seen", 0)) < cutoff]:
+        authorized_clients.pop(key, None)
 
 
 def _ensure_output_store() -> None:
@@ -999,10 +1013,11 @@ def ensure_license() -> None:
     _check_license(len(servers))
 
 
-async def check_ctl_token(cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
+async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
     if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
         log.warning("auth: bad/missing bearer rid=%s", rid())
         raise HTTPException(401, "bad token")
+    _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1134,43 @@ class McpRelayCallReq(BaseModel):
     retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
 
 
+class McpRelayResourcesListReq(BaseModel):
+    target: str
+    timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
+    background: bool = False
+    retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
+
+
+class McpRelayResourceReadReq(BaseModel):
+    target: str
+    uri: str
+    timeout: Optional[int] = Field(default=None, ge=1, le=MCP_RELAY_REQUEST_TIMEOUT_MAX_S)
+    background: bool = False
+    retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
+
+
+class AdminMcpManageReq(BaseModel):
+    target: str = Field(..., description="hub or shell:<server> / server name")
+    action: str = Field("list", pattern="^(list|add|remove|install|status|cat)$")
+    name: Optional[str] = None
+    url: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    cwd: Optional[str] = None
+    stdio_format: Optional[str] = Field(default=None, pattern="^(auto|framed|ndjson|jsonl|content-length)$")
+    agent_id: Optional[str] = None
+    run_as_user: Optional[str] = None
+    hub_url: Optional[str] = None
+    backend: Optional[str] = Field(default=None, pattern="^(systemd|launchd|windows-task)$")
+    force: bool = False
+    disabled: bool = False
+    install: bool = True
+    keep_service: bool = False
+    verbose: bool = False
+    include_raw: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
@@ -1191,10 +1243,86 @@ def _audit_event(event: Dict[str, Any]) -> None:
     if not audit_log.handlers:
         return
     event.setdefault("ts", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    ctx = audit_request_context()
+    if ctx:
+        for key in (
+            "rid", "method", "path", "client_ip", "ip", "socket_client",
+            "x_real_ip", "x_forwarded_for", "host", "user_agent", "auth_kind",
+            "token_id", "openai_ephemeral_user_id", "openai_conversation_id", "openai_gpt_id",
+            "response_client",
+        ):
+            if ctx.get(key) is not None:
+                event.setdefault(key, ctx.get(key))
     try:
         audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     except Exception as e:
         log.warning("audit write failed err=%s", e)
+
+
+def _limited_unique_append(items: Any, value: Any, limit: int = 16) -> List[Any]:
+    out = list(items) if isinstance(items, list) else []
+    if value in (None, ""):
+        return out[-limit:]
+    if value in out:
+        out.remove(value)
+    out.append(value)
+    return out[-limit:]
+
+
+def _current_request_context_public() -> Dict[str, Any]:
+    ctx = audit_request_context()
+    if not ctx:
+        return {}
+    keys = (
+        "rid", "method", "path", "client_ip", "socket_client", "x_real_ip",
+        "x_forwarded_for", "host", "user_agent", "auth_kind", "token_id",
+        "openai_ephemeral_user_id", "openai_conversation_id", "openai_gpt_id",
+        "response_client",
+    )
+    return {k: ctx.get(k) for k in keys if ctx.get(k) is not None}
+
+
+def _json_preview(obj: Any, max_chars: int = 1600) -> str:
+    try:
+        text = json.dumps(scrub_payload(obj), ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        text = str(obj)
+    return text[:max_chars] + ("…" if len(text) > max_chars else "")
+
+
+def _remember_auth_client(
+    request: Request,
+    *,
+    token_kind: str,
+    subject: Optional[str] = None,
+    client_id: Optional[str] = None,
+    scope: Optional[str] = None,
+) -> None:
+    token_id = _audit_token_id(request)
+    if not token_id:
+        return
+    now = int(time.time())
+    key = f"{token_kind}:{token_id}"
+    entry = authorized_clients.setdefault(
+        key,
+        {"key": key, "token_kind": token_kind, "token_id": token_id, "first_seen": now, "last_seen": now, "seen_count": 0, "ips": [], "user_agents": [], "hosts": [], "paths": [], "openai_ephemeral_user_ids": [], "openai_gpt_ids": [], "openai_conversation_ids": []},
+    )
+    entry["last_seen"] = now
+    entry["seen_count"] = int(entry.get("seen_count") or 0) + 1
+    entry["subject"] = subject or entry.get("subject")
+    entry["client_id"] = client_id or entry.get("client_id")
+    entry["scope"] = scope or entry.get("scope")
+    entry["ips"] = _limited_unique_append(entry.get("ips"), _client_ip(request), 32)
+    entry["user_agents"] = _limited_unique_append(entry.get("user_agents"), request.headers.get("user-agent"), 12)
+    entry["hosts"] = _limited_unique_append(entry.get("hosts"), request.headers.get("host"), 12)
+    entry["paths"] = _limited_unique_append(entry.get("paths"), request.url.path, 24)
+    entry["openai_ephemeral_user_ids"] = _limited_unique_append(entry.get("openai_ephemeral_user_ids"), request.headers.get("openai-ephemeral-user-id"), 12)
+    entry["openai_gpt_ids"] = _limited_unique_append(entry.get("openai_gpt_ids"), request.headers.get("openai-gpt-id"), 12)
+    entry["openai_conversation_ids"] = _limited_unique_append(entry.get("openai_conversation_ids"), request.headers.get("openai-conversation-id"), 16)
+    try:
+        _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
+    except Exception as e:
+        log.debug("auth clients: save failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -4025,6 +4153,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
                 "status": "running",
                 "created_at": int(time.time()),
                 "tool_name": tool_name,
+                "request_context": _current_request_context_public(),
             }
             task = background_tasks.get(srv, {}).get(result["task_id"], {})
             return _omit_none({
@@ -4212,13 +4341,25 @@ def _mcp_relay_enqueue(agent_id: str, method: str, params: Optional[Dict[str, An
         "queued_reason": "online" if alive else "offline",
         "retry_policy": policy,
         "response_budget": _current_response_budget(),
+        "request_context": _current_request_context_public(),
         "expires_at": int(time.time()) + (HUB_DEFERRED_DEFAULT_TTL_S if _retry_policy_queues_offline(policy) else MCP_RELAY_NO_RETRY_TTL_S),
     }
     log.info(
         "mcp_relay: queued target=%s method=%s tool=%s job_id=%s status=%s",
         agent_id, method, tool_name, job_id, status,
     )
-    _audit_event({"event":"mcp_relay_queued","target":agent_id,"method":method,"tool_name":tool_name,"job_id":job_id,"status":status})
+    audit_params: Dict[str, Any] = {"event":"mcp_relay_queued","target":agent_id,"method":method,"tool_name":tool_name,"job_id":job_id,"status":status}
+    if method == "tools/call":
+        args = params.get("arguments") if isinstance(params, dict) else None
+        if isinstance(args, dict):
+            audit_params["arguments_preview"] = _json_preview(args)
+            if tool_name == "shell_exec":
+                audit_params["command"] = args.get("cmd")
+                audit_params["cwd"] = args.get("cwd")
+                audit_params["background"] = bool(args.get("background"))
+    else:
+        audit_params["params_preview"] = _json_preview(params)
+    _audit_event(audit_params)
     try:
         _save_all_state()
     except Exception as e:
@@ -4593,6 +4734,271 @@ def mcp_relay_job_status(job_id: str, ack: bool = Query(False), verbose: bool = 
     return {"status": "running_or_unknown", "acked": False}
 
 
+
+
+# ---------------------------------------------------------------------------
+# Built-in admin web UI
+# ---------------------------------------------------------------------------
+
+
+def _status_counts(rows: List[Dict[str, Any]], key: str = "status") -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        status = str(row.get(key) or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _admin_public_auth_client(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    ips = list(entry.get("ips") or [])
+    uas = list(entry.get("user_agents") or [])
+    return {
+        "key": key,
+        "token_kind": entry.get("token_kind"),
+        "token_id": entry.get("token_id"),
+        "subject": entry.get("subject"),
+        "client_id": entry.get("client_id"),
+        "scope": entry.get("scope"),
+        "first_seen": entry.get("first_seen"),
+        "last_seen": entry.get("last_seen"),
+        "first_seen_fmt": _fmt_ts(entry.get("first_seen")),
+        "last_seen_fmt": _fmt_ts(entry.get("last_seen")),
+        "age_s": int(max(0, time.time() - float(entry.get("last_seen") or 0))) if entry.get("last_seen") else None,
+        "seen_count": entry.get("seen_count") or 0,
+        "ips": ips,
+        "ip_count": len(ips),
+        "multiple_ips": len(ips) > 1,
+        "user_agents": uas,
+        "user_agent_count": len(uas),
+        "hosts": entry.get("hosts") or [],
+        "paths": entry.get("paths") or [],
+        "openai_ephemeral_user_ids": entry.get("openai_ephemeral_user_ids") or [],
+        "openai_gpt_ids": entry.get("openai_gpt_ids") or [],
+        "openai_conversation_ids": entry.get("openai_conversation_ids") or [],
+    }
+
+
+def _admin_shell_task_row(server: str, task_id: str, task: Dict[str, Any]) -> Dict[str, Any]:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    stdout = str(result.get("stdout") or "") if isinstance(result, dict) else ""
+    stderr = str(result.get("stderr") or "") if isinstance(result, dict) else ""
+    return _omit_none({
+        "kind": "shell_task",
+        "server": server,
+        "agent_id": _virtual_shell_agent_id(server),
+        "task_id": task_id,
+        "status": task.get("status"),
+        "command": task.get("cmd"),
+        "cwd": task.get("cwd"),
+        "created_at": task.get("created_at"),
+        "started_at": task.get("started_at"),
+        "completed_at": task.get("completed_at"),
+        "created_fmt": _fmt_ts(task.get("created_at")),
+        "started_fmt": _fmt_ts(task.get("started_at")),
+        "completed_fmt": _fmt_ts(task.get("completed_at")),
+        "timing": _compact_timing(str(task.get("status") or ""), task.get("created_at"), task.get("started_at"), task.get("completed_at")),
+        "returncode": result.get("returncode") if isinstance(result, dict) else None,
+        "stdout_preview": stdout[:1200] + ("…" if len(stdout) > 1200 else ""),
+        "stderr_preview": stderr[:1200] + ("…" if len(stderr) > 1200 else ""),
+        "error": task.get("error"),
+        "request_context": task.get("request_context"),
+    })
+
+
+def _admin_mcp_job_row(job_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
+    params = job.get("params") if isinstance(job.get("params"), dict) else {}
+    args = params.get("arguments") if isinstance(params, dict) else None
+    command = args.get("cmd") if isinstance(args, dict) and job.get("tool_name") == "shell_exec" else None
+    result = job.get("result") if isinstance(job.get("result"), dict) else None
+    return _omit_none({
+        "kind": job.get("kind") or "mcp_job",
+        "job_id": job_id,
+        "agent_id": job.get("agent_id"),
+        "server": job.get("server"),
+        "task_id": job.get("task_id"),
+        "method": job.get("method"),
+        "tool_name": job.get("tool_name"),
+        "status": job.get("status"),
+        "command": command,
+        "arguments_preview": _json_preview(args) if args is not None else None,
+        "params_preview": _json_preview(params) if params else None,
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "updated_at": job.get("updated_at"),
+        "created_fmt": _fmt_ts(job.get("created_at")),
+        "started_fmt": _fmt_ts(job.get("started_at")),
+        "completed_fmt": _fmt_ts(job.get("completed_at")),
+        "updated_fmt": _fmt_ts(job.get("updated_at")),
+        "timing": _compact_timing(str(job.get("status") or ""), job.get("created_at"), job.get("started_at"), job.get("completed_at")),
+        "delivery_attempts": job.get("delivery_attempts"),
+        "retry_policy": job.get("retry_policy"),
+        "queued_reason": job.get("queued_reason"),
+        "expires_at": job.get("expires_at"),
+        "expires_fmt": _fmt_ts(job.get("expires_at")),
+        "request_context": job.get("request_context"),
+        "result_ok": result.get("ok") if isinstance(result, dict) else None,
+        "error": job.get("error"),
+    })
+
+
+def _admin_jobs(limit: int = 120) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for job_id, job in mcp_relay_jobs.items():
+        if isinstance(job, dict):
+            rows.append(_admin_mcp_job_row(job_id, job))
+    for server, tasks in background_tasks.items():
+        if not isinstance(tasks, dict):
+            continue
+        for task_id, task in tasks.items():
+            if isinstance(task, dict):
+                rows.append(_admin_shell_task_row(server, task_id, task))
+    rows.sort(key=lambda r: float(r.get("updated_at") or r.get("completed_at") or r.get("created_at") or 0), reverse=True)
+    rows = rows[:max(1, min(int(limit or 120), 500))]
+    queued_statuses = set(MCP_RELAY_QUEUED_STATUSES) | set(QUEUED_TASK_STATUSES)
+    return {"count": len(rows), "status_counts": _status_counts(rows), "queued": [r for r in rows if r.get("status") in queued_statuses], "background": [r for r in rows if r.get("status") in {"running", "dispatching"}], "recent": rows}
+
+
+def _tail_text(path: Path, max_bytes: int = 2_000_000) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()
+            return f.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        log.debug("admin audit tail failed path=%s err=%s", path, e)
+        return ""
+
+
+def _admin_recent_audit(limit: int = 160) -> List[Dict[str, Any]]:
+    wanted_prefixes = ("mcp_relay_", "oauth_", "server_", "http_request")
+    events: List[Dict[str, Any]] = []
+    for line in _tail_text(AUDIT_LOG_PATH).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        name = str(ev.get("event") or "")
+        if not name.startswith(wanted_prefixes):
+            continue
+        if name == "http_request" and not str(ev.get("path") or "").startswith(("/mcp", "/admin", "/tasks", "/exec", "/bulk", "/queue")):
+            continue
+        events.append(ev)
+    events = events[-max(1, min(int(limit or 160), 1000)):]
+    events.reverse()
+    return events
+
+
+def _admin_overview_payload(limit: int = 120) -> Dict[str, Any]:
+    _prune_state()
+    agents = _all_public_agents(statuses=["all"])
+    clients = [_admin_public_auth_client(k, v) for k, v in authorized_clients.items() if isinstance(v, dict)]
+    clients.sort(key=lambda r: float(r.get("last_seen") or 0), reverse=True)
+    jobs = _admin_jobs(limit=limit)
+    return {"ok": True, "build": build_info("hub_proxy"), "now": int(time.time()), "now_fmt": _fmt_ts(time.time()), "agents": agents, "agent_counts": _status_counts(agents), "clients": clients, "client_count": len(clients), "clients_with_multiple_ips": [c for c in clients if c.get("multiple_ips")], "jobs": jobs, "audit": _admin_recent_audit(limit=limit), "state_files": {"servers": str(HUB_SERVERS_STATE_FILE), "tasks": str(HUB_TASKS_STATE_FILE), "mcp_agents": str(HUB_MCP_AGENTS_STATE_FILE), "mcp_jobs": str(HUB_MCP_JOBS_STATE_FILE), "auth_clients": str(HUB_AUTH_CLIENTS_STATE_FILE), "audit_log": str(AUDIT_LOG_PATH)}}
+
+
+async def _admin_real_mcp_request(target: str, method: str, params: Dict[str, Any], *, timeout: Optional[int], background: bool, retry_policy: str) -> Dict[str, Any]:
+    selected = _mcp_relay_select_agent(target)
+    if selected == VIRTUAL_HUB_AGENT_ID or _is_virtual_shell_agent(selected):
+        raise HTTPException(400, f"{method} is supported only for real MCP relay agents")
+    job_id = _mcp_relay_enqueue(selected, method, params, retry_policy=retry_policy)
+    job = mcp_relay_jobs.get(job_id) or {}
+    if job.get("status") == "queued_offline":
+        return {"agent_id": selected, "status": "queued_offline", "background": True, "job_id": job_id, "message": f"{method} queued for reconnect"}
+    if background:
+        return {"agent_id": selected, "status": "running", "background": True, "job_id": job_id, "message": f"{method} queued"}
+    data = await _mcp_relay_wait(job_id, timeout)
+    if data is None:
+        return {"agent_id": selected, "status": "running", "background": True, "job_id": job_id, "message": f"{method} is still running"}
+    data = _spill_large_mcp_response(selected, method, data)
+    return {"agent_id": selected, "status": "completed", "response": data}
+
+
+async def _admin_mcp_manage(req: AdminMcpManageReq) -> Dict[str, Any]:
+    payload = req.dict(exclude_none=True)
+    target = str(payload.pop("target") or "").strip()
+    if not target:
+        raise HTTPException(400, "target is required")
+    action = str(payload.get("action") or "list")
+    if action in {"add", "remove"} and not str(payload.get("name") or "").strip():
+        raise HTTPException(400, f"mcp {action} requires name")
+    if action == "add" and not (payload.get("url") or payload.get("command")):
+        raise HTTPException(400, "mcp add requires either remote URL or local command")
+
+    if target == VIRTUAL_HUB_AGENT_ID or target.lower() == "hub":
+        data = _mcp_tools_manage(payload)
+        selected = VIRTUAL_HUB_AGENT_ID
+    else:
+        shell_agent = _canonical_shell_agent(target)
+        srv = _server_from_virtual_shell_agent(shell_agent)
+        data = await _mcp_tools_manage_on_shell(srv, payload)
+        selected = shell_agent
+
+    _audit_event({
+        "event": "admin_mcp_manage",
+        "target": selected,
+        "action": action,
+        "name": payload.get("name"),
+        "agent_id": payload.get("agent_id"),
+        "url_present": bool(payload.get("url")),
+        "command": payload.get("command"),
+    })
+    return {"ok": True, "target": selected, "action": action, "response": data}
+
+
+@app.get("/admin")
+@app.get("/admin/")
+def admin_dashboard():
+    return FileResponse(GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html", media_type="text/html")
+
+
+@app.get("/admin/api/overview", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_api_overview(limit: int = Query(120, ge=1, le=500)):
+    return _admin_overview_payload(limit=limit)
+
+
+@app.get("/admin/api/audit", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_api_audit(limit: int = Query(200, ge=1, le=1000)):
+    return {"events": _admin_recent_audit(limit=limit), "audit_log": str(AUDIT_LOG_PATH)}
+
+
+@app.get("/admin/api/clients", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_api_clients():
+    clients = [_admin_public_auth_client(k, v) for k, v in authorized_clients.items() if isinstance(v, dict)]
+    clients.sort(key=lambda r: float(r.get("last_seen") or 0), reverse=True)
+    return {"clients": clients, "count": len(clients), "multiple_ip": [c for c in clients if c.get("multiple_ips")]}
+
+
+@app.get("/admin/api/jobs", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_api_jobs(limit: int = Query(200, ge=1, le=500)):
+    return _admin_jobs(limit=limit)
+
+
+@app.post("/admin/api/mcp/manage", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def admin_mcp_manage(req: AdminMcpManageReq):
+    return await _admin_mcp_manage(req)
+
+
+@app.post("/admin/api/mcp/resources/list", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def admin_mcp_resources_list(req: McpRelayResourcesListReq):
+    return await _admin_real_mcp_request(req.target, "resources/list", {}, timeout=req.timeout, background=req.background, retry_policy=req.retry_policy)
+
+
+@app.post("/admin/api/mcp/resources/read", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def admin_mcp_resource_read(req: McpRelayResourceReadReq):
+    if not req.uri:
+        raise HTTPException(400, "resource uri is required")
+    return await _admin_real_mcp_request(req.target, "resources/read", {"uri": req.uri}, timeout=req.timeout, background=req.background, retry_policy=req.retry_policy)
+
+
 # ---------------------------------------------------------------------------
 # OAuth / Apps SDK MCP endpoint retained from previous architecture
 # ---------------------------------------------------------------------------
@@ -4640,28 +5046,52 @@ def _pkce_ok(verifier: str, challenge: str) -> bool:
     return hmac.compare_digest(_b64url(digest), challenge)
 
 
+def _normalize_oauth_resource(resource: Optional[str]) -> str:
+    return (resource or MCP_RESOURCE).rstrip("/")
+
+
+def _is_allowed_oauth_resource(resource: Optional[str]) -> bool:
+    if OAUTH_PERMISSIVE_RESOURCES:
+        return True
+    return _normalize_oauth_resource(resource) == _normalize_oauth_resource(MCP_RESOURCE)
+
+
 def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
+    # OAUTH_PERMISSIVE_REDIRECTS=1 intentionally allows dynamic OAuth clients.
+    if OAUTH_PERMISSIVE_REDIRECTS:
+        return bool(uri)
     if not uri:
         return False
     try:
         u = urlparse(uri)
-        if u.hostname in ("localhost", "127.0.0.1") and u.scheme in ("http", "https"):
+        host = (u.hostname or "").lower()
+        path = u.path or ""
+        if host in ("localhost", "127.0.0.1") and u.scheme in ("http", "https"):
+            return True
+        if u.scheme != "https":
+            return False
+        if (host == "chatgpt.com" or host.endswith(".chatgpt.com")) and path.startswith("/connector/oauth/"):
+            return True
+        if host == "opencode.bezrabotnyi.com" and path == "/mcp/oauth/callback":
             return True
     except Exception:
-        pass
-    try:
-        u = urlparse(uri)
-        return u.scheme == "https" and (u.hostname == "chatgpt.com" or (u.hostname or "").endswith(".chatgpt.com")) and u.path.startswith("/connector/oauth/")
-    except Exception:
         return False
-
+    return False
 
 
 def _mcp_auth(request: Request) -> Dict[str, Any]:
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
         raise HTTPException(401, "unauthorized")
-    return _verify_jwt(auth.split(None, 1)[1])
+    payload = _verify_jwt(auth.split(None, 1)[1])
+    _remember_auth_client(
+        request,
+        token_kind="oauth_bearer",
+        subject=str(payload.get("sub") or ""),
+        client_id=str(payload.get("client_id") or ""),
+        scope=str(payload.get("scope") or ""),
+    )
+    return payload
 
 
 def _mcp_unauthorized() -> Response:
@@ -4730,8 +5160,8 @@ async def oauth_register(request: Request):
 def oauth_authorize_get(request: Request):
     q = request.query_params
     redirect_uri = q.get("redirect_uri")
-    resource = (q.get("resource") or MCP_RESOURCE).rstrip("/")
-    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+    resource = _normalize_oauth_resource(q.get("resource"))
+    if not _is_chatgpt_redirect(redirect_uri) or not _is_allowed_oauth_resource(resource):
         return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     fields = {
         "redirect_uri": redirect_uri,
@@ -4761,8 +5191,8 @@ async def oauth_authorize_post(request: Request):
     if params.get("password") != ADMIN_PASSWORD:
         return JSONResponse({"error": "access_denied", "error_description": "invalid password"}, status_code=403)
     redirect_uri = params.get("redirect_uri")
-    resource = (params.get("resource") or MCP_RESOURCE).rstrip("/")
-    if not _is_chatgpt_redirect(redirect_uri) or resource != MCP_RESOURCE:
+    resource = _normalize_oauth_resource(params.get("resource"))
+    if not _is_chatgpt_redirect(redirect_uri) or not _is_allowed_oauth_resource(resource):
         return JSONResponse({"error": "invalid_request", "error_description": "invalid redirect_uri or resource"}, status_code=400)
     code = secrets.token_urlsafe(32)
     _oauth_codes[code] = {
@@ -4784,12 +5214,13 @@ async def oauth_token(request: Request):
     # Normalize trailing slash: the stored resource (authorize step) was rstrip'd,
     # but a client (e.g. Claude Code) may send resource with a trailing slash in
     # the token request. Without rstrip here the comparison spuriously mismatches.
-    resource = (params.get("resource") or (data or {}).get("resource") or MCP_RESOURCE).rstrip("/")
-    if not data or time.time() - data.get("created", 0) > 300 or resource != MCP_RESOURCE or resource != data.get("resource"):
+    resource = _normalize_oauth_resource(params.get("resource") or (data or {}).get("resource"))
+    if not data or time.time() - data.get("created", 0) > 300 or not _is_allowed_oauth_resource(resource) or resource != _normalize_oauth_resource(data.get("resource")):
         return JSONResponse({"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"}, status_code=400)
     if not _pkce_ok(params.get("code_verifier", ""), data.get("challenge", "")):
         return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
     token = _sign_jwt({"sub": "admin", "scope": data.get("scope"), "client_id": data.get("client_id")})
+    _audit_event({"event": "oauth_token_issued", "client_id": data.get("client_id"), "scope": data.get("scope"), "resource": resource})
     return {"access_token": token, "token_type": "Bearer", "expires_in": 43200}
 
 

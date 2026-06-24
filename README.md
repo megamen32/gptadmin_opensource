@@ -1,3 +1,5 @@
+> **Deprecated:** the legacy Python ShellMCP/rootd transport (`client/rootd.py` and `client/shellmcp.py`) is kept only for compatibility. The primary shell transport is now `go-shellmcp` / `rootd-go-canary`.
+
 # GPTAdmin Services
 
 This repository contains two small services used to remotely control a machine.
