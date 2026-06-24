@@ -4006,6 +4006,32 @@ def _shell_tools_list() -> Dict[str, Any]:
             },
         },
         {
+            "name": "file_backup",
+            "description": "Managed file/dir backup with TTL. Use before editing files instead of ad-hoc cp *.bak. Stores backups under ~/.gptadmin/file-backups or backup_dir, supports list/cleanup/restore.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["backup", "list", "cleanup", "restore"], "default": "backup"},
+                    "path": {"type": ["string", "null"], "description": "Source path for action=backup."},
+                    "paths": {"type": ["array", "null"], "items": {"type": "string"}, "description": "Multiple source paths for action=backup."},
+                    "backup_id": {"type": ["string", "null"], "description": "Backup id for action=restore."},
+                    "destination": {"type": ["string", "null"], "description": "Restore destination; defaults to original source path."},
+                    "backup_dir": {"type": ["string", "null"], "description": "Backup root; defaults to ~/.gptadmin/file-backups on the target host/user."},
+                    "ttl_days": {"type": ["integer", "null"], "default": 30, "description": "Retention for new backups. 0 means no expiry."},
+                    "max_age_days": {"type": ["integer", "null"], "description": "Additional cleanup cutoff for action=cleanup."},
+                    "label": {"type": ["string", "null"]},
+                    "limit": {"type": ["integer", "null"], "default": 100},
+                    "include_expired": {"type": "boolean", "default": True},
+                    "cleanup_expired": {"type": "boolean", "default": True, "description": "Run expired-backup cleanup before action=backup."},
+                    "overwrite": {"type": "boolean", "default": False, "description": "Allow restore over an existing destination."},
+                    "dry_run": {"type": "boolean", "default": False},
+                    "use_sudo": {"type": "boolean", "default": False, "description": "Run backup helper through sudo -n env ... python3 on the target."},
+                    "timeout": {"type": ["integer", "null"], "default": 60}
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "task_edit",
             "description": "Edit queued/background job: schedule, retry_now, pause, cancel, expiry, attempts.",
             "inputSchema": {
@@ -4025,6 +4051,270 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
     ]
     return {"tools": tools}
+
+
+
+def _file_backup_tool_script() -> str:
+    return r"""
+import base64, hashlib, json, os, pathlib, re, shutil, socket, sys, tarfile, tempfile, time, uuid
+
+
+def emit(obj, code=0):
+    print(json.dumps(obj, ensure_ascii=False, sort_keys=True))
+    raise SystemExit(code)
+
+
+def slug(value):
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-._")
+    return text[:96] or "item"
+
+
+def read_args():
+    raw = os.environ.get("GPTADMIN_FILE_BACKUP_ARGS_B64") or "e30="
+    try:
+        return json.loads(base64.b64decode(raw).decode("utf-8"))
+    except Exception as e:
+        emit({"ok": False, "error": "invalid GPTADMIN_FILE_BACKUP_ARGS_B64", "detail": str(e)}, 2)
+
+
+def backup_root(args):
+    raw = args.get("backup_dir") or os.environ.get("GPTADMIN_FILE_BACKUP_DIR") or str(pathlib.Path.home() / ".gptadmin" / "file-backups")
+    return pathlib.Path(raw).expanduser().resolve()
+
+
+def safe_int(value, default, lo=None, hi=None):
+    try:
+        n = int(value)
+    except Exception:
+        n = default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def iter_meta(objects_dir):
+    for meta_path in sorted(objects_dir.glob("*/meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+            meta["meta_path"] = str(meta_path)
+            yield meta
+        except Exception:
+            continue
+
+
+def append_manifest(root, meta):
+    manifest = root / "manifest.jsonl"
+    with manifest.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(meta, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def remove_backup_dir(path, root):
+    path = pathlib.Path(path).resolve()
+    root = root.resolve()
+    if path == root or root not in path.parents:
+        raise RuntimeError("refusing to remove backup outside backup root")
+    shutil.rmtree(path)
+
+
+def cleanup_expired(root, objects_dir, args, default_dry_run=False):
+    now = time.time()
+    max_age_days = args.get("max_age_days")
+    dry_run = bool(args.get("dry_run", default_dry_run))
+    removed = []
+    kept = 0
+    for meta in iter_meta(objects_dir):
+        expires_at = meta.get("expires_at")
+        created_at = float(meta.get("created_at") or 0)
+        expired = bool(expires_at and float(expires_at) <= now)
+        too_old = False
+        if max_age_days is not None:
+            too_old = created_at and created_at + safe_int(max_age_days, 0, lo=0) * 86400 <= now
+        if not (expired or too_old):
+            kept += 1
+            continue
+        item = {"backup_id": meta.get("backup_id"), "path": meta.get("backup_path"), "source": meta.get("source"), "expired": expired, "too_old": too_old}
+        if not dry_run:
+            remove_backup_dir(meta.get("backup_path"), root)
+            item["removed"] = True
+        else:
+            item["would_remove"] = True
+        removed.append(item)
+    return {"removed_count": len(removed), "kept_count": kept, "dry_run": dry_run, "removed": removed}
+
+
+def list_backups(root, objects_dir, args):
+    now = time.time()
+    include_expired = bool(args.get("include_expired", True))
+    limit = safe_int(args.get("limit"), 100, lo=1, hi=1000)
+    items = []
+    for meta in iter_meta(objects_dir):
+        expires_at = meta.get("expires_at")
+        meta["expired"] = bool(expires_at and float(expires_at) <= now)
+        if meta["expired"] and not include_expired:
+            continue
+        items.append(meta)
+    items.sort(key=lambda x: float(x.get("created_at") or 0), reverse=True)
+    return {"ok": True, "action": "list", "backup_root": str(root), "count": len(items[:limit]), "items": items[:limit]}
+
+
+def backup_one(src, root, objects_dir, args, now):
+    src_path = pathlib.Path(src).expanduser()
+    if not src_path.exists():
+        return {"ok": False, "source": str(src), "error": "source does not exist"}
+    real = src_path.resolve()
+    label = args.get("label") or real.name
+    ttl_days = safe_int(args.get("ttl_days", args.get("retention_days", 30)), 30, lo=0, hi=3650)
+    expires_at = None if ttl_days <= 0 else now + ttl_days * 86400
+    host = slug(socket.gethostname())
+    digest = hashlib.sha256((str(real) + str(now) + uuid.uuid4().hex).encode()).hexdigest()[:10]
+    backup_id = f"{time.strftime('%Y%m%d_%H%M%S', time.localtime(now))}_{host}_{digest}_{slug(label)}"
+    dest_dir = objects_dir / backup_id
+    dest_dir.mkdir(parents=True, exist_ok=False)
+    is_dir = real.is_dir()
+    if is_dir:
+        artifact = dest_dir / (slug(real.name) + ".tar.gz")
+        with tarfile.open(artifact, "w:gz") as tf:
+            tf.add(real, arcname=real.name)
+        backup_type = "directory_tar_gz"
+    else:
+        artifact = dest_dir / real.name
+        shutil.copy2(real, artifact)
+        backup_type = "file_copy"
+    st = real.stat()
+    meta = {
+        "ok": True,
+        "schema": "gptadmin-file-backup-v1",
+        "backup_id": backup_id,
+        "backup_type": backup_type,
+        "backup_path": str(dest_dir),
+        "artifact": str(artifact),
+        "source": str(src_path),
+        "source_realpath": str(real),
+        "source_name": real.name,
+        "source_is_dir": is_dir,
+        "size_bytes": int(st.st_size),
+        "mode": oct(st.st_mode & 0o7777),
+        "uid": getattr(st, "st_uid", None),
+        "gid": getattr(st, "st_gid", None),
+        "created_at": now,
+        "created_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+        "ttl_days": ttl_days,
+        "expires_at": expires_at,
+        "expires_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(expires_at)) if expires_at else None,
+        "label": args.get("label"),
+    }
+    (dest_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    append_manifest(root, meta)
+    return meta
+
+
+def restore_backup(root, objects_dir, args):
+    backup_id = str(args.get("backup_id") or "").strip()
+    if not backup_id:
+        emit({"ok": False, "action": "restore", "error": "backup_id is required"}, 2)
+    meta_path = objects_dir / backup_id / "meta.json"
+    if not meta_path.is_file():
+        emit({"ok": False, "action": "restore", "backup_id": backup_id, "error": "backup metadata not found"}, 2)
+    meta = json.loads(meta_path.read_text())
+    dest = pathlib.Path(args.get("destination") or meta.get("source_realpath") or meta.get("source") or "").expanduser()
+    overwrite = bool(args.get("overwrite", False))
+    dry_run = bool(args.get("dry_run", False))
+    artifact = pathlib.Path(meta.get("artifact") or "")
+    if not artifact.is_file():
+        emit({"ok": False, "action": "restore", "backup_id": backup_id, "error": "backup artifact not found", "artifact": str(artifact)}, 2)
+    if dest.exists() and not overwrite:
+        emit({"ok": False, "action": "restore", "backup_id": backup_id, "destination": str(dest), "error": "destination exists; set overwrite=true"}, 2)
+    if dry_run:
+        return {"ok": True, "action": "restore", "dry_run": True, "backup_id": backup_id, "destination": str(dest), "source": meta.get("source_realpath")}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if meta.get("source_is_dir"):
+        with tempfile.TemporaryDirectory(prefix="gptadmin-restore-") as td:
+            tmp = pathlib.Path(td)
+            with tarfile.open(artifact, "r:gz") as tf:
+                for member in tf.getmembers():
+                    target = (tmp / member.name).resolve()
+                    if tmp.resolve() != target and tmp.resolve() not in target.parents:
+                        raise RuntimeError("unsafe path in tar archive")
+                tf.extractall(tmp)
+            extracted = tmp / str(meta.get("source_name") or "")
+            if dest.exists() and overwrite:
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            shutil.copytree(extracted, dest)
+    else:
+        if dest.exists() and overwrite:
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            else:
+                dest.unlink()
+        shutil.copy2(artifact, dest)
+    return {"ok": True, "action": "restore", "backup_id": backup_id, "destination": str(dest), "source": meta.get("source_realpath")}
+
+
+def main():
+    args = read_args()
+    action = str(args.get("action") or "backup").strip().lower()
+    root = backup_root(args)
+    objects_dir = root / "objects"
+    objects_dir.mkdir(parents=True, exist_ok=True)
+    if action == "list":
+        emit(list_backups(root, objects_dir, args))
+    if action == "cleanup":
+        result = cleanup_expired(root, objects_dir, args)
+        result.update({"ok": True, "action": "cleanup", "backup_root": str(root)})
+        emit(result)
+    if action == "restore":
+        result = restore_backup(root, objects_dir, args)
+        result.update({"backup_root": str(root)})
+        emit(result)
+    if action != "backup":
+        emit({"ok": False, "error": "unsupported action", "action": action}, 2)
+    cleanup_result = cleanup_expired(root, objects_dir, {"dry_run": False}) if bool(args.get("cleanup_expired", True)) else None
+    paths = args.get("paths")
+    if not paths:
+        paths = [args.get("path")]
+    if isinstance(paths, str):
+        paths = [paths]
+    paths = [x for x in paths if x]
+    if not paths:
+        emit({"ok": False, "action": "backup", "error": "path or paths is required"}, 2)
+    now = time.time()
+    items = [backup_one(path, root, objects_dir, args, now) for path in paths]
+    ok = all(item.get("ok") for item in items)
+    emit({"ok": ok, "action": "backup", "backup_root": str(root), "count": len(items), "items": items, "cleanup": cleanup_result}, 0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+async def _file_backup_tool_call(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    payload = base64.b64encode(json.dumps(args or {}, ensure_ascii=False, default=str).encode("utf-8")).decode("ascii")
+    use_sudo = bool(args.get("use_sudo") or args.get("sudo"))
+    if use_sudo:
+        runner = "sudo -n env GPTADMIN_FILE_BACKUP_ARGS_B64=" + shlex.quote(payload) + " python3 -"
+    else:
+        runner = "GPTADMIN_FILE_BACKUP_ARGS_B64=" + shlex.quote(payload) + " python3 -"
+    cmd = runner + " <<'PY'\n" + _file_backup_tool_script() + "\nPY"
+    req = BulkExec(servers=[srv], cmd=cmd, timeout=int(args.get("timeout") or 60), background=False)
+    data = await bulk_exec(req)
+    result = (data.get("results") or {}).get(srv, {})
+    stdout = (result or {}).get("stdout") if isinstance(result, dict) else ""
+    try:
+        parsed = json.loads(stdout or "{}")
+    except Exception:
+        parsed = {"ok": False, "error": "failed to parse file_backup JSON", "raw_result": result}
+    if isinstance(result, dict):
+        parsed.setdefault("returncode", result.get("returncode"))
+        if result.get("stderr"):
+            parsed.setdefault("stderr", str(result.get("stderr"))[-2000:])
+    parsed.setdefault("server", srv)
+    return parsed
 
 
 def _legacy_get_task(srv: str, tid: str, ack: bool = False) -> Optional[Dict[str, Any]]:
@@ -4233,6 +4523,13 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
             count = len(data.get("servers") or {})
             return _mcp_envelope_text(f"{count} configured MCP tool(s) on {srv}", data)
         return _mcp_envelope_text(f"MCP {action} {name or ''} on {srv}: ok", data)
+
+    if tool_name == "file_backup":
+        data = await _file_backup_tool_call(srv, args)
+        data = _spill_mcp_structured(srv, data, f"file_backup {data.get('action') or args.get('action') or 'backup'}")
+        status = "ok" if data.get("ok") else "failed"
+        action = data.get("action") or args.get("action") or "backup"
+        return _mcp_envelope_text(f"file_backup {action} on {srv}: {status}", data)
 
     if tool_name == "help":
         data = _shell_help(srv, args)
