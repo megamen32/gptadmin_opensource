@@ -1149,6 +1149,28 @@ class McpRelayResourceReadReq(BaseModel):
     retry_policy: str = Field(MCP_RELAY_DEFAULT_RETRY_POLICY, pattern="^(none|offline_queue|at_least_once)$")
 
 
+class AdminMcpManageReq(BaseModel):
+    target: str = Field(..., description="hub or shell:<server> / server name")
+    action: str = Field("list", pattern="^(list|add|remove|install|status|cat)$")
+    name: Optional[str] = None
+    url: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    cwd: Optional[str] = None
+    stdio_format: Optional[str] = Field(default=None, pattern="^(auto|framed|ndjson|jsonl|content-length)$")
+    agent_id: Optional[str] = None
+    run_as_user: Optional[str] = None
+    hub_url: Optional[str] = None
+    backend: Optional[str] = Field(default=None, pattern="^(systemd|launchd|windows-task)$")
+    force: bool = False
+    disabled: bool = False
+    install: bool = True
+    keep_service: bool = False
+    verbose: bool = False
+    include_raw: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
@@ -4900,6 +4922,38 @@ async def _admin_real_mcp_request(target: str, method: str, params: Dict[str, An
     return {"agent_id": selected, "status": "completed", "response": data}
 
 
+async def _admin_mcp_manage(req: AdminMcpManageReq) -> Dict[str, Any]:
+    payload = req.dict(exclude_none=True)
+    target = str(payload.pop("target") or "").strip()
+    if not target:
+        raise HTTPException(400, "target is required")
+    action = str(payload.get("action") or "list")
+    if action in {"add", "remove"} and not str(payload.get("name") or "").strip():
+        raise HTTPException(400, f"mcp {action} requires name")
+    if action == "add" and not (payload.get("url") or payload.get("command")):
+        raise HTTPException(400, "mcp add requires either remote URL or local command")
+
+    if target == VIRTUAL_HUB_AGENT_ID or target.lower() == "hub":
+        data = _mcp_tools_manage(payload)
+        selected = VIRTUAL_HUB_AGENT_ID
+    else:
+        shell_agent = _canonical_shell_agent(target)
+        srv = _server_from_virtual_shell_agent(shell_agent)
+        data = await _mcp_tools_manage_on_shell(srv, payload)
+        selected = shell_agent
+
+    _audit_event({
+        "event": "admin_mcp_manage",
+        "target": selected,
+        "action": action,
+        "name": payload.get("name"),
+        "agent_id": payload.get("agent_id"),
+        "url_present": bool(payload.get("url")),
+        "command": payload.get("command"),
+    })
+    return {"ok": True, "target": selected, "action": action, "response": data}
+
+
 @app.get("/admin")
 @app.get("/admin/")
 def admin_dashboard():
@@ -4926,6 +4980,11 @@ def admin_api_clients():
 @app.get("/admin/api/jobs", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def admin_api_jobs(limit: int = Query(200, ge=1, le=500)):
     return _admin_jobs(limit=limit)
+
+
+@app.post("/admin/api/mcp/manage", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def admin_mcp_manage(req: AdminMcpManageReq):
+    return await _admin_mcp_manage(req)
 
 
 @app.post("/admin/api/mcp/resources/list", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
