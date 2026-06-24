@@ -1,5 +1,11 @@
+# DEPRECATED: legacy Python shellmcp/rootd compatibility implementation.
+# Primary GPTAdmin shell transport is go-shellmcp / rootd-go-canary.
+# Keep this file only for compatibility with old/source installs.
 # shellmcp.py / rootd.py compatibility entrypoint
 """
+DEPRECATED legacy Python shellmcp/rootd compatibility implementation.
+Use go-shellmcp / rootd-go-canary for new installs.
+
 Голый root-API без Docker, но с:
  • /exec                             – любая команда
  • heartbeat → HUB_URL (если задан)
@@ -1093,6 +1099,9 @@ def version():
     data = build_info("rootd")
     data.update({
         "transport": TRANSPORT,
+        "deprecated": PYTHON_SHELLMCP_DEPRECATED,
+        "deprecation_notice": "legacy Python shellmcp/rootd is deprecated; use go-shellmcp/rootd-go-canary",
+        "replacement": PYTHON_SHELLMCP_REPLACEMENT,
         "queue_transport": QUEUE_TRANSPORT if QUEUE_URL else None,
         "queue_long_poll_timeout_s": QUEUE_LONG_POLL_TIMEOUT_S if QUEUE_URL and QUEUE_IS_LONG_POLL else None,
         "rootd_url": ROOTD_URL or f"http://{get_local_ip()}:{port}",

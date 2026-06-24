@@ -1,8 +1,8 @@
 # go-shellmcp
 
-Experimental Go rewrite of GPTAdmin `rootd` / `shellmcp` transport.
+Primary GPTAdmin `rootd` / `shellmcp` transport.
 
-Current goal: keep the production Python agent untouched while building a small, memory-stable Go core for command execution and HTTP transport.
+The old Python `client/rootd.py` / `client/shellmcp.py` transport is deprecated and kept only as a compatibility fallback for old/source installs. New deployments should use `go-shellmcp` / `rootd-go-canary`.
 
 Implemented in this prototype:
 
@@ -21,15 +21,10 @@ Implemented in this prototype:
 - optional signed heartbeat to GPTAdmin hub
 - `/file?path=...` for authenticated spool file retrieval
 
-Not implemented yet:
+Compatibility notes:
 
-- signed GPTAdmin hub auth
-- heartbeat/register
-- long-poll queue transport
-- durable callback outbox
-- callback delivery to hub
-- MCP stdio adapter
-- auto-update
+- Python `client/rootd.py` / `client/shellmcp.py` is deprecated.
+- Keep the `shellmcp.service` service name for compatibility; current production overrides it to execute the Go binary.
 
 Run locally:
 

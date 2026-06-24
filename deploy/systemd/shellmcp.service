@@ -1,8 +1,10 @@
 [Unit]
-Description=GPTAdmin Shell MCP agent
+Description=GPTAdmin Shell MCP agent (legacy Python template, deprecated)
 After=network.target
 
 [Service]
+# DEPRECATED: this template starts the legacy Python shellmcp/rootd.
+# Use go-shellmcp/rootd-go-canary for new deployments.
 WorkingDirectory=/home/admin/gptadmin
 ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/rootd.py
 Environment=SHELL_TOKEN=srv_secret
