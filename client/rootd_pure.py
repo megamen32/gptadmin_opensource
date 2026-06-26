@@ -10,6 +10,12 @@ import logging
 import time
 import platform
 import threading
+try:
+    import pwd
+    import grp
+except Exception:
+    pwd = None
+    grp = None
 import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,6 +60,9 @@ def _queue_long_poll_timeout_s() -> int:
 ROOTD_NAME = os.getenv("ROOTD_NAME") or socket.gethostname()
 ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else os.path.expanduser("~/.gptadmin"))
 ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or "local"
+ROOTD_DEFAULT_USER = os.getenv("SHELL_DEFAULT_USER") or os.getenv("ROOTD_DEFAULT_USER") or ""
+ROOTD_DEFAULT_HOME = os.getenv("SHELL_DEFAULT_HOME") or os.getenv("ROOTD_DEFAULT_HOME") or ""
+ROOTD_DEFAULT_CWD = os.getenv("SHELL_DEFAULT_CWD") or os.getenv("ROOTD_DEFAULT_CWD") or ROOTD_DEFAULT_HOME
 BUILD_VERSION = int(os.getenv("GPTADMIN_BUILD_VERSION", "0"))
 BUILD_TS = os.getenv("GPTADMIN_BUILD_TS", "unknown")
 GIT_COMMIT = os.getenv("GPTADMIN_GIT_COMMIT", "unknown")
@@ -247,6 +256,9 @@ def system_info():
         'cores': os.cpu_count(),
         'mem_mb': _get_mem_mb(),
         'uptime_s': _get_uptime_s(),
+        'default_user': ROOTD_DEFAULT_USER or None,
+        'default_home': ROOTD_DEFAULT_HOME or None,
+        'default_cwd': ROOTD_DEFAULT_CWD or None,
     }
 
 
@@ -377,9 +389,60 @@ def _capability_registry(include_status=True):
     mcp = _mcp_capabilities(include_status=include_status)
     return {"ok": True, "schema_version": 1, "host": ROOTD_NAME, "server_id": ROOTD_SERVER_ID, "transport_role": "rootd_transport_layer", "capability_host": True, "capabilities": [{"id":"shell","kind":"shell","role":"local_executor","hosted_by":ROOTD_NAME},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":ROOTD_NAME},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":ROOTD_NAME},{"id":"system","kind":"system","role":"host_introspection","hosted_by":ROOTD_NAME}, *mcp], "summary": {"mcp_count": len(mcp), "enabled_mcp_count": sum(1 for x in mcp if x.get("enabled"))}}
 
-def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None):
-    log.info("EXEC: %s (cwd=%s)", cmd, cwd)
+def _user_info(username: str):
+    if not username or os.name == 'nt' or pwd is None:
+        return None
+    try:
+        return pwd.getpwnam(username)
+    except KeyError:
+        return None
+
+
+def _apply_default_user_env(env_full: dict, username: str | None, pw) -> dict:
+    if not username or pw is None:
+        return env_full
+    env_full = dict(env_full)
+    env_full.setdefault('USER', username)
+    env_full.setdefault('LOGNAME', username)
+    env_full.setdefault('HOME', pw.pw_dir)
+    if pw.pw_shell:
+        env_full.setdefault('SHELL', pw.pw_shell)
+    return env_full
+
+
+def _preexec_for_user(username: str | None, pw):
+    if not username or pw is None or os.name == 'nt':
+        return None
+    if hasattr(os, 'geteuid') and os.geteuid() != 0:
+        return None
+    def demote():
+        if grp is not None:
+            try:
+                os.initgroups(username, pw.pw_gid)
+            except Exception:
+                pass
+        os.setgid(pw.pw_gid)
+        os.setuid(pw.pw_uid)
+    return demote
+
+
+def _resolve_run_defaults(cwd: str | None, default_user: str | None = None, default_cwd: str | None = None):
+    username = default_user or ROOTD_DEFAULT_USER or None
+    pw = _user_info(username) if username else None
+    if username and pw is None:
+        raise ValueError(f'default user not found: {username}')
+    final_cwd = cwd or default_cwd or ROOTD_DEFAULT_CWD or (pw.pw_dir if pw is not None else None)
+    return username, pw, final_cwd
+
+
+def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None, default_user: str | None = None, default_cwd: str | None = None):
+    log.info("EXEC: %s (cwd=%s default_user=%s)", cmd, cwd, default_user or ROOTD_DEFAULT_USER or "")
+    try:
+        run_as_user, pw, final_cwd = _resolve_run_defaults(cwd, default_user, default_cwd)
+    except Exception as e:
+        return {'returncode': -1, 'error': str(e), 'stdout': '', 'stderr': str(e)}
     env_full = os.environ.copy()
+    env_full = _apply_default_user_env(env_full, run_as_user, pw)
     if env:
         env_full.update(env)
     try:
@@ -390,17 +453,20 @@ def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: d
             cmd_list = [shell_path, '-lc', cmd]
         res = subprocess.run(
             cmd_list,
-            cwd=cwd,
+            cwd=final_cwd,
             env=env_full,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout or EXEC_TIMEOUT,
             text=False,
+            preexec_fn=_preexec_for_user(run_as_user, pw),
         )
         return {
             'returncode': res.returncode,
             'stdout': _truncate(res.stdout),
             'stderr': _truncate(res.stderr),
+            'run_as_user': run_as_user or None,
+            'cwd_effective': final_cwd,
         }
     except subprocess.TimeoutExpired as e:
         return {
@@ -408,6 +474,8 @@ def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: d
             'error': f'timeout {e.timeout}s',
             'stdout': _truncate(e.stdout or ''),
             'stderr': _truncate(e.stderr or ''),
+            'run_as_user': run_as_user or None,
+            'cwd_effective': final_cwd,
         }
 
 
@@ -439,6 +507,9 @@ def heartbeat_loop():
             'build_ts': BUILD_TS,
             'git_commit': GIT_COMMIT,
             'backend': ROOTD_BACKEND,
+            'default_user': ROOTD_DEFAULT_USER or None,
+            'default_home': ROOTD_DEFAULT_HOME or None,
+            'default_cwd': ROOTD_DEFAULT_CWD or None,
         }
         try:
             data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
@@ -582,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/exec':
             started = time.perf_counter()
             try:
-                res = run_cmd(body.get('cmd', ''), body.get('timeout'), body.get('cwd'), body.get('env'))
+                res = run_cmd(body.get('cmd', ''), body.get('timeout'), body.get('cwd'), body.get('env'), body.get('default_user') or body.get('run_as_user') or body.get('user'), body.get('default_cwd'))
                 _audit_exec('http', body.get('cmd', ''), body.get('cwd'), body.get('timeout'), result=res, started_at=started)
             except Exception as e:
                 log.exception('http exec failed')
@@ -595,7 +666,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': 'cmd required'}, 400)
                 return
             cwd = body.get('cwd')
+            try:
+                run_as_user, pw, cwd = _resolve_run_defaults(cwd, body.get('default_user') or body.get('run_as_user') or body.get('user'), body.get('default_cwd'))
+            except Exception as e:
+                self._json({'error': str(e)}, 400)
+                return
             env = os.environ.copy()
+            env = _apply_default_user_env(env, run_as_user, pw)
             if isinstance(body.get('env'), dict):
                 env.update(body['env'])
             if os.name == 'nt':
@@ -611,7 +688,8 @@ class Handler(BaseHTTPRequestHandler):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                preexec_fn=_preexec_for_user(run_as_user, pw),
             )
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
