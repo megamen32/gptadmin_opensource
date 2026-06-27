@@ -1001,16 +1001,11 @@ except Exception as e:
 
 
 def _check_license(current_servers: int) -> None:
-    if _expiry:
-        exp_date = datetime.datetime.strptime(_expiry, "%Y-%m-%d").date()
-        if datetime.date.today() > exp_date:
-            raise HTTPException(403, "license expired")
-    if _max_servers and _max_servers > 0 and current_servers > _max_servers:
-        raise HTTPException(403, f"too many servers ({current_servers}/{_max_servers})")
+    pass
 
 
 def ensure_license() -> None:
-    _check_license(len(servers))
+    pass
 
 
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
