@@ -25,8 +25,8 @@ type Identity struct {
 }
 
 func LoadIdentity(dir, name string) (*Identity, error) {
-	keyPath := filepath.Join(dir, "rootd_ed25519")
-	identPath := filepath.Join(dir, "rootd_identity.json")
+	keyPath := filepath.Join(dir, "shellmcp_ed25519")
+	identPath := filepath.Join(dir, "shellmcp_identity.json")
 	pemBytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, err

@@ -26,13 +26,13 @@ from logging.handlers import WatchedFileHandler
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-TOKEN = os.getenv("ROOTD_TOKEN", "srv_secret")
+TOKEN = os.getenv("SHELLMCP_TOKEN", "srv_secret")
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
 EXEC_TIMEOUT = int(os.getenv("EXEC_TIMEOUT", "300"))
 HUB_URL = os.getenv("HUB_URL")
 HB_INT = int(os.getenv("HB_INTERVAL_S", "60"))
-ROOTD_URL = os.getenv("ROOTD_URL")
-PORT = int(os.getenv("ROOTD_PORT", "25900"))
+SHELLMCP_URL = os.getenv("SHELLMCP_URL")
+PORT = int(os.getenv("SHELLMCP_PORT", "25900"))
 QUEUE_URL = os.getenv("QUEUE_URL")
 POLL_INT = int(os.getenv("POLL_INTERVAL_S", "5"))
 QUEUE_TRANSPORT = os.getenv("QUEUE_TRANSPORT", "long_poll").strip().lower()
@@ -57,12 +57,12 @@ def _queue_http_timeout_s() -> int:
 def _queue_long_poll_timeout_s() -> int:
     return int(globals().get("QUEUE_LONG_POLL_TIMEOUT_S", 55))
 
-ROOTD_NAME = os.getenv("ROOTD_NAME") or socket.gethostname()
-ROOTD_IDENTITY_DIR = os.getenv("ROOTD_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else os.path.expanduser("~/.gptadmin"))
-ROOTD_BACKEND = os.getenv("ROOTD_BACKEND") or "local"
-ROOTD_DEFAULT_USER = os.getenv("SHELL_DEFAULT_USER") or os.getenv("ROOTD_DEFAULT_USER") or ""
-ROOTD_DEFAULT_HOME = os.getenv("SHELL_DEFAULT_HOME") or os.getenv("ROOTD_DEFAULT_HOME") or ""
-ROOTD_DEFAULT_CWD = os.getenv("SHELL_DEFAULT_CWD") or os.getenv("ROOTD_DEFAULT_CWD") or ROOTD_DEFAULT_HOME
+SHELLMCP_NAME = os.getenv("SHELLMCP_NAME") or socket.gethostname()
+SHELLMCP_IDENTITY_DIR = os.getenv("SHELLMCP_IDENTITY_DIR") or ("/etc/gptadmin" if os.access("/etc", os.W_OK) else os.path.expanduser("~/.gptadmin"))
+SHELLMCP_BACKEND = os.getenv("SHELLMCP_BACKEND") or "local"
+SHELLMCP_DEFAULT_USER = os.getenv("SHELL_DEFAULT_USER") or os.getenv("SHELLMCP_DEFAULT_USER") or ""
+SHELLMCP_DEFAULT_HOME = os.getenv("SHELL_DEFAULT_HOME") or os.getenv("SHELLMCP_DEFAULT_HOME") or ""
+SHELLMCP_DEFAULT_CWD = os.getenv("SHELL_DEFAULT_CWD") or os.getenv("SHELLMCP_DEFAULT_CWD") or SHELLMCP_DEFAULT_HOME
 BUILD_VERSION = int(os.getenv("GPTADMIN_BUILD_VERSION", "0"))
 BUILD_TS = os.getenv("GPTADMIN_BUILD_TS", "unknown")
 GIT_COMMIT = os.getenv("GPTADMIN_GIT_COMMIT", "unknown")
@@ -96,9 +96,9 @@ def _fingerprint_public_key_b64(public_key_b64: str) -> str:
 def _load_or_create_identity(config_dir: str, name: str) -> dict:
     cfg = Path(config_dir)
     cfg.mkdir(parents=True, exist_ok=True)
-    key_file = cfg / "rootd_ed25519"
-    pub_file = cfg / "rootd_ed25519.pub"
-    ident_file = cfg / "rootd_identity.json"
+    key_file = cfg / "shellmcp_ed25519"
+    pub_file = cfg / "shellmcp_ed25519.pub"
+    ident_file = cfg / "shellmcp_identity.json"
     if key_file.exists():
         priv = serialization.load_pem_private_key(key_file.read_bytes(), password=None)
     else:
@@ -135,10 +135,10 @@ def _load_or_create_identity(config_dir: str, name: str) -> dict:
     return {"identity": ident, "private_key": priv, "public_key_b64": pub, "fingerprint": fp}
 
 
-ROOTD_IDENTITY = _load_or_create_identity(ROOTD_IDENTITY_DIR, ROOTD_NAME)
-ROOTD_SERVER_ID = ROOTD_IDENTITY["identity"]["server_id"]
-ROOTD_PUBLIC_KEY_B64 = ROOTD_IDENTITY["public_key_b64"]
-ROOTD_FINGERPRINT = ROOTD_IDENTITY["fingerprint"]
+SHELLMCP_IDENTITY = _load_or_create_identity(SHELLMCP_IDENTITY_DIR, SHELLMCP_NAME)
+SHELLMCP_SERVER_ID = SHELLMCP_IDENTITY["identity"]["server_id"]
+SHELLMCP_PUBLIC_KEY_B64 = SHELLMCP_IDENTITY["public_key_b64"]
+SHELLMCP_FINGERPRINT = SHELLMCP_IDENTITY["fingerprint"]
 
 
 def _random_nonce() -> str:
@@ -153,45 +153,45 @@ def _canonical_request(method: str, path: str, timestamp: str, nonce: str, body:
 def _signed_headers(method: str, path: str, body: bytes) -> dict:
     ts = str(int(time.time()))
     nonce = _random_nonce()
-    sig = ROOTD_IDENTITY["private_key"].sign(_canonical_request(method, path, ts, nonce, body))
+    sig = SHELLMCP_IDENTITY["private_key"].sign(_canonical_request(method, path, ts, nonce, body))
     return {
         "Content-Type": "application/json",
-        "X-GPTAdmin-Server": ROOTD_NAME,
-        "X-GPTAdmin-Server-ID": ROOTD_SERVER_ID,
+        "X-GPTAdmin-Server": SHELLMCP_NAME,
+        "X-GPTAdmin-Server-ID": SHELLMCP_SERVER_ID,
         "X-GPTAdmin-Timestamp": ts,
         "X-GPTAdmin-Nonce": nonce,
         "X-GPTAdmin-Signature": _b64e(sig),
     }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-log = logging.getLogger("rootd_pure")
-audit_log = logging.getLogger("rootd_pure.audit")
+log = logging.getLogger("shellmcp_pure")
+audit_log = logging.getLogger("shellmcp_pure.audit")
 audit_log.setLevel(logging.INFO)
 audit_log.propagate = False
-ROOTD_AUDIT_LOG = os.getenv("ROOTD_AUDIT_LOG") or ("/var/log/gptadmin/rootd-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "rootd-audit.log"))
+SHELLMCP_AUDIT_LOG = os.getenv("SHELLMCP_AUDIT_LOG") or ("/var/log/gptadmin/shellmcp-audit.log" if os.access("/var/log", os.W_OK) else str(Path.home() / ".gptadmin" / "shellmcp-audit.log"))
 try:
-    _audit_path = Path(ROOTD_AUDIT_LOG)
+    _audit_path = Path(SHELLMCP_AUDIT_LOG)
     _audit_path.parent.mkdir(parents=True, exist_ok=True)
     _audit_handler = WatchedFileHandler(_audit_path)
     _audit_handler.setFormatter(logging.Formatter("%(message)s"))
     audit_log.addHandler(_audit_handler)
 except Exception as e:
-    log.warning("rootd audit log disabled path=%s err=%s", ROOTD_AUDIT_LOG, e)
+    log.warning("shellmcp audit log disabled path=%s err=%s", SHELLMCP_AUDIT_LOG, e)
 
 
 def _audit_event(event: dict) -> None:
     if not audit_log.handlers:
         return
     event.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    event.setdefault("server", ROOTD_NAME)
-    event.setdefault("server_id", ROOTD_SERVER_ID)
-    event.setdefault("backend", ROOTD_BACKEND)
+    event.setdefault("server", SHELLMCP_NAME)
+    event.setdefault("server_id", SHELLMCP_SERVER_ID)
+    event.setdefault("backend", SHELLMCP_BACKEND)
     event.setdefault("transport", "polling" if QUEUE_URL else "webhook")
     event.setdefault("pid", os.getpid())
     try:
         audit_log.info(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     except Exception as e:
-        log.warning("rootd audit write failed: %s", e)
+        log.warning("shellmcp audit write failed: %s", e)
 
 
 def _cmd_sha256(cmd: str) -> str:
@@ -199,7 +199,7 @@ def _cmd_sha256(cmd: str) -> str:
 
 
 def _audit_exec(source: str, cmd: str, cwd: str | None, timeout: int | None, result: dict | None = None, error: str | None = None, job_id: str | None = None, started_at: float | None = None) -> None:
-    event = {"event":"rootd_exec","source":source,"job_id":job_id,"cmd":cmd,"cmd_sha256":_cmd_sha256(cmd),"cwd":cwd,"timeout":timeout}
+    event = {"event":"shellmcp_exec","source":source,"job_id":job_id,"cmd":cmd,"cmd_sha256":_cmd_sha256(cmd),"cwd":cwd,"timeout":timeout}
     if started_at is not None:
         event["dt_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
     if isinstance(result, dict):
@@ -256,9 +256,9 @@ def system_info():
         'cores': os.cpu_count(),
         'mem_mb': _get_mem_mb(),
         'uptime_s': _get_uptime_s(),
-        'default_user': ROOTD_DEFAULT_USER or None,
-        'default_home': ROOTD_DEFAULT_HOME or None,
-        'default_cwd': ROOTD_DEFAULT_CWD or None,
+        'default_user': SHELLMCP_DEFAULT_USER or None,
+        'default_home': SHELLMCP_DEFAULT_HOME or None,
+        'default_cwd': SHELLMCP_DEFAULT_CWD or None,
     }
 
 
@@ -311,15 +311,15 @@ def _load_json_file(path):
 
 def _mcp_cfg_paths():
     home = Path.home()
-    cfg_path = Path(os.getenv("GPTADMIN_MCP_CONFIG") or os.getenv("ROOTD_MCP_CONFIG") or str(home / ".config/gptadmin/mcp.json"))
-    agents_dir = Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR") or os.getenv("ROOTD_MCP_AGENTS_DIR") or str(home / ".config/gptadmin/mcp-agents.d"))
+    cfg_path = Path(os.getenv("GPTADMIN_MCP_CONFIG") or os.getenv("SHELLMCP_MCP_CONFIG") or str(home / ".config/gptadmin/mcp.json"))
+    agents_dir = Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR") or os.getenv("SHELLMCP_MCP_AGENTS_DIR") or str(home / ".config/gptadmin/mcp-agents.d"))
     if not cfg_path.exists() and Path("/etc/gptadmin/mcp.json").exists(): cfg_path = Path("/etc/gptadmin/mcp.json")
     if not agents_dir.exists() and Path("/etc/gptadmin/mcp-agents.d").exists(): agents_dir = Path("/etc/gptadmin/mcp-agents.d")
     return cfg_path, agents_dir
 
 
 def _mcp_supervisor_backend():
-    override = os.getenv("ROOTD_MCP_SUPERVISOR_BACKEND") or os.getenv("GPTADMIN_MCP_BACKEND")
+    override = os.getenv("SHELLMCP_MCP_SUPERVISOR_BACKEND") or os.getenv("GPTADMIN_MCP_BACKEND")
     if override: return override.strip().lower()
     if sys.platform == "darwin": return "launchd"
     if sys.platform.startswith("win"): return "windows-task"
@@ -379,7 +379,7 @@ def _mcp_capabilities(include_status=True):
     for name, spec in sorted(servers.items()):
         if not isinstance(spec, dict): continue
         agent_id = str(spec.get("agent_id") or spec.get("name") or name)
-        item = {"id": f"mcp:{agent_id}", "name": name, "agent_id": agent_id, "kind": "mcp", "role": "capability_executor", "hosted_by": ROOTD_NAME, "supervised_by": "rootd", "legacy_service": _mcp_service_name(agent_id), "supervisor_backend": _mcp_supervisor_backend(), "service_file": _mcp_service_file(agent_id), "enabled": bool(spec.get("enabled", True)), "transport": "stdio_or_remote", "command": spec.get("command"), "args": _redact_public(spec.get("args") or []), "cwd": spec.get("cwd"), "run_as_user": spec.get("run_as_user") or spec.get("user"), "stdio_format": spec.get("stdio_format") or spec.get("transport") or "auto", "config_file": str(agents_dir / f"{name}.json"), "migration_state": "legacy_relay_supervised; rootd_registry_visible"}
+        item = {"id": f"mcp:{agent_id}", "name": name, "agent_id": agent_id, "kind": "mcp", "role": "capability_executor", "hosted_by": SHELLMCP_NAME, "supervised_by": "shellmcp", "legacy_service": _mcp_service_name(agent_id), "supervisor_backend": _mcp_supervisor_backend(), "service_file": _mcp_service_file(agent_id), "enabled": bool(spec.get("enabled", True)), "transport": "stdio_or_remote", "command": spec.get("command"), "args": _redact_public(spec.get("args") or []), "cwd": spec.get("cwd"), "run_as_user": spec.get("run_as_user") or spec.get("user"), "stdio_format": spec.get("stdio_format") or spec.get("transport") or "auto", "config_file": str(agents_dir / f"{name}.json"), "migration_state": "legacy_relay_supervised; shellmcp_registry_visible"}
         if include_status: item["supervisor"] = _mcp_supervisor_state(agent_id)
         out.append(item)
     return out
@@ -387,7 +387,7 @@ def _mcp_capabilities(include_status=True):
 
 def _capability_registry(include_status=True):
     mcp = _mcp_capabilities(include_status=include_status)
-    return {"ok": True, "schema_version": 1, "host": ROOTD_NAME, "server_id": ROOTD_SERVER_ID, "transport_role": "rootd_transport_layer", "capability_host": True, "capabilities": [{"id":"shell","kind":"shell","role":"local_executor","hosted_by":ROOTD_NAME},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":ROOTD_NAME},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":ROOTD_NAME},{"id":"system","kind":"system","role":"host_introspection","hosted_by":ROOTD_NAME}, *mcp], "summary": {"mcp_count": len(mcp), "enabled_mcp_count": sum(1 for x in mcp if x.get("enabled"))}}
+    return {"ok": True, "schema_version": 1, "host": SHELLMCP_NAME, "server_id": SHELLMCP_SERVER_ID, "transport_role": "shellmcp_transport_layer", "capability_host": True, "capabilities": [{"id":"shell","kind":"shell","role":"local_executor","hosted_by":SHELLMCP_NAME},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":SHELLMCP_NAME},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":SHELLMCP_NAME},{"id":"system","kind":"system","role":"host_introspection","hosted_by":SHELLMCP_NAME}, *mcp], "summary": {"mcp_count": len(mcp), "enabled_mcp_count": sum(1 for x in mcp if x.get("enabled"))}}
 
 def _user_info(username: str):
     if not username or os.name == 'nt' or pwd is None:
@@ -427,16 +427,16 @@ def _preexec_for_user(username: str | None, pw):
 
 
 def _resolve_run_defaults(cwd: str | None, default_user: str | None = None, default_cwd: str | None = None):
-    username = default_user or ROOTD_DEFAULT_USER or None
+    username = default_user or SHELLMCP_DEFAULT_USER or None
     pw = _user_info(username) if username else None
     if username and pw is None:
         raise ValueError(f'default user not found: {username}')
-    final_cwd = cwd or default_cwd or ROOTD_DEFAULT_CWD or (pw.pw_dir if pw is not None else None)
+    final_cwd = cwd or default_cwd or SHELLMCP_DEFAULT_CWD or (pw.pw_dir if pw is not None else None)
     return username, pw, final_cwd
 
 
 def run_cmd(cmd: str, timeout: int | None = None, cwd: str | None = None, env: dict | None = None, default_user: str | None = None, default_cwd: str | None = None):
-    log.info("EXEC: %s (cwd=%s default_user=%s)", cmd, cwd, default_user or ROOTD_DEFAULT_USER or "")
+    log.info("EXEC: %s (cwd=%s default_user=%s)", cmd, cwd, default_user or SHELLMCP_DEFAULT_USER or "")
     try:
         run_as_user, pw, final_cwd = _resolve_run_defaults(cwd, default_user, default_cwd)
     except Exception as e:
@@ -485,20 +485,20 @@ def heartbeat_loop():
     hb_url = HUB_URL + '/heartbeat' if '/heartbeat' not in HUB_URL else HUB_URL
     while True:
         payload = {
-            'name': ROOTD_NAME,
-            'server_id': ROOTD_SERVER_ID,
-            'public_key': ROOTD_PUBLIC_KEY_B64,
-            'fingerprint': ROOTD_FINGERPRINT,
-            'base_url': ROOTD_URL or f'http://{socket.gethostname()}:{PORT}',
-            'rootd_token': TOKEN,
+            'name': SHELLMCP_NAME,
+            'server_id': SHELLMCP_SERVER_ID,
+            'public_key': SHELLMCP_PUBLIC_KEY_B64,
+            'fingerprint': SHELLMCP_FINGERPRINT,
+            'base_url': SHELLMCP_URL or f'http://{socket.gethostname()}:{PORT}',
+            'shellmcp_token': TOKEN,
             'cores': os.cpu_count(),
             'mem_mb': _get_mem_mb(),
             'time': int(time.time()),
             'mode': 'long_poll' if QUEUE_URL and _queue_is_long_poll() else ('polling' if QUEUE_URL else 'webhook'),
             'queue_transport': QUEUE_TRANSPORT if QUEUE_URL else None,
-            'transport_role': 'rootd_transport_layer',
+            'transport_role': 'shellmcp_transport_layer',
             'capability_host': True,
-            'capability_model': 'rootd transports hub jobs to local executors/capabilities',
+            'capability_model': 'shellmcp transports hub jobs to local executors/capabilities',
             'local_capabilities': ['shell', 'tasks', 'logs', 'system', 'mcp_supervision'],
             'capability_registry': _capability_registry(include_status=False).get('summary'),
             'os': sys.platform,
@@ -506,10 +506,10 @@ def heartbeat_loop():
             'build_version': BUILD_VERSION,
             'build_ts': BUILD_TS,
             'git_commit': GIT_COMMIT,
-            'backend': ROOTD_BACKEND,
-            'default_user': ROOTD_DEFAULT_USER or None,
-            'default_home': ROOTD_DEFAULT_HOME or None,
-            'default_cwd': ROOTD_DEFAULT_CWD or None,
+            'backend': SHELLMCP_BACKEND,
+            'default_user': SHELLMCP_DEFAULT_USER or None,
+            'default_home': SHELLMCP_DEFAULT_HOME or None,
+            'default_cwd': SHELLMCP_DEFAULT_CWD or None,
         }
         try:
             data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
@@ -526,8 +526,8 @@ def poll_loop():
         return
     while True:
         try:
-            queue_path = f"/queue/{ROOTD_NAME}"
-            url = f"{QUEUE_URL}/{ROOTD_NAME}"
+            queue_path = f"/queue/{SHELLMCP_NAME}"
+            url = f"{QUEUE_URL}/{SHELLMCP_NAME}"
             if _queue_is_long_poll():
                 url += f"?timeout={max(1, _queue_long_poll_timeout_s())}"
             req = urlrequest.Request(url, headers=_signed_headers('GET', queue_path, b''))
@@ -548,8 +548,8 @@ def poll_loop():
                             res = {"error": str(e), "traceback": str(e)}
                             _audit_exec("polling", job.get('cmd', ''), job.get('cwd'), job.get('timeout'), error=str(e), job_id=job.get('id'), started_at=started)
                         try:
-                            result_path = f"/queue/{ROOTD_NAME}/result"
-                            result_url = f"{QUEUE_URL}/{ROOTD_NAME}/result"
+                            result_path = f"/queue/{SHELLMCP_NAME}/result"
+                            result_url = f"{QUEUE_URL}/{SHELLMCP_NAME}/result"
                             data = json.dumps({'id': job.get('id'), 'result': res}).encode()
                             headers = {'Content-Type': 'application/json'}
                             headers.update(_signed_headers('POST', result_path, data))
@@ -568,7 +568,7 @@ def poll_loop():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'rootd_pure/1.0'
+    server_version = 'shellmcp_pure/1.0'
     # Нужно для chunked-стриминга
     protocol_version = 'HTTP/1.1'
 
@@ -577,8 +577,8 @@ class Handler(BaseHTTPRequestHandler):
         if auth == f'Bearer {TOKEN}':
             return True
 
-        # Modern hub_proxy calls rootd with signed X-GPTAdmin-* headers instead of
-        # Authorization. Full rootd verifies the Ed25519 signature. rootd_pure is the
+        # Modern hub_proxy calls shellmcp with signed X-GPTAdmin-* headers instead of
+        # Authorization. Full shellmcp verifies the Ed25519 signature. shellmcp_pure is the
         # minimal cross-platform fallback, so accept signed hub-shaped requests to
         # stay compatible with hub_proxy. Keep Bearer token support for local/manual
         # calls.
@@ -618,7 +618,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == '/capabilities/mcp':
             params = parse.parse_qs(parsed.query)
             include_status = params.get('include_status', ['true'])[0].lower() not in {'0', 'false', 'no'}
-            self._json({'ok': True, 'host': ROOTD_NAME, 'capabilities': _mcp_capabilities(include_status=include_status)})
+            self._json({'ok': True, 'host': SHELLMCP_NAME, 'capabilities': _mcp_capabilities(include_status=include_status)})
         elif parsed.path == '/file':
             params = parse.parse_qs(parsed.query)
             path = params.get('path', [None])[0]

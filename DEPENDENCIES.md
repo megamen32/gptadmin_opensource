@@ -6,9 +6,9 @@ GPTAdmin состоит из нескольких компонентов с ра
 
 ### Без зависимостей (только стандартная библиотека Python)
 
-- **`rootd_pure.py`** — минимальный root-демон для голой ОС
+- **`shellmcp_pure.py`** — минимальный root-демон для голой ОС
   - Использует только `http.server`, `urllib`, `json`, `subprocess`
-  - Запуск: `python3 rootd_pure.py`
+  - Запуск: `python3 shellmcp_pure.py`
   
 - **`gptadmin.py`** — CLI утилита
   - Использует только стандартную библиотеку
@@ -16,19 +16,19 @@ GPTAdmin состоит из нескольких компонентов с ра
 
 ### С минимальными зависимостями
 
-- **`rootd_linux.py`** — Linux root-демон
+- **`shellmcp_linux.py`** — Linux root-демон
   - Зависимости: `psutil`
-  - Запуск: `uv run python rootd_linux.py`
+  - Запуск: `uv run python shellmcp_linux.py`
   
-- **`rootd_win.py`** — Windows root-демон
+- **`shellmcp_win.py`** — Windows root-демон
   - Зависимости: `psutil`
-  - Запуск: `uv run python rootd_win.py`
+  - Запуск: `uv run python shellmcp_win.py`
 
 ### С полным набором зависимостей
 
-- **`rootd.py`** — полный root-демон с FastAPI
+- **`shellmcp.py`** — полный root-демон с FastAPI
   - Зависимости: `fastapi`, `uvicorn`, `pydantic`, `requests`, `starlette`
-  - Запуск: `uv run python rootd.py`
+  - Запуск: `uv run python shellmcp.py`
   
 - **`hub_proxy.py`** — Hub прокси-сервер
   - Зависимости: `fastapi`, `httpx`, `pydantic`, `cryptography`, `starlette`
@@ -52,9 +52,9 @@ uv sync
 
 ```bash
 # Запуск с автоматической активацией виртуального окружения
-uv run python rootd.py
+uv run python shellmcp.py
 uv run python hub_proxy.py
-uv run python rootd_linux.py
+uv run python shellmcp_linux.py
 
 # Запуск тестов
 uv run pytest tests/
@@ -67,7 +67,7 @@ uv run gptadmin --help
 
 ```bash
 source .venv/bin/activate
-python rootd.py
+python shellmcp.py
 ```
 
 ## Для голой ОС (без зависимостей)
@@ -75,11 +75,11 @@ python rootd.py
 Если нужно запустить GPTAdmin на системе без установленных зависимостей:
 
 ```bash
-# Копируем только rootd_pure.py
-curl -O https://your-server/rootd_pure.py
+# Копируем только shellmcp_pure.py
+curl -O https://your-server/shellmcp_pure.py
 
 # Запускаем без установки зависимостей
-python3 rootd_pure.py
+python3 shellmcp_pure.py
 ```
 
 Это работает на любой системе с Python 3.10+ без дополнительных пакетов.

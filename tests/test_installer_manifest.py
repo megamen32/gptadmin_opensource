@@ -5,13 +5,13 @@ from fastapi.testclient import TestClient
 import server_for_installer
 
 
-def test_manifest_includes_hashes_for_python_rootd_artifacts():
+def test_manifest_includes_hashes_for_python_shellmcp_artifacts():
     client = TestClient(server_for_installer.app)
     manifest = client.get("/manifest.json")
     assert manifest.status_code == 200
     artifacts = manifest.json()["artifacts"]
 
-    for name in ("rootd.py", "rootd_pure.py"):
+    for name in ("shellmcp.py", "shellmcp_pure.py"):
         item = artifacts[name]
         artifact = client.get(item["url"])
         assert artifact.status_code == 200

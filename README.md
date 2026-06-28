@@ -1,13 +1,13 @@
-> **Deprecated:** the legacy Python ShellMCP/rootd transport (`client/rootd.py` and `client/shellmcp.py`) is kept only for compatibility. The primary shell transport is now `go-shellmcp` / `rootd-go-canary`.
+> **Deprecated:** the legacy Python ShellMCP/shellmcp transport (`client/shellmcp.py` and `client/shellmcp.py`) is kept only for compatibility. The primary shell transport is now `go-shellmcp` / `shellmcp-go-canary`.
 
 # GPTAdmin Services
 
 This repository contains two small services used to remotely control a machine.
 
-* **services/rootd.py** – runs as root and exposes low level operations.
-* **services/rootd_pure.py** – simplified variant of `rootd` that depends only on the
+* **services/shellmcp.py** – runs as root and exposes low level operations.
+* **services/shellmcp_pure.py** – simplified variant of `shellmcp` that depends only on the
   Python standard library and works on any Unix-like system including macOS.
-* **services/hub_proxy.py** – collects heartbeats from multiple `rootd` servers and
+* **services/hub_proxy.py** – collects heartbeats from multiple `shellmcp` servers and
   proxies requests to them.
 
 ## Requirements
@@ -27,42 +27,42 @@ and exposes the hub through ngrok, run:
 
 The script prompts for:
 
-* a Bearer token used by both `rootd` and `hub_proxy`;
+* a Bearer token used by both `shellmcp` and `hub_proxy`;
 * an ngrok token to publish the proxy.
 
 It downloads the packaged application, creates virtual environment, installs
-dependencies, writes systemd units for `rootd`, `hub_proxy` and an ngrok
+dependencies, writes systemd units for `shellmcp`, `hub_proxy` and an ngrok
 forwarder, then starts all services. The public URL returned by ngrok is
 displayed and stored in `ngrok_url.txt` inside the installation directory.
 
 ## Running
 
-Start `rootd` and `hub_proxy` in separate terminals:
+Start `shellmcp` and `hub_proxy` in separate terminals:
 
 ```
-ROOTD_TOKEN=srv_secret python services/rootd.py
+SHELLMCP_TOKEN=srv_secret python services/shellmcp.py
 CTL_TOKEN=chatgpt_secret python services/hub_proxy.py
 ```
 
-`rootd` can register itself with the hub when `HUB_URL` is set. Each service
+`shellmcp` can register itself with the hub when `HUB_URL` is set. Each service
 accepts tokens through environment variables as shown above.
 
 To run the minimal version that requires no external dependencies use:
 
 ```
-ROOTD_TOKEN=srv_secret python services/rootd_pure.py
+SHELLMCP_TOKEN=srv_secret python services/shellmcp_pure.py
 ```
 
 Set `QUEUE_URL` to enable polling mode. In this mode the daemon polls the
 queue for tasks and does not start an HTTP server:
 
 ```
-QUEUE_URL=http://hub:9001/queue ROOTD_TOKEN=srv_secret python services/rootd_pure.py
+QUEUE_URL=http://hub:9001/queue SHELLMCP_TOKEN=srv_secret python services/shellmcp_pure.py
 ```
 
 ### SSH backend
 
-If `rootd` should execute commands on a remote host instead of locally,
+If `shellmcp` should execute commands on a remote host instead of locally,
 set `SSH_HOST` (and optionally `SSH_PORT`, `SSH_USER`, `SSH_PASSWORD` or
 `SSH_KEY`) before starting the service. The server will connect over SSH and
 run all commands on that host.
@@ -117,12 +117,12 @@ generated binaries start and respond to basic requests.
 ### Rotating or revoking tokens
 
 Tokens are stored inside the systemd unit files. To change or revoke a token
-edit the relevant unit, update `ROOTD_TOKEN` or `CTL_TOKEN` and restart the
+edit the relevant unit, update `SHELLMCP_TOKEN` or `CTL_TOKEN` and restart the
 service:
 
 ```
-sudo systemctl edit --full rootd.service
-sudo systemctl restart rootd
+sudo systemctl edit --full shellmcp.service
+sudo systemctl restart shellmcp
 ```
 
 Repeat for `hub_proxy.service`. Removing a token and restarting effectively
@@ -133,8 +133,8 @@ revokes access. Remember to also update any clients that rely on the old token.
 Basic scripts for manual testing are provided:
 
 ```
-python services/hub_proxy.py & python services/rootd.py &
-python tests/test_rootd.py
+python services/hub_proxy.py & python services/shellmcp.py &
+python tests/test_shellmcp.py
 python tests/test_hub.py
 ```
 

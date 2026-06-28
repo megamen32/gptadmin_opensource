@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import client.rootd_linux as linux
+import client.shellmcp_linux as linux
 
 def test_info_with_psutil():
     with patch.dict('sys.modules', {'psutil': MagicMock()}):
@@ -33,9 +33,9 @@ def test_info_without_psutil():
 
         assert linux.HAS_PSUTIL is False
 
-        with patch('client.rootd_linux._fallback_cpu_count', return_value=4), \
-             patch('client.rootd_linux._fallback_virtual_memory') as mock_vm, \
-             patch('client.rootd_linux._fallback_uptime_s', return_value=1000):
+        with patch('client.shellmcp_linux._fallback_cpu_count', return_value=4), \
+             patch('client.shellmcp_linux._fallback_virtual_memory') as mock_vm, \
+             patch('client.shellmcp_linux._fallback_uptime_s', return_value=1000):
 
             mock_vm.return_value.total = 16 * 1024**3
             info = linux.info()
@@ -86,11 +86,11 @@ def test_health_without_psutil():
 
         assert linux.HAS_PSUTIL is False
 
-        with patch('client.rootd_linux._fallback_virtual_memory') as mock_vm, \
-             patch('client.rootd_linux._fallback_swap_memory') as mock_swap, \
-             patch('client.rootd_linux._fallback_cpu_percent', return_value=25.0), \
-             patch('client.rootd_linux._fallback_uptime_s', return_value=1000), \
-             patch('client.rootd_linux._fallback_sensors_temperatures', return_value={}), \
+        with patch('client.shellmcp_linux._fallback_virtual_memory') as mock_vm, \
+             patch('client.shellmcp_linux._fallback_swap_memory') as mock_swap, \
+             patch('client.shellmcp_linux._fallback_cpu_percent', return_value=25.0), \
+             patch('client.shellmcp_linux._fallback_uptime_s', return_value=1000), \
+             patch('client.shellmcp_linux._fallback_sensors_temperatures', return_value={}), \
              patch('shutil.disk_usage') as mock_du, \
              patch('os.getloadavg', return_value=(1.0, 2.0, 3.0)), \
              patch('subprocess.run') as mock_run, \

@@ -23,15 +23,15 @@ TMP_DIR=$(mktemp -d)
 echo "Downloading package..."
 curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$TMP_DIR"
-ROOTD_BIN="$TMP_DIR/rootd/dist/rootd"
-chmod +x "$ROOTD_BIN"
+SHELLMCP_BIN="$TMP_DIR/shellmcp/dist/shellmcp"
+chmod +x "$SHELLMCP_BIN"
 
-echo "Generated ROOTD token: $TOKEN"
+echo "Generated SHELLMCP token: $TOKEN"
 
-export ROOTD_TOKEN="$TOKEN"
+export SHELLMCP_TOKEN="$TOKEN"
 export HUB_URL="$HUB_URL"
 
-nohup "$ROOTD_BIN" >/tmp/rootd.log 2>&1 &
+nohup "$SHELLMCP_BIN" >/tmp/shellmcp.log 2>&1 &
 
-echo "rootd running and registered to $HUB_URL"
-echo "Use ROOTD_TOKEN=$TOKEN for authorization"
+echo "shellmcp running and registered to $HUB_URL"
+echo "Use SHELLMCP_TOKEN=$TOKEN for authorization"

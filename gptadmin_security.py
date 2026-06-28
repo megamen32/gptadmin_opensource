@@ -77,7 +77,7 @@ def load_public_key_b64(path: str | Path) -> str:
     return Path(path).read_text().strip()
 
 
-def load_or_create_identity(config_dir: str | Path, name: Optional[str] = None, prefix: str = "rootd") -> Dict[str, Any]:
+def load_or_create_identity(config_dir: str | Path, name: Optional[str] = None, prefix: str = "shellmcp") -> Dict[str, Any]:
     cfg = Path(config_dir)
     cfg.mkdir(parents=True, exist_ok=True)
     key_file = cfg / f"{prefix}_ed25519"

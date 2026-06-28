@@ -1,31 +1,31 @@
 #requires -version 5.1
 <#
-GPT Admin rootd Windows public installer.
+GPT Admin shellmcp Windows public installer.
 
 Installs the obfuscated PyInstaller/PyArmor Windows artifact from a public URL.
 No git checkout, no private repo, no local Python runtime.
 Autostart uses built-in Windows Task Scheduler.
 
 Usage:
-  powershell -ExecutionPolicy Bypass -File .\install_win.ps1 -HubUrl https://gptadmin.bezrabotnyi.com -RootdToken srv_secret
-  powershell -ExecutionPolicy Bypass -Command "irm https://became.bezrabotnyi.com/install_win.ps1 -OutFile $env:TEMP\install_win.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\install_win.ps1 -HubUrl https://gptadmin.bezrabotnyi.com -RootdToken srv_secret"
+  powershell -ExecutionPolicy Bypass -File .\install_win.ps1 -HubUrl https://gptadmin.bezrabotnyi.com -ShellmcpToken srv_secret
+  powershell -ExecutionPolicy Bypass -Command "irm https://became.bezrabotnyi.com/install_win.ps1 -OutFile $env:TEMP\install_win.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\install_win.ps1 -HubUrl https://gptadmin.bezrabotnyi.com -ShellmcpToken srv_secret"
 
 Env overrides:
-  PACKAGE_URL, GPTADMIN_DIR, HUB_URL, ROOTD_TOKEN, ROOTD_PORT, ROOTD_BIND, ROOTD_NAME, ROOTD_URL, ROOTD_TRANSPORT, HUB_PUBLIC_KEY, ROOTD_TASK_NAME
+  PACKAGE_URL, GPTADMIN_DIR, HUB_URL, SHELLMCP_TOKEN, SHELLMCP_PORT, SHELLMCP_BIND, SHELLMCP_NAME, SHELLMCP_URL, SHELLMCP_TRANSPORT, HUB_PUBLIC_KEY, SHELLMCP_TASK_NAME
 #>
 
 param(
     [string]$PackageUrl = $env:PACKAGE_URL,
     [string]$InstallDir = $env:GPTADMIN_DIR,
     [string]$HubUrl = $env:HUB_URL,
-    [string]$RootdToken = $env:ROOTD_TOKEN,
-    [int]$RootdPort = $(if ($env:ROOTD_PORT) { [int]$env:ROOTD_PORT } else { 25900 }),
-    [string]$RootdBind = $(if ($env:ROOTD_BIND) { $env:ROOTD_BIND } else { '0.0.0.0' }),
-    [string]$RootdName = $env:ROOTD_NAME,
-    [string]$RootdUrl = $env:ROOTD_URL,
-    [string]$RootdTransport = $(if ($env:ROOTD_TRANSPORT) { $env:ROOTD_TRANSPORT } else { 'polling' }),
+    [string]$ShellmcpToken = $env:SHELLMCP_TOKEN,
+    [int]$ShellmcpPort = $(if ($env:SHELLMCP_PORT) { [int]$env:SHELLMCP_PORT } else { 25900 }),
+    [string]$ShellmcpBind = $(if ($env:SHELLMCP_BIND) { $env:SHELLMCP_BIND } else { '0.0.0.0' }),
+    [string]$ShellmcpName = $env:SHELLMCP_NAME,
+    [string]$ShellmcpUrl = $env:SHELLMCP_URL,
+    [string]$ShellmcpTransport = $(if ($env:SHELLMCP_TRANSPORT) { $env:SHELLMCP_TRANSPORT } else { 'polling' }),
     [string]$HubPublicKey = $(if ($env:HUB_PUBLIC_KEY) { $env:HUB_PUBLIC_KEY } else { 'mEhYDiOc9ZxY54dXelDTsVD2Wjew3f6R0f2dVW2qKPQ' }),
-    [string]$TaskName = $env:ROOTD_TASK_NAME,
+    [string]$TaskName = $env:SHELLMCP_TASK_NAME,
     [switch]$User,
     [switch]$System,
     [switch]$Uninstall,
@@ -49,21 +49,21 @@ if (-not $InstallDir) {
     else { $InstallDir = Join-Path $env:ProgramData 'gptadmin' }
 }
 if (-not $HubUrl) { $HubUrl = 'https://gptadmin.bezrabotnyi.com' }
-if (-not $RootdToken) { $RootdToken = ([System.Guid]::NewGuid().ToString('n')) }
-if (-not $RootdName) { $RootdName = $env:COMPUTERNAME }
-if (-not $RootdUrl) { $RootdUrl = "http://$RootdName`:$RootdPort" }
+if (-not $ShellmcpToken) { $ShellmcpToken = ([System.Guid]::NewGuid().ToString('n')) }
+if (-not $ShellmcpName) { $ShellmcpName = $env:COMPUTERNAME }
+if (-not $ShellmcpUrl) { $ShellmcpUrl = "http://$ShellmcpName`:$ShellmcpPort" }
 if (-not $TaskName) {
-    if ($UserMode) { $TaskName = "gptadmin-rootd-$env:USERNAME" }
-    else { $TaskName = 'gptadmin-rootd' }
+    if ($UserMode) { $TaskName = "gptadmin-shellmcp-$env:USERNAME" }
+    else { $TaskName = 'gptadmin-shellmcp' }
 }
 
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $BinDir = Join-Path $InstallDir 'bin'
 $LogDir = Join-Path $InstallDir 'logs'
-$EnvFile = Join-Path $InstallDir 'rootd.env'
-$RunScript = Join-Path $InstallDir 'run_rootd.ps1'
+$EnvFile = Join-Path $InstallDir 'shellmcp.env'
+$RunScript = Join-Path $InstallDir 'run_shellmcp.ps1'
 $HubPublicKeyFile = Join-Path $InstallDir 'hub_ed25519.pub'
-$CurrentExe = Join-Path $BinDir 'rootd.exe'
+$CurrentExe = Join-Path $BinDir 'shellmcp.exe'
 
 function Require-Admin {
     if (-not $IsAdmin) {
@@ -81,8 +81,8 @@ function Download-And-InstallArtifact {
     Invoke-WebRequest -UseBasicParsing -Uri $PackageUrl -OutFile $archive
     Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
 
-    $exe = Get-ChildItem -Path $tmp -Recurse -File -Include 'rootd.exe','rootd_win.exe' | Select-Object -First 1
-    if (-not $exe) { throw 'rootd executable not found in package. Expected rootd.exe or rootd_win.exe.' }
+    $exe = Get-ChildItem -Path $tmp -Recurse -File -Include 'shellmcp.exe','shellmcp_win.exe' | Select-Object -First 1
+    if (-not $exe) { throw 'shellmcp executable not found in package. Expected shellmcp.exe or shellmcp_win.exe.' }
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -90,7 +90,7 @@ function Download-And-InstallArtifact {
         Start-Sleep -Seconds 3
     }
     if (Test-Path $CurrentExe) {
-        Copy-Item $CurrentExe (Join-Path $BinDir "rootd.exe.bak.$stamp") -Force
+        Copy-Item $CurrentExe (Join-Path $BinDir "shellmcp.exe.bak.$stamp") -Force
     }
     Copy-Item $exe.FullName $CurrentExe -Force
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -99,42 +99,42 @@ function Download-And-InstallArtifact {
 function Write-Config {
     Set-Content -Path $HubPublicKeyFile -Value $HubPublicKey -Encoding ASCII
     @(
-        "ROOTD_TOKEN=$RootdToken",
+        "SHELLMCP_TOKEN=$ShellmcpToken",
         "HUB_URL=$HubUrl",
-        "ROOTD_PORT=$RootdPort",
-        "ROOTD_BIND=$RootdBind",
-        "ROOTD_TRANSPORT=$RootdTransport",
-        "ROOTD_URL=$RootdUrl",
-        "ROOTD_NAME=$RootdName",
+        "SHELLMCP_PORT=$ShellmcpPort",
+        "SHELLMCP_BIND=$ShellmcpBind",
+        "SHELLMCP_TRANSPORT=$ShellmcpTransport",
+        "SHELLMCP_URL=$ShellmcpUrl",
+        "SHELLMCP_NAME=$ShellmcpName",
         "QUEUE_URL=1",
         "HUB_PUBLIC_KEY_FILE=$HubPublicKeyFile",
-        "ROOTD_SERVICE_NAME=$TaskName",
-        "ROOTD_SERVICE_SCOPE=$(if ($UserMode) { 'user' } else { 'system' })",
-        "ROOTD_AUTO_UPDATE=1",
-        "ROOTD_UPDATE_INTERVAL_S=3600",
-        "ROOTD_UPDATE_MANIFEST_URL=$HubUrl/artifacts/rootd.json",
-        "ROOTD_UPDATE_TOKEN=$RootdToken"
+        "SHELLMCP_SERVICE_NAME=$TaskName",
+        "SHELLMCP_SERVICE_SCOPE=$(if ($UserMode) { 'user' } else { 'system' })",
+        "SHELLMCP_AUTO_UPDATE=1",
+        "SHELLMCP_UPDATE_INTERVAL_S=3600",
+        "SHELLMCP_UPDATE_MANIFEST_URL=$HubUrl/artifacts/shellmcp.json",
+        "SHELLMCP_UPDATE_TOKEN=$ShellmcpToken"
     ) | Set-Content -Path $EnvFile -Encoding ASCII
 
     @"
 `$ErrorActionPreference = 'Stop'
-`$env:ROOTD_TOKEN = '$RootdToken'
+`$env:SHELLMCP_TOKEN = '$ShellmcpToken'
 `$env:HUB_URL = '$HubUrl'
-`$env:ROOTD_PORT = '$RootdPort'
-`$env:ROOTD_BIND = '$RootdBind'
-`$env:ROOTD_TRANSPORT = '$RootdTransport'
-`$env:ROOTD_URL = '$RootdUrl'
-`$env:ROOTD_NAME = '$RootdName'
+`$env:SHELLMCP_PORT = '$ShellmcpPort'
+`$env:SHELLMCP_BIND = '$ShellmcpBind'
+`$env:SHELLMCP_TRANSPORT = '$ShellmcpTransport'
+`$env:SHELLMCP_URL = '$ShellmcpUrl'
+`$env:SHELLMCP_NAME = '$ShellmcpName'
 `$env:QUEUE_URL = '1'
 `$env:HUB_PUBLIC_KEY_FILE = '$HubPublicKeyFile'
-`$env:ROOTD_SERVICE_NAME = '$TaskName'
-`$env:ROOTD_SERVICE_SCOPE = '$(if ($UserMode) { 'user' } else { 'system' })'
-`$env:ROOTD_AUTO_UPDATE = '1'
-`$env:ROOTD_UPDATE_INTERVAL_S = '3600'
-`$env:ROOTD_UPDATE_MANIFEST_URL = '$HubUrl/artifacts/rootd.json'
-`$env:ROOTD_UPDATE_TOKEN = '$RootdToken'
+`$env:SHELLMCP_SERVICE_NAME = '$TaskName'
+`$env:SHELLMCP_SERVICE_SCOPE = '$(if ($UserMode) { 'user' } else { 'system' })'
+`$env:SHELLMCP_AUTO_UPDATE = '1'
+`$env:SHELLMCP_UPDATE_INTERVAL_S = '3600'
+`$env:SHELLMCP_UPDATE_MANIFEST_URL = '$HubUrl/artifacts/shellmcp.json'
+`$env:SHELLMCP_UPDATE_TOKEN = '$ShellmcpToken'
 Set-Location '$InstallDir'
-& '$CurrentExe' *> '$LogDir\rootd.task.log'
+& '$CurrentExe' *> '$LogDir\shellmcp.task.log'
 "@ | Set-Content -Path $RunScript -Encoding UTF8
 }
 
@@ -165,24 +165,24 @@ Install-Task
 if (-not $NoStart) { Start-ScheduledTask -TaskName $TaskName }
 Start-Sleep -Seconds 3
 
-Write-Host "Installed GPT Admin rootd"
+Write-Host "Installed GPT Admin shellmcp"
 Write-Host "InstallMode: $(if ($UserMode) { 'user' } else { 'system' })"
 Write-Host "TaskName: $TaskName"
 Write-Host "InstallDir: $InstallDir"
 Write-Host "PackageUrl: $PackageUrl"
 Write-Host "Exe: $CurrentExe"
 Write-Host "HubUrl: $HubUrl"
-Write-Host "Port: $RootdPort"
-Write-Host "RootdUrl: $RootdUrl"
-Write-Host "Transport: $RootdTransport"
+Write-Host "Port: $ShellmcpPort"
+Write-Host "ShellmcpUrl: $ShellmcpUrl"
+Write-Host "Transport: $ShellmcpTransport"
 Write-Host "HubPublicKeyFile: $HubPublicKeyFile"
-Write-Host "Token: $RootdToken"
-if ($RootdTransport -eq 'polling') {
+Write-Host "Token: $ShellmcpToken"
+if ($ShellmcpTransport -eq 'polling') {
     Write-Host 'Polling mode: local HTTP listener is intentionally disabled.'
 } else {
     try {
-        Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$RootdPort/system/info" -Headers @{ Authorization = "Bearer $RootdToken" } | ConvertTo-Json -Compress | Write-Host
+        Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$ShellmcpPort/system/info" -Headers @{ Authorization = "Bearer $ShellmcpToken" } | ConvertTo-Json -Compress | Write-Host
     } catch {
-        Write-Warning "Local rootd health check failed. Check $LogDir\rootd.task.log"
+        Write-Warning "Local shellmcp health check failed. Check $LogDir\shellmcp.task.log"
     }
 }

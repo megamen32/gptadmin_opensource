@@ -1,25 +1,21 @@
 [Unit]
-Description=GPTAdmin Shell MCP agent (legacy Python template, deprecated)
+Description=Root Daemon for GPT Control (legacy Python shellmcp, deprecated)
 After=network.target
 
 [Service]
-# DEPRECATED: this template starts the legacy Python shellmcp/rootd.
-# Use go-shellmcp/rootd-go-canary for new deployments.
+# DEPRECATED: this template starts legacy Python shellmcp.
+# Use go-shellmcp/shellmcp-go-canary for new deployments.
 WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/rootd.py
-Environment=SHELL_TOKEN=srv_secret
-Environment=ROOTD_TOKEN=srv_secret
-Environment=SHELL_URL=http://203.0.113.10:25900
-Environment=ROOTD_URL=http://203.0.113.10:25900
-Environment=SHELL_NAME=admin-server-100
-Environment=ROOTD_NAME=admin-server-100
-Environment=SHELL_IDENTITY_DIR=/etc/gptadmin
-Environment=ROOTD_IDENTITY_DIR=/etc/gptadmin
+# Запуск из вашего .venv
+ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/shellmcp.py
+
+# Переменные окружения: агентов регистрируются у Hub по HTTPS
+Environment=SHELLMCP_TOKEN=srv_secret
+Environment=SHELLMCP_URL=http://203.0.113.10:25900
 Environment=HUB_URL=https://gptadmin.bezrabotnyi.com/heartbeat
 Environment=EXEC_TIMEOUT=300
-Environment=LOG_LIMIT_B=8192
-Environment=SHELL_TRANSPORT=webhook
-Environment=ROOTD_TRANSPORT=webhook
+Environment=LOG_LIMIT_B=10485760
+Environment=SHELLMCP_TRANSPORT=webhook
 Restart=always
 RestartSec=5
 User=root

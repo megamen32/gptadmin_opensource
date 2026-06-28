@@ -15,8 +15,8 @@ for target in "${targets[@]}"; do
   GOARCH=${target#*/}
   ext=""
   [ "$GOOS" = windows ] && ext=".exe"
-  out=".build/cross/rootd-go-${GOOS}-${GOARCH}${ext}"
+  out=".build/cross/shellmcp-go-${GOOS}-${GOARCH}${ext}"
   echo "==> $GOOS/$GOARCH -> $out"
-  GOOS=$GOOS GOARCH=$GOARCH go build -o "$out" ./cmd/rootd-go
+  GOOS=$GOOS GOARCH=$GOARCH go build -o "$out" ./cmd/shellmcp-go
   ls -lh "$out"
 done

@@ -1,13 +1,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOTD_UNIT="$SCRIPT_DIR/systemd/rootd.service"
+SHELLMCP_UNIT="$SCRIPT_DIR/systemd/shellmcp.service"
 
 # Копируем юниты
-sudo cp "$ROOTD_UNIT" /etc/systemd/system/
+sudo cp "$SHELLMCP_UNIT" /etc/systemd/system/
 
 # Перечитываем systemd и запускаем оба
 sudo systemctl daemon-reload
-sudo systemctl enable rootd
-sudo systemctl restart rootd
+sudo systemctl enable shellmcp
+sudo systemctl restart shellmcp
 
 # Проверка
-sudo systemctl status rootd
+sudo systemctl status shellmcp

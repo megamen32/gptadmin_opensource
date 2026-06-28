@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Black-box rootd HTTP contract tests.
+"""Black-box shellmcp HTTP contract tests.
 
-These tests intentionally exercise rootd through its HTTP API instead of importing
+These tests intentionally exercise shellmcp through its HTTP API instead of importing
 implementation internals. Any implementation can run this suite (Python, Go, Rust,
-etc.) by setting ROOTD_CONTRACT_COMMANDS to one or more newline-separated commands
-that start a rootd-compatible process.
+etc.) by setting SHELLMCP_CONTRACT_COMMANDS to one or more newline-separated commands
+that start a shellmcp-compatible process.
 
 Example:
-  ROOTD_CONTRACT_COMMANDS=$'python3 client/rootd_pure.py\n./target/release/rootd-rs' pytest tests/test_rootd_contract.py
+  SHELLMCP_CONTRACT_COMMANDS=$'python3 client/shellmcp_pure.py\n./target/release/shellmcp-rs' pytest tests/test_shellmcp_contract.py
 """
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_COMMANDS = [f"{sys.executable} {ROOT / 'client' / 'rootd_pure.py'}"]
+DEFAULT_COMMANDS = [f"{sys.executable} {ROOT / 'client' / 'shellmcp_pure.py'}"]
 
 
 def _contract_commands() -> list[str]:
-    raw = os.getenv("ROOTD_CONTRACT_COMMANDS", "").strip()
+    raw = os.getenv("SHELLMCP_CONTRACT_COMMANDS", "").strip()
     if not raw:
         return DEFAULT_COMMANDS
     commands = [line.strip() for line in raw.splitlines() if line.strip() and not line.strip().startswith("#")]
@@ -67,7 +67,7 @@ def _http_json(method: str, url: str, token: str, payload: dict | None = None, t
 
 
 @dataclass
-class RootdProcess:
+class ShellmcpProcess:
     command: str
     port: int
     token: str
@@ -93,7 +93,7 @@ class RootdProcess:
 
 
 @pytest.fixture(params=CONTRACT_COMMANDS, ids=lambda cmd: Path(cmd.split()[0]).name)
-def rootd_contract(request, tmp_path: Path):
+def shellmcp_contract(request, tmp_path: Path):
     command = request.param
     port = _free_port()
     token = "contract-token"
@@ -103,40 +103,40 @@ def rootd_contract(request, tmp_path: Path):
     Path(cwd).mkdir()
     identity_dir = tmp_path / "identity"
     spill_dir = tmp_path / "spool"
-    log_path = tmp_path / "rootd.log"
+    log_path = tmp_path / "shellmcp.log"
 
     env = os.environ.copy()
     env.update(
         {
-            "ROOTD_TOKEN": token,
+            "SHELLMCP_TOKEN": token,
             "SHELL_TOKEN": token,
-            "ROOTD_PORT": str(port),
+            "SHELLMCP_PORT": str(port),
             "SHELL_PORT": str(port),
-            "ROOTD_BIND": "127.0.0.1",
+            "SHELLMCP_BIND": "127.0.0.1",
             "SHELL_HOST": "127.0.0.1",
-            "ROOTD_NAME": "contract-rootd",
-            "SHELL_NAME": "contract-rootd",
-            "ROOTD_URL": f"http://127.0.0.1:{port}",
+            "SHELLMCP_NAME": "contract-shellmcp",
+            "SHELL_NAME": "contract-shellmcp",
+            "SHELLMCP_URL": f"http://127.0.0.1:{port}",
             "SHELL_URL": f"http://127.0.0.1:{port}",
-            "ROOTD_IDENTITY_DIR": str(identity_dir),
+            "SHELLMCP_IDENTITY_DIR": str(identity_dir),
             "SHELL_IDENTITY_DIR": str(identity_dir),
-            "ROOTD_SPILL_DIR": str(spill_dir),
+            "SHELLMCP_SPILL_DIR": str(spill_dir),
             "SHELL_SPILL_DIR": str(spill_dir),
-            "ROOTD_DEFAULT_CWD": cwd,
+            "SHELLMCP_DEFAULT_CWD": cwd,
             "SHELL_DEFAULT_CWD": cwd,
-            "ROOTD_DEFAULT_HOME": home,
+            "SHELLMCP_DEFAULT_HOME": home,
             "SHELL_DEFAULT_HOME": home,
             # Disable background hub/queue behavior for deterministic local contract tests.
             "HUB_URL": "",
             "QUEUE_URL": "",
-            "ROOTD_QUEUE": "0",
+            "SHELLMCP_QUEUE": "0",
             "SHELL_QUEUE": "0",
-            "ROOTD_HEARTBEAT": "0",
+            "SHELLMCP_HEARTBEAT": "0",
             "SHELL_HEARTBEAT": "0",
         }
     )
     if current_user:
-        env["ROOTD_DEFAULT_USER"] = current_user
+        env["SHELLMCP_DEFAULT_USER"] = current_user
         env["SHELL_DEFAULT_USER"] = current_user
 
     with log_path.open("wb") as log:
@@ -150,14 +150,14 @@ def rootd_contract(request, tmp_path: Path):
             start_new_session=True,
         )
 
-    rootd = RootdProcess(command=command, port=port, token=token, proc=proc, log_path=log_path)
+    shellmcp = ShellmcpProcess(command=command, port=port, token=token, proc=proc, log_path=log_path)
     deadline = time.time() + 10
     last_error = None
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise AssertionError(f"rootd exited early rc={proc.returncode}; log:\n{log_path.read_text(errors='replace')}")
+            raise AssertionError(f"shellmcp exited early rc={proc.returncode}; log:\n{log_path.read_text(errors='replace')}")
         try:
-            status, _ = rootd.request("GET", "/system/info")
+            status, _ = shellmcp.request("GET", "/system/info")
             if status == 200:
                 break
             last_error = f"HTTP {status}"
@@ -165,30 +165,30 @@ def rootd_contract(request, tmp_path: Path):
             last_error = repr(e)
         time.sleep(0.1)
     else:
-        rootd.stop()
-        raise AssertionError(f"rootd did not become ready: {last_error}; log:\n{log_path.read_text(errors='replace')}")
+        shellmcp.stop()
+        raise AssertionError(f"shellmcp did not become ready: {last_error}; log:\n{log_path.read_text(errors='replace')}")
 
     try:
-        yield rootd
+        yield shellmcp
     finally:
-        rootd.stop()
+        shellmcp.stop()
 
 
-def test_rootd_contract_requires_auth(rootd_contract: RootdProcess):
-    req = urllib.request.Request(f"{rootd_contract.base_url}/system/info", headers={"Connection": "close"})
+def test_shellmcp_contract_requires_auth(shellmcp_contract: ShellmcpProcess):
+    req = urllib.request.Request(f"{shellmcp_contract.base_url}/system/info", headers={"Connection": "close"})
     with pytest.raises(urllib.error.HTTPError) as ei:
         urllib.request.urlopen(req, timeout=5)
     assert ei.value.code == 401
 
 
-def test_rootd_contract_system_endpoints_advertise_identity_and_defaults(rootd_contract: RootdProcess):
-    status, info = rootd_contract.request("GET", "/system/info")
+def test_shellmcp_contract_system_endpoints_advertise_identity_and_defaults(shellmcp_contract: ShellmcpProcess):
+    status, info = shellmcp_contract.request("GET", "/system/info")
     assert status == 200
     assert info.get("host") or info.get("hostname") or info.get("name")
 
-    # Defaults are part of the rootd health/metadata contract. Implementations in
+    # Defaults are part of the shellmcp health/metadata contract. Implementations in
     # any language should expose them here so the hub can reason about execution.
-    status, health = rootd_contract.request("GET", "/system/health")
+    status, health = shellmcp_contract.request("GET", "/system/health")
     assert status == 200
     assert health.get("default_cwd")
     assert health.get("default_home")
@@ -196,12 +196,12 @@ def test_rootd_contract_system_endpoints_advertise_identity_and_defaults(rootd_c
         assert health.get("default_user") in {os.getenv("USER"), os.getenv("LOGNAME")}
 
 
-def test_rootd_contract_exec_supports_cwd_env_and_default_user(rootd_contract: RootdProcess):
-    cmd = "printf 'user=%s\n' \"$(whoami)\"; printf 'pwd=%s\n' \"$(pwd)\"; printf 'env=%s\n' \"$ROOTD_CONTRACT_VAR\"; printf 'home=%s\n' \"$HOME\""
-    status, res = rootd_contract.request(
+def test_shellmcp_contract_exec_supports_cwd_env_and_default_user(shellmcp_contract: ShellmcpProcess):
+    cmd = "printf 'user=%s\n' \"$(whoami)\"; printf 'pwd=%s\n' \"$(pwd)\"; printf 'env=%s\n' \"$SHELLMCP_CONTRACT_VAR\"; printf 'home=%s\n' \"$HOME\""
+    status, res = shellmcp_contract.request(
         "POST",
         "/exec",
-        {"cmd": cmd, "timeout": 5, "env": {"ROOTD_CONTRACT_VAR": "ok-env"}},
+        {"cmd": cmd, "timeout": 5, "env": {"SHELLMCP_CONTRACT_VAR": "ok-env"}},
     )
     assert status == 200
     assert res.get("returncode") == 0, res
@@ -213,17 +213,17 @@ def test_rootd_contract_exec_supports_cwd_env_and_default_user(rootd_contract: R
         assert f"user={os.getenv('USER') or os.getenv('LOGNAME')}" in out
 
 
-def test_rootd_contract_exec_allows_explicit_cwd(rootd_contract: RootdProcess, tmp_path: Path):
+def test_shellmcp_contract_exec_allows_explicit_cwd(shellmcp_contract: ShellmcpProcess, tmp_path: Path):
     custom_cwd = tmp_path / "request-cwd"
     custom_cwd.mkdir()
-    status, res = rootd_contract.request("POST", "/exec", {"cmd": "pwd", "timeout": 5, "cwd": str(custom_cwd)})
+    status, res = shellmcp_contract.request("POST", "/exec", {"cmd": "pwd", "timeout": 5, "cwd": str(custom_cwd)})
     assert status == 200
     assert res.get("returncode") == 0, res
     assert str(custom_cwd) in res.get("stdout", "")
 
 
-def test_rootd_contract_exec_reports_failures(rootd_contract: RootdProcess):
-    status, res = rootd_contract.request("POST", "/exec", {"cmd": "echo bad >&2; exit 23", "timeout": 5})
+def test_shellmcp_contract_exec_reports_failures(shellmcp_contract: ShellmcpProcess):
+    status, res = shellmcp_contract.request("POST", "/exec", {"cmd": "echo bad >&2; exit 23", "timeout": 5})
     assert status == 200
     assert res.get("returncode") == 23
     assert "bad" in res.get("stderr", "")

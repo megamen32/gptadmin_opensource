@@ -47,28 +47,28 @@ type Config struct {
 }
 
 func FromEnv() Config {
-	port := env("SHELL_PORT", env("ROOTD_PORT", env("PORT", "25900")))
-	host := env("SHELL_HOST", env("ROOTD_HOST", ""))
+	port := env("SHELL_PORT", env("SHELLMCP_PORT", env("PORT", "25900")))
+	host := env("SHELL_HOST", env("SHELLMCP_HOST", ""))
 	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", "8192"), 10, 64)
 	timeout, _ := strconv.Atoi(env("EXEC_TIMEOUT", "300"))
-	spill := env("SHELL_SPOOL_DIR", env("ROOTD_SPOOL_DIR", filepath.Join(os.TempDir(), "rootd-go-spool")))
-	name := env("SHELL_NAME", env("ROOTD_NAME", ""))
-	baseURL := env("SHELL_URL", env("ROOTD_URL", "http://127.0.0.1:"+port))
+	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))
+	name := env("SHELL_NAME", env("SHELLMCP_NAME", ""))
+	baseURL := env("SHELL_URL", env("SHELLMCP_URL", "http://127.0.0.1:"+port))
 	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "60"))
 	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
-	mode := env("SHELL_MODE", env("ROOTD_MODE", ""))
+	mode := env("SHELL_MODE", env("SHELLMCP_MODE", ""))
 	if mode == "" {
-		if truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))) {
+		if truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))) {
 			mode = "long_poll"
 		} else {
 			mode = "webhook"
 		}
 	}
-	outbox := env("SHELL_OUTBOX_DIR", env("ROOTD_OUTBOX_DIR", filepath.Join(spill, "outbox")))
-	defaultUser := env("SHELL_DEFAULT_USER", env("ROOTD_DEFAULT_USER", ""))
-	defaultHome := env("SHELL_DEFAULT_HOME", env("ROOTD_DEFAULT_HOME", ""))
-	defaultCwd := env("SHELL_DEFAULT_CWD", env("ROOTD_DEFAULT_CWD", defaultHome))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("ROOTD_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("ROOTD_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("ROOTD_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("ROOTD_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
+	outbox := env("SHELL_OUTBOX_DIR", env("SHELLMCP_OUTBOX_DIR", filepath.Join(spill, "outbox")))
+	defaultUser := env("SHELL_DEFAULT_USER", env("SHELLMCP_DEFAULT_USER", ""))
+	defaultHome := env("SHELL_DEFAULT_HOME", env("SHELLMCP_DEFAULT_HOME", ""))
+	defaultCwd := env("SHELL_DEFAULT_CWD", env("SHELLMCP_DEFAULT_CWD", defaultHome))
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
 }
 
 func env(k, d string) string {
@@ -137,7 +137,7 @@ func (s *Server) ListenAndServe() error {
 		go s.queueLoop(ctx)
 	}
 	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("rootd-go listening addr=%s name=%s heartbeat=%v queue=%v", s.cfg.Addr, s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
+	log.Printf("shellmcp-go listening addr=%s name=%s heartbeat=%v queue=%v", s.cfg.Addr, s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
 	return srv.ListenAndServe()
 }
 
@@ -169,7 +169,7 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "rootd-go", "build_version": BuildVersion, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": BuildVersion, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

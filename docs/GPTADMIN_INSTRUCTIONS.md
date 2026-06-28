@@ -4,12 +4,12 @@ BASIC URL
   - All requests go to https://gptadmin.bezrabotnyi.com
 
 ENDPOINTS
-  - `/servers` – list registered rootd instances
+  - `/servers` – list registered shellmcp instances
   - `/bulk/exec` – run a command on several servers at once
-  - `/srv/{path}?server=name` – proxy any rootd call
+  - `/srv/{path}?server=name` – proxy any shellmcp call
       • `name` is the target server (e.g.: `admin-server-100`, `admin-server-88`, `server-01`).
         Ask the user for available names if unsure.
-      • `path` is the endpoint on rootd, for example:
+      • `path` is the endpoint on shellmcp, for example:
           ◦ `exec`
 
 CONFIRMATION OF DANGEROUS ACTIONS
@@ -18,7 +18,7 @@ CONFIRMATION OF DANGEROUS ACTIONS
   Execute only after explicit confirmation.
 
 OUTPUT FORMAT
-  • stdout/stderr from rootd is limited to 8KB.
+  • stdout/stderr from shellmcp is limited to 8KB.
   • Show the key part of the response, collapse long logs.
 
 DO NOT

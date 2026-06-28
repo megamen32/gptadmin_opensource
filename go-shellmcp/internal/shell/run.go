@@ -98,7 +98,7 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 
 	spillDir := req.SpillDir
 	if spillDir == "" {
-		spillDir = filepath.Join(os.TempDir(), "rootd-go-spool")
+		spillDir = filepath.Join(os.TempDir(), "shellmcp-go-spool")
 	}
 	spoolID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 	stdoutPath := filepath.Join(spillDir, spoolID+".stdout")

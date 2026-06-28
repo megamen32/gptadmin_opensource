@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for rootd_pure (dependency-free rootd)"""
+"""Unit tests for shellmcp_pure (dependency-free shellmcp)"""
 import sys
 import pytest
 from pathlib import Path
@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from client.rootd_pure import _truncate, system_info, system_health, run_cmd
+from client.shellmcp_pure import _truncate, system_info, system_health, run_cmd
 
 
 def test_truncate_short_string():
@@ -22,7 +22,7 @@ def test_truncate_short_string():
 def test_truncate_long_string():
     """Test that long strings are truncated with marker"""
     # Set LOG_MAX to a small value for testing
-    import client.rootd_pure as pure_module
+    import client.shellmcp_pure as pure_module
     original_max = pure_module.LOG_MAX
     pure_module.LOG_MAX = 10
     

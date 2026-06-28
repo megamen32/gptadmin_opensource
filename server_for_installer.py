@@ -5,7 +5,7 @@ Clients can download the scripts from this service running on port 22554.
 
 Endpoints:
   * /install.sh        – hub installer
-  * /install_rootd.sh  – Linux agent installer
+  * /install_shellmcp.sh  – Linux agent installer
   * /install_win.ps1   – Windows agent installer
   * /api.json          – OpenAPI schema
 """
@@ -53,11 +53,11 @@ def _artifact_meta(path: Path, route: str) -> dict:
 def _artifact_manifest() -> dict:
     candidates = {
         "gptadmin.py": (BUILD_DIR / "cli" / "gptadmin.py", "/gptadmin.py"),
-        "rootd.py": (REPO_DIR / "client" / "rootd.py", "/rootd.py"),
-        "rootd_pure.py": (REPO_DIR / "client" / "rootd_pure.py", "/rootd_pure.py"),
+        "shellmcp.py": (REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py"),
+        "shellmcp_pure.py": (REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
         "gptadmin-hub.tar.gz": (BUILD_DIR / "gptadmin-hub.tar.gz", "/gptadmin-hub.tar.gz"),
-        "gptadmin-rootd.tar.gz": (BUILD_DIR / "gptadmin-rootd.tar.gz", "/gptadmin-rootd.tar.gz"),
+        "gptadmin-shellmcp.tar.gz": (BUILD_DIR / "gptadmin-shellmcp.tar.gz", "/gptadmin-shellmcp.tar.gz"),
         "gptadmin-win.zip": (PUBLIC_DIR / "gptadmin-win.zip", "/gptadmin-win.zip"),
     }
     artifacts = {}
@@ -81,9 +81,9 @@ async def get_install_sh():
     return Response(content, media_type="text/plain")
 
 
-@app.get("/install_rootd.sh")
-async def get_install_rootd_sh():
-    content = load_script(DEPLOY_DIR / "install_rootd.sh")
+@app.get("/install_shellmcp.sh")
+async def get_install_shellmcp_sh():
+    content = load_script(DEPLOY_DIR / "install_shellmcp.sh")
     return Response(content, media_type="text/plain")
 
 
@@ -114,13 +114,13 @@ async def get_hub():
     return _bin(BUILD_DIR / "gptadmin-hub.tar.gz", "gptadmin-hub.tar.gz", "application/gzip")
 
 
-@app.get('/gptadmin-rootd.tar.gz')
-async def get_rootd():
-    return _bin(BUILD_DIR / "gptadmin-rootd.tar.gz", "gptadmin-rootd.tar.gz", "application/gzip")
+@app.get('/gptadmin-shellmcp.tar.gz')
+async def get_shellmcp():
+    return _bin(BUILD_DIR / "gptadmin-shellmcp.tar.gz", "gptadmin-shellmcp.tar.gz", "application/gzip")
 
 
 @app.get('/gptadmin-win.zip')
-async def get_rootd_win():
+async def get_shellmcp_win():
     return _bin(PUBLIC_DIR / "gptadmin-win.zip", "gptadmin-win.zip", "application/zip")
 
 
@@ -129,24 +129,24 @@ async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")
 
 
-@app.get('/rootd_pure.py')
-async def get_rootd_pure_py():
-    return _bin(REPO_DIR / "client" / "rootd_pure.py", "rootd_pure.py", "text/x-python")
+@app.get('/shellmcp_pure.py')
+async def get_shellmcp_pure_py():
+    return _bin(REPO_DIR / "client" / "shellmcp_pure.py", "shellmcp_pure.py", "text/x-python")
 
 
-@app.get('/rootd.py')
-async def get_rootd_py():
-    return _bin(REPO_DIR / "client" / "rootd.py", "rootd.py", "text/x-python")
+@app.get('/shellmcp.py')
+async def get_shellmcp_py():
+    return _bin(REPO_DIR / "client" / "shellmcp.py", "shellmcp.py", "text/x-python")
 
 
-@app.get('/rootd.py.json')
-async def get_rootd_py_meta():
-    return _artifact_meta(REPO_DIR / "client" / "rootd.py", "/rootd.py")
+@app.get('/shellmcp.py.json')
+async def get_shellmcp_py_meta():
+    return _artifact_meta(REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py")
 
 
-@app.get('/rootd_pure.py.json')
-async def get_rootd_pure_py_meta():
-    return _artifact_meta(REPO_DIR / "client" / "rootd_pure.py", "/rootd_pure.py")
+@app.get('/shellmcp_pure.py.json')
+async def get_shellmcp_pure_py_meta():
+    return _artifact_meta(REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py")
 
 
 @app.get('/manifest.json')

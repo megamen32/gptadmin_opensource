@@ -8,7 +8,7 @@ test -x /usr/local/bin/gptadmin
 test -f /etc/gptadmin/gptadmin.env
 grep -q 'FRP_ENABLE=true' /etc/gptadmin/gptadmin.env
 grep -q 'INSTALL_HUB=true' /etc/gptadmin/gptadmin.env
-grep -q 'INSTALL_ROOTD=true' /etc/gptadmin/gptadmin.env
+grep -q 'INSTALL_SHELLMCP=true' /etc/gptadmin/gptadmin.env
 test -f /etc/systemd/system/gptadmin-hub.service
 test -f /etc/systemd/system/gptadmin-shellmcp.service
 test -f /etc/systemd/system/gptadmin-frpc.service

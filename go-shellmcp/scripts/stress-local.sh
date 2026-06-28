@@ -6,10 +6,10 @@ TOKEN=${TOKEN:-stress-token}
 REQUESTS=${REQUESTS:-120}
 WORKERS=${WORKERS:-20}
 LOG_LIMIT_B=${LOG_LIMIT_B:-4096}
-SPOOL=${SPOOL:-/tmp/rootd-go-stress-spool}
-BIN=${BIN:-/tmp/rootd-go-stress}
+SPOOL=${SPOOL:-/tmp/shellmcp-go-stress-spool}
+BIN=${BIN:-/tmp/shellmcp-go-stress}
 rm -rf "$SPOOL"
-go build -o "$BIN" ./cmd/rootd-go
+go build -o "$BIN" ./cmd/shellmcp-go
 SHELL_PORT=$PORT \
 SHELL_HOST=127.0.0.1 \
 SHELL_NAME=go-stress-test \
@@ -19,7 +19,7 @@ SHELL_HEARTBEAT=0 \
 SHELL_QUEUE=0 \
 SHELL_MODE=webhook \
 LOG_LIMIT_B=$LOG_LIMIT_B \
-"$BIN" > /tmp/rootd-go-stress-${PORT}.log 2>&1 &
+"$BIN" > /tmp/shellmcp-go-stress-${PORT}.log 2>&1 &
 PID=$!
 cleanup(){ kill "$PID" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -57,4 +57,4 @@ printf '%s\n' "$RES" | python3 -m json.tool | sed -n '1,80p'
 P=$(printf '%s' "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("stdout_path",""))')
 echo "spill_file_size=$(stat -c %s "$P")"
 echo "log:"
-sed -n '1,120p' /tmp/rootd-go-stress-${PORT}.log
+sed -n '1,120p' /tmp/shellmcp-go-stress-${PORT}.log

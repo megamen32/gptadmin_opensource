@@ -68,7 +68,7 @@ def test_heartbeat_signature_accepts_rotated_key_for_pending_flow():
     beat = hub_proxy.Beat(
         name=name,
         base_url="http://203.0.113.10:25900",
-        rootd_token="srv_secret",
+        shellmcp_token="srv_secret",
         time=1,
         mode="polling",
         server_id=server_id,

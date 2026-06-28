@@ -1,6 +1,6 @@
 import os, subprocess, logging, asyncio, psutil, socket, time, shutil, platform
 
-log = logging.getLogger("rootd_win")
+log = logging.getLogger("shellmcp_win")
 
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))

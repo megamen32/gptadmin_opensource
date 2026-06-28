@@ -85,10 +85,10 @@ if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
     LOG_DIR = USER_HOME / 'Library' / 'Logs' / 'gptadmin' if IS_USER_INSTALL else Path('/var/log/gptadmin')
     SVC_HUB_LABEL   = 'com.gptadmin.hub'
-    SVC_ROOTD_LABEL = 'com.gptadmin.shellmcp'
+    SVC_SHELLMCP_LABEL = 'com.gptadmin.shellmcp'
     SVC_FRPC_LABEL  = 'com.gptadmin.frpc'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
-    UNIT_PATH_ROOTD = SERVICES_DIR / f'{SVC_ROOTD_LABEL}.plist'
+    UNIT_PATH_SHELLMCP = SERVICES_DIR / f'{SVC_SHELLMCP_LABEL}.plist'
     UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 else:
@@ -98,18 +98,18 @@ else:
         str((USER_HOME / '.local' / 'state' / 'gptadmin' / 'logs') if IS_USER_INSTALL else Path('/var/log/gptadmin'))
     )).expanduser()
     SYSTEMD_HUB   = 'gptadmin-hub.service'
-    SYSTEMD_ROOTD = 'gptadmin-shellmcp.service'
+    SYSTEMD_SHELLMCP = 'gptadmin-shellmcp.service'
     SYSTEMD_FRPC  = 'gptadmin-frpc.service'
     UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
-    UNIT_PATH_ROOTD = SYSTEMD_DIR / SYSTEMD_ROOTD
+    UNIT_PATH_SHELLMCP = SYSTEMD_DIR / SYSTEMD_SHELLMCP
     UNIT_PATH_FRPC  = SYSTEMD_DIR / SYSTEMD_FRPC
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 
 # Package URLs can be overridden by env or args
 PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   'https://became.bezrabotnyi.com/gptadmin.tar.gz')
 PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   'https://became.bezrabotnyi.com/gptadmin-hub.tar.gz')
-PKG_ROOTD_URL_DEFAULT = os.environ.get('PKG_ROOTD_URL', 'https://became.bezrabotnyi.com/gptadmin-rootd.tar.gz')
-ROOTD_PURE_URL_DEFAULT = os.environ.get('ROOTD_PURE_URL', 'https://became.bezrabotnyi.com/rootd_pure.py')
+PKG_SHELLMCP_URL_DEFAULT = os.environ.get('PKG_SHELLMCP_URL', 'https://became.bezrabotnyi.com/gptadmin-shellmcp.tar.gz')
+SHELLMCP_PURE_URL_DEFAULT = os.environ.get('SHELLMCP_PURE_URL', 'https://became.bezrabotnyi.com/shellmcp_pure.py')
 
 REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
@@ -276,24 +276,24 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
         if component == 'hub':
             candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
         elif IS_MACOS:
-            # Linux PyInstaller rootd cannot run on macOS. Install bundled
-            # pure-Python long-poll rootd from this package, while still copying
+            # Linux PyInstaller shellmcp cannot run on macOS. Install bundled
+            # pure-Python long-poll shellmcp from this package, while still copying
             # cli/agents runtime needed for MCP relay management.
-            candidates = [tdp / 'client' / 'rootd_pure.py']
+            candidates = [tdp / 'client' / 'shellmcp_pure.py']
         else:
-            candidates = [tdp / 'rootd' / 'dist' / 'rootd', tdp / 'build' / 'rootd' / 'dist' / 'rootd']
+            candidates = [tdp / 'shellmcp' / 'dist' / 'shellmcp', tdp / 'build' / 'shellmcp' / 'dist' / 'shellmcp']
         for c in candidates:
             if c.exists():
                 BIN_DIR.mkdir(parents=True, exist_ok=True)
-                dst_name = 'rootd' if (component == 'rootd' and IS_MACOS) else c.name
+                dst_name = 'shellmcp' if (component == 'shellmcp' and IS_MACOS) else c.name
                 shutil.copy2(c, BIN_DIR / dst_name)
                 os.chmod(BIN_DIR / dst_name, 0o755)
                 return
-        if component == 'rootd' and IS_MACOS:
+        if component == 'shellmcp' and IS_MACOS:
             # Backward compatibility with old archives.
             BIN_DIR.mkdir(parents=True, exist_ok=True)
-            download(ROOTD_PURE_URL_DEFAULT, BIN_DIR / 'rootd')
-            os.chmod(BIN_DIR / 'rootd', 0o755)
+            download(SHELLMCP_PURE_URL_DEFAULT, BIN_DIR / 'shellmcp')
+            os.chmod(BIN_DIR / 'shellmcp', 0o755)
             return
         die(f'{component} binary not found in package')
 
@@ -320,7 +320,7 @@ if IS_MACOS:
     def _wrapper_script(name: str, bin_path: Path) -> Path:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = BIN_DIR / f'run_{name}.sh'
-        if name == 'rootd':
+        if name == 'shellmcp':
             exec_line = f'exec {_mac_python()} {bin_path}'
         else:
             exec_line = f'exec {bin_path}'
@@ -435,7 +435,7 @@ if IS_MACOS:
             if log_file and log_file.exists():
                 run(['tail', '-n', '200', '-f', str(log_file)], check=False)
 
-    def write_hub_unit(install_hub: bool, _install_rootd: bool):
+    def write_hub_unit(install_hub: bool, _install_shellmcp: bool):
         if not install_hub:
             return
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -443,13 +443,13 @@ if IS_MACOS:
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_HUB.write_text(_make_plist(SVC_HUB_LABEL, wrapper, LOG_DIR / 'hub.log'))
 
-    def write_rootd_unit(_install_hub: bool, install_rootd: bool):
-        if not install_rootd:
+    def write_shellmcp_unit(_install_hub: bool, install_shellmcp: bool):
+        if not install_shellmcp:
             return
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        wrapper = _wrapper_script('rootd', BIN_DIR / 'rootd')
+        wrapper = _wrapper_script('shellmcp', BIN_DIR / 'shellmcp')
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
-        UNIT_PATH_ROOTD.write_text(_make_plist(SVC_ROOTD_LABEL, wrapper, LOG_DIR / 'shellmcp.log'))
+        UNIT_PATH_SHELLMCP.write_text(_make_plist(SVC_SHELLMCP_LABEL, wrapper, LOG_DIR / 'shellmcp.log'))
 
     def write_frpc_unit(frpc_bin: str):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -463,7 +463,7 @@ if IS_MACOS:
         UNIT_PATH_FRPC.write_text(_make_plist(SVC_FRPC_LABEL, wrapper, LOG_DIR / 'frpc.log'))
 
     def svc_hub_name():  return SVC_HUB_LABEL
-    def svc_rootd_name(): return SVC_ROOTD_LABEL
+    def svc_shellmcp_name(): return SVC_SHELLMCP_LABEL
     def svc_frpc_name():  return SVC_FRPC_LABEL
 
 else:
@@ -488,7 +488,7 @@ RestartSec=3
 WantedBy={LINUX_WANTED_BY}
 """
 
-    UNIT_ROOTD = f"""
+    UNIT_SHELLMCP = f"""
 [Unit]
 Description=GPTAdmin Shell MCP Agent
 After=network-online.target
@@ -497,7 +497,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile={ENV_FILE}
-ExecStart={BIN_DIR}/rootd
+ExecStart={BIN_DIR}/shellmcp
 Restart=always
 RestartSec=3
 {LINUX_HARDENING}
@@ -564,22 +564,22 @@ WantedBy={wanted_by}
         else:
             print('Журналы пусты: сервисы не установлены.')
 
-    def write_hub_unit(install_hub: bool, _install_rootd: bool):
+    def write_hub_unit(install_hub: bool, _install_shellmcp: bool):
         if install_hub:
             UNIT_PATH_HUB.parent.mkdir(parents=True, exist_ok=True)
             UNIT_PATH_HUB.write_text(UNIT_HUB)
 
-    def write_rootd_unit(_install_hub: bool, install_rootd: bool):
-        if install_rootd:
-            UNIT_PATH_ROOTD.parent.mkdir(parents=True, exist_ok=True)
-            UNIT_PATH_ROOTD.write_text(UNIT_ROOTD)
+    def write_shellmcp_unit(_install_hub: bool, install_shellmcp: bool):
+        if install_shellmcp:
+            UNIT_PATH_SHELLMCP.parent.mkdir(parents=True, exist_ok=True)
+            UNIT_PATH_SHELLMCP.write_text(UNIT_SHELLMCP)
 
     def write_frpc_unit(frpc_bin: str):
         UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF, hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
 
     def svc_hub_name():   return SYSTEMD_HUB
-    def svc_rootd_name(): return SYSTEMD_ROOTD
+    def svc_shellmcp_name(): return SYSTEMD_SHELLMCP
     def svc_frpc_name():  return SYSTEMD_FRPC
 
 
@@ -649,32 +649,32 @@ def ask(prompt: str, default: str = '') -> str:
     return val or default
 
 
-def configure_rootd_transport(env: dict, install_hub: bool, install_rootd: bool):
-    if not install_rootd or not env.get('HUB_URL'):
+def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp: bool):
+    if not install_shellmcp or not env.get('HUB_URL'):
         return
     print('\nКак TermCP будет подключаться к хабу?')
     print('  1) long-polling / polling — рекомендуется, работает за NAT/firewall')
     print('  2) webhook — только если хаб может напрямую достучаться до TermCP')
     print('  3) websocket — experimental')
-    default_transport = env.get('ROOTD_TRANSPORT', 'polling')
+    default_transport = env.get('SHELLMCP_TRANSPORT', 'polling')
     default_choice = {'polling': '1', 'webhook': '2', 'websocket': '3'}.get(default_transport, '1')
     ch = ask('Ваш выбор', default_choice)
     hub = env['HUB_URL'].rstrip('/')
     if ch == '2':
-        env['ROOTD_TRANSPORT'] = 'webhook'
+        env['SHELLMCP_TRANSPORT'] = 'webhook'
         env.pop('QUEUE_URL', None)
-        rootd_url_default = env.get('ROOTD_URL') or f"http://{first_ip()}:{env.get('ROOTD_PORT', '25900')}"
-        env['ROOTD_URL'] = ask('Введите ROOTD_URL, доступный хабу', rootd_url_default)
+        shellmcp_url_default = env.get('SHELLMCP_URL') or f"http://{first_ip()}:{env.get('SHELLMCP_PORT', '25900')}"
+        env['SHELLMCP_URL'] = ask('Введите SHELLMCP_URL, доступный хабу', shellmcp_url_default)
     elif ch == '3':
-        env['ROOTD_TRANSPORT'] = 'websocket'
+        env['SHELLMCP_TRANSPORT'] = 'websocket'
         env.pop('QUEUE_URL', None)
-        env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/rootd'
-        env['ROOTD_URL'] = ''
+        env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/shellmcp'
+        env['SHELLMCP_URL'] = ''
     else:
-        env['ROOTD_TRANSPORT'] = 'polling'
+        env['SHELLMCP_TRANSPORT'] = 'polling'
         env['QUEUE_URL'] = hub + '/queue'
-        env['ROOTD_URL'] = ''
-        env.setdefault('ROOTD_BIND', '127.0.0.1')
+        env['SHELLMCP_URL'] = ''
+        env.setdefault('SHELLMCP_BIND', '127.0.0.1')
 
 
 def setup_interactive(args):
@@ -691,30 +691,30 @@ def setup_interactive(args):
     print('  3) только TermCP agent')
     ch = ask('Ваш выбор', '1')
     install_hub = ch in ('1', '2')
-    install_rootd = ch in ('1', '3')
+    install_shellmcp = ch in ('1', '3')
 
     env = env_read()
 
     env.setdefault('CTL_TOKEN', gen_hex())
-    env.setdefault('ROOTD_TOKEN', gen_hex())
-    if install_rootd:
-        env.setdefault('ROOTD_AUTO_UPDATE', '1')
-        env.setdefault('ROOTD_UPDATE_INTERVAL_S', '3600')
-        env.setdefault('ROOTD_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
-        env.setdefault('ROOTD_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/rootd.json')
-        env.setdefault('ROOTD_SERVICE_NAME', svc_rootd_name())
-        env.setdefault('ROOTD_SERVICE_SCOPE', INSTALL_SCOPE)
-    rootd_default_uid = os.environ.get('ROOTD_DEFAULT_UID')
-    if rootd_default_uid and rootd_default_uid.isdigit() and rootd_default_uid != '0':
-        env.setdefault('ROOTD_DEFAULT_UID', rootd_default_uid)
+    env.setdefault('SHELLMCP_TOKEN', gen_hex())
+    if install_shellmcp:
+        env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
+        env.setdefault('SHELLMCP_UPDATE_INTERVAL_S', '3600')
+        env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
+        env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
+        env.setdefault('SHELLMCP_SERVICE_NAME', svc_shellmcp_name())
+        env.setdefault('SHELLMCP_SERVICE_SCOPE', INSTALL_SCOPE)
+    shellmcp_default_uid = os.environ.get('SHELLMCP_DEFAULT_UID')
+    if shellmcp_default_uid and shellmcp_default_uid.isdigit() and shellmcp_default_uid != '0':
+        env.setdefault('SHELLMCP_DEFAULT_UID', shellmcp_default_uid)
 
     env.setdefault('GPTADMIN_HOME', str(INSTALL_DIR))
     env.setdefault('GPTADMIN_CONFIG_DIR', str(ETC_DIR))
     env.setdefault('GPTADMIN_AUDIT_LOG', str((globals().get('LOG_DIR', Path('/var/log/gptadmin'))) / 'audit.log'))
     env['HUB_BIND'] = '127.0.0.1'
     env.setdefault('HUB_PORT', '9001')
-    env.setdefault('ROOTD_BIND', '127.0.0.1')
-    env.setdefault('ROOTD_PORT', '25900')
+    env.setdefault('SHELLMCP_BIND', '127.0.0.1')
+    env.setdefault('SHELLMCP_PORT', '25900')
 
     if install_hub:
         print('\nДоступ к хабу из Интернета:')
@@ -731,7 +731,7 @@ def setup_interactive(args):
             env['FRP_SUBDOMAIN'] = gen_subdomain()
             env['FRP_TOKEN'] = FRPC_TOKEN_DEFAULT
             env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
-            if install_rootd:
+            if install_shellmcp:
                 env['HUB_URL'] = env['HUB_PUBLIC_URL']
         else:
             url = ask('Введите публичный HTTPS URL хаба (например, https://gptadmin.example.com)')
@@ -746,32 +746,32 @@ def setup_interactive(args):
         env['FRP_ENABLE'] = 'false'
         env['HUB_URL'] = url
 
-    configure_rootd_transport(env, install_hub, install_rootd)
-    if install_rootd:
+    configure_shellmcp_transport(env, install_hub, install_shellmcp)
+    if install_shellmcp:
         hub_for_update = (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
-        env['ROOTD_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/rootd.json'
-        env['ROOTD_UPDATE_TOKEN'] = env.get('ROOTD_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
-        env['ROOTD_SERVICE_NAME'] = svc_rootd_name()
-        env['ROOTD_SERVICE_SCOPE'] = INSTALL_SCOPE
+        env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
+        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
+        env['SHELLMCP_SERVICE_SCOPE'] = INSTALL_SCOPE
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
-    env['INSTALL_ROOTD'] = 'true' if install_rootd else 'false'
+    env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
     env_set_many(env)
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     CLI_PATH.parent.mkdir(parents=True, exist_ok=True)
     pkg_all   = args.pkg_all   or PKG_ALL_URL_DEFAULT
     pkg_hub   = args.pkg_hub   or PKG_HUB_URL_DEFAULT
-    pkg_rootd = args.pkg_rootd or PKG_ROOTD_URL_DEFAULT
+    pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
 
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        if install_hub and install_rootd:
+        if install_hub and install_shellmcp:
             print('\n[Загрузка] общий пакет...')
             pkg = tdp / 'all.tgz'
             download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'hub')
-            install_component_from_pkg(pkg, 'rootd')
+            install_component_from_pkg(pkg, 'shellmcp')
         elif install_hub:
             print('\n[Загрузка] hub_proxy...')
             pkg = tdp / 'hub.tgz'
@@ -783,16 +783,16 @@ def setup_interactive(args):
             install_component_from_pkg(pkg, 'hub')
         else:
             print('\n[Загрузка] TermCP agent...')
-            pkg = tdp / 'rootd.tgz'
+            pkg = tdp / 'shellmcp.tgz'
             try:
-                download(pkg_rootd, pkg)
+                download(pkg_shellmcp, pkg)
             except subprocess.CalledProcessError:
                 print('  Нет компонентного архива, беру общий...')
                 download(pkg_all, pkg)
-            install_component_from_pkg(pkg, 'rootd')
+            install_component_from_pkg(pkg, 'shellmcp')
 
-    write_hub_unit(install_hub, install_rootd)
-    write_rootd_unit(install_hub, install_rootd)
+    write_hub_unit(install_hub, install_shellmcp)
+    write_shellmcp_unit(install_hub, install_shellmcp)
 
     if env.get('FRP_ENABLE', 'false') == 'true':
         frpc_bin = ensure_frpc_installed()
@@ -802,8 +802,8 @@ def setup_interactive(args):
     svc_daemon_reload()
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
-    if install_rootd:
-        svc_enable_start(svc_rootd_name(), UNIT_PATH_ROOTD)
+    if install_shellmcp:
+        svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         maybe_import_and_install_mcp_from_desktop_clients()
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
@@ -813,14 +813,14 @@ def setup_interactive(args):
     if install_hub:
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
         print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
-    if install_rootd and not install_hub:
+    if install_shellmcp and not install_hub:
         print(f"HUB_URL для TermCP: {env.get('HUB_URL', '—')}")
-    if install_rootd:
+    if install_shellmcp:
         print('TermCP agent установлен.')
 
     installed = [n for n, p in [
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
-        (svc_rootd_name(), UNIT_PATH_ROOTD),
+        (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
         ('gptadmin-frpc' if not IS_MACOS else SVC_FRPC_LABEL,
          UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None)
     ] if p and Path(p).exists()]
@@ -1448,7 +1448,7 @@ def maybe_import_and_install_mcp_from_desktop_clients():
 def installed_units():
     res = []
     if UNIT_PATH_HUB.exists():   res.append((svc_hub_name(),   UNIT_PATH_HUB))
-    if UNIT_PATH_ROOTD.exists(): res.append((svc_rootd_name(), UNIT_PATH_ROOTD))
+    if UNIT_PATH_SHELLMCP.exists(): res.append((svc_shellmcp_name(), UNIT_PATH_SHELLMCP))
     if UNIT_PATH_FRPC.exists():  res.append((svc_frpc_name(),  UNIT_PATH_FRPC))
     return res
 
@@ -1464,35 +1464,35 @@ def cmd_config_termcp(args):
         env['HUB_URL'] = url.rstrip('/')
     transport = args.transport
     if not transport:
-        configure_rootd_transport(env, install_hub=False, install_rootd=True)
+        configure_shellmcp_transport(env, install_hub=False, install_shellmcp=True)
     else:
         hub = env['HUB_URL'].rstrip('/')
-        env['ROOTD_TRANSPORT'] = transport
+        env['SHELLMCP_TRANSPORT'] = transport
         if transport == 'polling':
             env['QUEUE_URL'] = hub + '/queue'
-            env['ROOTD_URL'] = ''
-            env.setdefault('ROOTD_BIND', '127.0.0.1')
+            env['SHELLMCP_URL'] = ''
+            env.setdefault('SHELLMCP_BIND', '127.0.0.1')
         elif transport == 'webhook':
             env.pop('QUEUE_URL', None)
-            env['ROOTD_URL'] = args.rootd_url or env.get('ROOTD_URL') or f"http://{first_ip()}:{env.get('ROOTD_PORT', '25900')}"
+            env['SHELLMCP_URL'] = args.shellmcp_url or env.get('SHELLMCP_URL') or f"http://{first_ip()}:{env.get('SHELLMCP_PORT', '25900')}"
         elif transport == 'websocket':
             env.pop('QUEUE_URL', None)
-            env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/rootd'
-            env['ROOTD_URL'] = ''
+            env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/shellmcp'
+            env['SHELLMCP_URL'] = ''
     env_set_many(env)
-    if UNIT_PATH_ROOTD.exists():
-        svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
+    if UNIT_PATH_SHELLMCP.exists():
+        svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     print('TermCP transport configured:')
-    print(f"  ROOTD_TRANSPORT={env.get('ROOTD_TRANSPORT', 'polling')}")
+    print(f"  SHELLMCP_TRANSPORT={env.get('SHELLMCP_TRANSPORT', 'polling')}")
     print(f"  HUB_URL={env.get('HUB_URL', '')}")
     if env.get('QUEUE_URL'):
         print(f"  QUEUE_URL={env['QUEUE_URL']}")
-    if env.get('ROOTD_URL'):
-        print(f"  ROOTD_URL={env['ROOTD_URL']}")
+    if env.get('SHELLMCP_URL'):
+        print(f"  SHELLMCP_URL={env['SHELLMCP_URL']}")
 
 
 cmd_config_shell = cmd_config_termcp  # legacy internal alias
-cmd_config_rootd = cmd_config_termcp  # legacy internal alias
+cmd_config_shellmcp = cmd_config_termcp  # legacy internal alias
 
 def cmd_status(_):
     units = installed_units()
@@ -1531,14 +1531,14 @@ def _log_file(label: str) -> Path:
 
 def cmd_logs(args):
     svc = args.service
-    if svc in ('termcp', 'shell', 'shellmcp', 'shell-mcp', 'rootd'):
+    if svc in ('termcp', 'shell', 'shellmcp', 'shell-mcp'):
         svc = 'shell'
     if svc not in ('hub', 'shell', 'frpc', 'all'):
         die('unknown service. Use: hub, shellmcp, shell, termcp, frpc, all')
     if IS_MACOS:
         mapping = {
             'hub':   (SVC_HUB_LABEL, UNIT_PATH_HUB, _log_file(SVC_HUB_LABEL)),
-            'shell': (svc_rootd_name(), UNIT_PATH_ROOTD, _log_file(svc_rootd_name())),
+            'shell': (svc_shellmcp_name(), UNIT_PATH_SHELLMCP, _log_file(svc_shellmcp_name())),
             'frpc':  (SVC_FRPC_LABEL, UNIT_PATH_FRPC, _log_file(SVC_FRPC_LABEL)),
         }
         if svc == 'all':
@@ -1549,7 +1549,7 @@ def cmd_logs(args):
     else:
         name_map = {
             'hub':   SYSTEMD_HUB,
-            'shell': SYSTEMD_ROOTD,
+            'shell': SYSTEMD_SHELLMCP,
             'frpc':  SYSTEMD_FRPC,
         }
         if svc == 'all':
@@ -1561,14 +1561,14 @@ def cmd_logs(args):
 def cmd_tokens(_):
     env = env_read()
     print(f"CTL_TOKEN={env.get('CTL_TOKEN','')}  # hub")
-    print('TermCP token is stored as ROOTD_TOKEN and is intentionally not printed.')
+    print('TermCP token is stored as SHELLMCP_TOKEN and is intentionally not printed.')
 
 def cmd_rotate(args):
     need_root()
     which = args.which
     if which in ('termcp', 'shell', 'shell-mcp'):
-        which = 'rootd'
-    if which not in ('hub', 'rootd'):
+        which = 'shellmcp'
+    if which not in ('hub', 'shellmcp'):
         die('unknown token target. Use: hub or termcp')
     newtok = gen_hex()
     if which == 'hub':
@@ -1577,9 +1577,9 @@ def cmd_rotate(args):
             svc_restart(svc_hub_name(), UNIT_PATH_HUB)
         print(f'New hub CTL_TOKEN: {newtok}')
     else:
-        env_set_many({'ROOTD_TOKEN': newtok})
-        if UNIT_PATH_ROOTD.exists():
-            svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
+        env_set_many({'SHELLMCP_TOKEN': newtok})
+        if UNIT_PATH_SHELLMCP.exists():
+            svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         print('TermCP token rotated (значение не выводится).')
 
 def cmd_port(args):
@@ -1600,8 +1600,8 @@ def cmd_seturl(args):
     url = args.url
     ensure_https(url)
     env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false'})
-    if UNIT_PATH_ROOTD.exists():
-        svc_restart(svc_rootd_name(), UNIT_PATH_ROOTD)
+    if UNIT_PATH_SHELLMCP.exists():
+        svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     if UNIT_PATH_FRPC.exists():
         svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
     print(f'HUB_PUBLIC_URL/HUB_URL = {url}; FRP отключён.')
@@ -1666,7 +1666,7 @@ def cmd_uninstall(args):
     need_root()
     failures = []
     for name, path in [(svc_frpc_name(), UNIT_PATH_FRPC),
-                       (svc_rootd_name(), UNIT_PATH_ROOTD),
+                       (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
                        (svc_hub_name(), UNIT_PATH_HUB)]:
         stopped = svc_disable_stop(name, path)
         if stopped is False:
@@ -1706,10 +1706,10 @@ def cmd_uninstall(args):
 
 def main():
     # Backward-compatible command aliases, hidden from help.
-    if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-rootd', 'config-termcp'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-shellmcp', 'config-termcp'):
         legacy = sys.argv[1]
         sys.argv[1:2] = ['config', 'termcp']
-        # Keep old --rootd-url accepted by the TermCP config parser.
+        # Keep old --shellmcp-url accepted by the TermCP config parser.
     ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + shell agents)')
     ap.add_argument('--user', action='store_true', help='Use per-user install paths/services (default when not root)')
     ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
@@ -1718,7 +1718,7 @@ def main():
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
-    ap_setup.add_argument('--pkg-rootd')
+    ap_setup.add_argument('--pkg-shellmcp')
     ap_setup.add_argument('--user', action='store_true', help='Use per-user install paths/services')
     ap_setup.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_setup.set_defaults(func=setup_interactive)
@@ -1728,7 +1728,7 @@ def main():
     ap_conf = config_sub.add_parser('termcp', help='Настроить TermCP transport: polling/webhook/websocket')
     ap_conf.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
     ap_conf.add_argument('--hub-url')
-    ap_conf.add_argument('--termcp-url', '--shell-url', '--rootd-url', dest='rootd_url', help='URL TermCP agent для webhook режима')
+    ap_conf.add_argument('--termcp-url', '--shell-url', '--shellmcp-url', dest='shellmcp_url', help='URL TermCP agent для webhook режима')
     ap_conf.set_defaults(func=cmd_config_termcp)
 
     sub.add_parser('status').set_defaults(func=cmd_status)
@@ -1743,7 +1743,7 @@ def main():
     hub_sub.add_parser('stop').set_defaults(func=cmd_stop)
     hub_sub.add_parser('restart').set_defaults(func=cmd_restart)
 
-    for alias in ('shell','shellmcp','termcp','rootd'):
+    for alias in ('shell','shellmcp','termcp'):
         rp = sub.add_parser(alias)
         rs = rp.add_subparsers(dest='svc_cmd')
         rs.add_parser('status').set_defaults(func=cmd_status)

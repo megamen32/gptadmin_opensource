@@ -18,14 +18,14 @@ except ImportError:
     psutil = None  # type: ignore[assignment]
     HAS_PSUTIL = False
 
-log = logging.getLogger("rootd_linux")
+log = logging.getLogger("shellmcp_linux")
 
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", str(10 * 1024 * 1024)))
-PRESERVE_FILE_METADATA = os.getenv("ROOTD_PRESERVE_FILE_METADATA", "1").lower() not in {"0", "false", "no", "off"}
-PRESERVE_METADATA_MAX_FILES = int(os.getenv("ROOTD_PRESERVE_METADATA_MAX_FILES", "50000"))
-DEFAULT_RUN_USER = os.getenv("ROOTD_DEFAULT_USER", "")
-DEFAULT_RUN_UID = os.getenv("ROOTD_DEFAULT_UID", "")
+PRESERVE_FILE_METADATA = os.getenv("SHELLMCP_PRESERVE_FILE_METADATA", "1").lower() not in {"0", "false", "no", "off"}
+PRESERVE_METADATA_MAX_FILES = int(os.getenv("SHELLMCP_PRESERVE_METADATA_MAX_FILES", "50000"))
+DEFAULT_RUN_USER = os.getenv("SHELLMCP_DEFAULT_USER", "")
+DEFAULT_RUN_UID = os.getenv("SHELLMCP_DEFAULT_UID", "")
 
 
 def _metadata_root(cwd: str | None) -> Path | None:
@@ -73,7 +73,7 @@ def _uid_to_user(uid: int) -> str | None:
 
 
 def _install_owner_user() -> str | None:
-    """Best-effort fallback: user that owns the installed rootd source tree."""
+    """Best-effort fallback: user that owns the installed shellmcp source tree."""
 
     try:
         uid = Path(__file__).resolve().stat().st_uid
@@ -230,7 +230,7 @@ def _fallback_sensors_temperatures() -> dict:
 def _wrap_default_user_command(cmd: str, cwd: str | None = None, env: dict | None = None) -> tuple[str, str | None]:
     """Run normal commands as resolved non-root user; keep root for explicit sudo commands."""
 
-    if env and str(env.get("ROOTD_RUN_AS_ROOT", "")).lower() in {"1", "true", "yes", "on"}:
+    if env and str(env.get("SHELLMCP_RUN_AS_ROOT", "")).lower() in {"1", "true", "yes", "on"}:
         return cmd, None
     if _command_needs_root(cmd):
         return cmd, None
@@ -243,7 +243,7 @@ def _wrap_default_user_command(cmd: str, cwd: str | None = None, env: dict | Non
 def _snapshot_file_metadata(cwd: str | None):
     """Snapshot owner/group/mode of files that already exist before a root command.
 
-    rootd runs as root. When a command rewrites a file via temp-file+rename,
+    shellmcp runs as root. When a command rewrites a file via temp-file+rename,
     the file can become root:root or lose executable/setgid bits. This snapshot
     lets us restore metadata for existing files after the command finishes.
     """

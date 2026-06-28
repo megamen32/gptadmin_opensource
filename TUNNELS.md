@@ -84,12 +84,12 @@ Tunnel Service (Cloudflare/ngrok/FRP)
     ↓ encrypted tunnel
 GPTAdmin Hub (local, port 9001)
     ↓ forwards to
-GPTAdmin rootd (multiple machines)
+GPTAdmin shellmcp (multiple machines)
 ```
 
 **Hub** is your control plane:
 - Manages authentication tokens
-- Routes requests to the correct rootd
+- Routes requests to the correct shellmcp
 - Scrubs sensitive data from logs
 - Maintains registry of connected servers
 
@@ -97,7 +97,7 @@ GPTAdmin rootd (multiple machines)
 
 ## Security Considerations
 
-1. **Hub holds all the keys** — whoever controls hub controls all connected rootd instances (with root access). This is why hub should run locally on a machine you trust.
+1. **Hub holds all the keys** — whoever controls hub controls all connected shellmcp instances (with root access). This is why hub should run locally on a machine you trust.
 
 2. **Tunnel services see your traffic** — when using Cloudflare or ngrok, your traffic passes through their servers. However:
    - All traffic is HTTPS (encrypted in transit)

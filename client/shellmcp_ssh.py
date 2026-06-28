@@ -9,7 +9,7 @@ from typing import Dict, Optional
 
 import paramiko
 
-log = logging.getLogger("rootd_ssh")
+log = logging.getLogger("shellmcp_ssh")
 
 TMO_DEF = int(os.getenv("EXEC_TIMEOUT", "300"))
 LOG_MAX = int(os.getenv("LOG_LIMIT_B", "8192"))

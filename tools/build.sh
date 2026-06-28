@@ -18,10 +18,10 @@ ART_DIR="build"
 CACHE_DIR=".buildcache"
 VERSION_FILE="VERSION"
 LOG="$ART_DIR/build.log"
-ROOTD_RT_LOG="$ART_DIR/rootd_runtime.log"
+SHELLMCP_RT_LOG="$ART_DIR/shellmcp_runtime.log"
 HUB_RT_LOG="$ART_DIR/hub_runtime.log"
 
-ROOTD_PID=""
+SHELLMCP_PID=""
 HUB_PID=""
 
 FORCE="${FORCE:-0}"                    # 1 = force rebuild components regardless of fingerprint
@@ -42,7 +42,7 @@ exec > >(tee -a "$LOG") 2>&1
 cleanup() {
   set +e
   echo "== cleanup ==" | tee -a "$LOG"
-  [[ -n "$ROOTD_PID" ]] && kill "$ROOTD_PID" 2>/dev/null || true
+  [[ -n "$SHELLMCP_PID" ]] && kill "$SHELLMCP_PID" 2>/dev/null || true
   [[ -n "$HUB_PID"   ]] && kill "$HUB_PID"   2>/dev/null || true
 }
 trap cleanup EXIT
@@ -59,7 +59,7 @@ err_report() {
   tail -n 200 "$LOG" || true
   echo "---------------------------------------------------------------------"
   echo "Runtime logs (if any):"
-  [[ -f "$ROOTD_RT_LOG" ]] && { echo "--- rootd_runtime.log (tail) ---"; tail -n 120 "$ROOTD_RT_LOG"; }
+  [[ -f "$SHELLMCP_RT_LOG" ]] && { echo "--- shellmcp_runtime.log (tail) ---"; tail -n 120 "$SHELLMCP_RT_LOG"; }
   [[ -f "$HUB_RT_LOG"   ]] && { echo "--- hub_runtime.log (tail) ---";   tail -n 120 "$HUB_RT_LOG"; }
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   exit "$exit_code"
@@ -122,9 +122,13 @@ python -V
 pip --version || true
 
 # ---------- install deps (verbose) ----------
-step "pip install requirements, pyinstaller"
+step "pip install project deps, pyinstaller"
 pip install -vvv --upgrade pip
-pip install -vvv -r requirements.txt pyinstaller
+if [[ -f requirements.txt ]]; then
+  pip install -vvv -r requirements.txt pyinstaller
+else
+  pip install -vvv . pyinstaller
+fi
 
 step "Tool versions"
 pyinstaller --version || true
@@ -211,40 +215,40 @@ PY
 }
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
-ROOTD_IMPORTS=$(py_hidden_imports client/rootd.py client/rootd_pure.py client/gptadmin_build_info.py client/gptadmin_security.py)
+SHELLMCP_IMPORTS=$(py_hidden_imports client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py)
 HUB_IMPORTS=$(py_hidden_imports hub_proxy.py gptadmin_build_info.py gptadmin_security.py)
-ROOTD_HIDDEN_FLAGS=$(echo "$ROOTD_IMPORTS" | to_pyinstaller_flags)
+SHELLMCP_HIDDEN_FLAGS=$(echo "$SHELLMCP_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f client/rootd_linux.py ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_linux"
-[[ -f client/rootd_win.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_win"
-[[ -f client/rootd_mac.py   ]] && ROOTD_HIDDEN_FLAGS="$ROOTD_HIDDEN_FLAGS --hidden-import=rootd_mac"
-echo "ROOTD hidden-imports flags: $ROOTD_HIDDEN_FLAGS"
+[[ -f client/shellmcp_linux.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_linux"
+[[ -f client/shellmcp_win.py   ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_win"
+[[ -f client/shellmcp_mac.py   ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_mac"
+echo "SHELLMCP hidden-imports flags: $SHELLMCP_HIDDEN_FLAGS"
 echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
 
 # ---------- fingerprints ----------
-ROOTD_SRC=(client/rootd.py client/rootd_pure.py client/gptadmin_build_info.py client/gptadmin_security.py cli.py)
-[[ -f client/rootd_linux.py ]] && ROOTD_SRC+=(client/rootd_linux.py)
-[[ -f client/rootd_win.py   ]] && ROOTD_SRC+=(client/rootd_win.py)
-[[ -f client/rootd_mac.py   ]] && ROOTD_SRC+=(client/rootd_mac.py)
-[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && ROOTD_SRC+=(requirements.txt)
+SHELLMCP_SRC=(client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py cli.py)
+[[ -f client/shellmcp_linux.py ]] && SHELLMCP_SRC+=(client/shellmcp_linux.py)
+[[ -f client/shellmcp_win.py   ]] && SHELLMCP_SRC+=(client/shellmcp_win.py)
+[[ -f client/shellmcp_mac.py   ]] && SHELLMCP_SRC+=(client/shellmcp_mac.py)
+[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && SHELLMCP_SRC+=(requirements.txt)
 
 HUB_SRC=(hub_proxy.py gptadmin_build_info.py gptadmin_security.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
-FP_ROOTD_NEW="$(fingerprint "${ROOTD_SRC[@]}")"
+FP_SHELLMCP_NEW="$(fingerprint "${SHELLMCP_SRC[@]}")"
 FP_HUB_NEW="$(fingerprint "${HUB_SRC[@]}")"
-FP_ROOTD_FILE="$CACHE_DIR/.fp_rootd"
+FP_SHELLMCP_FILE="$CACHE_DIR/.fp_shellmcp"
 FP_HUB_FILE="$CACHE_DIR/.fp_hub"
 
-ROOTD_DIST="$ART_DIR/rootd/dist/rootd"
+SHELLMCP_DIST="$ART_DIR/shellmcp/dist/shellmcp"
 HUB_DIST="$ART_DIR/hub_proxy/dist/hub_proxy"
 
-NEED_BUILD_ROOTD="$FORCE"
+NEED_BUILD_SHELLMCP="$FORCE"
 NEED_BUILD_HUB="$FORCE"
 
-if [[ "$NEED_BUILD_ROOTD" == "0" ]]; then
-  if [[ ! -x "$ROOTD_DIST" ]] || changed "$FP_ROOTD_FILE" "$FP_ROOTD_NEW"; then
-    NEED_BUILD_ROOTD=1
+if [[ "$NEED_BUILD_SHELLMCP" == "0" ]]; then
+  if [[ ! -x "$SHELLMCP_DIST" ]] || changed "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"; then
+    NEED_BUILD_SHELLMCP=1
   fi
 fi
 if [[ "$NEED_BUILD_HUB" == "0" ]]; then
@@ -253,27 +257,27 @@ if [[ "$NEED_BUILD_HUB" == "0" ]]; then
   fi
 fi
 
-echo "Fingerprint rootd: $FP_ROOTD_NEW (changed=$([[ $NEED_BUILD_ROOTD == 1 ]] && echo yes || echo no))"
+echo "Fingerprint shellmcp: $FP_SHELLMCP_NEW (changed=$([[ $NEED_BUILD_SHELLMCP == 1 ]] && echo yes || echo no))"
 echo "Fingerprint hub   : $FP_HUB_NEW (changed=$([[ $NEED_BUILD_HUB == 1 ]] && echo yes || echo no))"
 
 # ---------- PyInstaller (incremental, no obfuscation) ----------
 : "${PYTHONPATH:=}"
 export PYTHONPATH="client:$PYTHONPATH"
-mkdir -p "$ART_DIR/rootd" "$ART_DIR/hub_proxy"
+mkdir -p "$ART_DIR/shellmcp" "$ART_DIR/hub_proxy"
 
-if [[ "$NEED_BUILD_ROOTD" == "1" ]]; then
-  step "PyInstaller: build rootd"
-  pyinstaller "client/rootd.py" \
+if [[ "$NEED_BUILD_SHELLMCP" == "1" ]]; then
+  step "PyInstaller: build shellmcp"
+  pyinstaller "client/shellmcp.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
-    --specpath "$ART_DIR/rootd" \
+    --specpath "$ART_DIR/shellmcp" \
     "${COLLECT_FLAGS[@]}" \
-    $ROOTD_HIDDEN_FLAGS \
-    --distpath "$ART_DIR/rootd/dist" \
-    --workpath "$ART_DIR/rootd/build"
-  save_fp "$FP_ROOTD_FILE" "$FP_ROOTD_NEW"
+    $SHELLMCP_HIDDEN_FLAGS \
+    --distpath "$ART_DIR/shellmcp/dist" \
+    --workpath "$ART_DIR/shellmcp/build"
+  save_fp "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"
 else
-  echo "Skip PyInstaller rootd"
+  echo "Skip PyInstaller shellmcp"
 fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
@@ -293,7 +297,7 @@ fi
 
 # ---------- Summarize PyInstaller warnings ----------
 step "Summarize PyInstaller warnings"
-for f in "$ART_DIR"/rootd/build/rootd/warn-*.txt "$ART_DIR"/hub_proxy/build/hub_proxy/warn-*.txt; do
+for f in "$ART_DIR"/shellmcp/build/shellmcp/warn-*.txt "$ART_DIR"/hub_proxy/build/hub_proxy/warn-*.txt; do
   [[ -f "$f" ]] || continue
   echo "--- $(basename "$f") ---"
   sed -n '1,200p' "$f"
@@ -310,7 +314,7 @@ step "Archive: gptadmin.tar.gz"
 # Тарим только существующие папки (на случай первой частичной сборки)
 pushd "$ART_DIR" >/dev/null
 INCLUDE=()
-for d in rootd hub_proxy cli agents; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
+for d in shellmcp hub_proxy cli agents; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
 tar -czf gptadmin.tar.gz "${INCLUDE[@]}"
 
 # NEW: компонентные архивы (если есть соответствующие папки)
@@ -322,37 +326,37 @@ else
   echo "WARN: hub_proxy dir not found, skip gptadmin-hub.tar.gz"
 fi
 
-if [[ -d rootd ]]; then
+if [[ -d shellmcp ]]; then
   rm -rf client
   mkdir -p client
   cp -a ../client/. client/
   find client -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' | xargs -r rm -rf
-  ROOTD_INCLUDE=(rootd)
-  [[ -d cli ]] && ROOTD_INCLUDE+=(cli)
-  [[ -d agents ]] && ROOTD_INCLUDE+=(agents)
-  [[ -d client ]] && ROOTD_INCLUDE+=(client)
-  tar -czf gptadmin-rootd.tar.gz "${ROOTD_INCLUDE[@]}"
-  sha256sum gptadmin-rootd.tar.gz > gptadmin-rootd.sha256
+  SHELLMCP_INCLUDE=(shellmcp)
+  [[ -d cli ]] && SHELLMCP_INCLUDE+=(cli)
+  [[ -d agents ]] && SHELLMCP_INCLUDE+=(agents)
+  [[ -d client ]] && SHELLMCP_INCLUDE+=(client)
+  tar -czf gptadmin-shellmcp.tar.gz "${SHELLMCP_INCLUDE[@]}"
+  sha256sum gptadmin-shellmcp.tar.gz > gptadmin-shellmcp.sha256
   python - <<PY
 import json, pathlib
-sha = pathlib.Path("gptadmin-rootd.sha256").read_text().split()[0]
-pathlib.Path("gptadmin-rootd.json").write_text(json.dumps({
-    "component": "rootd",
+sha = pathlib.Path("gptadmin-shellmcp.sha256").read_text().split()[0]
+pathlib.Path("gptadmin-shellmcp.json").write_text(json.dumps({
+    "component": "shellmcp",
     "build_version": int("$BUILD_VERSION"),
     "build_ts": "$BUILD_TS",
     "git_commit": "$GIT_COMMIT",
     "platform": "linux",
     "arch": "x86_64",
     "artifact_type": "binary-runtime+source",
-    "runtime_payload": ["rootd/dist/rootd", "cli", "agents/generic_stdio_mcp_relay", "client"],
-    "source_payload": ["client/rootd.py", "client/rootd_pure.py", "client/rootd_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
+    "runtime_payload": ["shellmcp/dist/shellmcp", "cli", "agents/generic_stdio_mcp_relay", "client"],
+    "source_payload": ["client/shellmcp.py", "client/shellmcp_pure.py", "client/shellmcp_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
     "sha256": sha,
-    "url": "/artifacts/rootd.tar.gz",
+    "url": "/artifacts/shellmcp.tar.gz",
 }, ensure_ascii=False, indent=2)+"\n")
 PY
-  echo "built: $ART_DIR/gptadmin-rootd.tar.gz"
+  echo "built: $ART_DIR/gptadmin-shellmcp.tar.gz"
 else
-  echo "WARN: rootd dir not found, skip gptadmin-rootd.tar.gz"
+  echo "WARN: shellmcp dir not found, skip gptadmin-shellmcp.tar.gz"
 fi
 
 # полезно увидеть размеры
@@ -409,37 +413,36 @@ is_port_busy() {
   fi
 }
 
-# Выбирает base или base+1. Если оба заняты — падаем с понятной ошибкой.
+# Выбирает первый свободный порт начиная с base.
 pick_port_plus1() {
   local base="$1"
-  if is_port_busy "$base"; then
-    local alt=$((base+1))
-    if is_port_busy "$alt"; then
-      echo "ERROR: ports $base и $alt заняты" >&2
-      exit 1
+  local port
+  for ((port=base; port<base+50; port++)); do
+    if ! is_port_busy "$port"; then
+      echo "$port"
+      return 0
     fi
-    echo "$alt"
-  else
-    echo "$base"
-  fi
+  done
+  echo "ERROR: no free port in range $base..$((base+49))" >&2
+  exit 1
 }
 
 
 if [[ "$SKIP_TESTS" != "1" ]]; then
-  [[ -x "$ROOTD_DIST" ]] || { echo "Missing $ROOTD_DIST"; exit 1; }
+  [[ -x "$SHELLMCP_DIST" ]] || { echo "Missing $SHELLMCP_DIST"; exit 1; }
   [[ -x "$HUB_DIST"   ]] || { echo "Missing $HUB_DIST";   exit 1; }
 
-    step "Smoke test: rootd"
-    : > "$ROOTD_RT_LOG"
-    ROOTD_PORT="$(pick_port_plus1 25900)"
-    echo "Using ROOTD_PORT=$ROOTD_PORT"
-    ROOTD_TOKEN=testtoken HUB_URL='' ROOTD_PORT="$ROOTD_PORT" \
-    "$ROOTD_DIST" >"$ROOTD_RT_LOG" 2>&1 &
-    ROOTD_PID=$!
-    wait_for_http "http://127.0.0.1:${ROOTD_PORT}/version" 25
-    curl -sS -f "http://127.0.0.1:${ROOTD_PORT}/version" | grep -q build_version
-    kill "$ROOTD_PID" || true
-    ROOTD_PID=""
+    step "Smoke test: shellmcp"
+    : > "$SHELLMCP_RT_LOG"
+    SHELLMCP_PORT="$(pick_port_plus1 25900)"
+    echo "Using SHELLMCP_PORT=$SHELLMCP_PORT"
+    SHELLMCP_TOKEN=testtoken HUB_URL='' SHELLMCP_PORT="$SHELLMCP_PORT" \
+    "$SHELLMCP_DIST" >"$SHELLMCP_RT_LOG" 2>&1 &
+    SHELLMCP_PID=$!
+    wait_for_http "http://127.0.0.1:${SHELLMCP_PORT}/version" 25
+    curl -sS -f "http://127.0.0.1:${SHELLMCP_PORT}/version" | grep -q build_version
+    kill "$SHELLMCP_PID" || true
+    SHELLMCP_PID=""
 
     step "Smoke test: hub_proxy"
     : > "$HUB_RT_LOG"
@@ -468,5 +471,5 @@ fi
 
 step "DONE: Artifacts stored in $ART_DIR"
 echo "Main log: $LOG"
-echo "Runtime logs: $ROOTD_RT_LOG, $HUB_RT_LOG"
+echo "Runtime logs: $SHELLMCP_RT_LOG, $HUB_RT_LOG"
 echo "Cache dir: $CACHE_DIR  (delete with CLEAN=1)"

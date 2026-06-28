@@ -1,8 +1,8 @@
 # go-shellmcp
 
-Primary GPTAdmin `rootd` / `shellmcp` transport.
+Primary GPTAdmin `shellmcp` / `shellmcp` transport.
 
-The old Python `client/rootd.py` / `client/shellmcp.py` transport is deprecated and kept only as a compatibility fallback for old/source installs. New deployments should use `go-shellmcp` / `rootd-go-canary`.
+The old Python `client/shellmcp.py` / `client/shellmcp.py` transport is deprecated and kept only as a compatibility fallback for old/source installs. New deployments should use `go-shellmcp` / `shellmcp-go-canary`.
 
 Implemented in this prototype:
 
@@ -23,14 +23,14 @@ Implemented in this prototype:
 
 Compatibility notes:
 
-- Python `client/rootd.py` / `client/shellmcp.py` is deprecated.
+- Python `client/shellmcp.py` / `client/shellmcp.py` is deprecated.
 - Keep the `shellmcp.service` service name for compatibility; current production overrides it to execute the Go binary.
 
 Run locally:
 
 ```bash
 cd go-shellmcp
-SHELL_PORT=25990 SHELL_TOKEN=test go run ./cmd/rootd-go
+SHELL_PORT=25990 SHELL_TOKEN=test go run ./cmd/shellmcp-go
 curl -H 'Authorization: Bearer test' http://127.0.0.1:25990/system/health
 curl -H 'Authorization: Bearer test' -H 'Content-Type: application/json' \
   -d '{"cmd":"printf hello"}' http://127.0.0.1:25990/exec
@@ -49,11 +49,11 @@ REQUESTS=120 WORKERS=20 ./scripts/stress-local.sh
 ```
 
 `cross-build.sh` verifies Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 builds.
-`stress-local.sh` starts a local rootd-go process, runs concurrent `/exec` requests, checks background jobs, and verifies large stdout spill files.
+`stress-local.sh` starts a local shellmcp-go process, runs concurrent `/exec` requests, checks background jobs, and verifies large stdout spill files.
 
 ## Default execution user
 
-When `SHELL_DEFAULT_USER` is set and a request does not explicitly set `run_as_user`/`user`, rootd-go runs commands that do not mention `sudo` as that user:
+When `SHELL_DEFAULT_USER` is set and a request does not explicitly set `run_as_user`/`user`, shellmcp-go runs commands that do not mention `sudo` as that user:
 
 ```bash
 SHELL_DEFAULT_USER=admin

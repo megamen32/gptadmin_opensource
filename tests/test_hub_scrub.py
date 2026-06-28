@@ -23,7 +23,7 @@ def test_scrub_headers_removes_sensitive():
     # Only test keys that are actually in SENSITIVE_KEYS
     headers = {
         'Authorization': 'Bearer secret123',
-        'rootd_token': 'token456',
+        'shellmcp_token': 'token456',
         'token': 'tok789',
         'ctl_token': 'ctl123',
         'Content-Type': 'application/json'
@@ -32,7 +32,7 @@ def test_scrub_headers_removes_sensitive():
     assert result['Content-Type'] == 'application/json'
     # Sensitive headers should be masked
     assert result['Authorization'] != 'Bearer secret123'
-    assert result['rootd_token'] != 'token456'
+    assert result['shellmcp_token'] != 'token456'
     assert result['token'] != 'tok789'
     assert result['ctl_token'] != 'ctl123'
 

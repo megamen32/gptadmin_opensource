@@ -4,7 +4,7 @@ set -euo pipefail
 CLI_URL=${CLI_URL:-https://became.bezrabotnyi.com/gptadmin.py}
 PKG_ALL_URL=${PKG_ALL_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
 PKG_HUB_URL=${PKG_HUB_URL:-https://became.bezrabotnyi.com/gptadmin-hub.tar.gz}
-PKG_ROOTD_URL=${PKG_ROOTD_URL:-https://became.bezrabotnyi.com/gptadmin-rootd.tar.gz}
+PKG_SHELLMCP_URL=${PKG_SHELLMCP_URL:-https://became.bezrabotnyi.com/gptadmin-shellmcp.tar.gz}
 
 err(){ echo "ERROR: $*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
@@ -52,17 +52,17 @@ have python3 || err "python3 required"
 # When installed via: curl -fsSL .../install.sh | sudo bash
 # preserve the original invoking user's UID for TermCP's default non-root exec mode.
 if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-0}" != "0" ]; then
-  export ROOTD_DEFAULT_UID="${ROOTD_DEFAULT_UID:-$SUDO_UID}"
+  export SHELLMCP_DEFAULT_UID="${SHELLMCP_DEFAULT_UID:-$SUDO_UID}"
 fi
 
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-  export ROOTD_DEFAULT_USER="${ROOTD_DEFAULT_USER:-$SUDO_USER}"
+  export SHELLMCP_DEFAULT_USER="${SHELLMCP_DEFAULT_USER:-$SUDO_USER}"
   if command -v getent >/dev/null 2>&1; then
     _home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
   else
     _home="$(eval echo ~"$SUDO_USER")"
   fi
-  export ROOTD_DEFAULT_HOME="${ROOTD_DEFAULT_HOME:-$_home}"
+  export SHELLMCP_DEFAULT_HOME="${SHELLMCP_DEFAULT_HOME:-$_home}"
 fi
 
 mkdir -p "$INSTALL_DIR" "$(dirname "$CLI_PATH")"
@@ -84,9 +84,9 @@ export GPTADMIN_HOME="$INSTALL_DIR"
 
 # 2) Интерактивный мастер (правильный stdin)
 if [ -t 0 ]; then
-  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" || err "setup failed"
+  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" || err "setup failed"
 elif [ -r /dev/tty ]; then
-  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-rootd "$PKG_ROOTD_URL" < /dev/tty || err "setup failed"
+  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" < /dev/tty || err "setup failed"
 else
   err "no TTY available for interactive setup. Run: bash <(curl -fsSL https://.../install.sh)"
 fi

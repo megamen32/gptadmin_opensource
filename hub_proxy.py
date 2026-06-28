@@ -11,10 +11,10 @@ Public GPT Actions surface is now intentionally small and MCP-centric:
   • GET  /mcp-relay/job/{job_id}
 
 Old shell/server endpoints are kept as legacy/internal fallback:
-  • /servers, /bulk/exec, /tasks/*, /srv/*, /queue/*, /ws/rootd
+  • /servers, /bulk/exec, /tasks/*, /srv/*, /queue/*, /ws/shellmcp
 
 Important architectural decision:
-  rootd servers are exposed to GPT as *virtual MCP agents* with tools such as
+  shellmcp servers are exposed to GPT as *virtual MCP agents* with tools such as
   shell_exec, tasks and task_edit. This lets GPT use one mental
   model: list agents → list tools → call tool → poll job.
 
@@ -23,7 +23,7 @@ Env highlights:
   DEAD_S                     Seconds before server/agent is offline
   HUB_SYNC_TIMEOUT_S          Synchronous wait window before returning background job
   GPTADMIN_CONFIG_DIR         Runtime config dir
-  GPTADMIN_ARTIFACT_DIR       Directory with gptadmin-rootd.tar.gz
+  GPTADMIN_ARTIFACT_DIR       Directory with gptadmin-shellmcp.tar.gz
   MCP_RELAY_AGENT_TOKEN       Token for real local MCP relay agents
   PUBLIC_ORIGIN               Public origin for Apps SDK OAuth/MCP server
 """
@@ -125,7 +125,7 @@ def audit_request_context() -> Dict[str, Any]:
     return dict(ctx) if isinstance(ctx, dict) else {}
 
 
-SENSITIVE_KEYS = {"authorization", "rootd_token", "token", "ctl_token", "password", "client_secret"}
+SENSITIVE_KEYS = {"authorization", "shellmcp_token", "token", "ctl_token", "password", "client_secret"}
 
 
 def _mask(v: Optional[str]) -> Optional[str]:
@@ -901,7 +901,7 @@ def _server_fingerprint(d: Dict[str, Any]) -> str:
 
 def _sanitize_server(d: Dict[str, Any]) -> Dict[str, Any]:
     safe = dict(d)
-    safe.pop("rootd_token", None)
+    safe.pop("shellmcp_token", None)
     safe.pop("public_key", None)
     return safe
 
@@ -1035,7 +1035,7 @@ class Beat(BaseModel):
     public_key: str
     fingerprint: Optional[str] = None
     base_url: str
-    rootd_token: Optional[str] = None
+    shellmcp_token: Optional[str] = None
     time: int
     cores: Optional[int] = None
     mem_mb: Optional[int] = None
@@ -1390,7 +1390,7 @@ app.add_middleware(AccessLogMiddleware)
 
 
 # ---------------------------------------------------------------------------
-# Rootd signing / heartbeat / artifacts
+# Shellmcp signing / heartbeat / artifacts
 # ---------------------------------------------------------------------------
 
 
@@ -1602,7 +1602,7 @@ async def _dispatch_due_deferred_tasks() -> None:
             await _queue_or_fire_background(srv, info, dict(payload), tid, retry_policy=task.get("retry_policy"), from_deferred=True)
 
 
-def _signed_rootd_headers(method: str, path: str, body: bytes, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+def _signed_shellmcp_headers(method: str, path: str, body: bytes, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     signed = sign_request(HUB_PRIVATE_KEY, method, path, body)
     headers = {
         "X-GPTAdmin-Hub-ID": HUB_ID,
@@ -1639,19 +1639,19 @@ def _verify_heartbeat_signature(request: Request, b: Beat, body: bytes) -> None:
     for pub in candidate_keys:
         try:
             verify_signature(pub, request.method, request.url.path, ts, nonce, body, sig)
-            SIGNATURE_NONCES.check_and_store(f"rootd:{b.name}:{b.server_id}", nonce)
+            SIGNATURE_NONCES.check_and_store(f"shellmcp:{b.name}:{b.server_id}", nonce)
             return
         except Exception as e:
             last_error = e
     raise HTTPException(401, f"invalid signed heartbeat: {last_error}")
 
 
-def _rootd_artifact_path() -> Path:
-    return ARTIFACT_DIR / "gptadmin-rootd.tar.gz"
+def _shellmcp_artifact_path() -> Path:
+    return ARTIFACT_DIR / "gptadmin-shellmcp.tar.gz"
 
 
-def _rootd_artifact_meta_path() -> Path:
-    return ARTIFACT_DIR / "gptadmin-rootd.json"
+def _shellmcp_artifact_meta_path() -> Path:
+    return ARTIFACT_DIR / "gptadmin-shellmcp.json"
 
 
 def _sha256_file(path: Path) -> str:
@@ -1934,39 +1934,39 @@ def actions_openapi_yaml():
     return PlainTextResponse(ACTIONS_OPENAPI_YAML.strip() + "\n", media_type="application/yaml")
 
 
-@app.get("/artifacts/rootd.json", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def rootd_artifact_manifest(request: Request):
-    artifact = _rootd_artifact_path()
+@app.get("/artifacts/shellmcp.json", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def shellmcp_artifact_manifest(request: Request):
+    artifact = _shellmcp_artifact_path()
     if not artifact.is_file():
-        raise HTTPException(404, f"rootd artifact not found: {artifact}")
+        raise HTTPException(404, f"shellmcp artifact not found: {artifact}")
     meta = {
-        "component": "rootd",
+        "component": "shellmcp",
         "build_version": BUILD_VERSION,
         "build_ts": BUILD_TS,
         "git_commit": GIT_COMMIT,
     }
-    meta_path = _rootd_artifact_meta_path()
+    meta_path = _shellmcp_artifact_meta_path()
     if meta_path.is_file():
         try:
             loaded = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 meta.update({k: v for k, v in loaded.items() if k not in {"sha256", "size", "url"}})
         except Exception as e:
-            log.warning("rootd artifact metadata ignored path=%s err=%s", meta_path, e)
+            log.warning("shellmcp artifact metadata ignored path=%s err=%s", meta_path, e)
     meta.update({
         "sha256": _sha256_file(artifact),
         "size": artifact.stat().st_size,
-        "url": str(request.url_for("rootd_artifact_download")),
+        "url": str(request.url_for("shellmcp_artifact_download")),
     })
     return meta
 
 
-@app.get("/artifacts/rootd.tar.gz", name="rootd_artifact_download", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
-def rootd_artifact_download():
-    artifact = _rootd_artifact_path()
+@app.get("/artifacts/shellmcp.tar.gz", name="shellmcp_artifact_download", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def shellmcp_artifact_download():
+    artifact = _shellmcp_artifact_path()
     if not artifact.is_file():
-        raise HTTPException(404, f"rootd artifact not found: {artifact}")
-    return FileResponse(str(artifact), media_type="application/gzip", filename="gptadmin-rootd.tar.gz")
+        raise HTTPException(404, f"shellmcp artifact not found: {artifact}")
+    return FileResponse(str(artifact), media_type="application/gzip", filename="gptadmin-shellmcp.tar.gz")
 
 
 @app.post("/heartbeat")
@@ -2120,7 +2120,7 @@ def _reject_pending_server(name: str) -> Dict[str, Any]:
 async def _webhook_exec(info: Dict[str, Any], payload: dict) -> dict:
     url = f"{str(info['base_url']).rstrip('/')}/exec"
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    headers = _signed_rootd_headers("POST", "/exec", body, {"Content-Type": "application/json"})
+    headers = _signed_shellmcp_headers("POST", "/exec", body, {"Content-Type": "application/json"})
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         r = await client.post(url, content=body, headers=headers)
         try:
@@ -2134,7 +2134,7 @@ async def _webhook_exec_callback(srv: str, info: Dict[str, Any], payload: dict, 
     callback_payload = dict(payload)
     callback_payload["job_id"] = tid
     body = json.dumps(callback_payload, separators=(",", ":")).encode("utf-8")
-    headers = _signed_rootd_headers("POST", "/exec/callback", body, {"Content-Type": "application/json"})
+    headers = _signed_shellmcp_headers("POST", "/exec/callback", body, {"Content-Type": "application/json"})
     async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
         r = await client.post(url, content=body, headers=headers)
         if r.status_code == 404:
@@ -2150,10 +2150,10 @@ async def _webhook_exec_callback(srv: str, info: Dict[str, Any], payload: dict, 
 
 
 async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid: str) -> dict:
-    """Run webhook command through rootd /exec/live and update task stdout/stderr while it runs."""
+    """Run webhook command through shellmcp /exec/live and update task stdout/stderr while it runs."""
     url = f"{str(info['base_url']).rstrip('/')}/exec/live"
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    headers = _signed_rootd_headers("POST", "/exec/live", body, {"Content-Type": "application/json"})
+    headers = _signed_shellmcp_headers("POST", "/exec/live", body, {"Content-Type": "application/json"})
     slot = _task_slot(srv, tid)
     result: Dict[str, Any] = slot.setdefault("result", {})
     result.setdefault("stdout", "")
@@ -2164,7 +2164,7 @@ async def _webhook_exec_live(srv: str, info: Dict[str, Any], payload: dict, tid:
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         async with client.stream("POST", url, content=body, headers=headers) as r:
             if r.status_code == 404:
-                # Older rootd without /exec/live; fall back to legacy buffered exec.
+                # Older shellmcp without /exec/live; fall back to legacy buffered exec.
                 return await _webhook_exec(info, payload)
             if r.status_code >= 400:
                 text = await r.aread()
@@ -2256,7 +2256,7 @@ async def _queue_or_fire_background(srv: str, info: Dict[str, Any], payload: dic
                 return
             task = _task_slot(srv, tid)
             attempts = int(task.get("attempts") or 0) + 1
-            task.update({"status": "running", "attempts": attempts, "delivery": "callback_outbox", "rootd_start": started, "started_at": int(time.time()), "updated_at": int(time.time())})
+            task.update({"status": "running", "attempts": attempts, "delivery": "callback_outbox", "shellmcp_start": started, "started_at": int(time.time()), "updated_at": int(time.time())})
         except Exception as e:
             task = _task_slot(srv, tid)
             attempts = int(task.get("attempts") or 0) + 1
@@ -2381,8 +2381,8 @@ async def ws_exec(srv: str, payload: dict) -> dict:
         ws_results.pop(tid, None)
 
 
-@app.websocket("/ws/rootd")
-async def rootd_ws(websocket: WebSocket):
+@app.websocket("/ws/shellmcp")
+async def shellmcp_ws(websocket: WebSocket):
     await websocket.accept()
     srv_name = None
     try:
@@ -2572,7 +2572,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
     for hk in list(headers):
         if hk.lower().startswith("x-gptadmin-"):
             headers.pop(hk, None)
-    headers.update(_signed_rootd_headers(request.method, "/" + path, body))
+    headers.update(_signed_shellmcp_headers(request.method, "/" + path, body))
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         try:
@@ -2655,7 +2655,7 @@ def _redact_secret_value(value: Any) -> Any:
     """Return a public-safe copy with obvious secrets redacted.
 
     Hub registry/meta is user-visible via listMcpAgents. Never expose bearer
-    headers, API keys, passwords or token-like values there; rootd/relay may
+    headers, API keys, passwords or token-like values there; shellmcp/relay may
     still keep the real values in local config files with filesystem ACLs.
     """
     if isinstance(value, dict):
@@ -2688,7 +2688,7 @@ def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any], now: Optional[f
     meta = _redact_secret_value(dict(info.get("meta") or {}))
     meta.setdefault("age_s", int(_mcp_relay_agent_age_s(info, now)))
     meta.setdefault("transport_role", "capability_executor")
-    meta.setdefault("rootd_transport_ready", True)
+    meta.setdefault("shellmcp_transport_ready", True)
     for k, v in _mcp_relay_job_counts(agent_id).items():
         if v:
             meta[k] = v
@@ -2876,7 +2876,7 @@ def _ps_quote(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-_MCP_RUNTIME_BOOTSTRAP_PY = "import hashlib\nimport json\nimport os\nimport pathlib\nimport stat\nimport sys\nimport tarfile\nimport tempfile\nimport urllib.parse\nimport urllib.request\n\n\ndef log(message):\n    print('gptadmin mcp bootstrap: ' + str(message), file=sys.stderr)\n\n\ndef hub_base():\n    raw = (os.environ.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://gptadmin.bezrabotnyi.com').strip()\n    for suffix in ('/heartbeat', '/queue'):\n        if raw.endswith(suffix):\n            raw = raw[:-len(suffix)]\n    return raw.rstrip('/')\n\n\ndef headers():\n    token = (os.environ.get('ROOTD_UPDATE_TOKEN') or os.environ.get('SHELL_UPDATE_TOKEN') or os.environ.get('GPTADMIN_UPDATE_TOKEN') or os.environ.get('CTL_TOKEN') or '').strip()\n    return {'Authorization': 'Bearer ' + token} if token else {}\n\n\ndef artifact_url(base, value):\n    value = (value or '/artifacts/rootd.tar.gz').strip()\n    if value.startswith('/'):\n        return base + value\n    parsed = urllib.parse.urlparse(value)\n    b = urllib.parse.urlparse(base)\n    if parsed.scheme == 'http' and b.scheme == 'https' and parsed.netloc == b.netloc:\n        return urllib.parse.urlunparse(('https', parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))\n    return value\n\n\ndef read_json(url, hdrs):\n    req = urllib.request.Request(url, headers=hdrs)\n    with urllib.request.urlopen(req, timeout=30) as r:\n        return json.loads(r.read().decode('utf-8'))\n\n\ndef download(url, hdrs, path):\n    req = urllib.request.Request(url, headers=hdrs)\n    h = hashlib.sha256(); total = 0\n    with urllib.request.urlopen(req, timeout=120) as r, open(path, 'wb') as f:\n        while True:\n            chunk = r.read(1024 * 1024)\n            if not chunk:\n                break\n            h.update(chunk); f.write(chunk); total += len(chunk)\n    return h.hexdigest(), total\n\n\ndef install_dir():\n    candidates = []\n    for key in ('GPTADMIN_HOME', 'ROOTD_HOME'):\n        val = os.environ.get(key)\n        if val:\n            candidates.append(pathlib.Path(val))\n    candidates += [pathlib.Path.cwd(), pathlib.Path.home() / 'gptadmin', pathlib.Path('/opt/gptadmin')]\n    for c in candidates:\n        try:\n            if c.exists() and ((c / 'rootd.py').exists() or (c / 'requirements.txt').exists() or c == pathlib.Path.cwd()):\n                return c.resolve()\n        except Exception:\n            pass\n    return pathlib.Path.cwd().resolve()\n\n\ndef safe_members(tf, dst):\n    root = dst.resolve()\n    for member in tf.getmembers():\n        name = member.name.replace('\\\\', '/')\n        if name.startswith('/') or '..' in pathlib.PurePosixPath(name).parts:\n            continue\n        wanted = name == 'cli' or name.startswith('cli/') or name == 'agents' or name.startswith('agents/generic_stdio_mcp_relay/')\n        if not wanted:\n            continue\n        target = (dst / name).resolve()\n        if target != root and not str(target).startswith(str(root) + os.sep):\n            continue\n        member.name = name\n        yield member\n\n\ndef chmod_runtime(dst):\n    for rel in ('cli/gptadmin.py', 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py', 'agents/generic_stdio_mcp_relay/generic_stdio_mcp_relay.py'):\n        path = dst / rel\n        if path.exists():\n            try:\n                path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)\n            except Exception:\n                pass\n\n\ndef main():\n    dst = install_dir(); base = hub_base(); hdrs = headers()\n    manifest = read_json(base + '/artifacts/rootd.json', hdrs)\n    url = artifact_url(base, manifest.get('url'))\n    expected = (manifest.get('sha256') or '').lower().strip()\n    with tempfile.TemporaryDirectory(prefix='gptadmin-mcp-runtime-') as td:\n        archive = pathlib.Path(td) / 'rootd.tar.gz'\n        actual, total = download(url, hdrs, archive)\n        if expected and actual.lower() != expected:\n            raise SystemExit('sha256 mismatch for rootd artifact: got %s expected %s' % (actual, expected))\n        with tarfile.open(archive, 'r:gz') as tf:\n            members = list(safe_members(tf, dst))\n            names = {m.name for m in members}\n            if 'cli/gptadmin.py' not in names or 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py' not in names:\n                raise SystemExit('rootd artifact does not contain cli/gptadmin.py and generic_stdio_mcp_relay runtime')\n            tf.extractall(dst, members)\n    chmod_runtime(dst)\n    if not (dst / 'cli' / 'gptadmin.py').exists():\n        raise SystemExit('bootstrap finished but cli/gptadmin.py is still missing')\n    log(json.dumps({'ok': True, 'install_dir': str(dst), 'artifact_build_version': manifest.get('build_version'), 'artifact_size': manifest.get('size') or total, 'runtime_payload': manifest.get('runtime_payload')}, ensure_ascii=False, sort_keys=True))\n\n\nif __name__ == '__main__':\n    main()\n"
+_MCP_RUNTIME_BOOTSTRAP_PY = "import hashlib\nimport json\nimport os\nimport pathlib\nimport stat\nimport sys\nimport tarfile\nimport tempfile\nimport urllib.parse\nimport urllib.request\n\n\ndef log(message):\n    print('gptadmin mcp bootstrap: ' + str(message), file=sys.stderr)\n\n\ndef hub_base():\n    raw = (os.environ.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://gptadmin.bezrabotnyi.com').strip()\n    for suffix in ('/heartbeat', '/queue'):\n        if raw.endswith(suffix):\n            raw = raw[:-len(suffix)]\n    return raw.rstrip('/')\n\n\ndef headers():\n    token = (os.environ.get('SHELLMCP_UPDATE_TOKEN') or os.environ.get('SHELL_UPDATE_TOKEN') or os.environ.get('GPTADMIN_UPDATE_TOKEN') or os.environ.get('CTL_TOKEN') or '').strip()\n    return {'Authorization': 'Bearer ' + token} if token else {}\n\n\ndef artifact_url(base, value):\n    value = (value or '/artifacts/shellmcp.tar.gz').strip()\n    if value.startswith('/'):\n        return base + value\n    parsed = urllib.parse.urlparse(value)\n    b = urllib.parse.urlparse(base)\n    if parsed.scheme == 'http' and b.scheme == 'https' and parsed.netloc == b.netloc:\n        return urllib.parse.urlunparse(('https', parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))\n    return value\n\n\ndef read_json(url, hdrs):\n    req = urllib.request.Request(url, headers=hdrs)\n    with urllib.request.urlopen(req, timeout=30) as r:\n        return json.loads(r.read().decode('utf-8'))\n\n\ndef download(url, hdrs, path):\n    req = urllib.request.Request(url, headers=hdrs)\n    h = hashlib.sha256(); total = 0\n    with urllib.request.urlopen(req, timeout=120) as r, open(path, 'wb') as f:\n        while True:\n            chunk = r.read(1024 * 1024)\n            if not chunk:\n                break\n            h.update(chunk); f.write(chunk); total += len(chunk)\n    return h.hexdigest(), total\n\n\ndef install_dir():\n    candidates = []\n    for key in ('GPTADMIN_HOME', 'SHELLMCP_HOME'):\n        val = os.environ.get(key)\n        if val:\n            candidates.append(pathlib.Path(val))\n    candidates += [pathlib.Path.cwd(), pathlib.Path.home() / 'gptadmin', pathlib.Path('/opt/gptadmin')]\n    for c in candidates:\n        try:\n            if c.exists() and ((c / 'shellmcp.py').exists() or (c / 'requirements.txt').exists() or c == pathlib.Path.cwd()):\n                return c.resolve()\n        except Exception:\n            pass\n    return pathlib.Path.cwd().resolve()\n\n\ndef safe_members(tf, dst):\n    root = dst.resolve()\n    for member in tf.getmembers():\n        name = member.name.replace('\\\\', '/')\n        if name.startswith('/') or '..' in pathlib.PurePosixPath(name).parts:\n            continue\n        wanted = name == 'cli' or name.startswith('cli/') or name == 'agents' or name.startswith('agents/generic_stdio_mcp_relay/')\n        if not wanted:\n            continue\n        target = (dst / name).resolve()\n        if target != root and not str(target).startswith(str(root) + os.sep):\n            continue\n        member.name = name\n        yield member\n\n\ndef chmod_runtime(dst):\n    for rel in ('cli/gptadmin.py', 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py', 'agents/generic_stdio_mcp_relay/generic_stdio_mcp_relay.py'):\n        path = dst / rel\n        if path.exists():\n            try:\n                path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)\n            except Exception:\n                pass\n\n\ndef main():\n    dst = install_dir(); base = hub_base(); hdrs = headers()\n    manifest = read_json(base + '/artifacts/shellmcp.json', hdrs)\n    url = artifact_url(base, manifest.get('url'))\n    expected = (manifest.get('sha256') or '').lower().strip()\n    with tempfile.TemporaryDirectory(prefix='gptadmin-mcp-runtime-') as td:\n        archive = pathlib.Path(td) / 'shellmcp.tar.gz'\n        actual, total = download(url, hdrs, archive)\n        if expected and actual.lower() != expected:\n            raise SystemExit('sha256 mismatch for shellmcp artifact: got %s expected %s' % (actual, expected))\n        with tarfile.open(archive, 'r:gz') as tf:\n            members = list(safe_members(tf, dst))\n            names = {m.name for m in members}\n            if 'cli/gptadmin.py' not in names or 'agents/generic_stdio_mcp_relay/mcp_agent_manager.py' not in names:\n                raise SystemExit('shellmcp artifact does not contain cli/gptadmin.py and generic_stdio_mcp_relay runtime')\n            tf.extractall(dst, members)\n    chmod_runtime(dst)\n    if not (dst / 'cli' / 'gptadmin.py').exists():\n        raise SystemExit('bootstrap finished but cli/gptadmin.py is still missing')\n    log(json.dumps({'ok': True, 'install_dir': str(dst), 'artifact_build_version': manifest.get('build_version'), 'artifact_size': manifest.get('size') or total, 'runtime_payload': manifest.get('runtime_payload')}, ensure_ascii=False, sort_keys=True))\n\n\nif __name__ == '__main__':\n    main()\n"
 
 
 def _mcp_runtime_bootstrap_b64() -> str:
@@ -2889,8 +2889,8 @@ def _target_gptadmin_mcp_command(srv: str, argv: List[str]) -> str:
     The hub should not guess how to install a service for another OS. It sends a
     normal shell job to that host, then the local gptadmin CLI/mcp_agent_manager
     chooses systemd, launchd, or Windows Scheduled Task. If the local MCP runtime
-    is missing, the same command bootstraps cli/ + agents/ from the rootd update
-    artifact first, using ROOTD_UPDATE_TOKEN like rootd auto-update.
+    is missing, the same command bootstraps cli/ + agents/ from the shellmcp update
+    artifact first, using SHELLMCP_UPDATE_TOKEN like shellmcp auto-update.
     """
     mcp_args = ["mcp", *[str(x) for x in argv]]
     bootstrap_b64 = _mcp_runtime_bootstrap_b64()
@@ -2953,8 +2953,8 @@ def _mcp_json_from_stdout(stdout: str) -> Any:
     return None
 
 
-async def _rootd_get_json(srv: str, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Dict[str, Any]:
-    """Call a rootd read endpoint directly with the same signed transport as /exec."""
+async def _shellmcp_get_json(srv: str, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Dict[str, Any]:
+    """Call a shellmcp read endpoint directly with the same signed transport as /exec."""
     info = servers.get(srv)
     if not info:
         return {"ok": False, "error": "unknown server", "server": srv}
@@ -2964,34 +2964,34 @@ async def _rootd_get_json(srv: str, path: str, params: Optional[Dict[str, Any]] 
     if not path.startswith("/"):
         path = "/" + path
     url = f"{base_url}{path}"
-    headers = _signed_rootd_headers("GET", path, b"")
+    headers = _signed_shellmcp_headers("GET", path, b"")
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             r = await client.get(url, params=params or {}, headers=headers)
     except httpx.RequestError as e:
-        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     if r.status_code == 404:
-        return {"ok": False, "error": "rootd endpoint not found", "status_code": 404, "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": "shellmcp endpoint not found", "status_code": 404, "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     if r.status_code >= 400:
-        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     try:
         data = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:500], "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     if isinstance(data, dict):
         data.setdefault("ok", True)
-        data.setdefault("transport", "direct_signed_rootd")
+        data.setdefault("transport", "direct_signed_shellmcp")
         data.setdefault("server", srv)
         return data
-    return {"ok": True, "data": data, "transport": "direct_signed_rootd", "server": srv}
+    return {"ok": True, "data": data, "transport": "direct_signed_shellmcp", "server": srv}
 
 
-async def _capability_registry_via_rootd(srv: str, *, include_status: bool = True) -> Dict[str, Any]:
-    return await _rootd_get_json(srv, "/capabilities", {"include_status": str(bool(include_status)).lower()}, timeout=15)
+async def _capability_registry_via_shellmcp(srv: str, *, include_status: bool = True) -> Dict[str, Any]:
+    return await _shellmcp_get_json(srv, "/capabilities", {"include_status": str(bool(include_status)).lower()}, timeout=15)
 
 
-async def _rootd_post_json(srv: str, path: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
-    """POST JSON to rootd directly with the same signed transport as /exec."""
+async def _shellmcp_post_json(srv: str, path: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
+    """POST JSON to shellmcp directly with the same signed transport as /exec."""
     info = servers.get(srv)
     if not info:
         return {"ok": False, "error": "unknown server", "server": srv}
@@ -3001,32 +3001,32 @@ async def _rootd_post_json(srv: str, path: str, payload: Optional[Dict[str, Any]
     if not path.startswith("/"):
         path = "/" + path
     body = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = _signed_rootd_headers("POST", path, body, {"Content-Type": "application/json"})
+    headers = _signed_shellmcp_headers("POST", path, body, {"Content-Type": "application/json"})
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             r = await client.post(f"{base_url}{path}", content=body, headers=headers)
     except httpx.RequestError as e:
-        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": str(e), "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     if r.status_code >= 400:
-        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": f"HTTP {r.status_code}", "status_code": r.status_code, "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     try:
         data = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_rootd"}
+        return {"ok": False, "error": f"invalid JSON: {e}", "body": r.text[:800], "server": srv, "path": path, "transport": "direct_signed_shellmcp"}
     if isinstance(data, dict):
         data.setdefault("ok", True)
-        data.setdefault("transport", "direct_signed_rootd")
+        data.setdefault("transport", "direct_signed_shellmcp")
         data.setdefault("server", srv)
         return data
-    return {"ok": True, "data": data, "transport": "direct_signed_rootd", "server": srv}
+    return {"ok": True, "data": data, "transport": "direct_signed_shellmcp", "server": srv}
 
 
-async def _mcp_lifecycle_via_rootd(srv: str, mcp_ref: str, action: str, backend: Optional[str] = None) -> Dict[str, Any]:
+async def _mcp_lifecycle_via_shellmcp(srv: str, mcp_ref: str, action: str, backend: Optional[str] = None) -> Dict[str, Any]:
     safe_ref = quote(str(mcp_ref or ""), safe="")
     payload = {"action": action}
     if backend:
         payload["backend"] = backend
-    return await _rootd_post_json(srv, f"/capabilities/mcp/{safe_ref}/lifecycle", payload, timeout=45)
+    return await _shellmcp_post_json(srv, f"/capabilities/mcp/{safe_ref}/lifecycle", payload, timeout=45)
 
 
 async def _run_target_gptadmin_mcp(srv: str, argv: List[str], timeout: int = 60, check: bool = True) -> Dict[str, Any]:
@@ -3491,7 +3491,7 @@ async def _hub_file_transfer(args: Dict[str, Any]) -> Dict[str, Any]:
         source_sha = lines[1].strip()
         b64 = "\n".join(lines[2:]).strip()
         if len(b64) > int(args.get("max_inline_b64") or 48_000_000):
-            raise RuntimeError("file too large for MVP inline relay; add chunked rootd transfer next")
+            raise RuntimeError("file too large for MVP inline relay; add chunked shellmcp transfer next")
         calc_sha = hashlib.sha256(base64.b64decode(b64.encode("ascii"))).hexdigest()
         if verify_sha256 and calc_sha != source_sha:
             raise RuntimeError(f"hub sha256 mismatch source={source_sha} hub={calc_sha}")
@@ -3626,17 +3626,17 @@ def _hub_tools_list() -> Dict[str, Any]:
     tools = [
         {
             "name": "list_servers",
-            "description": "List legacy rootd servers exposed as virtual shell agents.",
+            "description": "List legacy shellmcp servers exposed as virtual shell agents.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "list_pending_servers",
-            "description": "List rootd servers pending approval.",
+            "description": "List shellmcp servers pending approval.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "approve_pending_server",
-            "description": "Approve a pending rootd server by name.",
+            "description": "Approve a pending shellmcp server by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -3646,7 +3646,7 @@ def _hub_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "reject_pending_server",
-            "description": "Reject a pending rootd server by name.",
+            "description": "Reject a pending shellmcp server by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -3745,7 +3745,7 @@ def _shell_cli_info(srv: str, info: Dict[str, Any], verbose: bool = False) -> Di
     os_text = str(info.get("os") or "").lower()
     backend = str(info.get("backend") or "")
     is_macos = "darwin" in os_text or "mac" in os_text
-    service = "com.gptadmin.rootd" if is_macos else "gptadmin-rootd.service"
+    service = "com.gptadmin.shellmcp" if is_macos else "gptadmin-shellmcp.service"
     service_manager = "launchctl" if is_macos else "systemctl"
     status_cmd = "gptadmin status"
     logs_cmd = "gptadmin logs shell"
@@ -3871,23 +3871,23 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if section in {"all", "architecture"}:
         out["architecture"] = {
             "hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host",
-            "rootd": "durable transport layer between hub and local capabilities on every platform",
-            "shell": "local executor capability exposed through rootd as virtual MCP agent shell:<server>",
-            "real_mcp": "stdio or remote MCP capability; migration target is supervision/transport behind rootd",
-            "polling_vs_webhook": "transport detail owned by rootd; capabilities should not implement their own fragile hub transport",
+            "shellmcp": "durable transport layer between hub and local capabilities on every platform",
+            "shell": "local executor capability exposed through shellmcp as virtual MCP agent shell:<server>",
+            "real_mcp": "stdio or remote MCP capability; migration target is supervision/transport behind shellmcp",
+            "polling_vs_webhook": "transport detail owned by shellmcp; capabilities should not implement their own fragile hub transport",
         }
     if section in {"all", "rescue"}:
         out["rescue"] = {
-            "principle": "If a shell agent on the hub host is broken, use hub.mcp_tools to add a temporary real MCP rescue shell on that same host, fix shellmcp/rootd, then remove the rescue MCP.",
+            "principle": "If a shell agent on the hub host is broken, use hub.mcp_tools to add a temporary real MCP rescue shell on that same host, fix shellmcp/shellmcp, then remove the rescue MCP.",
             "safe_migration_rule": "Never stop/restart the current shell agent from a plain nohup/background command inside its own systemd cgroup; systemd may kill the migration with the old service. Use systemd-run transient units for self-migration.",
             "systemd_run_pattern": "sudo systemd-run --unit=gptadmin-shellmcp-migrate --collect /bin/bash /path/to/migrate.sh",
             "private_tmp_note": "If systemd-run cannot see /tmp script paths, put the script in a durable path visible outside the service namespace, e.g. /opt/gptadmin/migrate.sh.",
             "rescue_mcp_flow": [
                 "hub.mcp_tools add name=rescue-shell-<host> command=python3 args=[minimal stdio MCP exposing shell_exec] agent_id=RescueShell<Host> run_as_user=root backend=systemd install=true",
-                "call RescueShell<Host>.shell_exec to run systemctl start shellmcp.service || systemctl start rootd.service and inspect logs",
+                "call RescueShell<Host>.shell_exec to run systemctl start shellmcp.service || systemctl start shellmcp.service and inspect logs",
                 "after normal shell:<host> works, hub.mcp_tools remove name=rescue-shell-<host> backend=systemd",
             ],
-            "ssh_jump_fallback": "If the broken host is not the hub host, use a live shell agent with SSH/LAN reachability to run: sudo systemctl start shellmcp.service || sudo systemctl start rootd.service || sudo systemctl start gptadmin-rootd.service.",
+            "ssh_jump_fallback": "If the broken host is not the hub host, use a live shell agent with SSH/LAN reachability to run: sudo systemctl start shellmcp.service || sudo systemctl start shellmcp.service || sudo systemctl start gptadmin-shellmcp.service.",
         }
     return _omit_none(out)
 
@@ -3934,7 +3934,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "capability_registry",
-            "description": "Show host capabilities and supervised MCP services behind rootd.",
+            "description": "Show host capabilities and supervised MCP services behind shellmcp.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3946,7 +3946,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_lifecycle",
-            "description": "Start/stop/restart/status a supervised MCP service on this host via rootd.",
+            "description": "Start/stop/restart/status a supervised MCP service on this host via shellmcp.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3961,7 +3961,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_tools",
-            "description": "Manage MCP servers on this host: list/add/remove/install/status/cat. Uses local GPTAdmin/rootd service backend.",
+            "description": "Manage MCP servers on this host: list/add/remove/install/status/cat. Uses local GPTAdmin/shellmcp service backend.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4449,7 +4449,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
                 "task_id": result["task_id"],
                 "timing": _compact_timing("running", started_at=task.get("started_at") or time.time()),
                 "command": str(cmd),
-                "cwd": str(args.get("cwd")) if args.get("cwd") else str((servers.get(srv) or {}).get("default_cwd") or "agent process cwd (default cwd not reported by this rootd yet)"),
+                "cwd": str(args.get("cwd")) if args.get("cwd") else str((servers.get(srv) or {}).get("default_cwd") or "agent process cwd (default cwd not reported by this shellmcp yet)"),
                 "message": "Shell command continues in background.",
             })
         return _mcp_envelope_text(f"shell_exec completed on {srv}", {"server": srv, "result": result})
@@ -4472,13 +4472,13 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
 
     if tool_name == "capability_registry":
         include_status = bool(args.get("include_status", True))
-        registry = await _capability_registry_via_rootd(srv, include_status=include_status)
+        registry = await _capability_registry_via_shellmcp(srv, include_status=include_status)
         if registry.get("ok"):
             if args.get("include_raw"):
                 registry["include_raw"] = True
             return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
         direct_error = dict(registry)
-        py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("ROOTD_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"rootd","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; rootd_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"rootd_transport_layer","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
+        py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("SHELLMCP_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"shellmcp","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; shellmcp_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"shellmcp_transport_layer","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
         py = py.replace("INCLUDE_STATUS", "True" if include_status else "False")
         req = BulkExec(servers=[srv], cmd="python3 - <<'PY'\n" + py + "\nPY", timeout=20, background=False)
         data = await bulk_exec(req)
@@ -4501,7 +4501,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
         action = str(args.get("action") or "status").strip().lower()
         backend = args.get("backend")
         backend = str(backend).strip().lower() if backend else None
-        data = await _mcp_lifecycle_via_rootd(srv, mcp_ref, action, backend=backend)
+        data = await _mcp_lifecycle_via_shellmcp(srv, mcp_ref, action, backend=backend)
         if not args.get("include_raw"):
             data.pop("body", None)
         unit = ((data.get("capability") or {}).get("legacy_service") or data.get("unit") or mcp_ref) if isinstance(data, dict) else mcp_ref
@@ -4920,7 +4920,7 @@ def _resolve_cwd(srv: Optional[str], task: Dict[str, Any], result_fields: Dict[s
     info = servers.get(str(srv or "")) or {}
     if info.get("default_cwd"):
         return str(info.get("default_cwd")), "heartbeat.default_cwd"
-    return "agent process cwd (default cwd not reported by this rootd yet)", "unknown"
+    return "agent process cwd (default cwd not reported by this shellmcp yet)", "unknown"
 
 
 def _compact_virtual_shell_task(job_id: str, job: Dict[str, Any], task: Optional[Dict[str, Any]], *, acked: bool) -> Dict[str, Any]:

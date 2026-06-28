@@ -11,7 +11,7 @@ test -x /home/app/.local/bin/gptadmin
 test -f /home/app/.config/gptadmin/gptadmin.env
 grep -q "HUB_PUBLIC_URL=$hub_url" /home/app/.config/gptadmin/gptadmin.env
 grep -q 'INSTALL_HUB=true' /home/app/.config/gptadmin/gptadmin.env
-grep -q 'INSTALL_ROOTD=true' /home/app/.config/gptadmin/gptadmin.env
+grep -q 'INSTALL_SHELLMCP=true' /home/app/.config/gptadmin/gptadmin.env
 test -f /home/app/.config/systemd/user/gptadmin-hub.service
 test -f /home/app/.config/systemd/user/gptadmin-shellmcp.service
 grep -q 'GPTAdmin Shell MCP Agent' /home/app/.config/systemd/user/gptadmin-shellmcp.service

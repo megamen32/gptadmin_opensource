@@ -15,22 +15,22 @@ curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 sudo mkdir -p "$INSTALL_DIR"
 sudo tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$INSTALL_DIR"
 rm -rf "$TMP_DIR"
-sudo chmod +x "$INSTALL_DIR/rootd/dist/rootd" "$INSTALL_DIR/hub_proxy/dist/hub_proxy"
+sudo chmod +x "$INSTALL_DIR/shellmcp/dist/shellmcp" "$INSTALL_DIR/hub_proxy/dist/hub_proxy"
 
 # Prepare logs
 sudo mkdir -p "$LOG_DIR"
 sudo chown "$(whoami)" "$LOG_DIR"
 
-# rootd service
-sudo tee /etc/systemd/system/rootd.service >/dev/null <<EOR
+# shellmcp service
+sudo tee /etc/systemd/system/shellmcp.service >/dev/null <<EOR
 [Unit]
-Description=Root Daemon for GPT Control (rootd)
+Description=Root Daemon for GPT Control (shellmcp)
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_DIR/rootd/dist/rootd
-Environment=ROOTD_TOKEN=$BEARER_TOKEN
-Environment=ROOTD_URL=http://\$(hostname):25900
+ExecStart=$INSTALL_DIR/shellmcp/dist/shellmcp
+Environment=SHELLMCP_TOKEN=$BEARER_TOKEN
+Environment=SHELLMCP_URL=http://\$(hostname):25900
 Environment=HUB_URL=http://127.0.0.1:8000/heartbeat
 Environment=LOG_DIR=$LOG_DIR
 Restart=always
@@ -80,8 +80,8 @@ ngrok config add-authtoken "$NGROK_TOKEN"
 
 # Enable and start services
 sudo systemctl daemon-reload
-sudo systemctl enable rootd hub_proxy ngrok-hub
-sudo systemctl restart rootd hub_proxy ngrok-hub
+sudo systemctl enable shellmcp hub_proxy ngrok-hub
+sudo systemctl restart shellmcp hub_proxy ngrok-hub
 
 # Obtain public URL
 sleep 5
@@ -90,5 +90,5 @@ echo "ngrok public URL: $PUBLIC_URL"
 echo "$PUBLIC_URL" | sudo tee "$INSTALL_DIR/ngrok_url.txt"
 
 # Verify services
-sudo systemctl status rootd --no-pager
+sudo systemctl status shellmcp --no-pager
 sudo systemctl status hub_proxy --no-pager

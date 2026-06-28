@@ -18,8 +18,8 @@ import requests
 # Skip all tests if hub is not running
 HUB_URL      = os.getenv("HUB_URL", "http://localhost:9001")
 CTL_TOKEN    = os.getenv("CTL_TOKEN", "chatgpt_secret")
-ROOTD_URL    = os.getenv("ROOTD_URL", "http://localhost:25900")
-ROOTD_TOKEN  = os.getenv("ROOTD_TOKEN", "srv_secret")
+SHELLMCP_URL    = os.getenv("SHELLMCP_URL", "http://localhost:25900")
+SHELLMCP_TOKEN  = os.getenv("SHELLMCP_TOKEN", "srv_secret")
 SERVER_NAME  = socket.gethostname()
 
 HEADERS_HUB  = {"Authorization": f"Bearer {CTL_TOKEN}"}
@@ -41,8 +41,8 @@ pytestmark = pytest.mark.skipif(not is_hub_running(), reason="hub server not run
 def send_heartbeat(mode="webhook"):
     payload = {
         "name":        SERVER_NAME,
-        "base_url":    ROOTD_URL,
-        "rootd_token": ROOTD_TOKEN,
+        "base_url":    SHELLMCP_URL,
+        "shellmcp_token": SHELLMCP_TOKEN,
         "time":        int(time.time()),
         "mode":        mode,
     }
@@ -81,14 +81,14 @@ def test_proxy_exec_polling():
 
     def worker():
         for _ in range(50):  # Try for 5 seconds
-            r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": ROOTD_TOKEN})
+            r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": SHELLMCP_TOKEN})
             job = r.json()
             if job.get("cmd"):
                 os.system(job["cmd"])
                 res = {"id": job["id"], "result": {"returncode": 0, "stdout": "polled\n", "stderr": ""}}
                 requests.post(
                     f"{HUB_URL}/queue/{SERVER_NAME}/result",
-                    params={"token": ROOTD_TOKEN},
+                    params={"token": SHELLMCP_TOKEN},
                     json=res,
                 )
                 break
@@ -115,14 +115,14 @@ def test_bulk_exec_polling():
 
     def worker():
         for _ in range(50):  # Try for 5 seconds
-            r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": ROOTD_TOKEN})
+            r = requests.get(f"{HUB_URL}/queue/{SERVER_NAME}", params={"token": SHELLMCP_TOKEN})
             job = r.json()
             if job.get("cmd"):
                 os.system(job["cmd"])
                 res = {"id": job["id"], "result": {"returncode": 0, "stdout": "bulk polled\n", "stderr": ""}}
                 requests.post(
                     f"{HUB_URL}/queue/{SERVER_NAME}/result",
-                    params={"token": ROOTD_TOKEN},
+                    params={"token": SHELLMCP_TOKEN},
                     json=res,
                 )
                 break
