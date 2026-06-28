@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /e2e/out
+printf '[frpc] %s\n' "$*" >>/e2e/out/frpc.log
+while true; do sleep 3600; done

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /e2e/out
+printf '[cloudflared] %s\n' "$*" >>/e2e/out/cloudflared.log
+echo 'Your quick Tunnel has been created! Try it out: https://shellmcp-e2e.trycloudflare.com'
+while true; do sleep 3600; done

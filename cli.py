@@ -85,7 +85,7 @@ if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
     LOG_DIR = USER_HOME / 'Library' / 'Logs' / 'gptadmin' if IS_USER_INSTALL else Path('/var/log/gptadmin')
     SVC_HUB_LABEL   = 'com.gptadmin.hub'
-    SVC_ROOTD_LABEL = 'com.gptadmin.rootd'
+    SVC_ROOTD_LABEL = 'com.gptadmin.shellmcp'
     SVC_FRPC_LABEL  = 'com.gptadmin.frpc'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
     UNIT_PATH_ROOTD = SERVICES_DIR / f'{SVC_ROOTD_LABEL}.plist'
@@ -93,8 +93,12 @@ if IS_MACOS:
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 else:
     SYSTEMD_DIR = USER_HOME / '.config' / 'systemd' / 'user' if IS_USER_INSTALL else Path('/etc/systemd/system')
+    LOG_DIR = Path(os.environ.get(
+        'GPTADMIN_LOG_DIR',
+        str((USER_HOME / '.local' / 'state' / 'gptadmin' / 'logs') if IS_USER_INSTALL else Path('/var/log/gptadmin'))
+    )).expanduser()
     SYSTEMD_HUB   = 'gptadmin-hub.service'
-    SYSTEMD_ROOTD = 'gptadmin-rootd.service'
+    SYSTEMD_ROOTD = 'gptadmin-shellmcp.service'
     SYSTEMD_FRPC  = 'gptadmin-frpc.service'
     UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
     UNIT_PATH_ROOTD = SYSTEMD_DIR / SYSTEMD_ROOTD
@@ -445,7 +449,7 @@ if IS_MACOS:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         wrapper = _wrapper_script('rootd', BIN_DIR / 'rootd')
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
-        UNIT_PATH_ROOTD.write_text(_make_plist(SVC_ROOTD_LABEL, wrapper, LOG_DIR / 'rootd.log'))
+        UNIT_PATH_ROOTD.write_text(_make_plist(SVC_ROOTD_LABEL, wrapper, LOG_DIR / 'shellmcp.log'))
 
     def write_frpc_unit(frpc_bin: str):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -816,7 +820,7 @@ def setup_interactive(args):
 
     installed = [n for n, p in [
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
-        ('gptadmin-rootd' if not IS_MACOS else SVC_ROOTD_LABEL, UNIT_PATH_ROOTD),
+        (svc_rootd_name(), UNIT_PATH_ROOTD),
         ('gptadmin-frpc' if not IS_MACOS else SVC_FRPC_LABEL,
          UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None)
     ] if p and Path(p).exists()]
@@ -1198,6 +1202,8 @@ def _user_home(username: str | None) -> Path:
 
 
 def _mcp_external_path(kind: str, username: str | None, explicit: str | None) -> Path:
+    if kind == 'claude':
+        kind = 'claude-desktop'
     if explicit:
         return Path(explicit).expanduser()
     home = _user_home(username)
@@ -1401,7 +1407,7 @@ def cmd_mcp_sync(args):
 def maybe_import_and_install_mcp_from_desktop_clients():
     """Offer to import existing Claude MCP servers during setup and install them.
 
-    Best-effort: a failure here must not break the main rootd install.
+    Best-effort: a failure here must not break the main shellmcp install.
     """
     if os.environ.get('GPTADMIN_SKIP_MCP_IMPORT', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
         return
@@ -1409,9 +1415,9 @@ def maybe_import_and_install_mcp_from_desktop_clients():
         return
     candidates = []
     try:
-        p = _mcp_external_path('claude', None, None)
+        p = _mcp_external_path('claude-desktop', None, None)
         if p.exists():
-            candidates.append(('claude', p))
+            candidates.append(('claude-desktop', p))
     except Exception:
         pass
     if not candidates:
@@ -1420,7 +1426,7 @@ def maybe_import_and_install_mcp_from_desktop_clients():
     do_it = default in {'1', 'true', 'yes', 'on'}
     if not do_it:
         try:
-            do_it = ask('Найдены MCP servers в Claude. Импортировать и запустить через GPTAdmin/rootd?', 'y').lower().startswith('y')
+            do_it = ask('Найдены MCP servers в Claude. Импортировать и запустить через GPTAdmin shellmcp?', 'y').lower().startswith('y')
         except Exception:
             do_it = False
     if not do_it:
@@ -1525,15 +1531,15 @@ def _log_file(label: str) -> Path:
 
 def cmd_logs(args):
     svc = args.service
-    if svc in ('termcp', 'shell', 'shell-mcp'):
-        svc = 'rootd'
-    if svc not in ('hub', 'rootd', 'frpc', 'all'):
-        die('unknown service. Use: hub, termcp, frpc, all')
+    if svc in ('termcp', 'shell', 'shellmcp', 'shell-mcp', 'rootd'):
+        svc = 'shell'
+    if svc not in ('hub', 'shell', 'frpc', 'all'):
+        die('unknown service. Use: hub, shellmcp, shell, termcp, frpc, all')
     if IS_MACOS:
         mapping = {
-            'hub':   (SVC_HUB_LABEL,   UNIT_PATH_HUB,   _log_file(SVC_HUB_LABEL)),
-            'rootd': (SVC_ROOTD_LABEL, UNIT_PATH_ROOTD, _log_file(SVC_ROOTD_LABEL)),
-            'frpc':  (SVC_FRPC_LABEL,  UNIT_PATH_FRPC,  _log_file(SVC_FRPC_LABEL)),
+            'hub':   (SVC_HUB_LABEL, UNIT_PATH_HUB, _log_file(SVC_HUB_LABEL)),
+            'shell': (svc_rootd_name(), UNIT_PATH_ROOTD, _log_file(svc_rootd_name())),
+            'frpc':  (SVC_FRPC_LABEL, UNIT_PATH_FRPC, _log_file(SVC_FRPC_LABEL)),
         }
         if svc == 'all':
             svc_logs_all(list(mapping.values()))
@@ -1543,7 +1549,7 @@ def cmd_logs(args):
     else:
         name_map = {
             'hub':   SYSTEMD_HUB,
-            'rootd': SYSTEMD_ROOTD,
+            'shell': SYSTEMD_ROOTD,
             'frpc':  SYSTEMD_FRPC,
         }
         if svc == 'all':
@@ -1737,7 +1743,7 @@ def main():
     hub_sub.add_parser('stop').set_defaults(func=cmd_stop)
     hub_sub.add_parser('restart').set_defaults(func=cmd_restart)
 
-    for alias in ('shell','termcp','rootd'):
+    for alias in ('shell','shellmcp','termcp','rootd'):
         rp = sub.add_parser(alias)
         rs = rp.add_subparsers(dest='svc_cmd')
         rs.add_parser('status').set_defaults(func=cmd_status)
