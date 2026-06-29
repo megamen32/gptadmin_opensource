@@ -830,6 +830,37 @@ def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp:
         env.setdefault('SHELLMCP_BIND', '127.0.0.1')
 
 
+
+def shellmcp_identity_dir_default() -> str:
+    """Return the safest identity dir for ShellMCP.
+
+    Older user installs used ~/.gptadmin by default. New installs use ETC_DIR
+    (~/.config/gptadmin for user mode, /etc/gptadmin for system mode). During
+    update, prefer an existing identity to avoid changing server_id/fingerprint
+    and forcing users to re-approve the machine.
+    """
+    candidates = []
+    for env_name in ('SHELLMCP_IDENTITY_DIR', 'SHELL_IDENTITY_DIR'):
+        val = os.environ.get(env_name)
+        if val:
+            candidates.append(Path(val).expanduser())
+    candidates.append(ETC_DIR)
+    if IS_USER_INSTALL:
+        candidates.append(USER_HOME / '.gptadmin')
+    for d in candidates:
+        try:
+            if (d / 'shellmcp_identity.json').exists() or (d / 'shellmcp_ed25519').exists():
+                return str(d)
+        except Exception:
+            pass
+    return str(ETC_DIR)
+
+
+def ensure_shellmcp_identity_env(env: dict) -> None:
+    ident = env.get('SHELLMCP_IDENTITY_DIR') or env.get('SHELL_IDENTITY_DIR') or shellmcp_identity_dir_default()
+    env['SHELLMCP_IDENTITY_DIR'] = ident
+    env['SHELL_IDENTITY_DIR'] = ident
+
 def sync_oauth_origin_env(env: dict) -> None:
     """Point OAuth discovery to this hub's public URL.
 
@@ -947,8 +978,7 @@ def setup_interactive(args):
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
     if install_shellmcp:
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
-        env.setdefault('SHELLMCP_IDENTITY_DIR', str(ETC_DIR))
-        env.setdefault('SHELL_IDENTITY_DIR', str(ETC_DIR))
+        ensure_shellmcp_identity_env(env)
         env.setdefault('SHELLMCP_UPDATE_INTERVAL_S', '3600')
         env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
         env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
@@ -1915,7 +1945,7 @@ def cmd_seturl(args):
     need_root()
     url = args.url
     ensure_https(url)
-    env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false', 'CLOUDFLARE_TUNNEL_ENABLE': 'false', 'TUNNEL_MODE': 'manual'})
+    env = env_read(); env.update({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false', 'CLOUDFLARE_TUNNEL_ENABLE': 'false', 'TUNNEL_MODE': 'manual'}); sync_oauth_origin_env(env); env_set_many(env)
     if UNIT_PATH_SHELLMCP.exists():
         svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     if UNIT_PATH_FRPC.exists():
@@ -1969,6 +1999,7 @@ def cmd_tunnel_enable(args):
 
     env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
     env['HUB_URL'] = env['HUB_PUBLIC_URL']
+    sync_oauth_origin_env(env)
     env_set_many(env)
 
     print('FRP tunnel enabled.')
@@ -1982,6 +2013,126 @@ def cmd_tunnel_disable(_):
         svc_disable_stop(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
     env = env_read(); env['FRP_ENABLE'] = 'false'; env['CLOUDFLARE_TUNNEL_ENABLE'] = 'false'; env['TUNNEL_MODE'] = 'manual'; env_set_many(env)
     print('Tunnel disabled.')
+
+
+# ===== Update / in-place upgrade =====
+
+def _service_pairs_for_update(install_hub: bool, install_shellmcp: bool, env: dict):
+    pairs = []
+    if install_hub:
+        pairs.append((svc_hub_name(), UNIT_PATH_HUB))
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        pairs.append((svc_frpc_name(), UNIT_PATH_FRPC))
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        pairs.append((svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED))
+    if install_shellmcp:
+        pairs.append((svc_shellmcp_name(), UNIT_PATH_SHELLMCP))
+    return pairs
+
+
+def cmd_update(args):
+    """In-place upgrade for existing installs.
+
+    Safe for old clients: preserves tokens, subdomain, URLs and MCP config;
+    refreshes binaries/CLI/service files; backfills OAuth env required by Codex.
+    """
+    need_root()
+    env = env_read()
+    if not env and not any(p.exists() for p in (UNIT_PATH_HUB, UNIT_PATH_SHELLMCP, CLI_PATH, BIN_DIR / 'gptadmin_hub', BIN_DIR / 'shellmcp')):
+        die('GPTAdmin installation was not found. Run: gptadmin setup')
+
+    install_hub = bool(UNIT_PATH_HUB.exists() or (BIN_DIR / 'gptadmin_hub').exists() or env.get('INSTALL_HUB') == 'true')
+    install_shellmcp = bool(UNIT_PATH_SHELLMCP.exists() or (BIN_DIR / 'shellmcp').exists() or env.get('INSTALL_SHELLMCP') == 'true')
+    if args.hub:
+        install_hub = True
+    if args.shellmcp:
+        install_shellmcp = True
+    if args.no_hub:
+        install_hub = False
+    if args.no_shellmcp:
+        install_shellmcp = False
+    if not install_hub and not install_shellmcp:
+        die('No installed components detected. Use --hub and/or --shellmcp, or run: gptadmin setup')
+
+    env.setdefault('CTL_TOKEN', gen_hex())
+    env.setdefault('SHELLMCP_TOKEN', gen_hex())
+    env.setdefault('ADMIN_PASSWORD', gen_hex())
+    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    env['INSTALL_HUB'] = 'true' if install_hub else 'false'
+    env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
+    if install_shellmcp:
+        ensure_shellmcp_identity_env(env)
+        env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
+        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+        env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
+        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
+        env['SHELLMCP_SERVICE_SCOPE'] = INSTALL_SCOPE
+    sync_oauth_origin_env(env)
+    env_set_many(env)
+
+    pkg_all = args.pkg_all or PKG_ALL_URL_DEFAULT
+    pkg_hub = args.pkg_hub or PKG_HUB_URL_DEFAULT
+    pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
+
+    print('Stopping installed GPTAdmin services for safe in-place update...')
+    svc_stop_multi(_service_pairs_for_update(install_hub, install_shellmcp, env))
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        if install_hub and install_shellmcp:
+            print('[Update] downloading full package...')
+            pkg = tdp / 'all.tgz'
+            download(pkg_all, pkg)
+            install_component_from_pkg(pkg, 'hub')
+            install_component_from_pkg(pkg, 'shellmcp')
+        elif install_hub:
+            print('[Update] downloading hub package...')
+            pkg = tdp / 'hub.tgz'
+            try:
+                download(pkg_hub, pkg)
+            except subprocess.CalledProcessError:
+                print('  Component package unavailable, using full package...')
+                download(pkg_all, pkg)
+            install_component_from_pkg(pkg, 'hub')
+        elif install_shellmcp:
+            print('[Update] downloading shellmcp package...')
+            pkg = tdp / 'shellmcp.tgz'
+            try:
+                download(pkg_shellmcp, pkg)
+            except subprocess.CalledProcessError:
+                print('  Component package unavailable, using full package...')
+                download(pkg_all, pkg)
+            install_component_from_pkg(pkg, 'shellmcp')
+
+    write_hub_unit(install_hub, install_shellmcp)
+    write_shellmcp_unit(install_hub, install_shellmcp)
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        frpc_bin = ensure_frpc_installed()
+        write_frpc_conf(env)
+        write_frpc_unit(frpc_bin)
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        cloudflared_bin = ensure_cloudflared_installed()
+        write_cloudflared_unit(cloudflared_bin, env)
+
+    svc_daemon_reload()
+    if install_hub:
+        svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
+        wait_local_hub_health(env, timeout_s=90)
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        svc_enable_start(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
+    if install_shellmcp:
+        svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
+    maybe_autoapprove_local_shellmcp(env_read(), install_hub, install_shellmcp)
+
+    env = env_read()
+    print('GPTAdmin updated in-place.')
+    if install_hub:
+        print(f"Hub URL: {env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '—'}")
+        print(f"OAuth resource: {env.get('MCP_RESOURCE') or env.get('PUBLIC_ORIGIN') or '—'}")
+    print('Next for Codex if it cached old discovery: codex mcp remove gptadmin && codex mcp add gptadmin --url <Hub URL>/mcp')
 
 # ===== Uninstall =====
 
@@ -2058,6 +2209,18 @@ def main():
     ap_setup.add_argument('--user', action='store_true', help='Use per-user install paths/services')
     ap_setup.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_setup.set_defaults(func=setup_interactive)
+
+    ap_update = sub.add_parser('update', help='Обновить существующую установку in-place')
+    ap_update.add_argument('--pkg-all')
+    ap_update.add_argument('--pkg-hub')
+    ap_update.add_argument('--pkg-shellmcp')
+    ap_update.add_argument('--hub', action='store_true', help='Force updating/installing hub component')
+    ap_update.add_argument('--shellmcp', action='store_true', help='Force updating/installing ShellMCP component')
+    ap_update.add_argument('--no-hub', action='store_true', help='Do not update hub component')
+    ap_update.add_argument('--no-shellmcp', action='store_true', help='Do not update ShellMCP component')
+    ap_update.add_argument('--user', action='store_true', help='Use per-user install paths/services')
+    ap_update.add_argument('--system', action='store_true', help='Use system install paths/services')
+    ap_update.set_defaults(func=cmd_update)
 
     ap_config = sub.add_parser('config', help='Настроить компоненты GPTAdmin')
     config_sub = ap_config.add_subparsers(dest='config_target')
