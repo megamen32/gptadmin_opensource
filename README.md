@@ -60,6 +60,59 @@ queue for tasks and does not start an HTTP server:
 QUEUE_URL=http://hub:9001/queue SHELLMCP_TOKEN=srv_secret python services/shellmcp_pure.py
 ```
 
+## Auth model
+
+Do not mix these three values:
+
+* `CTL_TOKEN` — Bearer token for the hub admin/control HTTP API. It protects
+  `/admin`, `/admin/api/*`, `/mcp-relay/*`, `/servers`, `/tasks/*` and artifact
+  endpoints.
+* `ADMIN_PASSWORD` — password shown on the OAuth HTML form at `/authorize`.
+  Users type this during the OAuth login flow for `/mcp`.
+* `OAUTH_CLIENT_SECRET` — server-side secret used by `hub_proxy.py` to sign and
+  verify OAuth bearer tokens for `/mcp`. Do not hand this value to users.
+
+Important: `/mcp` is not authenticated by `CTL_TOKEN`. The `/mcp` endpoint
+expects an OAuth bearer token minted by the hub.
+
+For a very simple single-user setup it is acceptable to set the same literal
+value in both `CTL_TOKEN` and `ADMIN_PASSWORD`, for example:
+
+```
+CTL_TOKEN=***REMOVED***
+ADMIN_PASSWORD=***REMOVED***
+OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)
+PUBLIC_ORIGIN=https://your-hub.example.com
+MCP_RESOURCE=https://your-hub.example.com
+```
+
+## Key hub env vars
+
+The website docs page now contains the exhaustive env reference rendered from
+the current code. The most important hub settings are:
+
+* `CTL_TOKEN` — admin/control Bearer token.
+* `PUBLIC_ORIGIN` — public HTTPS origin used in OAuth metadata.
+* `MCP_RESOURCE` — OAuth audience/resource for `/mcp`.
+* `ADMIN_PASSWORD` — OAuth login password for `/authorize`.
+* `OAUTH_CLIENT_SECRET` — JWT signing secret for `/mcp` OAuth tokens.
+* `MCP_RELAY_AGENT_TOKEN` — backend token for real relay agents.
+* `MCP_BRIDGE_KEY` — bridge/userscript key for `/mcp-prompt/*`.
+* `HUB_PORT`, `HUB_BIND` — listener socket settings.
+* `LOG_LEVEL`, `GPTADMIN_AUDIT_LOG` — logging and audit settings.
+
+## Repo sync note
+
+`website/` is a separate git repository nested inside this repo.
+
+If a change touches docs/site content and the root repo at the same time, push
+both repositories so they stay in sync:
+
+```bash
+cd /home/admin/gptadmin && git push
+cd /home/admin/gptadmin/website && git push
+```
+
 ### SSH backend
 
 If `shellmcp` should execute commands on a remote host instead of locally,
