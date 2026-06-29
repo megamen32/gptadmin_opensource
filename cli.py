@@ -932,6 +932,8 @@ def setup_interactive(args):
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
     if install_shellmcp:
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
+        env.setdefault('SHELLMCP_IDENTITY_DIR', str(ETC_DIR))
+        env.setdefault('SHELL_IDENTITY_DIR', str(ETC_DIR))
         env.setdefault('SHELLMCP_UPDATE_INTERVAL_S', '3600')
         env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
         env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
