@@ -14,6 +14,7 @@ one of three adapters. Manage everything from server admin to running subagents
 GigaChat.
 
 > 🌐 Website & live docs: **https://gptadmin.bezrabotnyi.com**
+> 📚 Full docs: **[docs/](./docs/Home.md)** — architecture, adapters, hub, install, config, API, security, FAQ
 > 📦 Install: `curl -s https://became.bezrabotnyi.com/install.sh | bash`
 
 ---
