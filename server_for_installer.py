@@ -75,24 +75,24 @@ def load_script(path: Path) -> str:
     return path.read_text()
 
 
-@app.get("/install.sh")
+@app.api_route("/install.sh", methods=["GET", "HEAD"])
 async def get_install_sh():
     content = load_script(DEPLOY_DIR / "install.sh")
     return Response(content, media_type="text/plain")
 
 
-@app.get("/install_shellmcp.sh")
+@app.api_route("/install_shellmcp.sh", methods=["GET", "HEAD"])
 async def get_install_shellmcp_sh():
     content = load_script(DEPLOY_DIR / "install_shellmcp.sh")
     return Response(content, media_type="text/plain")
 
 
-@app.get("/install_win.ps1")
+@app.api_route("/install_win.ps1", methods=["GET", "HEAD"])
 async def get_install_win_ps1():
     content = load_script(DEPLOY_DIR / "install_win.ps1")
     return Response(content, media_type="text/plain")
 
-@app.get("/api.json")
+@app.api_route("/api.json", methods=["GET", "HEAD"])
 async def get_openapi_json():
     content = load_script(PUBLIC_DIR / "openapi.yaml")
     return Response(content, media_type="application/json")
@@ -104,52 +104,52 @@ def _bin(path: Path, filename: str, media_type: str):
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
-@app.get('/gptadmin.tar.gz')
+@app.api_route('/gptadmin.tar.gz', methods=['GET', 'HEAD'])
 async def get_all():
     return _bin(BUILD_DIR / "gptadmin.tar.gz", "gptadmin.tar.gz", "application/gzip")
 
 
-@app.get('/gptadmin-hub.tar.gz')
+@app.api_route('/gptadmin-hub.tar.gz', methods=['GET', 'HEAD'])
 async def get_hub():
     return _bin(BUILD_DIR / "gptadmin-hub.tar.gz", "gptadmin-hub.tar.gz", "application/gzip")
 
 
-@app.get('/gptadmin-shellmcp.tar.gz')
+@app.api_route('/gptadmin-shellmcp.tar.gz', methods=['GET', 'HEAD'])
 async def get_shellmcp():
     return _bin(BUILD_DIR / "gptadmin-shellmcp.tar.gz", "gptadmin-shellmcp.tar.gz", "application/gzip")
 
 
-@app.get('/gptadmin-win.zip')
+@app.api_route('/gptadmin-win.zip', methods=['GET', 'HEAD'])
 async def get_shellmcp_win():
     return _bin(PUBLIC_DIR / "gptadmin-win.zip", "gptadmin-win.zip", "application/zip")
 
 
-@app.get('/gptadmin.py')
+@app.api_route('/gptadmin.py', methods=['GET', 'HEAD'])
 async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")
 
 
-@app.get('/shellmcp_pure.py')
+@app.api_route('/shellmcp_pure.py', methods=['GET', 'HEAD'])
 async def get_shellmcp_pure_py():
     return _bin(REPO_DIR / "client" / "shellmcp_pure.py", "shellmcp_pure.py", "text/x-python")
 
 
-@app.get('/shellmcp.py')
+@app.api_route('/shellmcp.py', methods=['GET', 'HEAD'])
 async def get_shellmcp_py():
     return _bin(REPO_DIR / "client" / "shellmcp.py", "shellmcp.py", "text/x-python")
 
 
-@app.get('/shellmcp.py.json')
+@app.api_route('/shellmcp.py.json', methods=['GET', 'HEAD'])
 async def get_shellmcp_py_meta():
     return _artifact_meta(REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py")
 
 
-@app.get('/shellmcp_pure.py.json')
+@app.api_route('/shellmcp_pure.py.json', methods=['GET', 'HEAD'])
 async def get_shellmcp_pure_py_meta():
     return _artifact_meta(REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py")
 
 
-@app.get('/manifest.json')
+@app.api_route('/manifest.json', methods=['GET', 'HEAD'])
 async def get_manifest_json():
     return _artifact_manifest()
 
