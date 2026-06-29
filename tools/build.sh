@@ -103,7 +103,10 @@ echo "Build version: $BUILD_VERSION ts=$BUILD_TS git=$GIT_COMMIT"
 step "Include gptadmin.py"
 CLI_SRC="cli.py"
 if [[ -f "$CLI_SRC" ]]; then
-  cp "$CLI_SRC" "$ART_DIR/cli/"
+  rm -f "$ART_DIR/cli/cli.py" "$ART_DIR/cli/gptadmin.py"
+  cp "$CLI_SRC" "$ART_DIR/cli/cli.py"
+  cp "$CLI_SRC" "$ART_DIR/cli/gptadmin.py"
+  chmod 755 "$ART_DIR/cli/gptadmin.py"
 else
   echo "WARN: $CLI_SRC not found; continuing without it"
 fi
@@ -309,28 +312,44 @@ rm -rf "$ART_DIR/agents"
 mkdir -p "$ART_DIR/agents"
 cp -a agents/generic_stdio_mcp_relay "$ART_DIR/agents/"
 
-# ---------- Archive (include CLI and MCP agents) ----------
+# ---------- Source payloads for non-Linux installers ----------
+step "Copy source payloads for macOS/pure-Python installs"
+rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
+mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
+cp -a hub_proxy.py gptadmin_build_info.py gptadmin_security.py "$ART_DIR/hub_source/"
+cat > "$ART_DIR/hub_source/requirements-hub.txt" <<'REQ'
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+cryptography
+psutil
+requests
+REQ
+cp -a client/. "$ART_DIR/client/"
+find "$ART_DIR/hub_source" "$ART_DIR/client"   \( -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' \) -print0 | xargs -0 -r rm -rf
+
+# ---------- Archive (include CLI, MCP agents and source payloads) ----------
 step "Archive: gptadmin.tar.gz"
 # Тарим только существующие папки (на случай первой частичной сборки)
 pushd "$ART_DIR" >/dev/null
 INCLUDE=()
-for d in shellmcp hub_proxy cli agents; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
+for d in shellmcp hub_proxy cli agents hub_source client; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
 tar -czf gptadmin.tar.gz "${INCLUDE[@]}"
 
 # NEW: компонентные архивы (если есть соответствующие папки)
 step "Archive: per-component tarballs"
 if [[ -d hub_proxy ]]; then
-  tar -czf gptadmin-hub.tar.gz hub_proxy
+  HUB_INCLUDE=(hub_proxy)
+  [[ -d hub_source ]] && HUB_INCLUDE+=(hub_source)
+  [[ -d cli ]] && HUB_INCLUDE+=(cli)
+  tar -czf gptadmin-hub.tar.gz "${HUB_INCLUDE[@]}"
   echo "built: $ART_DIR/gptadmin-hub.tar.gz"
 else
   echo "WARN: hub_proxy dir not found, skip gptadmin-hub.tar.gz"
 fi
 
 if [[ -d shellmcp ]]; then
-  rm -rf client
-  mkdir -p client
-  cp -a ../client/. client/
-  find client -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' | xargs -r rm -rf
   SHELLMCP_INCLUDE=(shellmcp)
   [[ -d cli ]] && SHELLMCP_INCLUDE+=(cli)
   [[ -d agents ]] && SHELLMCP_INCLUDE+=(agents)

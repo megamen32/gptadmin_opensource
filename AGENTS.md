@@ -23,6 +23,16 @@
 - Все клиентские вызовы имеют форму `/srv/{path}?server=name` и перенаправляются к нужному shellmcp с подстановкой его токена.
 - Проверяет авторизацию через `CTL_TOKEN`.
 
+## Команда "обнови сайт"
+Полный цикл обновления website (Next.js):
+```bash
+bash scripts/update-website.sh
+```
+Что делает:
+1. `git pull` в `website/`
+2. `bun run build`
+3. `sudo systemctl restart gptadminwebsite-next.service`
+
 ## Работа c кодом
 - Соблюдайте уже используемый стиль (f‑строки, явное логирование).
 - Логи пишутся через `logging.getLogger('shellmcp')` и `logging.basicConfig(...)`.

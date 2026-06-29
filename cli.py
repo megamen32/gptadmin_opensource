@@ -84,9 +84,16 @@ HUB_VENV_DIR = INSTALL_DIR / 'hub_venv'
 if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
     LOG_DIR = USER_HOME / 'Library' / 'Logs' / 'gptadmin' if IS_USER_INSTALL else Path('/var/log/gptadmin')
-    SVC_HUB_LABEL   = 'com.gptadmin.hub'
-    SVC_SHELLMCP_LABEL = 'com.gptadmin.shellmcp'
-    SVC_FRPC_LABEL  = 'com.gptadmin.frpc'
+    # Optional test namespace for parallel macOS launchd installs.
+    # Example: GPTADMIN_SERVICE_SUFFIX=.e2e42 -> com.gptadmin.e2e42.hub
+    # Empty by default, so normal production labels stay unchanged.
+    SERVICE_SUFFIX = os.environ.get('GPTADMIN_SERVICE_SUFFIX', '').strip()
+    if SERVICE_SUFFIX and not re.fullmatch(r'[A-Za-z0-9_.-]+', SERVICE_SUFFIX):
+        die('GPTADMIN_SERVICE_SUFFIX may contain only letters, digits, dot, underscore and dash')
+    SERVICE_PREFIX = f'com.gptadmin{SERVICE_SUFFIX}'
+    SVC_HUB_LABEL   = f'{SERVICE_PREFIX}.hub'
+    SVC_SHELLMCP_LABEL = f'{SERVICE_PREFIX}.shellmcp'
+    SVC_FRPC_LABEL  = f'{SERVICE_PREFIX}.frpc'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
     UNIT_PATH_SHELLMCP = SERVICES_DIR / f'{SVC_SHELLMCP_LABEL}.plist'
     UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
