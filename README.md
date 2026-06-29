@@ -1,5 +1,10 @@
 # GPT‑Админ
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Self-hosted](https://img.shields.io/badge/Self--hosted-yes-green.svg)](#)
+[![MCP](https://img.shields.io/badge/MCP-compatible-violet.svg)](#how-it-works)
+
 **One MCP hub — any AI controls any infrastructure.**
 
 GPT‑Админ is a self-hosted MCP hub that sits between your AI assistant and your
