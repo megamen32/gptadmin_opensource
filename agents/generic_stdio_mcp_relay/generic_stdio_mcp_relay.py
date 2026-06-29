@@ -3,7 +3,7 @@
 Generic stdio MCP relay agent.
 
 Runs any local stdio MCP server from an mcpServers JSON config and exposes it to
-GPTAdmin hub_proxy through /mcp-relay long polling.
+GPTAdmin gptadmin_hub through /mcp-relay long polling.
 
 Supported stdio wire formats:
   - ndjson: one JSON-RPC message per line. This is what @page-agent/mcp and

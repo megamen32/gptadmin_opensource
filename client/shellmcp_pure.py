@@ -577,10 +577,10 @@ class Handler(BaseHTTPRequestHandler):
         if auth == f'Bearer {TOKEN}':
             return True
 
-        # Modern hub_proxy calls shellmcp with signed X-GPTAdmin-* headers instead of
+        # Modern gptadmin_hub calls shellmcp with signed X-GPTAdmin-* headers instead of
         # Authorization. Full shellmcp verifies the Ed25519 signature. shellmcp_pure is the
         # minimal cross-platform fallback, so accept signed hub-shaped requests to
-        # stay compatible with hub_proxy. Keep Bearer token support for local/manual
+        # stay compatible with gptadmin_hub. Keep Bearer token support for local/manual
         # calls.
         if (
             self.headers.get('X-GPTAdmin-Hub-ID')

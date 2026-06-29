@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free watchdog for GPTAdmin hub_proxy.
+"""Dependency-free watchdog for GPTAdmin gptadmin_hub.
 
 Modes:
   --check-once
@@ -216,7 +216,7 @@ def parse_args(argv: Iterable[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--startup-grace", type=float, default=float(os.getenv("GPTADMIN_HUB_WATCHDOG_STARTUP_GRACE", "3")))
     parser.add_argument("--max-failures", type=int, default=int(os.getenv("GPTADMIN_HUB_WATCHDOG_MAX_FAILURES", "2")))
     parser.add_argument("--min-restart-interval", type=int, default=int(os.getenv("GPTADMIN_HUB_WATCHDOG_MIN_RESTART_INTERVAL", "60")))
-    parser.add_argument("--restart-command", default=os.getenv("GPTADMIN_HUB_RESTART_COMMAND", "systemctl restart hub_proxy.service"))
+    parser.add_argument("--restart-command", default=os.getenv("GPTADMIN_HUB_RESTART_COMMAND", "systemctl restart gptadmin_hub.service"))
     parser.add_argument("--restart-timeout", type=float, default=float(os.getenv("GPTADMIN_HUB_RESTART_TIMEOUT", "30")))
     parser.add_argument("--post-restart-delay", type=float, default=float(os.getenv("GPTADMIN_HUB_POST_RESTART_DELAY", "3")))
     parser.add_argument("--stamp-file", default=os.getenv("GPTADMIN_HUB_WATCHDOG_STAMP", "/run/gptadmin-hub-watchdog.last-restart"))

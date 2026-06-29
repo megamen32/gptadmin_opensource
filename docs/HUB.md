@@ -1,4 +1,4 @@
-# Hub (`hub_proxy.py`)
+# Hub (`gptadmin_hub.py`)
 
 The hub is the central process of GPT‑Админ. It proxies commands from AIs to
 shellmcp agents, handles auth, and serves the web panel.
@@ -20,7 +20,7 @@ shellmcp agents, handles auth, and serves the web panel.
 ## Running
 
 ```bash
-CTL_TOKEN=your-token python hub_proxy.py
+CTL_TOKEN=your-token python gptadmin_hub.py
 ```
 
 By default it listens on `0.0.0.0:25900`. Change with `--port` or `HUB_PORT`.
@@ -69,7 +69,7 @@ See [Configuration](./CONFIGURATION.md) for the full list. The essentials:
 unit that restarts the hub on failure. Run manually:
 
 ```bash
-python hub_watchdog.py --supervise -- python hub_proxy.py
+python hub_watchdog.py --supervise -- python gptadmin_hub.py
 ```
 
 ## See also

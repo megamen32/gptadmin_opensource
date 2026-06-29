@@ -14,7 +14,7 @@ adapters.
 | [Architecture](./ARCHITECTURE.md) | How the hub, shellmcp, and 3 adapters fit together |
 | [Getting Started](./GETTING_STARTED.md) | Install + first command in 5 minutes |
 | [Adapters](./ADAPTERS.md) | The 3 ways to connect your AI (MCP / extension / Custom GPT) |
-| [Hub](./HUB.md) | hub_proxy: config, env vars, endpoints, web panel |
+| [Hub](./HUB.md) | gptadmin_hub: config, env vars, endpoints, web panel |
 | [ShellMCP](./SHELLMCP.md) | The agent that runs on target machines |
 | [Install Paths](./INSTALL_PATHS.md) | Where GPT‑Админ lives on Linux/macOS/Windows |
 | [Configuration](./CONFIGURATION.md) | Full env-var reference, auth model, OAuth |

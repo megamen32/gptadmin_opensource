@@ -29,7 +29,7 @@ anonymous).
 
 ## Scope
 
-- The `hub_proxy` / `shellmcp` services and their HTTP/MCP endpoints
+- The `gptadmin_hub` / `shellmcp` services and their HTTP/MCP endpoints
 - The `gptadmin` CLI
 - The `mcp-bridge.user.js` browser extension
 - Install scripts (`deploy/install*.sh`, `install_win.ps1`)

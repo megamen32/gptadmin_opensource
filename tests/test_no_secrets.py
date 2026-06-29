@@ -16,7 +16,7 @@ SKIP_FILES = {
     "docs/OPEN_CORE_PLAN.md",
     "CHANGELOG.md",
     "scripts/check_mac_tunnel_matrix.py",  # generates runtime passwords via secrets.token_urlsafe
-    "hub_proxy.py",  # contains password validation logic, not hardcoded secrets
+    "gptadmin_hub.py",  # contains password validation logic, not hardcoded secrets
 }
 
 # Real secret patterns (high specificity)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration tests for hub_proxy."""
+"""Integration tests for gptadmin_hub."""
 
 import json
 import os

@@ -10,7 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 os.environ.setdefault("GPTADMIN_AUDIT_LOG", "/tmp/gptadmin-test-audit.log")
 
-import hub_proxy  # noqa: E402
+import gptadmin_hub  # noqa: E402
 from gptadmin_security import NonceCache, fingerprint_public_key_b64, public_key_to_b64, sign_request  # noqa: E402
 
 
@@ -19,8 +19,8 @@ def _pub(priv):
 
 
 def test_reconcile_uses_approved_identity_over_stale_state():
-    hub_proxy.approved_servers.clear()
-    hub_proxy.approved_servers["win"] = {
+    gptadmin_hub.approved_servers.clear()
+    gptadmin_hub.approved_servers["win"] = {
         "server_id": "new-id",
         "public_key": "new-public",
         "fingerprint": "SHA256:new",
@@ -37,7 +37,7 @@ def test_reconcile_uses_approved_identity_over_stale_state():
         "mode": "polling",
     }
 
-    reconciled = hub_proxy._reconcile_approved_server_record("win", stale)
+    reconciled = gptadmin_hub._reconcile_approved_server_record("win", stale)
 
     assert reconciled["server_id"] == "new-id"
     assert reconciled["public_key"] == "new-public"
@@ -55,17 +55,17 @@ def test_heartbeat_signature_accepts_rotated_key_for_pending_flow():
     server_id = "rotated-id"
     name = "BeyondInfinity"
 
-    hub_proxy.approved_servers.clear()
-    hub_proxy.approved_servers[name] = {
+    gptadmin_hub.approved_servers.clear()
+    gptadmin_hub.approved_servers[name] = {
         "server_id": "old-id",
         "public_key": old_pub,
         "fingerprint": fingerprint_public_key_b64(old_pub),
         "base_url": "http://old:25900",
         "backend": "local",
     }
-    hub_proxy.SIGNATURE_NONCES = NonceCache(ttl_s=300)
+    gptadmin_hub.SIGNATURE_NONCES = NonceCache(ttl_s=300)
 
-    beat = hub_proxy.Beat(
+    beat = gptadmin_hub.Beat(
         name=name,
         base_url="http://203.0.113.10:25900",
         shellmcp_token="srv_secret",
@@ -76,7 +76,7 @@ def test_heartbeat_signature_accepts_rotated_key_for_pending_flow():
         fingerprint=fingerprint_public_key_b64(new_pub),
     )
     body = beat.model_dump_json().encode("utf-8")
-    signed = sign_request(new_priv, "POST", "/heartbeat", body, timestamp=int(hub_proxy.time.time()), nonce="unit-test-nonce")
+    signed = sign_request(new_priv, "POST", "/heartbeat", body, timestamp=int(gptadmin_hub.time.time()), nonce="unit-test-nonce")
     request = SimpleNamespace(
         method="POST",
         url=SimpleNamespace(path="/heartbeat"),
@@ -89,4 +89,4 @@ def test_heartbeat_signature_accepts_rotated_key_for_pending_flow():
         },
     )
 
-    hub_proxy._verify_heartbeat_signature(request, beat, body)
+    gptadmin_hub._verify_heartbeat_signature(request, beat, body)

@@ -50,7 +50,7 @@ have curl || err "curl required"
 have python3 || err "python3 required"
 
 # When installed via: curl -fsSL .../install.sh | sudo bash
-# preserve the original invoking user's UID for TermCP's default non-root exec mode.
+# preserve the original invoking user's UID for ShellMCP's default non-root exec mode.
 if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID:-0}" != "0" ]; then
   export SHELLMCP_DEFAULT_UID="${SHELLMCP_DEFAULT_UID:-$SUDO_UID}"
 fi
@@ -99,8 +99,8 @@ cat <<EOF
   gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)
   gptadmin logs hub         # логи хаба
   gptadmin port 4555        # смена порта хаба
-  gptadmin config termcp    # настроить TermCP transport
-  gptadmin logs termcp      # логи TermCP
+  gptadmin config shellmcp    # настроить ShellMCP transport
+  gptadmin logs shellmcp      # логи ShellMCP
   gptadmin uninstall        # Полное удаление всего с компьютера
 
 EOF

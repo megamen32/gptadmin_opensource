@@ -1,6 +1,6 @@
 # Mac Chrome MCP Relay Agent
 
-This connects your logged-in Mac Chrome to `hub_proxy` through long polling.
+This connects your logged-in Mac Chrome to `gptadmin_hub` through long polling.
 
 ## 1. On Mac: install dependency
 

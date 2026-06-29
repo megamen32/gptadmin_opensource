@@ -238,9 +238,9 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 
 def _install_macos_hub_from_pkg(tdp: Path):
     src_candidates = [tdp / 'hub_source', tdp / 'hub', tdp / 'services' / 'main_package']
-    src = next((x for x in src_candidates if (x / 'hub_proxy.py').exists()), None)
+    src = next((x for x in src_candidates if (x / 'gptadmin_hub.py').exists()), None)
     if src is None:
-        die('macOS hub source not found in package: expected hub_source/hub_proxy.py')
+        die('macOS hub source not found in package: expected hub_source/gptadmin_hub.py')
     if HUB_SOURCE_DIR.exists():
         shutil.rmtree(HUB_SOURCE_DIR, ignore_errors=True)
     HUB_SOURCE_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -257,11 +257,11 @@ def _install_macos_hub_from_pkg(tdp: Path):
     run([str(vpy), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
     run([str(vpip), 'install', '-r', str(req)])
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    wrapper = BIN_DIR / 'hub_proxy'
+    wrapper = BIN_DIR / 'gptadmin_hub'
     wrapper.write_text(
         '#!/bin/sh\n'
         f'cd {HUB_SOURCE_DIR}\n'
-        f'exec {vpy} hub_proxy.py\n',
+        f'exec {vpy} gptadmin_hub.py\n',
         encoding='utf-8',
     )
     os.chmod(wrapper, 0o755)
@@ -287,7 +287,7 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
             _install_macos_hub_from_pkg(tdp)
             return
         if component == 'hub':
-            candidates = [tdp / 'hub_proxy' / 'dist' / 'hub_proxy', tdp / 'build' / 'hub_proxy' / 'dist' / 'hub_proxy']
+            candidates = [tdp / 'gptadmin_hub' / 'dist' / 'gptadmin_hub', tdp / 'build' / 'gptadmin_hub' / 'dist' / 'gptadmin_hub']
         elif IS_MACOS:
             # Linux PyInstaller shellmcp cannot run on macOS. Install bundled
             # pure-Python long-poll shellmcp from this package, while still copying
@@ -452,7 +452,7 @@ if IS_MACOS:
         if not install_hub:
             return
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        wrapper = _wrapper_script('hub', BIN_DIR / 'hub_proxy')
+        wrapper = _wrapper_script('hub', BIN_DIR / 'gptadmin_hub')
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_HUB.write_text(_make_plist(SVC_HUB_LABEL, wrapper, LOG_DIR / 'hub.log'))
 
@@ -507,7 +507,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile={ENV_FILE}
-ExecStart={BIN_DIR}/hub_proxy
+ExecStart={BIN_DIR}/gptadmin_hub
 Restart=always
 RestartSec=3
 {LINUX_HARDENING}
@@ -758,7 +758,7 @@ def wait_cloudflare_public_health(public_url: str, timeout_s: int = 45, fatal: b
     last_err = ''
     while time.time() < deadline:
         res = subprocess.run(['curl', '-fsS', '--max-time', '10', url], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if res.returncode == 0 and 'hub_proxy' in res.stdout:
+        if res.returncode == 0 and 'gptadmin_hub' in res.stdout:
             return True
         last_err = (res.stdout or '').strip()
         time.sleep(3)
@@ -787,9 +787,9 @@ def ask(prompt: str, default: str = '') -> str:
 def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp: bool):
     if not install_shellmcp or not env.get('HUB_URL'):
         return
-    print('\nКак TermCP будет подключаться к хабу?')
+    print('\nКак ShellMCP будет подключаться к хабу?')
     print('  1) long-polling / polling — рекомендуется, работает за NAT/firewall')
-    print('  2) webhook — только если хаб может напрямую достучаться до TermCP')
+    print('  2) webhook — только если хаб может напрямую достучаться до ShellMCP')
     print('  3) websocket — experimental')
     default_transport = env.get('SHELLMCP_TRANSPORT', 'polling')
     default_choice = {'polling': '1', 'webhook': '2', 'websocket': '3'}.get(default_transport, '1')
@@ -822,7 +822,7 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
     last_err = ''
     while time.time() < deadline:
         res = subprocess.run(['curl', '-fsS', '--max-time', '5', url], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode == 0 and 'hub_proxy' in (res.stdout or ''):
+        if res.returncode == 0 and 'gptadmin_hub' in (res.stdout or ''):
             return True
         last_err = (res.stderr or res.stdout or f'curl rc={res.returncode}').strip()
         time.sleep(2)
@@ -842,12 +842,12 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
         return
     flag = os.environ.get('GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP', env.get('GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP', '1')).strip().lower()
     if flag in {'0', 'false', 'no', 'off'}:
-        print('Local TermCP auto-approve skipped: GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP=0')
+        print('Local ShellMCP auto-approve skipped: GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP=0')
         return
     token = env.get('CTL_TOKEN') or ''
     hub_port = env.get('HUB_PORT', '9001')
     if not token:
-        print('WARNING: Local TermCP auto-approve skipped: CTL_TOKEN is empty', file=sys.stderr)
+        print('WARNING: Local ShellMCP auto-approve skipped: CTL_TOKEN is empty', file=sys.stderr)
         return
     base = f'http://127.0.0.1:{hub_port}'
     headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']
@@ -870,7 +870,7 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             if not pending:
                 servers = data.get('servers') or []
                 if any((x.get('mode') in {'polling', 'long_poll'} and str(x.get('status')) == 'active') for x in servers if isinstance(x, dict)):
-                    print('Local TermCP auto-approve: already active')
+                    print('Local ShellMCP auto-approve: already active')
                     return
             approved = []
             for item in pending:
@@ -885,12 +885,12 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
                 if sc.get('ok'):
                     approved.append(name)
             if approved:
-                print('Local TermCP auto-approved: ' + ', '.join(approved))
+                print('Local ShellMCP auto-approved: ' + ', '.join(approved))
                 return
         except Exception as e:
             last_err = str(e)
         time.sleep(2)
-    print('WARNING: Local TermCP auto-approve did not complete' + (f': {last_err}' if last_err else ''), file=sys.stderr)
+    print('WARNING: Local ShellMCP auto-approve did not complete' + (f': {last_err}' if last_err else ''), file=sys.stderr)
 
 def setup_interactive(args):
     need_root()
@@ -901,9 +901,9 @@ def setup_interactive(args):
     print('=== GPTAdmin setup ===')
     print(f'Install mode: {INSTALL_SCOPE}  install_dir={INSTALL_DIR}  config_dir={ETC_DIR}')
     print('Что устанавливать?')
-    print('  1) hub_proxy и TermCP agent')
-    print('  2) только hub_proxy')
-    print('  3) только TermCP agent')
+    print('  1) gptadmin_hub и ShellMCP agent')
+    print('  2) только gptadmin_hub')
+    print('  3) только ShellMCP agent')
     ch = ask('Ваш выбор', '1')
     install_hub = ch in ('1', '2')
     install_shellmcp = ch in ('1', '3')
@@ -979,7 +979,7 @@ def setup_interactive(args):
             env['HUB_PUBLIC_URL'] = url
             env['HUB_URL'] = url
     else:
-        print('\nУстановка только TermCP agent.')
+        print('\nУстановка только ShellMCP agent.')
         url = ask('Введите HUB_URL (публичный HTTPS адрес вашего хаба, например, https://gptadmin.example.com)')
         ensure_https(url)
         env['FRP_ENABLE'] = 'false'
@@ -1013,7 +1013,7 @@ def setup_interactive(args):
             install_component_from_pkg(pkg, 'hub')
             install_component_from_pkg(pkg, 'shellmcp')
         elif install_hub:
-            print('\n[Загрузка] hub_proxy...')
+            print('\n[Загрузка] gptadmin_hub...')
             pkg = tdp / 'hub.tgz'
             try:
                 download(pkg_hub, pkg)
@@ -1022,7 +1022,7 @@ def setup_interactive(args):
                 download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'hub')
         else:
-            print('\n[Загрузка] TermCP agent...')
+            print('\n[Загрузка] ShellMCP agent...')
             pkg = tdp / 'shellmcp.tgz'
             try:
                 download(pkg_shellmcp, pkg)
@@ -1079,9 +1079,9 @@ def setup_interactive(args):
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
         print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
     if install_shellmcp and not install_hub:
-        print(f"HUB_URL для TermCP: {env.get('HUB_URL', '—')}")
+        print(f"HUB_URL для ShellMCP: {env.get('HUB_URL', '—')}")
     if install_shellmcp:
-        print('TermCP agent установлен.')
+        print('ShellMCP agent установлен.')
 
     installed = [n for n, p in [
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
@@ -1720,7 +1720,7 @@ def installed_units():
     if UNIT_PATH_CLOUDFLARED.exists(): res.append((svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED))
     return res
 
-def cmd_config_termcp(args):
+def cmd_config_shellmcp(args):
     need_root()
     env = env_read()
     if args.hub_url:
@@ -1750,7 +1750,7 @@ def cmd_config_termcp(args):
     env_set_many(env)
     if UNIT_PATH_SHELLMCP.exists():
         svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
-    print('TermCP transport configured:')
+    print('ShellMCP transport configured:')
     print(f"  SHELLMCP_TRANSPORT={env.get('SHELLMCP_TRANSPORT', 'polling')}")
     print(f"  HUB_URL={env.get('HUB_URL', '')}")
     if env.get('QUEUE_URL'):
@@ -1759,8 +1759,7 @@ def cmd_config_termcp(args):
         print(f"  SHELLMCP_URL={env['SHELLMCP_URL']}")
 
 
-cmd_config_shell = cmd_config_termcp  # legacy internal alias
-cmd_config_shellmcp = cmd_config_termcp  # legacy internal alias
+cmd_config_shell = cmd_config_shellmcp  # legacy internal alias
 
 def cmd_status(_):
     units = installed_units()
@@ -1799,12 +1798,12 @@ def _log_file(label: str) -> Path:
 
 def cmd_logs(args):
     svc = args.service
-    if svc in ('termcp', 'shell', 'shellmcp', 'shell-mcp'):
+    if svc in ('shellmcp', 'shell', 'shell-mcp'):
         svc = 'shell'
     if svc in ('cloudflare', 'cloudflared', 'cf'):
         svc = 'cloudflared'
     if svc not in ('hub', 'shell', 'frpc', 'cloudflared', 'all'):
-        die('unknown service. Use: hub, shellmcp, shell, termcp, frpc, cloudflared, all')
+        die('unknown service. Use: hub, shellmcp, shell, frpc, cloudflared, all')
     if IS_MACOS:
         mapping = {
             'hub':   (SVC_HUB_LABEL, UNIT_PATH_HUB, _log_file(SVC_HUB_LABEL)),
@@ -1833,15 +1832,15 @@ def cmd_logs(args):
 def cmd_tokens(_):
     env = env_read()
     print(f"CTL_TOKEN={env.get('CTL_TOKEN','')}  # hub")
-    print('TermCP token is stored as SHELLMCP_TOKEN and is intentionally not printed.')
+    print('ShellMCP token is stored as SHELLMCP_TOKEN and is intentionally not printed.')
 
 def cmd_rotate(args):
     need_root()
     which = args.which
-    if which in ('termcp', 'shell', 'shell-mcp'):
+    if which in ('shellmcp', 'shell', 'shell-mcp'):
         which = 'shellmcp'
     if which not in ('hub', 'shellmcp'):
-        die('unknown token target. Use: hub or termcp')
+        die('unknown token target. Use: hub or shellmcp')
     newtok = gen_hex()
     if which == 'hub':
         env_set_many({'CTL_TOKEN': newtok})
@@ -1852,7 +1851,7 @@ def cmd_rotate(args):
         env_set_many({'SHELLMCP_TOKEN': newtok})
         if UNIT_PATH_SHELLMCP.exists():
             svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
-        print('TermCP token rotated (значение не выводится).')
+        print('ShellMCP token rotated (значение не выводится).')
 
 def cmd_port(args):
     need_root()
@@ -2002,10 +2001,10 @@ def cmd_uninstall(args):
 
 def main():
     # Backward-compatible command aliases, hidden from help.
-    if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-shellmcp', 'config-termcp'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-shellmcp'):
         legacy = sys.argv[1]
-        sys.argv[1:2] = ['config', 'termcp']
-        # Keep old --shellmcp-url accepted by the TermCP config parser.
+        sys.argv[1:2] = ['config', 'shellmcp']
+        # Keep old --shellmcp-url accepted by the ShellMCP config parser.
     ap = argparse.ArgumentParser(prog='gptadmin', description='GPTAdmin manager (hub + shell agents)')
     ap.add_argument('--user', action='store_true', help='Use per-user install paths/services (default when not root)')
     ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
@@ -2021,11 +2020,11 @@ def main():
 
     ap_config = sub.add_parser('config', help='Настроить компоненты GPTAdmin')
     config_sub = ap_config.add_subparsers(dest='config_target')
-    ap_conf = config_sub.add_parser('termcp', help='Настроить TermCP transport: polling/webhook/websocket')
+    ap_conf = config_sub.add_parser('shellmcp', help='Настроить ShellMCP transport: polling/webhook/websocket')
     ap_conf.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
     ap_conf.add_argument('--hub-url')
-    ap_conf.add_argument('--termcp-url', '--shell-url', '--shellmcp-url', dest='shellmcp_url', help='URL TermCP agent для webhook режима')
-    ap_conf.set_defaults(func=cmd_config_termcp)
+    ap_conf.add_argument('--shellmcp-url', '--shell-url', dest='shellmcp_url', help='URL ShellMCP agent для webhook режима')
+    ap_conf.set_defaults(func=cmd_config_shellmcp)
 
     sub.add_parser('status').set_defaults(func=cmd_status)
     sub.add_parser('start').set_defaults(func=cmd_start)
@@ -2039,7 +2038,7 @@ def main():
     hub_sub.add_parser('stop').set_defaults(func=cmd_stop)
     hub_sub.add_parser('restart').set_defaults(func=cmd_restart)
 
-    for alias in ('shell','shellmcp','termcp'):
+    for alias in ('shell', 'shellmcp'):
         rp = sub.add_parser(alias)
         rs = rp.add_subparsers(dest='svc_cmd')
         rs.add_parser('status').set_defaults(func=cmd_status)

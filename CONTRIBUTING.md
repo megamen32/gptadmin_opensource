@@ -15,7 +15,7 @@ pip install -r requirements.txt   # or: pip install fastapi uvicorn
 Run the hub + an agent locally:
 
 ```bash
-python hub_proxy.py   # terminal 1
+python gptadmin_hub.py   # terminal 1
 python client/shellmcp.py   # terminal 2
 python tests/test_hub.py    # terminal 3 — smoke test
 ```

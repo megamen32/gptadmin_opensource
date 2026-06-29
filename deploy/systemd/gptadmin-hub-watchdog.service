@@ -2,7 +2,7 @@
 Description=GPTAdmin Hub external watchdog
 Documentation=man:systemd.service(5)
 Wants=network-online.target
-After=network-online.target hub_proxy.service
+After=network-online.target gptadmin_hub.service
 
 [Service]
 Type=oneshot

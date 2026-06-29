@@ -15,7 +15,7 @@ curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 sudo mkdir -p "$INSTALL_DIR"
 sudo tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$INSTALL_DIR"
 rm -rf "$TMP_DIR"
-sudo chmod +x "$INSTALL_DIR/shellmcp/dist/shellmcp" "$INSTALL_DIR/hub_proxy/dist/hub_proxy"
+sudo chmod +x "$INSTALL_DIR/shellmcp/dist/shellmcp" "$INSTALL_DIR/gptadmin_hub/dist/gptadmin_hub"
 
 # Prepare logs
 sudo mkdir -p "$LOG_DIR"
@@ -41,14 +41,14 @@ User=root
 WantedBy=multi-user.target
 EOR
 
-# hub_proxy service
-sudo tee /etc/systemd/system/hub_proxy.service >/dev/null <<EOH
+# gptadmin_hub service
+sudo tee /etc/systemd/system/gptadmin_hub.service >/dev/null <<EOH
 [Unit]
-Description=Hub Proxy for GPT Server Management (hub_proxy)
+Description=Hub Proxy for GPT Server Management (gptadmin_hub)
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_DIR/hub_proxy/dist/hub_proxy
+ExecStart=$INSTALL_DIR/gptadmin_hub/dist/gptadmin_hub
 Environment=CTL_TOKEN=$BEARER_TOKEN
 Environment=LOG_DIR=$LOG_DIR
 Restart=always
@@ -59,10 +59,10 @@ User=$(whoami)
 WantedBy=multi-user.target
 EOH
 
-# ngrok service for hub_proxy
+# ngrok service for gptadmin_hub
 sudo tee /etc/systemd/system/ngrok-hub.service >/dev/null <<EON
 [Unit]
-Description=Expose hub_proxy via ngrok
+Description=Expose gptadmin_hub via ngrok
 After=network-online.target
 Wants=network-online.target
 
@@ -80,8 +80,8 @@ ngrok config add-authtoken "$NGROK_TOKEN"
 
 # Enable and start services
 sudo systemctl daemon-reload
-sudo systemctl enable shellmcp hub_proxy ngrok-hub
-sudo systemctl restart shellmcp hub_proxy ngrok-hub
+sudo systemctl enable shellmcp gptadmin_hub ngrok-hub
+sudo systemctl restart shellmcp gptadmin_hub ngrok-hub
 
 # Obtain public URL
 sleep 5
@@ -91,4 +91,4 @@ echo "$PUBLIC_URL" | sudo tee "$INSTALL_DIR/ngrok_url.txt"
 
 # Verify services
 sudo systemctl status shellmcp --no-pager
-sudo systemctl status hub_proxy --no-pager
+sudo systemctl status gptadmin_hub --no-pager

@@ -19,7 +19,7 @@ AIs connect OUT of it.
 
 ## Components
 
-### 1. The Hub (`hub_proxy.py`)
+### 1. The Hub (`gptadmin_hub.py`)
 
 The central process. It:
 - Accepts heartbeats from shellmcp agents (registers them, tracks liveness)

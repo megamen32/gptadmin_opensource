@@ -23,7 +23,7 @@ Each backup has a `meta.json` and an append-only `manifest.jsonl`. Cleanup scans
 Examples:
 
 ```json
-{"action":"backup","path":"/home/admin/gptadmin/hub_proxy.py","ttl_days":30,"label":"before-admin-api-change"}
+{"action":"backup","path":"/home/admin/gptadmin/gptadmin_hub.py","ttl_days":30,"label":"before-admin-api-change"}
 ```
 
 ```json

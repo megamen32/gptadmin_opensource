@@ -2,7 +2,7 @@
 
 Full environment-variable reference, auth model, and OAuth setup.
 
-## Hub env vars (`hub_proxy.py`)
+## Hub env vars (`gptadmin_hub.py`)
 
 ### Auth
 
