@@ -830,6 +830,19 @@ def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp:
         env.setdefault('SHELLMCP_BIND', '127.0.0.1')
 
 
+def sync_oauth_origin_env(env: dict) -> None:
+    """Point OAuth discovery to this hub's public URL.
+
+    Remote MCP clients such as Codex discover OAuth from the MCP endpoint.
+    Leaving PUBLIC_ORIGIN/MCP_RESOURCE unset makes gptadmin_hub.py use the
+    legacy global default gptadminmcp.bezrabotnyi.com, which redirects users to
+    the wrong authorization server/password.
+    """
+    public = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '').rstrip('/')
+    if not public:
+        return
+    env['PUBLIC_ORIGIN'] = public
+    env['MCP_RESOURCE'] = public
 
 
 def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
@@ -930,6 +943,8 @@ def setup_interactive(args):
 
     env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
+    env.setdefault('ADMIN_PASSWORD', gen_hex())
+    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
     if install_shellmcp:
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
         env.setdefault('SHELLMCP_IDENTITY_DIR', str(ETC_DIR))
@@ -1016,6 +1031,7 @@ def setup_interactive(args):
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
+    sync_oauth_origin_env(env)
     env_set_many(env)
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -1087,6 +1103,7 @@ def setup_interactive(args):
             env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
         else:
             env['HUB_URL'] = public_url
+        sync_oauth_origin_env(env)
         env_set_many(env)
     if install_shellmcp:
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
