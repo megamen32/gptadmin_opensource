@@ -5464,15 +5464,59 @@ def oauth_authorize_get(request: Request):
         "scope": q.get("scope", " ".join(OAUTH_SCOPES)),
     }
     hidden = "".join(f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v or "")}">' for k, v in fields.items())
-    page = f"""<!doctype html><html><body>
-<h2>GPTAdmin MCP Authorization</h2>
-<p>Scopes: {html.escape(fields['scope'])}</p>
-<form method="POST" action="/authorize">
-{hidden}
-<input type="password" name="password" placeholder="Admin password" autofocus>
-<button type="submit">Authorize</button>
-</form>
-</body></html>"""
+    scope_html = "".join(f'<span class="scope">{html.escape(x)}</span>' for x in (fields['scope'] or '').split())
+    client_html = html.escape(fields.get('client_id') or 'MCP client')
+    resource_html = html.escape(resource or MCP_RESOURCE)
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize GPTAdmin MCP</title>
+  <style>
+    :root {{ color-scheme: dark; --bg:#070a12; --card:rgba(18,24,38,.84); --line:rgba(148,163,184,.22); --text:#e5eefc; --muted:#9fb0c7; --accent:#7c3aed; --accent2:#06b6d4; --danger:#fb7185; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:28px; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background: radial-gradient(circle at top left, rgba(124,58,237,.36), transparent 34rem), radial-gradient(circle at bottom right, rgba(6,182,212,.22), transparent 28rem), var(--bg); }}
+    .card {{ width:min(520px,100%); border:1px solid var(--line); border-radius:28px; padding:30px; background:linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.035)), var(--card); box-shadow:0 28px 90px rgba(0,0,0,.45); backdrop-filter: blur(18px); }}
+    .brand {{ display:flex; align-items:center; gap:14px; margin-bottom:22px; }}
+    .logo {{ width:48px; height:48px; display:grid; place-items:center; border-radius:16px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 12px 30px rgba(124,58,237,.35); font-weight:900; letter-spacing:-.05em; }}
+    h1 {{ margin:0; font-size:26px; line-height:1.12; letter-spacing:-.04em; }}
+    .sub {{ margin:4px 0 0; color:var(--muted); font-size:14px; }}
+    .meta {{ display:grid; gap:10px; margin:22px 0; padding:16px; border:1px solid var(--line); border-radius:18px; background:rgba(2,6,23,.35); }}
+    .row {{ display:flex; justify-content:space-between; gap:16px; font-size:13px; }}
+    .row b {{ color:#cbd5e1; font-weight:700; }}
+    .row span {{ color:var(--muted); text-align:right; word-break:break-all; }}
+    .scopes {{ display:flex; flex-wrap:wrap; gap:8px; margin:0 0 22px; }}
+    .scope {{ padding:7px 10px; border-radius:999px; font-size:12px; color:#dbeafe; background:rgba(59,130,246,.16); border:1px solid rgba(96,165,250,.24); }}
+    label {{ display:block; margin:0 0 8px; color:#cbd5e1; font-size:13px; font-weight:700; }}
+    input[type=password] {{ width:100%; border:1px solid var(--line); outline:none; border-radius:16px; padding:15px 16px; color:var(--text); background:rgba(15,23,42,.82); font-size:16px; box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }}
+    input[type=password]:focus {{ border-color:rgba(6,182,212,.7); box-shadow:0 0 0 4px rgba(6,182,212,.14); }}
+    button {{ width:100%; margin-top:16px; border:0; border-radius:16px; padding:15px 18px; cursor:pointer; color:white; font-weight:800; font-size:15px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 16px 34px rgba(6,182,212,.20); }}
+    .hint {{ margin:16px 0 0; color:var(--muted); font-size:12px; line-height:1.5; }}
+    .warn {{ color:#fecdd3; }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+      <div class="logo">GA</div>
+      <div><h1>Authorize GPTAdmin MCP</h1><p class="sub">Grant this client access to your local GPTAdmin hub.</p></div>
+    </div>
+    <div class="meta">
+      <div class="row"><b>Client</b><span>{client_html}</span></div>
+      <div class="row"><b>Resource</b><span>{resource_html}</span></div>
+    </div>
+    <div class="scopes">{scope_html}</div>
+    <form method="POST" action="/authorize">
+      {hidden}
+      <label for="password">Admin password</label>
+      <input id="password" type="password" name="password" placeholder="Enter ADMIN_PASSWORD" autocomplete="current-password" autofocus required>
+      <button type="submit">Authorize MCP client</button>
+    </form>
+    <p class="hint"><span class="warn">Security:</span> only approve clients you trust. This grants GPTAdmin MCP scopes shown above.</p>
+  </main>
+</body>
+</html>"""
     return Response(page, media_type="text/html")
 
 
