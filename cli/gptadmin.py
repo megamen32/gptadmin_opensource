@@ -7,6 +7,9 @@ import os
 import sys
 import tarfile
 import tempfile
+import base64
+import hmac
+import hashlib
 import json
 import subprocess
 import shutil
@@ -1163,6 +1166,7 @@ def setup_interactive(args):
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         maybe_import_and_install_mcp_from_desktop_clients()
     maybe_autoapprove_local_shellmcp(env, install_hub, install_shellmcp)
+    auto_configure_ai_mcp_clients(env_read(), install_hub)
 
     env = env_read()
     print('\n=== Готово ===')
@@ -2156,6 +2160,7 @@ def cmd_update(args):
     if install_shellmcp:
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     maybe_autoapprove_local_shellmcp(env_read(), install_hub, install_shellmcp)
+    auto_configure_ai_mcp_clients(env_read(), install_hub)
 
     env = env_read()
     print('GPTAdmin updated in-place.')
@@ -2163,6 +2168,152 @@ def cmd_update(args):
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '—'}")
         print(f"OAuth resource: {env.get('MCP_RESOURCE') or env.get('PUBLIC_ORIGIN') or '—'}")
     print('Next for Codex if it cached old discovery: codex mcp remove gptadmin && codex mcp add gptadmin --url <Hub URL>/mcp')
+
+
+# ===== AI client MCP auto-configuration =====
+
+def _b64url_bytes(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+
+def _b64url_json(obj: dict) -> str:
+    return _b64url_bytes(json.dumps(obj, separators=(',', ':')).encode())
+
+
+def make_mcp_bearer_token(env: dict, client_id: str = 'gptadmin-auto-client') -> str:
+    secret = env.get('OAUTH_CLIENT_SECRET') or ''
+    if not secret:
+        raise RuntimeError('OAUTH_CLIENT_SECRET is missing')
+    origin = (env.get('PUBLIC_ORIGIN') or env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '').rstrip('/')
+    resource = (env.get('MCP_RESOURCE') or origin).rstrip('/')
+    if not origin or not resource:
+        raise RuntimeError('PUBLIC_ORIGIN/MCP_RESOURCE is missing')
+    now = int(time.time())
+    header = {'alg': 'HS256', 'typ': 'JWT'}
+    body = {
+        'sub': 'admin',
+        'scope': 'gptadmin.read gptadmin.exec',
+        'client_id': client_id,
+        'iss': origin,
+        'aud': resource,
+        'iat': now,
+        'exp': now + 365 * 24 * 3600,
+    }
+    signing_input = f'{_b64url_json(header)}.{_b64url_json(body)}'.encode()
+    sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    return signing_input.decode() + '.' + _b64url_bytes(sig)
+
+
+def _mcp_client_url(env: dict) -> str:
+    base = (env.get('HUB_URL') or '').rstrip('/')
+    if not base:
+        base = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
+    return base + '/mcp'
+
+
+def _run_quiet(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
+
+
+def _merge_env_for_client(token: str) -> dict:
+    child_env = os.environ.copy()
+    child_env['GPTADMIN_MCP_BEARER'] = token
+    child_env['GPTADMIN_CODEX_MCP_BEARER'] = token
+    return child_env
+
+
+def _set_process_env_for_gui_clients(token: str) -> None:
+    if IS_MACOS and shutil.which('launchctl'):
+        _run_quiet(['launchctl', 'setenv', 'GPTADMIN_MCP_BEARER', token])
+        _run_quiet(['launchctl', 'setenv', 'GPTADMIN_CODEX_MCP_BEARER', token])
+
+
+def _configure_codex_mcp(url: str, token: str) -> str:
+    if not shutil.which('codex'):
+        return 'skip: codex not found'
+    env = _merge_env_for_client(token)
+    _run_quiet(['codex', 'mcp', 'remove', 'gptadmin'], env=env)
+    res = _run_quiet(['codex', 'mcp', 'add', 'gptadmin', '--url', url, '--bearer-token-env-var', 'GPTADMIN_CODEX_MCP_BEARER'], env=env)
+    if res.returncode != 0:
+        return 'error: ' + ((res.stderr or res.stdout).strip() or f'codex rc={res.returncode}')
+    return 'ok'
+
+
+def _configure_claude_code_mcp(url: str, token: str) -> str:
+    if not shutil.which('claude'):
+        return 'skip: claude not found'
+    env = _merge_env_for_client(token)
+    _run_quiet(['claude', 'mcp', 'remove', '--scope', 'user', 'gptadmin'], env=env)
+    _run_quiet(['claude', 'mcp', 'remove', '--scope', 'local', 'gptadmin'], env=env)
+    res = _run_quiet(['claude', 'mcp', 'add', '--scope', 'user', '--transport', 'http', 'gptadmin', url, '--header', f'Authorization: Bearer {token}'], env=env)
+    if res.returncode != 0:
+        return 'error: ' + ((res.stderr or res.stdout).strip() or f'claude rc={res.returncode}')
+    return 'ok'
+
+
+def _configure_opencode_mcp(url: str, token: str) -> str:
+    if not shutil.which('opencode') and not (USER_HOME / '.config' / 'opencode').exists():
+        return 'skip: opencode not found'
+    cfg_dir = USER_HOME / '.config' / 'opencode'
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_dir / 'opencode.json'
+    data: dict = {}
+    if cfg.exists():
+        try:
+            data = json.loads(cfg.read_text())
+        except Exception as e:
+            return f'error: cannot parse {cfg}: {e}'
+    data.setdefault('mcp', {})
+    data['mcp']['gptadmin'] = {
+        'type': 'remote',
+        'url': url,
+        'enabled': True,
+        'headers': {'Authorization': f'Bearer {token}'},
+    }
+    if cfg.exists():
+        backup = cfg.with_suffix(cfg.suffix + '.bak.gptadmin-mcp.' + time.strftime('%Y%m%d_%H%M%S'))
+        shutil.copy2(cfg, backup)
+    cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    try:
+        os.chmod(cfg, 0o600)
+    except Exception:
+        pass
+    return 'ok'
+
+
+def auto_configure_ai_mcp_clients(env: dict, install_hub: bool) -> None:
+    if not install_hub:
+        return
+    flag = os.environ.get('GPTADMIN_AUTO_CONFIGURE_AI_MCP', env.get('GPTADMIN_AUTO_CONFIGURE_AI_MCP', '1')).strip().lower()
+    if flag in {'0', 'false', 'no', 'off'}:
+        print('AI MCP clients auto-config skipped: GPTADMIN_AUTO_CONFIGURE_AI_MCP=0')
+        return
+    try:
+        env = dict(env)
+        sync_oauth_origin_env(env)
+        env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+        env.setdefault('ADMIN_PASSWORD', gen_hex())
+        token = env.get('GPTADMIN_MCP_BEARER') or make_mcp_bearer_token(env, 'gptadmin-auto-client')
+        env['GPTADMIN_MCP_BEARER'] = token
+        env['GPTADMIN_CODEX_MCP_BEARER'] = token
+        env_set_many({
+            'PUBLIC_ORIGIN': env.get('PUBLIC_ORIGIN', ''),
+            'MCP_RESOURCE': env.get('MCP_RESOURCE', ''),
+            'ADMIN_PASSWORD': env.get('ADMIN_PASSWORD', ''),
+            'OAUTH_CLIENT_SECRET': env.get('OAUTH_CLIENT_SECRET', ''),
+            'GPTADMIN_MCP_BEARER': token,
+            'GPTADMIN_CODEX_MCP_BEARER': token,
+        })
+        _set_process_env_for_gui_clients(token)
+        url = _mcp_client_url(env)
+        results = {
+            'claude-code': _configure_claude_code_mcp(url, token),
+            'codex': _configure_codex_mcp(url, token),
+            'opencode': _configure_opencode_mcp(url, token),
+        }
+        print('AI MCP clients auto-config: ' + ', '.join(f'{k}={v}' for k, v in results.items()))
+    except Exception as e:
+        print(f'WARNING: AI MCP clients auto-config failed: {e}', file=sys.stderr)
 
 # ===== Uninstall =====
 
