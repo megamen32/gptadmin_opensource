@@ -9,34 +9,21 @@ build/
 1.html
 router_cookies.json
 .buildcache/
-<<<<<<< HEAD
-<<<<<<< HEAD
 
 # Python bytecode
-__pycache__/
 *.pyc
 *.pyo
 *.pyd
-
 # Runtime data and config
 config/
 logs/
-
 # Backup files
 *.bak*
 services/main_package/client.bak.*/
-
 # Apps (separate projects)
 apps/
-=======
-=======
->>>>>>> headroom-spill-integration
-config/
 deploy/nginx/became.bezrabotnyi.com.conf
 deploy/systemd/
-*.bak*
-<<<<<<< HEAD
->>>>>>> headroom-spill-integration
-=======
->>>>>>> headroom-spill-integration
 *.db
+# Local mac tunnel matrix secrets
+scripts/check_mac_tunnel_matrix.env
