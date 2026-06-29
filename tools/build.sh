@@ -335,7 +335,8 @@ step "Archive: gptadmin.tar.gz"
 pushd "$ART_DIR" >/dev/null
 INCLUDE=()
 for d in shellmcp hub_proxy cli agents hub_source client; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
-tar -czf gptadmin.tar.gz "${INCLUDE[@]}"
+tar -czf "gptadmin.tar.gz.tmp.$$" "${INCLUDE[@]}"
+mv -f "gptadmin.tar.gz.tmp.$$" gptadmin.tar.gz
 
 # NEW: компонентные архивы (если есть соответствующие папки)
 step "Archive: per-component tarballs"
@@ -343,7 +344,8 @@ if [[ -d hub_proxy ]]; then
   HUB_INCLUDE=(hub_proxy)
   [[ -d hub_source ]] && HUB_INCLUDE+=(hub_source)
   [[ -d cli ]] && HUB_INCLUDE+=(cli)
-  tar -czf gptadmin-hub.tar.gz "${HUB_INCLUDE[@]}"
+  tar -czf "gptadmin-hub.tar.gz.tmp.$$" "${HUB_INCLUDE[@]}"
+mv -f "gptadmin-hub.tar.gz.tmp.$$" gptadmin-hub.tar.gz
   echo "built: $ART_DIR/gptadmin-hub.tar.gz"
 else
   echo "WARN: hub_proxy dir not found, skip gptadmin-hub.tar.gz"
@@ -354,7 +356,8 @@ if [[ -d shellmcp ]]; then
   [[ -d cli ]] && SHELLMCP_INCLUDE+=(cli)
   [[ -d agents ]] && SHELLMCP_INCLUDE+=(agents)
   [[ -d client ]] && SHELLMCP_INCLUDE+=(client)
-  tar -czf gptadmin-shellmcp.tar.gz "${SHELLMCP_INCLUDE[@]}"
+  tar -czf "gptadmin-shellmcp.tar.gz.tmp.$$" "${SHELLMCP_INCLUDE[@]}"
+mv -f "gptadmin-shellmcp.tar.gz.tmp.$$" gptadmin-shellmcp.tar.gz
   sha256sum gptadmin-shellmcp.tar.gz > gptadmin-shellmcp.sha256
   python - <<PY
 import json, pathlib

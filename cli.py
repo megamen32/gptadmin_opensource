@@ -13,6 +13,7 @@ import shutil
 import socket
 import re
 import secrets
+import time
 import pwd
 from pathlib import Path
 try:
@@ -94,9 +95,11 @@ if IS_MACOS:
     SVC_HUB_LABEL   = f'{SERVICE_PREFIX}.hub'
     SVC_SHELLMCP_LABEL = f'{SERVICE_PREFIX}.shellmcp'
     SVC_FRPC_LABEL  = f'{SERVICE_PREFIX}.frpc'
+    SVC_CLOUDFLARED_LABEL = f'{SERVICE_PREFIX}.cloudflared'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
     UNIT_PATH_SHELLMCP = SERVICES_DIR / f'{SVC_SHELLMCP_LABEL}.plist'
     UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
+    UNIT_PATH_CLOUDFLARED = SERVICES_DIR / f'{SVC_CLOUDFLARED_LABEL}.plist'
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 else:
     SYSTEMD_DIR = USER_HOME / '.config' / 'systemd' / 'user' if IS_USER_INSTALL else Path('/etc/systemd/system')
@@ -107,9 +110,11 @@ else:
     SYSTEMD_HUB   = 'gptadmin-hub.service'
     SYSTEMD_SHELLMCP = 'gptadmin-shellmcp.service'
     SYSTEMD_FRPC  = 'gptadmin-frpc.service'
+    SYSTEMD_CLOUDFLARED = 'gptadmin-cloudflared.service'
     UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
     UNIT_PATH_SHELLMCP = SYSTEMD_DIR / SYSTEMD_SHELLMCP
     UNIT_PATH_FRPC  = SYSTEMD_DIR / SYSTEMD_FRPC
+    UNIT_PATH_CLOUDFLARED = SYSTEMD_DIR / SYSTEMD_CLOUDFLARED
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 
 # Package URLs can be overridden by env or args
@@ -126,6 +131,7 @@ FRPC_SERVER_ADDR_DEFAULT = 't.gptadmin.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
 FRPC_TOKEN_DEFAULT    = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
 FRPC_DOMAIN_DEFAULT   = FRPC_SERVER_ADDR_DEFAULT
+CLOUDFLARED_VERSION   = os.environ.get('CLOUDFLARED_VERSION', 'latest')
 
 # ===== Helpers =====
 
@@ -469,9 +475,23 @@ if IS_MACOS:
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_FRPC.write_text(_make_plist(SVC_FRPC_LABEL, wrapper, LOG_DIR / 'frpc.log'))
 
+    def write_cloudflared_unit(cloudflared_bin: str, env: dict):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = BIN_DIR / 'run_cloudflared.sh'
+        local_url = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
+        wrapper.write_text(
+            f'#!/bin/sh\n'
+            f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
+            f'exec {cloudflared_bin} tunnel --protocol http2 --url {local_url} --no-autoupdate\n'
+        )
+        os.chmod(wrapper, 0o755)
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_CLOUDFLARED.write_text(_make_plist(SVC_CLOUDFLARED_LABEL, wrapper, LOG_DIR / 'cloudflared.log'))
+
     def svc_hub_name():  return SVC_HUB_LABEL
     def svc_shellmcp_name(): return SVC_SHELLMCP_LABEL
     def svc_frpc_name():  return SVC_FRPC_LABEL
+    def svc_cloudflared_name(): return SVC_CLOUDFLARED_LABEL
 
 else:
     # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
@@ -520,6 +540,22 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={frpc_bin} -c {frpc_conf}
+Restart=always
+RestartSec=3
+{hardening}
+[Install]
+WantedBy={wanted_by}
+"""
+
+    CLOUDFLARED_UNIT_TPL = """[Unit]
+Description=Cloudflare Quick Tunnel for GPTAdmin Hub
+After=network-online.target gptadmin-hub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile={env_file}
+ExecStart={cloudflared_bin} tunnel --protocol http2 --url http://127.0.0.1:{hub_port} --no-autoupdate
 Restart=always
 RestartSec=3
 {hardening}
@@ -585,9 +621,16 @@ WantedBy={wanted_by}
         UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(frpc_bin=frpc_bin, frpc_conf=FRPC_CONF, hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
 
+    def write_cloudflared_unit(cloudflared_bin: str, env: dict):
+        UNIT_PATH_CLOUDFLARED.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_CLOUDFLARED.write_text(CLOUDFLARED_UNIT_TPL.format(
+            cloudflared_bin=cloudflared_bin, env_file=ENV_FILE, hub_port=env.get('HUB_PORT', '9001'),
+            hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
+
     def svc_hub_name():   return SYSTEMD_HUB
     def svc_shellmcp_name(): return SYSTEMD_SHELLMCP
     def svc_frpc_name():  return SYSTEMD_FRPC
+    def svc_cloudflared_name(): return SYSTEMD_CLOUDFLARED
 
 
 # ===== FRP helpers =====
@@ -648,6 +691,91 @@ subdomain = "{env['FRP_SUBDOMAIN']}"
     FRPC_CONF.write_text(content)
     os.chmod(FRPC_CONF, 0o640)
 
+
+# ===== Cloudflare Quick Tunnel helpers =====
+
+def ensure_cloudflared_installed() -> str:
+    existing = shutil.which('cloudflared')
+    if existing:
+        return existing
+
+    arch = detect_arch()
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    dst = BIN_DIR / 'cloudflared'
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        if IS_MACOS:
+            asset_arch = 'arm64' if arch == 'arm64' else 'amd64'
+            url = f'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-{asset_arch}.tgz'
+            pkg = tdp / 'cloudflared.tgz'
+            download(url, pkg)
+            extract_tgz(pkg, tdp)
+            candidates = [x for x in tdp.rglob('cloudflared') if x.is_file()]
+            if not candidates:
+                die('cloudflared binary not found in downloaded archive')
+            shutil.copy2(candidates[0], dst)
+        else:
+            if arch not in {'amd64', 'arm64'}:
+                die(f'cloudflared unsupported arch for direct install: {arch}')
+            url = f'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}'
+            download(url, dst)
+        os.chmod(dst, 0o755)
+    return str(dst)
+
+
+def cloudflared_log_file() -> Path:
+    return LOG_DIR / 'cloudflared.log'
+
+
+def wait_cloudflare_quick_url(timeout_s: int = 90) -> str:
+    log_file = cloudflared_log_file()
+    pat = re.compile(r'https://[-a-zA-Z0-9]+(?:[-a-zA-Z0-9]*[-a-zA-Z0-9])?\.trycloudflare\.com')
+    deadline = time.time() + timeout_s
+    last = ''
+    while time.time() < deadline:
+        try:
+            text = log_file.read_text(errors='ignore')[-20000:] if log_file.exists() else ''
+            last = text[-1200:]
+            m = pat.search(text)
+            if m:
+                return m.group(0).rstrip('/')
+        except Exception:
+            pass
+        time.sleep(1)
+    die(f'Cloudflare quick tunnel URL was not found in {log_file}. Last log tail:\n{last}')
+
+
+
+def wait_cloudflare_public_health(public_url: str, timeout_s: int = 45, fatal: bool = False) -> bool:
+    """Best-effort check that the published quick-tunnel URL reaches the hub.
+
+    Client DNS may lag or be different from external DNS. For hub+local shell
+    installs the shell uses localhost, while external clients use HUB_PUBLIC_URL.
+    """
+    url = public_url.rstrip('/') + '/version'
+    log_file = cloudflared_log_file()
+    deadline = time.time() + timeout_s
+    last_err = ''
+    while time.time() < deadline:
+        res = subprocess.run(['curl', '-fsS', '--max-time', '10', url], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if res.returncode == 0 and 'hub_proxy' in res.stdout:
+            return True
+        last_err = (res.stdout or '').strip()
+        time.sleep(3)
+    log_tail = ''
+    try:
+        log_tail = log_file.read_text(errors='ignore')[-2500:]
+    except Exception:
+        pass
+    msg = (
+        'Cloudflare quick tunnel URL was created but local public-health check did not pass: ' + url +
+        ('\nLast curl output:\n' + last_err if last_err else '') +
+        ('\ncloudflared log tail:\n' + log_tail if log_tail else '')
+    )
+    if fatal or os.environ.get('GPTADMIN_CLOUDFLARE_HEALTH_FATAL', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
+        die(msg)
+    print('WARNING: ' + msg, file=sys.stderr)
+    return False
 # ===== Interactive setup =====
 
 def ask(prompt: str, default: str = '') -> str:
@@ -683,6 +811,69 @@ def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp:
         env['SHELLMCP_URL'] = ''
         env.setdefault('SHELLMCP_BIND', '127.0.0.1')
 
+
+
+def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
+    """Approve the local shell agent created by a same-machine hub+shell setup.
+
+    A fresh hub intentionally keeps unknown shell agents pending. During a bundled
+    local install the agent was just generated by this setup command, so approving
+    it avoids a broken first-run where long-poll returns 401 until the user finds
+    the pending approval step.
+    """
+    if not (install_hub and install_shellmcp):
+        return
+    flag = os.environ.get('GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP', env.get('GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP', '1')).strip().lower()
+    if flag in {'0', 'false', 'no', 'off'}:
+        print('Local TermCP auto-approve skipped: GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP=0')
+        return
+    token = env.get('CTL_TOKEN') or ''
+    hub_port = env.get('HUB_PORT', '9001')
+    if not token:
+        print('WARNING: Local TermCP auto-approve skipped: CTL_TOKEN is empty', file=sys.stderr)
+        return
+    base = f'http://127.0.0.1:{hub_port}'
+    headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']
+
+    def curl_json(path: str, payload: dict | None = None) -> dict:
+        cmd = ['curl', '-fsS', '--max-time', '10', *headers]
+        if payload is not None:
+            cmd += ['-d', json.dumps(payload, separators=(',', ':'))]
+        cmd.append(base + path)
+        res = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise RuntimeError((res.stderr or res.stdout or f'curl rc={res.returncode}').strip())
+        return json.loads(res.stdout or '{}')
+
+    last_err = ''
+    for attempt in range(1, 31):
+        try:
+            data = curl_json('/servers')
+            pending = data.get('pending') or []
+            if not pending:
+                servers = data.get('servers') or []
+                if any((x.get('mode') in {'polling', 'long_poll'} and str(x.get('status')) == 'active') for x in servers if isinstance(x, dict)):
+                    print('Local TermCP auto-approve: already active')
+                    return
+            approved = []
+            for item in pending:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get('name') or '')
+                if not name:
+                    continue
+                payload = {'target': 'hub', 'tool_name': 'approve_pending_server', 'arguments': {'name': name}, 'timeout': 30}
+                res = curl_json('/mcp-relay/call', payload)
+                sc = ((res.get('response') or {}).get('structuredContent') or {}) if isinstance(res, dict) else {}
+                if sc.get('ok'):
+                    approved.append(name)
+            if approved:
+                print('Local TermCP auto-approved: ' + ', '.join(approved))
+                return
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(2)
+    print('WARNING: Local TermCP auto-approve did not complete' + (f': {last_err}' if last_err else ''), file=sys.stderr)
 
 def setup_interactive(args):
     need_root()
@@ -725,13 +916,31 @@ def setup_interactive(args):
 
     if install_hub:
         print('\nДоступ к хабу из Интернета:')
-        print('  1) Авто-туннель через наш FRP (без вашего домена). Быстрый старт.')
-        print('  2) У меня есть свой домен + HTTPS. Я настрою reverse-proxy (nginx/caddy/traefik)')
-        print('     на 127.0.0.1:%s (его можно позже сменить: gptadmin port <port>)' % env['HUB_PORT'])
-        mode = ask('Ваш выбор', '1')
+        if IS_MACOS:
+            print('  1) Авто-туннель Cloudflare Quick Tunnel (*.trycloudflare.com), без домена и port-forward')
+            print('  2) Legacy FRP через наш сервер')
+            print('  3) У меня есть свой домен + HTTPS. Я настрою reverse-proxy на 127.0.0.1:%s' % env['HUB_PORT'])
+            mode = ask('Ваш выбор', '1')
+        else:
+            print('  1) Авто-туннель через наш FRP (без вашего домена). Быстрый старт.')
+            print('  2) У меня есть свой домен + HTTPS. Я настрою reverse-proxy (nginx/caddy/traefik)')
+            print('     на 127.0.0.1:%s (его можно позже сменить: gptadmin port <port>)' % env['HUB_PORT'])
+            mode = ask('Ваш выбор', '1')
 
-        if mode == '1':
+        if IS_MACOS and mode == '1':
+            env['TUNNEL_MODE'] = 'cloudflare'
+            env['CLOUDFLARE_TUNNEL_ENABLE'] = 'true'
+            env['FRP_ENABLE'] = 'false'
+            env.pop('HUB_PUBLIC_URL', None)
+            env.pop('HUB_URL', None)
+            if install_shellmcp:
+                env['SHELLMCP_TRANSPORT'] = 'polling'
+                env['SHELLMCP_URL'] = ''
+                env.pop('QUEUE_URL', None)
+        elif mode == '1' or (IS_MACOS and mode == '2'):
+            env['TUNNEL_MODE'] = 'frp'
             env['FRP_ENABLE'] = 'true'
+            env['CLOUDFLARE_TUNNEL_ENABLE'] = 'false'
             env['FRP_SERVER_ADDR'] = FRPC_SERVER_ADDR_DEFAULT
             env['FRP_SERVER_PORT'] = FRPC_SERVER_PORT_DEFAULT
             env['FRP_DOMAIN'] = FRPC_DOMAIN_DEFAULT
@@ -743,7 +952,9 @@ def setup_interactive(args):
         else:
             url = ask('Введите публичный HTTPS URL хаба (например, https://gptadmin.example.com)')
             ensure_https(url)
+            env['TUNNEL_MODE'] = 'manual'
             env['FRP_ENABLE'] = 'false'
+            env['CLOUDFLARE_TUNNEL_ENABLE'] = 'false'
             env['HUB_PUBLIC_URL'] = url
             env['HUB_URL'] = url
     else:
@@ -753,7 +964,8 @@ def setup_interactive(args):
         env['FRP_ENABLE'] = 'false'
         env['HUB_URL'] = url
 
-    configure_shellmcp_transport(env, install_hub, install_shellmcp)
+    if not (install_hub and env.get('TUNNEL_MODE') == 'cloudflare'):
+        configure_shellmcp_transport(env, install_hub, install_shellmcp)
     if install_shellmcp:
         hub_for_update = (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
@@ -805,13 +1017,37 @@ def setup_interactive(args):
         frpc_bin = ensure_frpc_installed()
         write_frpc_conf(env)
         write_frpc_unit(frpc_bin)
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        cloudflared_bin = ensure_cloudflared_installed()
+        write_cloudflared_unit(cloudflared_bin, env)
 
     svc_daemon_reload()
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        svc_enable_start(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
+        public_url = wait_cloudflare_quick_url()
+        wait_cloudflare_public_health(public_url)
+        env = env_read()
+        env['TUNNEL_MODE'] = 'cloudflare'
+        env['CLOUDFLARE_TUNNEL_ENABLE'] = 'true'
+        env['FRP_ENABLE'] = 'false'
+        env['HUB_PUBLIC_URL'] = public_url
+        if install_shellmcp:
+            local_hub = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
+            env['HUB_URL'] = local_hub
+            env['SHELLMCP_TRANSPORT'] = 'polling'
+            env['QUEUE_URL'] = local_hub.rstrip('/') + '/queue'
+            env['SHELLMCP_URL'] = ''
+            env['SHELLMCP_UPDATE_MANIFEST_URL'] = public_url.rstrip('/') + '/artifacts/shellmcp.json'
+            env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        else:
+            env['HUB_URL'] = public_url
+        env_set_many(env)
     if install_shellmcp:
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         maybe_import_and_install_mcp_from_desktop_clients()
+    maybe_autoapprove_local_shellmcp(env, install_hub, install_shellmcp)
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
 
@@ -829,7 +1065,9 @@ def setup_interactive(args):
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
         (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
         ('gptadmin-frpc' if not IS_MACOS else SVC_FRPC_LABEL,
-         UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None)
+         UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None),
+        ('gptadmin-cloudflared' if not IS_MACOS else SVC_CLOUDFLARED_LABEL,
+         UNIT_PATH_CLOUDFLARED if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true' else None)
     ] if p and Path(p).exists()]
     print("Сервисы: " + ", ".join(installed))
     if IS_USER_INSTALL and str(CLI_PATH.parent) not in os.environ.get('PATH', '').split(os.pathsep):
@@ -844,7 +1082,7 @@ def setup_interactive(args):
 
 3) Выберите импорт по URL: https://became.bezrabotnyi.com/api.json
 
-4) Заменитие в "servers": "url": на свой Hub URL {env.get('HUB_URL', '—')}
+4) Заменитие в "servers": "url": на свой Hub URL {env.get('HUB_PUBLIC_URL') or env.get('HUB_URL', '—')}
 
 5) В разделе «Аутентификация» выберите тип API ключ, Bearer и вставьте ключ {env['CTL_TOKEN']}
 ---------------------''')
@@ -1457,6 +1695,7 @@ def installed_units():
     if UNIT_PATH_HUB.exists():   res.append((svc_hub_name(),   UNIT_PATH_HUB))
     if UNIT_PATH_SHELLMCP.exists(): res.append((svc_shellmcp_name(), UNIT_PATH_SHELLMCP))
     if UNIT_PATH_FRPC.exists():  res.append((svc_frpc_name(),  UNIT_PATH_FRPC))
+    if UNIT_PATH_CLOUDFLARED.exists(): res.append((svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED))
     return res
 
 def cmd_config_termcp(args):
@@ -1540,13 +1779,16 @@ def cmd_logs(args):
     svc = args.service
     if svc in ('termcp', 'shell', 'shellmcp', 'shell-mcp'):
         svc = 'shell'
-    if svc not in ('hub', 'shell', 'frpc', 'all'):
-        die('unknown service. Use: hub, shellmcp, shell, termcp, frpc, all')
+    if svc in ('cloudflare', 'cloudflared', 'cf'):
+        svc = 'cloudflared'
+    if svc not in ('hub', 'shell', 'frpc', 'cloudflared', 'all'):
+        die('unknown service. Use: hub, shellmcp, shell, termcp, frpc, cloudflared, all')
     if IS_MACOS:
         mapping = {
             'hub':   (SVC_HUB_LABEL, UNIT_PATH_HUB, _log_file(SVC_HUB_LABEL)),
             'shell': (svc_shellmcp_name(), UNIT_PATH_SHELLMCP, _log_file(svc_shellmcp_name())),
             'frpc':  (SVC_FRPC_LABEL, UNIT_PATH_FRPC, _log_file(SVC_FRPC_LABEL)),
+            'cloudflared': (SVC_CLOUDFLARED_LABEL, UNIT_PATH_CLOUDFLARED, cloudflared_log_file()),
         }
         if svc == 'all':
             svc_logs_all(list(mapping.values()))
@@ -1558,6 +1800,7 @@ def cmd_logs(args):
             'hub':   SYSTEMD_HUB,
             'shell': SYSTEMD_SHELLMCP,
             'frpc':  SYSTEMD_FRPC,
+            'cloudflared': SYSTEMD_CLOUDFLARED,
         }
         if svc == 'all':
             units = installed_units()
@@ -1600,29 +1843,46 @@ def cmd_port(args):
     if UNIT_PATH_FRPC.exists() and env.get('FRP_ENABLE', 'false') == 'true':
         write_frpc_conf(env)
         svc_restart(svc_frpc_name(), UNIT_PATH_FRPC)
+    if UNIT_PATH_CLOUDFLARED.exists() and (env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true'):
+        cloudflared_bin = ensure_cloudflared_installed()
+        write_cloudflared_unit(cloudflared_bin, env)
+        svc_restart(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
     print(f'Локальный порт хаба изменён на {port}.')
 
 def cmd_seturl(args):
     need_root()
     url = args.url
     ensure_https(url)
-    env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false'})
+    env_set_many({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false', 'CLOUDFLARE_TUNNEL_ENABLE': 'false', 'TUNNEL_MODE': 'manual'})
     if UNIT_PATH_SHELLMCP.exists():
         svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     if UNIT_PATH_FRPC.exists():
         svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
-    print(f'HUB_PUBLIC_URL/HUB_URL = {url}; FRP отключён.')
+    if UNIT_PATH_CLOUDFLARED.exists():
+        svc_disable_stop(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
+    print(f'HUB_PUBLIC_URL/HUB_URL = {url}; tunnels disabled.')
 
 # FRP subcommands
 
 def cmd_tunnel_status(_):
+    units = []
     if UNIT_PATH_FRPC.exists():
-        svc_status_multi([(svc_frpc_name(), UNIT_PATH_FRPC)])
+        units.append((svc_frpc_name(), UNIT_PATH_FRPC))
+    if UNIT_PATH_CLOUDFLARED.exists():
+        units.append((svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED))
+    if units:
+        svc_status_multi(units)
     else:
-        print('FRP не сконфигурирован. Запусти: gptadmin setup')
+        print('Tunnel не сконфигурирован. Запусти: gptadmin setup')
 
 def cmd_tunnel_logs(_):
-    if IS_MACOS:
+    env = env_read()
+    if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
+        if IS_MACOS:
+            svc_logs_one(svc_cloudflared_name(), cloudflared_log_file())
+        else:
+            run(['journalctl', '-u', SYSTEMD_CLOUDFLARED, '-e', '-n', '200', '-f'], check=False)
+    elif IS_MACOS:
         svc_logs_one(SVC_FRPC_LABEL, _log_file(SVC_FRPC_LABEL))
     else:
         run(['journalctl', '-u', SYSTEMD_FRPC, '-e', '-n', '200', '-f'], check=False)
@@ -1654,9 +1914,12 @@ def cmd_tunnel_enable(args):
 
 def cmd_tunnel_disable(_):
     need_root()
-    svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
-    env = env_read(); env['FRP_ENABLE'] = 'false'; env_set_many(env)
-    print('FRP tunnel disabled.')
+    if UNIT_PATH_FRPC.exists():
+        svc_disable_stop(svc_frpc_name(), UNIT_PATH_FRPC)
+    if UNIT_PATH_CLOUDFLARED.exists():
+        svc_disable_stop(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
+    env = env_read(); env['FRP_ENABLE'] = 'false'; env['CLOUDFLARE_TUNNEL_ENABLE'] = 'false'; env['TUNNEL_MODE'] = 'manual'; env_set_many(env)
+    print('Tunnel disabled.')
 
 # ===== Uninstall =====
 
@@ -1672,7 +1935,8 @@ def safe_rm(p: Path):
 def cmd_uninstall(args):
     need_root()
     failures = []
-    for name, path in [(svc_frpc_name(), UNIT_PATH_FRPC),
+    for name, path in [(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED),
+                       (svc_frpc_name(), UNIT_PATH_FRPC),
                        (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
                        (svc_hub_name(), UNIT_PATH_HUB)]:
         stopped = svc_disable_stop(name, path)
@@ -1684,6 +1948,9 @@ def cmd_uninstall(args):
     local_frpc = BIN_DIR / 'frpc'
     if local_frpc.exists():
         safe_rm(local_frpc)
+    local_cloudflared = BIN_DIR / 'cloudflared'
+    if local_cloudflared.exists():
+        safe_rm(local_cloudflared)
 
     safe_rm(INSTALL_DIR)
     safe_rm(ETC_DIR)
