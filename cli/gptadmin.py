@@ -1719,6 +1719,10 @@ def maybe_import_and_install_mcp_from_desktop_clients():
             cmd_mcp_import(import_args)
         except Exception as e:
             print(f'WARN: не удалось импортировать MCP из {fmt}: {e}', file=sys.stderr)
+    cfg = _mcp_config()
+    if not (cfg.get('mcpServers') or {}):
+        print('MCP import did not add any servers; skip MCP service install')
+        return
     try:
         backend = 'launchd' if IS_MACOS else ('windows-task' if IS_WINDOWS else 'systemd')
         install_args = argparse.Namespace(name=None, backend=backend)
