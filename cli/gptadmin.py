@@ -664,6 +664,9 @@ def ensure_frpc_installed() -> str:
     existing = shutil.which('frpc')
     if existing:
         return existing
+    managed = BIN_DIR / 'frpc'
+    if managed.exists() and os.access(managed, os.X_OK):
+        return str(managed)
 
     arch = detect_arch()
     os_name = 'darwin' if IS_MACOS else 'linux'
