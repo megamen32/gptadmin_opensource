@@ -298,6 +298,34 @@ else
   echo "Skip PyInstaller gptadmin_hub"
 fi
 
+# ---------- Package platform hub binaries ----------
+step "Package platform hub binaries"
+normalize_arch() {
+  case "${1,,}" in
+    x86_64|amd64) echo amd64 ;;
+    arm64|aarch64) echo arm64 ;;
+    *) echo "${1,,}" ;;
+  esac
+}
+copy_hub_platform_binary() {
+  local src="$1"
+  local tag="$2"
+  [[ -n "$src" && -x "$src" ]] || return 0
+  mkdir -p "$ART_DIR/gptadmin_hub/$tag"
+  cp -f "$src" "$ART_DIR/gptadmin_hub/$tag/gptadmin_hub"
+  chmod 755 "$ART_DIR/gptadmin_hub/$tag/gptadmin_hub"
+  echo "hub platform binary: $tag <= $src"
+}
+if [[ -x "$HUB_DIST" ]]; then
+  copy_hub_platform_binary "$HUB_DIST" "linux_$(normalize_arch "$(uname -m)")"
+fi
+copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_ARM64:-}" "darwin_arm64"
+copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_AMD64:-}" "darwin_amd64"
+copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_ARM64:-}" "darwin_arm64"
+copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_AMD64:-}" "darwin_amd64"
+copy_hub_platform_binary "prebuilt/gptadmin_hub/darwin_arm64/gptadmin_hub" "darwin_arm64"
+copy_hub_platform_binary "prebuilt/gptadmin_hub/darwin_amd64/gptadmin_hub" "darwin_amd64"
+
 # ---------- Summarize PyInstaller warnings ----------
 step "Summarize PyInstaller warnings"
 for f in "$ART_DIR"/shellmcp/build/shellmcp/warn-*.txt "$ART_DIR"/gptadmin_hub/build/gptadmin_hub/warn-*.txt; do

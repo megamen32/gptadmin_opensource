@@ -79,8 +79,6 @@ MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
 MCP_RUNTIME_DIR = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay'
 MCP_MANAGER = MCP_RUNTIME_DIR / 'mcp_agent_manager.py'
 MCP_RELAY = MCP_RUNTIME_DIR / 'generic_stdio_mcp_relay.py'
-HUB_SOURCE_DIR = INSTALL_DIR / 'hub_source'
-HUB_VENV_DIR = INSTALL_DIR / 'hub_venv'
 
 if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
@@ -236,59 +234,75 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 
 # package install
 
-def _install_macos_hub_from_pkg(tdp: Path):
-    src_candidates = [tdp / 'hub_source', tdp / 'hub', tdp / 'services' / 'main_package']
-    src = next((x for x in src_candidates if (x / 'gptadmin_hub.py').exists()), None)
-    if src is None:
-        die('macOS hub source not found in package: expected hub_source/gptadmin_hub.py')
-    if HUB_SOURCE_DIR.exists():
-        shutil.rmtree(HUB_SOURCE_DIR, ignore_errors=True)
-    HUB_SOURCE_DIR.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, HUB_SOURCE_DIR)
-    # Install a small dedicated venv for source-mode hub on macOS.
-    py = _mac_python() if IS_MACOS else (sys.executable or 'python3')
-    if not (HUB_VENV_DIR / 'bin' / 'python').exists():
-        run([py, '-m', 'venv', str(HUB_VENV_DIR)])
-    vpy = HUB_VENV_DIR / 'bin' / 'python'
-    vpip = HUB_VENV_DIR / 'bin' / 'pip'
-    req = HUB_SOURCE_DIR / 'requirements-hub.txt'
-    if not req.exists():
-        req.write_text('fastapi\nuvicorn[standard]\nhttpx\npydantic\ncryptography\npsutil\nrequests\n', encoding='utf-8')
-    run([str(vpy), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
-    run([str(vpip), 'install', '-r', str(req)])
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
-    wrapper = BIN_DIR / 'gptadmin_hub'
-    wrapper.write_text(
-        '#!/bin/sh\n'
-        f'cd {HUB_SOURCE_DIR}\n'
-        f'exec {vpy} gptadmin_hub.py\n',
-        encoding='utf-8',
-    )
-    os.chmod(wrapper, 0o755)
+def _copy_pkg_runtime_payloads(tdp: Path):
+    cli_src = tdp / 'cli'
+    if cli_src.exists():
+        cli_dst = INSTALL_DIR / 'cli'
+        if cli_dst.exists():
+            shutil.rmtree(cli_dst, ignore_errors=True)
+        shutil.copytree(cli_src, cli_dst)
+    agents_src = tdp / 'agents'
+    if agents_src.exists():
+        agents_dst = INSTALL_DIR / 'agents'
+        if agents_dst.exists():
+            shutil.rmtree(agents_dst, ignore_errors=True)
+        shutil.copytree(agents_src, agents_dst)
+
+
+def _arch_tag() -> str:
+    machine = (os.uname().machine if hasattr(os, 'uname') else '').lower()
+    if machine in {'arm64', 'aarch64'}:
+        return 'arm64'
+    if machine in {'x86_64', 'amd64'}:
+        return 'amd64'
+    return machine or 'unknown'
+
+
+def _platform_hub_candidates(tdp: Path) -> list[Path]:
+    if IS_MACOS:
+        arch = _arch_tag()
+        tags = [f'darwin_{arch}', f'macos_{arch}']
+        # Legacy location is accepted only when the archive itself was built on macOS.
+        legacy = [tdp / 'gptadmin_hub' / 'dist' / 'gptadmin_hub']
+    else:
+        arch = _arch_tag()
+        tags = [f'linux_{arch}']
+        legacy = [tdp / 'gptadmin_hub' / 'dist' / 'gptadmin_hub', tdp / 'build' / 'gptadmin_hub' / 'dist' / 'gptadmin_hub']
+    return [tdp / 'gptadmin_hub' / tag / 'gptadmin_hub' for tag in tags] + legacy
+
+
+def _binary_looks_native(path: Path) -> bool:
+    if not IS_MACOS:
+        return True
+    try:
+        out = run(['/usr/bin/file', str(path)], check=False, capture=True).stdout
+    except Exception:
+        return True
+    return 'Mach-O' in out
+
+
+def _install_hub_binary_from_pkg(tdp: Path):
+    for c in _platform_hub_candidates(tdp):
+        if c.exists() and _binary_looks_native(c):
+            BIN_DIR.mkdir(parents=True, exist_ok=True)
+            dst = BIN_DIR / 'gptadmin_hub'
+            shutil.copy2(c, dst)
+            os.chmod(dst, 0o755)
+            return
+    if IS_MACOS:
+        die('macOS gptadmin_hub binary not found in package: expected gptadmin_hub/darwin_arm64/gptadmin_hub or gptadmin_hub/darwin_amd64/gptadmin_hub')
+    die('gptadmin_hub binary not found in package')
 
 
 def install_component_from_pkg(pkg_tgz: Path, component: str):
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
-        cli_src = tdp / 'cli'
-        if cli_src.exists():
-            cli_dst = INSTALL_DIR / 'cli'
-            if cli_dst.exists():
-                shutil.rmtree(cli_dst, ignore_errors=True)
-            shutil.copytree(cli_src, cli_dst)
-        agents_src = tdp / 'agents'
-        if agents_src.exists():
-            agents_dst = INSTALL_DIR / 'agents'
-            if agents_dst.exists():
-                shutil.rmtree(agents_dst, ignore_errors=True)
-            shutil.copytree(agents_src, agents_dst)
-        if component == 'hub' and IS_MACOS:
-            _install_macos_hub_from_pkg(tdp)
-            return
+        _copy_pkg_runtime_payloads(tdp)
         if component == 'hub':
-            candidates = [tdp / 'gptadmin_hub' / 'dist' / 'gptadmin_hub', tdp / 'build' / 'gptadmin_hub' / 'dist' / 'gptadmin_hub']
-        elif IS_MACOS:
+            _install_hub_binary_from_pkg(tdp)
+            return
+        if IS_MACOS:
             # Linux PyInstaller shellmcp cannot run on macOS. Install bundled
             # pure-Python long-poll shellmcp from this package, while still copying
             # cli/agents runtime needed for MCP relay management.
