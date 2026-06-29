@@ -184,6 +184,20 @@ def env_set_many(upd: dict):
     ENV_FILE.write_text('\n'.join(lines) + '\n')
     os.chmod(ENV_FILE, 0o640)
 
+
+def env_remove_keys(keys: list[str]):
+    cur = env_read()
+    changed = False
+    for key in keys:
+        if key in cur:
+            cur.pop(key, None)
+            changed = True
+    if changed:
+        lines = [f'{k}={cur[k]}' for k in sorted(cur.keys())]
+        ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ENV_FILE.write_text('\n'.join(lines) + '\n')
+        os.chmod(ENV_FILE, 0o640)
+
 # tokens
 
 def gen_hex(nbytes=16) -> str:
@@ -2186,7 +2200,7 @@ def _b64url_json(obj: dict) -> str:
     return _b64url_bytes(json.dumps(obj, separators=(',', ':')).encode())
 
 
-def make_mcp_bearer_token(env: dict, client_id: str = 'gptadmin-auto-client') -> str:
+def make_mcp_bearer_token(env: dict, client_id: str) -> str:
     secret = env.get('OAUTH_CLIENT_SECRET') or ''
     if not secret:
         raise RuntimeError('OAUTH_CLIENT_SECRET is missing')
@@ -2221,23 +2235,23 @@ def _run_quiet(cmd: list[str], env: dict | None = None) -> subprocess.CompletedP
     return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
 
 
-def _merge_env_for_client(token: str) -> dict:
+def _merge_env_for_client(tokens: dict[str, str] | None = None) -> dict:
     child_env = os.environ.copy()
-    child_env['GPTADMIN_MCP_BEARER'] = token
-    child_env['GPTADMIN_CODEX_MCP_BEARER'] = token
+    for key, token in (tokens or {}).items():
+        child_env[key] = token
     return child_env
 
 
-def _set_process_env_for_gui_clients(token: str) -> None:
+def _set_process_env_for_gui_clients(tokens: dict[str, str]) -> None:
     if IS_MACOS and shutil.which('launchctl'):
-        _run_quiet(['launchctl', 'setenv', 'GPTADMIN_MCP_BEARER', token])
-        _run_quiet(['launchctl', 'setenv', 'GPTADMIN_CODEX_MCP_BEARER', token])
+        for key, token in tokens.items():
+            _run_quiet(['launchctl', 'setenv', key, token])
 
 
 def _configure_codex_mcp(url: str, token: str) -> str:
     if not shutil.which('codex'):
         return 'skip: codex not found'
-    env = _merge_env_for_client(token)
+    env = _merge_env_for_client({'GPTADMIN_CODEX_MCP_BEARER': token})
     _run_quiet(['codex', 'mcp', 'remove', 'gptadmin'], env=env)
     res = _run_quiet(['codex', 'mcp', 'add', 'gptadmin', '--url', url, '--bearer-token-env-var', 'GPTADMIN_CODEX_MCP_BEARER'], env=env)
     if res.returncode != 0:
@@ -2248,7 +2262,7 @@ def _configure_codex_mcp(url: str, token: str) -> str:
 def _configure_claude_code_mcp(url: str, token: str) -> str:
     if not shutil.which('claude'):
         return 'skip: claude not found'
-    env = _merge_env_for_client(token)
+    env = _merge_env_for_client({'GPTADMIN_CLAUDE_MCP_BEARER': token})
     _run_quiet(['claude', 'mcp', 'remove', '--scope', 'user', 'gptadmin'], env=env)
     _run_quiet(['claude', 'mcp', 'remove', '--scope', 'local', 'gptadmin'], env=env)
     res = _run_quiet(['claude', 'mcp', 'add', '--scope', 'user', '--transport', 'http', 'gptadmin', url, '--header', f'Authorization: Bearer {token}'], env=env)
@@ -2299,25 +2313,32 @@ def auto_configure_ai_mcp_clients(env: dict, install_hub: bool) -> None:
         sync_oauth_origin_env(env)
         env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
         env.setdefault('ADMIN_PASSWORD', gen_hex())
-        token = env.get('GPTADMIN_MCP_BEARER') or make_mcp_bearer_token(env, 'gptadmin-auto-client')
-        env['GPTADMIN_MCP_BEARER'] = token
-        env['GPTADMIN_CODEX_MCP_BEARER'] = token
+        tokens = {
+            'GPTADMIN_CLAUDE_MCP_BEARER': env.get('GPTADMIN_CLAUDE_MCP_BEARER') or make_mcp_bearer_token(env, 'claude-code'),
+            'GPTADMIN_CODEX_MCP_BEARER': env.get('GPTADMIN_CODEX_MCP_BEARER') or make_mcp_bearer_token(env, 'codex'),
+            'GPTADMIN_OPENCODE_MCP_BEARER': env.get('GPTADMIN_OPENCODE_MCP_BEARER') or make_mcp_bearer_token(env, 'opencode'),
+            'GPTADMIN_CUSTOM_MCP_BEARER': env.get('GPTADMIN_CUSTOM_MCP_BEARER') or make_mcp_bearer_token(env, 'custom-mcp-client'),
+        }
+        env.update(tokens)
+        env_remove_keys(['GPTADMIN_MCP_BEARER'])
         env_set_many({
             'PUBLIC_ORIGIN': env.get('PUBLIC_ORIGIN', ''),
             'MCP_RESOURCE': env.get('MCP_RESOURCE', ''),
             'ADMIN_PASSWORD': env.get('ADMIN_PASSWORD', ''),
             'OAUTH_CLIENT_SECRET': env.get('OAUTH_CLIENT_SECRET', ''),
-            'GPTADMIN_MCP_BEARER': token,
-            'GPTADMIN_CODEX_MCP_BEARER': token,
+            **tokens,
         })
-        _set_process_env_for_gui_clients(token)
+        _set_process_env_for_gui_clients(tokens)
         url = _mcp_client_url(env)
         results = {
-            'claude-code': _configure_claude_code_mcp(url, token),
-            'codex': _configure_codex_mcp(url, token),
-            'opencode': _configure_opencode_mcp(url, token),
+            'claude-code': _configure_claude_code_mcp(url, tokens['GPTADMIN_CLAUDE_MCP_BEARER']),
+            'codex': _configure_codex_mcp(url, tokens['GPTADMIN_CODEX_MCP_BEARER']),
+            'opencode': _configure_opencode_mcp(url, tokens['GPTADMIN_OPENCODE_MCP_BEARER']),
         }
         print('AI MCP clients auto-config: ' + ', '.join(f'{k}={v}' for k, v in results.items()))
+        print('Custom MCP client:')
+        print(f'  URL: {url}')
+        print(f"  Authorization: Bearer {tokens['GPTADMIN_CUSTOM_MCP_BEARER']}")
     except Exception as e:
         print(f'WARNING: AI MCP clients auto-config failed: {e}', file=sys.stderr)
 
