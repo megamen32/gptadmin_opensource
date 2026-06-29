@@ -116,10 +116,11 @@ else:
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 
 # Package URLs can be overridden by env or args
-PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   'https://became.bezrabotnyi.com/gptadmin.tar.gz')
-PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   'https://became.bezrabotnyi.com/gptadmin-hub.tar.gz')
-PKG_SHELLMCP_URL_DEFAULT = os.environ.get('PKG_SHELLMCP_URL', 'https://became.bezrabotnyi.com/gptadmin-shellmcp.tar.gz')
-SHELLMCP_PURE_URL_DEFAULT = os.environ.get('SHELLMCP_PURE_URL', 'https://became.bezrabotnyi.com/shellmcp_pure.py')
+PKG_BASE_URL_DEFAULT = os.environ.get('PKG_BASE_URL', 'https://became.bezrabotnyi.com').rstrip('/')
+PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   f'{PKG_BASE_URL_DEFAULT}/gptadmin.tar.gz')
+PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   f'{PKG_BASE_URL_DEFAULT}/gptadmin-hub.tar.gz')
+PKG_SHELLMCP_URL_DEFAULT = os.environ.get('PKG_SHELLMCP_URL', f'{PKG_BASE_URL_DEFAULT}/gptadmin-shellmcp.tar.gz')
+SHELLMCP_PURE_URL_DEFAULT = os.environ.get('SHELLMCP_PURE_URL', f'{PKG_BASE_URL_DEFAULT}/shellmcp_pure.py')
 
 REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
@@ -259,6 +260,11 @@ def _arch_tag() -> str:
     return machine or 'unknown'
 
 
+def platform_pkg_url_default() -> str:
+    platform = 'darwin' if IS_MACOS else 'linux'
+    return os.environ.get('PKG_PLATFORM_URL', f'{PKG_BASE_URL_DEFAULT}/gptadmin-{platform}-{_arch_tag()}.tar.gz')
+
+
 def _platform_hub_candidates(tdp: Path) -> list[Path]:
     if IS_MACOS:
         arch = _arch_tag()
@@ -381,12 +387,24 @@ if IS_MACOS:
     def svc_daemon_reload():
         pass  # launchd has no daemon-reload
 
-    def svc_enable_start(_label: str, unit_path: Path):
-        run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+    def svc_enable_start(label: str, unit_path: Path):
+        # macOS launchctl load/unload is legacy and can silently fail to restore
+        # a LaunchAgent after bootout during in-place update. Prefer bootstrap into
+        # the explicit domain, then kickstart; keep load -w as fallback for older
+        # systems.
+        domain = _launchd_domain()
+        run(['launchctl', 'bootout', _launchd_service_target(label)], check=False)
+        run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False)
+        run(['launchctl', 'enable', _launchd_service_target(label)], check=False)
+        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False)
+        if not _launchd_is_loaded(label):
+            run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+        if not _launchd_is_loaded(label):
+            raise RuntimeError(f'launchd service did not load: {_launchd_service_target(label)}')
 
-    def svc_restart(_label: str, unit_path: Path):
-        run(['launchctl', 'unload', str(unit_path)], check=False)
-        run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+    def svc_restart(label: str, unit_path: Path):
+        svc_disable_stop(label, unit_path)
+        svc_enable_start(label, unit_path)
 
     def _launchd_uid() -> str:
         if IS_USER_INSTALL:
@@ -443,9 +461,9 @@ if IS_MACOS:
                 run(['launchctl', 'list', label], check=False)
 
     def svc_start_multi(labels_and_paths):
-        for _label, path in labels_and_paths:
+        for label, path in labels_and_paths:
             if path.exists():
-                run(['launchctl', 'load', '-w', str(path)], check=False)
+                svc_enable_start(label, path)
 
     def svc_stop_multi(labels_and_paths):
         for label, path in reversed(labels_and_paths):
@@ -1066,7 +1084,7 @@ def setup_interactive(args):
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     CLI_PATH.parent.mkdir(parents=True, exist_ok=True)
-    pkg_all   = args.pkg_all   or PKG_ALL_URL_DEFAULT
+    pkg_all   = args.pkg_all   or platform_pkg_url_default()
     pkg_hub   = args.pkg_hub   or PKG_HUB_URL_DEFAULT
     pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
 
@@ -1075,7 +1093,13 @@ def setup_interactive(args):
         if install_hub and install_shellmcp:
             print('\n[Загрузка] общий пакет...')
             pkg = tdp / 'all.tgz'
-            download(pkg_all, pkg)
+            try:
+                download(pkg_all, pkg)
+            except subprocess.CalledProcessError:
+                if pkg_all == PKG_ALL_URL_DEFAULT:
+                    raise
+                print('  Platform package unavailable, using full package...')
+                download(PKG_ALL_URL_DEFAULT, pkg)
             install_component_from_pkg(pkg, 'hub')
             install_component_from_pkg(pkg, 'shellmcp')
         elif install_hub:
@@ -2071,7 +2095,7 @@ def cmd_update(args):
     sync_oauth_origin_env(env)
     env_set_many(env)
 
-    pkg_all = args.pkg_all or PKG_ALL_URL_DEFAULT
+    pkg_all = args.pkg_all or platform_pkg_url_default()
     pkg_hub = args.pkg_hub or PKG_HUB_URL_DEFAULT
     pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
 
@@ -2083,7 +2107,13 @@ def cmd_update(args):
         if install_hub and install_shellmcp:
             print('[Update] downloading full package...')
             pkg = tdp / 'all.tgz'
-            download(pkg_all, pkg)
+            try:
+                download(pkg_all, pkg)
+            except subprocess.CalledProcessError:
+                if pkg_all == PKG_ALL_URL_DEFAULT:
+                    raise
+                print('  Platform package unavailable, using full package...')
+                download(PKG_ALL_URL_DEFAULT, pkg)
             install_component_from_pkg(pkg, 'hub')
             install_component_from_pkg(pkg, 'shellmcp')
         elif install_hub:

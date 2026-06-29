@@ -56,6 +56,10 @@ def _artifact_manifest() -> dict:
         "shellmcp.py": (REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py"),
         "shellmcp_pure.py": (REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
+        "gptadmin-linux-amd64.tar.gz": (BUILD_DIR / "gptadmin-linux-amd64.tar.gz", "/gptadmin-linux-amd64.tar.gz"),
+        "gptadmin-linux-arm64.tar.gz": (BUILD_DIR / "gptadmin-linux-arm64.tar.gz", "/gptadmin-linux-arm64.tar.gz"),
+        "gptadmin-darwin-arm64.tar.gz": (BUILD_DIR / "gptadmin-darwin-arm64.tar.gz", "/gptadmin-darwin-arm64.tar.gz"),
+        "gptadmin-darwin-amd64.tar.gz": (BUILD_DIR / "gptadmin-darwin-amd64.tar.gz", "/gptadmin-darwin-amd64.tar.gz"),
         "gptadmin-hub.tar.gz": (BUILD_DIR / "gptadmin-hub.tar.gz", "/gptadmin-hub.tar.gz"),
         "gptadmin-shellmcp.tar.gz": (BUILD_DIR / "gptadmin-shellmcp.tar.gz", "/gptadmin-shellmcp.tar.gz"),
         "gptadmin-win.zip": (PUBLIC_DIR / "gptadmin-win.zip", "/gptadmin-win.zip"),
@@ -108,6 +112,14 @@ def _bin(path: Path, filename: str, media_type: str):
 async def get_all():
     return _bin(BUILD_DIR / "gptadmin.tar.gz", "gptadmin.tar.gz", "application/gzip")
 
+
+
+@app.api_route('/gptadmin-{platform}-{arch}.tar.gz', methods=['GET', 'HEAD'])
+async def get_platform_bundle(platform: str, arch: str):
+    if platform not in {'linux', 'darwin'} or arch not in {'amd64', 'arm64'}:
+        raise HTTPException(404, 'artifact not found')
+    filename = f'gptadmin-{platform}-{arch}.tar.gz'
+    return _bin(BUILD_DIR / filename, filename, 'application/gzip')
 
 @app.api_route('/gptadmin-hub.tar.gz', methods=['GET', 'HEAD'])
 async def get_hub():

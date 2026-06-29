@@ -366,6 +366,38 @@ for d in shellmcp gptadmin_hub cli agents hub_source client; do [[ -d "$d" ]] &&
 tar -czf "gptadmin.tar.gz.tmp.$$" "${INCLUDE[@]}"
 mv -f "gptadmin.tar.gz.tmp.$$" gptadmin.tar.gz
 
+# Platform-specific archives keep installer downloads small.
+step "Archive: platform-specific tarballs"
+make_platform_archive() {
+  local platform="$1" arch="$2" hub_tag="$3"
+  local out="gptadmin-${platform}-${arch}.tar.gz"
+  local tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/gptadmin_hub"
+  if [[ -d "gptadmin_hub/$hub_tag" ]]; then
+    mkdir -p "$tmp/gptadmin_hub/$hub_tag"
+    cp -a "gptadmin_hub/$hub_tag/." "$tmp/gptadmin_hub/$hub_tag/"
+  else
+    echo "WARN: skip $out: missing gptadmin_hub/$hub_tag"
+    rm -rf "$tmp"
+    return 0
+  fi
+  for d in cli agents hub_source client; do
+    [[ -d "$d" ]] && cp -a "$d" "$tmp/"
+  done
+  if [[ "$platform" == "linux" && -d shellmcp ]]; then
+    cp -a shellmcp "$tmp/"
+  fi
+  tar -C "$tmp" -czf "$out.tmp.$$" .
+  mv -f "$out.tmp.$$" "$out"
+  rm -rf "$tmp"
+  echo "built: $ART_DIR/$out"
+}
+make_platform_archive linux amd64 linux_amd64
+make_platform_archive linux arm64 linux_arm64
+make_platform_archive darwin arm64 darwin_arm64
+make_platform_archive darwin amd64 darwin_amd64
+
 # NEW: компонентные архивы (если есть соответствующие папки)
 step "Archive: per-component tarballs"
 if [[ -d gptadmin_hub ]]; then

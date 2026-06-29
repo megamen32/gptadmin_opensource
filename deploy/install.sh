@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CLI_URL=${CLI_URL:-https://became.bezrabotnyi.com/gptadmin.py}
-PKG_ALL_URL=${PKG_ALL_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
-PKG_HUB_URL=${PKG_HUB_URL:-https://became.bezrabotnyi.com/gptadmin-hub.tar.gz}
-PKG_SHELLMCP_URL=${PKG_SHELLMCP_URL:-https://became.bezrabotnyi.com/gptadmin-shellmcp.tar.gz}
+BASE_URL=${BASE_URL:-https://became.bezrabotnyi.com}
+CLI_URL=${CLI_URL:-$BASE_URL/gptadmin.py}
+PKG_FALLBACK_URL=${PKG_FALLBACK_URL:-$BASE_URL/gptadmin.tar.gz}
+PKG_HUB_URL=${PKG_HUB_URL:-$BASE_URL/gptadmin-hub.tar.gz}
+PKG_SHELLMCP_URL=${PKG_SHELLMCP_URL:-$BASE_URL/gptadmin-shellmcp.tar.gz}
+
+_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$_os" in
+  darwin) GPTADMIN_PLATFORM=darwin ;;
+  linux) GPTADMIN_PLATFORM=linux ;;
+  *) GPTADMIN_PLATFORM="$_os" ;;
+esac
+_arch="$(uname -m)"
+case "$_arch" in
+  arm64|aarch64) GPTADMIN_ARCH=arm64 ;;
+  x86_64|amd64) GPTADMIN_ARCH=amd64 ;;
+  *) GPTADMIN_ARCH="$_arch" ;;
+esac
+PKG_ALL_URL=${PKG_ALL_URL:-$BASE_URL/gptadmin-${GPTADMIN_PLATFORM}-${GPTADMIN_ARCH}.tar.gz}
 
 err(){ echo "ERROR: $*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
@@ -88,7 +103,7 @@ if download_file "$CLI_URL" "$TMP_DIR/gptadmin.py"; then
   echo "[1/2] Downloaded Python CLI"
 else
   echo "[1/2] CLI not found at $CLI_URL — fallback to package"
-  download_file "$PKG_ALL_URL" "$TMP_DIR/pkg.tar.gz"
+  download_file "$PKG_ALL_URL" "$TMP_DIR/pkg.tar.gz" || download_file "$PKG_FALLBACK_URL" "$TMP_DIR/pkg.tar.gz"
   mkdir -p "$TMP_DIR/pkg" && tar -xzf "$TMP_DIR/pkg.tar.gz" -C "$TMP_DIR/pkg"
   [ -f "$TMP_DIR/pkg/cli/gptadmin.py" ] || err "cli/gptadmin.py not found in package"
   cp "$TMP_DIR/pkg/cli/gptadmin.py" "$TMP_DIR/gptadmin.py"
@@ -134,6 +149,7 @@ fi
 cat <<EOF
 \n✅ GPTAdmin CLI установлен: $CLI_PATH
 Режим установки: $INSTALL_MODE
+Пакет: $PKG_ALL_URL
 Использование (примеры):
   gptadmin update           # обновить существующую установку
   gptadmin status
