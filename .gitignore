@@ -38,6 +38,8 @@ deploy/systemd/
 # --- Tunnels & tokens ---
 ngrok_url.txt
 .cloudflared/
+# Local mac tunnel matrix secrets
+scripts/check_mac_tunnel_matrix.env
 
 # --- AI assistant settings (private) ---
 .claude/

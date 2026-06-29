@@ -683,7 +683,7 @@ enable = true
 serverName = "{env['FRP_DOMAIN']}"
 
 [[proxies]]
-name = "gptadmin-web"
+name = "gptadmin-web-{env['FRP_SUBDOMAIN']}"
 type = "http"
 localPort = {local_port}
 subdomain = "{env['FRP_SUBDOMAIN']}"
@@ -813,6 +813,23 @@ def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp:
 
 
 
+
+def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
+    if not env.get('HUB_PORT'):
+        return False
+    url = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}/version"
+    deadline = time.time() + timeout_s
+    last_err = ''
+    while time.time() < deadline:
+        res = subprocess.run(['curl', '-fsS', '--max-time', '5', url], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0 and 'hub_proxy' in (res.stdout or ''):
+            return True
+        last_err = (res.stderr or res.stdout or f'curl rc={res.returncode}').strip()
+        time.sleep(2)
+    print('WARNING: Local hub health check did not pass before starting dependent services' + (f': {last_err}' if last_err else ''), file=sys.stderr)
+    return False
+
+
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
     """Approve the local shell agent created by a same-machine hub+shell setup.
 
@@ -917,8 +934,8 @@ def setup_interactive(args):
     if install_hub:
         print('\nДоступ к хабу из Интернета:')
         if IS_MACOS:
-            print('  1) Авто-туннель Cloudflare Quick Tunnel (*.trycloudflare.com), без домена и port-forward')
-            print('  2) Legacy FRP через наш сервер')
+            print('  1) Авто-туннель через наш FRP — рекомендуется, по умолчанию')
+            print('  2) Cloudflare Quick Tunnel (*.trycloudflare.com) — без домена/port-forward, но иногда нестабилен и может отдавать 530')
             print('  3) У меня есть свой домен + HTTPS. Я настрою reverse-proxy на 127.0.0.1:%s' % env['HUB_PORT'])
             mode = ask('Ваш выбор', '1')
         else:
@@ -927,7 +944,8 @@ def setup_interactive(args):
             print('     на 127.0.0.1:%s (его можно позже сменить: gptadmin port <port>)' % env['HUB_PORT'])
             mode = ask('Ваш выбор', '1')
 
-        if IS_MACOS and mode == '1':
+        if IS_MACOS and mode == '2':
+            print('WARNING: Cloudflare Quick Tunnel без аккаунта удобен для тестов, но может быть нестабилен и иногда отдавать HTTP 530.', file=sys.stderr)
             env['TUNNEL_MODE'] = 'cloudflare'
             env['CLOUDFLARE_TUNNEL_ENABLE'] = 'true'
             env['FRP_ENABLE'] = 'false'
@@ -937,7 +955,7 @@ def setup_interactive(args):
                 env['SHELLMCP_TRANSPORT'] = 'polling'
                 env['SHELLMCP_URL'] = ''
                 env.pop('QUEUE_URL', None)
-        elif mode == '1' or (IS_MACOS and mode == '2'):
+        elif mode == '1':
             env['TUNNEL_MODE'] = 'frp'
             env['FRP_ENABLE'] = 'true'
             env['CLOUDFLARE_TUNNEL_ENABLE'] = 'false'
@@ -948,7 +966,10 @@ def setup_interactive(args):
             env['FRP_TOKEN'] = FRPC_TOKEN_DEFAULT
             env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
             if install_shellmcp:
-                env['HUB_URL'] = env['HUB_PUBLIC_URL']
+                # Bundled same-machine shell should talk to the local hub.
+                # HUB_PUBLIC_URL stays public for ChatGPT/actions, while polling avoids
+                # depending on the public tunnel during first registration/approval.
+                env['HUB_URL'] = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
         else:
             url = ask('Введите публичный HTTPS URL хаба (например, https://gptadmin.example.com)')
             ensure_https(url)
@@ -967,7 +988,7 @@ def setup_interactive(args):
     if not (install_hub and env.get('TUNNEL_MODE') == 'cloudflare'):
         configure_shellmcp_transport(env, install_hub, install_shellmcp)
     if install_shellmcp:
-        hub_for_update = (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
         env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
         env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
@@ -1024,6 +1045,9 @@ def setup_interactive(args):
     svc_daemon_reload()
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
+        wait_local_hub_health(env)
+    if env.get('FRP_ENABLE', 'false') == 'true':
+        svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
     if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
         svc_enable_start(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
         public_url = wait_cloudflare_quick_url()
@@ -1048,8 +1072,6 @@ def setup_interactive(args):
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         maybe_import_and_install_mcp_from_desktop_clients()
     maybe_autoapprove_local_shellmcp(env, install_hub, install_shellmcp)
-    if env.get('FRP_ENABLE', 'false') == 'true':
-        svc_enable_start(svc_frpc_name(), UNIT_PATH_FRPC)
 
     env = env_read()
     print('\n=== Готово ===')
