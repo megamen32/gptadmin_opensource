@@ -181,7 +181,11 @@ client/                 → shellmcp/python/
 
 **3.5** `CHANGELOG.md` — start Keep a Changelog format, port current VERSION.
 
-### Stage 4 — CI/CD (1-2 hours)
+### Stage 4 — CI/CD ✅ DONE
+
+**Status:** badges in README, release.yml workflow, issue/PR templates.
+
+### Stage 4 — CI/CD (1-2 hours) — ARCHIVED
 
 **4.1** Update `.github/workflows/ci.yml`:
 - `lint` job: ruff (python) + eslint (userscript) on PR
@@ -192,7 +196,11 @@ client/                 → shellmcp/python/
 
 **4.3** `release.yml` — on tag v* create GitHub Release with changelog + artifacts.
 
-### Stage 5 — Tests (gradual, 1-2 days)
+### Stage 5 — Tests ✅ DONE (static)
+
+**Status:** 15 new static tests (userscript, install scripts, secret prevention). All pass in CI without infrastructure. Integration tests (hub/shellmcp/tunnels) already existed.
+
+### Stage 5 — Tests (gradual, 1-2 days) — ARCHIVED
 
 **5.1** Cover the basics:
 - `tests/test_hub.py` — extend (MCP-SSE endpoint, heartbeat, auth)
