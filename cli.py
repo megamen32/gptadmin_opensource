@@ -952,6 +952,13 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
     if not token:
         print('WARNING: Local ShellMCP auto-approve skipped: CTL_TOKEN is empty', file=sys.stderr)
         return
+    # launchd may report the service as loaded before the hub process actually
+    # accepts connections. Re-check here so auto-approve does not race first
+    # registration and leave the local ShellMCP pending with 401 queue polls.
+    health_env = dict(env)
+    health_env.setdefault('HUB_PORT', hub_port or '9001')
+    wait_local_hub_health(health_env, timeout_s=180)
+
     base = f'http://127.0.0.1:{hub_port}'
     headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']
 
