@@ -1,196 +1,159 @@
-> **Deprecated:** the legacy Python ShellMCP/shellmcp transport (`client/shellmcp.py` and `client/shellmcp.py`) is kept only for compatibility. The primary shell transport is now `go-shellmcp` / `shellmcp-go-canary`.
+# GPT‑Админ
 
-# GPTAdmin Services
+**One MCP hub — any AI controls any infrastructure.**
 
-This repository contains two small services used to remotely control a machine.
+GPT‑Админ is a self-hosted MCP hub that sits between your AI assistant and your
+servers. Plug servers and any MCP tools into the hub, then connect your AI via
+one of three adapters. Manage everything from server admin to running subagents
+— from ChatGPT, Claude, Codex, DeepSeek, Qwen, even Yandex Alice or Sber
+GigaChat.
 
-* **services/shellmcp.py** – runs as root and exposes low level operations.
-* **services/shellmcp_pure.py** – simplified variant of `shellmcp` that depends only on the
-  Python standard library and works on any Unix-like system including macOS.
-* **services/hub_proxy.py** – collects heartbeats from multiple `shellmcp` servers and
-  proxies requests to them.
+> 🌐 Website & live docs: **https://gptadmin.bezrabotnyi.com**
+> 📦 Install: `curl -s https://became.bezrabotnyi.com/install.sh | bash`
 
-## Requirements
+---
 
-```
-pip install -r requirements.txt
-```
+## Why
 
-## Installation with ngrok
+Most "AI server admin" tools are either cloud-only, tied to one AI, or require
+a paid API. GPT‑Админ is different:
 
-For an automated setup that installs dependencies, configures systemd units,
-and exposes the hub through ngrok, run:
+- **Self-hosted** — your servers, your hub, your tokens. Nothing leaves your
+  infra.
+- **Any AI** — ChatGPT, Claude, Codex, OpenCode, DeepSeek, Qwen, Alice,
+  GigaChat. Even free web chats work via a browser extension.
+- **MCP-native** — the hub speaks MCP remote SSE, so any MCP client connects.
+  Plug in chrome-devtools, openmemory, or any other MCP too.
+- **Real execution** — not "here's the command, copy it". The agent reads
+  state, runs commands, validates, and reports actual output.
 
-```
-./deploy/install_with_ngrok.sh
-```
-
-The script prompts for:
-
-* a Bearer token used by both `shellmcp` and `hub_proxy`;
-* an ngrok token to publish the proxy.
-
-It downloads the packaged application, creates virtual environment, installs
-dependencies, writes systemd units for `shellmcp`, `hub_proxy` and an ngrok
-forwarder, then starts all services. The public URL returned by ngrok is
-displayed and stored in `ngrok_url.txt` inside the installation directory.
-
-## Running
-
-Start `shellmcp` and `hub_proxy` in separate terminals:
+## How it works
 
 ```
-SHELLMCP_TOKEN=srv_secret python services/shellmcp.py
-CTL_TOKEN=chatgpt_secret python services/hub_proxy.py
+   MCP tools plug IN            AIs connect OUT (3 adapters)
+  ┌─────────────────┐          ┌──────────────────────┐
+  │ shellmcp        │          │ Claude · Codex       │ (MCP client)
+  │ chrome-devtools │  ──►  ┌──┴──────────────┐       │
+  │ openmemory      │       │   GPT‑Админ     │  ──►  │ DeepSeek · Qwen  │ (browser ext)
+  │ any MCP         │  ◄──  │   MCP hub       │       │ Alice · GigaChat │
+  └─────────────────┘       └──┬──────────────┘  ──►  │ ChatGPT · OpenUI │ (OpenAI Action)
+                              │                │       └──────────────────────┘
+                              ▼
+                        your servers
+                     (Linux · macOS · Windows)
 ```
 
-`shellmcp` can register itself with the hub when `HUB_URL` is set. Each service
-accepts tokens through environment variables as shown above.
+The hub is one process. Tools plug into it. AIs connect to it via one of three
+adapters. Capabilities (admin, code, logs, search, subagents) come from the hub
+— independent of which AI you use.
 
-To run the minimal version that requires no external dependencies use:
-
-```
-SHELLMCP_TOKEN=srv_secret python services/shellmcp_pure.py
-```
-
-Set `QUEUE_URL` to enable polling mode. In this mode the daemon polls the
-queue for tasks and does not start an HTTP server:
-
-```
-QUEUE_URL=http://hub:9001/queue SHELLMCP_TOKEN=srv_secret python services/shellmcp_pure.py
-```
-
-## Auth model
-
-Do not mix these three values:
-
-* `CTL_TOKEN` — Bearer token for the hub admin/control HTTP API. It protects
-  `/admin`, `/admin/api/*`, `/mcp-relay/*`, `/servers`, `/tasks/*` and artifact
-  endpoints.
-* `ADMIN_PASSWORD` — password shown on the OAuth HTML form at `/authorize`.
-  Users type this during the OAuth login flow for `/mcp`.
-* `OAUTH_CLIENT_SECRET` — server-side secret used by `hub_proxy.py` to sign and
-  verify OAuth bearer tokens for `/mcp`. Do not hand this value to users.
-
-Important: `/mcp` is not authenticated by `CTL_TOKEN`. The `/mcp` endpoint
-expects an OAuth bearer token minted by the hub.
-
-For a very simple single-user setup it is acceptable to set the same literal
-value in both `CTL_TOKEN` and `ADMIN_PASSWORD`, for example:
-
-```
-CTL_TOKEN=***REMOVED***
-ADMIN_PASSWORD=***REMOVED***
-OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)
-PUBLIC_ORIGIN=https://your-hub.example.com
-MCP_RESOURCE=https://your-hub.example.com
-```
-
-## Key hub env vars
-
-The website docs page now contains the exhaustive env reference rendered from
-the current code. The most important hub settings are:
-
-* `CTL_TOKEN` — admin/control Bearer token.
-* `PUBLIC_ORIGIN` — public HTTPS origin used in OAuth metadata.
-* `MCP_RESOURCE` — OAuth audience/resource for `/mcp`.
-* `ADMIN_PASSWORD` — OAuth login password for `/authorize`.
-* `OAUTH_CLIENT_SECRET` — JWT signing secret for `/mcp` OAuth tokens.
-* `MCP_RELAY_AGENT_TOKEN` — backend token for real relay agents.
-* `MCP_BRIDGE_KEY` — bridge/userscript key for `/mcp-prompt/*`.
-* `HUB_PORT`, `HUB_BIND` — listener socket settings.
-* `LOG_LEVEL`, `GPTADMIN_AUDIT_LOG` — logging and audit settings.
-
-## Repo sync note
-
-`website/` is a separate git repository nested inside this repo.
-
-If a change touches docs/site content and the root repo at the same time, push
-both repositories so they stay in sync:
+## Quickstart
 
 ```bash
-cd /home/admin/gptadmin && git push
-cd /home/admin/gptadmin/website && git push
+# 1. Install (Linux / macOS — auto-detects user/system mode)
+curl -s https://became.bezrabotnyi.com/install.sh | bash
+
+# Windows (PowerShell, no Administrator needed)
+iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
-### SSH backend
+The installer prints your **Hub URL** and **CTL_TOKEN** — keep them.
 
-If `shellmcp` should execute commands on a remote host instead of locally,
-set `SSH_HOST` (and optionally `SSH_PORT`, `SSH_USER`, `SSH_PASSWORD` or
-`SSH_KEY`) before starting the service. The server will connect over SSH and
-run all commands on that host.
+```bash
+# 2. Connect your AI — pick one adapter:
+#    - OpenAI Action (ChatGPT Custom GPT / Open WebUI) → see docs
+#    - MCP remote SSE (Claude / Codex / OpenCode)      → see docs
+#    - Browser extension (free web AIs)                → see docs
 
-
-## Hub watchdog
-
-`services/main_package/hub_watchdog.py` is a dependency-free Python watchdog for
-`hub_proxy`. It has two modes:
-
-* `--check-once` probes `http://127.0.0.1:9001/version` and runs a restart
-  command on failure. Linux deployments use this through
-  `gptadmin-hub-watchdog.service` + `gptadmin-hub-watchdog.timer`.
-* `--supervise -- <command...>` runs the hub under the watchdog and restarts the
-  child when the process exits or the health endpoint fails repeatedly. This mode
-  uses only the Python standard library and is suitable for macOS/Windows/manual
-  runs.
-
-Linux systemd deployment installs:
-
-```
-sudo cp deploy/systemd/gptadmin-hub-watchdog.service /etc/systemd/system/
-sudo cp deploy/systemd/gptadmin-hub-watchdog.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now gptadmin-hub-watchdog.timer
+# 3. Use it:
+#    "поставь nginx", "почини сайт", "покажи логи", "запусти codex для фикса бага"
 ```
 
-Cross-platform supervised run example:
+Full per-adapter instructions: **https://gptadmin.bezrabotnyi.com/#/docs**
+
+## What you can do through the hub
+
+| Capability | Example |
+|------------|---------|
+| **Server administration** | restart systemd services, manage firewall/nginx/fail2ban/sshd, install packages |
+| **Write & run code** | edit files, run type-check/lint/build, launch subagents ("run codex to fix this bug") |
+| **Fix & clean PRs** | find fork in memory, keep one feature commit, force-push via SSH |
+| **Check logs** | parse journalctl/nginx/postgres, find anomalies, suggest & apply fixes |
+| **Web search** | via chrome-devtools MCP — agent opens pages, reads docs, searches |
+| **Diagnose incidents** | find downed service, read logs, understand cause (ECONNREFUSED, 503, OOM), fix it |
+
+## Three adapters
+
+| Adapter | For | How |
+|---------|-----|-----|
+| **OpenAI Action** | ChatGPT, Open WebUI | Create a Custom GPT / add OpenAPI endpoint, Bearer token. No Codex limits. |
+| **MCP remote SSE** | Claude Desktop, Codex, OpenCode | Hub is an MCP server (Streamable HTTP). Add to `claude_desktop_config.json`. |
+| **Browser extension** | DeepSeek, Qwen, Alice, GigaChat, ChatGPT (free) | Userscript (Tampermonkey/Firefox) adds MCP buttons to web chat UIs. No paid API. |
+
+All three connect to the **same hub**. Same capabilities. Pick what fits your AI.
+
+## Install paths
+
+| OS | user-mode (default) | system-mode (`sudo`) |
+|----|---------------------|----------------------|
+| Linux / macOS | `~/.local/share/gptadmin` | `/opt/gptadmin` |
+| Windows | `%LOCALAPPDATA%\gptadmin` | `C:\Program Files\gptadmin` |
+
+The installer auto-detects the mode: no `sudo` → user-mode (home dir, user
+service); `sudo` → system-mode. No domain needed — auto-tunnel via FRP or
+Cloudflare gives a public URL.
+
+## Project layout
 
 ```
-python services/main_package/hub_watchdog.py --supervise -- \
-  python services/main_package/hub_proxy.py
+hub_proxy.py            # the MCP hub — proxies commands to agents
+hub_watchdog.py         # keeps the hub alive
+server_for_installer.py # serves install scripts + OpenAPI
+gptadmin_security.py    # auth, OAuth, token validation
+cli.py                  # `gptadmin` CLI (setup, tunnel, status, logs)
+telegram_logs_bot.py    # optional Telegram alerts
+go-shellmcp/            # primary shell agent (Go) — runs on target machines
+client/                 # legacy Python shell agent (compat)
+public/                 # OpenAPI schema, install scripts, mcp-bridge.user.js
+deploy/                 # install scripts, systemd, nginx configs
+tests/                  # test_hub.py, test_rootd.py
+docs/                   # OPEN_CORE_PLAN.md
 ```
 
-Watchdog logs default to `/var/log/gptadmin/hub-watchdog.log`. Configure with
-`GPTADMIN_HUB_HEALTH_URL`, `GPTADMIN_HUB_WATCHDOG_INTERVAL`,
-`GPTADMIN_HUB_RESTART_COMMAND`, and related environment variables.
+> Structure is being cleaned up — see `docs/OPEN_CORE_PLAN.md` for the target
+> layout and the open-core launch plan.
 
-## Build & Obfuscation
+## Running from source
 
-The repository includes a helper script to create obfuscated, distributable
-executables of both services using [PyArmor](https://github.com/dashingsoft/pyarmor).
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install fastapi uvicorn requests
 
-```
-./tools/build.sh
-```
+# hub (terminal 1)
+CTL_TOKEN=your-token python hub_proxy.py
 
-Artifacts will be placed in the `build/` directory (packed into
-`gptadmin.tar.gz`).  The script performs a small smoke test to ensure the
-generated binaries start and respond to basic requests.
+# agent on a target machine (terminal 2)
+SHELLMCP_TOKEN=agent-token HUB_URL=http://127.0.0.1:25900 python client/shellmcp.py
 
-### Rotating or revoking tokens
-
-Tokens are stored inside the systemd unit files. To change or revoke a token
-edit the relevant unit, update `SHELLMCP_TOKEN` or `CTL_TOKEN` and restart the
-service:
-
-```
-sudo systemctl edit --full shellmcp.service
-sudo systemctl restart shellmcp
-```
-
-Repeat for `hub_proxy.service`. Removing a token and restarting effectively
-revokes access. Remember to also update any clients that rely on the old token.
-
-## Tests
-
-Basic scripts for manual testing are provided:
-
-```
-python services/hub_proxy.py & python services/shellmcp.py &
-python tests/test_shellmcp.py
+# smoke test (terminal 3)
 python tests/test_hub.py
 ```
 
-## public/openapi.yaml
+## Contributing
 
-`public/openapi.yaml` documents the API served by `hub_proxy`. It was produced manualy, update it whenever the API changes to refresh the schema.
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style,
+and the PR process. For security issues see [SECURITY.md](SECURITY.md).
+
+## License
+
+**GNU AGPL-3.0** — see [LICENSE](LICENSE).
+
+The hub, shellmcp, all three adapters, and the basic web panel are **free
+forever**. Future paid offerings (hosted cloud, enterprise SSO/audit/RBAC,
+advanced panel, support) will live in a separate repo — the core stays open.
+
+## Links
+
+- 🌐 Website & docs: https://gptadmin.bezrabotnyi.com
+- 💬 Telegram: [@careviolan](https://t.me/careviolan)
+- 📦 Other projects: https://bezrabotnyi.com
