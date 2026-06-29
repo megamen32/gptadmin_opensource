@@ -511,7 +511,7 @@ if IS_MACOS:
 else:
     # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
     LINUX_WANTED_BY = 'default.target' if IS_USER_INSTALL else 'multi-user.target'
-    LINUX_HARDENING = '' if IS_USER_INSTALL else 'NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectHome=true\n'
+    LINUX_HARDENING = '' if IS_USER_INSTALL else f'NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectHome=true\nReadWritePaths={CONFIG_DIR} {INSTALL_DIR} {Path.home() / ".gptadmin"}\n'
 
     UNIT_HUB = f"""
 [Unit]
