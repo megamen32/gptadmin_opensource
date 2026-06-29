@@ -151,10 +151,16 @@ def need_root():
 def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
-def run(cmd, check=True, capture=False):
-    if capture:
-        return subprocess.run(cmd, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return subprocess.run(cmd, check=check)
+def run(cmd, check=True, capture=False, timeout=None):
+    try:
+        if capture:
+            return subprocess.run(cmd, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return subprocess.run(cmd, check=check, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        if check:
+            raise
+        print(f'WARNING: command timed out and was ignored: {cmd}', file=sys.stderr)
+        return subprocess.CompletedProcess(cmd, 124, stdout=getattr(e, 'stdout', None), stderr=getattr(e, 'stderr', None))
 
 # .env read/write
 
@@ -396,10 +402,10 @@ if IS_MACOS:
         # the explicit domain, then kickstart; keep load -w as fallback for older
         # systems.
         domain = _launchd_domain()
-        run(['launchctl', 'bootout', _launchd_service_target(label)], check=False)
-        run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False)
-        run(['launchctl', 'enable', _launchd_service_target(label)], check=False)
-        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False)
+        run(['launchctl', 'bootout', _launchd_service_target(label)], check=False, timeout=10)
+        run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False, timeout=10)
+        run(['launchctl', 'enable', _launchd_service_target(label)], check=False, timeout=10)
+        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False, timeout=10)
         if not _launchd_is_loaded(label):
             run(['launchctl', 'load', '-w', str(unit_path)], check=False)
         if not _launchd_is_loaded(label):
