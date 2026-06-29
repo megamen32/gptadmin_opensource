@@ -1,42 +1,51 @@
+# --- Python ---
 /.venv
-__pycache__/
-*.log
-node_modules/
-requirements.txt.bak*
-logs_config.json
-build/
-*.spec
-1.html
-router_cookies.json
-.buildcache/
-<<<<<<< HEAD
-<<<<<<< HEAD
-
-# Python bytecode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 
-# Runtime data and config
+# --- Node ---
+node_modules/
+package-lock.json.bak*
+
+# --- Build artifacts ---
+build/
+*.spec
+.buildcache/
+
+# --- Runtime data & config ---
 config/
 logs/
+logs_config.json
+*.log
+*.db
+router_cookies.json
 
-# Backup files
+# --- Backup files ---
 *.bak*
+requirements.txt.bak*
 services/main_package/client.bak.*/
 
-# Apps (separate projects)
+# --- Apps (separate projects) ---
 apps/
-=======
-=======
->>>>>>> headroom-spill-integration
-config/
+
+# --- Private deploy configs ---
 deploy/nginx/became.bezrabotnyi.com.conf
 deploy/systemd/
-*.bak*
-<<<<<<< HEAD
->>>>>>> headroom-spill-integration
-=======
->>>>>>> headroom-spill-integration
-*.db
+
+# --- Tunnels & tokens ---
+ngrok_url.txt
+.cloudflared/
+
+# --- AI assistant settings (private) ---
+.claude/
+.serena/
+
+# --- Archives belong in releases, not the repo ---
+*.tar.gz
+*.zip
+
+# --- Misc scratch ---
+1.html
