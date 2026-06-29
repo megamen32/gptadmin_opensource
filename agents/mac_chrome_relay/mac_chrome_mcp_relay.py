@@ -2,7 +2,7 @@
 """
 Mac Chrome MCP Relay Agent
 
-Connects a logged-in local Chrome profile to GPTAdmin hub_proxy through long polling.
+Connects a logged-in local Chrome profile to GPTAdmin gptadmin_hub through long polling.
 Chrome must be running with remote debugging enabled, for example:
 
   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \

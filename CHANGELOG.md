@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial release of GPT‑Админ
-- `hub_proxy` — MCP hub, proxies commands to agents
+- `gptadmin_hub` — MCP hub, proxies commands to agents
 - `shellmcp` — shell agent (Python + Go) for target machines
 - Three adapters: OpenAI Action, MCP remote SSE, browser extension (userscript)
 - CLI (`gptadmin`): setup, tunnel (FRP/Cloudflare), status, logs

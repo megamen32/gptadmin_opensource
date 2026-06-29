@@ -1664,7 +1664,7 @@ def _sha256_file(path: Path) -> str:
 
 @app.get("/version")
 def version():
-    data = build_info("hub_proxy")
+    data = build_info("gptadmin_hub")
     data.update(
         {
             "artifact_dir": str(ARTIFACT_DIR),
@@ -3779,14 +3779,14 @@ def _shell_cli_info(srv: str, info: Dict[str, Any], verbose: bool = False) -> Di
     return info_out
 
 
-def _hub_proxy_install_info(verbose: bool = False) -> Dict[str, Any]:
-    unit = "hub_proxy.service"
+def _gptadmin_hub_install_info(verbose: bool = False) -> Dict[str, Any]:
+    unit = "gptadmin_hub.service"
     info: Dict[str, Any] = {
         "unit": unit,
-        "file": "/etc/systemd/system/hub_proxy.service",
+        "file": "/etc/systemd/system/gptadmin_hub.service",
         "working_dir": str(GPTADMIN_REPO_ROOT),
         "python": str(GPTADMIN_PYTHON),
-        "script": str(GPTADMIN_REPO_ROOT / "services" / "main_package" / "hub_proxy.py"),
+        "script": str(GPTADMIN_REPO_ROOT / "services" / "main_package" / "gptadmin_hub.py"),
         "user": "admin",
         "public_origin": PUBLIC_ORIGIN,
         "mcp_relay": "/mcp-relay/*",
@@ -3859,7 +3859,7 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if section in {"all", "config"}:
         cfg = _omit_none({"version": info.get("version") or info.get("build_version"), "build": info.get("git_commit"), "public_hub": PUBLIC_ORIGIN, "openapi": "/actions/openapi.yaml", "mcp_relay": "/mcp-relay/*", "cwd": default_cwd, "outbox": info.get("outbox_dir"), "shell_cli": _shell_cli_info(srv, info, verbose)})
         if is_hub_host:
-            cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d", "hub_proxy": _hub_proxy_install_info(verbose)})
+            cfg.update({"repo": str(GPTADMIN_REPO_ROOT), "config_dir": str(CONFIG_DIR), "mcp_config": "/etc/gptadmin/mcp.json", "mcp_agent_configs": "/etc/gptadmin/mcp-agents.d", "gptadmin_hub": _gptadmin_hub_install_info(verbose)})
         if proxy_for or proxy_via:
             cfg["proxy"] = _omit_none({"proxy_for": proxy_for, "proxy_via": proxy_via, "ssh_host": info.get("ssh_host"), "ssh_port": info.get("ssh_port"), "ssh_user": info.get("ssh_user")})
         out["config"] = cfg
@@ -5194,7 +5194,7 @@ def _admin_overview_payload(limit: int = 120) -> Dict[str, Any]:
     clients = [_admin_public_auth_client(k, v) for k, v in authorized_clients.items() if isinstance(v, dict)]
     clients.sort(key=lambda r: float(r.get("last_seen") or 0), reverse=True)
     jobs = _admin_jobs(limit=limit)
-    return {"ok": True, "build": build_info("hub_proxy"), "now": int(time.time()), "now_fmt": _fmt_ts(time.time()), "agents": agents, "agent_counts": _status_counts(agents), "clients": clients, "client_count": len(clients), "clients_with_multiple_ips": [c for c in clients if c.get("multiple_ips")], "jobs": jobs, "audit": _admin_recent_audit(limit=limit), "state_files": {"servers": str(HUB_SERVERS_STATE_FILE), "tasks": str(HUB_TASKS_STATE_FILE), "mcp_agents": str(HUB_MCP_AGENTS_STATE_FILE), "mcp_jobs": str(HUB_MCP_JOBS_STATE_FILE), "auth_clients": str(HUB_AUTH_CLIENTS_STATE_FILE), "audit_log": str(AUDIT_LOG_PATH)}}
+    return {"ok": True, "build": build_info("gptadmin_hub"), "now": int(time.time()), "now_fmt": _fmt_ts(time.time()), "agents": agents, "agent_counts": _status_counts(agents), "clients": clients, "client_count": len(clients), "clients_with_multiple_ips": [c for c in clients if c.get("multiple_ips")], "jobs": jobs, "audit": _admin_recent_audit(limit=limit), "state_files": {"servers": str(HUB_SERVERS_STATE_FILE), "tasks": str(HUB_TASKS_STATE_FILE), "mcp_agents": str(HUB_MCP_AGENTS_STATE_FILE), "mcp_jobs": str(HUB_MCP_JOBS_STATE_FILE), "auth_clients": str(HUB_AUTH_CLIENTS_STATE_FILE), "audit_log": str(AUDIT_LOG_PATH)}}
 
 
 async def _admin_real_mcp_request(target: str, method: str, params: Dict[str, Any], *, timeout: Optional[int], background: bool, retry_policy: str) -> Dict[str, Any]:

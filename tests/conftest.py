@@ -182,7 +182,7 @@ def start_services():
         yield
         return
 
-    hub_script = REPO_DIR / "hub_proxy.py"
+    hub_script = REPO_DIR / "gptadmin_hub.py"
     shellmcp_script = REPO_DIR / "client" / "shellmcp_pure.py"
     if not hub_script.is_file():
         raise RuntimeError(f"Missing hub proxy script: {hub_script}")

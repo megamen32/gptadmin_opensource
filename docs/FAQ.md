@@ -98,7 +98,7 @@ update clients.
 
 ## Something broke. Where are the logs?
 
-- Hub: `journalctl -u hub_proxy -n 100` (or `--user` for user-mode)
+- Hub: `journalctl -u gptadmin_hub -n 100` (or `--user` for user-mode)
 - Agent: `journalctl -u shellmcp -n 100` (or `--user`)
 - Or read them in the web panel: `/admin` → Logs
 

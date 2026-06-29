@@ -219,7 +219,7 @@ PY
 to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
 
 SHELLMCP_IMPORTS=$(py_hidden_imports client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py)
-HUB_IMPORTS=$(py_hidden_imports hub_proxy.py gptadmin_build_info.py gptadmin_security.py)
+HUB_IMPORTS=$(py_hidden_imports gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
 SHELLMCP_HIDDEN_FLAGS=$(echo "$SHELLMCP_IMPORTS" | to_pyinstaller_flags)
 HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
 [[ -f client/shellmcp_linux.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_linux"
@@ -235,7 +235,7 @@ SHELLMCP_SRC=(client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_i
 [[ -f client/shellmcp_mac.py   ]] && SHELLMCP_SRC+=(client/shellmcp_mac.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && SHELLMCP_SRC+=(requirements.txt)
 
-HUB_SRC=(hub_proxy.py gptadmin_build_info.py gptadmin_security.py)
+HUB_SRC=(gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
 [[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
 
 FP_SHELLMCP_NEW="$(fingerprint "${SHELLMCP_SRC[@]}")"
@@ -244,7 +244,7 @@ FP_SHELLMCP_FILE="$CACHE_DIR/.fp_shellmcp"
 FP_HUB_FILE="$CACHE_DIR/.fp_hub"
 
 SHELLMCP_DIST="$ART_DIR/shellmcp/dist/shellmcp"
-HUB_DIST="$ART_DIR/hub_proxy/dist/hub_proxy"
+HUB_DIST="$ART_DIR/gptadmin_hub/dist/gptadmin_hub"
 
 NEED_BUILD_SHELLMCP="$FORCE"
 NEED_BUILD_HUB="$FORCE"
@@ -266,7 +266,7 @@ echo "Fingerprint hub   : $FP_HUB_NEW (changed=$([[ $NEED_BUILD_HUB == 1 ]] && e
 # ---------- PyInstaller (incremental, no obfuscation) ----------
 : "${PYTHONPATH:=}"
 export PYTHONPATH="client:$PYTHONPATH"
-mkdir -p "$ART_DIR/shellmcp" "$ART_DIR/hub_proxy"
+mkdir -p "$ART_DIR/shellmcp" "$ART_DIR/gptadmin_hub"
 
 if [[ "$NEED_BUILD_SHELLMCP" == "1" ]]; then
   step "PyInstaller: build shellmcp"
@@ -284,23 +284,23 @@ else
 fi
 
 if [[ "$NEED_BUILD_HUB" == "1" ]]; then
-  step "PyInstaller: build hub_proxy"
-  pyinstaller "hub_proxy.py" \
+  step "PyInstaller: build gptadmin_hub"
+  pyinstaller "gptadmin_hub.py" \
     --onefile --noconfirm --clean \
     --log-level=DEBUG \
-    --specpath "$ART_DIR/hub_proxy" \
+    --specpath "$ART_DIR/gptadmin_hub" \
     "${COLLECT_FLAGS[@]}" \
     $HUB_HIDDEN_FLAGS \
-    --distpath "$ART_DIR/hub_proxy/dist" \
-    --workpath "$ART_DIR/hub_proxy/build"
+    --distpath "$ART_DIR/gptadmin_hub/dist" \
+    --workpath "$ART_DIR/gptadmin_hub/build"
   save_fp "$FP_HUB_FILE" "$FP_HUB_NEW"
 else
-  echo "Skip PyInstaller hub_proxy"
+  echo "Skip PyInstaller gptadmin_hub"
 fi
 
 # ---------- Summarize PyInstaller warnings ----------
 step "Summarize PyInstaller warnings"
-for f in "$ART_DIR"/shellmcp/build/shellmcp/warn-*.txt "$ART_DIR"/hub_proxy/build/hub_proxy/warn-*.txt; do
+for f in "$ART_DIR"/shellmcp/build/shellmcp/warn-*.txt "$ART_DIR"/gptadmin_hub/build/gptadmin_hub/warn-*.txt; do
   [[ -f "$f" ]] || continue
   echo "--- $(basename "$f") ---"
   sed -n '1,200p' "$f"
@@ -316,7 +316,7 @@ cp -a agents/generic_stdio_mcp_relay "$ART_DIR/agents/"
 step "Copy source payloads for macOS/pure-Python installs"
 rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
 mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
-cp -a hub_proxy.py gptadmin_build_info.py gptadmin_security.py "$ART_DIR/hub_source/"
+cp -a gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py "$ART_DIR/hub_source/"
 cat > "$ART_DIR/hub_source/requirements-hub.txt" <<'REQ'
 fastapi
 uvicorn[standard]
@@ -334,21 +334,21 @@ step "Archive: gptadmin.tar.gz"
 # Тарим только существующие папки (на случай первой частичной сборки)
 pushd "$ART_DIR" >/dev/null
 INCLUDE=()
-for d in shellmcp hub_proxy cli agents hub_source client; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
+for d in shellmcp gptadmin_hub cli agents hub_source client; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
 tar -czf "gptadmin.tar.gz.tmp.$$" "${INCLUDE[@]}"
 mv -f "gptadmin.tar.gz.tmp.$$" gptadmin.tar.gz
 
 # NEW: компонентные архивы (если есть соответствующие папки)
 step "Archive: per-component tarballs"
-if [[ -d hub_proxy ]]; then
-  HUB_INCLUDE=(hub_proxy)
+if [[ -d gptadmin_hub ]]; then
+  HUB_INCLUDE=(gptadmin_hub)
   [[ -d hub_source ]] && HUB_INCLUDE+=(hub_source)
   [[ -d cli ]] && HUB_INCLUDE+=(cli)
   tar -czf "gptadmin-hub.tar.gz.tmp.$$" "${HUB_INCLUDE[@]}"
 mv -f "gptadmin-hub.tar.gz.tmp.$$" gptadmin-hub.tar.gz
   echo "built: $ART_DIR/gptadmin-hub.tar.gz"
 else
-  echo "WARN: hub_proxy dir not found, skip gptadmin-hub.tar.gz"
+  echo "WARN: gptadmin_hub dir not found, skip gptadmin-hub.tar.gz"
 fi
 
 if [[ -d shellmcp ]]; then
@@ -466,7 +466,7 @@ if [[ "$SKIP_TESTS" != "1" ]]; then
     kill "$SHELLMCP_PID" || true
     SHELLMCP_PID=""
 
-    step "Smoke test: hub_proxy"
+    step "Smoke test: gptadmin_hub"
     : > "$HUB_RT_LOG"
     HUB_PORT="$(pick_port_plus1 9001)"
     echo "Using HUB_PORT=$HUB_PORT"

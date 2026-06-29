@@ -44,7 +44,7 @@ human confirmation before executing. Enable per-agent in `/admin` → Security.
 openssl rand -hex 32
 
 # Update the hub env, restart
-sudo systemctl restart hub_proxy  # or: systemctl --user restart hub_proxy
+sudo systemctl restart gptadmin_hub  # or: systemctl --user restart gptadmin_hub
 
 # Update each agent's HUB_URL/TOKEN if you changed SHELLMCP_TOKEN
 # Update Custom GPT / MCP client configs with the new CTL_TOKEN
