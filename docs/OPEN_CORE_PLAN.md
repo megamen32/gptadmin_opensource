@@ -88,7 +88,11 @@ gptadmin/
 
 ## III. Execution plan: current → ideal
 
-### Stage 0 — Secret audit (BLOCKING, before any publish)
+### Stage 0 — Secret audit ✅ DONE
+
+**Status:** MCP_AUTH_TOKEN, CTL_TOKEN, ADMIN_PASSWORD scrubbed from git history via git filter-repo. Force-pushed. Tokens must be rotated by maintainer.
+
+### Stage 0 — Secret audit (BLOCKING, before any publish) — ARCHIVED
 
 **0.1** Scan full history:
 ```bash
@@ -112,7 +116,11 @@ git push --force origin main
 
 **0.4** Rotate ALL tokens that may have leaked: GitHub PAT, ngrok/cloudflare tokens, Bearer CTL_TOKEN, Telegram bot token, SSH keys.
 
-### Stage 1 — Basic hygiene (1-2 hours)
+### Stage 1 — Basic hygiene ✅ DONE
+
+**Status:** LICENSE (AGPL-3.0), .gitignore fixed, SECURITY/CONTRIBUTING/COC added, junk removed, pyproject license metadata, CHANGELOG.
+
+### Stage 1 — Basic hygiene (1-2 hours) — ARCHIVED
 
 **1.1** Fix `.gitignore`: remove conflict markers, merge duplicates, add `.claude/`, `.serena/`, `*.tar.gz`, `*.zip`, `ngrok_url.txt`, `*.db`, `.cloudflared/`.
 
@@ -148,7 +156,11 @@ client/                 → shellmcp/python/
 
 **2.4** Create `adapters/` structure so README can point at "3 adapters".
 
-### Stage 3 — README and meta-files (2-3 hours)
+### Stage 3 — README and meta-files ✅ DONE
+
+**Status:** New README (vision, architecture, quickstart, 3 adapters, use-cases, license, links). SECURITY/CONTRIBUTING/COC done in Stage 1. CHANGELOG added.
+
+### Stage 3 — README and meta-files (2-3 hours) — ARCHIVED
 
 **3.1** Write new README:
 - Hero with gif/screenshot from website
