@@ -46,6 +46,20 @@ else
   CLI_PATH="${GPTADMIN_CLI_PATH:-$USER_HOME/.local/bin/gptadmin}"
 fi
 
+CONFIG_DIR="${GPTADMIN_CONFIG_DIR:-}"
+if [ -z "$CONFIG_DIR" ]; then
+  if [ "$INSTALL_MODE" = "system" ]; then
+    CONFIG_DIR="/etc/gptadmin"
+  else
+    CONFIG_DIR="$USER_HOME/.config/gptadmin"
+  fi
+fi
+ENV_FILE="$CONFIG_DIR/gptadmin.env"
+EXISTING_INSTALL=0
+if [ -f "$ENV_FILE" ] || [ -x "$INSTALL_DIR/bin/gptadmin_hub" ] || [ -x "$INSTALL_DIR/bin/shellmcp" ]; then
+  EXISTING_INSTALL=1
+fi
+
 have curl || err "curl required"
 have python3 || err "python3 required"
 
@@ -82,19 +96,46 @@ fi
 install -m 0755 "$TMP_DIR/gptadmin.py" "$CLI_PATH"
 export GPTADMIN_HOME="$INSTALL_DIR"
 
-# 2) Интерактивный мастер (правильный stdin)
-if [ -t 0 ]; then
-  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" || err "setup failed"
-elif [ -r /dev/tty ]; then
-  "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" < /dev/tty || err "setup failed"
+# 2) Existing install -> update by default. Fresh install -> interactive setup.
+ACTION="${GPTADMIN_INSTALL_ACTION:-}"
+if [ -z "$ACTION" ] && [ "$EXISTING_INSTALL" = "1" ]; then
+  ACTION="update"
+  if [ -r /dev/tty ]; then
+    echo
+    echo "Найдена существующая установка GPTAdmin: $ENV_FILE"
+    echo "  1) Обновить существующую установку in-place (по умолчанию)"
+    echo "  2) Запустить полный setup заново"
+    printf "Ваш выбор [1]: " > /dev/tty
+    read -r _choice < /dev/tty || _choice=""
+    case "${_choice:-1}" in
+      2|setup|Setup|SETUP) ACTION="setup" ;;
+      *) ACTION="update" ;;
+    esac
+  fi
+fi
+if [ -z "$ACTION" ]; then
+  ACTION="setup"
+fi
+
+if [ "$ACTION" = "update" ]; then
+  "$CLI_PATH" update --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" || err "update failed"
+elif [ "$ACTION" = "setup" ]; then
+  if [ -t 0 ]; then
+    "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" || err "setup failed"
+  elif [ -r /dev/tty ]; then
+    "$CLI_PATH" setup --$INSTALL_MODE --pkg-all "$PKG_ALL_URL" --pkg-hub "$PKG_HUB_URL" --pkg-shellmcp "$PKG_SHELLMCP_URL" < /dev/tty || err "setup failed"
+  else
+    err "no TTY available for interactive setup. Run: bash <(curl -fsSL https://.../install.sh)"
+  fi
 else
-  err "no TTY available for interactive setup. Run: bash <(curl -fsSL https://.../install.sh)"
+  err "unknown GPTADMIN_INSTALL_ACTION=$ACTION (use update or setup)"
 fi
 
 cat <<EOF
 \n✅ GPTAdmin CLI установлен: $CLI_PATH
 Режим установки: $INSTALL_MODE
 Использование (примеры):
+  gptadmin update           # обновить существующую установку
   gptadmin status
   gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)
   gptadmin logs hub         # логи хаба
