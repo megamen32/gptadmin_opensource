@@ -124,6 +124,13 @@ async def get_shellmcp_win():
     return _bin(PUBLIC_DIR / "gptadmin-win.zip", "gptadmin-win.zip", "application/zip")
 
 
+@app.api_route('/frp-mirror/{filename}', methods=['GET', 'HEAD'])
+async def get_frp_mirror_artifact(filename: str):
+    if not filename.startswith('frp_') or not filename.endswith('.tar.gz'):
+        raise HTTPException(404, 'artifact not found')
+    return _bin(PUBLIC_DIR / 'frp-mirror' / filename, filename, 'application/gzip')
+
+
 @app.api_route('/gptadmin.py', methods=['GET', 'HEAD'])
 async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")

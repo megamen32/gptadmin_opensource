@@ -125,6 +125,7 @@ REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
 # ===== FRPC defaults =====
 FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
+FRPC_BASE_URL         = os.environ.get('FRPC_BASE_URL', 'https://became.bezrabotnyi.com/frp-mirror')
 FRPC_SERVER_ADDR_DEFAULT = 't.gptadmin.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
 FRPC_TOKEN_DEFAULT    = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
@@ -667,7 +668,7 @@ def ensure_frpc_installed() -> str:
     arch = detect_arch()
     os_name = 'darwin' if IS_MACOS else 'linux'
     tarname = f"frp_{FRPC_VERSION}_{os_name}_{arch}.tar.gz"
-    url = f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/{tarname}"
+    url = f"{FRPC_BASE_URL.rstrip('/')}/{tarname}"
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
