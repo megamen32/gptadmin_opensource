@@ -56,6 +56,7 @@ def _artifact_manifest() -> dict:
         "shellmcp.py": (REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py"),
         "shellmcp_pure.py": (REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
+        "gptadmin-cli.tar.gz": (BUILD_DIR / "gptadmin-cli.tar.gz", "/gptadmin-cli.tar.gz"),
         "gptadmin-linux-amd64.tar.gz": (BUILD_DIR / "gptadmin-linux-amd64.tar.gz", "/gptadmin-linux-amd64.tar.gz"),
         "gptadmin-linux-arm64.tar.gz": (BUILD_DIR / "gptadmin-linux-arm64.tar.gz", "/gptadmin-linux-arm64.tar.gz"),
         "gptadmin-darwin-arm64.tar.gz": (BUILD_DIR / "gptadmin-darwin-arm64.tar.gz", "/gptadmin-darwin-arm64.tar.gz"),
@@ -112,6 +113,10 @@ def _bin(path: Path, filename: str, media_type: str):
 async def get_all():
     return _bin(BUILD_DIR / "gptadmin.tar.gz", "gptadmin.tar.gz", "application/gzip")
 
+
+@app.api_route('/gptadmin-cli.tar.gz', methods=['GET', 'HEAD'])
+async def get_cli():
+    return _bin(BUILD_DIR / "gptadmin-cli.tar.gz", "gptadmin-cli.tar.gz", "application/gzip")
 
 
 @app.api_route('/gptadmin-{platform}-{arch}.tar.gz', methods=['GET', 'HEAD'])

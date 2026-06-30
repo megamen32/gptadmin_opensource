@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Incremental & robust build with auto --collect-all and logs in build/
+# GPTAdmin target-based builder.
+# Default target is `all` for backward compatibility.
 
 set -Eeuo pipefail
 
-# Always run from repo root.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-# ---------- pretty xtrace ----------
 export PS4='+ [${EPOCHREALTIME}] ${BASH_SOURCE##*/}:${LINENO}: '
 set -x
 export LC_ALL=C.UTF-8
@@ -20,33 +19,70 @@ VERSION_FILE="VERSION"
 LOG="$ART_DIR/build.log"
 SHELLMCP_RT_LOG="$ART_DIR/shellmcp_runtime.log"
 HUB_RT_LOG="$ART_DIR/hub_runtime.log"
+FORCE="${FORCE:-0}"
+CLEAN="${CLEAN:-0}"
+REBUILD_ON_REQ_CHANGE="${REBUILD_ON_REQ_CHANGE:-0}"
+SKIP_TESTS="${SKIP_TESTS:-0}"
 
-SHELLMCP_PID=""
-HUB_PID=""
+usage() {
+  cat <<'EOF'
+Usage: tools/build.sh [target...]
 
-FORCE="${FORCE:-0}"                    # 1 = force rebuild components regardless of fingerprint
-CLEAN="${CLEAN:-0}"                    # 1 = full clean of build/ and cache
-REBUILD_ON_REQ_CHANGE="${REBUILD_ON_REQ_CHANGE:-0}"  # 1 = include requirements.txt into fingerprints
-SKIP_TESTS="${SKIP_TESTS:-0}"          # 1 = skip smoke tests
+Targets:
+  all        Build Linux hub+shellmcp, CLI, source payloads, platform bundles,
+             component tarballs, Windows shellmcp zip, and smoke-test Linux bins.
+  cli        Package GPTAdmin CLI only: build/gptadmin-cli.tar.gz
+  hub        Build/package GPTAdmin hub: build/gptadmin-hub.tar.gz
+  shellmcp   Build/package Linux ShellMCP: build/gptadmin-shellmcp.tar.gz
+  platform   Package install convenience bundles: build/gptadmin-<os>-<arch>.tar.gz
+  windows    Cross-build Windows ShellMCP and public/gptadmin-win.zip
+  smoke      Smoke-test existing Linux hub+shellmcp binaries
+  clean      Remove build/ and .buildcache before selected targets
+  help       Show this help
 
-# ---------- clean or keep previous build ----------
+Env:
+  FORCE=1 CLEAN=1 SKIP_TESTS=1 REBUILD_ON_REQ_CHANGE=1
+  GPTADMIN_HUB_DARWIN_ARM64=/path/gptadmin_hub GPTADMIN_HUB_DARWIN_AMD64=/path/gptadmin_hub
+EOF
+}
+
+TARGETS=("${@:-all}")
+for t in "${TARGETS[@]}"; do
+  case "$t" in
+    help|-h|--help) usage; exit 0 ;;
+    clean) CLEAN=1 ;;
+  esac
+done
+
+want() {
+  local q="$1" t
+  for t in "${TARGETS[@]}"; do
+    [[ "$t" == "$q" || "$t" == all ]] && return 0
+  done
+  return 1
+}
+want_any() {
+  local q
+  for q in "$@"; do want "$q" && return 0; done
+  return 1
+}
+
 if [[ "$CLEAN" == "1" ]]; then
   rm -rf "$ART_DIR" "$CACHE_DIR"
 fi
 mkdir -p "$ART_DIR/cli" "$CACHE_DIR"
-
-# ---------- tee to build/build.log ----------
 : > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 
+SHELLMCP_PID=""
+HUB_PID=""
 cleanup() {
   set +e
   echo "== cleanup ==" | tee -a "$LOG"
-  [[ -n "$SHELLMCP_PID" ]] && kill "$SHELLMCP_PID" 2>/dev/null || true
-  [[ -n "$HUB_PID"   ]] && kill "$HUB_PID"   2>/dev/null || true
+  [[ -n "${SHELLMCP_PID:-}" ]] && kill "$SHELLMCP_PID" 2>/dev/null || true
+  [[ -n "${HUB_PID:-}" ]] && kill "$HUB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
-
 err_report() {
   local exit_code=$?
   local cmd="${BASH_COMMAND:-unknown}"
@@ -58,9 +94,8 @@ err_report() {
   echo "---- tail of $LOG ----------------------------------------------------"
   tail -n 200 "$LOG" || true
   echo "---------------------------------------------------------------------"
-  echo "Runtime logs (if any):"
   [[ -f "$SHELLMCP_RT_LOG" ]] && { echo "--- shellmcp_runtime.log (tail) ---"; tail -n 120 "$SHELLMCP_RT_LOG"; }
-  [[ -f "$HUB_RT_LOG"   ]] && { echo "--- hub_runtime.log (tail) ---";   tail -n 120 "$HUB_RT_LOG"; }
+  [[ -f "$HUB_RT_LOG" ]] && { echo "--- hub_runtime.log (tail) ---"; tail -n 120 "$HUB_RT_LOG"; }
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   exit "$exit_code"
 }
@@ -69,19 +104,22 @@ trap err_report ERR
 step(){ echo; echo "===== $* ====="; }
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing command: $1"; exit 127; }; }
 
-# ---------- tooling ----------
 step "Check tooling"
-need curl; need python3; need tar; need grep; need sed; need awk; need sha256sum
+need python3; need tar; need grep; need sed; need awk; need sha256sum
+want_any hub shellmcp all smoke && need curl
+want windows && { need go; need zip; }
 
-step "Bump build version"
-old_version="0"
-[[ -f "$VERSION_FILE" ]] && old_version="$(tr -dc '0-9' < "$VERSION_FILE" || true)"
-[[ -n "$old_version" ]] || old_version="0"
-BUILD_VERSION="$((old_version + 1))"
-printf '%s\n' "$BUILD_VERSION" > "$VERSION_FILE"
-BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-cat > client/gptadmin_build_info.py <<PYINFO
+build_version() {
+  step "Bump build version"
+  old_version="0"
+  [[ -f "$VERSION_FILE" ]] && old_version="$(tr -dc '0-9' < "$VERSION_FILE" || true)"
+  [[ -n "$old_version" ]] || old_version="0"
+  BUILD_VERSION="$((old_version + 1))"
+  printf '%s\n' "$BUILD_VERSION" > "$VERSION_FILE"
+  BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  mkdir -p client
+  cat > client/gptadmin_build_info.py <<PYINFO
 # Auto-generated by tools/build.sh. Safe to overwrite.
 BUILD_VERSION = ${BUILD_VERSION}
 BUILD_TS = "${BUILD_TS}"
@@ -95,257 +133,228 @@ def build_info(component: str) -> dict:
         "git_commit": GIT_COMMIT,
     }
 PYINFO
-cp client/gptadmin_build_info.py gptadmin_build_info.py
-echo "Build version: $BUILD_VERSION ts=$BUILD_TS git=$GIT_COMMIT"
+  cp client/gptadmin_build_info.py gptadmin_build_info.py
+  echo "Build version: $BUILD_VERSION ts=$BUILD_TS git=$GIT_COMMIT"
+}
 
+ensure_build_info() {
+  if [[ ! -f client/gptadmin_build_info.py || ! -f gptadmin_build_info.py ]]; then
+    build_version
+  else
+    BUILD_VERSION="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'BUILD_VERSION\s*=\s*(\d+)', p.read_text()) if p.exists() else None
+print(m.group(1) if m else '0')
+PY
+)"
+    BUILD_TS="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'BUILD_TS\s*=\s*"([^"]+)"', p.read_text()) if p.exists() else None
+print(m.group(1) if m else 'unknown')
+PY
+)"
+    GIT_COMMIT="$(python3 - <<'PY'
+import re, pathlib
+p=pathlib.Path('client/gptadmin_build_info.py')
+m=re.search(r'GIT_COMMIT\s*=\s*"([^"]+)"', p.read_text()) if p.exists() else None
+print(m.group(1) if m else 'unknown')
+PY
+)"
+  fi
+}
 
-# ---------- include CLI ----------
-step "Include gptadmin.py"
-CLI_SRC="cli.py"
-if [[ -f "$CLI_SRC" ]]; then
-  rm -f "$ART_DIR/cli/cli.py" "$ART_DIR/cli/gptadmin.py"
-  cp "$CLI_SRC" "$ART_DIR/cli/cli.py"
-  cp "$CLI_SRC" "$ART_DIR/cli/gptadmin.py"
+# Build-info changes affect hub/shellmcp binaries, so any real build bumps once.
+if want_any all cli hub shellmcp platform windows; then
+  build_version
+else
+  ensure_build_info
+fi
+
+build_cli() {
+  step "Build CLI payload"
+  mkdir -p "$ART_DIR/cli"
+  cp -f cli.py "$ART_DIR/cli/cli.py"
+  cp -f cli.py "$ART_DIR/cli/gptadmin.py"
   chmod 755 "$ART_DIR/cli/gptadmin.py"
-else
-  echo "WARN: $CLI_SRC not found; continuing without it"
-fi
+  (cd "$ART_DIR" && tar -czf gptadmin-cli.tar.gz.tmp.$$ cli && mv -f gptadmin-cli.tar.gz.tmp.$$ gptadmin-cli.tar.gz)
+  echo "built: $ART_DIR/gptadmin-cli.tar.gz"
+}
 
-# ---------- venv ----------
-step "Create/activate venv"
-if [[ ! -d "$ART_DIR/venv" ]]; then
-  python3 -V
-  python3 -m venv "$ART_DIR/venv"
-fi
-# shellcheck disable=SC1091
-source "$ART_DIR/venv/bin/activate"
+venv_ready=0
+ensure_venv() {
+  [[ "$venv_ready" == 1 ]] && return 0
+  step "Create/activate venv"
+  if [[ ! -d "$ART_DIR/venv" ]]; then
+    python3 -V
+    python3 -m venv "$ART_DIR/venv"
+  fi
+  # shellcheck disable=SC1091
+  source "$ART_DIR/venv/bin/activate"
+  step "pip versions"
+  python -V
+  pip --version || true
+  step "pip install project deps, pyinstaller"
+  pip install -vvv --upgrade pip
+  if [[ -f requirements.txt ]]; then
+    pip install -vvv -r requirements.txt pyinstaller
+  else
+    pip install -vvv . pyinstaller
+  fi
+  step "Tool versions"
+  pyinstaller --version || true
+  venv_ready=1
+}
 
-step "pip versions"
-python -V
-pip --version || true
-
-# ---------- install deps (verbose) ----------
-step "pip install project deps, pyinstaller"
-pip install -vvv --upgrade pip
-if [[ -f requirements.txt ]]; then
-  pip install -vvv -r requirements.txt pyinstaller
-else
-  pip install -vvv . pyinstaller
-fi
-
-step "Tool versions"
-pyinstaller --version || true
-pyarmor --version || true
-
-# ---------- incremental helpers ----------
 fingerprint() {
-  # usage: fingerprint <files...>  -> prints single sha256
   local files=()
   for f in "$@"; do [[ -f "$f" ]] && files+=("$f"); done
   [[ ${#files[@]} -eq 0 ]] && { echo "0"; return; }
-  # stable ordering by path
   sha256sum "${files[@]}" 2>/dev/null | sort -k2 | sha256sum | awk '{print $1}'
 }
-
 changed() {
-  # usage: changed <cache_file> <new_fp>
-  local cache="$1"; local newfp="$2"; local oldfp=""
+  local cache="$1" newfp="$2" oldfp=""
   [[ -f "$cache" ]] && oldfp="$(cat "$cache" 2>/dev/null || true)"
   [[ "$newfp" != "$oldfp" ]]
 }
-
 save_fp() { echo "$2" > "$1"; }
 
-# ---------- build collect-all flags from requirements.txt ----------
-step "Generate --collect-all flags from requirements.txt"
-REQ_FILE="requirements.txt"
-COLLECT_FLAGS=()
-if [[ -f "$REQ_FILE" ]]; then
-  MAP_PKGS=$(python - <<'PY'
+prepare_pyinstaller_flags() {
+  ensure_venv
+  step "Generate --collect-all flags from requirements.txt"
+  COLLECT_FLAGS=()
+  if [[ -f requirements.txt ]]; then
+    MAP_PKGS=$(python - <<'PY'
 import re
 names=set()
-for raw in open("requirements.txt", encoding="utf-8"):
+for raw in open('requirements.txt', encoding='utf-8'):
     line=raw.strip()
-    if not line or line.startswith("#"): continue
-    line=line.split("#",1)[0].strip()
-    line=line.split(";",1)[0].strip()
+    if not line or line.startswith('#'): continue
+    line=line.split('#',1)[0].strip().split(';',1)[0].strip()
     m=re.match(r'([A-Za-z0-9_.\-+]+)', line)
     if not m: continue
-    name=m.group(1).split("[",1)[0]
-    if name in ("-e",".","src"): continue
-    if name.startswith(("git+","http://","https://","file:")): continue
+    name=m.group(1).split('[',1)[0]
+    if name in ('-e','.','src'): continue
+    if name.startswith(('git+','http://','https://','file:')): continue
     names.add(name)
-for n in sorted(names):
-    print(n)
+for n in sorted(names): print(n)
 PY
 )
-  while IFS= read -r pkg; do
-    [[ -n "$pkg" ]] || continue
-    COLLECT_FLAGS+=( --collect-all "$pkg" )
-  done <<< "$MAP_PKGS"
-else
-  echo "WARN: requirements.txt not found; using minimal collect set"
-  COLLECT_FLAGS+=( --collect-all fastapi --collect-all starlette --collect-all pydantic --collect-all anyio --collect-all uvicorn )
-fi
-# common extra
-COLLECT_FLAGS+=( --collect-all psutil --collect-all cryptography )
-printf 'collect-all flags: %q ' "${COLLECT_FLAGS[@]}"; echo
+    while IFS= read -r pkg; do [[ -n "$pkg" ]] && COLLECT_FLAGS+=( --collect-all "$pkg" ); done <<< "$MAP_PKGS"
+  else
+    COLLECT_FLAGS+=( --collect-all fastapi --collect-all starlette --collect-all pydantic --collect-all anyio --collect-all uvicorn )
+  fi
+  COLLECT_FLAGS+=( --collect-all psutil --collect-all cryptography )
+  printf 'collect-all flags: %q ' "${COLLECT_FLAGS[@]}"; echo
 
-# ---------- hidden-import autodetect via AST ----------
-step "Detect hidden imports from sources"
-py_hidden_imports() {
-python - "$@" <<'PY'
+  py_hidden_imports() {
+    python - "$@" <<'PY'
 import ast, sys, pathlib
 mods=set()
 for p in sys.argv[1:]:
-    src=pathlib.Path(p).read_text(encoding='utf-8')
-    tree=ast.parse(src, filename=p)
+    path=pathlib.Path(p)
+    if not path.exists(): continue
+    tree=ast.parse(path.read_text(encoding='utf-8'), filename=p)
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
-            for a in n.names:
-                mods.add(a.name.split('.')[0])
-        elif isinstance(n, ast.ImportFrom):
-            if n.module:
-                mods.add(n.module.split('.')[0])
-mods |= {
-    "platform","asyncio","typing","pathlib","logging","json","re","time","datetime",
-    "http","socket","subprocess","threading","concurrent","importlib","pkgutil","inspect",
-    "uvicorn","fastapi","starlette","pydantic","anyio","sniffio","typing_extensions",
-    "requests","httpx","psutil","cryptography"
-}
-print("\n".join(sorted(mods)))
+            for a in n.names: mods.add(a.name.split('.')[0])
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            mods.add(n.module.split('.')[0])
+mods |= {'platform','asyncio','typing','pathlib','logging','json','re','time','datetime','http','socket','subprocess','threading','concurrent','importlib','pkgutil','inspect','uvicorn','fastapi','starlette','pydantic','anyio','sniffio','typing_extensions','requests','httpx','psutil','cryptography'}
+print('\n'.join(sorted(mods)))
 PY
+  }
+  to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
+  SHELLMCP_IMPORTS=$(py_hidden_imports client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py)
+  HUB_IMPORTS=$(py_hidden_imports gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
+  SHELLMCP_HIDDEN_FLAGS=$(echo "$SHELLMCP_IMPORTS" | to_pyinstaller_flags)
+  HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
+  [[ -f client/shellmcp_linux.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_linux"
+  [[ -f client/shellmcp_win.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_win"
+  [[ -f client/shellmcp_mac.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_mac"
+  echo "SHELLMCP hidden-imports flags: $SHELLMCP_HIDDEN_FLAGS"
+  echo "HUB hidden-imports flags: $HUB_HIDDEN_FLAGS"
 }
-to_pyinstaller_flags() { awk '{print "--hidden-import="$0}' | xargs; }
-
-SHELLMCP_IMPORTS=$(py_hidden_imports client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py)
-HUB_IMPORTS=$(py_hidden_imports gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
-SHELLMCP_HIDDEN_FLAGS=$(echo "$SHELLMCP_IMPORTS" | to_pyinstaller_flags)
-HUB_HIDDEN_FLAGS=$(echo "$HUB_IMPORTS" | to_pyinstaller_flags)
-[[ -f client/shellmcp_linux.py ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_linux"
-[[ -f client/shellmcp_win.py   ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_win"
-[[ -f client/shellmcp_mac.py   ]] && SHELLMCP_HIDDEN_FLAGS="$SHELLMCP_HIDDEN_FLAGS --hidden-import=shellmcp_mac"
-echo "SHELLMCP hidden-imports flags: $SHELLMCP_HIDDEN_FLAGS"
-echo "HUB   hidden-imports flags: $HUB_HIDDEN_FLAGS"
-
-# ---------- fingerprints ----------
-SHELLMCP_SRC=(client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py cli.py)
-[[ -f client/shellmcp_linux.py ]] && SHELLMCP_SRC+=(client/shellmcp_linux.py)
-[[ -f client/shellmcp_win.py   ]] && SHELLMCP_SRC+=(client/shellmcp_win.py)
-[[ -f client/shellmcp_mac.py   ]] && SHELLMCP_SRC+=(client/shellmcp_mac.py)
-[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && SHELLMCP_SRC+=(requirements.txt)
-
-HUB_SRC=(gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
-[[ "$REBUILD_ON_REQ_CHANGE" == "1" && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
-
-FP_SHELLMCP_NEW="$(fingerprint "${SHELLMCP_SRC[@]}")"
-FP_HUB_NEW="$(fingerprint "${HUB_SRC[@]}")"
-FP_SHELLMCP_FILE="$CACHE_DIR/.fp_shellmcp"
-FP_HUB_FILE="$CACHE_DIR/.fp_hub"
 
 SHELLMCP_DIST="$ART_DIR/shellmcp/dist/shellmcp"
 HUB_DIST="$ART_DIR/gptadmin_hub/dist/gptadmin_hub"
+py_flags_ready=0
+ensure_py_flags() { [[ "$py_flags_ready" == 1 ]] && return 0; prepare_pyinstaller_flags; py_flags_ready=1; }
 
-NEED_BUILD_SHELLMCP="$FORCE"
-NEED_BUILD_HUB="$FORCE"
-
-if [[ "$NEED_BUILD_SHELLMCP" == "0" ]]; then
-  if [[ ! -x "$SHELLMCP_DIST" ]] || changed "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"; then
-    NEED_BUILD_SHELLMCP=1
+build_shellmcp_linux() {
+  ensure_py_flags
+  step "PyInstaller: build shellmcp Linux"
+  SHELLMCP_SRC=(client/shellmcp.py client/shellmcp_pure.py client/gptadmin_build_info.py client/gptadmin_security.py cli.py)
+  [[ -f client/shellmcp_linux.py ]] && SHELLMCP_SRC+=(client/shellmcp_linux.py)
+  [[ -f client/shellmcp_win.py ]] && SHELLMCP_SRC+=(client/shellmcp_win.py)
+  [[ -f client/shellmcp_mac.py ]] && SHELLMCP_SRC+=(client/shellmcp_mac.py)
+  [[ "$REBUILD_ON_REQ_CHANGE" == 1 && -f requirements.txt ]] && SHELLMCP_SRC+=(requirements.txt)
+  FP_SHELLMCP_NEW="$(fingerprint "${SHELLMCP_SRC[@]}")"
+  FP_SHELLMCP_FILE="$CACHE_DIR/.fp_shellmcp"
+  if [[ "$FORCE" == 1 || ! -x "$SHELLMCP_DIST" ]] || changed "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"; then
+    : "${PYTHONPATH:=}"; export PYTHONPATH="client:$PYTHONPATH"
+    mkdir -p "$ART_DIR/shellmcp"
+    pyinstaller client/shellmcp.py --onefile --noconfirm --clean --log-level=DEBUG \
+      --specpath "$ART_DIR/shellmcp" "${COLLECT_FLAGS[@]}" $SHELLMCP_HIDDEN_FLAGS \
+      --distpath "$ART_DIR/shellmcp/dist" --workpath "$ART_DIR/shellmcp/build"
+    save_fp "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"
+  else
+    echo "Skip PyInstaller shellmcp"
   fi
-fi
-if [[ "$NEED_BUILD_HUB" == "0" ]]; then
-  if [[ ! -x "$HUB_DIST" ]] || changed "$FP_HUB_FILE" "$FP_HUB_NEW"; then
-    NEED_BUILD_HUB=1
+}
+
+build_hub_linux() {
+  ensure_py_flags
+  step "PyInstaller: build gptadmin_hub Linux"
+  HUB_SRC=(gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py)
+  [[ "$REBUILD_ON_REQ_CHANGE" == 1 && -f requirements.txt ]] && HUB_SRC+=(requirements.txt)
+  FP_HUB_NEW="$(fingerprint "${HUB_SRC[@]}")"
+  FP_HUB_FILE="$CACHE_DIR/.fp_hub"
+  if [[ "$FORCE" == 1 || ! -x "$HUB_DIST" ]] || changed "$FP_HUB_FILE" "$FP_HUB_NEW"; then
+    mkdir -p "$ART_DIR/gptadmin_hub"
+    pyinstaller gptadmin_hub.py --onefile --noconfirm --clean --log-level=DEBUG \
+      --specpath "$ART_DIR/gptadmin_hub" "${COLLECT_FLAGS[@]}" $HUB_HIDDEN_FLAGS \
+      --distpath "$ART_DIR/gptadmin_hub/dist" --workpath "$ART_DIR/gptadmin_hub/build"
+    save_fp "$FP_HUB_FILE" "$FP_HUB_NEW"
+  else
+    echo "Skip PyInstaller gptadmin_hub"
   fi
-fi
+}
 
-echo "Fingerprint shellmcp: $FP_SHELLMCP_NEW (changed=$([[ $NEED_BUILD_SHELLMCP == 1 ]] && echo yes || echo no))"
-echo "Fingerprint hub   : $FP_HUB_NEW (changed=$([[ $NEED_BUILD_HUB == 1 ]] && echo yes || echo no))"
-
-# ---------- PyInstaller (incremental, no obfuscation) ----------
-: "${PYTHONPATH:=}"
-export PYTHONPATH="client:$PYTHONPATH"
-mkdir -p "$ART_DIR/shellmcp" "$ART_DIR/gptadmin_hub"
-
-if [[ "$NEED_BUILD_SHELLMCP" == "1" ]]; then
-  step "PyInstaller: build shellmcp"
-  pyinstaller "client/shellmcp.py" \
-    --onefile --noconfirm --clean \
-    --log-level=DEBUG \
-    --specpath "$ART_DIR/shellmcp" \
-    "${COLLECT_FLAGS[@]}" \
-    $SHELLMCP_HIDDEN_FLAGS \
-    --distpath "$ART_DIR/shellmcp/dist" \
-    --workpath "$ART_DIR/shellmcp/build"
-  save_fp "$FP_SHELLMCP_FILE" "$FP_SHELLMCP_NEW"
-else
-  echo "Skip PyInstaller shellmcp"
-fi
-
-if [[ "$NEED_BUILD_HUB" == "1" ]]; then
-  step "PyInstaller: build gptadmin_hub"
-  pyinstaller "gptadmin_hub.py" \
-    --onefile --noconfirm --clean \
-    --log-level=DEBUG \
-    --specpath "$ART_DIR/gptadmin_hub" \
-    "${COLLECT_FLAGS[@]}" \
-    $HUB_HIDDEN_FLAGS \
-    --distpath "$ART_DIR/gptadmin_hub/dist" \
-    --workpath "$ART_DIR/gptadmin_hub/build"
-  save_fp "$FP_HUB_FILE" "$FP_HUB_NEW"
-else
-  echo "Skip PyInstaller gptadmin_hub"
-fi
-
-# ---------- Package platform hub binaries ----------
-step "Package platform hub binaries"
 normalize_arch() {
-  case "${1,,}" in
-    x86_64|amd64) echo amd64 ;;
-    arm64|aarch64) echo arm64 ;;
-    *) echo "${1,,}" ;;
-  esac
+  case "${1,,}" in x86_64|amd64) echo amd64 ;; arm64|aarch64) echo arm64 ;; *) echo "${1,,}" ;; esac
 }
 copy_hub_platform_binary() {
-  local src="$1"
-  local tag="$2"
+  local src="$1" tag="$2" exe_name="${3:-gptadmin_hub}"
   [[ -n "$src" && -x "$src" ]] || return 0
   mkdir -p "$ART_DIR/gptadmin_hub/$tag"
-  cp -f "$src" "$ART_DIR/gptadmin_hub/$tag/gptadmin_hub"
-  chmod 755 "$ART_DIR/gptadmin_hub/$tag/gptadmin_hub"
-  echo "hub platform binary: $tag <= $src"
+  cp -f "$src" "$ART_DIR/gptadmin_hub/$tag/$exe_name"
+  chmod 755 "$ART_DIR/gptadmin_hub/$tag/$exe_name"
+  echo "hub platform binary: $tag/$exe_name <= $src"
 }
-if [[ -x "$HUB_DIST" ]]; then
-  copy_hub_platform_binary "$HUB_DIST" "linux_$(normalize_arch "$(uname -m)")"
-fi
-copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_ARM64:-}" "darwin_arm64"
-copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_AMD64:-}" "darwin_amd64"
-copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_ARM64:-}" "darwin_arm64"
-copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_AMD64:-}" "darwin_amd64"
-copy_hub_platform_binary "prebuilt/gptadmin_hub/darwin_arm64/gptadmin_hub" "darwin_arm64"
-copy_hub_platform_binary "prebuilt/gptadmin_hub/darwin_amd64/gptadmin_hub" "darwin_amd64"
+package_hub_platform_binaries() {
+  step "Package platform hub binaries"
+  [[ -x "$HUB_DIST" ]] && copy_hub_platform_binary "$HUB_DIST" "linux_$(normalize_arch "$(uname -m)")" "gptadmin_hub"
+  copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_ARM64:-}" darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_DARWIN_AMD64:-}" darwin_amd64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_ARM64:-}" darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary "${GPTADMIN_HUB_MACOS_AMD64:-}" darwin_amd64 gptadmin_hub
+  copy_hub_platform_binary prebuilt/gptadmin_hub/darwin_arm64/gptadmin_hub darwin_arm64 gptadmin_hub
+  copy_hub_platform_binary prebuilt/gptadmin_hub/darwin_amd64/gptadmin_hub darwin_amd64 gptadmin_hub
+}
 
-# ---------- Summarize PyInstaller warnings ----------
-step "Summarize PyInstaller warnings"
-for f in "$ART_DIR"/shellmcp/build/shellmcp/warn-*.txt "$ART_DIR"/gptadmin_hub/build/gptadmin_hub/warn-*.txt; do
-  [[ -f "$f" ]] || continue
-  echo "--- $(basename "$f") ---"
-  sed -n '1,200p' "$f"
-done
+copy_support_payloads() {
+  step "Copy generic stdio MCP agents"
+  rm -rf "$ART_DIR/agents"
+  mkdir -p "$ART_DIR/agents"
+  cp -a agents/generic_stdio_mcp_relay "$ART_DIR/agents/"
 
-# ---------- Copy generic stdio MCP agents ----------
-step "Copy generic stdio MCP agents"
-rm -rf "$ART_DIR/agents"
-mkdir -p "$ART_DIR/agents"
-cp -a agents/generic_stdio_mcp_relay "$ART_DIR/agents/"
-
-# ---------- Source payloads for non-Linux installers ----------
-step "Copy source payloads for macOS/pure-Python installs"
-rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
-mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
-cp -a gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py "$ART_DIR/hub_source/"
-cat > "$ART_DIR/hub_source/requirements-hub.txt" <<'REQ'
+  step "Copy source payloads"
+  rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
+  mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
+  cp -a gptadmin_hub.py gptadmin_build_info.py gptadmin_security.py "$ART_DIR/hub_source/"
+  cat > "$ART_DIR/hub_source/requirements-hub.txt" <<'REQ'
 fastapi
 uvicorn[standard]
 httpx
@@ -354,204 +363,168 @@ cryptography
 psutil
 requests
 REQ
-cp -a client/. "$ART_DIR/client/"
-find "$ART_DIR/hub_source" "$ART_DIR/client"   \( -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' \) -print0 | xargs -0 -r rm -rf
+  cp -a client/. "$ART_DIR/client/"
+  find "$ART_DIR/hub_source" "$ART_DIR/client" \( -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' \) -print0 | xargs -0 -r rm -rf
+}
 
-# ---------- Archive (include CLI, MCP agents and source payloads) ----------
-step "Archive: gptadmin.tar.gz"
-# Тарим только существующие папки (на случай первой частичной сборки)
-pushd "$ART_DIR" >/dev/null
-INCLUDE=()
-for d in shellmcp gptadmin_hub cli agents hub_source client; do [[ -d "$d" ]] && INCLUDE+=("$d"); done
-tar -czf "gptadmin.tar.gz.tmp.$$" "${INCLUDE[@]}"
-mv -f "gptadmin.tar.gz.tmp.$$" gptadmin.tar.gz
+archive_component_cli() { build_cli; }
+archive_component_hub() {
+  step "Archive: gptadmin-hub.tar.gz"
+  (cd "$ART_DIR" && tar -czf gptadmin-hub.tar.gz.tmp.$$ gptadmin_hub hub_source cli && mv -f gptadmin-hub.tar.gz.tmp.$$ gptadmin-hub.tar.gz)
+  echo "built: $ART_DIR/gptadmin-hub.tar.gz"
+}
+archive_component_shellmcp() {
+  step "Archive: gptadmin-shellmcp.tar.gz"
+  (cd "$ART_DIR" && tar -czf gptadmin-shellmcp.tar.gz.tmp.$$ shellmcp cli agents client && mv -f gptadmin-shellmcp.tar.gz.tmp.$$ gptadmin-shellmcp.tar.gz)
+  sha256sum "$ART_DIR/gptadmin-shellmcp.tar.gz" > "$ART_DIR/gptadmin-shellmcp.sha256"
+  python3 - <<PY
+import json, pathlib
+sha = pathlib.Path('$ART_DIR/gptadmin-shellmcp.sha256').read_text().split()[0]
+pathlib.Path('$ART_DIR/gptadmin-shellmcp.json').write_text(json.dumps({
+  'component': 'shellmcp', 'build_version': int('$BUILD_VERSION'), 'build_ts': '$BUILD_TS',
+  'git_commit': '$GIT_COMMIT', 'platform': 'linux', 'arch': 'x86_64',
+  'artifact_type': 'binary-runtime+source',
+  'runtime_payload': ['shellmcp/dist/shellmcp', 'cli', 'agents/generic_stdio_mcp_relay', 'client'],
+  'source_payload': ['client/shellmcp.py', 'client/shellmcp_pure.py', 'client/shellmcp_linux.py', 'client/gptadmin_security.py', 'client/gptadmin_build_info.py'],
+  'sha256': sha, 'url': '/gptadmin-shellmcp.tar.gz'
+}, ensure_ascii=False, indent=2) + '\n')
+PY
+  echo "built: $ART_DIR/gptadmin-shellmcp.tar.gz"
+}
+archive_all() {
+  step "Archive: gptadmin.tar.gz"
+  (cd "$ART_DIR" && tar -czf gptadmin.tar.gz.tmp.$$ shellmcp gptadmin_hub cli agents hub_source client && mv -f gptadmin.tar.gz.tmp.$$ gptadmin.tar.gz)
+  echo "built: $ART_DIR/gptadmin.tar.gz"
+}
 
-# Platform-specific archives keep installer downloads small.
-step "Archive: platform-specific tarballs"
 make_platform_archive() {
-  local platform="$1" arch="$2" hub_tag="$3"
+  local platform="$1"
+  local arch="$2"
+  local hub_tag="$3"
   local out="gptadmin-${platform}-${arch}.tar.gz"
   local tmp
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/gptadmin_hub"
-  if [[ -d "gptadmin_hub/$hub_tag" ]]; then
+  if [[ -d "$ART_DIR/gptadmin_hub/$hub_tag" ]]; then
     mkdir -p "$tmp/gptadmin_hub/$hub_tag"
-    cp -a "gptadmin_hub/$hub_tag/." "$tmp/gptadmin_hub/$hub_tag/"
+    cp -a "$ART_DIR/gptadmin_hub/$hub_tag/." "$tmp/gptadmin_hub/$hub_tag/"
   else
-    echo "WARN: skip $out: missing gptadmin_hub/$hub_tag"
-    rm -rf "$tmp"
-    return 0
+    echo "WARN: skip $out: missing $ART_DIR/gptadmin_hub/$hub_tag"
+    rm -rf "$tmp"; return 0
   fi
-  for d in cli agents hub_source client; do
-    [[ -d "$d" ]] && cp -a "$d" "$tmp/"
-  done
-  if [[ "$platform" == "linux" && -d shellmcp ]]; then
-    cp -a shellmcp "$tmp/"
-  fi
-  tar -C "$tmp" -czf "$out.tmp.$$" .
-  mv -f "$out.tmp.$$" "$out"
+  for d in cli agents hub_source client; do [[ -d "$ART_DIR/$d" ]] && cp -a "$ART_DIR/$d" "$tmp/"; done
+  if [[ "$platform" == linux && -d "$ART_DIR/shellmcp" ]]; then cp -a "$ART_DIR/shellmcp" "$tmp/"; fi
+  tar -C "$tmp" -czf "$ART_DIR/$out.tmp.$$" .
+  mv -f "$ART_DIR/$out.tmp.$$" "$ART_DIR/$out"
   rm -rf "$tmp"
   echo "built: $ART_DIR/$out"
 }
-make_platform_archive linux amd64 linux_amd64
-make_platform_archive linux arm64 linux_arm64
-make_platform_archive darwin arm64 darwin_arm64
-make_platform_archive darwin amd64 darwin_amd64
+archive_platforms() {
+  step "Archive: platform-specific tarballs"
+  make_platform_archive linux amd64 linux_amd64
+  make_platform_archive linux arm64 linux_arm64
+  make_platform_archive darwin arm64 darwin_arm64
+  make_platform_archive darwin amd64 darwin_amd64
+}
 
-# NEW: компонентные архивы (если есть соответствующие папки)
-step "Archive: per-component tarballs"
-if [[ -d gptadmin_hub ]]; then
-  HUB_INCLUDE=(gptadmin_hub)
-  [[ -d hub_source ]] && HUB_INCLUDE+=(hub_source)
-  [[ -d cli ]] && HUB_INCLUDE+=(cli)
-  tar -czf "gptadmin-hub.tar.gz.tmp.$$" "${HUB_INCLUDE[@]}"
-mv -f "gptadmin-hub.tar.gz.tmp.$$" gptadmin-hub.tar.gz
-  echo "built: $ART_DIR/gptadmin-hub.tar.gz"
-else
-  echo "WARN: gptadmin_hub dir not found, skip gptadmin-hub.tar.gz"
-fi
+build_windows_shellmcp() {
+  step "Cross-build Windows ShellMCP"
+  mkdir -p "$ART_DIR/windows" public
+  pushd go-shellmcp >/dev/null
+  export CGO_ENABLED=0
+  GOOS=windows GOARCH=amd64 go build -o "../$ART_DIR/windows/shellmcp.exe" ./cmd/shellmcp-go
+  popd >/dev/null
+  ls -lh "$ART_DIR/windows/shellmcp.exe"
+  file "$ART_DIR/windows/shellmcp.exe" || true
+  step "Archive: gptadmin-win.zip"
+  rm -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
+  (cd "$ART_DIR/windows" && zip -q -9 "../gptadmin-win.zip" shellmcp.exe)
+  cp -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
+  cp -f deploy/install_win.ps1 public/install_win.ps1
+  unzip -l public/gptadmin-win.zip
+  sha256sum public/gptadmin-win.zip > public/gptadmin-win.zip.sha256
+  echo "built: public/gptadmin-win.zip"
+}
 
-if [[ -d shellmcp ]]; then
-  SHELLMCP_INCLUDE=(shellmcp)
-  [[ -d cli ]] && SHELLMCP_INCLUDE+=(cli)
-  [[ -d agents ]] && SHELLMCP_INCLUDE+=(agents)
-  [[ -d client ]] && SHELLMCP_INCLUDE+=(client)
-  tar -czf "gptadmin-shellmcp.tar.gz.tmp.$$" "${SHELLMCP_INCLUDE[@]}"
-mv -f "gptadmin-shellmcp.tar.gz.tmp.$$" gptadmin-shellmcp.tar.gz
-  sha256sum gptadmin-shellmcp.tar.gz > gptadmin-shellmcp.sha256
-  python - <<PY
-import json, pathlib
-sha = pathlib.Path("gptadmin-shellmcp.sha256").read_text().split()[0]
-pathlib.Path("gptadmin-shellmcp.json").write_text(json.dumps({
-    "component": "shellmcp",
-    "build_version": int("$BUILD_VERSION"),
-    "build_ts": "$BUILD_TS",
-    "git_commit": "$GIT_COMMIT",
-    "platform": "linux",
-    "arch": "x86_64",
-    "artifact_type": "binary-runtime+source",
-    "runtime_payload": ["shellmcp/dist/shellmcp", "cli", "agents/generic_stdio_mcp_relay", "client"],
-    "source_payload": ["client/shellmcp.py", "client/shellmcp_pure.py", "client/shellmcp_linux.py", "client/gptadmin_security.py", "client/gptadmin_build_info.py"],
-    "sha256": sha,
-    "url": "/artifacts/shellmcp.tar.gz",
-}, ensure_ascii=False, indent=2)+"\n")
-PY
-  echo "built: $ART_DIR/gptadmin-shellmcp.tar.gz"
-else
-  echo "WARN: shellmcp dir not found, skip gptadmin-shellmcp.tar.gz"
-fi
-
-# полезно увидеть размеры
-ls -lh gptadmin*.tar.gz 2>/dev/null || true
-popd >/dev/null
-
-
-# ---------- Smoke tests ----------
 wait_for_http() {
-  # wait_for_http URL [timeout_seconds] [extra_curl_args...]
-  local url="$1"; local timeout="${2:-20}"; shift 2 || true
+  local url="$1" timeout="${2:-20}"; shift 2 || true
   local attempt
   for ((attempt=1; attempt<=timeout; attempt++)); do
-    # ВАЖНО: НЕ используем -f — нам достаточно ЛЮБОГО HTTP-ответа (даже 404/401),
-    # чтобы понять, что сервер уже поднялся и отвечает.
-    if curl -sS "$url" "$@" -o /dev/null; then
-      echo "HTTP OK: $url (attempt $attempt/$timeout)"
-      return 0
-    fi
+    if curl -sS "$url" "$@" -o /dev/null; then echo "HTTP OK: $url (attempt $attempt/$timeout)"; return 0; fi
     sleep 1
   done
-  echo "Timeout waiting for $url"
-  return 1
+  echo "Timeout waiting for $url"; return 1
 }
 wait_for_listen_port() {
-  # wait_for_listen_port PORT [timeout_seconds]
-  local port="$1"; local timeout="${2:-20}"
-  local attempt line
+  local port="$1" timeout="${2:-20}" line attempt
   for ((attempt=1; attempt<=timeout; attempt++)); do
     line="$(ss -ltn "( sport = :$port )" 2>/dev/null | sed -n '2p' || true)"
-    if [[ -n "$line" ]]; then
-      echo "LISTEN OK: :$port (attempt $attempt/$timeout)"
-      return 0
-    fi
+    [[ -n "$line" ]] && { echo "LISTEN OK: :$port (attempt $attempt/$timeout)"; return 0; }
     sleep 1
   done
-  echo "Timeout waiting for port :$port to listen"
-  return 1
+  echo "Timeout waiting for port :$port to listen"; return 1
 }
-
-
-# Возвращает 0 если порт ЗАНЯТ, 1 если свободен (без падений при set -e)
 is_port_busy() {
-  local port="$1"
-  local line out
-  if command -v ss >/dev/null 2>&1; then
-    line="$(ss -ltn "( sport = :$port )" 2>/dev/null | sed -n '2p' || true)"
-    [[ -n "$line" ]]
-  elif command -v lsof >/dev/null 2>&1; then
-    out="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-    [[ -n "$out" ]]
-  else
-    return 1  # не можем проверить — считаем свободным
-  fi
+  local port="$1" line out
+  if command -v ss >/dev/null 2>&1; then line="$(ss -ltn "( sport = :$port )" 2>/dev/null | sed -n '2p' || true)"; [[ -n "$line" ]];
+  elif command -v lsof >/dev/null 2>&1; then out="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"; [[ -n "$out" ]];
+  else return 1; fi
 }
-
-# Выбирает первый свободный порт начиная с base.
 pick_port_plus1() {
-  local base="$1"
-  local port
-  for ((port=base; port<base+50; port++)); do
-    if ! is_port_busy "$port"; then
-      echo "$port"
-      return 0
-    fi
-  done
-  echo "ERROR: no free port in range $base..$((base+49))" >&2
-  exit 1
+  local base="$1" port
+  for ((port=base; port<base+50; port++)); do if ! is_port_busy "$port"; then echo "$port"; return 0; fi; done
+  echo "ERROR: no free port in range $base..$((base+49))" >&2; exit 1
+}
+smoke_linux() {
+  if [[ "$SKIP_TESTS" == 1 ]]; then echo "Skip smoke tests (SKIP_TESTS=1)"; return 0; fi
+  [[ -x "$SHELLMCP_DIST" ]] || { echo "Missing $SHELLMCP_DIST"; exit 1; }
+  [[ -x "$HUB_DIST" ]] || { echo "Missing $HUB_DIST"; exit 1; }
+  step "Smoke test: shellmcp"
+  : > "$SHELLMCP_RT_LOG"
+  SHELLMCP_PORT="$(pick_port_plus1 25900)"
+  SHELLMCP_TOKEN=testtoken HUB_URL='' SHELLMCP_PORT="$SHELLMCP_PORT" "$SHELLMCP_DIST" >"$SHELLMCP_RT_LOG" 2>&1 &
+  SHELLMCP_PID=$!
+  wait_for_http "http://127.0.0.1:${SHELLMCP_PORT}/version" 25
+  curl -sS -f "http://127.0.0.1:${SHELLMCP_PORT}/version" | grep -q build_version
+  kill "$SHELLMCP_PID" || true; SHELLMCP_PID=""
+  step "Smoke test: gptadmin_hub"
+  : > "$HUB_RT_LOG"
+  HUB_PORT="$(pick_port_plus1 9001)"
+  CTL_TOKEN=ctltest HUB_PORT="$HUB_PORT" "$HUB_DIST" >"$HUB_RT_LOG" 2>&1 &
+  HUB_PID=$!
+  wait_for_listen_port "$HUB_PORT" 25
+  wait_for_http "http://127.0.0.1:${HUB_PORT}/version" 10
+  curl -sS -f "http://127.0.0.1:${HUB_PORT}/version" | grep -q build_version
+  curl -sS -f "http://127.0.0.1:${HUB_PORT}/servers" -H "Authorization: Bearer ctltest" >/dev/null
+  kill "$HUB_PID" || true; HUB_PID=""
 }
 
-
-if [[ "$SKIP_TESTS" != "1" ]]; then
-  [[ -x "$SHELLMCP_DIST" ]] || { echo "Missing $SHELLMCP_DIST"; exit 1; }
-  [[ -x "$HUB_DIST"   ]] || { echo "Missing $HUB_DIST";   exit 1; }
-
-    step "Smoke test: shellmcp"
-    : > "$SHELLMCP_RT_LOG"
-    SHELLMCP_PORT="$(pick_port_plus1 25900)"
-    echo "Using SHELLMCP_PORT=$SHELLMCP_PORT"
-    SHELLMCP_TOKEN=testtoken HUB_URL='' SHELLMCP_PORT="$SHELLMCP_PORT" \
-    "$SHELLMCP_DIST" >"$SHELLMCP_RT_LOG" 2>&1 &
-    SHELLMCP_PID=$!
-    wait_for_http "http://127.0.0.1:${SHELLMCP_PORT}/version" 25
-    curl -sS -f "http://127.0.0.1:${SHELLMCP_PORT}/version" | grep -q build_version
-    kill "$SHELLMCP_PID" || true
-    SHELLMCP_PID=""
-
-    step "Smoke test: gptadmin_hub"
-    : > "$HUB_RT_LOG"
-    HUB_PORT="$(pick_port_plus1 9001)"
-    echo "Using HUB_PORT=$HUB_PORT"
-    CTL_TOKEN=ctltest HUB_PORT="$HUB_PORT" \
-    "$HUB_DIST" >"$HUB_RT_LOG" 2>&1 &
-    HUB_PID=$!
-
-    # 1) ждём старт порта
-    wait_for_listen_port "$HUB_PORT" 25
-
-    # 2) проверяем /version (публичный) и /servers (авторизованный)
-    wait_for_http "http://127.0.0.1:${HUB_PORT}/version" 10
-    curl -sS -f "http://127.0.0.1:${HUB_PORT}/version" | grep -q build_version
-    curl -sS -f "http://127.0.0.1:${HUB_PORT}/servers" -H "Authorization: Bearer ctltest" > /dev/null
-
-    kill "$HUB_PID" || true
-    HUB_PID=""
-
-
-
+# Dependency expansion.
+if want all; then
+  build_cli
+  build_shellmcp_linux
+  build_hub_linux
+  package_hub_platform_binaries
+  copy_support_payloads
+  archive_component_cli
+  archive_component_hub
+  archive_component_shellmcp
+  archive_all
+  archive_platforms
+  build_windows_shellmcp
+  smoke_linux
 else
-  echo "Skip smoke tests (SKIP_TESTS=1)"
+  want cli && build_cli
+  if want shellmcp; then build_cli; build_shellmcp_linux; copy_support_payloads; archive_component_shellmcp; fi
+  if want hub; then build_cli; build_hub_linux; package_hub_platform_binaries; copy_support_payloads; archive_component_hub; fi
+  if want platform; then build_cli; package_hub_platform_binaries; copy_support_payloads; archive_platforms; fi
+  want windows && build_windows_shellmcp
+  want smoke && smoke_linux
 fi
 
 step "DONE: Artifacts stored in $ART_DIR"
+echo "Targets: ${TARGETS[*]}"
 echo "Main log: $LOG"
 echo "Runtime logs: $SHELLMCP_RT_LOG, $HUB_RT_LOG"
-echo "Cache dir: $CACHE_DIR  (delete with CLEAN=1)"
+echo "Cache dir: $CACHE_DIR (delete with CLEAN=1)"
+ls -lh "$ART_DIR"/gptadmin*.tar.gz "$ART_DIR"/gptadmin*.zip public/gptadmin-win.zip 2>/dev/null || true
