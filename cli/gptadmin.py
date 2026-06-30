@@ -933,6 +933,34 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
     return False
 
 
+def _load_local_shellmcp_identity(env: dict, timeout_s: int = 30) -> dict:
+    identity_dir = Path(env.get('IDENTITY_DIR') or env.get('SHELLMCP_IDENTITY_DIR') or str(ETC_DIR))
+    ident_file = identity_dir / 'shellmcp_identity.json'
+    deadline = time.time() + max(0, timeout_s)
+    while True:
+        try:
+            data = json.loads(ident_file.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            if time.time() >= deadline:
+                return {}
+            time.sleep(1)
+
+
+def _server_matches_local_shell_identity(server: dict, identity: dict) -> bool:
+    if not identity:
+        return False
+    # This is the security boundary for local auto-approve: the pending server
+    # must match the private key material generated on this machine. Hostname,
+    # base_url, mode, and client IP are advisory and can be spoofed.
+    for key in ('server_id', 'public_key', 'fingerprint'):
+        expected = str(identity.get(key) or '')
+        actual = str(server.get(key) or '')
+        if expected and actual and expected != actual:
+            return False
+    return bool(identity.get('server_id') and server.get('server_id') and identity.get('public_key') and server.get('public_key'))
+
+
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
     """Approve the local shell agent created by a same-machine hub+shell setup.
 
@@ -972,22 +1000,33 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             raise RuntimeError((res.stderr or res.stdout or f'curl rc={res.returncode}').strip())
         return json.loads(res.stdout or '{}')
 
+    expected_identity = _load_local_shellmcp_identity(env, timeout_s=60)
+    if not expected_identity:
+        print('WARNING: Local ShellMCP auto-approve skipped: local shellmcp identity did not appear', file=sys.stderr)
+        return
+
     last_err = ''
     for attempt in range(1, 31):
         try:
             data = curl_json('/servers')
             pending = data.get('pending') or []
-            if not pending:
-                servers = data.get('servers') or []
-                if any((x.get('mode') in {'polling', 'long_poll'} and str(x.get('status')) == 'active') for x in servers if isinstance(x, dict)):
+            servers = data.get('servers') or []
+            for x in servers:
+                if not isinstance(x, dict):
+                    continue
+                if _server_matches_local_shell_identity(x, expected_identity) and str(x.get('status')) == 'active':
                     print('Local ShellMCP auto-approve: already active')
                     return
             approved = []
+            mismatched = []
             for item in pending:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name') or '')
                 if not name:
+                    continue
+                if not _server_matches_local_shell_identity(item, expected_identity):
+                    mismatched.append(name)
                     continue
                 payload = {'target': 'hub', 'tool_name': 'approve_pending_server', 'arguments': {'name': name}, 'timeout': 30}
                 res = curl_json('/mcp-relay/call', payload)
@@ -997,6 +1036,8 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             if approved:
                 print('Local ShellMCP auto-approved: ' + ', '.join(approved))
                 return
+            if mismatched:
+                last_err = 'pending server(s) did not match local shellmcp identity: ' + ', '.join(mismatched)
         except Exception as e:
             last_err = str(e)
         time.sleep(2)
@@ -2207,7 +2248,7 @@ def _b64url_json(obj: dict) -> str:
     return _b64url_bytes(json.dumps(obj, separators=(',', ':')).encode())
 
 
-def make_mcp_bearer_token(env: dict, client_id: str) -> str:
+def make_mcp_bearer_token(env: dict, client_id: str, ttl_days: int = 365) -> str:
     secret = env.get('OAUTH_CLIENT_SECRET') or ''
     if not secret:
         raise RuntimeError('OAUTH_CLIENT_SECRET is missing')
@@ -2216,6 +2257,7 @@ def make_mcp_bearer_token(env: dict, client_id: str) -> str:
     if not origin or not resource:
         raise RuntimeError('PUBLIC_ORIGIN/MCP_RESOURCE is missing')
     now = int(time.time())
+    ttl_days = max(1, int(ttl_days or 365))
     header = {'alg': 'HS256', 'typ': 'JWT'}
     body = {
         'sub': 'admin',
@@ -2224,7 +2266,7 @@ def make_mcp_bearer_token(env: dict, client_id: str) -> str:
         'iss': origin,
         'aud': resource,
         'iat': now,
-        'exp': now + 365 * 24 * 3600,
+        'exp': now + ttl_days * 24 * 3600,
     }
     signing_input = f'{_b64url_json(header)}.{_b64url_json(body)}'.encode()
     sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
@@ -2236,6 +2278,107 @@ def _mcp_client_url(env: dict) -> str:
     if not base:
         base = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
     return base + '/mcp'
+
+
+def _client_token_env_key(client_id: str) -> str:
+    safe = re.sub(r'[^A-Za-z0-9]+', '_', client_id.upper()).strip('_') or 'CUSTOM'
+    return f'GPTADMIN_{safe}_MCP_BEARER'
+
+
+def issue_mcp_bearer(env: dict, client_id: str, ttl_days: int = 365) -> tuple[str, str, str]:
+    env = dict(env)
+    if not (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or env.get('PUBLIC_ORIGIN')):
+        env['HUB_URL'] = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
+    sync_oauth_origin_env(env)
+    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    env.setdefault('ADMIN_PASSWORD', gen_hex())
+    token = make_mcp_bearer_token(env, client_id, ttl_days=ttl_days)
+    return token, _mcp_client_url(env), _client_token_env_key(client_id)
+
+
+def cmd_mcp_token(args):
+    need_root()
+    env = env_read()
+    if not (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or env.get('PUBLIC_ORIGIN')):
+        env['HUB_URL'] = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
+    sync_oauth_origin_env(env)
+    client_id = str(getattr(args, 'name', '') or '').strip()
+    if not client_id:
+        client_id = ask('MCP token name / client_id', 'custom-mcp-client').strip() or 'custom-mcp-client'
+    ttl_days = int(getattr(args, 'ttl_days', 365) or 365)
+    token, url, default_key = issue_mcp_bearer(env, client_id, ttl_days=ttl_days)
+    env_key = str(getattr(args, 'env_key', '') or default_key).strip()
+    save = not bool(getattr(args, 'no_save', False))
+    update = {
+        'HUB_URL': env.get('HUB_URL', ''),
+        'PUBLIC_ORIGIN': env.get('PUBLIC_ORIGIN') or env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '',
+        'MCP_RESOURCE': env.get('MCP_RESOURCE') or env.get('PUBLIC_ORIGIN') or env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '',
+        'ADMIN_PASSWORD': env.get('ADMIN_PASSWORD') or gen_hex(),
+        'OAUTH_CLIENT_SECRET': env.get('OAUTH_CLIENT_SECRET') or gen_hex(32),
+    }
+    if save:
+        update[env_key] = token
+    env_set_many(update)
+    if save:
+        _set_process_env_for_gui_clients({env_key: token})
+    print(f'MCP token issued: {client_id}')
+    print(f'URL: {url}')
+    print(f'Env: {env_key}' + ('' if save else '  # not saved'))
+    print(f'Expires in: {ttl_days} days')
+    print(f'Authorization: Bearer {token}')
+
+
+def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[str] | None = None, print_custom: bool = True) -> dict:
+    env = dict(env)
+    sync_oauth_origin_env(env)
+    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    env.setdefault('ADMIN_PASSWORD', gen_hex())
+    wanted = clients or {'claude-code', 'codex', 'opencode'}
+    tokens = {
+        'GPTADMIN_CLAUDE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CLAUDE_MCP_BEARER')) or make_mcp_bearer_token(env, 'claude-code'),
+        'GPTADMIN_CODEX_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CODEX_MCP_BEARER')) or make_mcp_bearer_token(env, 'codex'),
+        'GPTADMIN_OPENCODE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_OPENCODE_MCP_BEARER')) or make_mcp_bearer_token(env, 'opencode'),
+        'GPTADMIN_CUSTOM_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CUSTOM_MCP_BEARER')) or make_mcp_bearer_token(env, 'custom-mcp-client'),
+    }
+    env.update(tokens)
+    env_remove_keys(['GPTADMIN_MCP_BEARER'])
+    env_set_many({
+        'PUBLIC_ORIGIN': env.get('PUBLIC_ORIGIN', ''),
+        'MCP_RESOURCE': env.get('MCP_RESOURCE', ''),
+        'ADMIN_PASSWORD': env.get('ADMIN_PASSWORD', ''),
+        'OAUTH_CLIENT_SECRET': env.get('OAUTH_CLIENT_SECRET', ''),
+        **tokens,
+    })
+    _set_process_env_for_gui_clients(tokens)
+    url = _mcp_client_url(env)
+    results: dict[str, str] = {}
+    if 'claude-code' in wanted or 'claude' in wanted:
+        results['claude-code'] = _configure_claude_code_mcp(url, tokens['GPTADMIN_CLAUDE_MCP_BEARER'])
+    if 'codex' in wanted:
+        results['codex'] = _configure_codex_mcp(url, tokens['GPTADMIN_CODEX_MCP_BEARER'])
+    if 'opencode' in wanted:
+        results['opencode'] = _configure_opencode_mcp(url, tokens['GPTADMIN_OPENCODE_MCP_BEARER'])
+    results['_url'] = url
+    if print_custom:
+        results['_custom_token'] = tokens['GPTADMIN_CUSTOM_MCP_BEARER']
+    return results
+
+
+def cmd_mcp_connect(args):
+    need_root()
+    env = env_read()
+    selected = set(getattr(args, 'client', None) or [])
+    aliases = {'claude': 'claude-code'}
+    selected = {aliases.get(x, x) for x in selected}
+    if not selected:
+        selected = {'claude-code', 'codex', 'opencode'}
+    results = configure_ai_mcp_clients(env, rotate=bool(getattr(args, 'fresh', False)), clients=selected, print_custom=not bool(getattr(args, 'no_print_token', False)))
+    url = results.pop('_url')
+    custom = results.pop('_custom_token', None)
+    print('GPTAdmin MCP client install: ' + ', '.join(f'{k}={v}' for k, v in results.items()))
+    print(f'URL: {url}')
+    if custom:
+        print(f'Custom MCP Authorization: Bearer {custom}')
 
 
 def _run_quiet(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -2316,36 +2459,13 @@ def auto_configure_ai_mcp_clients(env: dict, install_hub: bool) -> None:
         print('AI MCP clients auto-config skipped: GPTADMIN_AUTO_CONFIGURE_AI_MCP=0')
         return
     try:
-        env = dict(env)
-        sync_oauth_origin_env(env)
-        env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
-        env.setdefault('ADMIN_PASSWORD', gen_hex())
-        tokens = {
-            'GPTADMIN_CLAUDE_MCP_BEARER': env.get('GPTADMIN_CLAUDE_MCP_BEARER') or make_mcp_bearer_token(env, 'claude-code'),
-            'GPTADMIN_CODEX_MCP_BEARER': env.get('GPTADMIN_CODEX_MCP_BEARER') or make_mcp_bearer_token(env, 'codex'),
-            'GPTADMIN_OPENCODE_MCP_BEARER': env.get('GPTADMIN_OPENCODE_MCP_BEARER') or make_mcp_bearer_token(env, 'opencode'),
-            'GPTADMIN_CUSTOM_MCP_BEARER': env.get('GPTADMIN_CUSTOM_MCP_BEARER') or make_mcp_bearer_token(env, 'custom-mcp-client'),
-        }
-        env.update(tokens)
-        env_remove_keys(['GPTADMIN_MCP_BEARER'])
-        env_set_many({
-            'PUBLIC_ORIGIN': env.get('PUBLIC_ORIGIN', ''),
-            'MCP_RESOURCE': env.get('MCP_RESOURCE', ''),
-            'ADMIN_PASSWORD': env.get('ADMIN_PASSWORD', ''),
-            'OAUTH_CLIENT_SECRET': env.get('OAUTH_CLIENT_SECRET', ''),
-            **tokens,
-        })
-        _set_process_env_for_gui_clients(tokens)
-        url = _mcp_client_url(env)
-        results = {
-            'claude-code': _configure_claude_code_mcp(url, tokens['GPTADMIN_CLAUDE_MCP_BEARER']),
-            'codex': _configure_codex_mcp(url, tokens['GPTADMIN_CODEX_MCP_BEARER']),
-            'opencode': _configure_opencode_mcp(url, tokens['GPTADMIN_OPENCODE_MCP_BEARER']),
-        }
+        results = configure_ai_mcp_clients(env, rotate=False, print_custom=True)
+        url = results.pop('_url')
+        custom = results.pop('_custom_token')
         print('AI MCP clients auto-config: ' + ', '.join(f'{k}={v}' for k, v in results.items()))
         print('Custom MCP client:')
         print(f'  URL: {url}')
-        print(f"  Authorization: Bearer {tokens['GPTADMIN_CUSTOM_MCP_BEARER']}")
+        print(f'  Authorization: Bearer {custom}')
     except Exception as e:
         print(f'WARNING: AI MCP clients auto-config failed: {e}', file=sys.stderr)
 
@@ -2471,6 +2591,19 @@ def main():
 
     sub.add_parser('tokens').set_defaults(func=cmd_tokens)
 
+    ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить новый Bearer token для GPTAdmin MCP client')
+    ap_mcp_token_top.add_argument('name', nargs='?', help='client_id / имя токена, например codex-work')
+    ap_mcp_token_top.add_argument('--ttl-days', type=int, default=365)
+    ap_mcp_token_top.add_argument('--env-key', help='Имя переменной для сохранения в gptadmin.env')
+    ap_mcp_token_top.add_argument('--no-save', action='store_true', help='Только напечатать token, не сохранять в gptadmin.env')
+    ap_mcp_token_top.set_defaults(func=cmd_mcp_token)
+
+    ap_mcp_connect_top = sub.add_parser('connect-mcp', aliases=['mcp-connect'], help='Установить GPTAdmin как MCP в Codex/Claude/OpenCode')
+    ap_mcp_connect_top.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode'], help='Кого настроить; можно повторять. По умолчанию все найденные')
+    ap_mcp_connect_top.add_argument('--fresh', action='store_true', help='Выпустить новые токены для AI MCP clients')
+    ap_mcp_connect_top.add_argument('--no-print-token', action='store_true', help='Не печатать custom Bearer token')
+    ap_mcp_connect_top.set_defaults(func=cmd_mcp_connect)
+
     ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или shell agent')
     ap_rot.add_argument('which', metavar='which', help='hub | shell')
     ap_rot.set_defaults(func=cmd_rotate)
@@ -2489,6 +2622,19 @@ def main():
     ap_mcp_list = mcp_sub.add_parser('list', help='List configured MCP servers')
     ap_mcp_list.add_argument('--json', action='store_true')
     ap_mcp_list.set_defaults(func=cmd_mcp_list)
+
+    ap_mcp_token = mcp_sub.add_parser('token', help='Выпустить Bearer token для GPTAdmin MCP client')
+    ap_mcp_token.add_argument('name', nargs='?', help='client_id / имя токена')
+    ap_mcp_token.add_argument('--ttl-days', type=int, default=365)
+    ap_mcp_token.add_argument('--env-key')
+    ap_mcp_token.add_argument('--no-save', action='store_true')
+    ap_mcp_token.set_defaults(func=cmd_mcp_token)
+
+    ap_mcp_connect = mcp_sub.add_parser('connect', aliases=['self-install', 'install-self'], help='Установить GPTAdmin как MCP в Codex/Claude/OpenCode')
+    ap_mcp_connect.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode'])
+    ap_mcp_connect.add_argument('--fresh', action='store_true')
+    ap_mcp_connect.add_argument('--no-print-token', action='store_true')
+    ap_mcp_connect.set_defaults(func=cmd_mcp_connect)
 
     ap_mcp_add = mcp_sub.add_parser('add', help='Add MCP server, Claude/Codex-style')
     ap_mcp_add.add_argument('name')
