@@ -424,7 +424,9 @@ if IS_MACOS:
         _launchctl_capture(['launchctl', 'bootout', domain, str(unit_path)])
         run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False, timeout=10)
         run(['launchctl', 'enable', _launchd_service_target(label)], check=False, timeout=10)
-        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False, timeout=10)
+        # kickstart can block for long-running LaunchAgents on some macOS versions;
+        # bootstrap already starts the job, so keep this as a short best-effort nudge.
+        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False, timeout=int(os.environ.get('GPTADMIN_LAUNCHCTL_KICKSTART_TIMEOUT', '2')))
         if not _launchd_is_loaded(label):
             run(['launchctl', 'load', '-w', str(unit_path)], check=False)
         if not _launchd_is_loaded(label):
@@ -2116,6 +2118,89 @@ def cmd_tunnel_disable(_):
     print('Tunnel disabled.')
 
 
+
+def _parse_build_info_text(text: str) -> dict:
+    out = {}
+    patterns = {
+        'build_version': r'BUILD_VERSION\s*=\s*([0-9]+)',
+        'build_ts': r'BUILD_TS\s*=\s*[\"\']([^\"\']+)[\"\']',
+        'git_commit': r'GIT_COMMIT\s*=\s*[\"\']([^\"\']+)[\"\']',
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        value = m.group(1)
+        if key == 'build_version':
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        out[key] = value
+    return out
+
+
+def _installed_build_info(env: dict, install_hub: bool) -> dict:
+    infos = []
+    for path in (INSTALL_DIR / 'client' / 'gptadmin_build_info.py', INSTALL_DIR / 'hub_source' / 'gptadmin_build_info.py'):
+        try:
+            if path.exists():
+                info = _parse_build_info_text(path.read_text(errors='replace'))
+                if info:
+                    infos.append(info)
+        except Exception:
+            pass
+    if install_hub:
+        port = env.get('HUB_PORT') or '9001'
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/version', timeout=2) as r:
+                if r.status == 200:
+                    data = json.loads(r.read().decode('utf-8', 'replace'))
+                    if isinstance(data, dict):
+                        info = {k: data.get(k) for k in ('build_version', 'build_ts', 'git_commit') if data.get(k) is not None}
+                        if info:
+                            infos.append(info)
+        except Exception:
+            pass
+    if not infos:
+        return {}
+    def version(info):
+        try:
+            return int(info.get('build_version') or 0)
+        except Exception:
+            return 0
+    return max(infos, key=version)
+
+
+def _artifact_name_from_url(url: str) -> str:
+    return url.rstrip('/').rsplit('/', 1)[-1]
+
+
+def _remote_artifact_build_info(pkg_url: str) -> dict:
+    if os.environ.get('GPTADMIN_UPDATE_SKIP_MANIFEST', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
+        return {}
+    base = pkg_url.rsplit('/', 1)[0]
+    manifest_url = os.environ.get('GPTADMIN_MANIFEST_URL') or (base.rstrip('/') + '/manifest.json')
+    name = _artifact_name_from_url(pkg_url)
+    try:
+        with urllib.request.urlopen(manifest_url, timeout=5) as r:
+            manifest = json.loads(r.read().decode('utf-8', 'replace'))
+    except Exception as exc:
+        print(f'WARNING: update manifest unavailable, continuing with download: {exc}', file=sys.stderr)
+        return {}
+    artifact = (manifest.get('artifacts') or {}).get(name) or {}
+    return {k: artifact.get(k) for k in ('build_version', 'build_ts', 'git_commit', 'sha256', 'size') if artifact.get(k) is not None}
+
+
+def _should_skip_update(installed: dict, remote: dict) -> bool:
+    try:
+        installed_v = int(installed.get('build_version') or 0)
+        remote_v = int(remote.get('build_version') or 0)
+    except Exception:
+        return False
+    return installed_v > 0 and remote_v > 0 and installed_v >= remote_v
+
+
 # ===== Update / in-place upgrade =====
 
 def _service_pairs_for_update(install_hub: bool, install_shellmcp: bool, env: dict):
@@ -2175,6 +2260,21 @@ def cmd_update(args):
     pkg_all = args.pkg_all or platform_pkg_url_default()
     pkg_hub = args.pkg_hub or PKG_HUB_URL_DEFAULT
     pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
+
+    if not getattr(args, 'force', False):
+        target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
+        installed_info = _installed_build_info(env, install_hub)
+        remote_info = _remote_artifact_build_info(target_pkg)
+        if _should_skip_update(installed_info, remote_info):
+            print(
+                'GPTAdmin already up to date: '
+                f"installed build_version={installed_info.get('build_version')} "
+                f"git_commit={installed_info.get('git_commit') or 'unknown'}; "
+                f"latest build_version={remote_info.get('build_version')} "
+                f"git_commit={remote_info.get('git_commit') or 'unknown'}."
+            )
+            print('Use `gptadmin update --force` to reinstall anyway.')
+            return
 
     print('Stopping installed GPTAdmin services for safe in-place update...')
     svc_stop_multi(_service_pairs_for_update(install_hub, install_shellmcp, env))
@@ -2554,6 +2654,7 @@ def main():
     ap_update.add_argument('--pkg-all')
     ap_update.add_argument('--pkg-hub')
     ap_update.add_argument('--pkg-shellmcp')
+    ap_update.add_argument('--force', action='store_true', help='Reinstall even when manifest says the installed build is current')
     ap_update.add_argument('--hub', action='store_true', help='Force updating/installing hub component')
     ap_update.add_argument('--shellmcp', action='store_true', help='Force updating/installing ShellMCP component')
     ap_update.add_argument('--no-hub', action='store_true', help='Do not update hub component')
