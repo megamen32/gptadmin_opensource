@@ -933,6 +933,30 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
     return False
 
 
+def _load_local_shellmcp_identity(env: dict) -> dict:
+    identity_dir = Path(env.get('IDENTITY_DIR') or env.get('SHELLMCP_IDENTITY_DIR') or str(ETC_DIR))
+    ident_file = identity_dir / 'shellmcp_identity.json'
+    try:
+        data = json.loads(ident_file.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _server_matches_local_shell_identity(server: dict, identity: dict) -> bool:
+    if not identity:
+        return False
+    # This is the security boundary for local auto-approve: the pending server
+    # must match the private key material generated on this machine. Hostname,
+    # base_url, mode, and client IP are advisory and can be spoofed.
+    for key in ('server_id', 'public_key', 'fingerprint'):
+        expected = str(identity.get(key) or '')
+        actual = str(server.get(key) or '')
+        if expected and actual and expected != actual:
+            return False
+    return bool(identity.get('server_id') and server.get('server_id') and identity.get('public_key') and server.get('public_key'))
+
+
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
     """Approve the local shell agent created by a same-machine hub+shell setup.
 
@@ -972,22 +996,33 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             raise RuntimeError((res.stderr or res.stdout or f'curl rc={res.returncode}').strip())
         return json.loads(res.stdout or '{}')
 
+    expected_identity = _load_local_shellmcp_identity(env)
+    if not expected_identity:
+        print('WARNING: Local ShellMCP auto-approve skipped: local shellmcp identity is missing', file=sys.stderr)
+        return
+
     last_err = ''
     for attempt in range(1, 31):
         try:
             data = curl_json('/servers')
             pending = data.get('pending') or []
-            if not pending:
-                servers = data.get('servers') or []
-                if any((x.get('mode') in {'polling', 'long_poll'} and str(x.get('status')) == 'active') for x in servers if isinstance(x, dict)):
+            servers = data.get('servers') or []
+            for x in servers:
+                if not isinstance(x, dict):
+                    continue
+                if _server_matches_local_shell_identity(x, expected_identity) and str(x.get('status')) == 'active':
                     print('Local ShellMCP auto-approve: already active')
                     return
             approved = []
+            mismatched = []
             for item in pending:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get('name') or '')
                 if not name:
+                    continue
+                if not _server_matches_local_shell_identity(item, expected_identity):
+                    mismatched.append(name)
                     continue
                 payload = {'target': 'hub', 'tool_name': 'approve_pending_server', 'arguments': {'name': name}, 'timeout': 30}
                 res = curl_json('/mcp-relay/call', payload)
@@ -997,6 +1032,8 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             if approved:
                 print('Local ShellMCP auto-approved: ' + ', '.join(approved))
                 return
+            if mismatched:
+                last_err = 'pending server(s) did not match local shellmcp identity: ' + ', '.join(mismatched)
         except Exception as e:
             last_err = str(e)
         time.sleep(2)
