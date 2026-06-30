@@ -416,7 +416,12 @@ if IS_MACOS:
         # the explicit domain, then kickstart; keep load -w as fallback for older
         # systems.
         domain = _launchd_domain()
-        run(['launchctl', 'bootout', _launchd_service_target(label)], check=False, timeout=10)
+        # A missing/unloaded launchd job is normal during update or first install.
+        # `launchctl bootout` prints "Boot-out failed: 3: No such process" to
+        # stderr in that case; suppress it so a harmless pre-cleanup does not look
+        # like an update failure.
+        _launchctl_capture(['launchctl', 'bootout', _launchd_service_target(label)])
+        _launchctl_capture(['launchctl', 'bootout', domain, str(unit_path)])
         run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False, timeout=10)
         run(['launchctl', 'enable', _launchd_service_target(label)], check=False, timeout=10)
         run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False, timeout=10)
