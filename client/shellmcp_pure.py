@@ -63,9 +63,13 @@ SHELLMCP_BACKEND = os.getenv("SHELLMCP_BACKEND") or "local"
 SHELLMCP_DEFAULT_USER = os.getenv("SHELL_DEFAULT_USER") or os.getenv("SHELLMCP_DEFAULT_USER") or ""
 SHELLMCP_DEFAULT_HOME = os.getenv("SHELL_DEFAULT_HOME") or os.getenv("SHELLMCP_DEFAULT_HOME") or ""
 SHELLMCP_DEFAULT_CWD = os.getenv("SHELL_DEFAULT_CWD") or os.getenv("SHELLMCP_DEFAULT_CWD") or SHELLMCP_DEFAULT_HOME
-BUILD_VERSION = int(os.getenv("GPTADMIN_BUILD_VERSION", "0"))
-BUILD_TS = os.getenv("GPTADMIN_BUILD_TS", "unknown")
-GIT_COMMIT = os.getenv("GPTADMIN_GIT_COMMIT", "unknown")
+try:
+    from gptadmin_build_info import BUILD_VERSION as _PKG_BUILD_VERSION, BUILD_TS as _PKG_BUILD_TS, GIT_COMMIT as _PKG_GIT_COMMIT
+except Exception:
+    _PKG_BUILD_VERSION, _PKG_BUILD_TS, _PKG_GIT_COMMIT = 0, "unknown", "unknown"
+BUILD_VERSION = int(os.getenv("GPTADMIN_BUILD_VERSION", str(_PKG_BUILD_VERSION or 0)))
+BUILD_TS = os.getenv("GPTADMIN_BUILD_TS", _PKG_BUILD_TS or "unknown")
+GIT_COMMIT = os.getenv("GPTADMIN_GIT_COMMIT", _PKG_GIT_COMMIT or "unknown")
 
 
 def _b64e(data: bytes) -> str:
