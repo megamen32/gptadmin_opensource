@@ -11,6 +11,8 @@ Endpoints:
 """
 import logging
 import hashlib
+import re
+import tarfile
 from pathlib import Path
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.responses import FileResponse
@@ -39,15 +41,69 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+_BUILD_INFO_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+
+def _parse_build_info_text(text: str) -> dict:
+    out = {}
+    patterns = {
+        "build_version": r"BUILD_VERSION\s*=\s*([0-9]+)",
+        "build_ts": r"BUILD_TS\s*=\s*[\"']([^\"']+)[\"']",
+        "git_commit": r"GIT_COMMIT\s*=\s*[\"']([^\"']+)[\"']",
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        value = m.group(1)
+        if key == "build_version":
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        out[key] = value
+    return out
+
+
+def _artifact_build_info(path: Path) -> dict:
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    cache_key = str(path)
+    cached = _BUILD_INFO_CACHE.get(cache_key)
+    if cached and cached[0] == int(st.st_mtime_ns) and cached[1] == int(st.st_size):
+        return dict(cached[2])
+    info = {}
+    try:
+        if path.suffix == ".py":
+            info = _parse_build_info_text(path.read_text(errors="replace"))
+        elif path.name.endswith(".tar.gz") or path.name.endswith(".tgz"):
+            with tarfile.open(path, "r:gz") as tar:
+                members = [m for m in tar.getmembers() if m.name.endswith("gptadmin_build_info.py")]
+                members.sort(key=lambda m: (0 if "/client/" in f"/{m.name}" else 1, m.name))
+                if members:
+                    f = tar.extractfile(members[0])
+                    if f:
+                        info = _parse_build_info_text(f.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        log.warning("build_info: failed to inspect %s: %s", path, exc)
+        info = {}
+    _BUILD_INFO_CACHE[cache_key] = (int(st.st_mtime_ns), int(st.st_size), dict(info))
+    return info
+
+
 def _artifact_meta(path: Path, route: str) -> dict:
     if not path.exists():
         raise HTTPException(404, "artifact not found")
-    return {
+    meta = {
         "name": path.name,
         "size": path.stat().st_size,
         "sha256": _sha256_file(path),
         "url": route,
     }
+    meta.update(_artifact_build_info(path))
+    return meta
 
 
 def _artifact_manifest() -> dict:
