@@ -21,7 +21,8 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
 )
 
-const BuildVersion = 3
+var BuildVersion = "3"
+var GitCommit = "go-shellmcp"
 
 type Config struct {
 	Addr              string
@@ -80,6 +81,14 @@ func env(k, d string) string {
 func truthy(v string) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func parseBuildVersion(v string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 type Server struct {
@@ -169,14 +178,14 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": BuildVersion, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": BuildVersion})
+	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit})
 }
 
 func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Request, bool) {
@@ -327,7 +336,8 @@ func (s *Server) sendHeartbeat(ctx context.Context) {
 	if s.hub == nil {
 		return
 	}
-	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, BuildVersion)
+	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, parseBuildVersion(BuildVersion))
+	beat.GitCommit = GitCommit
 	beat.DefaultUser = s.cfg.DefaultUser
 	beat.DefaultHome = s.cfg.DefaultHome
 	beat.DefaultCwd = s.cfg.DefaultCwd
