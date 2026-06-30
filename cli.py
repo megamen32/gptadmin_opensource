@@ -275,6 +275,12 @@ def _copy_pkg_runtime_payloads(tdp: Path):
         if agents_dst.exists():
             shutil.rmtree(agents_dst, ignore_errors=True)
         shutil.copytree(agents_src, agents_dst)
+    client_src = tdp / 'client'
+    if client_src.exists():
+        client_dst = INSTALL_DIR / 'client'
+        if client_dst.exists():
+            shutil.rmtree(client_dst, ignore_errors=True)
+        shutil.copytree(client_src, client_dst)
 
 
 def _arch_tag() -> str:
@@ -397,7 +403,7 @@ if IS_MACOS:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = BIN_DIR / f'run_{name}.sh'
         if name == 'shellmcp':
-            exec_line = f'exec {_mac_python()} {bin_path}'
+            exec_line = f'PYTHONPATH={INSTALL_DIR}/client${{PYTHONPATH:+:$PYTHONPATH}} exec {_mac_python()} {bin_path}'
         else:
             exec_line = f'exec {bin_path}'
         script.write_text(
@@ -973,18 +979,63 @@ def _load_local_shellmcp_identity(env: dict, timeout_s: int = 30) -> dict:
             time.sleep(1)
 
 
+def _normalize_local_shell_identity(identity: dict) -> dict:
+    if not isinstance(identity, dict):
+        return {}
+    nested = identity.get('identity') if isinstance(identity.get('identity'), dict) else {}
+    return {
+        'server_id': identity.get('server_id') or nested.get('server_id'),
+        'public_key': identity.get('public_key') or identity.get('public_key_b64') or nested.get('public_key') or nested.get('public_key_b64'),
+        'fingerprint': identity.get('fingerprint') or nested.get('fingerprint'),
+    }
+
+
 def _server_matches_local_shell_identity(server: dict, identity: dict) -> bool:
-    if not identity:
+    if not identity or not isinstance(server, dict):
         return False
+    expected_identity = _normalize_local_shell_identity(identity)
+    payload = server.get('payload') if isinstance(server.get('payload'), dict) else {}
     # This is the security boundary for local auto-approve: the pending server
     # must match the private key material generated on this machine. Hostname,
     # base_url, mode, and client IP are advisory and can be spoofed.
     for key in ('server_id', 'public_key', 'fingerprint'):
-        expected = str(identity.get(key) or '')
-        actual = str(server.get(key) or '')
+        expected = str(expected_identity.get(key) or '')
+        actual = str(server.get(key) or payload.get(key) or '')
         if expected and actual and expected != actual:
             return False
-    return bool(identity.get('server_id') and server.get('server_id') and identity.get('public_key') and server.get('public_key'))
+    actual_server_id = server.get('server_id') or payload.get('server_id')
+    actual_public_key = server.get('public_key') or payload.get('public_key')
+    return bool(expected_identity.get('server_id') and actual_server_id and expected_identity.get('public_key') and actual_public_key)
+
+
+def _server_active_matches_local_shell_identity(server: dict, identity: dict) -> bool:
+    if not isinstance(server, dict) or str(server.get('status')) != 'active':
+        return False
+    expected_identity = _normalize_local_shell_identity(identity)
+    expected_server_id = str(expected_identity.get('server_id') or '')
+    actual_server_id = str(server.get('server_id') or '')
+    return bool(expected_server_id and actual_server_id and expected_server_id == actual_server_id)
+
+
+def _approve_pending_response_ok(res: dict) -> bool:
+    if not isinstance(res, dict):
+        return False
+    candidates = [res]
+    response = res.get('response')
+    if isinstance(response, dict):
+        candidates.append(response)
+        sc = response.get('structuredContent')
+        if isinstance(sc, dict):
+            candidates.append(sc)
+    sc = res.get('structuredContent')
+    if isinstance(sc, dict):
+        candidates.append(sc)
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if item.get('ok') is True or item.get('status') in {'approved', 'active'}:
+            return True
+    return False
 
 
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
@@ -1040,7 +1091,7 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             for x in servers:
                 if not isinstance(x, dict):
                     continue
-                if _server_matches_local_shell_identity(x, expected_identity) and str(x.get('status')) == 'active':
+                if _server_active_matches_local_shell_identity(x, expected_identity):
                     print('Local ShellMCP auto-approve: already active')
                     return
             approved = []
@@ -1056,10 +1107,16 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
                     continue
                 payload = {'target': 'hub', 'tool_name': 'approve_pending_server', 'arguments': {'name': name}, 'timeout': 30}
                 res = curl_json('/mcp-relay/call', payload)
-                sc = ((res.get('response') or {}).get('structuredContent') or {}) if isinstance(res, dict) else {}
-                if sc.get('ok'):
+                if _approve_pending_response_ok(res):
                     approved.append(name)
             if approved:
+                for _ in range(10):
+                    data2 = curl_json('/servers')
+                    for x in data2.get('servers') or []:
+                        if _server_active_matches_local_shell_identity(x, expected_identity):
+                            print('Local ShellMCP auto-approved: ' + ', '.join(approved))
+                            return
+                    time.sleep(1)
                 print('Local ShellMCP auto-approved: ' + ', '.join(approved))
                 return
             if mismatched:
@@ -2247,7 +2304,15 @@ def _should_skip_update(installed: dict, remote: dict) -> bool:
         remote_v = int(remote.get('build_version') or 0)
     except Exception:
         return False
-    return installed_v > 0 and remote_v > 0 and installed_v >= remote_v
+    if not (installed_v > 0 and remote_v > 0):
+        return False
+    if installed_v < remote_v:
+        return False
+    installed_sha = str(installed.get('sha256') or '').strip().lower()
+    remote_sha = str(remote.get('sha256') or '').strip().lower()
+    if installed_v == remote_v and installed_sha and remote_sha and installed_sha != remote_sha:
+        return False
+    return True
 
 
 # ===== Update / in-place upgrade =====
