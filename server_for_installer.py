@@ -57,6 +57,7 @@ def _artifact_manifest() -> dict:
         "shellmcp_pure.py": (REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
         "gptadmin-cli.tar.gz": (BUILD_DIR / "gptadmin-cli.tar.gz", "/gptadmin-cli.tar.gz"),
+        "gptadmin-android-arm64.tar.gz": (BUILD_DIR / "gptadmin-android-arm64.tar.gz", "/gptadmin-android-arm64.tar.gz"),
         "gptadmin-linux-amd64.tar.gz": (BUILD_DIR / "gptadmin-linux-amd64.tar.gz", "/gptadmin-linux-amd64.tar.gz"),
         "gptadmin-linux-arm64.tar.gz": (BUILD_DIR / "gptadmin-linux-arm64.tar.gz", "/gptadmin-linux-arm64.tar.gz"),
         "gptadmin-darwin-arm64.tar.gz": (BUILD_DIR / "gptadmin-darwin-arm64.tar.gz", "/gptadmin-darwin-arm64.tar.gz"),
@@ -97,6 +98,12 @@ async def get_install_win_ps1():
     content = load_script(DEPLOY_DIR / "install_win.ps1")
     return Response(content, media_type="text/plain")
 
+
+@app.api_route("/install_android.sh", methods=["GET", "HEAD"])
+async def get_install_android_sh():
+    content = load_script(DEPLOY_DIR / "install_android.sh")
+    return Response(content, media_type="text/plain")
+
 @app.api_route("/api.json", methods=["GET", "HEAD"])
 async def get_openapi_json():
     content = load_script(PUBLIC_DIR / "openapi.yaml")
@@ -117,6 +124,11 @@ async def get_all():
 @app.api_route('/gptadmin-cli.tar.gz', methods=['GET', 'HEAD'])
 async def get_cli():
     return _bin(BUILD_DIR / "gptadmin-cli.tar.gz", "gptadmin-cli.tar.gz", "application/gzip")
+
+
+@app.api_route('/gptadmin-android-arm64.tar.gz', methods=['GET', 'HEAD'])
+async def get_android_arm64():
+    return _bin(BUILD_DIR / "gptadmin-android-arm64.tar.gz", "gptadmin-android-arm64.tar.gz", "application/gzip")
 
 
 @app.api_route('/gptadmin-{platform}-{arch}.tar.gz', methods=['GET', 'HEAD'])
