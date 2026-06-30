@@ -17,6 +17,8 @@ import socket
 import re
 import secrets
 import time
+import urllib.request
+import urllib.error
 import pwd
 from pathlib import Path
 try:
@@ -76,6 +78,7 @@ else:
 # ===== Paths & constants =====
 BIN_DIR = INSTALL_DIR / 'bin'
 ENV_FILE = ETC_DIR / 'gptadmin.env'
+INSTALLED_BUILD_FILE = INSTALL_DIR / 'gptadmin_installed_build.json'
 MCP_CONFIG_FILE = ETC_DIR / 'mcp.json'
 MCP_AGENTS_DIR = ETC_DIR / 'mcp-agents.d'
 MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
@@ -311,6 +314,17 @@ def _binary_looks_native(path: Path) -> bool:
     return 'Mach-O' in out
 
 
+def _macos_unquarantine_and_codesign(path: Path):
+    if not IS_MACOS:
+        return
+    # Files extracted from browser/curl-delivered archives can inherit macOS
+    # provenance/quarantine metadata. launchd may then kill ad-hoc binaries with
+    # OS_REASON_CODESIGNING. Clear xattrs and apply a local ad-hoc signature.
+    run(['/usr/bin/xattr', '-cr', str(path)], check=False, timeout=10)
+    if _binary_looks_native(path):
+        run(['/usr/bin/codesign', '--force', '--sign', '-', str(path)], check=False, timeout=20)
+
+
 def _install_hub_binary_from_pkg(tdp: Path):
     for c in _platform_hub_candidates(tdp):
         if c.exists() and _binary_looks_native(c):
@@ -318,6 +332,7 @@ def _install_hub_binary_from_pkg(tdp: Path):
             dst = BIN_DIR / 'gptadmin_hub'
             shutil.copy2(c, dst)
             os.chmod(dst, 0o755)
+            _macos_unquarantine_and_codesign(dst)
             return
     if IS_MACOS:
         die('macOS gptadmin_hub binary not found in package: expected gptadmin_hub/darwin_arm64/gptadmin_hub or gptadmin_hub/darwin_amd64/gptadmin_hub')
@@ -343,14 +358,18 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
             if c.exists():
                 BIN_DIR.mkdir(parents=True, exist_ok=True)
                 dst_name = 'shellmcp' if (component == 'shellmcp' and IS_MACOS) else c.name
-                shutil.copy2(c, BIN_DIR / dst_name)
-                os.chmod(BIN_DIR / dst_name, 0o755)
+                dst = BIN_DIR / dst_name
+                shutil.copy2(c, dst)
+                os.chmod(dst, 0o755)
+                _macos_unquarantine_and_codesign(dst)
                 return
         if component == 'shellmcp' and IS_MACOS:
             # Backward compatibility with old archives.
             BIN_DIR.mkdir(parents=True, exist_ok=True)
-            download(SHELLMCP_PURE_URL_DEFAULT, BIN_DIR / 'shellmcp')
-            os.chmod(BIN_DIR / 'shellmcp', 0o755)
+            dst = BIN_DIR / 'shellmcp'
+            download(SHELLMCP_PURE_URL_DEFAULT, dst)
+            os.chmod(dst, 0o755)
+            _macos_unquarantine_and_codesign(dst)
             return
         die(f'{component} binary not found in package')
 
@@ -2140,7 +2159,37 @@ def _parse_build_info_text(text: str) -> dict:
     return out
 
 
+def _read_installed_build_marker() -> dict:
+    try:
+        if INSTALLED_BUILD_FILE.exists():
+            data = json.loads(INSTALLED_BUILD_FILE.read_text())
+            if isinstance(data, dict):
+                return {k: data.get(k) for k in ('build_version', 'build_ts', 'git_commit', 'sha256', 'size', 'package_url') if data.get(k) is not None}
+    except Exception:
+        pass
+    return {}
+
+
+def _write_installed_build_marker(info: dict, package_url: str):
+    if not info:
+        return
+    try:
+        payload = {k: info.get(k) for k in ('build_version', 'build_ts', 'git_commit', 'sha256', 'size') if info.get(k) is not None}
+        if not payload.get('build_version'):
+            return
+        payload['package_url'] = package_url
+        payload['installed_at'] = int(time.time())
+        INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        INSTALLED_BUILD_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + '\n')
+        os.chmod(INSTALLED_BUILD_FILE, 0o644)
+    except Exception as exc:
+        print(f'WARNING: could not write installed build marker: {exc}', file=sys.stderr)
+
+
 def _installed_build_info(env: dict, install_hub: bool) -> dict:
+    marker_info = _read_installed_build_marker()
+    if marker_info:
+        return marker_info
     infos = []
     for path in (INSTALL_DIR / 'client' / 'gptadmin_build_info.py', INSTALL_DIR / 'hub_source' / 'gptadmin_build_info.py'):
         try:
@@ -2261,10 +2310,10 @@ def cmd_update(args):
     pkg_hub = args.pkg_hub or PKG_HUB_URL_DEFAULT
     pkg_shellmcp = args.pkg_shellmcp or PKG_SHELLMCP_URL_DEFAULT
 
+    target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
+    remote_info = _remote_artifact_build_info(target_pkg)
     if not getattr(args, 'force', False):
-        target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
         installed_info = _installed_build_info(env, install_hub)
-        remote_info = _remote_artifact_build_info(target_pkg)
         if _should_skip_update(installed_info, remote_info):
             print(
                 'GPTAdmin already up to date: '
@@ -2311,6 +2360,8 @@ def cmd_update(args):
                 print('  Component package unavailable, using full package...')
                 download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'shellmcp')
+
+    _write_installed_build_marker(remote_info, target_pkg)
 
     write_hub_unit(install_hub, install_shellmcp)
     write_shellmcp_unit(install_hub, install_shellmcp)
