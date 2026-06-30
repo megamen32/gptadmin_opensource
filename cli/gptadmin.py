@@ -933,14 +933,18 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
     return False
 
 
-def _load_local_shellmcp_identity(env: dict) -> dict:
+def _load_local_shellmcp_identity(env: dict, timeout_s: int = 30) -> dict:
     identity_dir = Path(env.get('IDENTITY_DIR') or env.get('SHELLMCP_IDENTITY_DIR') or str(ETC_DIR))
     ident_file = identity_dir / 'shellmcp_identity.json'
-    try:
-        data = json.loads(ident_file.read_text())
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    deadline = time.time() + max(0, timeout_s)
+    while True:
+        try:
+            data = json.loads(ident_file.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            if time.time() >= deadline:
+                return {}
+            time.sleep(1)
 
 
 def _server_matches_local_shell_identity(server: dict, identity: dict) -> bool:
@@ -996,9 +1000,9 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             raise RuntimeError((res.stderr or res.stdout or f'curl rc={res.returncode}').strip())
         return json.loads(res.stdout or '{}')
 
-    expected_identity = _load_local_shellmcp_identity(env)
+    expected_identity = _load_local_shellmcp_identity(env, timeout_s=60)
     if not expected_identity:
-        print('WARNING: Local ShellMCP auto-approve skipped: local shellmcp identity is missing', file=sys.stderr)
+        print('WARNING: Local ShellMCP auto-approve skipped: local shellmcp identity did not appear', file=sys.stderr)
         return
 
     last_err = ''
