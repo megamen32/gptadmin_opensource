@@ -5711,14 +5711,20 @@ body{{font:12px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;color:var(-
 .st{{font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .btn{{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;white-space:nowrap}}
 .btn:hover{{border-color:var(--accent);color:var(--accent)}}
-pre{{white-space:pre-wrap;word-break:break-all;font:11px/1.3 ui-monospace,monospace;color:#94a3b8;max-height:180px;overflow:auto;margin-top:4px}}
-pre.empty{{color:var(--muted);font-style:italic}}
-details{{margin-top:6px}}
-summary{{cursor:pointer;font-size:11px;font-weight:600;color:var(--text);padding:3px 0;list-style:none}}
-summary::-webkit-details-marker{{display:none}}
-summary::before{{content:'▸ ';color:var(--accent)}}
-details[open] summary::before{{content:'▾ '}}
 .lbl{{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:6px}}
+.preview{{font:11px/1.3 ui-monospace,monospace;color:#94a3b8;max-height:120px;overflow:auto;margin-top:4px;white-space:pre-wrap;word-break:break-all}}
+.preview.empty{{color:var(--muted);font-style:italic}}
+details{{margin-top:4px}}
+summary{{cursor:pointer;font-size:10px;color:var(--muted);padding:2px 0;list-style:none}}
+summary::-webkit-details-marker{{display:none}}
+summary::before{{content:'▸ '}}
+details[open] summary::before{{content:'▾ '}}
+.full{{font:11px/1.3 ui-monospace,monospace;color:#64748b;max-height:300px;overflow:auto;margin-top:4px;white-space:pre-wrap;word-break:break-all}}
+.kv{{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin-top:4px;font-size:11px}}
+.kv .k{{color:var(--muted)}}
+.kv .v{{color:var(--text);overflow:hidden;text-overflow:ellipsis}}
+.tag{{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:10px;margin:1px}}
+.tag.ok{{border-color:var(--ok);color:var(--ok)}}.tag.bad{{border-color:var(--bad);color:var(--bad)}}.tag.warn{{border-color:var(--warn);color:var(--warn)}}
 </style>
 </head>
 <body>
@@ -5726,40 +5732,127 @@ details[open] summary::before{{content:'▾ '}}
   <div class="bar">
     <span id="dot" class="dot"></span>
     <span id="st" class="st">ready</span>
-    <button id="ref" class="btn" style="display:none" title="Обновить background job">↻</button>
+    <button id="ref" class="btn" style="display:none" title="poll job">↻</button>
     <button id="col" class="btn">⤢</button>
   </div>
   <div id="inputWrap" style="display:none">
-    <div class="lbl">Что вызвали</div>
-    <pre id="in"></pre>
+    <div class="lbl">input</div>
+    <div id="inPreview" class="preview empty">—</div>
+    <details><summary>full JSON</summary><div id="inFull" class="full"></div></details>
   </div>
   <div id="resultWrap">
-    <div class="lbl">Ответ / live</div>
-    <pre id="out" class="empty">waiting…</pre>
+    <div class="lbl">result</div>
+    <div id="outPreview" class="preview empty">waiting…</div>
+    <details><summary>full JSON</summary><div id="outFull" class="full"></div></details>
   </div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
 let jobId=null,timer=null,compact=false;
 const RE=/(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;
-function redact(v){{if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){{const o={{}};for(const[k,val]of Object.entries(v))o[k]=RE.test(k)?'***MASKED***':redact(val);return o}}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***MASKED***');return v}}
-function pretty(v){{if(v==null||v==='')return'—';try{{return JSON.stringify(redact(v),null,1)}}catch{{return String(v)}}}}
-function setOut(v){{const el=$('out');el.classList.remove('empty');el.textContent=pretty(v);resize()}}
-function setIn(v){{if(v==null)return;const w=$('inputWrap');$('in').textContent=pretty(v);w.style.display=compact?'none':'block'}}
-function st(t,k){{$('st').textContent=t;$('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'');resize()}}
+function redact(v){{if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){{const o={{}};for(const[k,val]of Object.entries(v))o[k]=RE.test(k)?'***':redact(val);return o}}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***');return v}}
+function jstr(v){{if(v==null||v==='')return'—';try{{return JSON.stringify(redact(v),null,1)}}catch{{return String(v)}}}}
 function resize(){{try{{window.openai?.notifyIntrinsicHeight?.(Math.min(document.body.scrollHeight+4,500))}}catch{{}}}}
+
+// ── Smart preview: extract human-readable fields ──
+function smartPreview(v){{
+  if(v==null)return'—';
+  const r=redact(v);
+  // Extract key fields in priority order
+  const parts=[];
+  // Status
+  const status=r?.status||r?.structuredContent?.status||r?.result?.status;
+  if(status)parts.push(`status=${{status}}`);
+  // Return code
+  const rc=r?.returncode??r?.structuredContent?.returncode??r?.result?.returncode;
+  if(rc!==undefined&&rc!==null)parts.push(`exit=${{rc}}`);
+  // Stdout (first 3 lines)
+  const stdout=r?.stdout||r?.structuredContent?.stdout||r?.result?.stdout;
+  if(stdout){{
+    const lines=String(stdout).split('\n').filter(l=>l.trim()).slice(0,3);
+    if(lines.length)parts.push(lines.join('\n'));
+  }}
+  // Error
+  const err=r?.error||r?.stderr||r?.structuredContent?.error;
+  if(err)parts.push(`ERR: ${{String(err).slice(0,120)}}`);
+  // Job tracking
+  const jid=r?.job_id||r?.structuredContent?.job_id;
+  if(jid)parts.push(`job=${{jid}}`);
+  // Duration
+  const dur=r?.duration_ms||r?.timing?.duration_ms;
+  if(dur)parts.push(`${{dur}}ms`);
+  // Agent count / tool count
+  const ac=r?.agents||r?.structuredContent?.agents;
+  if(Array.isArray(ac))parts.push(`agents=${{ac.length}}`);
+  const tc=r?.tools||r?.structuredContent?.tools;
+  if(Array.isArray(tc))parts.push(`tools=${{tc.length}}`);
+  // Content array (MCP text blocks)
+  if(Array.isArray(r?.content)){{
+    for(const c of r.content){{
+      if(c?.text){{parts.push(c.text.slice(0,200));break}}
+    }}
+  }}
+  // Fallback: first 200 chars of JSON
+  if(!parts.length){{
+    const j=jstr(r);
+    return j.length>200?j.slice(0,200)+'…':j;
+  }}
+  return parts.join('  |  ');
+}}
+
+function setOut(v){{
+  const r=redact(v);
+  const pv=$('outPreview');pv.classList.remove('empty');pv.textContent=smartPreview(v);
+  const ff=$('outFull');ff.textContent=jstr(v);
+  resize();
+}}
+function setIn(v){{
+  if(v==null)return;
+  const w=$('inputWrap');
+  $('inPreview').textContent=smartPreview(v);
+  $('inFull').textContent=jstr(v);
+  w.style.display=compact?'none':'block';
+  resize();
+}}
+function st(t,k){{$('st').textContent=t;$('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'');resize()}}
 function unwrap(r){{return r?.structuredContent||r?.result?.structuredContent||r?.result||r}}
-function trackJob(v){{const j=v?.job_id||v?.structuredContent?.job_id;const s=v?.status||v?.structuredContent?.status;if(!j)return;jobId=j;$('ref').style.display='inline-block';if(!['completed','failed','cancelled','expired'].includes(String(s||'').toLowerCase()))start(j)}}
-async function poll(j){{if(!window.openai?.callTool)return;st('polling…','w');try{{const r=unwrap(await window.openai.callTool('get_mcp_job',{{job_id:j,ack:false,verbose:true,include_raw:false}}));setOut(r);const s=String(r?.status||'').toLowerCase();if(['completed','failed','cancelled','expired'].includes(s)){{st('done',s==='completed'?'':'b');stop()}}else st(s||'running','w')}}catch(e){{st(String(e?.message||e),'b');stop()}}}}
-function start(j){{if(timer)return;timer=setInterval(()=>poll(j).catch(e=>st(String(e),'b')),1500);poll(j).catch(()=>{{}})}}
+function trackJob(v){{
+  const j=v?.job_id||v?.structuredContent?.job_id;
+  const s=v?.status||v?.structuredContent?.status;
+  if(!j)return;jobId=j;$('ref').style.display='inline-block';
+  if(!['completed','failed','cancelled','expired'].includes(String(s||'').toLowerCase()))start(j);
+}}
+async function poll(j){{
+  if(!window.openai?.callTool)return;st('polling…','w');
+  try{{
+    const r=unwrap(await window.openai.callTool('get_mcp_job',{{job_id:j,ack:false,verbose:true,include_raw:false}}));
+    setOut(r);
+    const s=String(r?.status||'').toLowerCase();
+    if(['completed','failed','cancelled','expired'].includes(s)){{st('done',s==='completed'?'':'b');stop()}}
+    else st(s||'running','w');
+  }}catch(e){{st(String(e?.message||e),'b');stop()}}
+}}
+function start(j){{if(timer)return;timer=setInterval(()=>poll(j).catch(e=>st(String(e),'b')),2000);poll(j).catch(()=>{{}})}}
 function stop(){{if(timer)clearInterval(timer);timer=null}}
 $('ref').addEventListener('click',()=>jobId?poll(jobId):st('no job','w'));
 $('col').addEventListener('click',()=>{{compact=!compact;$('inputWrap').style.display=compact?'none':'block';$('col').textContent=compact?'⤡':'⤢';resize()}});
-window.addEventListener('message',e=>{{const d=e.data||{{}};if(d.method==='ui/notifications/tool-input'){{setIn(d.params||d);st('input')}}if(d.method==='ui/notifications/tool-result'){{setOut(unwrap(d.params||d));st('result');trackJob(d.params||d)}}}});
-try{{setIn(window.openai?.toolInput);setOut(unwrap(window.openai?.toolOutput||window.openai?.toolResponseMetadata));window.openai?.getContext?.().then(c=>{{if(c){{setIn(c.toolInput||c);setOut(unwrap(c.toolOutput||c.toolResponseMetadata));trackJob(c)}}}}).catch(()=>{{}});st(window.openai?'ready':'no bridge',window.openai?'':'w')}}catch(e){{st(String(e),'b');setOut({{error:String(e)}})}}resize();
+window.addEventListener('message',e=>{{
+  const d=e.data||{{}};
+  if(d.method==='ui/notifications/tool-input'){{setIn(d.params||d);st('input')}}
+  if(d.method==='ui/notifications/tool-result'){{setOut(unwrap(d.params||d));st('result');trackJob(d.params||d)}}
+}});
+try{{
+  setIn(window.openai?.toolInput);
+  setOut(unwrap(window.openai?.toolOutput||window.openai?.toolResponseMetadata));
+  window.openai?.getContext?.().then(c=>{{if(c){{setIn(c.toolInput||c);setOut(unwrap(c.toolOutput||c.toolResponseMetadata));trackJob(c)}}}}).catch(()=>{{}});
+  st(window.openai?'ready':'no bridge',window.openai?'':'w');
+}}catch(e){{st(String(e),'b');setOut({{error:String(e)}})}}
+resize();
 </script>
 </body>
 </html>"""
+
+
 
 
 def _apps_sdk_resources_list() -> Dict[str, Any]:
