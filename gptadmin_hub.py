@@ -6180,8 +6180,10 @@ async def mcp_options():
 async def mcp_get(request: Request):
     try:
         _mcp_auth(request)
-    except HTTPException:
-        return _mcp_unauthorized()
+    except HTTPException as e:
+        if e.status_code == 401:
+            return _mcp_unauthorized()
+        raise
     return {"ok": True, "name": "GPTAdmin MCP", "tools": _apps_sdk_tools()}
 
 
@@ -6189,8 +6191,10 @@ async def mcp_get(request: Request):
 async def mcp_post(request: Request):
     try:
         _mcp_auth(request)
-    except HTTPException:
-        return _mcp_unauthorized()
+    except HTTPException as e:
+        if e.status_code == 401:
+            return _mcp_unauthorized()
+        raise
     body = await request.json()
     method = body.get("method")
     params = body.get("params") or {}
