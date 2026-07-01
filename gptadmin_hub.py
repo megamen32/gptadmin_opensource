@@ -5650,10 +5650,101 @@ async def oauth_token(request: Request):
     return {"access_token": token, "token_type": "Bearer", "expires_in": 43200}
 
 
+APPS_SDK_WIDGET_URI = "ui://widget/admin-v3.html"
+APPS_SDK_WIDGET_MIME = "text/html;profile=mcp-app"
+APPS_SDK_WIDGET_DOMAIN = "https://widgets-gptadmin.bezrabotnyi.com"
+
+
+def _apps_sdk_widget_html() -> str:
+    public_origin = html.escape(PUBLIC_ORIGIN.rstrip("/"), quote=True)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GPTAdmin MCP</title>
+  <style>
+    :root {{ color-scheme: dark; --bg:#070a12; --card:#111827; --line:#263244; --text:#e5eefc; --muted:#9fb0c7; --ok:#22c55e; --accent:#38bdf8; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; padding:18px; font:14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:linear-gradient(135deg,#070a12,#101827); }}
+    .card {{ border:1px solid var(--line); border-radius:18px; background:rgba(17,24,39,.86); padding:18px; box-shadow:0 18px 50px rgba(0,0,0,.28); }}
+    h1 {{ margin:0 0 6px; font-size:18px; letter-spacing:-.02em; }}
+    p {{ margin:0 0 14px; color:var(--muted); }}
+    .pill {{ display:inline-flex; gap:8px; align-items:center; border:1px solid rgba(56,189,248,.28); color:#dff7ff; background:rgba(56,189,248,.10); padding:7px 10px; border-radius:999px; font-size:12px; }}
+    .dot {{ width:8px; height:8px; border-radius:999px; background:var(--ok); box-shadow:0 0 18px var(--ok); }}
+    pre {{ white-space:pre-wrap; word-break:break-word; margin:14px 0 0; padding:12px; border-radius:12px; background:#020617; border:1px solid #1e293b; color:#dbeafe; max-height:360px; overflow:auto; }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>GPTAdmin MCP</h1>
+    <p>Connector UI template loaded. Use the tools from chat to inspect agents, list tools and call shell commands.</p>
+    <span class="pill"><span class="dot"></span> Template OK</span>
+    <pre id="payload">Waiting for tool result…</pre>
+  </main>
+  <script>
+    const out = document.getElementById('payload');
+    const render = (value) => {{
+      try {{ out.textContent = JSON.stringify(value, null, 2); }}
+      catch (_) {{ out.textContent = String(value); }}
+    }};
+    window.addEventListener('message', (event) => {{
+      const data = event.data || {{}};
+      if (data.method === 'ui/notifications/tool-result') render(data.params || data);
+      if (data.method === 'ui/notifications/tool-input') render(data.params || data);
+    }});
+    if (window.openai) {{
+      window.openai.getContext?.().then(render).catch(() => render({{status:'ready', origin:'{public_origin}'}}));
+    }} else {{
+      render({{status:'ready', origin:'{public_origin}'}});
+    }}
+  </script>
+</body>
+</html>"""
+
+
+def _apps_sdk_resources_list() -> Dict[str, Any]:
+    return {
+        "resources": [
+            {
+                "uri": APPS_SDK_WIDGET_URI,
+                "name": "GPTAdmin MCP Admin Widget",
+                "title": "GPTAdmin MCP",
+                "description": "Minimal GPTAdmin connector UI template.",
+                "mimeType": APPS_SDK_WIDGET_MIME,
+                "_meta": {
+                    "openai/widgetDescription": "GPTAdmin MCP connector UI for agents, tools and shell command results.",
+                    "openai/widgetDomain": APPS_SDK_WIDGET_DOMAIN,
+                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
+                },
+            }
+        ]
+    }
+
+
+def _apps_sdk_resource_read(uri: str) -> Dict[str, Any]:
+    if uri != APPS_SDK_WIDGET_URI:
+        raise HTTPException(404, f"unknown resource {uri}")
+    return {
+        "contents": [
+            {
+                "uri": APPS_SDK_WIDGET_URI,
+                "mimeType": APPS_SDK_WIDGET_MIME,
+                "text": _apps_sdk_widget_html(),
+                "_meta": {
+                    "openai/widgetDescription": "GPTAdmin MCP connector UI template loaded.",
+                    "openai/widgetDomain": APPS_SDK_WIDGET_DOMAIN,
+                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
+                },
+            }
+        ]
+    }
+
+
 def _apps_sdk_tools() -> List[Dict[str, Any]]:
     # Apps SDK surface mirrors the reduced MCP relay model.
-    template_uri = "ui://widget/admin-v3.html"
-    widget_domain = "https://widgets-gptadmin.bezrabotnyi.com"
+    template_uri = APPS_SDK_WIDGET_URI
+    widget_domain = APPS_SDK_WIDGET_DOMAIN
     widget_csp = {"connectDomains": [PUBLIC_ORIGIN], "resourceDomains": [widget_domain]}
     legacy_widget_csp = {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [widget_domain]}
     base_meta = {
@@ -5782,6 +5873,13 @@ async def mcp_post(request: Request):
             result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "gptadmin-hub", "version": str(BUILD_VERSION)}}
         elif method == "tools/list":
             result = {"tools": _apps_sdk_tools()}
+        elif method == "resources/list":
+            result = _apps_sdk_resources_list()
+        elif method == "resources/read":
+            uri = params.get("uri")
+            if not isinstance(uri, str) or not uri:
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "resource uri is required"}}
+            result = _apps_sdk_resource_read(uri)
         elif method == "tools/call":
             tool_name = params.get("name")
             args = params.get("arguments") or {}
