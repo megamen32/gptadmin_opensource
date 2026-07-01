@@ -1378,6 +1378,23 @@ def _bf_gate(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
+class AdminNoCacheMiddleware(BaseHTTPMiddleware):
+    """Force no-cache headers on /admin and /admin/api/* so the SPA poll
+    always sees fresh state from the hub (state files, audit, clients)."""
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        is_admin = (path == "/admin") or path.startswith("/admin/") or path.startswith("/admin/api/")
+        if is_admin and request.method in ("GET", "HEAD"):
+            response: Response = await call_next(request)
+            existing_etag = response.headers.get("etag")
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            if existing_etag and "ETag" not in response.headers:
+                response.headers["ETag"] = existing_etag
+            return response
+        return await call_next(request)
+
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         req_id = request.headers.get("x-request-id") or str(uuid.uuid4())
@@ -1440,6 +1457,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AccessLogMiddleware)
+app.add_middleware(AdminNoCacheMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -5389,13 +5407,38 @@ async def _admin_mcp_manage(req: AdminMcpManageReq) -> Dict[str, Any]:
     return {"ok": True, "target": selected, "action": action, "response": data}
 
 
+def _admin_etag_for(path):  # type: ignore[name-defined]
+    """Stable ETag from file mtime + size (mtime-based, opaque to clients)."""
+    st = path.stat()
+    sig = f"{st.st_mtime_ns}-{st.st_size}".encode()
+    return chr(34) + hashlib.md5(sig).hexdigest() + chr(34)  # double-quoted ETag
+
+
+def _admin_no_cache_headers(etag):
+    return {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "ETag": etag,
+    }
+
+
 @app.get("/admin")
 @app.get("/admin/")
-def admin_dashboard():
-    index = GPTADMIN_REPO_ROOT / "public" / "admin" / "index.html"
-    if index.exists():
-        return FileResponse(index, media_type="text/html")
-    return FileResponse(GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html", media_type="text/html")
+def admin_dashboard(request: Request):
+    """Serve admin SPA with no-cache + ETag/304 so the browser always
+    sees the latest HTML after a deploy."""
+    path = GPTADMIN_REPO_ROOT / "public" / "admin" / "index.html"
+    if not path.exists():
+        path = GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html"
+    etag = _admin_etag_for(path)
+    inm = (request.headers.get("if-none-match") or "").strip()
+    if inm and (inm == etag or inm == "*"):
+        return Response(status_code=304, headers=_admin_no_cache_headers(etag))
+    body = path.read_bytes()
+    headers = _admin_no_cache_headers(etag)
+    headers["Content-Type"] = "text/html; charset=utf-8"
+    return Response(content=body, headers=headers)
 
 
 @app.get("/admin/api/overview", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
