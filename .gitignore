@@ -51,3 +51,5 @@ scripts/check_mac_tunnel_matrix.env
 
 # --- Misc scratch ---
 1.html
+.gitpublic/replace
+.gitpublic/scan
