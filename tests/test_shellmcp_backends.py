@@ -18,8 +18,13 @@ def test_truncate_accepts_none_and_bytes():
 
 def test_linux_run_handles_non_utf8_stdout():
     import shellmcp_linux
-    res = shellmcp_linux.run("python3 -c 'import sys; sys.stdout.buffer.write(bytes([0x9d, 0xff, 0x41]))'", timeout=10)
-    assert res["returncode"] == 0
+    # Run as root to avoid sudo wrapper (CI/sandbox may not have sudo)
+    res = shellmcp_linux.run(
+        "python3 -c 'import sys; sys.stdout.buffer.write(bytes([0x9d, 0xff, 0x41]))'",
+        timeout=10,
+        env={"SHELLMCP_RUN_AS_ROOT": "1"},
+    )
+    assert res["returncode"] == 0, f"expected 0, got {res.get('returncode')}: {res.get('stderr','')}"
     assert "stdout" in res
     assert "A" in res["stdout"]
 
