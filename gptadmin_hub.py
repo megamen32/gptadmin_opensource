@@ -6275,10 +6275,13 @@ def list_tasks(srv: str, status: Optional[str] = Query(None), limit: Optional[in
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    # Forward headers from the exception (e.g. Retry-After on 429, WWW-Authenticate on 401).
+    fwd = dict(exc.headers) if getattr(exc, "headers", None) else None
     return Response(
         content=json.dumps({"detail": exc.detail, "status_code": exc.status_code}, ensure_ascii=False),
         status_code=exc.status_code,
         media_type="application/json",
+        headers=fwd,
     )
 
 
