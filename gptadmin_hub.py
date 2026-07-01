@@ -1011,10 +1011,17 @@ def ensure_license() -> None:
 
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
     _bf_gate(request)
-    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
-        log.warning("auth: bad/missing bearer rid=%s", rid())
-        raise HTTPException(401, "bad token")
-    _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
+    ip = _bf_client_ip(request)
+    try:
+        if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
+            log.warning("auth: bad/missing bearer rid=%s ip=%s", rid(), ip)
+            raise HTTPException(401, "bad token")
+        _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
+    except HTTPException as e:
+        if e.status_code == 401:
+            _bf_record_failure(ip)
+        raise
+    _bf_record_success(ip)
 
 
 # ---------------------------------------------------------------------------
@@ -1324,11 +1331,25 @@ def _remember_auth_client(
 
 
 
+def _bf_client_ip(request: Request) -> str:
+    """Extract real client IP, trusting x-forwarded-for / x-real-ip when behind a proxy."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        # first entry is the originating client; rest are intermediate proxies
+        first = xff.split(",", 1)[0].strip()
+        if first:
+            return first
+    xri = request.headers.get("x-real-ip", "").strip()
+    if xri:
+        return xri
+    return (request.client.host if request.client else "") or ""
+
+
 def _bf_gate(request: Request) -> None:
     """Brute-force gate: raise 429 if IP is currently locked out."""
     if _BRUTEFORCE_DISABLED:
         return
-    ip = (request.client.host if request.client else "") or ""
+    ip = _bf_client_ip(request)
     blocked, retry_after = _bf_check_lockout(ip)
     if blocked:
         raise HTTPException(
@@ -5645,18 +5666,25 @@ def _bf_record_success(ip: str) -> None:
 
 def _mcp_auth(request: Request) -> Dict[str, Any]:
     _bf_gate(request)
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(401, "unauthorized")
-    payload = _verify_jwt(auth.split(None, 1)[1])
-    _remember_auth_client(
-        request,
-        token_kind="oauth_bearer",
-        subject=str(payload.get("sub") or ""),
-        client_id=str(payload.get("client_id") or ""),
-        scope=str(payload.get("scope") or ""),
-    )
-    return payload
+    ip = _bf_client_ip(request)
+    try:
+        auth = request.headers.get("authorization", "")
+        if not auth.lower().startswith("bearer "):
+            raise HTTPException(401, "unauthorized")
+        payload = _verify_jwt(auth.split(None, 1)[1])
+        _remember_auth_client(
+            request,
+            token_kind="oauth_bearer",
+            subject=str(payload.get("sub") or ""),
+            client_id=str(payload.get("client_id") or ""),
+            scope=str(payload.get("scope") or ""),
+        )
+        return payload
+    except HTTPException as e:
+        if e.status_code == 401:
+            _bf_record_failure(ip)
+        raise
+    _bf_record_success(ip)
 
 
 def _mcp_unauthorized() -> Response:
