@@ -250,6 +250,9 @@ pre{
 
 /* ── Job/audit entry cards ── */
 .stackList{display:grid;gap:10px}
+.kvList{margin:4px 0 4px 0;padding:0;list-style:none}
+.kvList li{padding:2px 0;border-bottom:1px dashed var(--line)}
+.kvList li:last-child{border-bottom:none}
 .entryCard{
   display:grid;gap:10px;
   padding:14px 16px;
@@ -517,7 +520,67 @@ const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="
 const problems=(data.agents||[]).filter(a=>a.status!=='online');$('problemAgents').innerHTML=asTable(problems.slice(0,12),[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['age/meta',r=>`<span class="small muted">${esc(JSON.stringify(r.meta||{}).slice(0,260))}</span>`]]);
 $('recentJobsCompact').innerHTML=renderRecentMini((data.jobs?.recent||[]).slice(0,8));
 let agents=(data.agents||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')agents=agents.filter(r=>r.status===ast);$('agents').innerHTML=asTable(agents,[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span><br><span class="muted small">${esc(r.name)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['kind',r=>esc(r.kind)],['transport',r=>esc(r.transport)],['last seen',r=>esc(r.last_seen||'')],['capabilities/meta',r=>`${esc((r.capabilities||[]).join(', '))}<br><span class="muted small mono">${esc(JSON.stringify(r.meta||{}).slice(0,600))}</span>`]]);
-$('clients').innerHTML=asTable(data.clients||[],[['token',r=>`<span class="mono">${esc(r.token_id)}</span><br><span class="muted small">${esc(r.token_kind)} ${esc(r.client_id||'')}</span>`],['last',r=>`${esc(r.last_seen_fmt)}<br><span class="muted small">seen ${esc(r.seen_count)}</span>`],['IPs',r=>`${r.multiple_ips?'<span class="warn">multiple IP</span><br>':''}${(r.ips||[]).map(x=>'<span class="pill mono">'+esc(x)+'</span>').join('')}`],['UA',r=>`<span class="small">${esc((r.user_agents||[]).join('\n').slice(0,300))}</span>`],['',r=>`<button class="cancelBtn" onclick="revokeClient('${esc(r.key)}')">отозвать</button>`]]);
+// ===== Authorized clients (card-style) =====
+const CLIENT_CARD_UA_SHOWN = 2;
+const CLIENT_CARD_PATHS_SHOWN = 3;
+function renderClientCard(r) {
+  const ua = Array.isArray(r.user_agents) ? r.user_agents : [];
+  const paths = Array.isArray(r.paths) ? r.paths : [];
+  const uaMore = Math.max(0, ua.length - CLIENT_CARD_UA_SHOWN);
+  const pMore  = Math.max(0, paths.length - CLIENT_CARD_PATHS_SHOWN);
+  const uaId = 'uam_' + Math.random().toString(36).slice(2, 9);
+  const pId  = 'pm_'  + Math.random().toString(36).slice(2, 9);
+  return (
+    '<div class="entryCard">' +
+      '<div class="entryHead"><div class="entryMain">' +
+        '<div class="entryTitle">' +
+          '<span class="mono">' + esc(r.token_id) + '</span> ' +
+          (r.token_kind ? '<span class="pill">' + esc(r.token_kind) + '</span>' : '') +
+          (r.client_id ? ' <span class="muted small">' + esc(r.client_id) + '</span>' : '') +
+        '</div>' +
+        '<div class="row" style="margin-top:6px">' +
+        '<button class="bad" onclick="revokeClient(\'' + esc(r.key || r.token_id) + '\')">отозвать</button>' +
+        '</div>' +
+        '<div class="entrySub muted small">' +
+          'last seen <b>' + esc(r.last_seen_fmt || '') + '</b>' +
+          (r.seen_count != null ? ' · seen ' + esc(String(r.seen_count)) : '') +
+        '</div>' +
+        '<div class="entrySub">' +
+          (r.multiple_ips ? '<span class="warn small">multiple IP</span> ' : '') +
+          (Array.isArray(r.ips) ? r.ips.map(x => '<span class="pill mono small">' + esc(x) + '</span>').join(' ') : '') +
+        '</div>' +
+        '<div class="entrySub small">' +
+          '<b>UA:</b>' +
+          '<ul class="kvList">' +
+            ua.slice(0, CLIENT_CARD_UA_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+          '</ul>' +
+          (uaMore > 0
+            ? '<a class="muted small" onclick="document.getElementById(\'' + uaId + '\').hidden=false;this.hidden=true">+' + uaMore + ' more</a>' +
+              '<ul class="kvList" id="' + uaId + '" hidden>' +
+                ua.slice(CLIENT_CARD_UA_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+              '</ul>'
+            : '') +
+        '</div>' +
+        '<div class="entrySub small">' +
+          '<b>Paths:</b>' +
+          '<ul class="kvList">' +
+            paths.slice(0, CLIENT_CARD_PATHS_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+          '</ul>' +
+          (pMore > 0
+            ? '<a class="muted small" onclick="document.getElementById(\'' + pId + '\').hidden=false;this.hidden=true">+' + pMore + ' more</a>' +
+              '<ul class="kvList" id="' + pId + '" hidden>' +
+                paths.slice(CLIENT_CARD_PATHS_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+              '</ul>'
+            : '') +
+        '</div>' +
+      '</div></div>' +
+    '</div>'
+  );
+}
+const _clients = data.clients || [];
+$('clients').innerHTML = _clients.length
+  ? '<div class="stackList">' + _clients.map(renderClientCard).join('') + '</div>'
+  : '<p class="muted">пусто</p>';
 let jobs=(data.jobs?.recent||[]).filter(r=>includesText(r,$('jobFilter')?.value||''));const jst=$('jobStatus')?.value||'all';if(jst==='queued')jobs=jobs.filter(r=>String(r.status||'').startsWith('queued'));else if(jst!=='all')jobs=jobs.filter(r=>r.status===jst);$('jobs').innerHTML=jobs.length?`<div class="stackList">${jobs.map(renderJobCard).join('')}</div>`:'<p class="muted">пусто</p>';
 let audit=(data.audit||[]).filter(r=>includesText(r,$('auditFilter')?.value||''));$('audit').innerHTML=audit.length?`<div class="stackList">${audit.map(renderAuditCard).join('')}</div>`:'<p class="muted">пусто</p>';$('rawJson').textContent=JSON.stringify(data,null,2)}
 async function refreshAll(){try{$('status').textContent='loading…';const lim=$('auditLimit')?.value||160;state=await api('/admin/api/overview?limit='+encodeURIComponent(lim));renderAll();$('status').textContent='ok'}catch(e){$('status').textContent='ERR '+e.message}}
