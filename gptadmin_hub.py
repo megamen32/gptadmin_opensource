@@ -1027,15 +1027,17 @@ def ensure_license() -> None:
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
     _bf_gate(request)
     ip = _bf_client_ip(request)
-    try:
-        if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
-            log.warning("auth: bad/missing bearer rid=%s ip=%s", rid(), ip)
-            raise HTTPException(401, "bad token")
-        _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
-    except HTTPException as e:
-        if e.status_code == 401:
-            _bf_record_failure(ip)
-        raise
+    if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
+        log.warning("auth: bad/missing bearer rid=%s ip=%s", rid(), ip)
+        _count, _locked_until, lockout_s = _bf_record_failure(ip)
+        if lockout_s > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many failed attempts; locked for {lockout_s}s",
+                headers={"Retry-After": str(lockout_s)},
+            )
+        raise HTTPException(401, "bad token")
+    _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
     _bf_record_success(ip)
 
 
@@ -5800,7 +5802,13 @@ def _mcp_auth(request: Request) -> Dict[str, Any]:
         return payload
     except HTTPException as e:
         if e.status_code == 401:
-            _bf_record_failure(ip)
+            _count, _locked_until, lockout_s = _bf_record_failure(ip)
+            if lockout_s > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"too many failed attempts; locked for {lockout_s}s",
+                    headers={"Retry-After": str(lockout_s)},
+                )
         raise
 
 
