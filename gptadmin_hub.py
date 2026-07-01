@@ -1315,7 +1315,7 @@ def _remember_auth_client(
     key = f"{token_kind}:{token_id}"
     entry = authorized_clients.setdefault(
         key,
-        {"key": key, "token_kind": token_kind, "token_id": token_id, "first_seen": now, "last_seen": now, "seen_count": 0, "ips": [], "user_agents": [], "hosts": [], "paths": [], "openai_ephemeral_user_ids": [], "openai_gpt_ids": [], "openai_conversation_ids": []},
+        {"key": key, "token_kind": token_kind, "token_id": token_id, "first_seen": now, "last_seen": now, "seen_count": 0, "enabled": True, "disabled_at": None, "disabled_reason": None, "ips": [], "user_agents": [], "hosts": [], "paths": [], "openai_ephemeral_user_ids": [], "openai_gpt_ids": [], "openai_conversation_ids": []},
     )
     entry["last_seen"] = now
     entry["seen_count"] = int(entry.get("seen_count") or 0) + 1
@@ -5167,9 +5167,17 @@ def _status_counts(rows: List[Dict[str, Any]], key: str = "status") -> Dict[str,
 def _admin_public_auth_client(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     ips = list(entry.get("ips") or [])
     uas = list(entry.get("user_agents") or [])
+    # Legacy entries without an explicit "enabled" flag are treated as enabled.
+    enabled = entry.get("enabled")
+    if enabled is None:
+        enabled = True
     return {
         "key": key,
         "token_kind": entry.get("token_kind"),
+        "enabled": bool(enabled),
+        "disabled_at": entry.get("disabled_at"),
+        "disabled_reason": entry.get("disabled_reason"),
+        "re_enabled_at": entry.get("re_enabled_at"),
         "token_id": entry.get("token_id"),
         "subject": entry.get("subject"),
         "client_id": entry.get("client_id"),
@@ -5418,15 +5426,48 @@ def admin_api_clients():
     return {"clients": clients, "count": len(clients), "multiple_ip": [c for c in clients if c.get("multiple_ips")]}
 
 
+def _set_client_enabled(client_key: str, enabled: bool, *, reason: str = "") -> Dict[str, Any]:
+    if client_key not in authorized_clients:
+        raise HTTPException(404, f"client not found: {client_key}")
+    entry = authorized_clients[client_key]
+    if not isinstance(entry, dict):
+        raise HTTPException(500, "client entry malformed")
+    now = int(time.time())
+    entry["enabled"] = bool(enabled)
+    if enabled:
+        entry["disabled_at"] = None
+        entry["disabled_reason"] = None
+        entry["re_enabled_at"] = now
+    else:
+        entry["disabled_at"] = now
+        entry["disabled_reason"] = reason or "disabled by admin"
+    _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
+    event = "client_enabled" if enabled else "client_disabled"
+    _audit(
+        event,
+        detail=f"{event} client={client_key} token_id={entry.get('token_id', '?')} reason={entry.get('disabled_reason') if not enabled else ''}",
+    )
+    return {"ok": True, "key": client_key, "enabled": entry["enabled"], "token_id": entry.get("token_id")}
+
+
+# Soft-disable: record stays in state but enabled=false.  Bearer requests from
+# this client_key get a 403 from _mcp_auth.  Use /enable to undo.
+@app.post("/admin/api/clients/{client_key}/disable", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_disable_client(client_key: str, reason: str = Query("", description="Optional human-readable reason for audit")):
+    return _set_client_enabled(client_key, False, reason=reason.strip())
+
+
+@app.post("/admin/api/clients/{client_key}/enable", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_enable_client(client_key: str):
+    return _set_client_enabled(client_key, True)
+
+
+# Backwards-compatible soft alias: legacy rev-btn / scripts that DELETE should
+# now mean "disable".  Hard-revoke is available via /admin/api/clients/revoke-all.
 @app.delete("/admin/api/clients/{client_key}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def admin_revoke_client(client_key: str):
-    """Revoke a single OAuth client by removing it from the registry."""
-    if client_key in authorized_clients:
-        entry = authorized_clients.pop(client_key)
-        _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
-        _audit("client_revoke", detail=f"revoked client {client_key} ({entry.get('token_id', '?')})")
-        return {"ok": True, "revoked": client_key, "token_id": entry.get("token_id")}
-    raise HTTPException(404, f"client not found: {client_key}")
+    """Legacy alias for /disable.  Record stays in state with enabled=false."""
+    return _set_client_enabled(client_key, False, reason="legacy DELETE /disable alias")
 
 
 @app.post("/admin/api/clients/revoke-all", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -5569,6 +5610,21 @@ def _mcp_auth(request: Request) -> Dict[str, Any]:
         client_id=str(payload.get("client_id") or ""),
         scope=str(payload.get("scope") or ""),
     )
+    # Block soft-disabled clients. Backward-compatible: legacy entries without
+    # explicit "enabled" are treated as enabled (truthy default).
+    try:
+        token_id = _audit_token_id(request)
+        if token_id:
+            key = f"oauth_bearer:{token_id}"
+            entry = authorized_clients.get(key)
+            if isinstance(entry, dict) and entry.get("enabled") is False:
+                detail = entry.get("disabled_reason") or "client disabled by admin"
+                log.warning("mcp_auth: blocked disabled client key=%s subject=%s", key, payload.get("sub"))
+                raise HTTPException(403, f"client disabled: {detail}")
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.debug("mcp_auth: soft-disable lookup skipped err=%s", _e)
     return payload
 
 
