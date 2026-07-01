@@ -541,8 +541,27 @@ if IS_MACOS:
 
     def svc_status_multi(labels_and_paths):
         for label, path in labels_and_paths:
-            if path.exists():
-                run(['launchctl', 'list', label], check=False)
+            if not path.exists():
+                print(f'  {c_bold(label):<40} {c_red("● missing")}')
+                continue
+            r = run(['launchctl', 'list', label], check=False)
+            out = r.stdout or ''
+            pid = '0'
+            status = 'unknown'
+            for line in out.splitlines():
+                if line.startswith('\t"PID"'):
+                    pid = line.split('=')[-1].strip().rstrip(';')
+                elif line.startswith('\t"state"'):
+                    status = line.split('=')[-1].strip().strip('"').rstrip(';')
+            if status == 'running':
+                status_str = c_green('● running')
+            elif status in ('exited',):
+                status_str = c_yellow('● exited')
+            elif status in ('not loaded',):
+                status_str = c_red('● not loaded')
+            else:
+                status_str = c_yellow('● ' + status)
+            print(f'  {c_bold(label):<40} {status_str}  PID {c_dim(pid):<8}')
 
     def svc_start_multi(labels_and_paths):
         for label, path in labels_and_paths:
@@ -701,8 +720,24 @@ WantedBy={wanted_by}
 
     def svc_status_multi(names_and_paths):
         names = [n for n, p in names_and_paths if p.exists()]
-        if names:
-            run(_systemctl_cmd('--no-pager', 'status', *names), check=False)
+        if not names:
+            return
+        for name in names:
+            is_active = run(_systemctl_cmd('is-active', name), check=False)
+            active = is_active.stdout.strip() if is_active.stdout else 'unknown'
+            is_enabled = run(_systemctl_cmd('is-enabled', name), check=False)
+            enabled = is_enabled.stdout.strip() if is_enabled.stdout else 'unknown'
+            pid_out = run(_systemctl_cmd('show', name, '--property=MainPID', '--value'), check=False)
+            pid = pid_out.stdout.strip() if pid_out.stdout else '0'
+            if active == 'active':
+                status_str = c_green('● active')
+            elif active in ('inactive', 'deactivating'):
+                status_str = c_red('● inactive')
+            elif active in ('failed',):
+                status_str = c_red('● failed')
+            else:
+                status_str = c_yellow('● ' + active)
+            print(f'  {c_bold(name):<40} {status_str}  PID {c_dim(pid):<8} {c_dim("enabled" if enabled == "enabled" else enabled)}')
 
     def svc_start_multi(names_and_paths):
         names = [n for n, p in names_and_paths if p.exists()]
@@ -2890,7 +2925,7 @@ def main():
 
     sub.add_parser('version', help='Показать версию и информацию о сборке').set_defaults(func=cmd_version)
     sub.add_parser('doctor', help='Проверка здоровья: сервисы, порты, конфиг, токены').set_defaults(func=cmd_doctor)
-    ap_setup = sub.add_parser('setup', help='Interactive installation & config')
+    ap_setup = sub.add_parser('setup', help='Интерактивная установка и настройка')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-shellmcp')
@@ -2898,7 +2933,7 @@ def main():
     ap_setup.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_setup.set_defaults(func=setup_interactive)
 
-    ap_update = sub.add_parser('update', help='Обновить существующую установку in-place')
+    ap_update = sub.add_parser('update', help='Обновить установленную версию')
     ap_update.add_argument('--pkg-all')
     ap_update.add_argument('--pkg-hub')
     ap_update.add_argument('--pkg-shellmcp')
@@ -2911,35 +2946,35 @@ def main():
     ap_update.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_update.set_defaults(func=cmd_update)
 
-    ap_config = sub.add_parser('config', help='Настроить компоненты GPTAdmin')
+    ap_config = sub.add_parser('config', help='Настроить компоненты (shellmcp transport)')
     config_sub = ap_config.add_subparsers(dest='config_target')
-    ap_conf = config_sub.add_parser('shellmcp', help='Настроить ShellMCP transport: polling/webhook/websocket')
+    ap_conf = config_sub.add_parser('shellmcp', help='Настроить транспорт shellmcp: polling/webhook/websocket')
     ap_conf.add_argument('--transport', choices=['polling', 'webhook', 'websocket'])
     ap_conf.add_argument('--hub-url')
     ap_conf.add_argument('--shellmcp-url', '--shell-url', dest='shellmcp_url', help='URL ShellMCP agent для webhook режима')
     ap_conf.set_defaults(func=cmd_config_shellmcp)
 
-    sub.add_parser('status').set_defaults(func=cmd_status)
-    sub.add_parser('start').set_defaults(func=cmd_start)
-    sub.add_parser('stop').set_defaults(func=cmd_stop)
-    sub.add_parser('restart').set_defaults(func=cmd_restart)
+    sub.add_parser('status', help='Статус сервисов').set_defaults(func=cmd_status)
+    sub.add_parser('start', help='Запустить сервисы').set_defaults(func=cmd_start)
+    sub.add_parser('stop', help='Остановить сервисы').set_defaults(func=cmd_stop)
+    sub.add_parser('restart', help='Перезапустить сервисы').set_defaults(func=cmd_restart)
 
-    hub = sub.add_parser('hub')
+    hub = sub.add_parser('hub', help='Управление хабом')
     hub_sub = hub.add_subparsers(dest='hub_cmd')
-    hub_sub.add_parser('status').set_defaults(func=cmd_status)
-    hub_sub.add_parser('start').set_defaults(func=cmd_start)
-    hub_sub.add_parser('stop').set_defaults(func=cmd_stop)
-    hub_sub.add_parser('restart').set_defaults(func=cmd_restart)
+    hub_sub.add_parser('status', help='Статус хаба').set_defaults(func=cmd_status)
+    hub_sub.add_parser('start', help='Запустить хаб').set_defaults(func=cmd_start)
+    hub_sub.add_parser('stop', help='Остановить хаб').set_defaults(func=cmd_stop)
+    hub_sub.add_parser('restart', help='Перезапустить хаб').set_defaults(func=cmd_restart)
 
     for alias in ('shell', 'shellmcp'):
         rp = sub.add_parser(alias)
         rs = rp.add_subparsers(dest='svc_cmd')
         rs.add_parser('status').set_defaults(func=cmd_status)
 
-    sub.add_parser('enable').set_defaults(func=cmd_enable)
-    sub.add_parser('disable').set_defaults(func=cmd_disable)
+    sub.add_parser('enable', help='Включить автозапуск сервисов').set_defaults(func=cmd_enable)
+    sub.add_parser('disable', help='Выключить автозапуск сервисов').set_defaults(func=cmd_disable)
 
-    ap_logs = sub.add_parser('logs', help='Журналы сервисов (по умолчанию — все; shell = shell agent)')
+    ap_logs = sub.add_parser('logs', help='Логи сервисов (по умолчанию все; shell = shellmcp)')
     ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
@@ -2947,52 +2982,52 @@ def main():
     ap_tok.add_argument('--show-shellmcp', action='store_true', help='Показать SHELLMCP_TOKEN (опасно!)')
     ap_tok.set_defaults(func=cmd_tokens)
 
-    ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить новый Bearer token для GPTAdmin MCP client')
+    ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить Bearer-токен для MCP-клиента')
     ap_mcp_token_top.add_argument('name', nargs='?', help='client_id / имя токена, например codex-work')
     ap_mcp_token_top.add_argument('--ttl-days', type=int, default=365)
     ap_mcp_token_top.add_argument('--env-key', help='Имя переменной для сохранения в gptadmin.env')
     ap_mcp_token_top.add_argument('--no-save', action='store_true', help='Только напечатать token, не сохранять в gptadmin.env')
     ap_mcp_token_top.set_defaults(func=cmd_mcp_token)
 
-    ap_mcp_connect_top = sub.add_parser('connect-mcp', aliases=['mcp-connect'], help='Установить GPTAdmin как MCP в Codex/Claude/OpenCode')
+    ap_mcp_connect_top = sub.add_parser('connect-mcp', aliases=['mcp-connect'], help='Установить GPTAdmin как MCP в Claude/Codex/OpenCode')
     ap_mcp_connect_top.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode'], help='Кого настроить; можно повторять. По умолчанию все найденные')
     ap_mcp_connect_top.add_argument('--fresh', action='store_true', help='Выпустить новые токены для AI MCP clients')
     ap_mcp_connect_top.add_argument('--no-print-token', action='store_true', help='Не печатать custom Bearer token')
     ap_mcp_connect_top.set_defaults(func=cmd_mcp_connect)
 
-    ap_rot = sub.add_parser('rotate', help='Переиздать токен hub или shell agent')
+    ap_rot = sub.add_parser('rotate', help='Переиздать токен (hub/shellmcp/mcp)')
     ap_rot.add_argument('which', metavar='which', help='hub | shell')
     ap_rot.set_defaults(func=cmd_rotate)
 
-    ap_port = sub.add_parser('port', help='Сменить локальный порт хаба')
+    ap_port = sub.add_parser('port', help='Сменить порт хаба')
     ap_port.add_argument('port', type=int)
     ap_port.set_defaults(func=cmd_port)
 
-    ap_url = sub.add_parser('set-url', help='Задать публичный HTTPS URL и отключить FRP')
+    ap_url = sub.add_parser('set-url', help='Задать публичный URL хаба (отключает FRP)')
     ap_url.add_argument('url')
     ap_url.set_defaults(func=cmd_seturl)
 
-    ap_mcp = sub.add_parser('mcp', help='Управление stdio MCP relay agents')
+    ap_mcp = sub.add_parser('mcp', help='Управление MCP relay-агентами')
     mcp_sub = ap_mcp.add_subparsers(dest='mcp_cmd')
 
-    ap_mcp_list = mcp_sub.add_parser('list', help='List configured MCP servers')
+    ap_mcp_list = mcp_sub.add_parser('list', help='Список настроенных MCP-серверов')
     ap_mcp_list.add_argument('--json', action='store_true')
     ap_mcp_list.set_defaults(func=cmd_mcp_list)
 
-    ap_mcp_token = mcp_sub.add_parser('token', help='Выпустить Bearer token для GPTAdmin MCP client')
+    ap_mcp_token = mcp_sub.add_parser('token', help='Выпустить Bearer-токен для MCP-клиента')
     ap_mcp_token.add_argument('name', nargs='?', help='client_id / имя токена')
     ap_mcp_token.add_argument('--ttl-days', type=int, default=365)
     ap_mcp_token.add_argument('--env-key')
     ap_mcp_token.add_argument('--no-save', action='store_true')
     ap_mcp_token.set_defaults(func=cmd_mcp_token)
 
-    ap_mcp_connect = mcp_sub.add_parser('connect', aliases=['self-install', 'install-self'], help='Установить GPTAdmin как MCP в Codex/Claude/OpenCode')
+    ap_mcp_connect = mcp_sub.add_parser('connect', aliases=['self-install', 'install-self'], help='Установить GPTAdmin как MCP в Claude/Codex/OpenCode')
     ap_mcp_connect.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode'])
     ap_mcp_connect.add_argument('--fresh', action='store_true')
     ap_mcp_connect.add_argument('--no-print-token', action='store_true')
     ap_mcp_connect.set_defaults(func=cmd_mcp_connect)
 
-    ap_mcp_add = mcp_sub.add_parser('add', help='Add MCP server, Claude/Codex-style')
+    ap_mcp_add = mcp_sub.add_parser('add', help='Добавить MCP-сервер (стиль Claude/Codex)')
     ap_mcp_add.add_argument('name')
     ap_mcp_add.add_argument('command', nargs='?', help='Command, e.g. npx')
     ap_mcp_add.add_argument('args', nargs=argparse.REMAINDER, help='Command args, e.g. -y mcp-remote https://...')
@@ -3007,23 +3042,23 @@ def main():
     ap_mcp_add.add_argument('--force', action='store_true')
     ap_mcp_add.set_defaults(func=cmd_mcp_add)
 
-    ap_mcp_rm = mcp_sub.add_parser('remove', aliases=['rm'], help='Remove MCP server from config')
+    ap_mcp_rm = mcp_sub.add_parser('remove', aliases=['rm'], help='Удалить MCP-сервер из конфига')
     ap_mcp_rm.add_argument('name')
     ap_mcp_rm.add_argument('--keep-service', action='store_true')
     ap_mcp_rm.add_argument('--backend', choices=['systemd', 'launchd', 'windows-task'])
     ap_mcp_rm.set_defaults(func=cmd_mcp_remove)
 
-    ap_mcp_edit = mcp_sub.add_parser('edit', help='Edit /etc/gptadmin/mcp.json')
+    ap_mcp_edit = mcp_sub.add_parser('edit', help='Редактировать mcp.json')
     ap_mcp_edit.set_defaults(func=cmd_mcp_edit)
 
-    ap_mcp_cat = mcp_sub.add_parser('cat', help='Print GPTAdmin MCP config or generated agent config')
+    ap_mcp_cat = mcp_sub.add_parser('cat', help='Показать MCP-конфиг')
     ap_mcp_cat.add_argument('name', nargs='?')
     ap_mcp_cat.set_defaults(func=cmd_mcp_cat)
 
     for action_name, func, help_text in [
-        ('import', cmd_mcp_import, 'Import MCP servers from Claude/Codex config'),
-        ('export', cmd_mcp_export, 'Export MCP servers to Claude/Codex config'),
-        ('sync', cmd_mcp_sync, 'Import then export merged Claude/Codex config'),
+        ('import', cmd_mcp_import, 'Импортировать MCP из Claude/Codex'),
+        ('export', cmd_mcp_export, 'Экспортировать MCP в Claude/Codex'),
+        ('sync', cmd_mcp_sync, 'Синхронизировать MCP с Claude/Codex'),
     ]:
         p = mcp_sub.add_parser(action_name, help=help_text)
         p.add_argument('format', choices=['claude-desktop', 'claude-code', 'codex'])
@@ -3037,21 +3072,21 @@ def main():
         p.set_defaults(func=func)
 
     for action_name, func, help_text in [
-        ('render', cmd_mcp_render, 'Render supervisor config'),
-        ('install', cmd_mcp_install, 'Install/start MCP service'),
-        ('status', cmd_mcp_status, 'Show MCP service status'),
+        ('render', cmd_mcp_render, 'Показать конфиг супервизора'),
+        ('install', cmd_mcp_install, 'Установить/запустить MCP-сервис'),
+        ('status', cmd_mcp_status, 'Статус MCP-сервисов'),
     ]:
         p = mcp_sub.add_parser(action_name, help=help_text)
         p.add_argument('name', nargs='?')
         p.add_argument('--backend', choices=['systemd', 'launchd', 'windows-task'])
         p.set_defaults(func=func)
 
-    ap_tun = sub.add_parser('tunnel', help='Управление FRP-туннелем')
+    ap_tun = sub.add_parser('tunnel', help='Управление туннелем (FRP/Cloudflare)')
     tun_sub = ap_tun.add_subparsers(dest='tun_cmd')
-    tun_sub.add_parser('status').set_defaults(func=cmd_tunnel_status)
-    tun_sub.add_parser('logs').set_defaults(func=cmd_tunnel_logs)
-    tun_sub.add_parser('enable').set_defaults(func=cmd_tunnel_enable)
-    tun_sub.add_parser('disable').set_defaults(func=cmd_tunnel_disable)
+    tun_sub.add_parser('status', help='Статус туннеля').set_defaults(func=cmd_tunnel_status)
+    tun_sub.add_parser('logs', help='Логи туннеля').set_defaults(func=cmd_tunnel_logs)
+    tun_sub.add_parser('enable', help='Включить туннель').set_defaults(func=cmd_tunnel_enable)
+    tun_sub.add_parser('disable', help='Выключить туннель').set_defaults(func=cmd_tunnel_disable)
 
     sub.add_parser('uninstall', help='Полное удаление GPTAdmin и всех сервисов').set_defaults(func=cmd_uninstall)
 
