@@ -468,6 +468,16 @@ pre{
   </div>
 
   <div style="margin-top:16px">
+    <h3 style="font-size:13px;margin-bottom:8px">UI tolerations (client-side)</h3>
+    <div class="row">
+      <label class="small muted" for="maxActiveIps">Active IPs tolerance per token:</label>
+      <input id="maxActiveIps" type="number" min="1" max="50" value="3" style="width:80px" oninput="onMaxActiveIpsChange()">
+      <span class="muted small">warn badge appears when a token's IP count exceeds this</span>
+    </div>
+    <p class="muted small" style="margin-top:6px">Stored in <code>localStorage</code> as <code>gptadmin_max_active_ips</code>. Pure client-side hint for the admin UI; the server-side limit (block #6 / #9) is unrelated.</p>
+  </div>
+
+  <div style="margin-top:16px">
     <h3 style="font-size:13px;margin-bottom:8px">Выпустить MCP bearer-токен</h3>
     <div class="row">
       <input id="secMcpTokenName" placeholder="client_id (например codex-work)" style="min-width:240px">
@@ -664,6 +674,24 @@ const AGENT_CARD_CAPS_SHOWN = 5;
 const AGENT_CARD_META_KEYS_SHOWN = 5;
 const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
 const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
+// getMaxActiveIps / onMaxActiveIpsChange — block #8 (client-side tolerance).
+// Reads/writes gptadmin_max_active_ips in localStorage. Defaults to 3.
+function getMaxActiveIps() {
+  const v = parseInt(localStorage.getItem('gptadmin_max_active_ips') || '3', 10);
+  return Number.isFinite(v) && v > 0 ? v : 3;
+}
+function onMaxActiveIpsChange() {
+  const el = $('maxActiveIps');
+  if (!el) return;
+  const v = parseInt(el.value || '3', 10);
+  const safe = Number.isFinite(v) && v > 0 ? v : 3;
+  localStorage.setItem('gptadmin_max_active_ips', String(safe));
+  if (state) renderAll();
+}
+function initMaxActiveIpsInput() {
+  const el = $('maxActiveIps');
+  if (el) el.value = String(getMaxActiveIps());
+}
 // topN: array top-N helper (avoids the .slice0N pattern that the acceptance grep flags)
 function topN(arr, n) {
   const out = [];
@@ -825,7 +853,7 @@ async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpNa
 
 async function getJob(){try{const id=$('jobId').value.trim();const j=await api('/mcp-relay/job/'+encodeURIComponent(id)+'?verbose=true&include_raw=true');$('result').textContent=JSON.stringify(j,null,2);refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 function formatArgs(){try{$('args').value=JSON.stringify(JSON.parse($('args').value||'{}'),null,2)}catch(e){$('result').textContent='Bad JSON: '+e.message}}
-$('token').value=localStorage.getItem('gptadmin_ctl_token')||'';showView(currentView);refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
+$('token').value=localStorage.getItem('gptadmin_ctl_token')||'';initMaxActiveIpsInput();showView(currentView);refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
 
 // ===== Security management =====
 async function loadSecurityEnv(){
