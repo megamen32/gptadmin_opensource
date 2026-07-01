@@ -36,6 +36,51 @@ def _jsonrpc_call(client: TestClient, name: str, arguments: dict) -> dict:
     return payload["result"]["structuredContent"]
 
 
+
+
+def _jsonrpc_method(client: TestClient, method: str, params: dict | None = None) -> dict:
+    token = gptadmin_hub._sign_jwt({
+        "sub": "unit-test",
+        "client_id": "mcp-connector-compat-test",
+        "scope": "gptadmin.read gptadmin.exec",
+    })
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert "error" not in payload, payload
+    return payload["result"]
+
+
+def test_mcp_widget_template_resource_is_registered_and_readable():
+    client = _client()
+    tools = _jsonrpc_method(client, "tools/list")
+    template_uris = {
+        tool.get("_meta", {}).get("ui", {}).get("resourceUri")
+        for tool in tools["tools"]
+        if tool.get("_meta", {}).get("ui", {}).get("resourceUri")
+    }
+    template_uris |= {
+        tool.get("_meta", {}).get("openai/outputTemplate")
+        for tool in tools["tools"]
+        if tool.get("_meta", {}).get("openai/outputTemplate")
+    }
+    assert template_uris == {"ui://widget/admin-v3.html"}
+
+    resources = _jsonrpc_method(client, "resources/list")
+    assert any(
+        item.get("uri") == "ui://widget/admin-v3.html" and item.get("mimeType") == "text/html;profile=mcp-app"
+        for item in resources["resources"]
+    )
+
+    read = _jsonrpc_method(client, "resources/read", {"uri": "ui://widget/admin-v3.html"})
+    assert read["contents"][0]["uri"] == "ui://widget/admin-v3.html"
+    assert read["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
+    assert "GPTAdmin MCP" in read["contents"][0]["text"]
+
 def test_actions_openapi_exposes_camelcase_and_snake_case_connector_operations():
     response = _client().get("/actions/openapi.yaml")
     assert response.status_code == 200
