@@ -5697,168 +5697,67 @@ def _apps_sdk_widget_html() -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GPTAdmin MCP</title>
-  <style>
-    :root {{ color-scheme: dark; --bg:#070a12; --card:#111827; --line:#263244; --text:#e5eefc; --muted:#9fb0c7; --ok:#22c55e; --warn:#f59e0b; --bad:#fb7185; --accent:#38bdf8; }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin:0; padding:16px; font:13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:linear-gradient(135deg,#070a12,#101827); }}
-    .card {{ border:1px solid var(--line); border-radius:18px; background:rgba(17,24,39,.88); padding:16px; box-shadow:0 18px 50px rgba(0,0,0,.28); }}
-    .head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }}
-    h1 {{ margin:0 0 4px; font-size:18px; letter-spacing:-.02em; }}
-    .sub {{ margin:0; color:var(--muted); }}
-    .pill {{ display:inline-flex; gap:8px; align-items:center; border:1px solid rgba(56,189,248,.28); color:#dff7ff; background:rgba(56,189,248,.10); padding:7px 10px; border-radius:999px; font-size:12px; white-space:nowrap; }}
-    .pill.warn {{ border-color:rgba(245,158,11,.36); background:rgba(245,158,11,.12); color:#fde68a; }}
-    .pill.bad {{ border-color:rgba(251,113,133,.36); background:rgba(251,113,133,.12); color:#fecdd3; }}
-    .dot {{ width:8px; height:8px; border-radius:999px; background:var(--ok); box-shadow:0 0 18px var(--ok); }}
-    .warn .dot {{ background:var(--warn); box-shadow:0 0 18px var(--warn); }}
-    .bad .dot {{ background:var(--bad); box-shadow:0 0 18px var(--bad); }}
-    details {{ margin-top:10px; border:1px solid #1e293b; border-radius:14px; background:rgba(2,6,23,.54); overflow:hidden; }}
-    summary {{ cursor:pointer; list-style:none; padding:10px 12px; color:#dbeafe; font-weight:750; border-bottom:1px solid #1e293b; }}
-    summary::-webkit-details-marker {{ display:none; }}
-    summary:before {{ content:'▸'; display:inline-block; margin-right:8px; color:var(--accent); transition:transform .15s ease; }}
-    details[open] summary:before {{ transform:rotate(90deg); }}
-    pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:12px; color:#dbeafe; max-height:420px; overflow:auto; tab-size:2; }}
-    .empty {{ color:var(--muted); }}
-    .toolbar {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
-    button {{ border:1px solid rgba(56,189,248,.28); background:rgba(56,189,248,.10); color:#dff7ff; border-radius:10px; padding:7px 10px; cursor:pointer; font-weight:700; }}
-    button:hover {{ background:rgba(56,189,248,.18); }}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPTAdmin MCP</title>
+<style>
+:root{{color-scheme:dark;--bg:#070a12;--card:#0f1623;--line:#1e293b;--text:#cbd5e1;--muted:#64748b;--ok:#22c55e;--warn:#f59e0b;--bad:#f43f5e;--accent:#818cf8}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font:12px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;color:var(--text);background:var(--bg);padding:8px}}
+.card{{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:10px;max-height:600px;overflow:auto}}
+.bar{{display:flex;align-items:center;gap:6px;margin-bottom:8px}}
+.dot{{width:6px;height:6px;border-radius:50%;background:var(--ok);flex-shrink:0}}
+.dot.w{{background:var(--warn)}}.dot.b{{background:var(--bad)}}
+.st{{font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.btn{{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;white-space:nowrap}}
+.btn:hover{{border-color:var(--accent);color:var(--accent)}}
+pre{{white-space:pre-wrap;word-break:break-all;font:11px/1.3 ui-monospace,monospace;color:#94a3b8;max-height:180px;overflow:auto;margin-top:4px}}
+pre.empty{{color:var(--muted);font-style:italic}}
+details{{margin-top:6px}}
+summary{{cursor:pointer;font-size:11px;font-weight:600;color:var(--text);padding:3px 0;list-style:none}}
+summary::-webkit-details-marker{{display:none}}
+summary::before{{content:'▸ ';color:var(--accent)}}
+details[open] summary::before{{content:'▾ '}}
+.lbl{{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:6px}}
+</style>
 </head>
 <body>
-  <main class="card">
-    <div class="head">
-      <div>
-        <h1>GPTAdmin MCP</h1>
-        <p class="sub">Live widget for tool input, result and background job polling.</p>
-      </div>
-      <span id="status" class="pill"><span class="dot"></span><span id="statusText">Widget ready</span></span>
-    </div>
-    <details open>
-      <summary>Что вызвали</summary>
-      <pre id="called" class="empty">Жду tool input…</pre>
-    </details>
-    <details open>
-      <summary>Ответ / live</summary>
-      <pre id="result" class="empty">Жду результат…</pre>
-    </details>
-    <div class="toolbar">
-      <button id="refresh" type="button">Обновить background job</button>
-      <button id="collapse" type="button">Свернуть JSON</button>
-    </div>
-  </main>
-  <script>
-    const calledEl = document.getElementById('called');
-    const resultEl = document.getElementById('result');
-    const statusEl = document.getElementById('status');
-    const statusTextEl = document.getElementById('statusText');
-    const refreshBtn = document.getElementById('refresh');
-    const collapseBtn = document.getElementById('collapse');
-    let lastJobId = null;
-    let pollTimer = null;
-    let collapsed = false;
-
-    const SECRET_KEY_RE = /(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;
-    function redact(value) {{
-      if (Array.isArray(value)) return value.map(redact);
-      if (value && typeof value === 'object') {{
-        const out = {{}};
-        for (const [k, v] of Object.entries(value)) out[k] = SECRET_KEY_RE.test(k) ? '***MASKED***' : redact(v);
-        return out;
-      }}
-      if (typeof value === 'string' && /Bearer\s+[A-Za-z0-9._~+\/-]+/.test(value)) return value.replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/g, 'Bearer ***MASKED***');
-      return value;
-    }}
-    function pretty(value) {{
-      if (value === undefined || value === null || value === '') return '—';
-      try {{ return JSON.stringify(redact(value), null, 2); }}
-      catch (_) {{ return String(value); }}
-    }}
-    function setPre(el, value) {{
-      el.classList.remove('empty');
-      el.textContent = pretty(value);
-      requestHeight();
-    }}
-    function setStatus(text, kind='ok') {{
-      statusTextEl.textContent = text;
-      statusEl.className = 'pill' + (kind === 'warn' ? ' warn' : kind === 'bad' ? ' bad' : '');
-      requestHeight();
-    }}
-    function requestHeight() {{
-      try {{ window.openai?.notifyIntrinsicHeight?.(Math.min(document.body.scrollHeight + 8, 900)); }} catch (_) {{}}
-    }}
-    function unwrapResult(raw) {{
-      const value = raw?.structuredContent || raw?.result?.structuredContent || raw?.result || raw;
-      return value?.structuredContent || value;
-    }}
-    function renderInput(value) {{
-      const input = value?.toolInput || value?.params?.toolInput || value?.arguments || value;
-      if (input !== undefined && input !== null) setPre(calledEl, input);
-    }}
-    function renderResult(value) {{
-      const result = unwrapResult(value);
-      if (result !== undefined && result !== null) setPre(resultEl, result);
-      maybeTrackJob(result);
-    }}
-    function maybeTrackJob(value) {{
-      const jobId = value?.job_id || value?.structuredContent?.job_id || value?.response?.job_id;
-      const status = value?.status || value?.structuredContent?.status;
-      if (!jobId) return;
-      lastJobId = jobId;
-      const terminal = ['completed','failed','cancelled','expired','offline'].includes(String(status || '').toLowerCase());
-      if (!terminal) startPolling(jobId);
-    }}
-    async function pollOnce(jobId) {{
-      if (!window.openai?.callTool) {{ setStatus('callTool недоступен в этом клиенте', 'warn'); return null; }}
-      setStatus('Polling ' + jobId, 'warn');
-      const response = await window.openai.callTool('get_mcp_job', {{ job_id: jobId, ack: false, verbose: true, include_raw: false }});
-      const result = unwrapResult(response);
-      setPre(resultEl, result);
-      const status = String(result?.status || '').toLowerCase();
-      if (['completed','failed','cancelled','expired','offline'].includes(status)) {{
-        setStatus('Job ' + status, status === 'completed' ? 'ok' : 'bad');
-        stopPolling();
-      }} else {{
-        setStatus('Job ' + (status || 'running'), 'warn');
-      }}
-      return result;
-    }}
-    function startPolling(jobId) {{
-      lastJobId = jobId;
-      if (pollTimer) return;
-      pollTimer = setInterval(() => pollOnce(jobId).catch(err => setStatus(String(err?.message || err), 'bad')), 1500);
-      pollOnce(jobId).catch(err => setStatus(String(err?.message || err), 'bad'));
-    }}
-    function stopPolling() {{
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = null;
-    }}
-    refreshBtn.addEventListener('click', () => lastJobId ? pollOnce(lastJobId).catch(err => setStatus(String(err?.message || err), 'bad')) : setStatus('Нет background job', 'warn'));
-    collapseBtn.addEventListener('click', () => {{
-      collapsed = !collapsed;
-      document.querySelectorAll('details').forEach(d => d.open = !collapsed);
-      collapseBtn.textContent = collapsed ? 'Развернуть JSON' : 'Свернуть JSON';
-      requestHeight();
-    }});
-
-    window.addEventListener('message', (event) => {{
-      const data = event.data || {{}};
-      if (data.method === 'ui/notifications/tool-input') {{ renderInput(data.params || data); setStatus('Input received'); }}
-      if (data.method === 'ui/notifications/tool-result') {{ renderResult(data.params || data); setStatus('Result received'); }}
-    }});
-
-    try {{
-      renderInput(window.openai?.toolInput);
-      renderResult(window.openai?.toolOutput || window.openai?.toolResponseMetadata);
-      window.openai?.getContext?.().then(ctx => {{ if (ctx) {{ renderInput(ctx.toolInput || ctx); renderResult(ctx.toolOutput || ctx.toolResponseMetadata); }} }}).catch(() => {{}});
-      setStatus(window.openai ? 'Widget ready' : 'Widget ready (no bridge)', window.openai ? 'ok' : 'warn');
-    }} catch (err) {{
-      setStatus(String(err?.message || err), 'bad');
-      setPre(resultEl, {{ error: String(err?.message || err), origin: '{public_origin}' }});
-    }}
-    requestHeight();
-  </script>
+<div class="card">
+  <div class="bar">
+    <span id="dot" class="dot"></span>
+    <span id="st" class="st">ready</span>
+    <button id="ref" class="btn" style="display:none">↻</button>
+    <button id="col" class="btn">⤢</button>
+  </div>
+  <div id="inputWrap" style="display:none">
+    <div class="lbl">input</div>
+    <pre id="in"></pre>
+  </div>
+  <div id="resultWrap">
+    <div class="lbl">result</div>
+    <pre id="out" class="empty">waiting…</pre>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let jobId=null,timer=null,compact=false;
+const RE=/(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;
+function redact(v){{if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){{const o={{}};for(const[k,val]of Object.entries(v))o[k]=RE.test(k)?'***':redact(val);return o}}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***');return v}}
+function pretty(v){{if(v==null||v==='')return'—';try{{return JSON.stringify(redact(v),null,1)}}catch{{return String(v)}}}}
+function setOut(v){{const el=$('out');el.classList.remove('empty');el.textContent=pretty(v);resize()}}
+function setIn(v){{if(v==null)return;const w=$('inputWrap');$('in').textContent=pretty(v);w.style.display=compact?'none':'block'}}
+function st(t,k){{$('st').textContent=t;$('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'');resize()}}
+function resize(){{try{{window.openai?.notifyIntrinsicHeight?.(Math.min(document.body.scrollHeight+4,500))}}catch{{}}}}
+function unwrap(r){{return r?.structuredContent||r?.result?.structuredContent||r?.result||r}}
+function trackJob(v){{const j=v?.job_id||v?.structuredContent?.job_id;const s=v?.status||v?.structuredContent?.status;if(!j)return;jobId=j;$('ref').style.display='inline-block';if(!['completed','failed','cancelled','expired'].includes(String(s||'').toLowerCase()))poll(j)}}
+async function poll(j){{if(!window.openai?.callTool)return;st('polling…','w');try{{const r=unwrap(await window.openai.callTool('get_mcp_job',{{job_id:j,ack:false,verbose:true,include_raw:false}}));setOut(r);const s=String(r?.status||'').toLowerCase();if(['completed','failed','cancelled','expired'].includes(s)){{st('done',s==='completed'?'':'b');stop()}}else st(s||'running','w')}}catch(e){{st(String(e?.message||e),'b');stop()}}}}
+function start(j){{if(timer)return;timer=setInterval(()=>poll(j).catch(e=>st(String(e),'b')),3000);poll(j).catch(()=>{{}})}}
+function stop(){{if(timer)clearInterval(timer);timer=null}}
+$('ref').addEventListener('click',()=>jobId?poll(jobId):st('no job','w'));
+$('col').addEventListener('click',()=>{{compact=!compact;$('inputWrap').style.display=compact?'none':'block';$('col').textContent=compact?'⤡':'⤢';resize()}});
+window.addEventListener('message',e=>{{const d=e.data||{{}};if(d.method==='ui/notifications/tool-input'){{setIn(d.params||d);st('input')}}if(d.method==='ui/notifications/tool-result'){{setOut(unwrap(d.params||d));st('result');trackJob(d.params||d)}}}});
+try{{setIn(window.openai?.toolInput);setOut(unwrap(window.openai?.toolOutput||window.openai?.toolResponseMetadata));window.openai?.getContext?.().then(c=>{{if(c){{setIn(c.toolInput||c);setOut(unwrap(c.toolOutput||c.toolResponseMetadata));trackJob(c)}}}}).catch(()=>{{}});st(window.openai?'ready':'no bridge',window.openai?'':'w')}}catch(e){{st(String(e),'b');setOut({{error:String(e)}})}}resize();
+</script>
 </body>
 </html>"""
 
