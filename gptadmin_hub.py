@@ -5664,40 +5664,163 @@ def _apps_sdk_widget_html() -> str:
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GPTAdmin MCP</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#070a12; --card:#111827; --line:#263244; --text:#e5eefc; --muted:#9fb0c7; --ok:#22c55e; --accent:#38bdf8; }}
+    :root {{ color-scheme: dark; --bg:#070a12; --card:#111827; --line:#263244; --text:#e5eefc; --muted:#9fb0c7; --ok:#22c55e; --warn:#f59e0b; --bad:#fb7185; --accent:#38bdf8; }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; padding:18px; font:14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:linear-gradient(135deg,#070a12,#101827); }}
-    .card {{ border:1px solid var(--line); border-radius:18px; background:rgba(17,24,39,.86); padding:18px; box-shadow:0 18px 50px rgba(0,0,0,.28); }}
-    h1 {{ margin:0 0 6px; font-size:18px; letter-spacing:-.02em; }}
-    p {{ margin:0 0 14px; color:var(--muted); }}
-    .pill {{ display:inline-flex; gap:8px; align-items:center; border:1px solid rgba(56,189,248,.28); color:#dff7ff; background:rgba(56,189,248,.10); padding:7px 10px; border-radius:999px; font-size:12px; }}
+    body {{ margin:0; padding:16px; font:13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:linear-gradient(135deg,#070a12,#101827); }}
+    .card {{ border:1px solid var(--line); border-radius:18px; background:rgba(17,24,39,.88); padding:16px; box-shadow:0 18px 50px rgba(0,0,0,.28); }}
+    .head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }}
+    h1 {{ margin:0 0 4px; font-size:18px; letter-spacing:-.02em; }}
+    .sub {{ margin:0; color:var(--muted); }}
+    .pill {{ display:inline-flex; gap:8px; align-items:center; border:1px solid rgba(56,189,248,.28); color:#dff7ff; background:rgba(56,189,248,.10); padding:7px 10px; border-radius:999px; font-size:12px; white-space:nowrap; }}
+    .pill.warn {{ border-color:rgba(245,158,11,.36); background:rgba(245,158,11,.12); color:#fde68a; }}
+    .pill.bad {{ border-color:rgba(251,113,133,.36); background:rgba(251,113,133,.12); color:#fecdd3; }}
     .dot {{ width:8px; height:8px; border-radius:999px; background:var(--ok); box-shadow:0 0 18px var(--ok); }}
-    pre {{ white-space:pre-wrap; word-break:break-word; margin:14px 0 0; padding:12px; border-radius:12px; background:#020617; border:1px solid #1e293b; color:#dbeafe; max-height:360px; overflow:auto; }}
+    .warn .dot {{ background:var(--warn); box-shadow:0 0 18px var(--warn); }}
+    .bad .dot {{ background:var(--bad); box-shadow:0 0 18px var(--bad); }}
+    details {{ margin-top:10px; border:1px solid #1e293b; border-radius:14px; background:rgba(2,6,23,.54); overflow:hidden; }}
+    summary {{ cursor:pointer; list-style:none; padding:10px 12px; color:#dbeafe; font-weight:750; border-bottom:1px solid #1e293b; }}
+    summary::-webkit-details-marker {{ display:none; }}
+    summary:before {{ content:'▸'; display:inline-block; margin-right:8px; color:var(--accent); transition:transform .15s ease; }}
+    details[open] summary:before {{ transform:rotate(90deg); }}
+    pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:12px; color:#dbeafe; max-height:420px; overflow:auto; tab-size:2; }}
+    .empty {{ color:var(--muted); }}
+    .toolbar {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
+    button {{ border:1px solid rgba(56,189,248,.28); background:rgba(56,189,248,.10); color:#dff7ff; border-radius:10px; padding:7px 10px; cursor:pointer; font-weight:700; }}
+    button:hover {{ background:rgba(56,189,248,.18); }}
   </style>
 </head>
 <body>
   <main class="card">
-    <h1>GPTAdmin MCP</h1>
-    <p>Connector UI template loaded. Use the tools from chat to inspect agents, list tools and call shell commands.</p>
-    <span class="pill"><span class="dot"></span> Template OK</span>
-    <pre id="payload">Waiting for tool result…</pre>
+    <div class="head">
+      <div>
+        <h1>GPTAdmin MCP</h1>
+        <p class="sub">Live widget for tool input, result and background job polling.</p>
+      </div>
+      <span id="status" class="pill"><span class="dot"></span><span id="statusText">Widget ready</span></span>
+    </div>
+    <details open>
+      <summary>Что вызвали</summary>
+      <pre id="called" class="empty">Жду tool input…</pre>
+    </details>
+    <details open>
+      <summary>Ответ / live</summary>
+      <pre id="result" class="empty">Жду результат…</pre>
+    </details>
+    <div class="toolbar">
+      <button id="refresh" type="button">Обновить background job</button>
+      <button id="collapse" type="button">Свернуть JSON</button>
+    </div>
   </main>
   <script>
-    const out = document.getElementById('payload');
-    const render = (value) => {{
-      try {{ out.textContent = JSON.stringify(value, null, 2); }}
-      catch (_) {{ out.textContent = String(value); }}
-    }};
+    const calledEl = document.getElementById('called');
+    const resultEl = document.getElementById('result');
+    const statusEl = document.getElementById('status');
+    const statusTextEl = document.getElementById('statusText');
+    const refreshBtn = document.getElementById('refresh');
+    const collapseBtn = document.getElementById('collapse');
+    let lastJobId = null;
+    let pollTimer = null;
+    let collapsed = false;
+
+    const SECRET_KEY_RE = /(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;
+    function redact(value) {{
+      if (Array.isArray(value)) return value.map(redact);
+      if (value && typeof value === 'object') {{
+        const out = {{}};
+        for (const [k, v] of Object.entries(value)) out[k] = SECRET_KEY_RE.test(k) ? '***MASKED***' : redact(v);
+        return out;
+      }}
+      if (typeof value === 'string' && /Bearer\s+[A-Za-z0-9._~+\/-]+/.test(value)) return value.replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/g, 'Bearer ***MASKED***');
+      return value;
+    }}
+    function pretty(value) {{
+      if (value === undefined || value === null || value === '') return '—';
+      try {{ return JSON.stringify(redact(value), null, 2); }}
+      catch (_) {{ return String(value); }}
+    }}
+    function setPre(el, value) {{
+      el.classList.remove('empty');
+      el.textContent = pretty(value);
+      requestHeight();
+    }}
+    function setStatus(text, kind='ok') {{
+      statusTextEl.textContent = text;
+      statusEl.className = 'pill' + (kind === 'warn' ? ' warn' : kind === 'bad' ? ' bad' : '');
+      requestHeight();
+    }}
+    function requestHeight() {{
+      try {{ window.openai?.notifyIntrinsicHeight?.(Math.min(document.body.scrollHeight + 8, 900)); }} catch (_) {{}}
+    }}
+    function unwrapResult(raw) {{
+      const value = raw?.structuredContent || raw?.result?.structuredContent || raw?.result || raw;
+      return value?.structuredContent || value;
+    }}
+    function renderInput(value) {{
+      const input = value?.toolInput || value?.params?.toolInput || value?.arguments || value;
+      if (input !== undefined && input !== null) setPre(calledEl, input);
+    }}
+    function renderResult(value) {{
+      const result = unwrapResult(value);
+      if (result !== undefined && result !== null) setPre(resultEl, result);
+      maybeTrackJob(result);
+    }}
+    function maybeTrackJob(value) {{
+      const jobId = value?.job_id || value?.structuredContent?.job_id || value?.response?.job_id;
+      const status = value?.status || value?.structuredContent?.status;
+      if (!jobId) return;
+      lastJobId = jobId;
+      const terminal = ['completed','failed','cancelled','expired','offline'].includes(String(status || '').toLowerCase());
+      if (!terminal) startPolling(jobId);
+    }}
+    async function pollOnce(jobId) {{
+      if (!window.openai?.callTool) {{ setStatus('callTool недоступен в этом клиенте', 'warn'); return null; }}
+      setStatus('Polling ' + jobId, 'warn');
+      const response = await window.openai.callTool('get_mcp_job', {{ job_id: jobId, ack: false, verbose: true, include_raw: false }});
+      const result = unwrapResult(response);
+      setPre(resultEl, result);
+      const status = String(result?.status || '').toLowerCase();
+      if (['completed','failed','cancelled','expired','offline'].includes(status)) {{
+        setStatus('Job ' + status, status === 'completed' ? 'ok' : 'bad');
+        stopPolling();
+      }} else {{
+        setStatus('Job ' + (status || 'running'), 'warn');
+      }}
+      return result;
+    }}
+    function startPolling(jobId) {{
+      lastJobId = jobId;
+      if (pollTimer) return;
+      pollTimer = setInterval(() => pollOnce(jobId).catch(err => setStatus(String(err?.message || err), 'bad')), 1500);
+      pollOnce(jobId).catch(err => setStatus(String(err?.message || err), 'bad'));
+    }}
+    function stopPolling() {{
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+    }}
+    refreshBtn.addEventListener('click', () => lastJobId ? pollOnce(lastJobId).catch(err => setStatus(String(err?.message || err), 'bad')) : setStatus('Нет background job', 'warn'));
+    collapseBtn.addEventListener('click', () => {{
+      collapsed = !collapsed;
+      document.querySelectorAll('details').forEach(d => d.open = !collapsed);
+      collapseBtn.textContent = collapsed ? 'Развернуть JSON' : 'Свернуть JSON';
+      requestHeight();
+    }});
+
     window.addEventListener('message', (event) => {{
       const data = event.data || {{}};
-      if (data.method === 'ui/notifications/tool-result') render(data.params || data);
-      if (data.method === 'ui/notifications/tool-input') render(data.params || data);
+      if (data.method === 'ui/notifications/tool-input') {{ renderInput(data.params || data); setStatus('Input received'); }}
+      if (data.method === 'ui/notifications/tool-result') {{ renderResult(data.params || data); setStatus('Result received'); }}
     }});
-    if (window.openai) {{
-      window.openai.getContext?.().then(render).catch(() => render({{status:'ready', origin:'{public_origin}'}}));
-    }} else {{
-      render({{status:'ready', origin:'{public_origin}'}});
+
+    try {{
+      renderInput(window.openai?.toolInput);
+      renderResult(window.openai?.toolOutput || window.openai?.toolResponseMetadata);
+      window.openai?.getContext?.().then(ctx => {{ if (ctx) {{ renderInput(ctx.toolInput || ctx); renderResult(ctx.toolOutput || ctx.toolResponseMetadata); }} }}).catch(() => {{}});
+      setStatus(window.openai ? 'Widget ready' : 'Widget ready (no bridge)', window.openai ? 'ok' : 'warn');
+    }} catch (err) {{
+      setStatus(String(err?.message || err), 'bad');
+      setPre(resultEl, {{ error: String(err?.message || err), origin: '{public_origin}' }});
     }}
+    requestHeight();
   </script>
 </body>
 </html>"""
@@ -5748,10 +5871,11 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
     widget_csp = {"connectDomains": [PUBLIC_ORIGIN], "resourceDomains": [widget_domain]}
     legacy_widget_csp = {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [widget_domain]}
     base_meta = {
-        "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp},
+        "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp, "visibility": ["model", "app"]},
         "openai/outputTemplate": template_uri,
         "openai/widgetDomain": widget_domain,
         "openai/widgetCSP": legacy_widget_csp,
+        "openai/widgetAccessible": True,
     }
     return [
         {
