@@ -282,6 +282,26 @@ pre{
   border-radius:var(--radius-sm);
   background:#06080f;
   border:1px solid var(--line);
+  max-height:120px;
+  overflow:auto;
+}
+.entryCommand::-webkit-scrollbar{height:4px;width:4px}
+.entryResponse>pre.responseBody:first-child{
+  margin-bottom:0;
+  border-bottom-left-radius:0;
+  border-bottom-right-radius:0;
+  border-bottom:none;
+}
+.entryResponse>details>summary{
+  border-top-left-radius:0;
+  border-top-right-radius:0;
+  border-top:1px solid var(--line);
+  font-size:12px;
+  padding:6px 12px;
+}
+.entryResponse>details{
+  border-top-left-radius:0;
+  border-top-right-radius:0;
 }
 .entryMeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:11px}
 .entryMetaInfo{
@@ -506,9 +526,71 @@ function responseToggleLabel(row){if(row.error)return 'Показать ошиб
 function jobMetaLines(row){const ctx=row.request_context||{};return ['token: '+(ctx.token_id||'—'),'ip: '+(ctx.client_ip||'—'),'ua: '+((ctx.user_agent||'—').slice(0,240)),row.agent_id?'agent: '+row.agent_id:'',row.server?'server: '+row.server:'',row.job_id?'job: '+row.job_id:'',row.task_id?'task: '+row.task_id:''].filter(Boolean)}
 function auditMetaLines(row){return ['event: '+(row.event||'—'),'token: '+(row.token_id||'—'),'ip: '+(row.client_ip||'—'),'ua: '+((row.user_agent||'—').slice(0,240)),row.target?'target: '+row.target:'',row.job_id?'job: '+row.job_id:'',row.path?'path: '+row.path:''].filter(Boolean)}
 function renderRecentMini(rows){if(!rows.length)return '<p class="muted">пусто</p>';return '<div class="recentMini">'+rows.map(r=>`<div class="recentMiniItem"><div class="recentMiniTop"><span class="${cls(r.status)}">${esc(r.status||'—')}</span><span class="entryCompactTime muted">${esc(compactTime(r.created_fmt||r.created_at||''))}</span></div><div><b>${esc(entrySummaryLabel(r))}</b></div><div class="recentMiniCmd mono">${esc(String(entryCommand(r)).slice(0,160))}</div></div>`).join('')+'</div>'}
-function renderResponseBlock(row, metaLabel){if(!canLoadResponse(row)&&!hasInlineResponse(row))return '';const preview=responsePreviewText(row);const body=preview?`<pre class="responseBody mono">${prettyJsonHtml(preview)}</pre>`:'<div class="responseEmpty">Ответ ещё не загружен.</div>';const attrs=row.job_id?` data-job-id="${esc(row.job_id)}"`:'';return `<div class="entryResponse"><details${attrs} ontoggle="handleResponseToggle(this)"><summary><span>${esc(responseToggleLabel(row))}</span><span class="responseHint">${esc(metaLabel)}</span></summary>${body}</details></div>`}
-function renderJobCard(row){return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(row.status)}">${esc(row.status||'—')}</span><div class="entryMain"><div class="entryTitle"><b>${esc(entrySummaryLabel(row))}</b><span class="entryCompactTime muted">${esc(compactTime(row.created_fmt||row.created_at||''))}</span><span class="entryMetaInfo" title="${metaTitle(jobMetaLines(row))}">i</span></div><div class="entryCommand mono">${(()=>{const cmd=entryCommand(row);try{const p=JSON.parse(cmd);return syntaxHighlightJson(p)}catch{return esc(cmd)}})()}</div><div class="entryMeta"><span>${esc(row.kind||'job')}</span>${row.timing?`<span>${esc(JSON.stringify(row.timing))}</span>`:''}${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}</div></div></div>${(row.status==='running'||row.status==='queued'||String(row.status||'').startsWith('queued'))?`<div class="row" style="margin-top:8px"><button class="cancelBtn" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">отменить</button></div>`:''}${renderResponseBlock(row,canLoadResponse(row)?'клик для загрузки':'превью')}</article>`}
-function renderAuditCard(row){const cmd=row.command||row.arguments_preview||row.params_preview||row.path||row.target||row.event||'—';const pseudoRow={...row,command:cmd,error:row.error};return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(row.status||row.event)}">${esc(row.event||'event')}</span><div class="entryMain"><div class="entryTitle"><b>${esc(row.tool_name||row.method||row.path||row.target||'audit')}</b><span class="entryCompactTime muted">${esc(compactTime(row.ts||''))}</span><span class="entryMetaInfo" title="${metaTitle(auditMetaLines(row))}">i</span></div><div class="entryCommand mono">${esc(cmd)}</div><div class="entryMeta">${row.status?`<span>${esc(row.status)}</span>`:''}${row.target?`<span>${esc(row.target)}</span>`:''}${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}</div></div></div>${renderResponseBlock(pseudoRow,row.job_id?'клик для загрузки':'ответа нет')}</article>`}
+function renderResponseBlock(row, metaLabel){
+  if(!canLoadResponse(row)&&!hasInlineResponse(row))return '';
+  const preview=responsePreviewText(row);
+  const PREVIEW_MAX=200;
+  // Short output — show inline, no spoiler
+  if(preview&&preview.length<=PREVIEW_MAX){
+    return `<div class="entryResponse"><pre class="responseBody mono" style="max-height:none;border-radius:var(--radius-sm)">${prettyJsonHtml(preview)}</pre></div>`;
+  }
+  // Long output — show truncated preview + spoiler for full
+  const shortPreview=preview?preview.slice(0,PREVIEW_MAX):'';
+  const previewHtml=shortPreview?`<pre class="responseBody mono" style="max-height:60px;overflow:hidden;border-radius:var(--radius-sm);margin-bottom:0;border-bottom:none;opacity:0.7">${prettyJsonHtml(shortPreview)}…</pre>`:'';
+  const body=preview?`<pre class="responseBody mono">${prettyJsonHtml(preview)}</pre>`:'<div class="responseEmpty">Ответ ещё не загружен.</div>';
+  const attrs=row.job_id?` data-job-id="${esc(row.job_id)}"`:'';
+  return `<div class="entryResponse">${previewHtml}<details${attrs} ontoggle="handleResponseToggle(this)"><summary><span>${esc(responseToggleLabel(row))}</span><span class="responseHint">${esc(metaLabel)}</span></summary>${body}</details></div>`;
+}
+function renderJobCard(row){
+  const isCancelable=row.status==='running'||row.status==='queued'||String(row.status||'').startsWith('queued');
+  const cmdHtml=(()=>{const cmd=entryCommand(row);try{return syntaxHighlightJson(JSON.parse(cmd))}catch{return esc(cmd)}})();
+  const timingStr=row.timing?Object.entries(row.timing).map(([k,v])=>`${k}:${v}`).join(' '):'';
+  return `<article class="entryCard">
+    <div class="entryHead">
+      <span class="entryStatus ${cls(row.status)}">${esc(row.status||'—')}</span>
+      <div class="entryMain">
+        <div class="entryTitle">
+          <b>${esc(entrySummaryLabel(row))}</b>
+          <span class="entryCompactTime muted">${esc(compactTime(row.created_fmt||row.created_at||''))}</span>
+          ${timingStr?`<span class="muted small mono">${esc(timingStr)}</span>`:''}
+          <span class="entryMetaInfo" title="${metaTitle(jobMetaLines(row))}">i</span>
+        </div>
+        <div class="entryCommand mono">${cmdHtml}</div>
+        <div class="entryMeta">
+          ${row.kind?`<span class="pill">${esc(row.kind)}</span>`:''}
+          ${row.server?`<span class="muted small">${esc(row.server)}</span>`:''}
+          ${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}
+          ${isCancelable?`<button class="cancelBtn" style="margin-left:auto" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">отменить</button>`:''}
+        </div>
+      </div>
+    </div>
+    ${renderResponseBlock(row,canLoadResponse(row)?'клик для полного вывода':'превью')}
+  </article>`;
+}
+function renderAuditCard(row){
+  const cmd=row.command||row.arguments_preview||row.params_preview||row.path||row.target||row.event||'—';
+  const pseudoRow={...row,command:cmd,error:row.error};
+  const cmdHtml=(()=>{try{return syntaxHighlightJson(JSON.parse(cmd))}catch{return esc(cmd)}})();
+  return `<article class="entryCard">
+    <div class="entryHead">
+      <span class="entryStatus ${cls(row.status||row.event)}">${esc(row.event||'event')}</span>
+      <div class="entryMain">
+        <div class="entryTitle">
+          <b>${esc(row.tool_name||row.method||row.path||row.target||'audit')}</b>
+          <span class="entryCompactTime muted">${esc(compactTime(row.ts||''))}</span>
+          <span class="entryMetaInfo" title="${metaTitle(auditMetaLines(row))}">i</span>
+        </div>
+        <div class="entryCommand mono">${cmdHtml}</div>
+        <div class="entryMeta">
+          ${row.status?`<span class="pill">${esc(row.status)}</span>`:''}
+          ${row.target?`<span class="muted small">${esc(row.target)}</span>`:''}
+          ${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}
+        </div>
+      </div>
+    </div>
+    ${renderResponseBlock(pseudoRow,row.job_id?'клик для полного вывода':'ответа нет')}
+  </article>`;
+}
 async function handleResponseToggle(details){if(!details.open||details.dataset.loaded||details.dataset.loading||!details.dataset.jobId)return;details.dataset.loading='1';const pre=details.querySelector('pre');const empty=details.querySelector('.responseEmpty');if(pre)pre.textContent='loading…';if(empty)empty.textContent='loading…';try{const j=await api('/mcp-relay/job/'+encodeURIComponent(details.dataset.jobId)+'?verbose=true&include_raw=true');const payload=('response' in j)?j.response:('result' in j?j.result:j);const textHtml=prettyJsonHtml(payload);const next=`<pre class="responseBody mono">${textHtml||'—'}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next);details.dataset.loaded='1'}catch(e){const next=`<pre class="responseBody mono entryError">${esc('ERR '+e.message)}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next)}finally{delete details.dataset.loading}}
 function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Агенты',clients:'Клиенты/Auth',jobs:'Jobs/очереди',tools:'MCP tools',resources:'MCP resources',mcpmanage:'MCP manager',security:'Tokens & Auth',audit:'Audit log',raw:'Raw JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
