@@ -401,7 +401,12 @@ pre{
   <section class="card span6"><h2>Проблемные агенты</h2><div id="problemAgents"></div></section><section class="card span6"><h2>Последние jobs</h2><div id="recentJobsCompact"></div></section>
 </div></section>
 <section id="view-agents" class="view"><div class="card"><div class="row"><h2>Агенты</h2><input id="agentFilter" class="search" placeholder="фильтр" oninput="renderAll()"><select id="agentStatus" onchange="renderAll()"><option value="all">all</option><option value="online">online</option><option value="offline">offline</option><option value="stale">stale</option></select></div><div id="agents"></div></div></section>
-<section id="view-clients" class="view"><div class="card"><h2>Авторизованные клиенты и Bearer-токены</h2><p class="muted">Флаг multiple IP показывает, что один и тот же Bearer-токен встречался с разных IP/UA.</p><div id="clients"></div></div></section>
+<section id="view-clients" class="view"><div class="card"><h2>Авторизованные клиенты и Bearer-токены</h2>
+<p class="muted">Флаг multiple IP показывает, что один и тот же Bearer-токен встречался с разных IP/UA.</p>
+<div class="row" style="margin:10px 0">
+  <button onclick="revokeAllClients()" style="border-color:var(--bad);color:var(--bad)">✗ Отозвать ВСЕх клиентов + ротировать OAuth secret</button>
+</div>
+<div id="clients"></div></div></section>
 <section id="view-jobs" class="view"><div class="card"><div class="row"><h2>Команды, очереди и фоновые jobs</h2><input id="jobFilter" class="search" placeholder="фильтр command/agent/token" oninput="renderAll()"><select id="jobStatus" onchange="renderAll()"><option value="all">all</option><option value="running">running</option><option value="queued">queued</option><option value="completed">completed</option><option value="failed">failed</option></select></div><div id="jobs"></div></div></section>
 <section id="view-tools" class="view"><div class="card"><h2>MCP tools tester</h2><div class="row"><select id="target"></select><button onclick="listTools()">tools/list</button><label class="small"><input type="checkbox" id="background"> background</label><input id="timeout" type="number" value="30" min="1" max="3600" style="width:95px"></div><div class="split" style="margin-top:10px"><div><label class="muted">Tool</label><select id="toolSelect" style="width:100%"></select><label class="muted">Arguments JSON</label><textarea id="args">{}</textarea><div class="row"><button onclick="callTool()">call tool</button><button onclick="formatArgs()">format JSON</button></div></div><div><div class="row"><input id="jobId" placeholder="job_id"><button onclick="getJob()">get job</button></div><label class="muted">Result</label><pre id="result">—</pre></div></div></div></section>
 <section id="view-resources" class="view"><div class="card"><h2>MCP resources</h2><div class="row"><select id="resourceTarget"></select><button onclick="listResources()">resources/list</button><input id="resourceUri" style="min-width:360px" placeholder="resource://..."><button onclick="readResource()">resources/read</button></div><pre id="resourceResult">—</pre></div></section>
@@ -512,7 +517,7 @@ const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="
 const problems=(data.agents||[]).filter(a=>a.status!=='online');$('problemAgents').innerHTML=asTable(problems.slice(0,12),[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['age/meta',r=>`<span class="small muted">${esc(JSON.stringify(r.meta||{}).slice(0,260))}</span>`]]);
 $('recentJobsCompact').innerHTML=renderRecentMini((data.jobs?.recent||[]).slice(0,8));
 let agents=(data.agents||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')agents=agents.filter(r=>r.status===ast);$('agents').innerHTML=asTable(agents,[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span><br><span class="muted small">${esc(r.name)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['kind',r=>esc(r.kind)],['transport',r=>esc(r.transport)],['last seen',r=>esc(r.last_seen||'')],['capabilities/meta',r=>`${esc((r.capabilities||[]).join(', '))}<br><span class="muted small mono">${esc(JSON.stringify(r.meta||{}).slice(0,600))}</span>`]]);
-$('clients').innerHTML=asTable(data.clients||[],[['token',r=>`<span class="mono">${esc(r.token_id)}</span><br><span class="muted small">${esc(r.token_kind)} ${esc(r.client_id||'')}</span>`],['last',r=>`${esc(r.last_seen_fmt)}<br><span class="muted small">seen ${esc(r.seen_count)}</span>`],['IPs',r=>`${r.multiple_ips?'<span class="warn">multiple IP</span><br>':''}${(r.ips||[]).map(x=>'<span class="pill mono">'+esc(x)+'</span>').join('')}`],['UA / paths',r=>`<span class="small">${esc((r.user_agents||[]).join('\n').slice(0,500))}</span><br><span class="muted small">${esc((r.paths||[]).join(', '))}</span>`]]);
+$('clients').innerHTML=asTable(data.clients||[],[['token',r=>`<span class="mono">${esc(r.token_id)}</span><br><span class="muted small">${esc(r.token_kind)} ${esc(r.client_id||'')}</span>`],['last',r=>`${esc(r.last_seen_fmt)}<br><span class="muted small">seen ${esc(r.seen_count)}</span>`],['IPs',r=>`${r.multiple_ips?'<span class="warn">multiple IP</span><br>':''}${(r.ips||[]).map(x=>'<span class="pill mono">'+esc(x)+'</span>').join('')}`],['UA',r=>`<span class="small">${esc((r.user_agents||[]).join('\n').slice(0,300))}</span>`],['',r=>`<button class="cancelBtn" onclick="revokeClient('${esc(r.key)}')">отозвать</button>`]]);
 let jobs=(data.jobs?.recent||[]).filter(r=>includesText(r,$('jobFilter')?.value||''));const jst=$('jobStatus')?.value||'all';if(jst==='queued')jobs=jobs.filter(r=>String(r.status||'').startsWith('queued'));else if(jst!=='all')jobs=jobs.filter(r=>r.status===jst);$('jobs').innerHTML=jobs.length?`<div class="stackList">${jobs.map(renderJobCard).join('')}</div>`:'<p class="muted">пусто</p>';
 let audit=(data.audit||[]).filter(r=>includesText(r,$('auditFilter')?.value||''));$('audit').innerHTML=audit.length?`<div class="stackList">${audit.map(renderAuditCard).join('')}</div>`:'<p class="muted">пусто</p>';$('rawJson').textContent=JSON.stringify(data,null,2)}
 async function refreshAll(){try{$('status').textContent='loading…';const lim=$('auditLimit')?.value||160;state=await api('/admin/api/overview?limit='+encodeURIComponent(lim));renderAll();$('status').textContent='ok'}catch(e){$('status').textContent='ERR '+e.message}}
@@ -644,6 +649,24 @@ async function restartHub(){
     $('secRestartStatus').textContent='Готово: '+(result.stdout||'').trim();
     setTimeout(()=>{$('secRestartStatus').textContent='';loadSecurityEnv()},3000);
   }catch(e){$('secRestartStatus').textContent='ERR '+e.message}
+}
+
+
+async function revokeClient(key){
+  if(!confirm('Отозвать клиента '+key+'? Он больше не сможет использовать MCP.'))return;
+  try{
+    await api('/admin/api/clients/'+encodeURIComponent(key),{method:'DELETE'});
+    refreshAll();
+  }catch(e){alert('ERR '+e.message)}
+}
+async function revokeAllClients(){
+  if(!confirm('Отозвать ВСЕХ клиентов и ротировать OAUTH_CLIENT_SECRET?\n\nВсе MCP-клиенты (Claude, Codex, OpenCode) должны будут заново авторизоваться!'))return;
+  if(!confirm('Точно? Это действие необратимо.'))return;
+  try{
+    const j=await api('/admin/api/clients/revoke-all',{method:'POST'});
+    alert('Отозвано клиентов: '+j.revoked_count+'\nOAuth secret ротирован: '+(j.oauth_secret_rotated?'да':'нет')+'\n\nПерезапустите хаб для применения.');
+    refreshAll();
+  }catch(e){alert('ERR '+e.message)}
 }
 
 </script>

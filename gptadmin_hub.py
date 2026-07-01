@@ -5359,6 +5359,43 @@ def admin_api_clients():
     return {"clients": clients, "count": len(clients), "multiple_ip": [c for c in clients if c.get("multiple_ips")]}
 
 
+@app.delete("/admin/api/clients/{client_key}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_revoke_client(client_key: str):
+    """Revoke a single OAuth client by removing it from the registry."""
+    if client_key in authorized_clients:
+        entry = authorized_clients.pop(client_key)
+        _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
+        _audit("client_revoke", detail=f"revoked client {client_key} ({entry.get('token_id', '?')})")
+        return {"ok": True, "revoked": client_key, "token_id": entry.get("token_id")}
+    raise HTTPException(404, f"client not found: {client_key}")
+
+
+@app.post("/admin/api/clients/revoke-all", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_revoke_all_clients():
+    """Revoke ALL OAuth clients and rotate OAUTH_CLIENT_SECRET (invalidates all JWT tokens)."""
+    count = len(authorized_clients)
+    authorized_clients.clear()
+    _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
+    # Rotate OAUTH_CLIENT_SECRET to invalidate all existing JWT tokens
+    import secrets as _secrets
+    new_secret = _secrets.token_hex(32)
+    os.environ["OAUTH_CLIENT_SECRET"] = new_secret
+    global OAUTH_CLIENT_SECRET
+    OAUTH_CLIENT_SECRET = new_secret
+    # Persist to env file
+    _env_path = CONFIG_DIR / "gptadmin.env"
+    try:
+        lines = []
+        if _env_path.exists():
+            lines = [l for l in _env_path.read_text().splitlines() if not l.strip().startswith("OAUTH_CLIENT_SECRET=")]
+        lines.append(f"OAUTH_CLIENT_SECRET={new_secret}")
+        _env_path.write_text("\n".join(lines) + "\n")
+    except Exception as e:
+        log.warning("could not persist OAUTH_CLIENT_SECRET to env: %s", e)
+    _audit("client_revoke_all", detail=f"revoked {count} clients + rotated OAUTH_CLIENT_SECRET")
+    return {"ok": True, "revoked_count": count, "oauth_secret_rotated": True, "note": "All MCP clients must re-authenticate. Update OAUTH_CLIENT_SECRET in gptadmin.env was written."}
+
+
 @app.get("/admin/api/jobs", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def admin_api_jobs(limit: int = Query(200, ge=1, le=500)):
     return _admin_jobs(limit=limit)
