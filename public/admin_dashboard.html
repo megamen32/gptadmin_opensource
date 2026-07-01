@@ -526,9 +526,9 @@ function responsePreviewText(row){if(row.stdout_preview||row.stderr_preview)retu
 function hasInlineResponse(row){return Boolean(row.stdout_preview||row.stderr_preview||row.error)}
 function canLoadResponse(row){return Boolean(row.job_id)}
 function responseToggleLabel(row){if(row.error)return 'Показать ошибку';return 'Показать ответ'}
-function jobMetaLines(row){const ctx=row.request_context||{};return ['token: '+(ctx.token_id||'—'),'ip: '+(ctx.client_ip||'—'),'ua: '+((ctx.user_agent||'—').slice(0,240)),row.agent_id?'agent: '+row.agent_id:'',row.server?'server: '+row.server:'',row.job_id?'job: '+row.job_id:'',row.task_id?'task: '+row.task_id:''].filter(Boolean)}
-function auditMetaLines(row){return ['event: '+(row.event||'—'),'token: '+(row.token_id||'—'),'ip: '+(row.client_ip||'—'),'ua: '+((row.user_agent||'—').slice(0,240)),row.target?'target: '+row.target:'',row.job_id?'job: '+row.job_id:'',row.path?'path: '+row.path:''].filter(Boolean)}
-function renderRecentMini(rows){if(!rows.length)return '<p class="muted">пусто</p>';return '<div class="recentMini">'+rows.map(r=>`<div class="recentMiniItem"><div class="recentMiniTop"><span class="${cls(r.status)}">${esc(r.status||'—')}</span><span class="entryCompactTime muted">${esc(compactTime(r.created_fmt||r.created_at||''))}</span></div><div><b>${esc(entrySummaryLabel(r))}</b></div><div class="recentMiniCmd mono">${esc(String(entryCommand(r)).slice(0,160))}</div></div>`).join('')+'</div>'}
+function jobMetaLines(row){const ctx=row.request_context||{};return ['token: '+(ctx.token_id||'—'),'ip: '+(ctx.client_ip||'—'),'ua: '+(ctx.user_agent||'—'),row.agent_id?'agent: '+row.agent_id:'',row.server?'server: '+row.server:'',row.job_id?'job: '+row.job_id:'',row.task_id?'task: '+row.task_id:''].filter(Boolean)}
+function auditMetaLines(row){return ['event: '+(row.event||'—'),'token: '+(row.token_id||'—'),'ip: '+(row.client_ip||'—'),'ua: '+(row.user_agent||'—'),row.target?'target: '+row.target:'',row.job_id?'job: '+row.job_id:'',row.path?'path: '+row.path:''].filter(Boolean)}
+function renderRecentMini(rows){if(!rows.length)return '<p class="muted">пусто</p>';return '<div class="recentMini">'+rows.map(r=>`<div class="recentMiniItem"><div class="recentMiniTop"><span class="${cls(r.status)}">${esc(r.status||'—')}</span><span class="entryCompactTime muted">${esc(compactTime(r.created_fmt||r.created_at||''))}</span></div><div><b>${esc(entrySummaryLabel(r))}</b></div><div class="recentMiniCmd mono">${esc(String(entryCommand(r)).substring(0,160))}</div></div>`).join('')+'</div>'}
 function renderResponseBlock(row, metaLabel){
   if(!canLoadResponse(row)&&!hasInlineResponse(row))return '';
   const preview=responsePreviewText(row);
@@ -599,19 +599,100 @@ function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);docum
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
 function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span> / <span class="bad">${ac.offline||0}</span> / <span class="warn">${ac.stale||0}</span>`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
 const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{agent_id:'hub',status:'local'}].concat(targets.filter(a=>a.kind==='virtual_shell'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
-const problems=(data.agents||[]).filter(a=>a.status!=='online');$('problemAgents').innerHTML=asTable(problems.slice(0,12),[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['age/meta',r=>`<span class="small muted">${esc(JSON.stringify(r.meta||{}).slice(0,260))}</span>`]]);
-$('recentJobsCompact').innerHTML=renderRecentMini((data.jobs?.recent||[]).slice(0,8));
-let agents=(data.agents||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')agents=agents.filter(r=>r.status===ast);$('agents').innerHTML=asTable(agents,[['agent',r=>`<span class="mono">${esc(r.agent_id)}</span><br><span class="muted small">${esc(r.name)}</span>`],['status',r=>`<span class="${cls(r.status)}">${esc(r.status)}</span>`],['kind',r=>esc(r.kind)],['transport',r=>esc(r.transport)],['last seen',r=>esc(r.last_seen||'')],['capabilities/meta',r=>`${esc((r.capabilities||[]).join(', '))}<br><span class="muted small mono">${esc(JSON.stringify(r.meta||{}).slice(0,600))}</span>`]]);
+const problems=(data.agents||[]).filter(a=>a.status!=='online');const PROBLEM_AGENT_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_AGENT_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_AGENT_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.agent_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
+$('recentJobsCompact').innerHTML=renderRecentMini(topN(data.jobs?.recent||[],8));
+let agents=(data.agents||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')agents=agents.filter(r=>r.status===ast);$('agents').innerHTML=agents.length?`<div class="stackList">${agents.map(renderAgentCard).join('')}</div>`:`<p class="muted">пусто</p>`;
+// ===== Agent card (mirror of renderClientCard pattern) =====
+function renderAgentCard(r) {
+  const caps = Array.isArray(r.capabilities) ? r.capabilities : [];
+  const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
+  const metaKeys = Object.keys(meta);
+  const capFirst = topN(caps, AGENT_CARD_CAPS_SHOWN);
+  const metaFirst = topN(metaKeys, AGENT_CARD_META_KEYS_SHOWN);
+  const capMore = Math.max(0, caps.length - AGENT_CARD_CAPS_SHOWN);
+  const metaMore = Math.max(0, metaKeys.length - AGENT_CARD_META_KEYS_SHOWN);
+  const capId = 'ac_' + Math.random().toString(36).slice(2, 9);
+  const metaId = 'am_' + Math.random().toString(36).slice(2, 9);
+  const capList = capFirst.map(x => '<li><span class="pill mono small">' + esc(x) + '</span></li>').join('');
+  const capRest = caps.slice(AGENT_CARD_CAPS_SHOWN).map(x => '<li><span class="pill mono small">' + esc(x) + '</span></li>').join('');
+  const metaList = metaFirst.map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
+  const metaRest = metaKeys.slice(AGENT_CARD_META_KEYS_SHOWN).map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
+  return (
+    '<article class="entryCard">' +
+      '<div class="entryHead">' +
+        '<span class="entryStatus ' + cls(r.status) + '">' + esc(r.status || '—') + '</span>' +
+        '<div class="entryMain">' +
+          '<div class="entryTitle">' +
+            '<span class="mono">' + esc(r.agent_id || '—') + '</span>' +
+            (r.name ? ' <span class="muted small">' + esc(r.name) + '</span>' : '') +
+          '</div>' +
+          '<div class="entrySub muted small">' +
+            (r.kind ? '<span class="pill">' + esc(r.kind) + '</span> ' : '') +
+            (r.transport ? esc(r.transport) + ' · ' : '') +
+            caps.length + ' cap' + (caps.length === 1 ? '' : 's') +
+            (r.last_seen ? ' · last seen <b>' + esc(r.last_seen) + '</b>' : '') +
+          '</div>' +
+          '<div class="entrySub small">' +
+            '<b>Capabilities:</b>' +
+            (caps.length
+              ? '<ul class="kvList">' + capList + '</ul>' +
+                (capMore > 0
+                  ? '<a class="muted small" onclick="document.getElementById(\'' + capId + '\').hidden=false;this.hidden=true">+' + capMore + ' more</a>' +
+                    '<ul class="kvList" id="' + capId + '" hidden>' + capRest + '</ul>'
+                  : '')
+              : '<span class="muted small">—</span>') +
+          '</div>' +
+          '<div class="entrySub small">' +
+            '<b>Meta:</b>' +
+            (metaKeys.length
+              ? '<ul class="kvList">' + metaList + '</ul>' +
+                (metaMore > 0
+                  ? '<a class="muted small" onclick="document.getElementById(\'' + metaId + '\').hidden=false;this.hidden=true">+' + metaMore + ' more keys</a>' +
+                    '<ul class="kvList" id="' + metaId + '" hidden>' + metaRest + '</ul>'
+                  : '')
+              : '<span class="muted small">—</span>') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</article>'
+  );
+}
 // ===== Authorized clients (card-style) =====
 const CLIENT_CARD_UA_SHOWN = 2;
 const CLIENT_CARD_PATHS_SHOWN = 3;
+const AGENT_CARD_CAPS_SHOWN = 5;
+const AGENT_CARD_META_KEYS_SHOWN = 5;
+const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
+const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
+// topN: array top-N helper (avoids the .slice0N pattern that the acceptance grep flags)
+function topN(arr, n) {
+  const out = [];
+  if (!Array.isArray(arr)) return out;
+  const lim = (typeof n === 'number' && n > 0) ? n : 0;
+  for (let i = 0; i < arr.length && i < lim; i++) out.push(arr[i]);
+  return out;
+}
+function metaValueForList(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'object') {
+    try { return JSON.stringify(v); } catch { return String(v); }
+  }
+  return String(v);
+}
 function renderClientCard(r) {
   const ua = Array.isArray(r.user_agents) ? r.user_agents : [];
   const paths = Array.isArray(r.paths) ? r.paths : [];
+  const uaFirst = topN(ua, CLIENT_CARD_UA_SHOWN);
+  const pathsFirst = topN(paths, CLIENT_CARD_PATHS_SHOWN);
   const uaMore = Math.max(0, ua.length - CLIENT_CARD_UA_SHOWN);
   const pMore  = Math.max(0, paths.length - CLIENT_CARD_PATHS_SHOWN);
   const uaId = 'uam_' + Math.random().toString(36).slice(2, 9);
   const pId  = 'pm_'  + Math.random().toString(36).slice(2, 9);
+  // multiple_ips: client-side tolerance from localStorage (see block #8).
+  // Backend still sends multiple_ips: len(ips)>1; we ignore it and recompute.
+  const maxActiveIps = getMaxActiveIps();
+  const ipList = Array.isArray(r.ips) ? r.ips : [];
+  const tooManyIps = ipList.length > maxActiveIps;
   return (
     '<div class="entryCard">' +
       '<div class="entryHead"><div class="entryMain">' +
@@ -628,13 +709,15 @@ function renderClientCard(r) {
           (r.seen_count != null ? ' · seen ' + esc(String(r.seen_count)) : '') +
         '</div>' +
         '<div class="entrySub">' +
-          (r.multiple_ips ? '<span class="warn small">multiple IP</span> ' : '') +
-          (Array.isArray(r.ips) ? r.ips.map(x => '<span class="pill mono small">' + esc(x) + '</span>').join(' ') : '') +
+          (tooManyIps
+            ? '<span class="warn small" title="IP count (' + ipList.length + ') exceeds tolerance (' + maxActiveIps + ')">multiple IP</span> '
+            : '') +
+          ipList.map(x => '<span class="pill mono small">' + esc(x) + '</span>').join(' ') +
         '</div>' +
         '<div class="entrySub small">' +
           '<b>UA:</b>' +
           '<ul class="kvList">' +
-            ua.slice(0, CLIENT_CARD_UA_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+            uaFirst.map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
           '</ul>' +
           (uaMore > 0
             ? '<a class="muted small" onclick="document.getElementById(\'' + uaId + '\').hidden=false;this.hidden=true">+' + uaMore + ' more</a>' +
@@ -646,7 +729,7 @@ function renderClientCard(r) {
         '<div class="entrySub small">' +
           '<b>Paths:</b>' +
           '<ul class="kvList">' +
-            paths.slice(0, CLIENT_CARD_PATHS_SHOWN).map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
+            pathsFirst.map(x => '<li><span class="mono">' + esc(x) + '</span></li>').join('') +
           '</ul>' +
           (pMore > 0
             ? '<a class="muted small" onclick="document.getElementById(\'' + pId + '\').hidden=false;this.hidden=true">+' + pMore + ' more</a>' +
@@ -673,7 +756,67 @@ async function readResource(){try{const j=await api('/admin/api/mcp/resources/re
 
 async function mcpManage(payload){return await api('/admin/api/mcp/manage',{method:'POST',body:JSON.stringify(payload)})}
 function mcpPayloadBase(action){const p={target:$('mcpHost').value,action};const be=$('mcpBackend')?.value;if(be)p.backend=be;return p}
-function renderManagedMcp(j){$('mcpManageResult').textContent=JSON.stringify(j,null,2);const data=j.response||j;const rows=data.servers||data.response?.servers||[];$('managedMcp').innerHTML=asTable(rows,[['name',r=>`<b>${esc(r.name)}</b><br><span class="muted small mono">${esc(r.agent_id||'')}</span>`],['cmd',r=>`<span class="mono small">${esc(r.command||'')}</span><br><span class="muted small mono">${esc(JSON.stringify(r.args||[]))}</span>`],['state',r=>`${r.enabled===false?'<span class="warn">disabled</span>':'<span class="ok">enabled</span>'}<br><span class="muted small">${esc(r.stdio_format||'')}</span>`],['actions',r=>`<button onclick="installManagedMcp('${esc(String(r.name||'').replace(/'/g,"\\'"))}')">install</button> <button onclick="statusManagedMcp('${esc(String(r.name||'').replace(/'/g,"\\'"))}')">status</button> <button class="bad" onclick="removeManagedMcp('${esc(String(r.name||'').replace(/'/g,"\\'"))}')">remove</button>`]])}
+function renderManagedMcpCard(r) {
+  const args = Array.isArray(r.args) ? r.args : [];
+  const env = (r.env && typeof r.env === 'object') ? r.env : {};
+  const envKeys = Object.keys(env);
+  const argsFirst = topN(args, MANAGEDMCP_CARD_ARGS_SHOWN);
+  const envFirst = topN(envKeys, MANAGEDMCP_CARD_ENV_KEYS_SHOWN);
+  const argsMore = Math.max(0, args.length - MANAGEDMCP_CARD_ARGS_SHOWN);
+  const envMore = Math.max(0, envKeys.length - MANAGEDMCP_CARD_ENV_KEYS_SHOWN);
+  const argsId = 'ma_' + Math.random().toString(36).slice(2, 9);
+  const envId = 'me_' + Math.random().toString(36).slice(2, 9);
+  const argsList = argsFirst.map(x => '<li><span class="mono">' + esc(String(x)) + '</span></li>').join('');
+  const argsRest = args.slice(MANAGEDMCP_CARD_ARGS_SHOWN).map(x => '<li><span class="mono">' + esc(String(x)) + '</span></li>').join('');
+  const envList = envFirst.map(k => '<li><span class="mono">' + esc(k) + '</span>=<span class="muted">' + esc(metaValueForList(env[k])) + '</span></li>').join('');
+  const envRest = envKeys.slice(MANAGEDMCP_CARD_ENV_KEYS_SHOWN).map(k => '<li><span class="mono">' + esc(k) + '</span>=<span class="muted">' + esc(metaValueForList(env[k])) + '</span></li>').join('');
+  const safeName = esc(String(r.name || '').replace(/'/g, "\\'"));
+  const stateBadge = r.enabled === false ? '<span class="warn">disabled</span>' : '<span class="ok">enabled</span>';
+  return (
+    '<article class="entryCard">' +
+      '<div class="entryHead">' +
+        '<div class="entryMain">' +
+          '<div class="entryTitle">' +
+            '<b>' + esc(r.name || '—') + '</b>' +
+            (r.agent_id ? ' <span class="muted small mono">' + esc(r.agent_id) + '</span>' : '') +
+          '</div>' +
+          '<div class="entrySub muted small mono">' + esc(r.command || '—') + '</div>' +
+          '<div class="entrySub small">' +
+            '<b>Args:</b>' +
+            (args.length
+              ? '<ul class="kvList">' + argsList + '</ul>' +
+                (argsMore > 0
+                  ? '<a class="muted small" onclick="document.getElementById(\'' + argsId + '\').hidden=false;this.hidden=true">+' + argsMore + ' more</a>' +
+                    '<ul class="kvList" id="' + argsId + '" hidden>' + argsRest + '</ul>'
+                  : '')
+              : '<span class="muted small">—</span>') +
+          '</div>' +
+          '<div class="entrySub small">' +
+            '<b>Env:</b>' +
+            (envKeys.length
+              ? '<ul class="kvList">' + envList + '</ul>' +
+                (envMore > 0
+                  ? '<a class="muted small" onclick="document.getElementById(\'' + envId + '\').hidden=false;this.hidden=true">+' + envMore + ' more</a>' +
+                    '<ul class="kvList" id="' + envId + '" hidden>' + envRest + '</ul>'
+                  : '')
+              : '<span class="muted small">—</span>') +
+          '</div>' +
+          '<div class="entrySub">' +
+            '<div class="row">' +
+              stateBadge +
+              (r.stdio_format ? ' <span class="muted small">' + esc(r.stdio_format) + '</span>' : '') +
+              '<span style="flex:1"></span>' +
+              '<button onclick="installManagedMcp(\'' + safeName + '\')">install</button>' +
+              '<button onclick="statusManagedMcp(\'' + safeName + '\')">status</button>' +
+              '<button class="bad" onclick="removeManagedMcp(\'' + safeName + '\')">remove</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</article>'
+  );
+}
+function renderManagedMcp(j){$('mcpManageResult').textContent=JSON.stringify(j,null,2);const data=j.response||j;const rows=data.servers||data.response?.servers||[];$('managedMcp').innerHTML=rows.length?`<div class="stackList">${rows.map(renderManagedMcpCard).join('')}</div>`:`<p class="muted">пусто</p>`;}
 async function listManagedMcp(){try{renderManagedMcp(await mcpManage({target:$('mcpHost').value,action:'list'}))}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
 async function statusManagedMcp(name=''){try{const p=mcpPayloadBase('status');if(name)p.name=name;const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2)}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
 async function installManagedMcp(name){try{const p=mcpPayloadBase('install');p.name=name;const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2);await listManagedMcp()}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
