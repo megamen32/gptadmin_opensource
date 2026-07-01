@@ -5910,7 +5910,7 @@ details[open] summary::before{{content:'▾ '}}
     <button id="col" class="btn">⤢</button>
   </div>
   <div id="inputWrap" style="display:none">
-    <div class="lbl">input</div>
+    <div class="lbl">Что вызвали</div>
     <div id="inPreview" class="preview empty">—</div>
     <details><summary>full JSON</summary><div id="inFull" class="full"></div></details>
   </div>
