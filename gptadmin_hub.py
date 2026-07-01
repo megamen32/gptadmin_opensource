@@ -5289,10 +5289,13 @@ def mcp_relay_job_status(job_id: str, ack: bool = Query(False), verbose: bool = 
         legacy = {"job_id": job_id, "status": job.get("status", "running"), "agent_id": job.get("agent_id"), "response": job.get("result"), "error": job.get("error"), "acked": False}
         return _compact_mcp_job_response(job_id, job=job, result=None, acked=False, verbose=want_verbose, legacy_response=legacy)
 
+    # Always include job_id so the caller (and MCP outputSchema validation)
+    # sees a complete record even when the job is unknown. The status
+    # differentiates "running_or_unknown" from a real terminal result.
     legacy = {"job_id": job_id, "status": "running_or_unknown", "agent_id": None, "response": None, "error": None, "acked": False}
     if want_verbose:
         return legacy
-    return {"status": "running_or_unknown", "acked": False}
+    return {"job_id": job_id, "status": "running_or_unknown", "acked": False, "missing_or_unknown": True}
 
 
 
@@ -6262,33 +6265,54 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _mcp_tool_arg_error(tool: str, missing: list, received: Dict[str, Any]) -> HTTPException:
+    """Build a -32602 HTTPException with structured data describing what the
+    client forgot to send. Used by the JSON-RPC dispatcher below."""
+    return HTTPException(
+        status_code=400,  # JSON-RPC layer translates to -32602 in the response.
+        detail={
+            "tool": tool,
+            "missing": missing,
+            "received_keys": sorted([k for k in received.keys() if isinstance(k, str)]),
+            "hint": f"Provide {', '.join(missing)} as required by the {tool} input schema",
+        },
+    )
+
+
 async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    received = args if isinstance(args, dict) else {}
     if name == "list_mcp_agents":
-        return mcp_relay_agents_list(statuses=args.get("statuses"), purge_stale=bool(args.get("purge_stale", False)))
+        return mcp_relay_agents_list(statuses=received.get("statuses"), purge_stale=bool(received.get("purge_stale", False)))
     if name == "list_mcp_tools":
-        target = args.get("target")
+        target = received.get("target")
         if not isinstance(target, str) or not target:
-            raise HTTPException(400, "Explicit MCP target is required. Call list_mcp_agents first and pass one returned agent_id.")
-        return await mcp_relay_tools(McpRelayToolsReq(target=target, retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY)))
+            raise _mcp_tool_arg_error("list_mcp_tools", ["target"], received)
+        return await mcp_relay_tools(McpRelayToolsReq(target=target, retry_policy=str(received.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY)))
     if name == "call_mcp_tool":
-        target = args.get("target")
+        target = received.get("target")
         if not isinstance(target, str) or not target:
-            raise HTTPException(400, "Explicit MCP target is required. Call list_mcp_agents first and pass one returned agent_id.")
-        tool_name = args.get("tool_name") or args.get("name")
+            raise _mcp_tool_arg_error("call_mcp_tool", ["target"], received)
+        tool_name = received.get("tool_name") or received.get("name")
         if not isinstance(tool_name, str) or not tool_name:
-            raise HTTPException(400, "tool_name is required")
+            raise _mcp_tool_arg_error("call_mcp_tool", ["target (ok)", "tool_name (missing or wrong type)"], received)
         return await mcp_relay_call(
             McpRelayCallReq(
                 target=target,
                 tool_name=tool_name,
-                arguments=args.get("arguments") or {},
-                background=bool(args.get("background", False)),
-                timeout=args.get("timeout"),
-                retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY),
+                arguments=received.get("arguments") or {},
+                background=bool(received.get("background", False)),
+                timeout=received.get("timeout"),
+                retry_policy=str(received.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY),
             )
         )
     if name == "get_mcp_job":
-        return mcp_relay_job_status(str(args.get("job_id") or ""), ack=bool(args.get("ack", False)), verbose=bool(args.get("verbose", False)), include_raw=bool(args.get("include_raw", False)))
+        job_id = received.get("job_id")
+        # If the caller sent a non-string or empty job_id, raise a verbose
+        # -32602 error. A real job_id (any string) is forwarded to the relay;
+        # unknown jobs return a normal running_or_unknown record from the relay.
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise _mcp_tool_arg_error("get_mcp_job", ["job_id (non-empty string)"], received)
+        return mcp_relay_job_status(job_id.strip(), ack=bool(received.get("ack", False)), verbose=bool(received.get("verbose", False)), include_raw=bool(received.get("include_raw", False)))
     raise HTTPException(404, f"unknown tool {name}")
 
 
@@ -6306,13 +6330,27 @@ async def mcp_get(request: Request):
     return {"ok": True, "name": "GPTAdmin MCP", "tools": _apps_sdk_tools()}
 
 
+_MCP_DATA_CAP = int(os.getenv("MCP_ERROR_DATA_CAP", "4096"))  # bytes; cap traceback snippet exposed to clients
+
+
+def _truncate_for_data(text: str, cap: int = _MCP_DATA_CAP) -> str:
+    text = text or ""
+    if len(text) <= cap:
+        return text
+    suffix = f"\n...[truncated {len(text) - cap} chars]"
+    return text[:cap] + suffix
+
+
 @app.post("/mcp")
 async def mcp_post(request: Request):
     try:
         _mcp_auth(request)
     except HTTPException:
         return _mcp_unauthorized()
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "invalid JSON body", "data": {"hint": str(e)[:_MCP_DATA_CAP]}}}
     method = body.get("method")
     params = body.get("params") or {}
     req_id = body.get("id")
@@ -6326,7 +6364,7 @@ async def mcp_post(request: Request):
         elif method == "resources/read":
             uri = params.get("uri")
             if not isinstance(uri, str) or not uri:
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "resource uri is required"}}
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "resource uri is required", "data": {"missing": ["uri"], "received_keys": sorted([k for k in params.keys() if isinstance(k, str)])}}}
             result = _apps_sdk_resource_read(uri)
         elif method == "tools/call":
             tool_name = params.get("name")
@@ -6346,13 +6384,19 @@ async def mcp_post(request: Request):
                     "isError": bool(isinstance(tool_result, dict) and tool_result.get("status") in {"failed", "offline", "expired", "cancelled"}),
                 }
         else:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"unknown method {method}"}}
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"unknown method {method}", "data": {"received_method": method, "known_methods": ["initialize", "tools/list", "tools/call", "resources/list", "resources/read"]}}}
         return {"jsonrpc": "2.0", "id": req_id, "result": result}
     except HTTPException as e:
-        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": e.status_code, "message": str(e.detail)}}
+        # Map HTTPException detail to JSON-RPC error. -32602 when the detail
+        # describes invalid params (dict with `missing` field), -32603 otherwise.
+        code = -32602 if (isinstance(e.detail, dict) and ("missing" in e.detail or "received_keys" in e.detail)) else -32603
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": str(e.detail) if not isinstance(e.detail, dict) else e.detail.get("hint", "invalid params"), "data": e.detail if isinstance(e.detail, dict) else {"http_status": e.status_code}}}
     except Exception as e:
-        log.exception("mcp_post failed")
-        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}
+        tb = traceback.format_exc()
+        # Full traceback goes to local log; the client gets a sanitized snippet.
+        log.error("mcp_post failed rid=%s method=%s err=%s\n%s", rid(), method, e, tb)
+        snippet = _truncate_for_data(tb)
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": f"{type(e).__name__}: {e}", "data": {"traceback_snippet": snippet, "hint": "full traceback is in hub logs (mcp_post failed)"}}}
 
 
 # ---------------------------------------------------------------------------
