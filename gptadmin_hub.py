@@ -5096,6 +5096,7 @@ def _compact_virtual_shell_task(job_id: str, job: Dict[str, Any], task: Optional
     completed_at = task.get("completed_at") or job.get("completed_at")
     cwd, cwd_source = _resolve_cwd(str(job.get("server") or ""), task, result_fields)
     base = {
+        "job_id": job_id,
         "status": status,
         "agent": job.get("agent_id"),
         "task_id": job.get("task_id") or task.get("task_id"),
@@ -5117,6 +5118,7 @@ def _compact_real_mcp_job(job_id: str, job: Optional[Dict[str, Any]], result: Op
     created_at = job.get("created_at") or result.get("created_at")
     completed_at = job.get("completed_at") or result.get("completed_at")
     out = {
+        "job_id": job_id,
         "status": status,
         "agent": result.get("agent_id") or job.get("agent_id"),
         "tool": job.get("tool_name") or job.get("method"),
