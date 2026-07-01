@@ -79,7 +79,19 @@ def test_mcp_widget_template_resource_is_registered_and_readable():
     read = _jsonrpc_method(client, "resources/read", {"uri": "ui://widget/admin-v3.html"})
     assert read["contents"][0]["uri"] == "ui://widget/admin-v3.html"
     assert read["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
-    assert "GPTAdmin MCP" in read["contents"][0]["text"]
+    html = read["contents"][0]["text"]
+    assert "GPTAdmin MCP" in html
+    assert "Что вызвали" in html
+    assert "window.openai.callTool" in html
+    assert "get_mcp_job" in html
+
+
+def test_mcp_widget_tools_are_accessible_from_iframe():
+    tools = _jsonrpc_method(_client(), "tools/list")["tools"]
+    for tool in tools:
+        meta = tool.get("_meta", {})
+        assert meta.get("openai/widgetAccessible") is True
+        assert meta.get("ui", {}).get("visibility") == ["model", "app"]
 
 def test_actions_openapi_exposes_camelcase_and_snake_case_connector_operations():
     response = _client().get("/actions/openapi.yaml")
