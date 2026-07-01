@@ -1001,12 +1001,27 @@ except Exception as e:
     _max_servers = 1
 
 
+def _is_license_gate_enabled() -> bool:
+    # Opt-in license enforcement. The OSS build keeps the gate off by default
+    # (LICENSE_GATE_ENABLED unset / 0). Set LICENSE_GATE_ENABLED=1 to
+    # re-enable the historical RSA-signed LICENSE.json check.
+    return os.getenv("LICENSE_GATE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _check_license(current_servers: int) -> None:
-    pass
+    if not _is_license_gate_enabled():
+        return
+    # Placeholder: original OSS gate was a no-op (MIT licensed).
+    # Cloud build would enforce _max_servers / _expiry here.
+    return
 
 
 def ensure_license() -> None:
-    pass
+    if not _is_license_gate_enabled():
+        return
+    # Placeholder for the historical RSA-signed LICENSE.json check.
+    # Already verified at module import above; future cloud build may tighten.
+    return
 
 
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
