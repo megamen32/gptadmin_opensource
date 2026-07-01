@@ -1827,6 +1827,76 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/McpJobResponse"
+  /mcp-relay/list_mcp_agents:
+    get:
+      operationId: list_mcp_agents
+      summary: Alias for listMcpAgents for MCP connectors that snake_case tool names
+      description: Compatibility alias for /mcp-relay/agents.
+      responses:
+        "200":
+          description: Available agents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListMcpAgentsResponse"
+  /mcp-relay/list_mcp_tools:
+    post:
+      operationId: list_mcp_tools
+      summary: Alias for listMcpTools for MCP connectors that snake_case tool names
+      description: Compatibility alias for /mcp-relay/tools.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListMcpToolsRequest"
+      responses:
+        "200":
+          description: Tool list or job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+  /mcp-relay/call_mcp_tool:
+    post:
+      operationId: call_mcp_tool
+      summary: Alias for callMcpTool for MCP connectors that snake_case tool names
+      description: Compatibility alias for /mcp-relay/call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallMcpToolRequest"
+      responses:
+        "200":
+          description: Tool response or job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+  /mcp-relay/get_mcp_job/{job_id}:
+    get:
+      operationId: get_mcp_job
+      summary: Alias for getMcpJob for MCP connectors that snake_case tool names
+      description: Compatibility alias for /mcp-relay/job/{job_id}.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: ack
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Clear terminal job after reading.
+      responses:
+        "200":
+          description: Job status/result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpJobResponse"
 components:
   securitySchemes:
     bearerAuth:
@@ -4776,6 +4846,26 @@ def mcp_relay_agents_list(statuses: Optional[List[str]] = Query(default=None), p
     if purged is not None:
         out["purged"] = purged
     return out
+
+
+@app.get("/mcp-relay/list_mcp_agents", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def mcp_relay_list_mcp_agents_alias(statuses: Optional[List[str]] = Query(default=None), purge_stale: bool = Query(False)):
+    return mcp_relay_agents_list(statuses=statuses, purge_stale=purge_stale)
+
+
+@app.post("/mcp-relay/list_mcp_tools", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def mcp_relay_list_mcp_tools_alias(req: McpRelayToolsReq):
+    return await mcp_relay_tools(req)
+
+
+@app.post("/mcp-relay/call_mcp_tool", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+async def mcp_relay_call_mcp_tool_alias(req: McpRelayCallReq):
+    return await mcp_relay_call(req)
+
+
+@app.get("/mcp-relay/get_mcp_job/{job_id}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def mcp_relay_get_mcp_job_alias(job_id: str, ack: bool = Query(False), verbose: bool = Query(False), include_raw: bool = Query(False)):
+    return mcp_relay_job_status(job_id, ack=ack, verbose=verbose, include_raw=include_raw)
 
 
 @app.post("/mcp-relay/tools", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
