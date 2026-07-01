@@ -607,6 +607,33 @@ function renderAuditCard(row){
 async function handleResponseToggle(details){if(!details.open||details.dataset.loaded||details.dataset.loading||!details.dataset.jobId)return;details.dataset.loading='1';const pre=details.querySelector('pre');const empty=details.querySelector('.responseEmpty');if(pre)pre.textContent='loading…';if(empty)empty.textContent='loading…';try{const j=await api('/mcp-relay/job/'+encodeURIComponent(details.dataset.jobId)+'?verbose=true&include_raw=true');const payload=('response' in j)?j.response:('result' in j?j.result:j);const textHtml=prettyJsonHtml(payload);const next=`<pre class="responseBody mono">${textHtml||'—'}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next);details.dataset.loaded='1'}catch(e){const next=`<pre class="responseBody mono entryError">${esc('ERR '+e.message)}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next)}finally{delete details.dataset.loading}}
 function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Агенты',clients:'Клиенты/Auth',jobs:'Jobs/очереди',tools:'MCP tools',resources:'MCP resources',mcpmanage:'MCP manager',security:'Tokens & Auth',audit:'Audit log',raw:'Raw JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
+// getMaxActiveIps / onMaxActiveIpsChange — client-side tolerance for token IP count.
+// These helpers are used by renderClientCard(), inline onchange handlers and page bootstrap,
+// so they must live in the top-level script scope, not inside renderAll().
+function getMaxActiveIps() {
+  const v = parseInt(localStorage.getItem('gptadmin_max_active_ips') || '3', 10);
+  return Number.isFinite(v) && v > 0 ? v : 3;
+}
+function onMaxActiveIpsChange() {
+  const el = $('maxActiveIps');
+  if (!el) return;
+  const v = parseInt(el.value || '3', 10);
+  const safe = Number.isFinite(v) && v > 0 ? v : 3;
+  localStorage.setItem('gptadmin_max_active_ips', String(safe));
+  if (state) renderAll();
+}
+function initMaxActiveIpsInput() {
+  const el = $('maxActiveIps');
+  if (el) el.value = String(getMaxActiveIps());
+}
+// Card rendering limits must be initialized before renderAll() can render cards.
+// Regression guard: renderAgentCard reads these during the first agents render.
+const CLIENT_CARD_UA_SHOWN = 2;
+const CLIENT_CARD_PATHS_SHOWN = 3;
+const AGENT_CARD_CAPS_SHOWN = 5;
+const AGENT_CARD_META_KEYS_SHOWN = 5;
+const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
+const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
 function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span> / <span class="bad">${ac.offline||0}</span> / <span class="warn">${ac.stale||0}</span>`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
 const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{agent_id:'hub',status:'local'}].concat(targets.filter(a=>a.kind==='virtual_shell'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
 const problems=(data.agents||[]).filter(a=>a.status!=='online');const PROBLEM_AGENT_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_AGENT_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_AGENT_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.agent_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
@@ -668,30 +695,6 @@ function renderAgentCard(r) {
   );
 }
 // ===== Authorized clients (card-style) =====
-const CLIENT_CARD_UA_SHOWN = 2;
-const CLIENT_CARD_PATHS_SHOWN = 3;
-const AGENT_CARD_CAPS_SHOWN = 5;
-const AGENT_CARD_META_KEYS_SHOWN = 5;
-const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
-const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
-// getMaxActiveIps / onMaxActiveIpsChange — block #8 (client-side tolerance).
-// Reads/writes gptadmin_max_active_ips in localStorage. Defaults to 3.
-function getMaxActiveIps() {
-  const v = parseInt(localStorage.getItem('gptadmin_max_active_ips') || '3', 10);
-  return Number.isFinite(v) && v > 0 ? v : 3;
-}
-function onMaxActiveIpsChange() {
-  const el = $('maxActiveIps');
-  if (!el) return;
-  const v = parseInt(el.value || '3', 10);
-  const safe = Number.isFinite(v) && v > 0 ? v : 3;
-  localStorage.setItem('gptadmin_max_active_ips', String(safe));
-  if (state) renderAll();
-}
-function initMaxActiveIpsInput() {
-  const el = $('maxActiveIps');
-  if (el) el.value = String(getMaxActiveIps());
-}
 // topN: array top-N helper (avoids the .slice0N pattern that the acceptance grep flags)
 function topN(arr, n) {
   const out = [];

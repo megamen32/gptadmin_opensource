@@ -5726,15 +5726,15 @@ details[open] summary::before{{content:'▾ '}}
   <div class="bar">
     <span id="dot" class="dot"></span>
     <span id="st" class="st">ready</span>
-    <button id="ref" class="btn" style="display:none">↻</button>
+    <button id="ref" class="btn" style="display:none" title="Обновить background job">↻</button>
     <button id="col" class="btn">⤢</button>
   </div>
   <div id="inputWrap" style="display:none">
-    <div class="lbl">input</div>
+    <div class="lbl">Что вызвали</div>
     <pre id="in"></pre>
   </div>
   <div id="resultWrap">
-    <div class="lbl">result</div>
+    <div class="lbl">Ответ / live</div>
     <pre id="out" class="empty">waiting…</pre>
   </div>
 </div>
@@ -5742,16 +5742,16 @@ details[open] summary::before{{content:'▾ '}}
 const $=id=>document.getElementById(id);
 let jobId=null,timer=null,compact=false;
 const RE=/(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;
-function redact(v){{if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){{const o={{}};for(const[k,val]of Object.entries(v))o[k]=RE.test(k)?'***':redact(val);return o}}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***');return v}}
+function redact(v){{if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){{const o={{}};for(const[k,val]of Object.entries(v))o[k]=RE.test(k)?'***MASKED***':redact(val);return o}}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***MASKED***');return v}}
 function pretty(v){{if(v==null||v==='')return'—';try{{return JSON.stringify(redact(v),null,1)}}catch{{return String(v)}}}}
 function setOut(v){{const el=$('out');el.classList.remove('empty');el.textContent=pretty(v);resize()}}
 function setIn(v){{if(v==null)return;const w=$('inputWrap');$('in').textContent=pretty(v);w.style.display=compact?'none':'block'}}
 function st(t,k){{$('st').textContent=t;$('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'');resize()}}
 function resize(){{try{{window.openai?.notifyIntrinsicHeight?.(Math.min(document.body.scrollHeight+4,500))}}catch{{}}}}
 function unwrap(r){{return r?.structuredContent||r?.result?.structuredContent||r?.result||r}}
-function trackJob(v){{const j=v?.job_id||v?.structuredContent?.job_id;const s=v?.status||v?.structuredContent?.status;if(!j)return;jobId=j;$('ref').style.display='inline-block';if(!['completed','failed','cancelled','expired'].includes(String(s||'').toLowerCase()))poll(j)}}
+function trackJob(v){{const j=v?.job_id||v?.structuredContent?.job_id;const s=v?.status||v?.structuredContent?.status;if(!j)return;jobId=j;$('ref').style.display='inline-block';if(!['completed','failed','cancelled','expired'].includes(String(s||'').toLowerCase()))start(j)}}
 async function poll(j){{if(!window.openai?.callTool)return;st('polling…','w');try{{const r=unwrap(await window.openai.callTool('get_mcp_job',{{job_id:j,ack:false,verbose:true,include_raw:false}}));setOut(r);const s=String(r?.status||'').toLowerCase();if(['completed','failed','cancelled','expired'].includes(s)){{st('done',s==='completed'?'':'b');stop()}}else st(s||'running','w')}}catch(e){{st(String(e?.message||e),'b');stop()}}}}
-function start(j){{if(timer)return;timer=setInterval(()=>poll(j).catch(e=>st(String(e),'b')),3000);poll(j).catch(()=>{{}})}}
+function start(j){{if(timer)return;timer=setInterval(()=>poll(j).catch(e=>st(String(e),'b')),1500);poll(j).catch(()=>{{}})}}
 function stop(){{if(timer)clearInterval(timer);timer=null}}
 $('ref').addEventListener('click',()=>jobId?poll(jobId):st('no job','w'));
 $('col').addEventListener('click',()=>{{compact=!compact;$('inputWrap').style.display=compact?'none':'block';$('col').textContent=compact?'⤡':'⤢';resize()}});
