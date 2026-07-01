@@ -29,6 +29,35 @@ except Exception:
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
 
+# ===== ANSI Colors =====
+_IS_TTY = sys.stderr.isatty() if hasattr(sys, 'stderr') else False
+_NO_COLOR = os.environ.get('NO_COLOR', '').strip() or os.environ.get('GPTADMIN_NO_COLOR', '').strip()
+
+def _c(code: str, text: str) -> str:
+    """Wrap text in ANSI color if TTY and not disabled."""
+    if not _IS_TTY or _NO_COLOR:
+        return text
+    return f'\033[{code}m{text}\033[0m'
+
+def c_green(t):  return _c('32', t)
+def c_red(t):    return _c('31', t)
+def c_yellow(t): return _c('33', t)
+def c_cyan(t):   return _c('36', t)
+def c_dim(t):    return _c('2', t)
+def c_bold(t):   return _c('1', t)
+def c_mag(t):    return _c('35', t)
+
+def c_ok(t):     return c_green('✓ ' + t)
+def c_err(t):    return c_red('✗ ' + t)
+def c_warn(t):   return c_yellow('⚠ ' + t)
+def c_info(t):   return c_cyan('→ ' + t)
+
+def print_ok(t):    print(c_ok(t))
+def print_err(t):   print(c_err(t), file=sys.stderr)
+def print_warn(t):  print(c_warn(t), file=sys.stderr)
+def print_info(t):  print(c_info(t))
+def print_header(t): print(c_bold(c_mag(t)))
+
 # ===== Install mode & paths =====
 def _early_install_mode_user() -> bool:
     mode = os.environ.get('GPTADMIN_INSTALL_MODE', '').strip().lower()
@@ -2011,12 +2040,90 @@ def cmd_config_shellmcp(args):
 
 cmd_config_shell = cmd_config_shellmcp  # legacy internal alias
 
+
+def cmd_version(_):
+    """Print version and build info."""
+    try:
+        v = (Path(__file__).parent / 'VERSION').read_text().strip()
+    except Exception:
+        v = 'unknown'
+    print(f'GPTAdmin {c_bold(v)}')
+    import platform
+    print(f'  {c_dim("Python:")}    {platform.python_version()}')
+    print(f'  {c_dim("Platform:")}  {platform.system()} {platform.machine()}')
+    mode = 'user' if _early_install_mode_user() else 'system'
+    print(f'  {c_dim("Mode:")}      {mode}')
+    home = str(INSTALL_DIR) if INSTALL_DIR else 'not set'
+    print(f'  {c_dim("Home:")}      {home}')
+
+def cmd_doctor(_):
+    """Health check — services, ports, config, tokens."""
+    print_header('GPTAdmin Doctor')
+    issues = 0
+    # Check services
+    units = installed_units()
+    if not units:
+        print_err('No services installed. Run: gptadmin setup')
+        issues += 1
+    else:
+        for label, path in units:
+            exists = path.exists()
+            if exists:
+                print_ok(f'{label} — unit installed')
+            else:
+                print_err(f'{label} — unit missing')
+                issues += 1
+    # Check config
+    env = env_read()
+    ctl = env.get('CTL_TOKEN', '')
+    if ctl:
+        print_ok(f'CTL_TOKEN is set ({len(ctl)} chars)')
+    else:
+        print_err('CTL_TOKEN is not set')
+        issues += 1
+    hub_url = env.get('HUB_URL', env.get('PUBLIC_ORIGIN', ''))
+    if hub_url:
+        print_ok(f'Hub URL: {hub_url}')
+    else:
+        print_warn('Hub URL is not set (needed for agents to connect)')
+        issues += 1
+    # Check port
+    hub_port = env.get('HUB_PORT', '9001')
+    try:
+        import socket as _sock
+        sock = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(('127.0.0.1', int(hub_port)))
+        sock.close()
+        if result == 0:
+            print_ok(f'Port {hub_port} is listening')
+        else:
+            print_warn(f'Port {hub_port} is not listening (hub not running?)')
+            issues += 1
+    except Exception:
+        pass
+    # Summary
+    print()
+    if issues == 0:
+        print_ok('All checks passed.')
+    else:
+        print_warn(f'{issues} issue(s) found. Fix them before proceeding.')
+
 def cmd_status(_):
     units = installed_units()
     if not units:
-        print('Нет установленных сервисов. Запусти: gptadmin setup')
+        print_warn('Нет установленных сервисов.')
+        print_info('Запусти: ' + c_bold('gptadmin setup'))
         return
+    print_header('GPTAdmin Status')
     svc_status_multi(units)
+    env = env_read()
+    hub_url = env.get('HUB_URL', env.get('PUBLIC_ORIGIN', ''))
+    if hub_url:
+        print(f'  {c_dim("Hub URL:")} {c_cyan(hub_url)}')
+    tunnel = env.get('TUNNEL_MODE', '')
+    if tunnel:
+        print(f'  {c_dim("Tunnel:")}  {c_green(tunnel)}')
 
 def cmd_start(_):
     need_root()
@@ -2079,10 +2186,33 @@ def cmd_logs(args):
         else:
             svc_logs_one(name_map[svc])
 
-def cmd_tokens(_):
+def cmd_tokens(args):
     env = env_read()
-    print(f"CTL_TOKEN={env.get('CTL_TOKEN','')}  # hub")
-    print('ShellMCP token is stored as SHELLMCP_TOKEN and is intentionally not printed.')
+    show_shell = getattr(args, 'show_shellmcp', False) if hasattr(args, 'show_shellmcp') else False
+    print_header('GPTAdmin Tokens')
+    ctl = env.get('CTL_TOKEN', '')
+    print(f'  {c_dim("CTL_TOKEN")}     {c_green(ctl) if ctl else c_red("(not set)")}')
+    print(f'  {c_dim("HUB_URL")}       {env.get("HUB_URL", env.get("PUBLIC_ORIGIN", c_dim("(not set)")))}')
+    # MCP bearer tokens
+    for k in sorted(env):
+        if k.startswith('GPTADMIN_') and k.endswith('_MCP_BEARER'):
+            val = env[k]
+            label = k.replace('GPTADMIN_', '').replace('_MCP_BEARER', '').lower()
+            print(f'  {c_dim("MCP_BEARER")}    {c_cyan(label)}: {c_green(val[:16] + "..." if len(val) > 20 else val) if val else c_red("(not set)")}')
+    # ShellMCP token
+    shell_tok = env.get('SHELLMCP_TOKEN', '')
+    if show_shell:
+        print(f'  {c_dim("SHELLMCP_TOKEN")} {c_yellow(shell_tok) if shell_tok else c_red("(not set)")}')
+        print_warn('SHELLMCP_TOKEN is sensitive — do not share it.')
+    else:
+        print(f'  {c_dim("SHELLMCP_TOKEN")} {c_yellow("(hidden, use --show-shellmcp to reveal)")}')
+    # MCP_BRIDGE_KEY
+    bridge = env.get('MCP_BRIDGE_KEY', '')
+    if bridge and bridge != ctl:
+        print(f'  {c_dim("MCP_BRIDGE_KEY")} {c_green(bridge[:16] + "...")}')
+    print()
+    print(c_dim('  Issue new MCP token:  gptadmin token issue <name>'))
+    print(c_dim('  Rotate tokens:        gptadmin token rotate [hub|shellmcp|mcp]'))
 
 def cmd_rotate(args):
     need_root()
@@ -2758,6 +2888,8 @@ def main():
     ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
     sub = ap.add_subparsers(dest='cmd')
 
+    sub.add_parser('version', help='Показать версию и информацию о сборке').set_defaults(func=cmd_version)
+    sub.add_parser('doctor', help='Проверка здоровья: сервисы, порты, конфиг, токены').set_defaults(func=cmd_doctor)
     ap_setup = sub.add_parser('setup', help='Interactive installation & config')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
@@ -2811,7 +2943,9 @@ def main():
     ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
-    sub.add_parser('tokens').set_defaults(func=cmd_tokens)
+    ap_tok = sub.add_parser('tokens', help='Показать все токены GPTAdmin')
+    ap_tok.add_argument('--show-shellmcp', action='store_true', help='Показать SHELLMCP_TOKEN (опасно!)')
+    ap_tok.set_defaults(func=cmd_tokens)
 
     ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить новый Bearer token для GPTAdmin MCP client')
     ap_mcp_token_top.add_argument('name', nargs='?', help='client_id / имя токена, например codex-work')
