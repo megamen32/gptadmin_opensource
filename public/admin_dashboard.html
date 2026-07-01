@@ -384,6 +384,9 @@ pre{
     <button class="navbtn" data-view="resources" onclick="showView('resources')"><span>Resources</span><span class="badge">read</span></button>
     <button class="navbtn" data-view="mcpmanage" onclick="showView('mcpmanage')"><span>MCP manager</span><span class="badge" id="bMcpManage">add</span></button>
   </div>
+  <div class="sidegroup"><h3>Security</h3>
+    <button class="navbtn" data-view="security" onclick="showView('security')"><span>Tokens & Auth</span><span class="badge">env</span></button>
+  </div>
   <div class="sidegroup"><h3>Журналы</h3>
     <button class="navbtn" data-view="audit" onclick="showView('audit')"><span>Audit log</span><span class="badge" id="bAudit">—</span></button>
     <button class="navbtn" data-view="raw" onclick="showView('raw')"><span>Raw JSON</span><span class="badge">json</span></button>
@@ -403,6 +406,57 @@ pre{
 <section id="view-tools" class="view"><div class="card"><h2>MCP tools tester</h2><div class="row"><select id="target"></select><button onclick="listTools()">tools/list</button><label class="small"><input type="checkbox" id="background"> background</label><input id="timeout" type="number" value="30" min="1" max="3600" style="width:95px"></div><div class="split" style="margin-top:10px"><div><label class="muted">Tool</label><select id="toolSelect" style="width:100%"></select><label class="muted">Arguments JSON</label><textarea id="args">{}</textarea><div class="row"><button onclick="callTool()">call tool</button><button onclick="formatArgs()">format JSON</button></div></div><div><div class="row"><input id="jobId" placeholder="job_id"><button onclick="getJob()">get job</button></div><label class="muted">Result</label><pre id="result">—</pre></div></div></div></section>
 <section id="view-resources" class="view"><div class="card"><h2>MCP resources</h2><div class="row"><select id="resourceTarget"></select><button onclick="listResources()">resources/list</button><input id="resourceUri" style="min-width:360px" placeholder="resource://..."><button onclick="readResource()">resources/read</button></div><pre id="resourceResult">—</pre></div></section>
 <section id="view-mcpmanage" class="view"><div class="grid"><section class="card span8"><h2>MCP manager</h2><div class="row"><select id="mcpHost"></select><button onclick="listManagedMcp()">list</button><button onclick="statusManagedMcp()">status all</button><label class="small"><input type="checkbox" id="mcpKeepService"> keep service при remove</label></div><div id="managedMcp" style="margin-top:10px"></div></section><section class="card span4"><h2>Добавить MCP</h2><label class="muted">Name</label><input id="mcpName" placeholder="my-mcp" style="width:100%"><label class="muted">Agent ID optional</label><input id="mcpAgentId" placeholder="MyMcpAgent" style="width:100%"><label class="muted">Remote URL</label><input id="mcpUrl" placeholder="https://.../mcp или http://127.0.0.1:..." style="width:100%"><div class="muted small">Или local stdio command:</div><input id="mcpCommand" placeholder="npx / python3 / node" style="width:100%"><label class="muted">Args JSON array</label><textarea id="mcpArgs" style="min-height:80px">[]</textarea><label class="muted">Env JSON object</label><textarea id="mcpEnv" style="min-height:80px">{}</textarea><div class="row"><input id="mcpRunAs" placeholder="run_as_user" style="width:140px"><select id="mcpBackend"><option value="">backend auto</option><option>systemd</option><option>launchd</option><option>windows-task</option></select><select id="mcpStdio"><option value="">stdio auto</option><option>auto</option><option>ndjson</option><option>jsonl</option><option>framed</option><option>content-length</option></select></div><div class="row"><label class="small"><input type="checkbox" id="mcpInstall" checked> install/start</label><label class="small"><input type="checkbox" id="mcpForce"> force</label><label class="small"><input type="checkbox" id="mcpDisabled"> disabled</label></div><button onclick="addManagedMcp()">add MCP</button><pre id="mcpManageResult">—</pre></section></div></section>
+<section id="view-security" class="view"><div class="card">
+  <h2>Tokens & Auth Management</h2>
+  <p class="muted">Управление CTL_TOKEN, ADMIN_PASSWORD, OAUTH_CLIENT_SECRET и MCP bearer-токенами. Чтение и запись через shell_exec на hub-сервере.</p>
+
+  <div class="row" style="margin:12px 0">
+    <button onclick="loadSecurityEnv()">↻ Обновить</button>
+    <button onclick="rotateCtlToken()" style="border-color:var(--warn);color:var(--warn)">↻ Ротировать CTL_TOKEN</button>
+    <button onclick="rotateOAuth()" style="border-color:var(--warn);color:var(--warn)">↻ Ротировать OAUTH_CLIENT_SECRET</button>
+  </div>
+
+  <div id="securityEnv" class="stackList" style="margin-top:12px">
+    <p class="muted">Нажмите «Обновить» чтобы загрузить текущие значения.</p>
+  </div>
+
+  <div style="margin-top:16px">
+    <h3 style="font-size:13px;margin-bottom:8px">Установить новое значение</h3>
+    <div class="row">
+      <select id="secEnvKey" style="min-width:220px">
+        <option value="CTL_TOKEN">CTL_TOKEN</option>
+        <option value="ADMIN_PASSWORD">ADMIN_PASSWORD</option>
+        <option value="OAUTH_CLIENT_SECRET">OAUTH_CLIENT_SECRET</option>
+        <option value="MCP_BRIDGE_KEY">MCP_BRIDGE_KEY</option>
+        <option value="HUB_URL">HUB_URL</option>
+        <option value="PUBLIC_ORIGIN">PUBLIC_ORIGIN</option>
+        <option value="MCP_RESOURCE">MCP_RESOURCE</option>
+        <option value="_custom">— своя переменная —</option>
+      </select>
+      <input id="secEnvVal" placeholder="новое значение" style="min-width:300px">
+      <button onclick="setEnvVar()">Установить</button>
+    </div>
+    <p class="muted small" style="margin-top:6px">После изменения нужно перезапустить хаб: <code>sudo systemctl restart gptadmin_hub</code></p>
+  </div>
+
+  <div style="margin-top:16px">
+    <h3 style="font-size:13px;margin-bottom:8px">Выпустить MCP bearer-токен</h3>
+    <div class="row">
+      <input id="secMcpTokenName" placeholder="client_id (например codex-work)" style="min-width:240px">
+      <button onclick="issueMcpTokenFromPanel()">Выпустить</button>
+    </div>
+    <pre id="secMcpTokenResult" style="margin-top:8px;min-height:60px">—</pre>
+  </div>
+
+  <div style="margin-top:16px">
+    <h3 style="font-size:13px;margin-bottom:8px">Перезапустить хаб</h3>
+    <div class="row">
+      <button onclick="restartHub()" style="border-color:var(--bad);color:var(--bad)">⟳ Restart gptadmin_hub</button>
+      <span id="secRestartStatus" class="muted small"></span>
+    </div>
+  </div>
+</div></section>
+
 <section id="view-audit" class="view"><div class="card"><div class="row"><h2>Audit log</h2><input id="auditFilter" class="search" placeholder="фильтр event/ip/token/path" oninput="renderAll()"><select id="auditLimit" onchange="refreshAll()"><option>50</option><option selected>160</option><option>300</option><option>500</option></select></div><div id="audit"></div></div></section>
 <section id="view-raw" class="view"><div class="card"><h2>Raw overview JSON</h2><pre id="rawJson" class="logbox">—</pre></div></section>
 </main>
@@ -451,7 +505,7 @@ function renderResponseBlock(row, metaLabel){if(!canLoadResponse(row)&&!hasInlin
 function renderJobCard(row){return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(row.status)}">${esc(row.status||'—')}</span><div class="entryMain"><div class="entryTitle"><b>${esc(entrySummaryLabel(row))}</b><span class="entryCompactTime muted">${esc(compactTime(row.created_fmt||row.created_at||''))}</span><span class="entryMetaInfo" title="${metaTitle(jobMetaLines(row))}">i</span></div><div class="entryCommand mono">${(()=>{const cmd=entryCommand(row);try{const p=JSON.parse(cmd);return syntaxHighlightJson(p)}catch{return esc(cmd)}})()}</div><div class="entryMeta"><span>${esc(row.kind||'job')}</span>${row.timing?`<span>${esc(JSON.stringify(row.timing))}</span>`:''}${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}</div></div></div>${(row.status==='running'||row.status==='queued'||String(row.status||'').startsWith('queued'))?`<div class="row" style="margin-top:8px"><button class="cancelBtn" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">отменить</button></div>`:''}${renderResponseBlock(row,canLoadResponse(row)?'клик для загрузки':'превью')}</article>`}
 function renderAuditCard(row){const cmd=row.command||row.arguments_preview||row.params_preview||row.path||row.target||row.event||'—';const pseudoRow={...row,command:cmd,error:row.error};return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(row.status||row.event)}">${esc(row.event||'event')}</span><div class="entryMain"><div class="entryTitle"><b>${esc(row.tool_name||row.method||row.path||row.target||'audit')}</b><span class="entryCompactTime muted">${esc(compactTime(row.ts||''))}</span><span class="entryMetaInfo" title="${metaTitle(auditMetaLines(row))}">i</span></div><div class="entryCommand mono">${esc(cmd)}</div><div class="entryMeta">${row.status?`<span>${esc(row.status)}</span>`:''}${row.target?`<span>${esc(row.target)}</span>`:''}${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}</div></div></div>${renderResponseBlock(pseudoRow,row.job_id?'клик для загрузки':'ответа нет')}</article>`}
 async function handleResponseToggle(details){if(!details.open||details.dataset.loaded||details.dataset.loading||!details.dataset.jobId)return;details.dataset.loading='1';const pre=details.querySelector('pre');const empty=details.querySelector('.responseEmpty');if(pre)pre.textContent='loading…';if(empty)empty.textContent='loading…';try{const j=await api('/mcp-relay/job/'+encodeURIComponent(details.dataset.jobId)+'?verbose=true&include_raw=true');const payload=('response' in j)?j.response:('result' in j?j.result:j);const textHtml=prettyJsonHtml(payload);const next=`<pre class="responseBody mono">${textHtml||'—'}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next);details.dataset.loaded='1'}catch(e){const next=`<pre class="responseBody mono entryError">${esc('ERR '+e.message)}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next)}finally{delete details.dataset.loading}}
-function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Агенты',clients:'Клиенты/Auth',jobs:'Jobs/очереди',tools:'MCP tools',resources:'MCP resources',mcpmanage:'MCP manager',audit:'Audit log',raw:'Raw JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
+function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Агенты',clients:'Клиенты/Auth',jobs:'Jobs/очереди',tools:'MCP tools',resources:'MCP resources',mcpmanage:'MCP manager',security:'Tokens & Auth',audit:'Audit log',raw:'Raw JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
 function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span> / <span class="bad">${ac.offline||0}</span> / <span class="warn">${ac.stale||0}</span>`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
 const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{agent_id:'hub',status:'local'}].concat(targets.filter(a=>a.kind==='virtual_shell'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
@@ -479,6 +533,119 @@ async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpNa
 async function getJob(){try{const id=$('jobId').value.trim();const j=await api('/mcp-relay/job/'+encodeURIComponent(id)+'?verbose=true&include_raw=true');$('result').textContent=JSON.stringify(j,null,2);refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 function formatArgs(){try{$('args').value=JSON.stringify(JSON.parse($('args').value||'{}'),null,2)}catch(e){$('result').textContent='Bad JSON: '+e.message}}
 $('token').value=localStorage.getItem('gptadmin_ctl_token')||'';showView(currentView);refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
+
+// ===== Security management =====
+async function loadSecurityEnv(){
+  const el=$('securityEnv');
+  el.innerHTML='<p class="muted">Загрузка…</p>';
+  try{
+    // Read env file via shell_exec on hub
+    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
+      target:'shell:admin-server-100',
+      tool_name:'shell_exec',
+      arguments:{cmd:'cat /etc/gptadmin/gptadmin.env 2>/dev/null || cat ~/.config/gptadmin/gptadmin.env 2>/dev/null || echo NOT_FOUND'}
+    })});
+    const sc=j.response?.structuredContent||j.structuredContent||{};
+    const result=sc.result||{};
+    const stdout=result.stdout||'';
+    if(stdout.trim()==='NOT_FOUND'||!stdout.trim()){
+      el.innerHTML='<p class="muted">env-файл не найден. Возможно хаб использует другой путь.</p>';
+      return;
+    }
+    const lines=stdout.trim().split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
+    const sensitive=['CTL_TOKEN','ADMIN_PASSWORD','OAUTH_CLIENT_SECRET','SHELLMCP_TOKEN','MCP_BRIDGE_KEY'];
+    el.innerHTML=lines.map(line=>{
+      const eq=line.indexOf('=');
+      if(eq<0)return '';
+      const key=line.substring(0,eq).trim();
+      const val=line.substring(eq+1).trim();
+      const isSensitive=sensitive.some(s=>key.includes(s))||key.includes('TOKEN')||key.includes('SECRET')||key.includes('PASSWORD')||key.includes('BEARER');
+      const displayVal=isSensitive?(val.substring(0,8)+'••••••••'+(val.length>20?'...':'')):val;
+      const valClass=isSensitive?'warn':'';
+      return `<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">${esc(key)}</span><span class="muted small">${isSensitive?'sensitive':''}</span></div><div class="mono ${valClass}">${esc(displayVal)}</div></div>`;
+    }).join('');
+  }catch(e){
+    el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>';
+  }
+}
+
+async function setEnvVar(){
+  const key=$('secEnvKey').value;
+  const val=$('secEnvVal').value.trim();
+  if(!val){alert('Введите значение');return}
+  const realKey=key==='_custom'?prompt('Имя переменной:'):key;
+  if(!realKey)return;
+  if(!confirm('Установить '+realKey+' в env? Это изменит конфигурацию хаба.'))return;
+  try{
+    const cmd=`grep -v '^${realKey}=' /etc/gptadmin/gptadmin.env 2>/dev/null > /tmp/_gptadmin.env.tmp && echo '${realKey}=${val.replace(/'/g,"'\''")}' >> /tmp/_gptadmin.env.tmp && mv /tmp/_gptadmin.env.tmp /etc/gptadmin/gptadmin.env && echo OK || echo FAIL`;
+    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
+      target:'shell:admin-server-100',
+      tool_name:'shell_exec',
+      arguments:{cmd,sudo:true}
+    })});
+    const sc=j.response?.structuredContent||j.structuredContent||{};
+    const result=sc.result||{};
+    const out=result.stdout||'';
+    if(out.includes('OK')){
+      $('secEnvVal').value='';
+      loadSecurityEnv();
+      alert(realKey+' установлен. Перезапустите хаб.');
+    }else{
+      alert('Ошибка: '+out);
+    }
+  }catch(e){alert('ERR '+e.message)}
+}
+
+async function rotateCtlToken(){
+  if(!confirm('Сгенерировать новый CTL_TOKEN? Старый перестанет работать!'))return;
+  const newToken=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
+  $('secEnvKey').value='CTL_TOKEN';
+  $('secEnvVal').value=newToken;
+  alert('Новый CTL_TOKEN сгенерирован. Нажмите «Установить» чтобы применить, затем перезапустите хаб.\n\nВНИМАНИЕ: после рестарта старый токен перестанет работать!');
+}
+
+async function rotateOAuth(){
+  if(!confirm('Сгенерировать новый OAUTH_CLIENT_SECRET? Все MCP-клиенты нужно будет переподключить!'))return;
+  const newSecret=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
+  $('secEnvKey').value='OAUTH_CLIENT_SECRET';
+  $('secEnvVal').value=newSecret;
+  alert('Новый OAUTH_CLIENT_SECRET сгенерирован. Нажмите «Установить» чтобы применить, затем перезапустите хаб.');
+}
+
+async function issueMcpTokenFromPanel(){
+  const name=$('secMcpTokenName').value.trim();
+  if(!name){alert('Введите client_id');return}
+  const el=$('secMcpTokenResult');
+  el.textContent='Выпускаю…';
+  try{
+    const cmd=`cd /home/admin/gptadmin 2>/dev/null && python3 cli.py mcp token '${name.replace(/'/g,"'\''")}' --no-save 2>&1 || echo FALLBACK`;
+    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
+      target:'shell:admin-server-100',
+      tool_name:'shell_exec',
+      arguments:{cmd}
+    })});
+    const sc=j.response?.structuredContent||j.structuredContent||{};
+    const result=sc.result||{};
+    el.textContent=result.stdout||result.stderr||'—';
+  }catch(e){el.textContent='ERR '+e.message}
+}
+
+async function restartHub(){
+  if(!confirm('Перезапустить gptadmin_hub? Кратковременный простой.'))return;
+  $('secRestartStatus').textContent='Перезапуск…';
+  try{
+    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
+      target:'shell:admin-server-100',
+      tool_name:'shell_exec',
+      arguments:{cmd:'sudo systemctl restart gptadmin_hub 2>&1; echo exit=$?',sudo:true}
+    })});
+    const sc=j.response?.structuredContent||j.structuredContent||{};
+    const result=sc.result||{};
+    $('secRestartStatus').textContent='Готово: '+(result.stdout||'').trim();
+    setTimeout(()=>{$('secRestartStatus').textContent='';loadSecurityEnv()},3000);
+  }catch(e){$('secRestartStatus').textContent='ERR '+e.message}
+}
+
 </script>
 </body>
 </html>
