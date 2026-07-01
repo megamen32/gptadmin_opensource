@@ -52,7 +52,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from logging.handlers import WatchedFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import httpx
@@ -354,6 +354,7 @@ HUB_TASKS_STATE_FILE = Path(os.getenv("GPTADMIN_TASKS_STATE_FILE", str(CONFIG_DI
 HUB_MCP_AGENTS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_AGENTS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_agents_state.json")))
 HUB_MCP_JOBS_STATE_FILE = Path(os.getenv("GPTADMIN_MCP_JOBS_STATE_FILE", str(CONFIG_DIR / "hub_mcp_jobs_state.json")))
 HUB_AUTH_CLIENTS_STATE_FILE = Path(os.getenv("GPTADMIN_AUTH_CLIENTS_STATE_FILE", str(CONFIG_DIR / "hub_auth_clients_state.json")))
+LOGIN_FAILURES_STATE_FILE = Path(os.getenv("GPTADMIN_LOGIN_FAILURES_STATE_FILE", str(CONFIG_DIR / "login_failures.json")))
 
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://gptadminmcp.bezrabotnyi.com")
 MCP_RESOURCE = os.getenv("MCP_RESOURCE", PUBLIC_ORIGIN)
@@ -1000,18 +1001,51 @@ except Exception as e:
     _max_servers = 1
 
 
+def _is_license_gate_enabled() -> bool:
+    # Opt-in license enforcement. The OSS build keeps the gate off by default
+    # (LICENSE_GATE_ENABLED unset / 0). Set LICENSE_GATE_ENABLED=1 to
+    # re-enable the historical RSA-signed LICENSE.json check.
+    return os.getenv("LICENSE_GATE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _check_license(current_servers: int) -> None:
-    pass
+    if not _is_license_gate_enabled():
+        return
+    # Placeholder: original OSS gate was a no-op (MIT licensed).
+    # Cloud build would enforce _max_servers / _expiry here.
+    return
 
 
 def ensure_license() -> None:
-    pass
+    if not _is_license_gate_enabled():
+        return
+    # Placeholder for the historical RSA-signed LICENSE.json check.
+    # Already verified at module import above; future cloud build may tighten.
+    return
 
 
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
+    ip = _client_ip(request)
+    locked, retry = _bf_check_lockout(ip)
+    if locked:
+        log.warning("auth: locked out ip=%s rid=%s retry=%ss", ip, rid(), retry)
+        raise HTTPException(
+            status_code=429,
+            detail="too many failed attempts; try again later",
+            headers={"Retry-After": str(retry)},
+        )
     if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
-        log.warning("auth: bad/missing bearer rid=%s", rid())
+        log.warning("auth: bad/missing bearer rid=%s ip=%s", rid(), ip)
+        count, locked_until, lockout_s = _bf_record_failure(ip)
+        if lockout_s > 0:
+            # Surface 429 immediately so attackers learn the door is closed.
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many failed attempts; locked for {lockout_s}s",
+                headers={"Retry-After": str(lockout_s)},
+            )
         raise HTTPException(401, "bad token")
+    _bf_record_success(ip)
     _remember_auth_client(request, token_kind="ctl_bearer", subject="control", client_id="ctl-token", scope="gptadmin.read gptadmin.exec")
 
 
@@ -1300,7 +1334,7 @@ def _remember_auth_client(
     key = f"{token_kind}:{token_id}"
     entry = authorized_clients.setdefault(
         key,
-        {"key": key, "token_kind": token_kind, "token_id": token_id, "first_seen": now, "last_seen": now, "seen_count": 0, "ips": [], "user_agents": [], "hosts": [], "paths": [], "openai_ephemeral_user_ids": [], "openai_gpt_ids": [], "openai_conversation_ids": []},
+        {"key": key, "token_kind": token_kind, "token_id": token_id, "first_seen": now, "last_seen": now, "seen_count": 0, "enabled": True, "disabled_at": None, "disabled_reason": None, "ips": [], "user_agents": [], "hosts": [], "paths": [], "openai_ephemeral_user_ids": [], "openai_gpt_ids": [], "openai_conversation_ids": []},
     )
     entry["last_seen"] = now
     entry["seen_count"] = int(entry.get("seen_count") or 0) + 1
@@ -1320,10 +1354,154 @@ def _remember_auth_client(
         log.debug("auth clients: save failed: %s", e)
 
 
+# ----------------------------------------------------------------------
+# Graduated IP brute-force lockout for bearer auth
+# ----------------------------------------------------------------------
+
+
+_BRUTEFORCE_THRESHOLD_SOFT = int(os.getenv("BRUTEFORCE_THRESHOLD_SOFT", "5"))
+_BRUTEFORCE_THRESHOLD_HARD = int(os.getenv("BRUTEFORCE_THRESHOLD_HARD", "10"))
+_BRUTEFORCE_THRESHOLD_DOS = int(os.getenv("BRUTEFORCE_THRESHOLD_DOS", "20"))
+_BRUTEFORCE_LOCKOUT_SOFT_S = int(os.getenv("BRUTEFORCE_LOCKOUT_SOFT_S", "60"))
+_BRUTEFORCE_LOCKOUT_HARD_S = int(os.getenv("BRUTEFORCE_LOCKOUT_HARD_S", "3600"))
+_BRUTEFORCE_LOCKOUT_DOS_S = int(os.getenv("BRUTEFORCE_LOCKOUT_DOS_S", "86400"))
+_BRUTEFORCE_DISABLED = os.getenv("BRUTEFORCE_LOCKOUT_DISABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+# Older code lives: this cutoff lets us bypass on dev/test if needed.
+_BRUTEFORCE_PRUNE_AGE_S = int(os.getenv("BRUTEFORCE_PRUNE_AGE_S", "604800"))  # 7d
+
+
+def _bf_load() -> Dict[str, Any]:
+    try:
+        data = json.loads(LOGIN_FAILURES_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.debug("bruteforce: load failed path=%s err=%s", LOGIN_FAILURES_STATE_FILE, e)
+    return {}
+
+
+def _bf_save(data: Dict[str, Any]) -> None:
+    try:
+        LOGIN_FAILURES_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOGIN_FAILURES_STATE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log.debug("bruteforce: save failed path=%s err=%s", LOGIN_FAILURES_STATE_FILE, e)
+
+
+def _bf_lockout_for_count(count: int) -> int:
+    """Return lockout duration seconds for a given failure count (0 = no lockout)."""
+    if count >= _BRUTEFORCE_THRESHOLD_DOS:
+        return _BRUTEFORCE_LOCKOUT_DOS_S
+    if count >= _BRUTEFORCE_THRESHOLD_HARD:
+        return _BRUTEFORCE_LOCKOUT_HARD_S
+    if count >= _BRUTEFORCE_THRESHOLD_SOFT:
+        return _BRUTEFORCE_LOCKOUT_SOFT_S
+    return 0
+
+
+def _bf_prune(state: Dict[str, Any]) -> None:
+    """Drop entries older than _BRUTEFORCE_PRUNE_AGE_S to bound file size."""
+    if not state:
+        return
+    now = int(time.time())
+    drop = [
+        ip for ip, entry in state.items()
+        if not isinstance(entry, dict)
+        or int(entry.get("last_attempt", 0) or 0) + _BRUTEFORCE_PRUNE_AGE_S < now
+    ]
+    for ip in drop:
+        state.pop(ip, None)
+
+
+def _bf_check_lockout(ip: str) -> Tuple[bool, int]:
+    """Returns (locked, retry_after_seconds). Does not mutate state."""
+    if _BRUTEFORCE_DISABLED or not ip:
+        return False, 0
+    state = _bf_load()
+    entry = state.get(ip)
+    if not isinstance(entry, dict):
+        return False, 0
+    locked_until = int(entry.get("locked_until", 0) or 0)
+    now = int(time.time())
+    if locked_until > now:
+        return True, locked_until - now
+    return False, 0
+
+
+def _bf_record_failure(ip: str) -> Tuple[int, int, int]:
+    """Increment failure count, set locked_until if a threshold is crossed.
+
+    Returns (count, locked_until_epoch, lockout_s) — lockout_s is 0 if no lock.
+    """
+    if _BRUTEFORCE_DISABLED or not ip:
+        return 0, 0, 0
+    state = _bf_load()
+    _bf_prune(state)
+    entry = state.get(ip)
+    if not isinstance(entry, dict):
+        entry = {"count": 0, "locked_until": 0, "last_attempt": 0}
+        state[ip] = entry
+    now = int(time.time())
+    count = int(entry.get("count", 0) or 0)
+    if int(entry.get("locked_until", 0) or 0) > now:
+        # already locked; keep lock but don't inflate counter further
+        retry = int(entry.get("locked_until", 0)) - now
+        return count, int(entry.get("locked_until", 0)), retry
+    count += 1
+    entry["count"] = count
+    entry["last_attempt"] = now
+    lockout_s = _bf_lockout_for_count(count)
+    if lockout_s > 0:
+        entry["locked_until"] = now + lockout_s
+        entry["locked_reason"] = (
+            "soft" if count >= _BRUTEFORCE_THRESHOLD_SOFT and count < _BRUTEFORCE_THRESHOLD_HARD
+            else "hard" if count < _BRUTEFORCE_THRESHOLD_DOS
+            else "dos"
+        )
+    else:
+        entry["locked_until"] = 0
+    _bf_save(state)
+    return count, int(entry.get("locked_until", 0) or 0), lockout_s
+
+
+def _bf_record_success(ip: str) -> None:
+    if _BRUTEFORCE_DISABLED or not ip:
+        return
+    try:
+        state = _bf_load()
+        if ip in state:
+            state.pop(ip, None)
+            _bf_save(state)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
+
+class AdminNoCacheMiddleware(BaseHTTPMiddleware):
+    """Force no-cache headers on /admin and /admin/api/* so the SPA poll
+    always sees fresh state from the hub (state files, audit, clients)."""
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        is_admin = (path == "/admin") or path.startswith("/admin/") or path.startswith("/admin/api/")
+        if is_admin and request.method in ("GET", "HEAD"):
+            response: Response = await call_next(request)
+            existing_etag = response.headers.get("etag")
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            if existing_etag and "ETag" not in response.headers:
+                response.headers["ETag"] = existing_etag
+            return response
+        return await call_next(request)
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -1387,6 +1565,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AccessLogMiddleware)
+app.add_middleware(AdminNoCacheMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -5023,6 +5202,7 @@ def _compact_virtual_shell_task(job_id: str, job: Dict[str, Any], task: Optional
     completed_at = task.get("completed_at") or job.get("completed_at")
     cwd, cwd_source = _resolve_cwd(str(job.get("server") or ""), task, result_fields)
     base = {
+        "job_id": job_id,
         "status": status,
         "agent": job.get("agent_id"),
         "task_id": job.get("task_id") or task.get("task_id"),
@@ -5044,6 +5224,7 @@ def _compact_real_mcp_job(job_id: str, job: Optional[Dict[str, Any]], result: Op
     created_at = job.get("created_at") or result.get("created_at")
     completed_at = job.get("completed_at") or result.get("completed_at")
     out = {
+        "job_id": job_id,
         "status": status,
         "agent": result.get("agent_id") or job.get("agent_id"),
         "tool": job.get("tool_name") or job.get("method"),
@@ -5110,10 +5291,13 @@ def mcp_relay_job_status(job_id: str, ack: bool = Query(False), verbose: bool = 
         legacy = {"job_id": job_id, "status": job.get("status", "running"), "agent_id": job.get("agent_id"), "response": job.get("result"), "error": job.get("error"), "acked": False}
         return _compact_mcp_job_response(job_id, job=job, result=None, acked=False, verbose=want_verbose, legacy_response=legacy)
 
+    # Always include job_id so the caller (and MCP outputSchema validation)
+    # sees a complete record even when the job is unknown. The status
+    # differentiates "running_or_unknown" from a real terminal result.
     legacy = {"job_id": job_id, "status": "running_or_unknown", "agent_id": None, "response": None, "error": None, "acked": False}
     if want_verbose:
         return legacy
-    return {"status": "running_or_unknown", "acked": False}
+    return {"job_id": job_id, "status": "running_or_unknown", "acked": False, "missing_or_unknown": True}
 
 
 
@@ -5134,9 +5318,17 @@ def _status_counts(rows: List[Dict[str, Any]], key: str = "status") -> Dict[str,
 def _admin_public_auth_client(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     ips = list(entry.get("ips") or [])
     uas = list(entry.get("user_agents") or [])
+    # Legacy entries without an explicit "enabled" flag are treated as enabled.
+    enabled = entry.get("enabled")
+    if enabled is None:
+        enabled = True
     return {
         "key": key,
         "token_kind": entry.get("token_kind"),
+        "enabled": bool(enabled),
+        "disabled_at": entry.get("disabled_at"),
+        "disabled_reason": entry.get("disabled_reason"),
+        "re_enabled_at": entry.get("re_enabled_at"),
         "token_id": entry.get("token_id"),
         "subject": entry.get("subject"),
         "client_id": entry.get("client_id"),
@@ -5336,10 +5528,36 @@ async def _admin_mcp_manage(req: AdminMcpManageReq) -> Dict[str, Any]:
     return {"ok": True, "target": selected, "action": action, "response": data}
 
 
+def _admin_etag_for(path):  # type: ignore[name-defined]
+    """Stable ETag from file mtime + size (mtime-based, opaque to clients)."""
+    st = path.stat()
+    sig = f"{st.st_mtime_ns}-{st.st_size}".encode()
+    return chr(34) + hashlib.md5(sig).hexdigest() + chr(34)  # double-quoted ETag
+
+
+def _admin_no_cache_headers(etag):
+    return {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "ETag": etag,
+    }
+
+
 @app.get("/admin")
 @app.get("/admin/")
-def admin_dashboard():
-    return FileResponse(GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html", media_type="text/html")
+def admin_dashboard(request: Request):
+    """Serve admin SPA with no-cache + ETag/304 so the browser always
+    sees the latest HTML after a deploy."""
+    path = GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html"
+    etag = _admin_etag_for(path)
+    inm = (request.headers.get("if-none-match") or "").strip()
+    if inm and (inm == etag or inm == "*"):
+        return Response(status_code=304, headers=_admin_no_cache_headers(etag))
+    body = path.read_bytes()
+    headers = _admin_no_cache_headers(etag)
+    headers["Content-Type"] = "text/html; charset=utf-8"
+    return Response(content=body, headers=headers)
 
 
 @app.get("/admin/api/overview", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -5359,15 +5577,48 @@ def admin_api_clients():
     return {"clients": clients, "count": len(clients), "multiple_ip": [c for c in clients if c.get("multiple_ips")]}
 
 
+def _set_client_enabled(client_key: str, enabled: bool, *, reason: str = "") -> Dict[str, Any]:
+    if client_key not in authorized_clients:
+        raise HTTPException(404, f"client not found: {client_key}")
+    entry = authorized_clients[client_key]
+    if not isinstance(entry, dict):
+        raise HTTPException(500, "client entry malformed")
+    now = int(time.time())
+    entry["enabled"] = bool(enabled)
+    if enabled:
+        entry["disabled_at"] = None
+        entry["disabled_reason"] = None
+        entry["re_enabled_at"] = now
+    else:
+        entry["disabled_at"] = now
+        entry["disabled_reason"] = reason or "disabled by admin"
+    _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
+    event = "client_enabled" if enabled else "client_disabled"
+    _audit(
+        event,
+        detail=f"{event} client={client_key} token_id={entry.get('token_id', '?')} reason={entry.get('disabled_reason') if not enabled else ''}",
+    )
+    return {"ok": True, "key": client_key, "enabled": entry["enabled"], "token_id": entry.get("token_id")}
+
+
+# Soft-disable: record stays in state but enabled=false.  Bearer requests from
+# this client_key get a 403 from _mcp_auth.  Use /enable to undo.
+@app.post("/admin/api/clients/{client_key}/disable", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_disable_client(client_key: str, reason: str = Query("", description="Optional human-readable reason for audit")):
+    return _set_client_enabled(client_key, False, reason=reason.strip())
+
+
+@app.post("/admin/api/clients/{client_key}/enable", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
+def admin_enable_client(client_key: str):
+    return _set_client_enabled(client_key, True)
+
+
+# Backwards-compatible soft alias: legacy rev-btn / scripts that DELETE should
+# now mean "disable".  Hard-revoke is available via /admin/api/clients/revoke-all.
 @app.delete("/admin/api/clients/{client_key}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def admin_revoke_client(client_key: str):
-    """Revoke a single OAuth client by removing it from the registry."""
-    if client_key in authorized_clients:
-        entry = authorized_clients.pop(client_key)
-        _save_json_dict(HUB_AUTH_CLIENTS_STATE_FILE, authorized_clients)
-        _audit("client_revoke", detail=f"revoked client {client_key} ({entry.get('token_id', '?')})")
-        return {"ok": True, "revoked": client_key, "token_id": entry.get("token_id")}
-    raise HTTPException(404, f"client not found: {client_key}")
+    """Legacy alias for /disable.  Record stays in state with enabled=false."""
+    return _set_client_enabled(client_key, False, reason="legacy DELETE /disable alias")
 
 
 @app.post("/admin/api/clients/revoke-all", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
@@ -5499,10 +5750,36 @@ def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
 
 
 def _mcp_auth(request: Request) -> Dict[str, Any]:
+    ip = _client_ip(request)
+    locked, retry = _bf_check_lockout(ip)
+    if locked:
+        log.warning("mcp_auth: locked out ip=%s rid=%s retry=%ss", ip, rid(), retry)
+        raise HTTPException(
+            status_code=429,
+            detail="too many failed attempts; try again later",
+            headers={"Retry-After": str(retry)},
+        )
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
+        count, locked_until, lockout_s = _bf_record_failure(ip)
+        if lockout_s > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many failed attempts; locked for {lockout_s}s",
+                headers={"Retry-After": str(lockout_s)},
+            )
         raise HTTPException(401, "unauthorized")
-    payload = _verify_jwt(auth.split(None, 1)[1])
+    try:
+        payload = _verify_jwt(auth.split(None, 1)[1])
+    except HTTPException:
+        count, locked_until, lockout_s = _bf_record_failure(ip)
+        if lockout_s > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many failed attempts; locked for {lockout_s}s",
+                headers={"Retry-After": str(lockout_s)},
+            )
+        raise
     _remember_auth_client(
         request,
         token_kind="oauth_bearer",
@@ -5510,6 +5787,21 @@ def _mcp_auth(request: Request) -> Dict[str, Any]:
         client_id=str(payload.get("client_id") or ""),
         scope=str(payload.get("scope") or ""),
     )
+    # Block soft-disabled clients. Backward-compatible: legacy entries without
+    # explicit "enabled" are treated as enabled (truthy default).
+    try:
+        token_id = _audit_token_id(request)
+        if token_id:
+            key = f"oauth_bearer:{token_id}"
+            entry = authorized_clients.get(key)
+            if isinstance(entry, dict) and entry.get("enabled") is False:
+                detail = entry.get("disabled_reason") or "client disabled by admin"
+                log.warning("mcp_auth: blocked disabled client key=%s subject=%s", key, payload.get("sub"))
+                raise HTTPException(403, f"client disabled: {detail}")
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.debug("mcp_auth: soft-disable lookup skipped err=%s", _e)
     return payload
 
 
@@ -5975,33 +6267,54 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _mcp_tool_arg_error(tool: str, missing: list, received: Dict[str, Any]) -> HTTPException:
+    """Build a -32602 HTTPException with structured data describing what the
+    client forgot to send. Used by the JSON-RPC dispatcher below."""
+    return HTTPException(
+        status_code=400,  # JSON-RPC layer translates to -32602 in the response.
+        detail={
+            "tool": tool,
+            "missing": missing,
+            "received_keys": sorted([k for k in received.keys() if isinstance(k, str)]),
+            "hint": f"Provide {', '.join(missing)} as required by the {tool} input schema",
+        },
+    )
+
+
 async def _apps_sdk_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    received = args if isinstance(args, dict) else {}
     if name == "list_mcp_agents":
-        return mcp_relay_agents_list(statuses=args.get("statuses"), purge_stale=bool(args.get("purge_stale", False)))
+        return mcp_relay_agents_list(statuses=received.get("statuses"), purge_stale=bool(received.get("purge_stale", False)))
     if name == "list_mcp_tools":
-        target = args.get("target")
+        target = received.get("target")
         if not isinstance(target, str) or not target:
-            raise HTTPException(400, "Explicit MCP target is required. Call list_mcp_agents first and pass one returned agent_id.")
-        return await mcp_relay_tools(McpRelayToolsReq(target=target, retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY)))
+            raise _mcp_tool_arg_error("list_mcp_tools", ["target"], received)
+        return await mcp_relay_tools(McpRelayToolsReq(target=target, retry_policy=str(received.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY)))
     if name == "call_mcp_tool":
-        target = args.get("target")
+        target = received.get("target")
         if not isinstance(target, str) or not target:
-            raise HTTPException(400, "Explicit MCP target is required. Call list_mcp_agents first and pass one returned agent_id.")
-        tool_name = args.get("tool_name") or args.get("name")
+            raise _mcp_tool_arg_error("call_mcp_tool", ["target"], received)
+        tool_name = received.get("tool_name") or received.get("name")
         if not isinstance(tool_name, str) or not tool_name:
-            raise HTTPException(400, "tool_name is required")
+            raise _mcp_tool_arg_error("call_mcp_tool", ["target (ok)", "tool_name (missing or wrong type)"], received)
         return await mcp_relay_call(
             McpRelayCallReq(
                 target=target,
                 tool_name=tool_name,
-                arguments=args.get("arguments") or {},
-                background=bool(args.get("background", False)),
-                timeout=args.get("timeout"),
-                retry_policy=str(args.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY),
+                arguments=received.get("arguments") or {},
+                background=bool(received.get("background", False)),
+                timeout=received.get("timeout"),
+                retry_policy=str(received.get("retry_policy") or MCP_RELAY_DEFAULT_RETRY_POLICY),
             )
         )
     if name == "get_mcp_job":
-        return mcp_relay_job_status(str(args.get("job_id") or ""), ack=bool(args.get("ack", False)), verbose=bool(args.get("verbose", False)), include_raw=bool(args.get("include_raw", False)))
+        job_id = received.get("job_id")
+        # If the caller sent a non-string or empty job_id, raise a verbose
+        # -32602 error. A real job_id (any string) is forwarded to the relay;
+        # unknown jobs return a normal running_or_unknown record from the relay.
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise _mcp_tool_arg_error("get_mcp_job", ["job_id (non-empty string)"], received)
+        return mcp_relay_job_status(job_id.strip(), ack=bool(received.get("ack", False)), verbose=bool(received.get("verbose", False)), include_raw=bool(received.get("include_raw", False)))
     raise HTTPException(404, f"unknown tool {name}")
 
 
@@ -6019,13 +6332,27 @@ async def mcp_get(request: Request):
     return {"ok": True, "name": "GPTAdmin MCP", "tools": _apps_sdk_tools()}
 
 
+_MCP_DATA_CAP = int(os.getenv("MCP_ERROR_DATA_CAP", "4096"))  # bytes; cap traceback snippet exposed to clients
+
+
+def _truncate_for_data(text: str, cap: int = _MCP_DATA_CAP) -> str:
+    text = text or ""
+    if len(text) <= cap:
+        return text
+    suffix = f"\n...[truncated {len(text) - cap} chars]"
+    return text[:cap] + suffix
+
+
 @app.post("/mcp")
 async def mcp_post(request: Request):
     try:
         _mcp_auth(request)
     except HTTPException:
         return _mcp_unauthorized()
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "invalid JSON body", "data": {"hint": str(e)[:_MCP_DATA_CAP]}}}
     method = body.get("method")
     params = body.get("params") or {}
     req_id = body.get("id")
@@ -6039,7 +6366,7 @@ async def mcp_post(request: Request):
         elif method == "resources/read":
             uri = params.get("uri")
             if not isinstance(uri, str) or not uri:
-                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "resource uri is required"}}
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "resource uri is required", "data": {"missing": ["uri"], "received_keys": sorted([k for k in params.keys() if isinstance(k, str)])}}}
             result = _apps_sdk_resource_read(uri)
         elif method == "tools/call":
             tool_name = params.get("name")
@@ -6059,13 +6386,19 @@ async def mcp_post(request: Request):
                     "isError": bool(isinstance(tool_result, dict) and tool_result.get("status") in {"failed", "offline", "expired", "cancelled"}),
                 }
         else:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"unknown method {method}"}}
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"unknown method {method}", "data": {"received_method": method, "known_methods": ["initialize", "tools/list", "tools/call", "resources/list", "resources/read"]}}}
         return {"jsonrpc": "2.0", "id": req_id, "result": result}
     except HTTPException as e:
-        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": e.status_code, "message": str(e.detail)}}
+        # Map HTTPException detail to JSON-RPC error. -32602 when the detail
+        # describes invalid params (dict with `missing` field), -32603 otherwise.
+        code = -32602 if (isinstance(e.detail, dict) and ("missing" in e.detail or "received_keys" in e.detail)) else -32603
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": str(e.detail) if not isinstance(e.detail, dict) else e.detail.get("hint", "invalid params"), "data": e.detail if isinstance(e.detail, dict) else {"http_status": e.status_code}}}
     except Exception as e:
-        log.exception("mcp_post failed")
-        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}
+        tb = traceback.format_exc()
+        # Full traceback goes to local log; the client gets a sanitized snippet.
+        log.error("mcp_post failed rid=%s method=%s err=%s\n%s", rid(), method, e, tb)
+        snippet = _truncate_for_data(tb)
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": f"{type(e).__name__}: {e}", "data": {"traceback_snippet": snippet, "hint": "full traceback is in hub logs (mcp_post failed)"}}}
 
 
 # ---------------------------------------------------------------------------
