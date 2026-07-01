@@ -276,6 +276,7 @@ elif getattr(sys, "frozen", False):
     CONFIG_DIR = Path(sys.executable).parent / "config"
 else:
     CONFIG_DIR = Path(__file__).resolve().parent / "config"
+LOGIN_FAILURES_STATE_FILE = Path(os.getenv("GPTADMIN_LOGIN_FAILURES_STATE_FILE", str(CONFIG_DIR / "login_failures.json")))
 
 GPTADMIN_REPO_ROOT = Path(__file__).resolve().parent
 GPTADMIN_CLI_PATH = Path(os.getenv("GPTADMIN_CLI_PATH", str(GPTADMIN_REPO_ROOT / "cli.py")))
@@ -1009,6 +1010,7 @@ def ensure_license() -> None:
 
 
 async def check_ctl_token(request: Request, cred: HTTPAuthorizationCredentials = Depends(auth_ctl)) -> None:
+    _bf_gate(request)
     if not cred or cred.scheme.lower() != "bearer" or cred.credentials != CTL_TOKEN:
         log.warning("auth: bad/missing bearer rid=%s", rid())
         raise HTTPException(401, "bad token")
@@ -1319,6 +1321,21 @@ def _remember_auth_client(
     except Exception as e:
         log.debug("auth clients: save failed: %s", e)
 
+
+
+
+def _bf_gate(request: Request) -> None:
+    """Brute-force gate: raise 429 if IP is currently locked out."""
+    if _BRUTEFORCE_DISABLED:
+        return
+    ip = (request.client.host if request.client else "") or ""
+    blocked, retry_after = _bf_check_lockout(ip)
+    if blocked:
+        raise HTTPException(
+            429,
+            "too many failed attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 # ---------------------------------------------------------------------------
 # Middleware
@@ -5498,7 +5515,136 @@ def _is_chatgpt_redirect(uri: Optional[str]) -> bool:
     return False
 
 
+
+
+_BRUTEFORCE_THRESHOLD_SOFT = int(os.getenv("BRUTEFORCE_THRESHOLD_SOFT", "5"))
+_BRUTEFORCE_THRESHOLD_HARD = int(os.getenv("BRUTEFORCE_THRESHOLD_HARD", "10"))
+_BRUTEFORCE_THRESHOLD_DOS = int(os.getenv("BRUTEFORCE_THRESHOLD_DOS", "20"))
+_BRUTEFORCE_LOCKOUT_SOFT_S = int(os.getenv("BRUTEFORCE_LOCKOUT_SOFT_S", "60"))
+_BRUTEFORCE_LOCKOUT_HARD_S = int(os.getenv("BRUTEFORCE_LOCKOUT_HARD_S", "3600"))
+_BRUTEFORCE_LOCKOUT_DOS_S = int(os.getenv("BRUTEFORCE_LOCKOUT_DOS_S", "86400"))
+_BRUTEFORCE_DISABLED = os.getenv("BRUTEFORCE_LOCKOUT_DISABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+# Older code lives: this cutoff lets us bypass on dev/test if needed.
+_BRUTEFORCE_PRUNE_AGE_S = int(os.getenv("BRUTEFORCE_PRUNE_AGE_S", "604800"))  # 7d
+
+
+def _bf_load() -> Dict[str, Any]:
+    try:
+        data = json.loads(LOGIN_FAILURES_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.debug("bruteforce: load failed path=%s err=%s", LOGIN_FAILURES_STATE_FILE, e)
+    return {}
+
+
+def _bf_save(data: Dict[str, Any]) -> None:
+    try:
+        LOGIN_FAILURES_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOGIN_FAILURES_STATE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log.debug("bruteforce: save failed path=%s err=%s", LOGIN_FAILURES_STATE_FILE, e)
+
+
+def _bf_lockout_for_count(count: int) -> int:
+    """Return lockout duration seconds for a given failure count (0 = no lockout)."""
+    if count >= _BRUTEFORCE_THRESHOLD_DOS:
+        return _BRUTEFORCE_LOCKOUT_DOS_S
+    if count >= _BRUTEFORCE_THRESHOLD_HARD:
+        return _BRUTEFORCE_LOCKOUT_HARD_S
+    if count >= _BRUTEFORCE_THRESHOLD_SOFT:
+        return _BRUTEFORCE_LOCKOUT_SOFT_S
+    return 0
+
+
+def _bf_prune(state: Dict[str, Any]) -> None:
+    """Drop entries older than _BRUTEFORCE_PRUNE_AGE_S to bound file size."""
+    if not state:
+        return
+    now = int(time.time())
+    drop = [
+        ip for ip, entry in state.items()
+        if not isinstance(entry, dict)
+        or int(entry.get("last_attempt", 0) or 0) + _BRUTEFORCE_PRUNE_AGE_S < now
+    ]
+    for ip in drop:
+        state.pop(ip, None)
+
+
+def _bf_check_lockout(ip: str) -> Tuple[bool, int]:
+    """Returns (locked, retry_after_seconds). Does not mutate state."""
+    if _BRUTEFORCE_DISABLED or not ip:
+        return False, 0
+    state = _bf_load()
+    entry = state.get(ip)
+    if not isinstance(entry, dict):
+        return False, 0
+    locked_until = int(entry.get("locked_until", 0) or 0)
+    now = int(time.time())
+    if locked_until > now:
+        return True, locked_until - now
+    return False, 0
+
+
+def _bf_record_failure(ip: str) -> Tuple[int, int, int]:
+    """Increment failure count, set locked_until if a threshold is crossed.
+
+    Returns (count, locked_until_epoch, lockout_s) — lockout_s is 0 if no lock.
+    """
+    if _BRUTEFORCE_DISABLED or not ip:
+        return 0, 0, 0
+    state = _bf_load()
+    _bf_prune(state)
+    entry = state.get(ip)
+    if not isinstance(entry, dict):
+        entry = {"count": 0, "locked_until": 0, "last_attempt": 0}
+        state[ip] = entry
+    now = int(time.time())
+    count = int(entry.get("count", 0) or 0)
+    if int(entry.get("locked_until", 0) or 0) > now:
+        # already locked; keep lock but don't inflate counter further
+        retry = int(entry.get("locked_until", 0)) - now
+        return count, int(entry.get("locked_until", 0)), retry
+    count += 1
+    entry["count"] = count
+    entry["last_attempt"] = now
+    lockout_s = _bf_lockout_for_count(count)
+    if lockout_s > 0:
+        entry["locked_until"] = now + lockout_s
+        entry["locked_reason"] = (
+            "soft" if count >= _BRUTEFORCE_THRESHOLD_SOFT and count < _BRUTEFORCE_THRESHOLD_HARD
+            else "hard" if count < _BRUTEFORCE_THRESHOLD_DOS
+            else "dos"
+        )
+    else:
+        entry["locked_until"] = 0
+    _bf_save(state)
+    return count, int(entry.get("locked_until", 0) or 0), lockout_s
+
+
+def _bf_record_success(ip: str) -> None:
+    if _BRUTEFORCE_DISABLED or not ip:
+        return
+    try:
+        state = _bf_load()
+        if ip in state:
+            state.pop(ip, None)
+            _bf_save(state)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Middleware
+
+
 def _mcp_auth(request: Request) -> Dict[str, Any]:
+    _bf_gate(request)
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
         raise HTTPException(401, "unauthorized")
