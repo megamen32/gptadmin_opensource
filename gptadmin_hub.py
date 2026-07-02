@@ -5943,8 +5943,8 @@ function smartPreview(v){{
   // Stdout (first 3 lines)
   const stdout=r?.stdout||r?.structuredContent?.stdout||r?.result?.stdout;
   if(stdout){{
-    const lines=String(stdout).split('\n').filter(l=>l.trim()).slice(0,3);
-    if(lines.length)parts.push(lines.join('\n'));
+    const lines=String(stdout).split('\\n').filter(l=>l.trim()).slice(0,3);
+    if(lines.length)parts.push(lines.join('\\n'));
   }}
   // Error
   const err=r?.error||r?.stderr||r?.structuredContent?.error;
@@ -6018,7 +6018,9 @@ window.addEventListener('message',e=>{{
 try{{
   setIn(window.openai?.toolInput);
   setOut(unwrap(window.openai?.toolOutput||window.openai?.toolResponseMetadata));
-  window.openai?.getContext?.().then(c=>{{if(c){{setIn(c.toolInput||c);setOut(unwrap(c.toolOutput||c.toolResponseMetadata));trackJob(c)}}}}).catch(()=>{{}});
+  const ctx=window.openai?.getContext?.();
+  if(ctx&&typeof ctx.then==='function')ctx.then(c=>{{if(c){{setIn(c.toolInput||c);setOut(unwrap(c.toolOutput||c.toolResponseMetadata));trackJob(c)}}}}).catch(()=>{{}});
+  else if(ctx){{setIn(ctx.toolInput||ctx);setOut(unwrap(ctx.toolOutput||ctx.toolResponseMetadata));trackJob(ctx)}}
   st(window.openai?'ready':'no bridge',window.openai?'':'w');
 }}catch(e){{st(String(e),'b');setOut({{error:String(e)}})}}
 resize();
@@ -6041,7 +6043,8 @@ def _apps_sdk_resources_list() -> Dict[str, Any]:
                 "_meta": {
                     "openai/widgetDescription": "GPTAdmin MCP connector UI for agents, tools and shell command results.",
                     "openai/widgetDomain": APPS_SDK_WIDGET_DOMAIN,
-                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
+                    "ui": {"domain": APPS_SDK_WIDGET_DOMAIN, "csp": {"connectDomains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resourceDomains": [APPS_SDK_WIDGET_DOMAIN]}},
+                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
                 },
             }
         ]
@@ -6060,7 +6063,8 @@ def _apps_sdk_resource_read(uri: str) -> Dict[str, Any]:
                 "_meta": {
                     "openai/widgetDescription": "GPTAdmin MCP connector UI template loaded.",
                     "openai/widgetDomain": APPS_SDK_WIDGET_DOMAIN,
-                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
+                    "ui": {"domain": APPS_SDK_WIDGET_DOMAIN, "csp": {"connectDomains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resourceDomains": [APPS_SDK_WIDGET_DOMAIN]}},
+                    "openai/widgetCSP": {"connect_domains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resource_domains": [APPS_SDK_WIDGET_DOMAIN]},
                 },
             }
         ]
@@ -6071,8 +6075,8 @@ def _apps_sdk_tools() -> List[Dict[str, Any]]:
     # Apps SDK surface mirrors the reduced MCP relay model.
     template_uri = APPS_SDK_WIDGET_URI
     widget_domain = APPS_SDK_WIDGET_DOMAIN
-    widget_csp = {"connectDomains": [PUBLIC_ORIGIN], "resourceDomains": [widget_domain]}
-    legacy_widget_csp = {"connect_domains": [PUBLIC_ORIGIN], "resource_domains": [widget_domain]}
+    widget_csp = {"connectDomains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resourceDomains": [widget_domain]}
+    legacy_widget_csp = {"connect_domains": [PUBLIC_ORIGIN, "https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com"], "resource_domains": [widget_domain]}
     base_meta = {
         "ui": {"resourceUri": template_uri, "domain": widget_domain, "csp": widget_csp, "visibility": ["model", "app"]},
         "openai/outputTemplate": template_uri,
