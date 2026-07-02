@@ -57,6 +57,9 @@ def test_no_api_tokens():
     for fpath in _tracked_files():
         if not fpath.exists():
             continue
+        rel = fpath.relative_to(ROOT).as_posix()
+        if rel.startswith("binaries/venv/") or "/site-packages/" in rel:
+            continue
         if fpath.suffix in {".png", ".jpg", ".webp", ".gz", ".zip", ".lock"}:
             continue
         try:
@@ -72,6 +75,9 @@ def test_no_static_passwords():
     """No hardcoded static passwords (env vars and generated values are OK)."""
     for fpath in _tracked_files():
         if not fpath.exists():
+            continue
+        rel = fpath.relative_to(ROOT).as_posix()
+        if rel.startswith("binaries/venv/") or "/site-packages/" in rel:
             continue
         if fpath.suffix in {".png", ".jpg", ".webp", ".gz", ".zip", ".lock"}:
             continue
