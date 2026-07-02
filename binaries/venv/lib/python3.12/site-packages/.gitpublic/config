@@ -1,0 +1,5 @@
+# GPTAdmin private repo -> sanitized public mirror
+source = /home/roomhacker/gptadmin
+target = megamen32/gptadmin_opensource
+push_force = true
+push_branches = main

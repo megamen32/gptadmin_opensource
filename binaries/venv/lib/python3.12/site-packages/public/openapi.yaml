@@ -1,0 +1,307 @@
+openapi: 3.1.0
+
+info:
+  title: GPTAdmin MCP Relay
+  version: 4.0.0
+  description: |
+    Universal MCP relay for GPTAdmin.
+
+    Use this API as a single interface for remote tools:
+      1. listMcpAgents — choose an online agent.
+      2. listMcpTools — inspect tools available on that agent.
+      3. callMcpTool — call exactly one tool on exactly one target.
+      4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
+
+    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    The hub itself is exposed as target "hub" for registry and approval tools.
+
+servers:
+  - url: https://gptadmin.bezrabotnyi.com
+
+security:
+  - bearerAuth: []
+
+paths:
+  /mcp-relay/agents:
+    get:
+      operationId: listMcpAgents
+      summary: List MCP agents
+      description: Lists real long-polling MCP relay agents, virtual shell agents, and the built-in hub agent.
+      responses:
+        "200":
+          description: Available MCP agents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListMcpAgentsResponse"
+
+  /mcp-relay/tools:
+    post:
+      operationId: listMcpTools
+      summary: List tools for one MCP target
+      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListMcpToolsRequest"
+      responses:
+        "200":
+          description: Tool list response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+
+  /mcp-relay/call:
+    post:
+      operationId: callMcpTool
+      summary: Call one tool on one MCP target
+      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several agents must be used.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallMcpToolRequest"
+      responses:
+        "200":
+          description: Tool call response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+
+  /mcp-relay/job/{job_id}:
+    get:
+      operationId: getMcpJob
+      summary: Get MCP background job status
+      description: Polls a background MCP job. Set ack=true after reading a completed or failed result to remove it from hub memory.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job id returned by listMcpTools or callMcpTool.
+          schema:
+            type: string
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: MCP job status and optional result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpJobResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    ListMcpAgentsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - agents
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpAgent"
+
+    McpAgent:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - name
+        - kind
+        - status
+      properties:
+        agent_id:
+          type: string
+          description: Target id to use in listMcpTools and callMcpTool.
+        name:
+          type: string
+        kind:
+          type: string
+          enum:
+            - real_mcp
+            - virtual_shell
+            - virtual_hub
+        transport:
+          type:
+            - string
+            - "null"
+          description: Agent transport, for example stdio, http, shell, or internal.
+        status:
+          type: string
+          enum:
+            - online
+            - offline
+        last_seen:
+          type:
+            - number
+            - "null"
+        capabilities:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+          properties: {}
+          additionalProperties: true
+
+    ListMcpToolsRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - target
+      properties:
+        target:
+          type: string
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+        timeout:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 35
+          default: 30
+          description: Synchronous wait timeout in seconds.
+        background:
+          type: boolean
+          default: false
+          description: If true, queue tools/list and return job_id immediately.
+
+    CallMcpToolRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - target
+        - tool_name
+      properties:
+        target:
+          type: string
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+        tool_name:
+          type: string
+          description: Tool name returned by listMcpTools.
+        arguments:
+          type: object
+          properties: {}
+          additionalProperties: true
+          default: {}
+          description: Arguments matching the selected tool input schema.
+        timeout:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 35
+          default: 30
+          description: Synchronous wait timeout in seconds.
+        background:
+          type: boolean
+          default: false
+          description: If true, queue the tool call and return job_id immediately.
+
+    McpToolResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - status
+      properties:
+        agent_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - completed
+            - running
+            - failed
+            - running_or_unknown
+        response:
+          type:
+            - object
+            - "null"
+          properties: {}
+          additionalProperties: true
+          description: Tool response. For tools/list this usually contains a tools array.
+        background:
+          type: boolean
+          description: True when the operation continues in background and job_id should be polled.
+        job_id:
+          type:
+            - string
+            - "null"
+        message:
+          type:
+            - string
+            - "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+
+    McpJobResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - job_id
+        - status
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - completed
+            - failed
+            - orphaned
+            - running_or_unknown
+        agent_id:
+          type:
+            - string
+            - "null"
+        response:
+          type:
+            - object
+            - "null"
+          properties: {}
+          additionalProperties: true
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+        acked:
+          type: boolean
+          default: false
+
+    McpError:
+      type: object
+      additionalProperties: true
+      properties:
+        message:
+          type:
+            - string
+            - "null"
+        code:
+          type:
+            - string
+            - integer
+            - "null"
