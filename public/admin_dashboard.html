@@ -477,6 +477,51 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .navbtn.active{position:relative}
 .navbtn.active::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:60%;border-radius:999px;background:var(--accent)}
 
+
+/* ── Table zebra + better spacing ── */
+tbody tr:nth-child(even) td{background:rgba(255,255,255,0.015)}
+tbody tr:hover td{background:var(--panel-hover)}
+td{vertical-align:middle}
+.mono{font-size:12px}
+
+/* ── Better selects ── */
+select{
+  appearance:none;-webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2364748b' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;
+  padding-right:24px;
+}
+
+/* ── Textarea ── */
+textarea{
+  font-size:12px;line-height:1.4;
+  border-radius:var(--radius-sm);
+  border:1px solid var(--line-bright);
+  background:#06080f;
+  padding:8px;
+  transition:var(--transition);
+}
+
+/* ── Card headings ── */
+.card h2{display:flex;align-items:center;gap:6px}
+.card h2::before{content:'';width:3px;height:14px;border-radius:999px;background:var(--accent)}
+
+/* ── Input height match ── */
+input[type=text],input[type=password],input[type=number],input:not([type]){
+  height:32px;border-radius:var(--radius-sm);border:1px solid var(--line-bright);
+  background:var(--panel-solid);padding:0 10px;font-size:13px;color:var(--text);
+  transition:var(--transition);
+}
+select{height:32px;border-radius:var(--radius-sm);border:1px solid var(--line-bright);
+  background:var(--panel-solid);padding:0 24px 0 10px;font-size:13px;color:var(--text);}
+
+/* ── Button height match ── */
+button{height:32px;padding:0 12px;font-size:13px;border-radius:var(--radius-sm);
+  display:inline-flex;align-items:center;justify-content:center;gap:4px}
+
+/* ── Search input ── */
+.search{min-width:160px;max-width:100%;height:32px}
+
 </style>
 </head>
 <body>
@@ -530,9 +575,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 </div>
 <div id="clients"></div></div></section>
 <section id="view-jobs" class="view"><div class="card"><div class="row"><h2>Команды, очереди и фоновые jobs</h2><input id="jobFilter" class="search" placeholder="фильтр command/agent/token" oninput="renderAll()"><select id="jobStatus" onchange="renderAll()"><option value="all">all</option><option value="running">running</option><option value="queued">queued</option><option value="completed">completed</option><option value="failed">failed</option></select></div><div id="jobs"></div></div></section>
-<section id="view-tools" class="view"><div class="card"><h2>MCP tools tester</h2><div class="row"><select id="target"></select><button onclick="listTools()">tools/list</button><label class="small"><input type="checkbox" id="background"> background</label><input id="timeout" type="number" value="30" min="1" max="3600" style="width:95px"></div><div class="split" style="margin-top:10px"><div><label class="muted">Tool</label><select id="toolSelect" style="width:100%"></select><label class="muted">Arguments JSON</label><textarea id="args">{}</textarea><div class="row"><button onclick="callTool()">call tool</button><button onclick="formatArgs()">format JSON</button></div></div><div><div class="row"><input id="jobId" placeholder="job_id"><button onclick="getJob()">get job</button></div><label class="muted">Result</label><pre id="result">—</pre></div></div></div></section>
+<section id="view-tools" class="view"><div class="card"><h2>MCP tools tester</h2><div class="row"><select id="target"></select><button onclick="listTools()">tools/list</button><label class="small"><input type="checkbox" id="background"> background</label><input id="timeout" type="number" value="30" min="1" max="3600" style="width:95px"></div><div class="split" style="margin-top:12px;gap:16px"><div><label class="muted">Tool</label><select id="toolSelect" style="width:100%"></select><label class="muted">Arguments (JSON)</label><textarea id="args">{}</textarea><div class="row"><button onclick="callTool()">Вызвать</button><button onclick="formatArgs()">Форматировать</button></div></div><div><div class="row"><input id="jobId" placeholder="job_id"><button onclick="getJob()">получить job</button></div><label class="muted">Result</label><pre id="result">—</pre></div></div></div></section>
 <section id="view-resources" class="view"><div class="card"><h2>MCP resources</h2><div class="row"><select id="resourceTarget"></select><button onclick="listResources()">resources/list</button><input id="resourceUri" style="min-width:360px" placeholder="resource://..."><button onclick="readResource()">resources/read</button></div><pre id="resourceResult">—</pre></div></section>
-<section id="view-mcpmanage" class="view"><div class="grid"><section class="card span8"><h2>MCP менеджер</h2><div class="row"><select id="mcpHost"></select><button onclick="listManagedMcp()">list</button><button onclick="statusManagedMcp()">status all</button><label class="small"><input type="checkbox" id="mcpKeepService"> keep service при remove</label></div><div id="managedMcp" style="margin-top:10px"></div></section><section class="card span4"><h2>Добавить MCP</h2><label class="muted">Name</label><input id="mcpName" placeholder="my-mcp" style="width:100%"><label class="muted">Agent ID optional</label><input id="mcpAgentId" placeholder="MyMcpAgent" style="width:100%"><label class="muted">Remote URL</label><input id="mcpUrl" placeholder="https://.../mcp или http://127.0.0.1:..." style="width:100%"><div class="muted small">Или local stdio command:</div><input id="mcpCommand" placeholder="npx / python3 / node" style="width:100%"><label class="muted">Args JSON array</label><textarea id="mcpArgs" style="min-height:80px">[]</textarea><label class="muted">Env JSON object</label><textarea id="mcpEnv" style="min-height:80px">{}</textarea><div class="row"><input id="mcpRunAs" placeholder="run_as_user" style="width:140px"><select id="mcpBackend"><option value="">backend auto</option><option>systemd</option><option>launchd</option><option>windows-task</option></select><select id="mcpStdio"><option value="">stdio auto</option><option>auto</option><option>ndjson</option><option>jsonl</option><option>framed</option><option>content-length</option></select></div><div class="row"><label class="small"><input type="checkbox" id="mcpInstall" checked> install/start</label><label class="small"><input type="checkbox" id="mcpForce"> force</label><label class="small"><input type="checkbox" id="mcpDisabled"> disabled</label></div><button onclick="addManagedMcp()">add MCP</button><pre id="mcpManageResult">—</pre></section></div></section>
+<section id="view-mcpmanage" class="view"><div class="grid"><section class="card span8"><h2>MCP менеджер</h2><div class="row"><select id="mcpHost"></select><button onclick="listManagedMcp()">список</button><button onclick="statusManagedMcp()">статус всех</button><label class="small"><input type="checkbox" id="mcpKeepService"> keep service при remove</label></div><div id="managedMcp" style="margin-top:10px"></div></section><section class="card span4"><h2>Добавить MCP</h2><label class="muted">Имя</label><input id="mcpName" placeholder="my-mcp" style="width:100%"><label class="muted">Agent ID (опц.)</label><input id="mcpAgentId" placeholder="MyMcpAgent" style="width:100%"><label class="muted">Remote URL</label><input id="mcpUrl" placeholder="https://.../mcp или http://127.0.0.1:..." style="width:100%"><div class="muted small">Или local stdio command:</div><input id="mcpCommand" placeholder="npx / python3 / node" style="width:100%"><label class="muted">Args (JSON array)</label><textarea id="mcpArgs" style="min-height:80px">[]</textarea><label class="muted">Env (JSON object)</label><textarea id="mcpEnv" style="min-height:80px">{}</textarea><div class="row"><input id="mcpRunAs" placeholder="run_as_user" style="width:140px"><select id="mcpBackend"><option value="">backend auto</option><option>systemd</option><option>launchd</option><option>windows-task</option></select><select id="mcpStdio"><option value="">stdio auto</option><option>auto</option><option>ndjson</option><option>jsonl</option><option>framed</option><option>content-length</option></select></div><div class="row"><label class="small"><input type="checkbox" id="mcpInstall" checked> install/start</label><label class="small"><input type="checkbox" id="mcpForce"> force</label><label class="small"><input type="checkbox" id="mcpDisabled"> disabled</label></div><button onclick="addManagedMcp()">добавить MCP</button><pre id="mcpManageResult">—</pre></section></div></section>
 <section id="view-security" class="view"><div class="card">
   <h2>Tokens & Auth Management</h2>
   <p class="muted">Управление CTL_TOKEN, ADMIN_PASSWORD, OAUTH_CLIENT_SECRET и MCP bearer-токенами. Чтение и запись через shell_exec на hub-сервере.</p>
@@ -659,7 +704,7 @@ function renderJobCard(row){
   const timingStr=row.timing?Object.entries(row.timing).map(([k,v])=>`${k}:${v}`).join(' '):'';
   return `<article class="entryCard">
     <div class="entryHead">
-      <span class="entryStatus ${cls(row.status)}">${esc(row.status||'—')}</span>
+      <span class="entryStatus pill ${cls(row.status)}">${esc(row.status||'—')}</span>
       <div class="entryMain">
         <div class="entryTitle">
           <b>${esc(entrySummaryLabel(row))}</b>
