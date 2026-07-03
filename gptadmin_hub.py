@@ -5383,22 +5383,6 @@ def admin_dashboard():
     return FileResponse(GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html", media_type="text/html")
 
 
-@app.get("/admin/{path:path}")
-def admin_static(path: str):
-    """Serve static files (CSS, JS) for the admin dashboard."""
-    static = GPTADMIN_REPO_ROOT / "public" / "admin" / path
-    if static.exists() and static.is_file():
-        media = "text/html"
-        if path.endswith(".css"):
-            media = "text/css"
-        elif path.endswith(".js"):
-            media = "application/javascript"
-        elif path.endswith(".json"):
-            media = "application/json"
-        return FileResponse(static, media_type=media)
-    raise HTTPException(404, f"not found: /admin/{path}")
-
-
 @app.get("/admin/api/overview", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def admin_api_overview(limit: int = Query(120, ge=1, le=500)):
     return _admin_overview_payload(limit=limit)
@@ -6289,6 +6273,25 @@ def edit_task_endpoint(srv: str, tid: str, edit: TaskEdit):
 @app.get("/tasks/{srv}", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
 def list_tasks(srv: str, status: Optional[str] = Query(None), limit: Optional[int] = Query(50), sort_by: Optional[str] = Query("updated_at"), order: Optional[str] = Query("desc"), include_result: bool = Query(True), include_history: bool = Query(True)):
     return _legacy_list_tasks(srv, status=status, limit=limit, sort_by=sort_by, order=order, include_result=include_result, include_history=include_history)
+
+
+@app.get("/admin/{path:path}")
+def admin_static(path: str):
+    """Serve static files (CSS, JS) for the admin dashboard. Does NOT match /admin/api/*."""
+    if path.startswith("api/"):
+        raise HTTPException(404, f"not found: /admin/{path}")
+    static = GPTADMIN_REPO_ROOT / "public" / "admin" / path
+    if static.exists() and static.is_file():
+        media = "text/html"
+        if path.endswith(".css"):
+            media = "text/css"
+        elif path.endswith(".js"):
+            media = "application/javascript"
+        elif path.endswith(".json"):
+            media = "application/json"
+        return FileResponse(static, media_type=media)
+    raise HTTPException(404, f"not found: /admin/{path}")
+
 
 
 # ---------------------------------------------------------------------------
