@@ -5377,7 +5377,26 @@ async def _admin_mcp_manage(req: AdminMcpManageReq) -> Dict[str, Any]:
 @app.get("/admin")
 @app.get("/admin/")
 def admin_dashboard():
+    index = GPTADMIN_REPO_ROOT / "public" / "admin" / "index.html"
+    if index.exists():
+        return FileResponse(index, media_type="text/html")
     return FileResponse(GPTADMIN_REPO_ROOT / "public" / "admin_dashboard.html", media_type="text/html")
+
+
+@app.get("/admin/{path:path}")
+def admin_static(path: str):
+    """Serve static files (CSS, JS) for the admin dashboard."""
+    static = GPTADMIN_REPO_ROOT / "public" / "admin" / path
+    if static.exists() and static.is_file():
+        media = "text/html"
+        if path.endswith(".css"):
+            media = "text/css"
+        elif path.endswith(".js"):
+            media = "application/javascript"
+        elif path.endswith(".json"):
+            media = "application/json"
+        return FileResponse(static, media_type=media)
+    raise HTTPException(404, f"not found: /admin/{path}")
 
 
 @app.get("/admin/api/overview", dependencies=[Depends(check_ctl_token), Depends(ensure_license)])
