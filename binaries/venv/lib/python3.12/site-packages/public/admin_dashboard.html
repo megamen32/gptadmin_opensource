@@ -319,7 +319,7 @@ pre{
 }
 .entryCard:hover{border-color:var(--line-bright);box-shadow:0 4px 16px rgba(0,0,0,0.2)}
 .entryHead{display:flex;gap:10px;align-items:flex-start;min-width:0}
-.entryStatus{
+.entryStatus{font-weight:600;min-width:70px;text-align:center;
   flex:0 0 auto;
   font-size:10px;
   line-height:1.2;
@@ -333,7 +333,7 @@ pre{
 }
 .entryMain{min-width:0;display:grid;gap:6px}
 .entryTitle{display:flex;gap:8px;align-items:center;min-width:0;flex-wrap:wrap}
-.entryCommand{
+.entryCommand{max-height:80px;overflow:hidden;text-overflow:ellipsis;
   font-size:12px;
   line-height:1.5;
   padding:8px 10px;
@@ -413,7 +413,7 @@ pre{
 }
 .recentMiniItem:hover{border-color:var(--line-bright)}
 .recentMiniTop{display:flex;gap:8px;align-items:center;justify-content:space-between}
-.recentMiniCmd{
+.recentMiniCmd{max-height:40px;overflow:hidden;
   font-size:11px;
   padding:6px 8px;
   border-radius:6px;
@@ -450,7 +450,7 @@ pre{
 .metric-card{display:flex;flex-direction:column;gap:4px}
 .metric-label{font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);font-weight:600}
 .metric-value{font-size:28px;font-weight:700;color:var(--text-bright);font-variant-numeric:tabular-nums;line-height:1.2}
-.metric-sub{font-size:11px;color:var(--muted)}
+.metric-sub{font-size:11px;color:var(--muted-bright);font-weight:500}
 
 /* ── Empty states ── */
 .empty-state{padding:20px;text-align:center;color:var(--muted);font-size:13px;font-style:italic}
@@ -503,7 +503,7 @@ textarea{
 }
 
 /* ── Card headings ── */
-.card h2{display:flex;align-items:center;gap:6px}
+.card h2{display:flex;align-items:center;gap:6px;color:var(--text-bright)}
 .card h2::before{content:'';width:3px;height:14px;border-radius:999px;background:var(--accent)}
 
 /* ── Input height match ── */
@@ -521,6 +521,10 @@ button{height:32px;padding:0 12px;font-size:13px;border-radius:var(--radius-sm);
 
 /* ── Search input ── */
 .search{min-width:160px;max-width:100%;height:32px}
+
+
+.entryCommand::after{content:'';position:absolute;bottom:0;left:0;right:0;height:20px;background:linear-gradient(transparent,#06080f);pointer-events:none}
+.entryCommand{position:relative}
 
 </style>
 </head>
@@ -712,7 +716,7 @@ function renderJobCard(row){
           ${timingStr?`<span class="muted small mono">${esc(timingStr)}</span>`:''}
           <span class="entryMetaInfo" title="${metaTitle(jobMetaLines(row))}">i</span>
         </div>
-        <div class="entryCommand mono">${cmdHtml}</div>
+        <div class="entryCommand mono" style="max-height:80px;overflow:hidden">${cmdHtml}</div>
         <div class="entryMeta">
           ${row.kind?`<span class="pill">${esc(row.kind)}</span>`:''}
           ${row.server?`<span class="muted small">${esc(row.server)}</span>`:''}
@@ -737,7 +741,7 @@ function renderAuditCard(row){
           <span class="entryCompactTime muted">${esc(compactTime(row.ts||''))}</span>
           <span class="entryMetaInfo" title="${metaTitle(auditMetaLines(row))}">i</span>
         </div>
-        <div class="entryCommand mono">${cmdHtml}</div>
+        <div class="entryCommand mono" style="max-height:80px;overflow:hidden">${cmdHtml}</div>
         <div class="entryMeta">
           ${row.status?`<span class="pill">${esc(row.status)}</span>`:''}
           ${row.target?`<span class="muted small">${esc(row.target)}</span>`:''}
@@ -778,7 +782,7 @@ const AGENT_CARD_CAPS_SHOWN = 5;
 const AGENT_CARD_META_KEYS_SHOWN = 5;
 const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
 const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
-function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').textContent=`${(ac.online||0)} online`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
+function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
 const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{agent_id:'hub',status:'local'}].concat(targets.filter(a=>a.kind==='virtual_shell'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
 const problems=(data.agents||[]).filter(a=>a.status!=='online');const PROBLEM_AGENT_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_AGENT_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_AGENT_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.agent_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
 $('recentJobsCompact').className='';$('recentJobsCompact').innerHTML=renderRecentMini(topN(data.jobs?.recent||[],8));
