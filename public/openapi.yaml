@@ -12,8 +12,12 @@ info:
       3. callMcpTool — call exactly one tool on exactly one target.
       4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
 
-    Shell servers are exposed as real MCP agents with ShellMCP transport and stable target ids like shell:<server_name>.
+    Private shell servers are exposed as real MCP agents with stable target ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
+
+    Every listed agent is also exposed by default as a pinned MCP server facade at /agent/{slug}/mcp.
+    For example: /agent/hub/mcp, /agent/openmemory/mcp, /agent/fileshare/mcp, /agent/shell-admin-server-100/mcp.
+    listMcpAgents includes public_mcp_slug/public_mcp_path/public_mcp_endpoint metadata for discovery.
 
 servers:
   - url: https://gptadmin.bezrabotnyi.com

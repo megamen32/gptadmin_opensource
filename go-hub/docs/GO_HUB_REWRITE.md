@@ -38,3 +38,23 @@ Added the next compatibility layer on top of the relay core:
 - Installer/actions compatibility: `/actions/openapi.yaml`, `/artifacts/shellmcp.json`, `/artifacts/shellmcp.tar.gz`, `/servers`, `/bulk/exec`, `/tasks/*`.
 
 The Go hub still intentionally keeps several legacy subsystems minimal/in-memory until final production cutover: OAuth client persistence, rich audit/client history, websocket shell transport, and full mutating MCP manager parity. Production service remains the Python hub until an explicit switch.
+
+## 2026-07-04 per-agent MCP facade
+
+Added default public MCP facades for every registered/public agent. The hub still exposes the aggregate endpoint at `/mcp`, but each agent can now be used as a drop-in MCP server endpoint:
+
+- `/agent/{slug}`
+- `/agent/{slug}/mcp`
+- `/agent/{slug}/card`
+- `/agent/{slug}/health`
+
+Examples:
+
+- `/agent/hub/mcp` — aggregate GPTAdmin hub MCP tools, same as `/mcp`.
+- `/agent/openmemory/mcp` — pinned MCP facade for the `OpenMemory` agent.
+- `/agent/fileshare/mcp` — pinned MCP facade for the `FileShare` agent.
+- `/agent/shell-admin-server-100/mcp` — pinned MCP facade for the shell agent.
+
+`list_mcp_agents` and `/mcp-relay/list_mcp_agents` now include default exposure metadata in each agent card: `public_mcp_slug`, `public_mcp_path`, `public_mcp_endpoint`, `exposed_by_default`, and `public_mcp_auth`. The facade accepts the same Bearer/OAuth authentication as `/mcp` for now. Future admin UI work should turn these defaults into explicit expose aliases with per-alias security policy: Bearer on/off, OAuth on/off, tool allowlist/denylist, and eventually per-client policy.
+
+The public endpoint is pinned to exactly one upstream agent. A client connected to `/agent/openmemory/mcp` sees an ordinary MCP server and cannot choose another `target`; the hub routes `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get` to the resolved internal agent through whatever transport backs it (`stdio`, `mcp-tunnel`, shell connector, or another relay adapter).
