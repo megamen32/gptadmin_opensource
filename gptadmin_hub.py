@@ -15,8 +15,8 @@ Old shell/server endpoints are kept as legacy/internal fallback:
 
 Important architectural decision:
   private/local capability servers are exposed to GPT as ordinary real MCP agents.
-  NAT/firewall traversal is a separate MCP tunnel transport concern: the hub presents
-  a normal MCP request path while local clients pull queued work over outbound links.
+  Shell transports are a transport concern: the hub presents a normal MCP request
+  path while local clients pull queued work over outbound links.
 
 Env highlights:
   CTL_TOKEN                  Bearer token for GPT Actions / admin API
@@ -1990,7 +1990,7 @@ components:
             properties:
               agent_id: { type: string }
               name: { type: string }
-              kind: { type: string, enum: [real_mcp, virtual_hub] }
+              kind: { type: string, enum: [real_mcp, virtual_shell, virtual_hub, hub] }
               transport: { type: string }
               status: { type: string, enum: [online, offline, stale, pending] }
               last_seen: { type: [number, "null"] }
@@ -2851,7 +2851,7 @@ def _virtual_hub_agent() -> Dict[str, Any]:
     return {
         "agent_id": VIRTUAL_HUB_AGENT_ID,
         "name": "GPTAdmin Hub",
-        "kind": "virtual_hub",
+        "kind": "hub",
         "transport": "internal",
         "status": "online",
         "last_seen": int(time.time()),
