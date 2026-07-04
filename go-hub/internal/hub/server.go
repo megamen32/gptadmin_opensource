@@ -218,6 +218,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
 	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
 	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
 	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.adminMCPManage))
@@ -647,14 +648,45 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mcpRelayAgents(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	agents := make([]Agent, 0, len(s.agents)+1)
-	agents = append(agents, s.hubAgentLocked())
-	for _, a := range s.agents {
-		cp := *a
-		agents = append(agents, cp)
-	}
+	agents := s.publicAgentsLocked(r)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
+	agents := make([]Agent, 0, len(s.agents)+1)
+	hub := s.hubAgentLocked()
+	agents = append(agents, s.withExposeMetaLocked(hub, r))
+	for _, a := range s.agents {
+		cp := *a
+		agents = append(agents, s.withExposeMetaLocked(cp, r))
+	}
+	return agents
+}
+
+func (s *Server) withExposeMetaLocked(a Agent, r *http.Request) Agent {
+	slug := agentSlug(a.AgentID)
+	if slug == "" {
+		slug = agentSlug(a.Name)
+	}
+	if a.Meta == nil {
+		a.Meta = map[string]any{}
+	} else {
+		cp := make(map[string]any, len(a.Meta)+6)
+		for k, v := range a.Meta {
+			cp[k] = v
+		}
+		a.Meta = cp
+	}
+	path := "/agent/" + slug + "/mcp"
+	a.Meta["exposed_by_default"] = true
+	a.Meta["public_mcp_slug"] = slug
+	a.Meta["public_mcp_path"] = path
+	if r != nil {
+		a.Meta["public_mcp_endpoint"] = s.origin(r) + path
+	}
+	a.Meta["public_mcp_auth"] = map[string]any{"bearer": true, "oauth": true}
+	return a
 }
 
 func (s *Server) hubAgentLocked() Agent {
@@ -817,11 +849,7 @@ func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, 
 	s.addAuditLocked("hub_tool", map[string]any{"tool": name})
 	switch name {
 	case "listMcpAgents", "list_mcp_agents":
-		agents := make([]Agent, 0, len(s.agents)+1)
-		agents = append(agents, s.hubAgentLocked())
-		for _, a := range s.agents {
-			agents = append(agents, *a)
-		}
+		agents := s.publicAgentsLocked(nil)
 		return map[string]any{"agents": agents}, http.StatusOK
 	case "list_pending_servers":
 		return map[string]any{"pending": []any{}, "count": 0}, http.StatusOK
@@ -1016,11 +1044,7 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	agents := make([]Agent, 0, len(s.agents)+1)
-	agents = append(agents, s.hubAgentLocked())
-	for _, a := range s.agents {
-		agents = append(agents, *a)
-	}
+	agents := s.publicAgentsLocked(r)
 	jobs := s.adminJobsDataLocked()
 	audit := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
@@ -1437,6 +1461,288 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200})
 }
 
+func agentSlug(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range v {
+		if r >= 'A' && r <= 'Z' {
+			r = r + ('a' - 'A')
+		}
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlnum {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func compactSlug(v string) string {
+	return strings.ReplaceAll(agentSlug(v), "-", "")
+}
+
+func (s *Server) resolveExposedAgent(slug string) (Agent, bool) {
+	slug, _ = url.PathUnescape(strings.Trim(slug, "/"))
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return Agent{}, false
+	}
+	want := agentSlug(slug)
+	wantCompact := compactSlug(slug)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hub := s.hubAgentLocked()
+	for _, a := range append([]Agent{hub}, s.agentCopiesLocked()...) {
+		aliases := []string{a.AgentID, a.Name, agentSlug(a.AgentID), agentSlug(a.Name), compactSlug(a.AgentID), compactSlug(a.Name)}
+		for _, alias := range aliases {
+			if strings.EqualFold(slug, alias) || want == agentSlug(alias) || wantCompact == compactSlug(alias) {
+				return a, true
+			}
+		}
+	}
+	return Agent{}, false
+}
+
+func (s *Server) agentCopiesLocked() []Agent {
+	agents := make([]Agent, 0, len(s.agents))
+	for _, a := range s.agents {
+		if a == nil {
+			continue
+		}
+		cp := *a
+		agents = append(agents, cp)
+	}
+	return agents
+}
+
+func parseAgentPath(p string) (slug, tail string, ok bool) {
+	rest := strings.TrimPrefix(p, "/agent/")
+	if rest == p || rest == "" {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", "", false
+	}
+	tail = ""
+	if len(parts) > 1 {
+		tail = strings.Join(parts[1:], "/")
+	}
+	return parts[0], tail, true
+}
+
+func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	slug, tail, ok := parseAgentPath(r.URL.Path)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "missing agent slug"})
+		return
+	}
+	agent, ok := s.resolveExposedAgent(slug)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown exposed MCP agent", "slug": slug})
+		return
+	}
+	if tail != "" && tail != "mcp" && tail != "card" && tail != "health" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown agent endpoint", "endpoint": tail})
+		return
+	}
+	if !s.mcpAuth(w, r) {
+		return
+	}
+	if tail == "card" {
+		writeJSON(w, http.StatusOK, s.agentCard(r, agent))
+		return
+	}
+	if tail == "health" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": agent.Status == "online" || agent.AgentID == "hub", "agent_id": agent.AgentID, "status": agent.Status})
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, s.agentCard(r, agent))
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var body map[string]any
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": err.Error()}})
+		return
+	}
+	result, rpcErr, noContent := s.agentMCPJSONRPC(r, agent, body)
+	if noContent {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	resp := map[string]any{"jsonrpc": "2.0", "id": body["id"]}
+	if rpcErr != nil {
+		resp["error"] = rpcErr
+	} else {
+		resp["result"] = result
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) agentCard(r *http.Request, agent Agent) map[string]any {
+	slug := agentSlug(agent.AgentID)
+	path := "/agent/" + slug + "/mcp"
+	return map[string]any{
+		"ok":                  true,
+		"agent_id":            agent.AgentID,
+		"name":                agent.Name,
+		"kind":                agent.Kind,
+		"transport":           agent.Transport,
+		"status":              agent.Status,
+		"slug":                slug,
+		"mcp_path":            path,
+		"mcp_endpoint":        s.origin(r) + path,
+		"auth":                map[string]any{"bearer": true, "oauth": true},
+		"tools_endpoint":      path,
+		"drop_in_replacement": true,
+	}
+}
+
+func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]any) (any, any, bool) {
+	method := firstString(body, "method")
+	params := mapValue(body["params"])
+	switch method {
+	case "initialize":
+		return map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-agent-" + agentSlug(agent.AgentID), "version": BuildVersion}}, nil, false
+	case "notifications/initialized", "notifications/cancelled":
+		return nil, nil, true
+	case "tools/list":
+		result, err := s.agentToolsList(agent)
+		return result, err, false
+	case "tools/call":
+		name := firstString(params, "name")
+		args := mapValue(params["arguments"])
+		if name == "" {
+			return nil, map[string]any{"code": -32602, "message": "tool name is required"}, false
+		}
+		result, err := s.agentToolCall(agent, name, args)
+		return result, err, false
+	case "resources/list":
+		result, err := s.agentResourcesList(r, agent)
+		return result, err, false
+	case "resources/read":
+		uri := firstString(params, "uri")
+		if uri == "" {
+			return nil, map[string]any{"code": -32602, "message": "resource uri is required"}, false
+		}
+		result, err := s.agentResourceRead(r, agent, uri)
+		return result, err, false
+	case "prompts/list":
+		result, err := s.agentPromptsList(agent)
+		return result, err, false
+	case "prompts/get":
+		result, err := s.agentPromptGet(agent, params)
+		return result, err, false
+	default:
+		return nil, map[string]any{"code": -32601, "message": "method not found"}, false
+	}
+}
+
+func (s *Server) agentToolsList(agent Agent) (any, any) {
+	if agent.AgentID == "hub" {
+		return map[string]any{"tools": appsSDKTools()}, nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return map[string]any{"tools": shellTools()}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "tools/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentToolCall(agent Agent, name string, args map[string]any) (any, any) {
+	if agent.AgentID == "hub" {
+		return s.appsSDKCall(name, args), nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return unwrapMCPUpstream(s.callShellTool(agent.AgentID, name, args, false, s.cfg.DefaultTimeout))
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
+	if agent.AgentID == "hub" {
+		return appsSDKResourcesList(), nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "resources/list") {
+		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://agent/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "resources/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (any, any) {
+	if agent.AgentID == "hub" {
+		return s.appsSDKResourceRead(r, uri), nil
+	}
+	if strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
+		b, _ := json.Marshal(s.agentCard(r, agent))
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "resources/read", map[string]any{"uri": uri})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentPromptsList(agent Agent) (any, any) {
+	if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/list") {
+		return map[string]any{"prompts": []any{}}, nil
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "prompts/list", map[string]any{})
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func (s *Server) agentPromptGet(agent Agent, params map[string]any) (any, any) {
+	if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/get") {
+		return nil, map[string]any{"code": -32601, "message": "prompts/get is not supported by this agent"}
+	}
+	jobID := s.enqueueRelay(agent.AgentID, "prompts/get", params)
+	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+}
+
+func hasCapability(agent Agent, cap string) bool {
+	for _, item := range agent.Capabilities {
+		if item == cap {
+			return true
+		}
+	}
+	return false
+}
+
+func unwrapMCPUpstream(resp map[string]any) (any, any) {
+	status := firstString(resp, "status")
+	if status == "failed" {
+		return nil, map[string]any{"code": -32000, "message": "upstream MCP call failed", "data": resp}
+	}
+	if status == "running" || truthy(resp["background"]) {
+		return nil, map[string]any{"code": -32001, "message": "upstream MCP call is still running", "data": resp}
+	}
+	if v, ok := resp["response"]; ok {
+		return v, nil
+	}
+	return resp, nil
+}
+
 func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type")
@@ -1516,11 +1822,7 @@ func (s *Server) mcpPrompt(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("target")
 	if target == "" || target == "all" {
 		s.mu.Lock()
-		agents := make([]Agent, 0, len(s.agents)+1)
-		agents = append(agents, s.hubAgentLocked())
-		for _, a := range s.agents {
-			agents = append(agents, *a)
-		}
+		agents := s.publicAgentsLocked(nil)
 		s.mu.Unlock()
 		var b strings.Builder
 		b.WriteString("You have GPTAdmin MCP tools. Use JSON target/tool/args.\nAvailable agents:\n")
@@ -1566,11 +1868,7 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	switch name {
 	case "list_mcp_agents", "listMcpAgents":
 		s.mu.Lock()
-		agents := make([]Agent, 0, len(s.agents)+1)
-		agents = append(agents, s.hubAgentLocked())
-		for _, a := range s.agents {
-			agents = append(agents, *a)
-		}
+		agents := s.publicAgentsLocked(nil)
 		s.mu.Unlock()
 		return map[string]any{"agents": agents}
 	case "list_mcp_tools", "listMcpTools":
@@ -1635,11 +1933,7 @@ func appsSDKResourcesList() map[string]any {
 func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
 	if uri == "gptadmin://agents" {
 		s.mu.Lock()
-		agents := make([]Agent, 0, len(s.agents)+1)
-		agents = append(agents, s.hubAgentLocked())
-		for _, a := range s.agents {
-			agents = append(agents, *a)
-		}
+		agents := s.publicAgentsLocked(nil)
 		s.mu.Unlock()
 		b, _ := json.Marshal(map[string]any{"agents": agents})
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
