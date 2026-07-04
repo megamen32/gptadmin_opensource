@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/system/info", s.authed(s.systemInfo))
 	mux.HandleFunc("/system/health", s.authed(s.health))
 	mux.HandleFunc("/capabilities", s.authed(s.capabilities))
+	mux.HandleFunc("/mcp", s.authed(s.mcpHTTP))
 	mux.HandleFunc("/exec", s.authed(s.exec))
 	mux.HandleFunc("/exec/live", s.authed(s.execLive))
 	mux.HandleFunc("/exec/callback", s.authed(s.execCallback))
@@ -178,14 +179,14 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue"}})
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "heartbeat", "queue", "real_mcp", "mcp_http", "mcp_stdio"}})
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit})
+	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "go_shellmcp": true, "real_mcp": true, "mcp_transports": []string{"stdio", "streamable-http-poll"}, "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit})
 }
 
 func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Request, bool) {
