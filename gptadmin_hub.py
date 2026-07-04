@@ -14,7 +14,7 @@ Old shell/server endpoints are kept as legacy/internal fallback:
   • /servers, /bulk/exec, /tasks/*, /srv/*, /queue/*, /ws/shellmcp
 
 Important architectural decision:
-  shellmcp servers are exposed to GPT as *virtual MCP agents* with tools such as
+  shellmcp servers are exposed to GPTAdmin as shell agents with tools such as
   shell_exec, tasks and task_edit. This lets GPT use one mental
   model: list agents → list tools → call tool → poll job.
 
@@ -1955,7 +1955,7 @@ components:
             properties:
               agent_id: { type: string }
               name: { type: string }
-              kind: { type: string, enum: [real_mcp, virtual_shell, virtual_hub] }
+              kind: { type: string, enum: [real_mcp, virtual_shell, hub] }
               transport: { type: string }
               status: { type: string, enum: [online, offline, stale, pending] }
               last_seen: { type: [number, "null"] }
@@ -2816,7 +2816,7 @@ def _virtual_hub_agent() -> Dict[str, Any]:
     return {
         "agent_id": VIRTUAL_HUB_AGENT_ID,
         "name": "GPTAdmin Hub",
-        "kind": "virtual_hub",
+        "kind": "hub",
         "transport": "internal",
         "status": "online",
         "last_seen": int(time.time()),

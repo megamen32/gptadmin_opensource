@@ -659,7 +659,7 @@ button{height:32px;padding:0 12px;font-size:13px;border-radius:var(--radius-sm);
 </div>
 <script>
 const $=(id)=>document.getElementById(id);let state=null,currentView=localStorage.getItem('gptadmin_view')||'overview';
-function token(){return $('token').value.trim()||localStorage.getItem('gptadmin_ctl_token')||''}function saveToken(){localStorage.setItem('gptadmin_ctl_token',$('token').value.trim());refreshAll()}function hdr(){return {'Authorization':'Bearer '+token(),'Content-Type':'application/json'}}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}function toggleSidebar(){ $('sidebar').classList.toggle('open') }
+function token(){return $('token').value.trim()||localStorage.getItem('gptadmin_ctl_token')||''}function saveToken(){localStorage.setItem('gptadmin_ctl_token',$('token').value.trim());refreshAll()}function hdr(){return {'Authorization':'Bearer '+token(),'Content-Type':'application/json'}}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}function displayKind(kind){return kind==='virtual_hub'?'hub':kind}function toggleSidebar(){ $('sidebar').classList.toggle('open') }
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...hdr(),...(opts.headers||{})}});const t=await r.text();let j;try{j=JSON.parse(t)}catch{j={text:t}}if(!r.ok)throw new Error((j&&j.detail)||j.error||t||r.status);return j}
 function asTable(rows,cols){if(!rows||!rows.length)return '<p class="muted">пусто</p>';return '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c[0])+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
 function compactTime(ts){if(!ts)return '—';const numeric=typeof ts==='number'?ts:Number(ts);const value=Number.isFinite(numeric)&&String(ts).trim()!==''?(numeric<1e12?numeric*1000:numeric):ts;const d=new Date(value);if(Number.isNaN(d.getTime()))return ts;return d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
@@ -727,7 +727,7 @@ function renderJobCard(row){
         </div>
         <div class="entryCommand mono" style="max-height:60px;overflow:hidden;cursor:pointer" onclick="toggleCmdExpand(this)">${cmdHtml}</div>
         <div class="entryMeta">
-          ${row.kind?`<span class="pill">${esc(row.kind)}</span>`:''}
+          ${row.kind?`<span class="pill">${esc(displayKind(row.kind))}</span>`:''}
           ${row.server?`<span class="muted small">${esc(row.server)}</span>`:''}
           ${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}
           ${isCancelable?`<button class="cancelBtn" style="margin-left:auto" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">отменить</button>`:''}
@@ -821,7 +821,7 @@ function renderAgentCard(r) {
             (r.name ? ' <span class="muted small">' + esc(r.name) + '</span>' : '') +
           '</div>' +
           '<div class="entrySub muted small">' +
-            (r.kind ? '<span class="pill">' + esc(r.kind) + '</span> ' : '') +
+            (r.kind ? '<span class="pill">' + esc(displayKind(r.kind)) + '</span> ' : '') +
             (r.transport ? esc(r.transport) + ' · ' : '') +
             caps.length + ' cap' + (caps.length === 1 ? '' : 's') +
             (r.last_seen ? ' · last seen <b>' + esc(r.last_seen) + '</b>' : '') +
@@ -1153,7 +1153,7 @@ function openAgentDetail(aid){
   const a=(state?.agents||[]).find(x=>x.agent_id===aid);
   if(!a){$('agentDetailBody').innerHTML='<p class="bad">Не найден</p>';return}
   let h='<div class="stackList">';
-  h+='<div class="entryCard"><div class="entryHead"><span class="entryStatus pill '+cls(a.status)+'">'+esc(a.status)+'</span><div class="entryMain"><div class="entryTitle"><b class="mono">'+esc(a.agent_id)+'</b>'+(a.name?'<span class="muted small">'+esc(a.name)+'</span>':'')+'</div><div class="entryMeta"><span class="pill">'+esc(a.kind||'?')+'</span><span class="muted small">'+esc(a.transport||'')+'</span></div></div></div></div>';
+  h+='<div class="entryCard"><div class="entryHead"><span class="entryStatus pill '+cls(a.status)+'">'+esc(a.status)+'</span><div class="entryMain"><div class="entryTitle"><b class="mono">'+esc(a.agent_id)+'</b>'+(a.name?'<span class="muted small">'+esc(a.name)+'</span>':'')+'</div><div class="entryMeta"><span class="pill">'+esc(displayKind(a.kind||'?'))+'</span><span class="muted small">'+esc(a.transport||'')+'</span></div></div></div></div>';
   const caps=a.capabilities||[];
   if(caps.length)h+='<div class="entryCard"><h2>Capabilities</h2><div style="display:flex;flex-wrap:wrap;gap:4px">'+caps.map(c=>'<span class="pill mono small">'+esc(c)+'</span>').join('')+'</div></div>';
   const meta=a.meta||{};
