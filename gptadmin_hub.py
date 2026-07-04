@@ -14,9 +14,9 @@ Old shell/server endpoints are kept as legacy/internal fallback:
   • /servers, /bulk/exec, /tasks/*, /srv/*, /queue/*, /ws/shellmcp
 
 Important architectural decision:
-  shellmcp servers are exposed to GPTAdmin as shell agents with tools such as
-  shell_exec, tasks and task_edit. This lets GPT use one mental
-  model: list agents → list tools → call tool → poll job.
+  private/local capability servers are exposed to GPTAdmin as ordinary real MCP agents.
+  NAT/firewall traversal is a separate MCP tunnel transport concern: the hub presents
+  a normal MCP request path while local clients pull queued work over outbound links.
 
 Env highlights:
   CTL_TOKEN                  Bearer token for GPT Actions / admin API
@@ -1109,7 +1109,7 @@ class TaskEdit(BaseModel):
 class McpRelayRegister(BaseModel):
     agent_id: str
     name: Optional[str] = None
-    transport: str = Field("stdio", pattern="^(stdio|http)$")
+    transport: str = Field("stdio", pattern="^(stdio|http|streamable-http|httpstreamable|polling|mcp-tunnel|outbound-poll|outbound-webhook|tunnel)$")
     command: Optional[str] = None
     capabilities: Optional[List[str]] = None
     meta: Optional[Dict[str, Any]] = None
@@ -1725,12 +1725,12 @@ info:
     Universal MCP relay for GPTAdmin.
 
     Workflow:
-      1. listMcpAgents — choose a real local MCP relay agent or a virtual shell agent.
+      1. listMcpAgents — choose a real MCP agent, including private shell:<server_name> agents reached through MCP tunnel transport.
       2. listMcpTools — inspect tools available on that target.
       3. callMcpTool — call one tool on one target.
       4. If response has background:true and job_id, poll getMcpJob until completed/failed.
 
-    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    Private shell servers are exposed as real MCP agents with stable target ids like shell:<server_name>; NAT traversal is represented as generic MCP tunnel transport.
 
     Optional response-budget headers:
       X-GPTAdmin-Client: chatgpt|opencode|cli|custom (default/autodetected: chatgpt for OpenAI requests)
@@ -1955,7 +1955,7 @@ components:
             properties:
               agent_id: { type: string }
               name: { type: string }
-              kind: { type: string, enum: [real_mcp, virtual_shell, hub] }
+              kind: { type: string, enum: [real_mcp, virtual_hub] }
               transport: { type: string }
               status: { type: string, enum: [online, offline, stale, pending] }
               last_seen: { type: [number, "null"] }
@@ -2192,7 +2192,7 @@ def _handle_gptadmin_task_command(srv: str, cmd: str):
         if len(parts) >= 2 and parts[1] == "list":
             return {"ok": True, "pending": list(pending_servers.values()), "count": len(pending_servers)}
         if len(parts) >= 3 and parts[1] == "approve":
-            return _approve_pending_server(parts[2], approved_by=f"gptadmin_pending via {srv}", approved_via="virtual_shell:gptadmin_pending", approved_subject=srv)
+            return _approve_pending_server(parts[2], approved_by=f"gptadmin_pending via {srv}", approved_via="shellmcp:gptadmin_pending", approved_subject=srv)
         if len(parts) >= 3 and parts[1] == "reject":
             return _reject_pending_server(parts[2])
         return {"error": "usage: gptadmin_pending list | gptadmin_pending approve <name> | gptadmin_pending reject <name>"}
@@ -2693,7 +2693,7 @@ async def proxy(path: str, request: Request, srv: str = Query(..., alias="server
 
 
 # ---------------------------------------------------------------------------
-# MCP relay: real agents + virtual shell agents
+# MCP relay: real MCP agents, including private agents reached through outbound MCP tunnels
 # ---------------------------------------------------------------------------
 
 
@@ -2714,7 +2714,7 @@ def _is_virtual_shell_agent(agent_id: str) -> bool:
 
 def _server_from_virtual_shell_agent(agent_id: str) -> str:
     if not _is_virtual_shell_agent(agent_id):
-        raise HTTPException(400, f"not a virtual shell agent: {agent_id}")
+        raise HTTPException(400, f"not a shellmcp agent: {agent_id}")
     return agent_id[len(VIRTUAL_SHELL_PREFIX) :]
 
 
@@ -2796,7 +2796,7 @@ def _mcp_relay_public_agent(agent_id: str, info: Dict[str, Any], now: Optional[f
     meta = _redact_secret_value(dict(info.get("meta") or {}))
     meta.setdefault("age_s", int(_mcp_relay_agent_age_s(info, now)))
     meta.setdefault("transport_role", "capability_executor")
-    meta.setdefault("shellmcp_transport_ready", True)
+    meta.setdefault("tunnel_transport_ready", True)
     for k, v in _mcp_relay_job_counts(agent_id).items():
         if v:
             meta[k] = v
@@ -2825,21 +2825,102 @@ def _virtual_hub_agent() -> Dict[str, Any]:
     }
 
 
+
+def _mcp_tunnel_transport_name(info: Dict[str, Any]) -> str:
+    """Public transport name for private MCP servers reached through an outbound tunnel.
+
+    The implementation client can be ShellMCP, rootd, or another local connector;
+    hub/client-visible semantics remain just MCP-over-tunnel.
+    """
+    return "mcp-tunnel"
+
+
+def _mcp_tunnel_transport_meta(info: Dict[str, Any]) -> Dict[str, Any]:
+    mode = str(info.get("mode") or "webhook")
+    poll_mode = "poll" in mode.lower() or bool(info.get("outbox_dir"))
+    return {
+        "protocol": "mcp",
+        "protocol_role": "mcp_server",
+        "transport_layer": "mcp_tunnel",
+        "transport_direction": "outbound",
+        "transport_mode": "poll" if poll_mode else "webhook",
+        "private_connector": str(info.get("connector") or "shell"),
+        "tunnel": {
+            "kind": "mcp-tunnel",
+            "mode": "poll" if poll_mode else "webhook",
+            "poll_mode": poll_mode,
+            "public_endpoint_role": "normal_mcp_request_path",
+            "private_server_requires_public_listener": False,
+            "forwards_json_rpc": True,
+            "streamable_http_facade": True,
+            "queue_result_endpoint": "/queue/{server}/result",
+            "long_poll_endpoint": "/queue/{server}",
+        },
+    }
+
+
+def _mcp_tunnel_resources_list(agent_id: str) -> Dict[str, Any]:
+    srv = _server_from_virtual_shell_agent(agent_id)
+    return {
+        "resources": [
+            {"uri": f"mcp-tunnel://{srv}/system/info", "name": f"System info for {srv}", "mimeType": "application/json"},
+            {"uri": f"mcp-tunnel://{srv}/system/health", "name": f"MCP tunnel health for {srv}", "mimeType": "application/json"},
+            {"uri": f"mcp-tunnel://{srv}/tasks", "name": f"MCP tasks for {srv}", "mimeType": "application/json"},
+            {"uri": f"mcp-tunnel://{srv}/capabilities", "name": f"MCP capability registry for {srv}", "mimeType": "application/json"},
+        ]
+    }
+
+
+def _mcp_tunnel_resource_text(agent_id: str, uri: str) -> str:
+    srv = _server_from_virtual_shell_agent(agent_id)
+    info = servers.get(srv) or {}
+    if uri.endswith("/system/info"):
+        data = _sanitize_server({**info, "server_name": srv})
+    elif uri.endswith("/system/health"):
+        now = time.time()
+        data = {"ok": (now - float(info.get("time", 0) or 0)) < DEAD_S, "server": srv, "last_seen": info.get("time"), "transport": _mcp_tunnel_transport_meta(info)}
+    elif uri.endswith("/tasks"):
+        data = _legacy_list_tasks(srv, limit=50, include_result=False, include_history=False)
+    elif uri.endswith("/capabilities"):
+        data = {"agent_id": agent_id, "server": srv, "kind": "real_mcp", "tools": _shell_tools_list().get("tools", []), "transport": _mcp_tunnel_transport_meta(info)}
+    else:
+        raise HTTPException(404, f"unknown MCP tunnel resource uri {uri}")
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+async def _mcp_tunnel_request(agent_id: str, method: str, params: Dict[str, Any], *, request_background: bool = False) -> Dict[str, Any]:
+    if method == "tools/list":
+        return _shell_tools_list()
+    if method == "tools/call":
+        name = str((params or {}).get("name") or "")
+        arguments = (params or {}).get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        return await _virtual_shell_tool_call(agent_id, name, arguments, request_background=request_background)
+    if method == "resources/list":
+        return _mcp_tunnel_resources_list(agent_id)
+    if method == "resources/read":
+        uri = str((params or {}).get("uri") or "")
+        return {"contents": [{"uri": uri, "mimeType": "application/json", "text": _mcp_tunnel_resource_text(agent_id, uri)}]}
+    raise HTTPException(404, f"unsupported MCP method for tunnel-backed agent {method}")
+
 def _virtual_shell_agents() -> List[Dict[str, Any]]:
     now = time.time()
     agents = []
     for name, info in servers.items():
         alive = (now - float(info.get("time", 0))) < DEAD_S
+        sanitized = _sanitize_server({**info, "server_name": name})
+        meta = {**sanitized, **_mcp_tunnel_transport_meta(info)}
         agents.append(
             {
                 "agent_id": _virtual_shell_agent_id(name),
-                "name": f"Shell: {name}",
-                "kind": "virtual_shell",
-                "transport": str(info.get("mode", "webhook")),
+                "name": f"MCP: {name}",
+                "kind": "real_mcp",
+                "transport": _mcp_tunnel_transport_name(info),
                 "status": "online" if alive else "offline",
                 "last_seen": info.get("time"),
-                "capabilities": ["shell", "system", "tasks", "logs"],
-                "meta": _sanitize_server({**info, "server_name": name}),
+                "capabilities": ["tools/list", "tools/call", "resources/list", "resources/read", "shell", "system", "tasks", "logs"],
+                "meta": meta,
             }
         )
     return agents
@@ -2869,6 +2950,11 @@ def _all_public_agents(*, statuses: Optional[Any] = None) -> List[Dict[str, Any]
         if str(item.get("status")) in wanted:
             agents.append(item)
     for agent_id, info in mcp_relay_agents.items():
+        if _is_virtual_shell_agent(agent_id):
+            # Private shell targets are already projected above as ordinary real MCP agents.
+            # A tunnel client may still use the generic relay poll/result endpoints for
+            # delivery, but it must not create a second public agent row.
+            continue
         item = _mcp_relay_public_agent(agent_id, info, now)
         if str(item.get("status")) in wanted:
             agents.append(item)
@@ -3734,7 +3820,7 @@ def _hub_tools_list() -> Dict[str, Any]:
     tools = [
         {
             "name": "list_servers",
-            "description": "List legacy shellmcp servers exposed as virtual shell agents.",
+            "description": "List ShellMCP servers exposed as real MCP agents with shellmcp transport.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
@@ -3927,11 +4013,11 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
     proxy_for = info.get("proxy_for")
     proxy_via = info.get("proxy_via")
     default_cwd = info.get("default_cwd") or "not reported"
-    out: Dict[str, Any] = {"agent": agent_id, "kind": "GPTAdmin virtual shell MCP agent", "host": srv}
+    out: Dict[str, Any] = {"agent": agent_id, "kind": "GPTAdmin tunnel-backed real MCP agent", "host": srv}
     if section in {"all", "summary", "routing"}:
         if is_hub_host:
             role = ["hub host", "shell executor", "MCP router host"]
-            path = "ChatGPT/OpenAI Actions -> local public hub -> virtual shell agent -> shell on this host"
+            path = "ChatGPT/OpenAI Actions -> local public hub -> MCP tunnel -> private MCP server -> shell on this host"
         elif proxy_for or proxy_via:
             role = ["proxied shell agent"]
             path = f"ChatGPT/OpenAI Actions -> public hub -> {agent_id} -> proxy host {proxy_via or 'unknown'} -> SSH target {proxy_for or srv}"
@@ -3980,9 +4066,9 @@ def _shell_help(srv: str, args: Dict[str, Any]) -> Dict[str, Any]:
         out["architecture"] = {
             "hub": "public GPTAdmin entrypoint and dynamic MCP router; not present on every shell host",
             "shellmcp": "durable transport layer between hub and local capabilities on every platform",
-            "shell": "local executor capability exposed through shellmcp as virtual MCP agent shell:<server>",
-            "real_mcp": "stdio or remote MCP capability; migration target is supervision/transport behind shellmcp",
-            "polling_vs_webhook": "transport detail owned by shellmcp; capabilities should not implement their own fragile hub transport",
+            "shell": "local executor capability exposed by ShellMCP as a real MCP agent shell:<server>",
+            "real_mcp": "MCP protocol capability; transport is a separate layer (stdio, http, streamable-http, or mcp-tunnel)",
+            "transport_separation": "polling/webhook/streamable-http-like mode is owned by generic MCP tunnel transport; MCP tools stay protocol-level capabilities",
         }
     if section in {"all", "rescue"}:
         out["rescue"] = {
@@ -4042,7 +4128,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "capability_registry",
-            "description": "Show host capabilities and supervised MCP services behind shellmcp.",
+            "description": "Show host capabilities and supervised MCP services behind the local MCP tunnel client.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4054,7 +4140,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_lifecycle",
-            "description": "Start/stop/restart/status a supervised MCP service on this host via shellmcp.",
+            "description": "Start/stop/restart/status a supervised MCP service on this host via the local MCP tunnel client.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4069,7 +4155,7 @@ def _shell_tools_list() -> Dict[str, Any]:
         },
         {
             "name": "mcp_tools",
-            "description": "Manage MCP servers on this host: list/add/remove/install/status/cat. Uses local GPTAdmin/shellmcp service backend.",
+            "description": "Manage MCP servers on this host: list/add/remove/install/status/cat. Uses the local GPTAdmin MCP service backend.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4586,7 +4672,7 @@ async def _virtual_shell_tool_call(agent_id: str, tool_name: str, args: Dict[str
                 registry["include_raw"] = True
             return _mcp_envelope_text(f"{registry.get('summary', {}).get('mcp_count', 0)} MCP capabilities on {srv}", registry)
         direct_error = dict(registry)
-        py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("SHELLMCP_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"shellmcp","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; shellmcp_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"shellmcp_transport_layer","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
+        py = 'import json, os, pathlib, subprocess, sys, socket\n\ndef red(v):\n    keys=("token","secret","password","passwd","api_key","apikey","authorization","bearer","x-api-key")\n    if isinstance(v, dict):\n        return {str(k): ("***MASKED***" if any(w in str(k).lower() for w in keys) else red(val)) for k,val in v.items()}\n    if isinstance(v, list):\n        out=[]; skip=False\n        for item in v:\n            if skip:\n                out.append("***MASKED***"); skip=False; continue\n            if isinstance(item,str) and item.lower() in {"--header","--token","--api-key","--password","--secret"}:\n                out.append(item); skip=True; continue\n            out.append(red(item))\n        return out\n    if isinstance(v,str) and ("authorization:" in v.lower() or v.lower().startswith(("bearer ","apikey ","basic "))):\n        return v.split(None,1)[0] + " ***MASKED***"\n    return v\n\ndef state(unit):\n    if not sys.platform.startswith("linux"):\n        return {"backend":"unsupported","unit":unit,"active":None}\n    try:\n        cp=subprocess.run(["systemctl","show",unit,"-p","LoadState","-p","ActiveState","-p","SubState","--value"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)\n        vals=[x.strip() for x in cp.stdout.splitlines()]\n        return {"backend":"systemd","unit":unit,"load_state":vals[0] if len(vals)>0 else None,"active_state":vals[1] if len(vals)>1 else None,"sub_state":vals[2] if len(vals)>2 else None,"active": (vals[1]=="active") if len(vals)>1 else False}\n    except Exception as e:\n        return {"backend":"systemd","unit":unit,"active":False,"error":str(e)}\n\ncfg_path=pathlib.Path(os.getenv("GPTADMIN_MCP_CONFIG","/etc/gptadmin/mcp.json"))\nagents_dir=pathlib.Path(os.getenv("GPTADMIN_MCP_AGENTS_DIR","/etc/gptadmin/mcp-agents.d"))\nhost=os.getenv("SHELLMCP_NAME") or os.getenv("SHELL_NAME") or socket.gethostname()\ntry:\n    cfg=json.loads(cfg_path.read_text()) if cfg_path.is_file() else {}\nexcept Exception as e:\n    cfg={"_error":str(e)}\nservers=cfg.get("mcpServers") if isinstance(cfg.get("mcpServers"),dict) else {}\nmcps=[]\nfor name,spec in sorted(servers.items()):\n    if not isinstance(spec,dict): continue\n    agent_id=str(spec.get("agent_id") or spec.get("name") or name)\n    item={"id":"mcp:"+agent_id,"name":name,"agent_id":agent_id,"kind":"mcp","role":"capability_executor","hosted_by":host,"supervised_by":"mcp_tunnel","legacy_service":f"gptadmin-mcp-{agent_id}.service","enabled":bool(spec.get("enabled",True)),"transport":"stdio_or_remote","command":spec.get("command"),"args":red(spec.get("args") or []),"cwd":spec.get("cwd"),"run_as_user":spec.get("run_as_user") or spec.get("user"),"stdio_format":spec.get("stdio_format") or spec.get("transport") or "auto","config_file":str(agents_dir / f"{name}.json"),"migration_state":"legacy_relay_supervised; tunnel_registry_visible"}\n    if INCLUDE_STATUS:\n        item["supervisor"]=state(f"gptadmin-mcp-{agent_id}.service")\n    mcps.append(item)\nout={"ok":True,"schema_version":1,"host":host,"transport_role":"mcp_tunnel_client","capability_host":True,"capabilities":[{"id":"shell","kind":"shell","role":"local_executor","hosted_by":host},{"id":"tasks","kind":"task_store","role":"durable_queue_view","hosted_by":host},{"id":"logs","kind":"logs","role":"diagnostics","hosted_by":host},{"id":"system","kind":"system","role":"host_introspection","hosted_by":host},*mcps],"summary":{"mcp_count":len(mcps),"enabled_mcp_count":sum(1 for x in mcps if x.get("enabled"))}}\nprint(json.dumps(out,ensure_ascii=False))\n'
         py = py.replace("INCLUDE_STATUS", "True" if include_status else "False")
         req = BulkExec(servers=[srv], cmd="python3 - <<'PY'\n" + py + "\nPY", timeout=20, background=False)
         data = await bulk_exec(req)
@@ -4819,9 +4905,22 @@ async def mcp_relay_register(req: McpRelayRegister, request: Request):
 @app.get("/mcp-relay/poll/{agent_id}", dependencies=[Depends(ensure_license)])
 async def mcp_relay_poll(agent_id: str, request: Request, timeout: int = Query(55)):
     _mcp_relay_agent_auth(request)
-    if agent_id == VIRTUAL_HUB_AGENT_ID or _is_virtual_shell_agent(agent_id):
-        raise HTTPException(400, "virtual agents do not poll")
-    info = mcp_relay_agents.setdefault(agent_id, {"agent_id": agent_id, "name": agent_id, "transport": "stdio", "capabilities": [], "meta": {}})
+    if agent_id == VIRTUAL_HUB_AGENT_ID:
+        raise HTTPException(400, "hub does not poll")
+    if _is_virtual_shell_agent(agent_id):
+        srv = _server_from_virtual_shell_agent(agent_id)
+        if srv not in servers:
+            raise HTTPException(404, f"unknown MCP tunnel agent {agent_id}")
+        base = {
+            "agent_id": agent_id,
+            "name": f"MCP: {srv}",
+            "transport": "mcp-tunnel",
+            "capabilities": ["tools/list", "tools/call", "resources/list", "resources/read", "shell", "system", "tasks", "logs"],
+            "meta": _mcp_tunnel_transport_meta(servers.get(srv) or {}),
+        }
+    else:
+        base = {"agent_id": agent_id, "name": agent_id, "transport": "stdio", "capabilities": [], "meta": {}}
+    info = mcp_relay_agents.setdefault(agent_id, base)
     info["last_seen"] = time.time()
     deadline = time.time() + min(max(timeout, 1), MCP_RELAY_POLL_MAX_TIMEOUT)
     while time.time() < deadline:
@@ -4913,7 +5012,7 @@ async def mcp_relay_tools(req: McpRelayToolsReq):
     if target == VIRTUAL_HUB_AGENT_ID:
         return {"agent_id": target, "status": "completed", "response": _hub_tools_list()}
     if _is_virtual_shell_agent(target):
-        return {"agent_id": target, "status": "completed", "response": _shell_tools_list()}
+        return {"agent_id": target, "status": "completed", "response": await _mcp_tunnel_request(target, "tools/list", {})}
 
     job_id = _mcp_relay_enqueue(target, "tools/list", {}, retry_policy=req.retry_policy)
     job = mcp_relay_jobs.get(job_id) or {}
@@ -4942,7 +5041,7 @@ async def mcp_relay_call(req: McpRelayCallReq):
         args = dict(req.arguments or {})
         if req.retry_policy and "retry_policy" not in args:
             args["retry_policy"] = req.retry_policy
-        data = await _virtual_shell_tool_call(target, req.tool_name, args, request_background=bool(req.background))
+        data = await _mcp_tunnel_request(target, "tools/call", {"name": req.tool_name, "arguments": args}, request_background=bool(req.background))
         if isinstance(data, dict) and data.get("background"):
             return {"agent_id": target, "status": "running", **data}
         status = "completed"
@@ -5327,8 +5426,11 @@ def _admin_overview_payload(limit: int = 120) -> Dict[str, Any]:
 
 async def _admin_real_mcp_request(target: str, method: str, params: Dict[str, Any], *, timeout: Optional[int], background: bool, retry_policy: str) -> Dict[str, Any]:
     selected = _mcp_relay_select_agent(target)
-    if selected == VIRTUAL_HUB_AGENT_ID or _is_virtual_shell_agent(selected):
-        raise HTTPException(400, f"{method} is supported only for real MCP relay agents")
+    if selected == VIRTUAL_HUB_AGENT_ID:
+        raise HTTPException(400, f"{method} is supported only for real MCP agents")
+    if _is_virtual_shell_agent(selected):
+        data = await _mcp_tunnel_request(selected, method, params)
+        return {"agent_id": selected, "status": "completed", "response": data}
     job_id = _mcp_relay_enqueue(selected, method, params, retry_policy=retry_policy)
     job = mcp_relay_jobs.get(job_id) or {}
     if job.get("status") == "queued_offline":
@@ -6514,7 +6616,7 @@ async def mcp_prompt_call(request: Request):
         if validated == VIRTUAL_HUB_AGENT_ID:
             result = await _hub_tool_call(tool, args)
         elif _is_virtual_shell_agent(validated):
-            result = await _virtual_shell_tool_call(validated, tool, args)
+            result = await _mcp_tunnel_request(validated, "tools/call", {"name": tool, "arguments": args})
         else:
             job_id = _mcp_relay_enqueue(
                 validated, "tools/call", {"name": tool, "arguments": args}, retry_policy=str(body.get("retry_policy") or "none"))

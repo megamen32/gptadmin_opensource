@@ -12,7 +12,7 @@ info:
       3. callMcpTool — call exactly one tool on exactly one target.
       4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
 
-    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    Shell servers are exposed as real MCP agents with ShellMCP transport and stable target ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
 
 servers:
@@ -26,7 +26,7 @@ paths:
     get:
       operationId: listMcpAgents
       summary: List MCP agents
-      description: Lists real long-polling MCP relay agents, virtual shell agents, and the built-in hub agent.
+      description: Lists real MCP relay agents, tunnel-backed private MCP agents, and the built-in hub agent.
       responses:
         "200":
           description: Available MCP agents
@@ -136,7 +136,6 @@ components:
           type: string
           enum:
             - real_mcp
-            - virtual_shell
             - virtual_hub
         transport:
           type:
