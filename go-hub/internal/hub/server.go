@@ -45,6 +45,7 @@ type Config struct {
 	OAuthClientSecret        string
 	OAuthPermissiveRedirects bool
 	OAuthPermissiveResources bool
+	AuthLogSecrets           bool
 	BridgeKey                string
 }
 
@@ -72,6 +73,7 @@ func FromEnv() Config {
 		OAuthClientSecret:        env("OAUTH_CLIENT_SECRET", env("ADMIN_PASSWORD", env("CTL_TOKEN", "gptadmin-dev-secret"))),
 		OAuthPermissiveRedirects: truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
 		OAuthPermissiveResources: truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
+		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
 		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
 	}
 }
@@ -259,8 +261,16 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.CtlToken == "" || tokenMatches(r, s.cfg.CtlToken) {
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
 			next(w, r)
 			return
+		}
+		if claims, err := s.verifyBearerJWTFromRequest(r); err == nil {
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
+			next(w, r)
+			return
+		} else {
+			s.authAudit("ctl_auth_denied", r, map[string]any{"reason": err.Error()})
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
 	}
@@ -301,16 +311,242 @@ func tokenMatches(r *http.Request, expected string) bool {
 
 func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
 	origin := s.origin(r)
-	yaml := "openapi: 3.1.0\n" +
-		"info:\n  title: GPTAdmin Go Hub Actions\n  version: " + BuildVersion + "\n" +
-		"servers:\n  - url: " + origin + "\n" +
-		"paths:\n" +
-		"  /mcp-relay/list_mcp_agents:\n    get:\n      operationId: listMcpAgents\n      responses:\n        '200': { description: ok }\n" +
-		"  /mcp-relay/list_mcp_tools:\n    post:\n      operationId: listMcpTools\n      responses:\n        '200': { description: ok }\n" +
-		"  /mcp-relay/call_mcp_tool:\n    post:\n      operationId: callMcpTool\n      responses:\n        '200': { description: ok }\n" +
-		"  /mcp-relay/get_mcp_job/{job_id}:\n    get:\n      operationId: getMcpJob\n      parameters:\n        - name: job_id\n          in: path\n          required: true\n          schema: { type: string }\n      responses:\n        '200': { description: ok }\n"
+	yaml := fmt.Sprintf(`openapi: 3.1.0
+info:
+  title: GPTAdmin MCP Relay
+  version: %s
+  description: |
+    Universal MCP relay for GPTAdmin.
+
+    Use this API as a single interface for remote tools:
+      1. listMcpAgents — choose an online agent.
+      2. listMcpTools — inspect tools available on that agent.
+      3. callMcpTool — call exactly one tool on exactly one target.
+      4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
+
+    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    The hub itself is exposed as target "hub" for registry and approval tools.
+servers:
+  - url: %s
+security:
+  - bearerAuth: []
+paths:
+  /mcp-relay/agents:
+    get:
+      operationId: listMcpAgents
+      summary: List MCP agents
+      description: Lists real long-polling MCP relay agents, virtual shell agents, and the built-in hub agent.
+      responses:
+        "200":
+          description: Available MCP agents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListMcpAgentsResponse"
+  /mcp-relay/tools:
+    post:
+      operationId: listMcpTools
+      summary: List tools for one MCP target
+      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListMcpToolsRequest"
+      responses:
+        "200":
+          description: Tool list response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+  /mcp-relay/call:
+    post:
+      operationId: callMcpTool
+      summary: Call one tool on one MCP target
+      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several agents must be used.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallMcpToolRequest"
+      responses:
+        "200":
+          description: Tool call response or background job reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpToolResponse"
+  /mcp-relay/job/{job_id}:
+    get:
+      operationId: getMcpJob
+      summary: Get MCP background job status
+      description: Polls a background MCP job. Set ack=true after reading a completed or failed result to remove it from hub memory.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job id returned by listMcpTools or callMcpTool.
+          schema:
+            type: string
+        - name: ack
+          in: query
+          required: false
+          description: Remove completed or failed job result after reading.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: MCP job status and optional result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpJobResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ListMcpAgentsResponse:
+      type: object
+      additionalProperties: false
+      required: [agents]
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpAgent"
+    McpAgent:
+      type: object
+      additionalProperties: true
+      required: [agent_id, name, kind, status]
+      properties:
+        agent_id:
+          type: string
+          description: Target id to use in listMcpTools and callMcpTool.
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [real_mcp, virtual_shell, virtual_hub, hub]
+        transport:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [online, offline, stale]
+        last_seen:
+          type: [number, "null"]
+        capabilities:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+          additionalProperties: true
+    ListMcpToolsRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+        timeout:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 35
+          default: 30
+        background:
+          type: boolean
+          default: false
+    CallMcpToolRequest:
+      type: object
+      additionalProperties: false
+      required: [target, tool_name]
+      properties:
+        target:
+          type: string
+          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+        tool_name:
+          type: string
+          description: Tool name returned by listMcpTools.
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+        timeout:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 35
+          default: 30
+        background:
+          type: boolean
+          default: false
+    McpToolResponse:
+      type: object
+      additionalProperties: true
+      required: [agent_id, status]
+      properties:
+        agent_id:
+          type: string
+        status:
+          type: string
+          enum: [completed, running, failed, running_or_unknown]
+        response:
+          type: [object, "null"]
+          additionalProperties: true
+        background:
+          type: boolean
+        job_id:
+          type: [string, "null"]
+        message:
+          type: [string, "null"]
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+    McpJobResponse:
+      type: object
+      additionalProperties: true
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, orphaned, running_or_unknown]
+        agent_id:
+          type: [string, "null"]
+        response:
+          type: [object, "null"]
+          additionalProperties: true
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/McpError"
+            - type: string
+            - type: "null"
+        acked:
+          type: boolean
+          default: false
+    McpError:
+      type: object
+      additionalProperties: true
+      properties:
+        message:
+          type: [string, "null"]
+        code:
+          type: [string, integer, "null"]
+`, BuildVersion, origin)
+	b := []byte(yaml)
 	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
-	_, _ = w.Write([]byte(yaml))
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
 }
 
 func (s *Server) shellmcpArtifactPath() string {
@@ -1141,11 +1377,17 @@ func (nilWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (nilWriter) WriteHeader(statusCode int)  {}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		status = http.StatusInternalServerError
+		b = []byte(`{"error":"json encode failed"}`)
+	}
+	b = append(b, '\n')
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(b)
 }
-
 func firstString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := m[k]; ok {
@@ -1368,6 +1610,7 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		resource = s.resource(r)
 	}
 	if !s.allowedRedirect(redirectURI) || !s.allowedResource(resource, r) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid redirect_uri or resource", "redirect_uri": redirectURI, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
 		return
 	}
@@ -1394,6 +1637,7 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.adminPasswordOK(r.Form.Get("password")) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid password", "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "invalid password"})
 		return
 	}
@@ -1403,6 +1647,7 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		resource = s.resource(r)
 	}
 	if !s.allowedRedirect(redirectURI) || !s.allowedResource(resource, r) {
+		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid redirect_uri or resource", "redirect_uri": redirectURI, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
 		return
 	}
@@ -1415,6 +1660,7 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	s.oauthCodes[code] = oauthCode{Created: time.Now(), Challenge: r.Form.Get("code_challenge"), ClientID: r.Form.Get("client_id"), RedirectURI: redirectURI, Resource: resource, Scope: scope, State: r.Form.Get("state")}
 	s.addAuditLocked("oauth_code_issued", map[string]any{"client_id": r.Form.Get("client_id"), "resource": resource})
 	s.mu.Unlock()
+	s.authAudit("oauth_authorize_ok", r, map[string]any{"client_id": r.Form.Get("client_id"), "redirect_uri": redirectURI, "resource": resource, "scope": scope, "code": s.secretForAudit(code), "form": s.formForAudit(r)})
 	loc := redirectURI
 	sep := "?"
 	if strings.Contains(loc, "?") {
@@ -1443,14 +1689,16 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		resource = data.Resource
 	}
 	if !ok || time.Since(data.Created) > 5*time.Minute || !s.allowedResource(resource, r) || strings.TrimRight(data.Resource, "/") != resource {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "code not found, expired, or resource mismatch", "resource": resource, "stored_resource": data.Resource, "code_found": ok, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"})
 		return
 	}
 	if data.Challenge != "" && !pkceOK(r.Form.Get("code_verifier"), data.Challenge) {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "PKCE verification failed", "client_id": data.ClientID, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 		return
 	}
-	token, err := s.signJWT(map[string]any{"sub": "admin", "scope": data.Scope, "client_id": data.ClientID, "exp": time.Now().Add(12 * time.Hour).Unix(), "iat": time.Now().Unix()})
+	token, err := s.signJWT(map[string]any{"sub": "admin", "scope": data.Scope, "client_id": data.ClientID, "iss": s.origin(r), "aud": resource, "resource": resource, "exp": time.Now().Add(12 * time.Hour).Unix(), "iat": time.Now().Unix()})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -1458,6 +1706,7 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.addAuditLocked("oauth_token_issued", map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource})
 	s.mu.Unlock()
+	s.authAudit("oauth_token_ok", r, map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource, "access_token": s.secretForAudit(token), "jwt_claims": decodeJWTClaimsUnverified(token), "form": s.formForAudit(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200})
 }
 
@@ -1942,16 +2191,143 @@ func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any
 	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": widget}}}
 }
 
+func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, error) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		if auth == "" {
+			return nil, errors.New("missing authorization header")
+		}
+		return nil, errors.New("unsupported authorization scheme")
+	}
+	tok := strings.TrimSpace(auth[7:])
+	if tok == "" {
+		return nil, errors.New("empty bearer token")
+	}
+	return s.verifyJWT(tok)
+}
+
+func (s *Server) authAudit(name string, r *http.Request, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	for k, v := range s.requestForAudit(r) {
+		fields[k] = v
+	}
+	s.mu.Lock()
+	s.addAuditLocked(name, fields)
+	s.mu.Unlock()
+	if b, err := json.Marshal(fields); err == nil {
+		log.Printf("auth_audit name=%s fields=%s", name, string(b))
+	}
+}
+
+func (s *Server) requestForAudit(r *http.Request) map[string]any {
+	if r == nil {
+		return map[string]any{}
+	}
+	fields := map[string]any{
+		"method":          r.Method,
+		"path":            r.URL.Path,
+		"raw_query":       r.URL.RawQuery,
+		"host":            r.Host,
+		"remote_addr":     r.RemoteAddr,
+		"x_forwarded_for": r.Header.Get("X-Forwarded-For"),
+		"x_real_ip":       r.Header.Get("X-Real-IP"),
+		"user_agent":      r.UserAgent(),
+		"referer":         r.Referer(),
+		"origin":          r.Header.Get("Origin"),
+		"content_type":    r.Header.Get("Content-Type"),
+	}
+	if s.cfg.AuthLogSecrets {
+		fields["authorization"] = r.Header.Get("Authorization")
+		fields["cookie"] = r.Header.Get("Cookie")
+	} else {
+		fields["authorization"] = redactSecret(r.Header.Get("Authorization"))
+		if r.Header.Get("Cookie") != "" {
+			fields["cookie"] = "<redacted>"
+		}
+	}
+	return fields
+}
+
+func (s *Server) formForAudit(r *http.Request) map[string]any {
+	out := map[string]any{}
+	if r == nil || r.Form == nil {
+		return out
+	}
+	for k, vals := range r.Form {
+		vv := append([]string(nil), vals...)
+		if !s.cfg.AuthLogSecrets && isSensitiveField(k) {
+			for i := range vv {
+				vv[i] = redactSecret(vv[i])
+			}
+		}
+		if len(vv) == 1 {
+			out[k] = vv[0]
+		} else {
+			out[k] = vv
+		}
+	}
+	return out
+}
+
+func (s *Server) secretForAudit(v string) string {
+	if s.cfg.AuthLogSecrets {
+		return v
+	}
+	return redactSecret(v)
+}
+
+func isSensitiveField(k string) bool {
+	k = strings.ToLower(k)
+	return strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "token") || strings.Contains(k, "code") || strings.Contains(k, "verifier")
+}
+
+func redactSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if len(v) <= 12 {
+		return "<redacted len=" + strconv.Itoa(len(v)) + ">"
+	}
+	return v[:6] + "..." + v[len(v)-4:] + " (len=" + strconv.Itoa(len(v)) + ")"
+}
+
+func decodeJWTClaimsUnverified(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return map[string]any{"decode_error": err.Error()}
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return map[string]any{"decode_error": err.Error()}
+	}
+	return claims
+}
+
 func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 		tok := strings.TrimSpace(auth[7:])
 		if s.cfg.CtlToken != "" && tok == s.cfg.CtlToken {
+			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
 			return true
 		}
-		if _, err := s.verifyJWT(tok); err == nil {
+		if claims, err := s.verifyJWT(tok); err == nil {
+			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
 			return true
+		} else {
+			s.authAudit("mcp_auth_denied", r, map[string]any{"reason": err.Error(), "jwt_claims_unverified": decodeJWTClaimsUnverified(tok)})
 		}
+	} else if auth == "" {
+		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "missing authorization header"})
+	} else {
+		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "unsupported authorization scheme"})
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
 	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
