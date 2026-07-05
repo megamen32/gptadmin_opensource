@@ -129,10 +129,12 @@ if IS_MACOS:
     SVC_SHELLMCP_LABEL = f'{SERVICE_PREFIX}.shellmcp'
     SVC_FRPC_LABEL  = f'{SERVICE_PREFIX}.tunnel-frpc'
     SVC_CLOUDFLARED_LABEL = f'{SERVICE_PREFIX}.cloudflared'
+    SVC_AUTO_UPDATE_LABEL = f'{SERVICE_PREFIX}.auto-update'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
     UNIT_PATH_SHELLMCP = SERVICES_DIR / f'{SVC_SHELLMCP_LABEL}.plist'
     UNIT_PATH_FRPC  = SERVICES_DIR / f'{SVC_FRPC_LABEL}.plist'
     UNIT_PATH_CLOUDFLARED = SERVICES_DIR / f'{SVC_CLOUDFLARED_LABEL}.plist'
+    UNIT_PATH_AUTO_UPDATE = SERVICES_DIR / f'{SVC_AUTO_UPDATE_LABEL}.plist'
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 else:
     SYSTEMD_DIR = USER_HOME / '.config' / 'systemd' / 'user' if IS_USER_INSTALL else Path('/etc/systemd/system')
@@ -144,10 +146,14 @@ else:
     SYSTEMD_SHELLMCP = 'gptadmin-shellmcp.service'
     SYSTEMD_FRPC  = 'gptadmin-tunnel-frpc.service'
     SYSTEMD_CLOUDFLARED = 'gptadmin-cloudflared.service'
+    SYSTEMD_AUTO_UPDATE = 'gptadmin-auto-update.service'
+    SYSTEMD_AUTO_UPDATE_TIMER = 'gptadmin-auto-update.timer'
     UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
     UNIT_PATH_SHELLMCP = SYSTEMD_DIR / SYSTEMD_SHELLMCP
     UNIT_PATH_FRPC  = SYSTEMD_DIR / SYSTEMD_FRPC
     UNIT_PATH_CLOUDFLARED = SYSTEMD_DIR / SYSTEMD_CLOUDFLARED
+    UNIT_PATH_AUTO_UPDATE = SYSTEMD_DIR / SYSTEMD_AUTO_UPDATE
+    UNIT_PATH_AUTO_UPDATE_TIMER = SYSTEMD_DIR / SYSTEMD_AUTO_UPDATE_TIMER
     FRPC_CONF = ETC_DIR / 'frpc.toml'
 
 # Package URLs can be overridden by env or args
@@ -234,6 +240,35 @@ def env_remove_keys(keys: list[str]):
         ENV_FILE.write_text('\n'.join(lines) + '\n')
         os.chmod(ENV_FILE, 0o640)
 
+def env_bool(env: dict, key: str, default: bool = False) -> bool:
+    raw = env.get(key)
+    if raw is None or str(raw).strip() == '':
+        return default
+    return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def auto_update_enabled(env: dict) -> bool:
+    # Автообновление GPTAdmin включено по умолчанию. Отключается явно:
+    # GPTADMIN_AUTO_UPDATE=false или `gptadmin auto-update disable`.
+    return env_bool(env, 'GPTADMIN_AUTO_UPDATE', True)
+
+
+def auto_update_interval_seconds(env: dict) -> int:
+    try:
+        value = int(str(env.get('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC') or '21600').strip())
+    except Exception:
+        value = 21600
+    return max(value, 300)
+
+
+def auto_update_randomized_delay_seconds(env: dict) -> int:
+    try:
+        value = int(str(env.get('GPTADMIN_AUTO_UPDATE_RANDOM_DELAY_SEC') or '1800').strip())
+    except Exception:
+        value = 1800
+    return max(value, 0)
+
+
 # tokens
 
 def gen_hex(nbytes=16) -> str:
@@ -295,9 +330,32 @@ def extract_tgz(tgz_path: Path, target_dir: Path):
 
 # package install
 
+def _install_cli_executable_from_file(src: Path):
+    if not src.exists() or not src.is_file():
+        return
+    try:
+        candidate_text = src.read_text(encoding='utf-8', errors='replace')
+        current_text = CLI_PATH.read_text(encoding='utf-8', errors='replace') if CLI_PATH.exists() else ''
+        # Do not let older component packages downgrade a CLI that already knows
+        # about the new automatic updater. Fresh/future packages with cmd_autoupdate
+        # still update the executable normally.
+        if 'cmd_autoupdate' in current_text and 'cmd_autoupdate' not in candidate_text:
+            print(f'WARNING: package CLI {src} is older than installed CLI; keeping {CLI_PATH}', file=sys.stderr)
+            return
+    except Exception as exc:
+        print(f'WARNING: could not inspect package CLI {src}: {exc}; keeping installed CLI', file=sys.stderr)
+        return
+    CLI_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CLI_PATH.with_name(CLI_PATH.name + '.new')
+    shutil.copy2(src, tmp)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, CLI_PATH)
+
+
 def _copy_pkg_runtime_payloads(tdp: Path):
     cli_src = tdp / 'cli'
     if cli_src.exists():
+        _install_cli_executable_from_file(cli_src / 'gptadmin.py')
         cli_dst = INSTALL_DIR / 'cli'
         if cli_dst.exists():
             shutil.rmtree(cli_dst, ignore_errors=True)
@@ -509,6 +567,25 @@ if IS_MACOS:
             '</dict></plist>\n'
         )
 
+
+    def _make_interval_plist(label: str, wrapper: Path, log_file: Path, interval: int) -> str:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+            ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            f'    <key>Label</key><string>{label}</string>\n'
+            '    <key>ProgramArguments</key><array>\n'
+            '        <string>/bin/sh</string>\n'
+            f'        <string>{wrapper}</string>\n'
+            '    </array>\n'
+            '    <key>RunAtLoad</key><true/>\n'
+            f'    <key>StartInterval</key><integer>{interval}</integer>\n'
+            f'    <key>StandardOutPath</key><string>{log_file}</string>\n'
+            f'    <key>StandardErrorPath</key><string>{log_file}</string>\n'
+            '</dict></plist>\n'
+        )
+
     def svc_daemon_reload():
         pass  # launchd has no daemon-reload
 
@@ -670,6 +747,21 @@ if IS_MACOS:
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_CLOUDFLARED.write_text(_make_plist(SVC_CLOUDFLARED_LABEL, wrapper, LOG_DIR / 'cloudflared.log'))
 
+
+    def write_autoupdate_unit(env: dict):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = BIN_DIR / 'run_auto_update.sh'
+        wrapper.write_text(
+            f'#!/bin/sh\n'
+            f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
+            f'exec {CLI_PATH} --{INSTALL_SCOPE} update --auto\n'
+        )
+        os.chmod(wrapper, 0o755)
+        UNIT_PATH_AUTO_UPDATE.write_text(_make_interval_plist(
+            SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log', auto_update_interval_seconds(env)))
+
     def svc_hub_name():  return SVC_HUB_LABEL
     def svc_shellmcp_name(): return SVC_SHELLMCP_LABEL
     def svc_frpc_name():  return SVC_FRPC_LABEL
@@ -743,6 +835,32 @@ RestartSec=3
 {hardening}
 [Install]
 WantedBy={wanted_by}
+"""
+
+
+    AUTO_UPDATE_SERVICE_TPL = """[Unit]
+Description=GPTAdmin automatic update runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile={env_file}
+ExecStart={cli_path} --{install_scope} update --auto
+"""
+
+    AUTO_UPDATE_TIMER_TPL = """[Unit]
+Description=Run GPTAdmin automatic update periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={interval_sec}s
+RandomizedDelaySec={random_delay_sec}s
+Persistent=true
+Unit={service_name}
+
+[Install]
+WantedBy=timers.target
 """
 
     def _systemctl_cmd(*args: str) -> list[str]:
@@ -831,6 +949,16 @@ WantedBy={wanted_by}
         UNIT_PATH_CLOUDFLARED.write_text(CLOUDFLARED_UNIT_TPL.format(
             cloudflared_bin=cloudflared_bin, env_file=ENV_FILE, hub_port=env.get('HUB_PORT', '9001'),
             hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
+
+
+    def write_autoupdate_unit(env: dict):
+        UNIT_PATH_AUTO_UPDATE.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_AUTO_UPDATE.write_text(AUTO_UPDATE_SERVICE_TPL.format(
+            env_file=ENV_FILE, cli_path=CLI_PATH, install_scope=INSTALL_SCOPE))
+        UNIT_PATH_AUTO_UPDATE_TIMER.write_text(AUTO_UPDATE_TIMER_TPL.format(
+            interval_sec=auto_update_interval_seconds(env),
+            random_delay_sec=auto_update_randomized_delay_seconds(env),
+            service_name=SYSTEMD_AUTO_UPDATE))
 
     def svc_hub_name():   return SYSTEMD_HUB
     def svc_shellmcp_name(): return SYSTEMD_SHELLMCP
@@ -1544,6 +1672,8 @@ def setup_interactive(args):
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
+    env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
+    env.setdefault('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC', '21600')
     sync_oauth_origin_env(env)
     env_set_many(env)
 
@@ -1627,6 +1757,7 @@ def setup_interactive(args):
     if install_shellmcp:
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
         maybe_import_and_install_mcp_from_desktop_clients()
+    svc_autoupdate_enable_start(env_read())
     maybe_autoapprove_local_shellmcp(env, install_hub, install_shellmcp)
     auto_configure_ai_mcp_clients(env_read(), install_hub)
 
@@ -2282,6 +2413,80 @@ def installed_units():
     if UNIT_PATH_CLOUDFLARED.exists(): res.append((svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED))
     return res
 
+
+def autoupdate_unit_pairs():
+    if IS_MACOS:
+        return [(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)]
+    return [(SYSTEMD_AUTO_UPDATE, UNIT_PATH_AUTO_UPDATE), (SYSTEMD_AUTO_UPDATE_TIMER, UNIT_PATH_AUTO_UPDATE_TIMER)]
+
+
+def svc_autoupdate_enable_start(env: dict):
+    if not auto_update_enabled(env):
+        svc_autoupdate_disable_stop()
+        return
+    write_autoupdate_unit(env)
+    svc_daemon_reload()
+    if IS_MACOS:
+        svc_enable_start(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
+    else:
+        run(_systemctl_cmd('enable', '--now', SYSTEMD_AUTO_UPDATE_TIMER))
+
+
+def svc_autoupdate_disable_stop():
+    if IS_MACOS:
+        svc_disable_stop(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
+        safe_rm(UNIT_PATH_AUTO_UPDATE)
+    else:
+        run(_systemctl_cmd('disable', '--now', SYSTEMD_AUTO_UPDATE_TIMER), check=False)
+        safe_rm(UNIT_PATH_AUTO_UPDATE_TIMER)
+        safe_rm(UNIT_PATH_AUTO_UPDATE)
+        svc_daemon_reload()
+
+
+def print_autoupdate_status(env: dict):
+    enabled = auto_update_enabled(env)
+    state = c_green('enabled') if enabled else c_red('disabled')
+    print(f'  {c_dim("Auto-update:")} {state} interval={auto_update_interval_seconds(env)}s')
+    existing = [(n, p) for n, p in autoupdate_unit_pairs() if p.exists()]
+    if existing:
+        svc_status_multi(existing)
+
+
+def cmd_autoupdate(args):
+    need_root()
+    env = env_read()
+    action = getattr(args, 'action', None) or 'status'
+    if action == 'status':
+        print_header('GPTAdmin Auto-update')
+        print_autoupdate_status(env)
+        return
+    if action == 'enable':
+        env['GPTADMIN_AUTO_UPDATE'] = 'true'
+        env.setdefault('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC', '21600')
+        env_set_many(env)
+        svc_autoupdate_enable_start(env)
+        print('GPTAdmin auto-update enabled.')
+        return
+    if action == 'disable':
+        env['GPTADMIN_AUTO_UPDATE'] = 'false'
+        env_set_many(env)
+        svc_autoupdate_disable_stop()
+        print('GPTAdmin auto-update disabled.')
+        return
+    if action == 'run':
+        args.hub = False
+        args.shellmcp = False
+        args.no_hub = False
+        args.no_shellmcp = False
+        args.pkg_all = None
+        args.pkg_hub = None
+        args.pkg_shellmcp = None
+        args.auto = True
+        cmd_update(args)
+        return
+    die('unknown auto-update action. Use: status, enable, disable, run')
+
+
 def cmd_config_shellmcp(args):
     need_root()
     env = env_read()
@@ -2407,6 +2612,7 @@ def cmd_status(_):
     tunnel = env.get('TUNNEL_MODE', '')
     if tunnel:
         print(f'  {c_dim("Tunnel:")}  {c_green(tunnel)}')
+    print_autoupdate_status(env)
 
 def cmd_start(_):
     need_root()
@@ -2425,11 +2631,16 @@ def cmd_enable(_):
     need_root()
     for name, path in installed_units():
         svc_enable_start(name, path)
+    env = env_read()
+    env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
+    env_set_many(env)
+    svc_autoupdate_enable_start(env)
 
 def cmd_disable(_):
     need_root()
     for name, path in installed_units():
         svc_disable_stop(name, path)
+    svc_autoupdate_disable_stop()
 
 def _log_file(label: str) -> Path:
     if IS_MACOS:
@@ -2780,6 +2991,11 @@ def cmd_update(args):
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
+    env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
+    env.setdefault('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC', '21600')
+    if getattr(args, 'auto', False) and not auto_update_enabled(env):
+        print('GPTAdmin auto-update is disabled; skipping automatic update.')
+        return
     if install_shellmcp:
         ensure_shellmcp_identity_env(env)
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
@@ -2868,8 +3084,11 @@ def cmd_update(args):
         svc_enable_start(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED)
     if install_shellmcp:
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
+    if not getattr(args, 'auto', False):
+        svc_autoupdate_enable_start(env_read())
     maybe_autoapprove_local_shellmcp(env_read(), install_hub, install_shellmcp)
-    auto_configure_ai_mcp_clients(env_read(), install_hub)
+    if not getattr(args, 'auto', False):
+        auto_configure_ai_mcp_clients(env_read(), install_hub)
 
     env = env_read()
     print('GPTAdmin updated in-place.')
@@ -3124,6 +3343,10 @@ def safe_rm(p: Path):
 def cmd_uninstall(args):
     need_root()
     failures = []
+    try:
+        svc_autoupdate_disable_stop()
+    except Exception as e:
+        failures.append(f'не удалось отключить auto-update: {e}')
     for name, path in [(svc_cloudflared_name(), UNIT_PATH_CLOUDFLARED),
                        (svc_frpc_name(), UNIT_PATH_FRPC),
                        (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
@@ -3209,7 +3432,15 @@ def main():
     ap_update.add_argument('--no-shellmcp', action='store_true', help='Do not update ShellMCP component')
     ap_update.add_argument('--user', action='store_true', help='Use per-user install paths/services')
     ap_update.add_argument('--system', action='store_true', help='Use system install paths/services')
+    ap_update.add_argument('--auto', action='store_true', help='Run from the automatic updater; obey GPTADMIN_AUTO_UPDATE')
     ap_update.set_defaults(func=cmd_update)
+
+    ap_autoupdate = sub.add_parser('auto-update', aliases=['autoupdate'], help='Управление автообновлением GPTAdmin')
+    ap_autoupdate.add_argument('action', nargs='?', choices=['status', 'enable', 'disable', 'run'], default='status')
+    ap_autoupdate.add_argument('--force', action='store_true', help='For run: reinstall even when already current')
+    ap_autoupdate.add_argument('--user', action='store_true', help='Use per-user install paths/services')
+    ap_autoupdate.add_argument('--system', action='store_true', help='Use system install paths/services')
+    ap_autoupdate.set_defaults(func=cmd_autoupdate)
 
     ap_config = sub.add_parser('config', help='Настроить компоненты (shellmcp transport)')
     config_sub = ap_config.add_subparsers(dest='config_target')
