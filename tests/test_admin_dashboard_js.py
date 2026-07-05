@@ -10,24 +10,24 @@ def _line_no(text: str, needle: str) -> int:
     return text[:idx].count("\n") + 1
 
 
-def test_agent_card_constants_are_initialized_before_rendering_agents():
-    """Regression for ReferenceError: Cannot access AGENT_CARD_CAPS_SHOWN before initialization.
+def test_server_card_constants_are_initialized_before_rendering_servers():
+    """Regression for ReferenceError: Cannot access SERVER_CARD_CAPS_SHOWN before initialization.
 
-    renderAll() immediately renders agents with renderAgentCard(). Because renderAgentCard()
-    reads AGENT_CARD_CAPS_SHOWN / AGENT_CARD_META_KEYS_SHOWN, those consts must be
-    initialized earlier in the script/function body than the first renderAgentCard call.
+    renderAll() immediately renders servers with renderServerCard(). Because renderServerCard()
+    reads SERVER_CARD_CAPS_SHOWN / SERVER_CARD_META_KEYS_SHOWN, those consts must be
+    initialized earlier in the script/function body than the first renderServerCard call.
     """
     html = ADMIN_HTML.read_text(encoding="utf-8")
-    call_line = _line_no(html, "agents.map(renderAgentCard)")
-    caps_line = _line_no(html, "const AGENT_CARD_CAPS_SHOWN")
-    meta_line = _line_no(html, "const AGENT_CARD_META_KEYS_SHOWN")
+    call_line = _line_no(html, "map(renderServerCard)")
+    caps_line = _line_no(html, "const SERVER_CARD_CAPS_SHOWN")
+    meta_line = _line_no(html, "const SERVER_CARD_META_KEYS_SHOWN")
 
     assert caps_line < call_line, (
-        "AGENT_CARD_CAPS_SHOWN must be initialized before renderAll calls renderAgentCard "
+        "SERVER_CARD_CAPS_SHOWN must be initialized before renderAll calls renderServerCard "
         f"(const line {caps_line}, call line {call_line})"
     )
     assert meta_line < call_line, (
-        "AGENT_CARD_META_KEYS_SHOWN must be initialized before renderAll calls renderAgentCard "
+        "SERVER_CARD_META_KEYS_SHOWN must be initialized before renderAll calls renderServerCard "
         f"(const line {meta_line}, call line {call_line})"
     )
 

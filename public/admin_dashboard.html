@@ -784,11 +784,11 @@ function initMaxActiveIpsInput() {
   if (el) el.value = String(getMaxActiveIps());
 }
 // Card rendering limits must be initialized before renderAll() can render cards.
-// Regression guard: renderServerCard reads these during the first agents render.
+// Regression guard: renderServerCard reads these during the first servers render.
 const CLIENT_CARD_UA_SHOWN = 2;
 const CLIENT_CARD_PATHS_SHOWN = 3;
-const AGENT_CARD_CAPS_SHOWN = 5;
-const AGENT_CARD_META_KEYS_SHOWN = 5;
+const SERVER_CARD_CAPS_SHOWN = 5;
+const SERVER_CARD_META_KEYS_SHOWN = 5;
 const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
 const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
 function renderAll(){if(!state)return;const data=state;const ac=data.server_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bServers').textContent=(data.servers||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
@@ -801,16 +801,16 @@ function renderServerCard(r) {
   const caps = Array.isArray(r.capabilities) ? r.capabilities : [];
   const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
   const metaKeys = Object.keys(meta);
-  const capFirst = topN(caps, AGENT_CARD_CAPS_SHOWN);
-  const metaFirst = topN(metaKeys, AGENT_CARD_META_KEYS_SHOWN);
-  const capMore = Math.max(0, caps.length - AGENT_CARD_CAPS_SHOWN);
-  const metaMore = Math.max(0, metaKeys.length - AGENT_CARD_META_KEYS_SHOWN);
+  const capFirst = topN(caps, SERVER_CARD_CAPS_SHOWN);
+  const metaFirst = topN(metaKeys, SERVER_CARD_META_KEYS_SHOWN);
+  const capMore = Math.max(0, caps.length - SERVER_CARD_CAPS_SHOWN);
+  const metaMore = Math.max(0, metaKeys.length - SERVER_CARD_META_KEYS_SHOWN);
   const capId = 'ac_' + Math.random().toString(36).slice(2, 9);
   const metaId = 'am_' + Math.random().toString(36).slice(2, 9);
   const capList = capFirst.map(x => '<li><span class="pill mono small">' + esc(x) + '</span></li>').join('');
-  const capRest = caps.slice(AGENT_CARD_CAPS_SHOWN).map(x => '<li><span class="pill mono small">' + esc(x) + '</span></li>').join('');
+  const capRest = caps.slice(SERVER_CARD_CAPS_SHOWN).map(x => '<li><span class="pill mono small">' + esc(x) + '</span></li>').join('');
   const metaList = metaFirst.map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
-  const metaRest = metaKeys.slice(AGENT_CARD_META_KEYS_SHOWN).map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
+  const metaRest = metaKeys.slice(SERVER_CARD_META_KEYS_SHOWN).map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
   return (
     '<article class="entryCard" style="cursor:pointer" onclick="openServerDetail(\''+esc(r.server_id||'')+'\')">' +
       '<div class="entryHead">' +
