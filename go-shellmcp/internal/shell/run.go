@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -259,15 +260,129 @@ func targetRunUser(req Request) (string, bool) {
 
 func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
 	user, explicit := targetRunUser(req)
+	if useAndroidShizuku(req, user, explicit) {
+		return exec.CommandContext(ctx, shizukuRishPath(req), "-c", stripLeadingSudo(req.Cmd)), "shizuku"
+	}
 	if runtime.GOOS != "windows" && user != "" && user != "root" && (explicit || os.Geteuid() == 0) {
 		return exec.CommandContext(ctx, "sudo", "-H", "-u", user, "--", shellName(), shellArg(), req.Cmd), user
 	}
 	return exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd), ""
 }
 
+func envFromReq(req Request, key string) string {
+	if req.Env != nil {
+		if v, ok := req.Env[key]; ok {
+			return v
+		}
+	}
+	return os.Getenv(key)
+}
+
+func androidPrivilegeMode(req Request) string {
+	mode := strings.ToLower(strings.TrimSpace(envFromReq(req, "SHELLMCP_ANDROID_PRIVILEGE")))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(envFromReq(req, "SHELLMCP_PRIVILEGE_MODE")))
+	}
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "1", "true", "yes", "on", "rish":
+		return "shizuku"
+	}
+	return mode
+}
+
+func shizukuRishPath(req Request) string {
+	if p := strings.TrimSpace(envFromReq(req, "SHELLMCP_SHIZUKU_RISH")); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(envFromReq(req, "SHIZUKU_RISH")); p != "" {
+		return p
+	}
+	return "rish"
+}
+
+func useAndroidShizuku(req Request, user string, explicit bool) bool {
+	if runtime.GOOS != "android" {
+		return false
+	}
+	wantPrivileged := (explicit && (user == "root" || user == "shizuku")) || commandMentionsSudo(req.Cmd)
+	mode := androidPrivilegeMode(req)
+	switch mode {
+	case "auto":
+		return wantPrivileged && shizukuRishAvailable(req)
+	case "auto-all":
+		return shizukuRishAvailable(req)
+	case "shizuku-all", "rish-all", "all":
+		return true
+	case "shizuku", "rish":
+		return wantPrivileged
+	default:
+		return false
+	}
+}
+
+func shizukuRishAvailable(req Request) bool {
+	path := shizukuRishPath(req)
+	if strings.Contains(path, string(os.PathSeparator)) {
+		st, err := os.Stat(path)
+		return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
+	}
+	_, err := exec.LookPath(path)
+	return err == nil
+}
+
+func stripLeadingSudo(cmd string) string {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "sudo" {
+		return "true"
+	}
+	if !strings.HasPrefix(trimmed, "sudo ") {
+		return cmd
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 || fields[0] != "sudo" {
+		return cmd
+	}
+	i := 1
+	for i < len(fields) {
+		switch fields[i] {
+		case "-n", "-E", "-H", "-S", "--":
+			i++
+			continue
+		}
+		if strings.HasPrefix(fields[i], "-") {
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(fields) {
+		return "true"
+	}
+	return strings.Join(fields[i:], " ")
+}
+
 func shellName() string {
-	if runtime.GOOS == "windows" {
+	return shellNameForGOOS(runtime.GOOS)
+}
+
+func shellNameForGOOS(goos string) string {
+	if goos == "windows" {
 		return "cmd"
+	}
+	if goos == "android" {
+		if sh := strings.TrimSpace(os.Getenv("SHELL")); sh != "" {
+			return sh
+		}
+		if prefix := strings.TrimSpace(os.Getenv("PREFIX")); prefix != "" {
+			candidate := filepath.Join(prefix, "bin", "bash")
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate
+			}
+		}
+		return "/system/bin/sh"
 	}
 	return "/bin/bash"
 }

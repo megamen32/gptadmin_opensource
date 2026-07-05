@@ -80,3 +80,30 @@ func TestDefaultUserSelection(t *testing.T) {
 		t.Fatalf("explicit user not selected: got=%q explicit=%v", got, explicit)
 	}
 }
+
+func TestAndroidPrivilegeModeAndShizukuHelpers(t *testing.T) {
+	if got := androidPrivilegeMode(Request{Cmd: "id"}); got != "auto" {
+		t.Fatalf("default mode should be auto: %q", got)
+	}
+	req := Request{Cmd: "id", Env: map[string]string{"SHELLMCP_ANDROID_PRIVILEGE": "rish", "SHELLMCP_SHIZUKU_RISH": "/data/local/tmp/rish"}}
+	if got := androidPrivilegeMode(req); got != "shizuku" {
+		t.Fatalf("mode alias not normalized: %q", got)
+	}
+	if got := shizukuRishPath(req); got != "/data/local/tmp/rish" {
+		t.Fatalf("bad rish path: %q", got)
+	}
+	if got := stripLeadingSudo("sudo -n -E id"); got != "id" {
+		t.Fatalf("sudo not stripped: %q", got)
+	}
+	if got := stripLeadingSudo("echo sudo ok"); got != "echo sudo ok" {
+		t.Fatalf("non-leading sudo changed: %q", got)
+	}
+}
+
+func TestShellNameForAndroidFallsBackToSystemShell(t *testing.T) {
+	t.Setenv("SHELL", "")
+	t.Setenv("PREFIX", "")
+	if got := shellNameForGOOS("android"); got != "/system/bin/sh" {
+		t.Fatalf("bad android shell fallback: %q", got)
+	}
+}

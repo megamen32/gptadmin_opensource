@@ -11,6 +11,7 @@ set -euo pipefail
 # Env overrides:
 #   PACKAGE_URL, GPTADMIN_DIR, HUB_URL, SHELLMCP_NAME, SHELLMCP_TOKEN,
 #   SHELLMCP_PORT, SHELLMCP_AUTO_START, SHELLMCP_FOREGROUND, SHELLMCP_QUEUE_TIMEOUT_S
+#   SHELLMCP_ANDROID_PRIVILEGE=auto|none|shizuku|shizuku-all, SHELLMCP_SHIZUKU_RISH=/path/to/rish
 
 PACKAGE_URL=${PACKAGE_URL:-https://became.bezrabotnyi.com/gptadmin-android-arm64.tar.gz}
 GPTADMIN_DIR=${GPTADMIN_DIR:-$HOME/.local/share/gptadmin}
@@ -29,6 +30,9 @@ SHELLMCP_PORT=${SHELLMCP_PORT:-25900}
 SHELLMCP_QUEUE_TIMEOUT_S=${SHELLMCP_QUEUE_TIMEOUT_S:-55}
 SHELLMCP_AUTO_START=${SHELLMCP_AUTO_START:-1}
 SHELLMCP_FOREGROUND=${SHELLMCP_FOREGROUND:-0}
+SHELLMCP_ANDROID_PRIVILEGE=${SHELLMCP_ANDROID_PRIVILEGE:-auto}
+SHELLMCP_SHIZUKU_RISH=${SHELLMCP_SHIZUKU_RISH:-${SHIZUKU_RISH:-$BIN_DIR/rish}}
+RISH_PRESERVE_ENV=${RISH_PRESERVE_ENV:-0}
 
 if [[ -z "${PREFIX:-}" || ! -d "${PREFIX:-/nope}" ]]; then
   echo "ERROR: this installer is meant to run inside Termux. PREFIX is missing." >&2
@@ -58,6 +62,33 @@ if [[ -z "${SHELLMCP_NAME:-}" ]]; then
   host=$(getprop ro.product.model 2>/dev/null | tr ' /' '--' | tr -cd '[:alnum:]._-' || true)
   serial=$(getprop ro.serialno 2>/dev/null | tr -cd '[:alnum:]' | tail -c 6 || true)
   SHELLMCP_NAME="android-${host:-termux}${serial:+-$serial}"
+fi
+
+case "$SHELLMCP_ANDROID_PRIVILEGE" in
+  auto|auto-all|none|off|0|false|shizuku|rish|shizuku-all|rish-all|all) ;;
+  *)
+    echo "ERROR: SHELLMCP_ANDROID_PRIVILEGE must be auto, none, shizuku, or shizuku-all" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$SHELLMCP_ANDROID_PRIVILEGE" == auto* || "$SHELLMCP_ANDROID_PRIVILEGE" == shizuku* || "$SHELLMCP_ANDROID_PRIVILEGE" == rish* || "$SHELLMCP_ANDROID_PRIVILEGE" == all ]]; then
+  if [[ ! -x "$SHELLMCP_SHIZUKU_RISH" ]] && ! command -v rish >/dev/null 2>&1; then
+    if [[ "$SHELLMCP_ANDROID_PRIVILEGE" == auto* ]]; then
+      echo "INFO: Shizuku/rish not found; keeping normal Termux shell mode. Export rish later and restart to enable auto privilege." >&2
+    else
+      cat >&2 <<WARN
+WARN: Shizuku privilege mode is enabled, but rish was not found.
+      In Shizuku app: Use Shizuku in terminal apps -> Export files.
+      Then put rish/rish_shizuku.dex in Termux, for example:
+        $BIN_DIR/rish
+        $BIN_DIR/rish_shizuku.dex
+      Or rerun with SHELLMCP_SHIZUKU_RISH=/path/to/rish.
+WARN
+    fi
+  else
+    echo "INFO: Shizuku/rish found; Android privilege mode: $SHELLMCP_ANDROID_PRIVILEGE" >&2
+  fi
 fi
 
 mkdir -p "$GPTADMIN_DIR" "$CONFIG_DIR" "$BIN_DIR" "$LOG_DIR" "$SPOOL_DIR" "$IDENTITY_DIR"
@@ -92,6 +123,9 @@ SHELLMCP_DEFAULT_HOME=$HOME
 SHELLMCP_DEFAULT_CWD=$HOME
 LOG_LIMIT_B=32768
 EXEC_TIMEOUT=300
+SHELLMCP_ANDROID_PRIVILEGE=$SHELLMCP_ANDROID_PRIVILEGE
+SHELLMCP_SHIZUKU_RISH=$SHELLMCP_SHIZUKU_RISH
+RISH_PRESERVE_ENV=$RISH_PRESERVE_ENV
 ENV
 chmod 600 "$ENV_FILE"
 
@@ -135,12 +169,21 @@ Bin:  $TARGET_BIN
 Env:  $ENV_FILE
 Log:  $LOG_DIR/shellmcp.log
 Mode: long_poll
+Privilege: $SHELLMCP_ANDROID_PRIVILEGE
+Shizuku rish: $SHELLMCP_SHIZUKU_RISH
 Service: $([[ $installed_service == 1 ]] && echo termux-services:$SERVICE_NAME || echo nohup/manual)
 
 Next:
   1) In Android settings, disable battery optimization for Termux.
-  2) Keep Termux:API installed if you want commands like termux-location later.
-  3) Approve pending server in GPTAdmin hub if auto-approval is not configured.
+  2) Optional Shizuku mode:
+       - install/start Shizuku
+       - Shizuku app -> Use Shizuku in terminal apps -> Export files
+       - copy rish and rish_shizuku.dex into Termux, usually $BIN_DIR
+       - default mode is auto: root/sudo shell_exec uses rish when rish is present
+       - force with: SHELLMCP_ANDROID_PRIVILEGE=shizuku
+     Modes: auto=normal Termux plus rish for root/sudo when present, none=normal Termux, shizuku=root/sudo requests via rish, shizuku-all=all shell_exec via rish.
+  3) Keep Termux:API installed if you want commands like termux-location later.
+  4) Approve pending server in GPTAdmin hub if auto-approval is not configured.
 
 Manual start:
   $RUN_FILE
