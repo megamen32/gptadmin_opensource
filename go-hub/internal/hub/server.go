@@ -198,6 +198,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/actions/openapi.yaml", s.actionsOpenAPI)
 	mux.HandleFunc("/artifacts/shellmcp.json", s.requireCtl(s.shellmcpArtifactManifest))
 	mux.HandleFunc("/artifacts/shellmcp.tar.gz", s.requireCtl(s.shellmcpArtifactDownload))
+	// Legacy rootd artifact aliases: old services still point ROOTD_UPDATE_MANIFEST_URL here.
+	mux.HandleFunc("/artifacts/rootd.json", s.requireCtl(s.shellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/rootd.tar.gz", s.requireCtl(s.shellmcpArtifactDownload))
 	mux.HandleFunc("/heartbeat", s.heartbeat)
 	mux.HandleFunc("/servers", s.requireCtl(s.serversList))
 	mux.HandleFunc("/bulk/exec", s.requireCtl(s.bulkExec))
