@@ -47,6 +47,7 @@ type Config struct {
 	OAuthPermissiveResources bool
 	AuthLogSecrets           bool
 	BridgeKey                string
+	RegistryStateFile        string
 }
 
 func FromEnv() Config {
@@ -75,6 +76,7 @@ func FromEnv() Config {
 		OAuthPermissiveResources: truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
 		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
 		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
+		RegistryStateFile:        env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
 	}
 }
 
@@ -107,6 +109,13 @@ type Agent struct {
 	LastSeen     float64        `json:"last_seen"`
 	Capabilities []string       `json:"capabilities"`
 	Meta         map[string]any `json:"meta,omitempty"`
+}
+
+type persistentRegistryState struct {
+	SavedAt      float64          `json:"saved_at"`
+	BuildVersion string           `json:"build_version,omitempty"`
+	GitCommit    string           `json:"git_commit,omitempty"`
+	Agents       map[string]Agent `json:"agents"`
 }
 
 type relayJob struct {
@@ -179,7 +188,98 @@ func New(cfg Config) *Server {
 		audit:       []auditEvent{},
 	}
 	s.cond = sync.NewCond(&s.mu)
+	if err := s.loadRegistryState(); err != nil {
+		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
+	}
 	return s
+}
+
+func (s *Server) registryStatePath() string {
+	if s.cfg.RegistryStateFile != "" {
+		return s.cfg.RegistryStateFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "registry_state.json")
+}
+
+func (s *Server) loadRegistryState() error {
+	path := s.registryStatePath()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var state persistentRegistryState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return err
+	}
+	loaded := 0
+	for id, agent := range state.Agents {
+		if id == "" {
+			id = agent.AgentID
+		}
+		if id == "" || id == "hub" {
+			continue
+		}
+		agent.AgentID = id
+		if agent.Status == "" || agent.Status == "online" || agent.Status == "running" {
+			agent.Status = "stale"
+		}
+		if agent.Meta == nil {
+			agent.Meta = map[string]any{}
+		}
+		agent.Meta["restored_from_state"] = true
+		agent.Meta["state_file"] = path
+		cp := agent
+		s.agents[id] = &cp
+		loaded++
+	}
+	if loaded > 0 {
+		log.Printf("registry state loaded path=%s agents=%d saved_at=%.0f", path, loaded, state.SavedAt)
+	}
+	return nil
+}
+
+func (s *Server) saveRegistryStateLocked() error {
+	path := s.registryStatePath()
+	if path == "" {
+		return nil
+	}
+	state := persistentRegistryState{SavedAt: nowFloat(), BuildVersion: BuildVersion, GitCommit: GitCommit, Agents: map[string]Agent{}}
+	for id, agent := range s.agents {
+		if id == "" || agent == nil || id == "hub" {
+			continue
+		}
+		cp := *agent
+		cp.Meta = cloneMap(cp.Meta)
+		delete(cp.Meta, "public_mcp_endpoint")
+		delete(cp.Meta, "public_mcp_path")
+		delete(cp.Meta, "public_mcp_slug")
+		delete(cp.Meta, "public_mcp_auth")
+		delete(cp.Meta, "exposed_by_default")
+		delete(cp.Meta, "restored_from_state")
+		delete(cp.Meta, "state_file")
+		state.Agents[id] = cp
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (s *Server) ListenAndServe() error {
@@ -682,6 +782,9 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: transport, Status: "online", LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
 	s.addAuditLocked("heartbeat", map[string]any{"agent_id": agentID, "transport": transport})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		log.Printf("registry state save failed: %v", err)
+	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
 }
@@ -800,6 +903,9 @@ func (s *Server) mcpRelayRegister(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.agents[agentID] = &Agent{AgentID: agentID, Name: name, Kind: kind, Transport: transport, Status: "online", LastSeen: nowFloat(), Capabilities: caps, Meta: meta}
 	s.addAuditLocked("mcp_register", map[string]any{"agent_id": agentID, "kind": kind, "transport": transport})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		log.Printf("registry state save failed: %v", err)
+	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
 }
@@ -1324,7 +1430,7 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	jobs := s.adminJobsDataLocked()
 	audit := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-in-memory"}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath()}})
 }
 
 func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {

@@ -169,6 +169,52 @@ func TestAdminOverviewShape(t *testing.T) {
 	}
 }
 
+func TestRegistryStatePersistsAgentsAcrossRestart(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := Config{CtlToken: "ctl", RelayAgentToken: "relay", ConfigDir: tmp, RegistryStateFile: filepath.Join(tmp, "registry_state.json"), DefaultTimeout: time.Second, PollMaxTimeout: time.Second}
+	s := New(cfg)
+	h := s.Handler()
+
+	register := []byte(`{"agent_id":"demo-agent","name":"Demo Agent","kind":"real_mcp","transport":"stdio","capabilities":["tools/list"],"meta":{"os":"test"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(cfg.RegistryStateFile); err != nil {
+		t.Fatalf("registry state not written: %v", err)
+	}
+
+	restarted := New(cfg)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_agents", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w = httptest.NewRecorder()
+	restarted.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Agents []Agent `json:"agents"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range body.Agents {
+		if a.AgentID == "demo-agent" {
+			if a.Status != "stale" {
+				t.Fatalf("restored agent status=%q, want stale", a.Status)
+			}
+			if a.Meta["restored_from_state"] != true {
+				t.Fatalf("restored agent meta missing marker: %#v", a.Meta)
+			}
+			return
+		}
+	}
+	t.Fatalf("restored agent not listed: %+v", body.Agents)
+}
+
 func pkceChallenge(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(sum[:])

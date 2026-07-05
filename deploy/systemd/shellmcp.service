@@ -1,10 +1,10 @@
 [Unit]
-Description=Root Daemon for GPT Control (legacy Python shellmcp, deprecated)
+Description=GPTAdmin ShellMCP Go transport
 After=network.target
 
 [Service]
-# DEPRECATED: this template starts legacy Python shellmcp.
-# Use go-shellmcp/shellmcp-go-canary for new deployments.
+# Go ShellMCP/rootd transport layer for GPTAdmin.
+# Legacy Python shellmcp is deprecated.
 WorkingDirectory=/home/admin/gptadmin
 # Запуск из вашего .venv
 ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/shellmcp.py
