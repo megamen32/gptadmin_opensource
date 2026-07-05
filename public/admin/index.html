@@ -12,7 +12,7 @@
     <div class="brand">GPTAdmin</div>
     <div class="sidegroup"><h3>Мониторинг</h3>
       <button class="navbtn active" data-view="overview" onclick="showView('overview')"><span>Обзор</span><span class="badge" id="bOverview">—</span></button>
-      <button class="navbtn" data-view="agents" onclick="showView('agents')"><span>Агенты</span><span class="badge" id="bAgents">—</span></button>
+      <button class="navbtn" data-view="agents" onclick="showView('agents')"><span>Серверы</span><span class="badge" id="bServers">—</span></button>
       <button class="navbtn" data-view="clients" onclick="showView('clients')"><span>Клиенты и Auth</span><span class="badge" id="bClients">—</span></button>
       <button class="navbtn" data-view="jobs" onclick="showView('jobs')"><span>Jobs и очереди</span><span class="badge" id="bJobs">—</span></button>
     </div>
@@ -45,23 +45,23 @@
     <main>
       <!-- Overview -->
       <section id="view-overview" class="view active"><div class="grid">
-        <section class="card span3 metric-card"><div class="metric-label">Агенты</div><div class="metric-value" id="agentCounts">—</div><div class="metric-sub" id="agentSub">online / offline / stale</div></section>
+        <section class="card span3 metric-card"><div class="metric-label">Серверы</div><div class="metric-value" id="agentCounts">—</div><div class="metric-sub" id="agentSub">online / offline / stale</div></section>
         <section class="card span3 metric-card"><div class="metric-label">Клиенты</div><div class="metric-value" id="clientCount">—</div><div class="metric-sub">bearer tokens</div></section>
         <section class="card span3 metric-card"><div class="metric-label">В очереди</div><div class="metric-value" id="queuedCount">—</div><div class="metric-sub">queued jobs</div></section>
         <section class="card span3 metric-card"><div class="metric-label">В фоне</div><div class="metric-value" id="bgCount">—</div><div class="metric-sub">running jobs</div></section>
-        <section class="card span6"><h2>Проблемные агенты</h2><div id="problemAgents" class="empty-state">Все агенты онлайн ✓</div></section>
+        <section class="card span6"><h2>Проблемные серверы</h2><div id="problemServers" class="empty-state">Все серверы онлайн ✓</div></section>
         <section class="card span6"><h2>Последние jobs</h2><div id="recentJobsCompact" class="empty-state">Нет recent jobs</div></section>
       </div></section>
 
-      <!-- Agent detail -->
+      <!-- Server detail -->
       <section id="view-agent-detail" class="view"><div class="card">
-        <div class="row" style="margin-bottom:12px"><button class="btn-secondary" onclick="showView('agents')">← Назад</button><h2 id="agentDetailTitle" style="margin:0">—</h2></div>
-        <div id="agentDetailBody">Загрузка…</div>
+        <div class="row" style="margin-bottom:12px"><button class="btn-secondary" onclick="showView('agents')">← Назад</button><h2 id="serverDetailTitle" style="margin:0">—</h2></div>
+        <div id="serverDetailBody">Загрузка…</div>
       </div></section>
 
-      <!-- Agents -->
+      <!-- Servers -->
       <section id="view-agents" class="view"><div class="card">
-        <div class="row"><h2>Агенты</h2><input id="agentFilter" class="search" placeholder="фильтр" oninput="renderAll()"><select id="agentStatus" onchange="renderAll()"><option value="all">all</option><option value="online">online</option><option value="offline">offline</option><option value="stale">stale</option></select></div>
+        <div class="row"><h2>Серверы</h2><input id="agentFilter" class="search" placeholder="фильтр" oninput="renderAll()"><select id="agentStatus" onchange="renderAll()"><option value="all">all</option><option value="online">online</option><option value="offline">offline</option><option value="stale">stale</option></select></div>
         <div id="agents"></div>
       </div></section>
 
@@ -104,7 +104,7 @@
         <section class="card span8"><h2>MCP менеджер</h2><div class="row"><select id="mcpHost"></select><button onclick="listManagedMcp()">список</button><button onclick="statusManagedMcp()">статус всех</button><label class="small"><input type="checkbox" id="mcpKeepService"> keep service</label></div><div id="managedMcp" style="margin-top:10px"></div></section>
         <section class="card span4"><h2>Добавить MCP</h2>
           <label class="muted">Имя</label><input id="mcpName" placeholder="my-mcp" style="width:100%">
-          <label class="muted">Agent ID (опц.)</label><input id="mcpAgentId" placeholder="MyMcpAgent" style="width:100%">
+          <label class="muted">Server ID (опц.)</label><input id="mcpAgentId" placeholder="MyMcpServer" style="width:100%">
           <label class="muted">Remote URL</label><input id="mcpUrl" placeholder="https://.../mcp" style="width:100%">
           <label class="muted">Command</label><input id="mcpCommand" placeholder="npx / python3" style="width:100%">
           <label class="muted">Args (JSON)</label><textarea id="mcpArgs" style="min-height:60px">[]</textarea>

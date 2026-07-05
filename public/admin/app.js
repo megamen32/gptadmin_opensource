@@ -37,7 +37,7 @@ function responsePreviewText(row){if(row.stdout_preview||row.stderr_preview)retu
 function hasInlineResponse(row){return Boolean(row.stdout_preview||row.stderr_preview||row.error)}
 function canLoadResponse(row){return Boolean(row.job_id)}
 function responseToggleLabel(row){if(row.error)return '▼ ошибка';return '▼ полный вывод'}
-function jobMetaLines(row){const ctx=row.request_context||{};return ['token: '+(ctx.token_id||'—'),'ip: '+(ctx.client_ip||'—'),'ua: '+(ctx.user_agent||'—'),row.agent_id?'agent: '+row.agent_id:'',row.server?'server: '+row.server:'',row.job_id?'job: '+row.job_id:'',row.task_id?'task: '+row.task_id:''].filter(Boolean)}
+function jobMetaLines(row){const ctx=row.request_context||{};return ['token: '+(ctx.token_id||'—'),'ip: '+(ctx.client_ip||'—'),'ua: '+(ctx.user_agent||'—'),row.server_id?'server: '+row.server_id:'',row.server?'server: '+row.server:'',row.job_id?'job: '+row.job_id:'',row.task_id?'task: '+row.task_id:''].filter(Boolean)}
 function auditMetaLines(row){return ['event: '+(row.event||'—'),'token: '+(row.token_id||'—'),'ip: '+(row.client_ip||'—'),'ua: '+(row.user_agent||'—'),row.target?'target: '+row.target:'',row.job_id?'job: '+row.job_id:'',row.path?'path: '+row.path:''].filter(Boolean)}
 function renderRecentMini(rows){if(!rows.length)return '<p class="muted">пусто</p>';return '<div class="recentMini">'+rows.map(r=>`<div class="recentMiniItem"><div class="recentMiniTop"><span class="${cls(r.status)}">${esc(r.status||'—')}</span><span class="entryCompactTime muted">${esc(compactTime(r.created_fmt||r.created_at||''))}</span></div><div><b>${esc(entrySummaryLabel(r))}</b></div><div class="recentMiniCmd mono">${esc(String(entryCommand(r)).substring(0,160))}</div></div>`).join('')+'</div>'}
 function renderResponseBlock(row, metaLabel){
@@ -59,7 +59,7 @@ function renderJobCard(row){
   const isCancelable=row.status==='running'||row.status==='queued'||String(row.status||'').startsWith('queued');
   const cmdHtml=(()=>{const cmd=entryCommand(row);try{return syntaxHighlightJson(JSON.parse(cmd))}catch{return esc(cmd)}})();
   const timingStr=row.timing?Object.entries(row.timing).map(([k,v])=>`${k}:${v}`).join(' '):'';
-  return `<article class="entryCard" style="cursor:pointer" onclick="openJobDetail('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">
+  return `<article class="entryCard" style="cursor:pointer" onclick="openJobDetail('${esc(row.job_id||'')}','${esc(row.server||row.server_id||'hub')}')">
     <div class="entryHead">
       <span class="entryStatus pill ${cls(row.status)}">${esc(row.status||'—')}</span>
       <div class="entryMain">
@@ -74,7 +74,7 @@ function renderJobCard(row){
           ${row.kind?`<span class="pill">${esc(displayKind(row.kind))}</span>`:''}
           ${row.server?`<span class="muted small">${esc(row.server)}</span>`:''}
           ${row.job_id?`<span class="entryId mono">${esc(row.job_id)}</span>`:''}
-          ${isCancelable?`<button class="cancelBtn" style="margin-left:auto" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">отменить</button>`:''}
+          ${isCancelable?`<button class="cancelBtn" style="margin-left:auto" onclick="cancelJob('${esc(row.job_id||'')}','${esc(row.server||row.server_id||'hub')}')">отменить</button>`:''}
         </div>
       </div>
     </div>
@@ -85,7 +85,7 @@ function renderAuditCard(row){
   const cmd=row.command||row.arguments_preview||row.params_preview||row.path||row.target||row.event||'—';
   const pseudoRow={...row,command:cmd,error:row.error};
   const cmdHtml=(()=>{try{return syntaxHighlightJson(JSON.parse(cmd))}catch{return esc(cmd)}})();
-  return `<article class="entryCard" style="cursor:pointer" onclick="openJobDetail('${esc(row.job_id||'')}','${esc(row.server||row.agent_id||'hub')}')">
+  return `<article class="entryCard" style="cursor:pointer" onclick="openJobDetail('${esc(row.job_id||'')}','${esc(row.server||row.server_id||'hub')}')">
     <div class="entryHead">
       <span class="entryStatus ${cls(row.status||row.event)}">${esc(row.event||'event')}</span>
       <div class="entryMain">
@@ -106,7 +106,7 @@ function renderAuditCard(row){
   </article>`;
 }
 async function handleResponseToggle(details){if(!details.open||details.dataset.loaded||details.dataset.loading||!details.dataset.jobId)return;details.dataset.loading='1';const pre=details.querySelector('pre');const empty=details.querySelector('.responseEmpty');if(pre)pre.textContent='loading…';if(empty)empty.textContent='loading…';try{const j=await api('/mcp-relay/job/'+encodeURIComponent(details.dataset.jobId)+'?verbose=true&include_raw=true');const payload=('response' in j)?j.response:('result' in j?j.result:j);const textHtml=prettyJsonHtml(payload);const next=`<pre class="responseBody mono">${textHtml||'—'}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next);details.dataset.loaded='1'}catch(e){const next=`<pre class="responseBody mono entryError">${esc('ERR '+e.message)}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next)}finally{delete details.dataset.loading}}
-function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Агенты','agent-detail':'Детали агента',clients:'Клиенты и Auth',jobs:'Jobs и очереди','job-detail':'Детали job',tools:'Tools тестер',resources:'Ресурсы',mcpmanage:'MCP менеджер',security:'Токены и Auth',audit:'Журнал аудита',raw:'Сырой JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
+function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Серверы','agent-detail':'Детали сервера',clients:'Клиенты и Auth',jobs:'Jobs и очереди','job-detail':'Детали job',tools:'Tools тестер',resources:'Ресурсы',mcpmanage:'MCP менеджер',security:'Токены и Auth',audit:'Журнал аудита',raw:'Сырой JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
 // getMaxActiveIps / onMaxActiveIpsChange — client-side tolerance for token IP count.
 // These helpers are used by renderClientCard(), inline onchange handlers and page bootstrap,
@@ -128,20 +128,20 @@ function initMaxActiveIpsInput() {
   if (el) el.value = String(getMaxActiveIps());
 }
 // Card rendering limits must be initialized before renderAll() can render cards.
-// Regression guard: renderAgentCard reads these during the first agents render.
+// Regression guard: renderServerCard reads these during the first servers render.
 const CLIENT_CARD_UA_SHOWN = 2;
 const CLIENT_CARD_PATHS_SHOWN = 3;
 const AGENT_CARD_CAPS_SHOWN = 5;
 const AGENT_CARD_META_KEYS_SHOWN = 5;
 const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
 const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
-function renderAll(){if(!state)return;const data=state;const ac=data.agent_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bAgents').textContent=(data.agents||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
-const targets=(data.agents||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{agent_id:'hub',status:'local'}].concat(targets.filter(a=>String(a.agent_id||'').startsWith('shell:')||a.meta?.transport_layer==='mcp_tunnel'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.agent_id)}">${esc(a.agent_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
-const problems=(data.agents||[]).filter(a=>a.status!=='online');const PROBLEM_AGENT_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_AGENT_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_AGENT_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.agent_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
+function renderAll(){if(!state)return;const data=state;const ac=data.server_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bServers').textContent=(data.servers||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
+const targets=(data.servers||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{server_id:'hub',status:'local'}].concat(targets.filter(a=>String(a.server_id||'').startsWith('shell:')||a.meta?.transport_layer==='mcp_tunnel'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
+const problems=(data.servers||[]).filter(a=>a.status!=='online');const PROBLEM_SERVER_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_SERVER_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_SERVER_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.server_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
 $('recentJobsCompact').className='';$('recentJobsCompact').innerHTML=renderRecentMini(topN(data.jobs?.recent||[],8));
-let agents=(data.agents||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')agents=agents.filter(r=>r.status===ast);$('agents').innerHTML=agents.length?`<div class="stackList">${agents.map(renderAgentCard).join('')}</div>`:`<p class="muted">пусто</p>`;
-// ===== Agent card (mirror of renderClientCard pattern) =====
-function renderAgentCard(r) {
+let servers=(data.servers||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')servers=servers.filter(r=>r.status===ast);$('agents').innerHTML=servers.length?`<div class="stackList">${servers.map(renderServerCard).join('')}</div>`:`<p class="muted">пусто</p>`;
+// ===== Server card (mirror of renderClientCard pattern) =====
+function renderServerCard(r) {
   const caps = Array.isArray(r.capabilities) ? r.capabilities : [];
   const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
   const metaKeys = Object.keys(meta);
@@ -156,12 +156,12 @@ function renderAgentCard(r) {
   const metaList = metaFirst.map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
   const metaRest = metaKeys.slice(AGENT_CARD_META_KEYS_SHOWN).map(k => '<li><span class="mono">' + esc(k) + '</span>: <span class="muted">' + esc(metaValueForList(meta[k])) + '</span></li>').join('');
   return (
-    '<article class="entryCard" style="cursor:pointer" onclick="openAgentDetail(\''+esc(r.agent_id||'')+'\')">' +
+    '<article class="entryCard" style="cursor:pointer" onclick="openServerDetail(\''+esc(r.server_id||'')+'\')">' +
       '<div class="entryHead">' +
         '<span class="entryStatus ' + cls(r.status) + '">' + esc(r.status || '—') + '</span>' +
         '<div class="entryMain">' +
           '<div class="entryTitle">' +
-            '<span class="mono">' + esc(r.agent_id || '—') + '</span>' +
+            '<span class="mono">' + esc(r.server_id || '—') + '</span>' +
             (r.name ? ' <span class="muted small">' + esc(r.name) + '</span>' : '') +
           '</div>' +
           '<div class="entrySub muted small">' +
@@ -305,12 +305,12 @@ function renderManagedMcpCard(r) {
   const safeName = esc(String(r.name || '').replace(/'/g, "\\'"));
   const stateBadge = r.enabled === false ? '<span class="warn">disabled</span>' : '<span class="ok">enabled</span>';
   return (
-    '<article class="entryCard" style="cursor:pointer" onclick="openAgentDetail(\''+esc(r.agent_id||'')+'\')">' +
+    '<article class="entryCard" style="cursor:pointer" onclick="openServerDetail(\''+esc(r.server_id||'')+'\')">' +
       '<div class="entryHead">' +
         '<div class="entryMain">' +
           '<div class="entryTitle">' +
             '<b>' + esc(r.name || '—') + '</b>' +
-            (r.agent_id ? ' <span class="muted small mono">' + esc(r.agent_id) + '</span>' : '') +
+            (r.server_id ? ' <span class="muted small mono">' + esc(r.server_id) + '</span>' : '') +
           '</div>' +
           '<div class="entrySub muted small mono">' + esc(r.command || '—') + '</div>' +
           '<div class="entrySub small">' +
@@ -353,7 +353,7 @@ async function listManagedMcp(){try{renderManagedMcp(await mcpManage({target:$('
 async function statusManagedMcp(name=''){try{const p=mcpPayloadBase('status');if(name)p.name=name;const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2)}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
 async function installManagedMcp(name){try{const p=mcpPayloadBase('install');p.name=name;const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2);await listManagedMcp()}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
 async function removeManagedMcp(name){try{if(!confirm('Удалить MCP '+name+' на '+$('mcpHost').value+'?'))return;const p=mcpPayloadBase('remove');p.name=name;p.keep_service=$('mcpKeepService').checked;const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2);await listManagedMcp();refreshAll()}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
-async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpName').value.trim();p.agent_id=$('mcpAgentId').value.trim()||undefined;p.url=$('mcpUrl').value.trim()||undefined;p.command=$('mcpCommand').value.trim()||undefined;p.args=JSON.parse($('mcpArgs').value||'[]');p.env=JSON.parse($('mcpEnv').value||'{}');p.run_as_user=$('mcpRunAs').value.trim()||undefined;p.stdio_format=$('mcpStdio').value||undefined;p.install=$('mcpInstall').checked;p.force=$('mcpForce').checked;p.disabled=$('mcpDisabled').checked;if(!p.name)throw new Error('name required');if(!p.url&&!p.command)throw new Error('remote URL or command required');const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2);await listManagedMcp();refreshAll()}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
+async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpName').value.trim();p.server_id=$('mcpAgentId').value.trim()||undefined;p.url=$('mcpUrl').value.trim()||undefined;p.command=$('mcpCommand').value.trim()||undefined;p.args=JSON.parse($('mcpArgs').value||'[]');p.env=JSON.parse($('mcpEnv').value||'{}');p.run_as_user=$('mcpRunAs').value.trim()||undefined;p.stdio_format=$('mcpStdio').value||undefined;p.install=$('mcpInstall').checked;p.force=$('mcpForce').checked;p.disabled=$('mcpDisabled').checked;if(!p.name)throw new Error('name required');if(!p.url&&!p.command)throw new Error('remote URL or command required');const j=await mcpManage(p);$('mcpManageResult').textContent=JSON.stringify(j,null,2);await listManagedMcp();refreshAll()}catch(e){$('mcpManageResult').textContent='ERR '+e.message}}
 
 async function getJob(){try{const id=$('jobId').value.trim();const j=await api('/mcp-relay/job/'+encodeURIComponent(id)+'?verbose=true&include_raw=true');$('result').textContent=JSON.stringify(j,null,2);refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 function formatArgs(){try{$('args').value=JSON.stringify(JSON.parse($('args').value||'{}'),null,2)}catch(e){$('result').textContent='Bad JSON: '+e.message}}
@@ -490,22 +490,22 @@ async function revokeAllClients(){
 }
 
 
-function openAgentDetail(aid){
+function openServerDetail(aid){
   showView('agent-detail');
-  $('agentDetailTitle').textContent=aid;
-  $('agentDetailBody').innerHTML='<p class="muted">Загрузка…</p>';
-  const a=(state?.agents||[]).find(x=>x.agent_id===aid);
-  if(!a){$('agentDetailBody').innerHTML='<p class="bad">Не найден</p>';return}
+  $('serverDetailTitle').textContent=aid;
+  $('serverDetailBody').innerHTML='<p class="muted">Загрузка…</p>';
+  const a=(state?.servers||[]).find(x=>x.server_id===aid);
+  if(!a){$('serverDetailBody').innerHTML='<p class="bad">Не найден</p>';return}
   let h='<div class="stackList">';
-  h+='<div class="entryCard"><div class="entryHead"><span class="entryStatus pill '+cls(a.status)+'">'+esc(a.status)+'</span><div class="entryMain"><div class="entryTitle"><b class="mono">'+esc(a.agent_id)+'</b>'+(a.name?'<span class="muted small">'+esc(a.name)+'</span>':'')+'</div><div class="entryMeta"><span class="pill">'+esc(displayKind(a.kind||'?'))+'</span><span class="muted small">'+esc(a.transport||'')+'</span></div></div></div></div>';
+  h+='<div class="entryCard"><div class="entryHead"><span class="entryStatus pill '+cls(a.status)+'">'+esc(a.status)+'</span><div class="entryMain"><div class="entryTitle"><b class="mono">'+esc(a.server_id)+'</b>'+(a.name?'<span class="muted small">'+esc(a.name)+'</span>':'')+'</div><div class="entryMeta"><span class="pill">'+esc(displayKind(a.kind||'?'))+'</span><span class="muted small">'+esc(a.transport||'')+'</span></div></div></div></div>';
   const caps=a.capabilities||[];
   if(caps.length)h+='<div class="entryCard"><h2>Capabilities</h2><div style="display:flex;flex-wrap:wrap;gap:4px">'+caps.map(c=>'<span class="pill mono small">'+esc(c)+'</span>').join('')+'</div></div>';
   const meta=a.meta||{};
   if(Object.keys(meta).length)h+='<div class="entryCard"><h2>Meta</h2><pre class="responseBody mono" style="max-height:none">'+prettyJsonHtml(meta)+'</pre></div>';
-  const aj=(state?.jobs?.recent||[]).filter(j=>j.server===aid||j.agent_id===aid).slice(0,10);
+  const aj=(state?.jobs?.recent||[]).filter(j=>j.server===aid||j.server_id===aid).slice(0,10);
   if(aj.length)h+='<div class="entryCard"><h2>Jobs ('+aj.length+')</h2><div class="stackList">'+aj.map(renderJobCard).join('')+'</div></div>';
   h+='</div>';
-  $('agentDetailBody').innerHTML=h;
+  $('serverDetailBody').innerHTML=h;
 }
 async function openJobDetail(jid,srv){
   if(!jid)return;

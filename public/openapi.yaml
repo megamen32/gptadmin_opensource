@@ -6,18 +6,18 @@ info:
   description: |
     Universal MCP relay for GPTAdmin.
 
-    Use this API as a single interface for remote tools:
-      1. listMcpAgents — choose an online agent.
-      2. listMcpTools — inspect tools available on that agent.
+    Use this API as a single interface for remote servers:
+      1. listMcpServers — choose an online server.
+      2. listMcpTools — inspect tools available on that server.
       3. callMcpTool — call exactly one tool on exactly one target.
       4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
 
-    Private shell servers are exposed as real MCP agents with stable target ids like shell:<server_name>.
+    Private shell servers are exposed as real MCP servers with stable target ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
 
-    Every listed agent is also exposed by default as a pinned MCP server facade at /agent/{slug}/mcp.
-    For example: /agent/hub/mcp, /agent/openmemory/mcp, /agent/fileshare/mcp, /agent/shell-admin-server-100/mcp.
-    listMcpAgents includes public_mcp_slug/public_mcp_path/public_mcp_endpoint metadata for discovery.
+    Every listed server is also exposed by default as a pinned MCP server facade at /server/{slug}/mcp.
+    For example: /server/hub/mcp, /server/openmemory/mcp, /server/fileshare/mcp, /server/shell-admin-server-100/mcp.
+    listMcpServers includes public_mcp_slug/public_mcp_path/public_mcp_endpoint metadata for discovery.
 
 servers:
   - url: https://gptadmin.bezrabotnyi.com
@@ -26,24 +26,24 @@ security:
   - bearerAuth: []
 
 paths:
-  /mcp-relay/agents:
+  /mcp-relay/servers:
     get:
-      operationId: listMcpAgents
-      summary: List MCP agents
-      description: Lists real MCP relay agents, tunnel-backed private MCP agents, and the built-in hub agent.
+      operationId: listMcpServers
+      summary: List MCP servers
+      description: Lists real MCP servers, tunnel-backed private MCP servers, and the built-in hub server.
       responses:
         "200":
-          description: Available MCP agents
+          description: Available MCP servers
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ListMcpAgentsResponse"
+                $ref: "#/components/schemas/ListMcpServersResponse"
 
   /mcp-relay/tools:
     post:
       operationId: listMcpTools
       summary: List tools for one MCP target
-      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
+      description: Requests tools/list from an explicitly selected MCP server. Call listMcpServers first and pass one returned server_id as target. There is no default target; never use target="default".
       requestBody:
         required: true
         content:
@@ -62,7 +62,7 @@ paths:
     post:
       operationId: callMcpTool
       summary: Call one tool on one MCP target
-      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several agents must be used.
+      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several servers must be used.
       requestBody:
         required: true
         content:
@@ -111,27 +111,27 @@ components:
       scheme: bearer
 
   schemas:
-    ListMcpAgentsResponse:
+    ListMcpServersResponse:
       type: object
       additionalProperties: false
       required:
-        - agents
+        - servers
       properties:
-        agents:
+        servers:
           type: array
           items:
-            $ref: "#/components/schemas/McpAgent"
+            $ref: "#/components/schemas/McpServer"
 
-    McpAgent:
+    McpServer:
       type: object
       additionalProperties: false
       required:
-        - agent_id
+        - server_id
         - name
         - kind
         - status
       properties:
-        agent_id:
+        server_id:
           type: string
           description: Target id to use in listMcpTools and callMcpTool.
         name:
@@ -172,7 +172,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         timeout:
           type:
             - integer
@@ -195,7 +195,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
@@ -222,10 +222,10 @@ components:
       type: object
       additionalProperties: false
       required:
-        - agent_id
+        - server_id
         - status
       properties:
-        agent_id:
+        server_id:
           type: string
         status:
           type: string
@@ -276,7 +276,7 @@ components:
             - failed
             - orphaned
             - running_or_unknown
-        agent_id:
+        server_id:
           type:
             - string
             - "null"

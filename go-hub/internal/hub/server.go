@@ -206,6 +206,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp-relay/register", s.mcpRelayRegister)
 	mux.HandleFunc("/mcp-relay/poll/", s.mcpRelayPoll)
 	mux.HandleFunc("/mcp-relay/result/", s.mcpRelayResult)
+	mux.HandleFunc("/mcp-relay/servers", s.requireCtl(s.mcpRelayServers))
+	mux.HandleFunc("/mcp-relay/list_mcp_servers", s.requireCtl(s.mcpRelayServers))
+	// Legacy aliases kept for old clients only. Do not expose in OpenAPI.
 	mux.HandleFunc("/mcp-relay/agents", s.requireCtl(s.mcpRelayAgents))
 	mux.HandleFunc("/mcp-relay/list_mcp_agents", s.requireCtl(s.mcpRelayAgents))
 	mux.HandleFunc("/mcp-relay/list_mcp_tools", s.requireCtl(s.mcpRelayTools))
@@ -220,6 +223,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/server/", s.serverMCPEndpoint)
+	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
 	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
 	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
@@ -318,36 +323,36 @@ info:
   description: |
     Universal MCP relay for GPTAdmin.
 
-    Use this API as a single interface for remote tools:
-      1. listMcpAgents — choose an online agent.
-      2. listMcpTools — inspect tools available on that agent.
+    Use this API as a single interface for remote servers:
+      1. listMcpServers — choose an online server.
+      2. listMcpTools — inspect tools available on that server.
       3. callMcpTool — call exactly one tool on exactly one target.
       4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
 
-    Shell servers are exposed as virtual MCP agents with target ids like shell:<server_name>.
+    Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
 servers:
   - url: %s
 security:
   - bearerAuth: []
 paths:
-  /mcp-relay/agents:
+  /mcp-relay/servers:
     get:
-      operationId: listMcpAgents
-      summary: List MCP agents
-      description: Lists real long-polling MCP relay agents, virtual shell agents, and the built-in hub agent.
+      operationId: listMcpServers
+      summary: List MCP servers
+      description: Lists real MCP servers, virtual shell servers, and the built-in hub server.
       responses:
         "200":
-          description: Available MCP agents
+          description: Available MCP servers
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ListMcpAgentsResponse"
+                $ref: "#/components/schemas/ListMcpServersResponse"
   /mcp-relay/tools:
     post:
       operationId: listMcpTools
-      summary: List tools for one MCP target
-      description: Requests tools/list from an explicitly selected MCP agent. Call listMcpAgents first and pass one returned agent_id as target. There is no default target; never use target="default".
+      summary: List tools for one MCP server target
+      description: Requests tools/list from an explicitly selected MCP server. Call listMcpServers first and pass one returned server_id as target. There is no default target; never use target="default".
       requestBody:
         required: true
         content:
@@ -364,8 +369,8 @@ paths:
   /mcp-relay/call:
     post:
       operationId: callMcpTool
-      summary: Call one tool on one MCP target
-      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several agents must be used.
+      summary: Call one tool on one MCP server target
+      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several servers must be used.
       requestBody:
         required: true
         content:
@@ -411,21 +416,21 @@ components:
       type: http
       scheme: bearer
   schemas:
-    ListMcpAgentsResponse:
+    ListMcpServersResponse:
       type: object
       additionalProperties: false
-      required: [agents]
+      required: [servers]
       properties:
-        agents:
+        servers:
           type: array
           items:
-            $ref: "#/components/schemas/McpAgent"
-    McpAgent:
+            $ref: "#/components/schemas/McpServer"
+    McpServer:
       type: object
       additionalProperties: true
-      required: [agent_id, name, kind, status]
+      required: [server_id, name, kind, status]
       properties:
-        agent_id:
+        server_id:
           type: string
           description: Target id to use in listMcpTools and callMcpTool.
         name:
@@ -454,7 +459,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         timeout:
           type: [integer, "null"]
           minimum: 1
@@ -470,7 +475,7 @@ components:
       properties:
         target:
           type: string
-          description: Explicit agent id from listMcpAgents. There is no default target. Never use "default".
+          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
@@ -489,9 +494,9 @@ components:
     McpToolResponse:
       type: object
       additionalProperties: true
-      required: [agent_id, status]
+      required: [server_id, status]
       properties:
-        agent_id:
+        server_id:
           type: string
         status:
           type: string
@@ -520,7 +525,7 @@ components:
         status:
           type: string
           enum: [queued, running, completed, failed, orphaned, running_or_unknown]
-        agent_id:
+        server_id:
           type: [string, "null"]
         response:
           type: [object, "null"]
@@ -548,7 +553,6 @@ components:
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(b)
 }
-
 func (s *Server) shellmcpArtifactPath() string {
 	return filepath.Join(s.cfg.ArtifactDir, "gptadmin-shellmcp.tar.gz")
 }
@@ -588,7 +592,7 @@ func (s *Server) serversList(w http.ResponseWriter, r *http.Request) {
 	servers := []map[string]any{}
 	for _, a := range s.agents {
 		if strings.HasPrefix(a.AgentID, "shell:") {
-			servers = append(servers, map[string]any{"name": strings.TrimPrefix(a.AgentID, "shell:"), "agent_id": a.AgentID, "status": a.Status, "last_seen": a.LastSeen, "mode": a.Transport, "meta": a.Meta})
+			servers = append(servers, map[string]any{"name": strings.TrimPrefix(a.AgentID, "shell:"), "server_id": a.AgentID, "status": a.Status, "last_seen": a.LastSeen, "mode": a.Transport, "meta": a.Meta})
 		}
 	}
 	s.mu.Unlock()
@@ -876,17 +880,47 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 	} else {
 		job.Status = "completed"
 	}
-	s.addAuditLocked("mcp_result", map[string]any{"agent_id": agentID, "job_id": res.ID, "status": job.Status})
+	s.addAuditLocked("mcp_result", map[string]any{"server_id": agentID, "job_id": res.ID, "status": job.Status})
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) mcpRelayServers(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	servers := s.publicServersLocked(r)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
+}
+
+// mcpRelayAgents is a deprecated compatibility alias for old clients.
 func (s *Server) mcpRelayAgents(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	agents := s.publicAgentsLocked(r)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) publicServersLocked(r *http.Request) []map[string]any {
+	agents := s.publicAgentsLocked(r)
+	servers := make([]map[string]any, 0, len(agents))
+	for _, a := range agents {
+		servers = append(servers, agentAsServer(a))
+	}
+	return servers
+}
+
+func agentAsServer(a Agent) map[string]any {
+	return map[string]any{
+		"server_id":    a.AgentID,
+		"name":         a.Name,
+		"kind":         a.Kind,
+		"transport":    a.Transport,
+		"status":       a.Status,
+		"last_seen":    a.LastSeen,
+		"capabilities": a.Capabilities,
+		"meta":         a.Meta,
+	}
 }
 
 func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
@@ -914,7 +948,7 @@ func (s *Server) withExposeMetaLocked(a Agent, r *http.Request) Agent {
 		}
 		a.Meta = cp
 	}
-	path := "/agent/" + slug + "/mcp"
+	path := "/server/" + slug + "/mcp"
 	a.Meta["exposed_by_default"] = true
 	a.Meta["public_mcp_slug"] = slug
 	a.Meta["public_mcp_path"] = path
@@ -936,22 +970,22 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 	}
 	var req map[string]any
 	_ = readJSON(r, &req)
-	target := firstString(req, "target", "agent_id")
+	target := firstString(req, "target", "server_id", "agent_id")
 	if target == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target"})
 		return
 	}
 	if target == "hub" {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
 		return
 	}
 	if strings.HasPrefix(target, "shell:") {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
 		return
 	}
 	jobID := s.enqueueRelay(target, "tools/list", nil)
 	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": jobID})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
 	resp := s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout))
@@ -968,7 +1002,7 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	target := firstString(req, "target", "agent_id")
+	target := firstString(req, "target", "server_id", "agent_id")
 	toolName := firstString(req, "tool_name", "name")
 	args := mapValue(req["arguments"])
 	if len(args) == 0 {
@@ -980,7 +1014,7 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == "hub" {
 		resp, status := s.callHubTool(toolName, args)
-		writeJSON(w, status, map[string]any{"agent_id": target, "status": "completed", "response": resp})
+		writeJSON(w, status, map[string]any{"server_id": target, "status": "completed", "response": resp})
 		return
 	}
 	if strings.HasPrefix(target, "shell:") {
@@ -991,7 +1025,7 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 	params := map[string]any{"name": toolName, "arguments": args}
 	jobID := s.enqueueRelay(target, "tools/call", params)
 	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": jobID})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
 	resp := s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout))
@@ -1035,7 +1069,7 @@ func (s *Server) enqueueRelay(agentID, method string, params map[string]any) str
 	s.mu.Lock()
 	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
 	s.relayQueues[agentID] = append(s.relayQueues[agentID], id)
-	s.addAuditLocked("mcp_enqueue", map[string]any{"agent_id": agentID, "job_id": id, "method": method})
+	s.addAuditLocked("mcp_enqueue", map[string]any{"server_id": agentID, "job_id": id, "method": method})
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	return id
@@ -1055,7 +1089,7 @@ func (s *Server) waitRelay(jobID string, timeout time.Duration) map[string]any {
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return map[string]any{"agent_id": job.AgentID, "status": "running", "background": true, "job_id": jobID, "message": "MCP relay job is still running"}
+			return map[string]any{"server_id": job.AgentID, "status": "running", "background": true, "job_id": jobID, "message": "MCP relay job is still running"}
 		}
 		waitCond(s.cond, minDuration(remaining, 500*time.Millisecond))
 	}
@@ -1063,13 +1097,13 @@ func (s *Server) waitRelay(jobID string, timeout time.Duration) map[string]any {
 
 func relayJobResponse(job *relayJob) map[string]any {
 	if job.Status == "failed" {
-		return map[string]any{"agent_id": job.AgentID, "status": "failed", "job_id": job.ID, "error": job.Error}
+		return map[string]any{"server_id": job.AgentID, "status": "failed", "job_id": job.ID, "error": job.Error}
 	}
-	return map[string]any{"agent_id": job.AgentID, "status": job.Status, "job_id": job.ID, "response": spillFriendly(job.Result)}
+	return map[string]any{"server_id": job.AgentID, "status": job.Status, "job_id": job.ID, "response": spillFriendly(job.Result)}
 }
 
 func shellJobResponse(job *shellJob) map[string]any {
-	out := map[string]any{"agent_id": "shell:" + job.Server, "status": job.Status, "job_id": job.ID, "task_id": job.ID}
+	out := map[string]any{"server_id": "shell:" + job.Server, "status": job.Status, "job_id": job.ID, "task_id": job.ID}
 	if job.Result != nil {
 		out["response"] = map[string]any{"content": []map[string]any{{"type": "text", "text": "shell_exec completed on " + job.Server}}, "structuredContent": map[string]any{"server": job.Server, "result": job.Result}}
 	}
@@ -1084,13 +1118,16 @@ func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, 
 	defer s.mu.Unlock()
 	s.addAuditLocked("hub_tool", map[string]any{"tool": name})
 	switch name {
+	case "listMcpServers", "list_mcp_servers":
+		servers := s.publicServersLocked(nil)
+		return map[string]any{"servers": servers}, http.StatusOK
 	case "listMcpAgents", "list_mcp_agents":
 		agents := s.publicAgentsLocked(nil)
 		return map[string]any{"agents": agents}, http.StatusOK
 	case "list_pending_servers":
 		return map[string]any{"pending": []any{}, "count": 0}, http.StatusOK
 	case "hub_status", "status":
-		return map[string]any{"ok": true, "agents": len(s.agents), "relay_jobs": len(s.relayJobs), "shell_jobs": len(s.shellJobs)}, http.StatusOK
+		return map[string]any{"ok": true, "servers": len(s.agents), "relay_jobs": len(s.relayJobs), "shell_jobs": len(s.shellJobs)}, http.StatusOK
 	default:
 		return map[string]any{"error": "unsupported hub tool", "tool": name, "arguments": args}, http.StatusBadRequest
 	}
@@ -1099,11 +1136,11 @@ func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, 
 func (s *Server) callShellTool(target, toolName string, args map[string]any, background bool, timeout time.Duration) map[string]any {
 	server := strings.TrimPrefix(target, "shell:")
 	if toolName != "shell_exec" {
-		return map[string]any{"agent_id": target, "status": "failed", "error": "unsupported shell tool: " + toolName}
+		return map[string]any{"server_id": target, "status": "failed", "error": "unsupported shell tool: " + toolName}
 	}
 	cmd := firstString(args, "cmd", "command")
 	if cmd == "" {
-		return map[string]any{"agent_id": target, "status": "failed", "error": "missing cmd"}
+		return map[string]any{"server_id": target, "status": "failed", "error": "missing cmd"}
 	}
 	job := &shellJob{ID: newID(), Server: server, Cmd: cmd, Cwd: firstString(args, "cwd"), Timeout: intFromAny(args["timeout"]), Env: mapValue(args["env"]), CreatedAt: nowFloat(), Status: "queued"}
 	s.mu.Lock()
@@ -1113,7 +1150,7 @@ func (s *Server) callShellTool(target, toolName string, args map[string]any, bac
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	if background {
-		return map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job queued"}
+		return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job queued"}
 	}
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
@@ -1125,7 +1162,7 @@ func (s *Server) callShellTool(target, toolName string, args map[string]any, bac
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job is still running"}
+			return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job is still running"}
 		}
 		waitCond(s.cond, minDuration(remaining, 500*time.Millisecond))
 	}
@@ -1133,7 +1170,7 @@ func (s *Server) callShellTool(target, toolName string, args map[string]any, bac
 
 func hubTools() []map[string]any {
 	return []map[string]any{
-		{"name": "list_mcp_agents", "description": "List registered GPTAdmin agents, including the internal hub", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "list_mcp_servers", "description": "List registered GPTAdmin servers, including the internal hub", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "list_pending_servers", "description": "List pending shell server approvals", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "hub_status", "description": "Return Go hub runtime status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 	}
@@ -1212,7 +1249,7 @@ func (s *Server) adminMCPManage(w http.ResponseWriter, r *http.Request) {
 	if action == "" {
 		action = "list"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target": firstString(req, "target"), "action": action, "response": map[string]any{"note": "go hub MCP manage is read-only/placeholder; use shell:mcp_tools for mutation until full parity", "agents": len(s.agents)}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target": firstString(req, "target"), "action": action, "response": map[string]any{"note": "go hub MCP manage is read-only/placeholder; use shell:mcp_tools for mutation until full parity", "servers": len(s.agents)}})
 }
 
 func (s *Server) adminClientsRevokeAll(w http.ResponseWriter, r *http.Request) {
@@ -1241,14 +1278,14 @@ func (s *Server) adminMCPResourcesList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	target := firstString(req, "target", "agent_id")
+	target := firstString(req, "target", "server_id", "agent_id")
 	if target == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target"})
 		return
 	}
 	jobID := s.enqueueRelay(target, "resources/list", map[string]any{})
 	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": jobID})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
@@ -1264,7 +1301,7 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	target := firstString(req, "target", "agent_id")
+	target := firstString(req, "target", "server_id", "agent_id")
 	uri := firstString(req, "uri")
 	if target == "" || uri == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target or uri"})
@@ -1272,7 +1309,7 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := s.enqueueRelay(target, "resources/read", map[string]any{"uri": uri})
 	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": jobID})
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
@@ -1280,11 +1317,11 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	agents := s.publicAgentsLocked(r)
+	servers := s.publicServersLocked(r)
 	jobs := s.adminJobsDataLocked()
 	audit := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "agents": agents, "agent_counts": agentStatusCounts(agents), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-in-memory"}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-in-memory"}})
 }
 
 func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
@@ -1308,10 +1345,10 @@ func (s *Server) adminClients(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminJobsDataLocked() map[string]any {
 	items := make([]map[string]any, 0, len(s.relayJobs)+len(s.shellJobs))
 	for _, j := range s.relayJobs {
-		items = append(items, map[string]any{"job_id": j.ID, "agent_id": j.AgentID, "kind": "mcp_relay", "method": j.Method, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+		items = append(items, map[string]any{"job_id": j.ID, "server_id": j.AgentID, "kind": "mcp_relay", "method": j.Method, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
 	}
 	for _, j := range s.shellJobs {
-		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server": j.Server, "agent_id": "shell:" + j.Server, "kind": "shell", "command": j.Cmd, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server": j.Server, "server_id": "shell:" + j.Server, "kind": "shell", "command": j.Cmd, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
 	}
 	queued := []map[string]any{}
 	background := []map[string]any{}
@@ -1329,10 +1366,12 @@ func (s *Server) adminJobsDataLocked() map[string]any {
 	return map[string]any{"count": len(items), "status_counts": counts, "queued": queued, "background": background, "recent": items}
 }
 
-func agentStatusCounts(agents []Agent) map[string]int {
+func serverStatusCounts(servers []map[string]any) map[string]int {
 	counts := map[string]int{"online": 0, "offline": 0, "stale": 0, "pending": 0}
-	for _, a := range agents {
-		counts[a.Status]++
+	for _, srv := range servers {
+		if st, _ := srv["status"].(string); st != "" {
+			counts[st]++
+		}
 	}
 	return counts
 }
@@ -1774,7 +1813,7 @@ func (s *Server) agentCopiesLocked() []Agent {
 }
 
 func parseAgentPath(p string) (slug, tail string, ok bool) {
-	rest := strings.TrimPrefix(p, "/agent/")
+	rest := strings.TrimPrefix(strings.TrimPrefix(p, "/server/"), "/agent/")
 	if rest == p || rest == "" {
 		return "", "", false
 	}
@@ -1789,7 +1828,7 @@ func parseAgentPath(p string) (slug, tail string, ok bool) {
 	return parts[0], tail, true
 }
 
-func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -1819,7 +1858,7 @@ func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tail == "health" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": agent.Status == "online" || agent.AgentID == "hub", "agent_id": agent.AgentID, "status": agent.Status})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": agent.Status == "online" || agent.AgentID == "hub", "server_id": agent.AgentID, "status": agent.Status})
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -1849,12 +1888,17 @@ func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// agentMCPEndpoint is a deprecated compatibility alias for old pinned MCP URLs.
+func (s *Server) agentMCPEndpoint(w http.ResponseWriter, r *http.Request) {
+	s.serverMCPEndpoint(w, r)
+}
+
 func (s *Server) agentCard(r *http.Request, agent Agent) map[string]any {
 	slug := agentSlug(agent.AgentID)
-	path := "/agent/" + slug + "/mcp"
+	path := "/server/" + slug + "/mcp"
 	return map[string]any{
 		"ok":                  true,
-		"agent_id":            agent.AgentID,
+		"server_id":           agent.AgentID,
 		"name":                agent.Name,
 		"kind":                agent.Kind,
 		"transport":           agent.Transport,
@@ -1873,7 +1917,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 	params := mapValue(body["params"])
 	switch method {
 	case "initialize":
-		return map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-agent-" + agentSlug(agent.AgentID), "version": BuildVersion}}, nil, false
+		return map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + agentSlug(agent.AgentID), "version": BuildVersion}}, nil, false
 	case "notifications/initialized", "notifications/cancelled":
 		return nil, nil, true
 	case "tools/list":
@@ -1935,7 +1979,7 @@ func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 		return appsSDKResourcesList(), nil
 	}
 	if strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "resources/list") {
-		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://agent/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
+		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
 	}
 	jobID := s.enqueueRelay(agent.AgentID, "resources/list", map[string]any{})
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
@@ -1945,7 +1989,7 @@ func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (an
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourceRead(r, uri), nil
 	}
-	if strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
+	if strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(uri, "gptadmin://server/") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
 		b, _ := json.Marshal(s.agentCard(r, agent))
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
 	}
@@ -2071,12 +2115,12 @@ func (s *Server) mcpPrompt(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("target")
 	if target == "" || target == "all" {
 		s.mu.Lock()
-		agents := s.publicAgentsLocked(nil)
+		servers := s.publicServersLocked(nil)
 		s.mu.Unlock()
 		var b strings.Builder
-		b.WriteString("You have GPTAdmin MCP tools. Use JSON target/tool/args.\nAvailable agents:\n")
-		for _, a := range agents {
-			b.WriteString("  " + a.AgentID + " (" + a.Kind + ")\n")
+		b.WriteString("You have GPTAdmin MCP tools. Use JSON target/tool/args.\nAvailable servers:\n")
+		for _, srv := range servers {
+			b.WriteString("  " + fmt.Sprint(srv["server_id"]) + " (" + fmt.Sprint(srv["kind"]) + ")\n")
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(b.String()))
@@ -2115,35 +2159,40 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	switch name {
+	case "list_mcp_servers", "listMcpServers":
+		s.mu.Lock()
+		servers := s.publicServersLocked(nil)
+		s.mu.Unlock()
+		return map[string]any{"servers": servers}
 	case "list_mcp_agents", "listMcpAgents":
 		s.mu.Lock()
 		agents := s.publicAgentsLocked(nil)
 		s.mu.Unlock()
 		return map[string]any{"agents": agents}
 	case "list_mcp_tools", "listMcpTools":
-		target := firstString(args, "target", "agent_id")
+		target := firstString(args, "target", "server_id", "agent_id")
 		if target == "hub" {
-			return map[string]any{"agent_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}
+			return map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}
 		}
 		if strings.HasPrefix(target, "shell:") {
-			return map[string]any{"agent_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
+			return map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
 		}
 		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
 		return s.waitRelay(jobID, s.cfg.DefaultTimeout)
 	case "call_mcp_tool", "callMcpTool":
-		target := firstString(args, "target", "agent_id")
+		target := firstString(args, "target", "server_id", "agent_id")
 		toolName := firstString(args, "tool_name", "name")
 		callArgs := mapValue(args["arguments"])
 		if target == "hub" {
 			resp, _ := s.callHubTool(toolName, callArgs)
-			return map[string]any{"agent_id": target, "status": "completed", "response": resp}
+			return map[string]any{"server_id": target, "status": "completed", "response": resp}
 		}
 		if strings.HasPrefix(target, "shell:") {
 			return s.callShellTool(target, toolName, callArgs, truthy(args["background"]), s.cfg.DefaultTimeout)
 		}
 		jobID := s.enqueueRelay(target, "tools/call", map[string]any{"name": toolName, "arguments": callArgs})
 		if truthy(args["background"]) {
-			return map[string]any{"agent_id": target, "status": "running", "background": true, "job_id": jobID}
+			return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID}
 		}
 		return s.waitRelay(jobID, s.cfg.DefaultTimeout)
 	case "get_mcp_job", "getMcpJob":
@@ -2168,23 +2217,23 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 
 func appsSDKTools() []map[string]any {
 	return []map[string]any{
-		{"name": "list_mcp_agents", "title": "List agents", "description": "List real MCP agents, shell agents, and the internal hub.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
-		{"name": "list_mcp_tools", "title": "List tools", "description": "List tools for an explicit agent target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}}},
-		{"name": "call_mcp_tool", "title": "Call tool", "description": "Call a tool on an explicit agent target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool_name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}}, "required": []string{"target", "tool_name"}}},
+		{"name": "list_mcp_servers", "title": "List servers", "description": "List real MCP servers, shell servers, and the internal hub.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "list_mcp_tools", "title": "List tools", "description": "List tools for an explicit server target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}}},
+		{"name": "call_mcp_tool", "title": "Call tool", "description": "Call a tool on an explicit server target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool_name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}}, "required": []string{"target", "tool_name"}}},
 		{"name": "get_mcp_job", "title": "Get job", "description": "Read a queued/running/completed MCP job.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"job_id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}}, "required": []string{"job_id"}}},
 	}
 }
 
 func appsSDKResourcesList() map[string]any {
-	return map[string]any{"resources": []map[string]any{{"uri": "ui://widget/admin-v3.html", "name": "GPTAdmin dashboard widget", "mimeType": "text/html;profile=mcp-app"}, {"uri": "gptadmin://agents", "name": "GPTAdmin agents", "mimeType": "application/json"}}}
+	return map[string]any{"resources": []map[string]any{{"uri": "ui://widget/admin-v3.html", "name": "GPTAdmin dashboard widget", "mimeType": "text/html;profile=mcp-app"}, {"uri": "gptadmin://servers", "name": "GPTAdmin servers", "mimeType": "application/json"}}}
 }
 
 func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
-	if uri == "gptadmin://agents" {
+	if uri == "gptadmin://servers" || uri == "gptadmin://agents" {
 		s.mu.Lock()
-		agents := s.publicAgentsLocked(nil)
+		servers := s.publicServersLocked(nil)
 		s.mu.Unlock()
-		b, _ := json.Marshal(map[string]any{"agents": agents})
+		b, _ := json.Marshal(map[string]any{"servers": servers})
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
 	}
 	widget := `<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;padding:12px}.ok{color:#22c55e}</style></head><body><b class="ok">GPTAdmin Go Hub</b><p>Connected to ` + html.EscapeString(s.origin(r)) + `</p></body></html>`

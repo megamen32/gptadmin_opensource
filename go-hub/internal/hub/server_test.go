@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-func TestListAgentsUsesHubKind(t *testing.T) {
+func TestListServersUsesHubKind(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
-	r := httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_agents", nil)
+	r := httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_servers", nil)
 	r.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -25,15 +25,15 @@ func TestListAgentsUsesHubKind(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	var body struct {
-		Agents []Agent `json:"agents"`
+		Servers []map[string]any `json:"servers"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Agents) == 0 {
-		t.Fatalf("no agents in response")
+	if len(body.Servers) == 0 {
+		t.Fatalf("no servers in response")
 	}
-	if got := body.Agents[0].Kind; got != "hub" {
+	if got := body.Servers[0]["kind"]; got != "hub" {
 		t.Fatalf("hub kind=%q, want hub", got)
 	}
 }
@@ -143,8 +143,8 @@ func TestOAuthAndMCPJSONRPC(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("mcp status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !bytes.Contains(w.Body.Bytes(), []byte("list_mcp_agents")) {
-		t.Fatalf("tools/list missing expected tool: %s", w.Body.String())
+	if !bytes.Contains(w.Body.Bytes(), []byte("list_mcp_servers")) {
+		t.Fatalf("tools/list missing expected server tool: %s", w.Body.String())
 	}
 }
 
@@ -164,8 +164,8 @@ func TestAdminOverviewShape(t *testing.T) {
 	if _, ok := body["jobs"].(map[string]any); !ok {
 		t.Fatalf("overview.jobs has bad shape: %T", body["jobs"])
 	}
-	if _, ok := body["agent_counts"].(map[string]any); !ok {
-		t.Fatalf("overview.agent_counts has bad shape: %T", body["agent_counts"])
+	if _, ok := body["server_counts"].(map[string]any); !ok {
+		t.Fatalf("overview.server_counts has bad shape: %T", body["server_counts"])
 	}
 }
 
@@ -193,7 +193,7 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		want   int
 		needle string
 	}{
-		{http.MethodGet, "/actions/openapi.yaml", http.StatusOK, "operationId: listMcpAgents"},
+		{http.MethodGet, "/actions/openapi.yaml", http.StatusOK, "operationId: listMcpServers"},
 		{http.MethodGet, "/servers", http.StatusOK, "servers"},
 		{http.MethodGet, "/tasks/demo", http.StatusOK, "tasks"},
 		{http.MethodGet, "/artifacts/shellmcp.json", http.StatusOK, "sha256"},
@@ -215,7 +215,7 @@ func TestAgentFacadeDefaultExposesAllAgents(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", RelayAgentToken: "relay", PublicOrigin: "https://hub.example", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	h := s.Handler()
 
-	register := []byte(`{"agent_id":"OpenMemory","name":"OpenMemory","capabilities":["tools/list","tools/call","resources/list","resources/read","prompts/list","prompts/get"]}`)
+	register := []byte(`{"server_id":"OpenMemory","name":"OpenMemory","capabilities":["tools/list","tools/call","resources/list","resources/read","prompts/list","prompts/get"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
 	req.Header.Set("Authorization", "Bearer relay")
 	w := httptest.NewRecorder()
@@ -224,38 +224,38 @@ func TestAgentFacadeDefaultExposesAllAgents(t *testing.T) {
 		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_agents", nil)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_servers", nil)
 	req.Header.Set("Authorization", "Bearer ctl")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("agents status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("servers status=%d body=%s", w.Code, w.Body.String())
 	}
 	var listed struct {
-		Agents []Agent `json:"agents"`
+		Servers []map[string]any `json:"servers"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
 		t.Fatal(err)
 	}
-	var openMemory *Agent
-	for i := range listed.Agents {
-		if listed.Agents[i].AgentID == "OpenMemory" {
-			openMemory = &listed.Agents[i]
+	var openMemory map[string]any
+	for i := range listed.Servers {
+		if listed.Servers[i]["server_id"] == "OpenMemory" {
+			openMemory = listed.Servers[i]
 			break
 		}
 	}
 	if openMemory == nil {
-		t.Fatalf("OpenMemory not listed: %+v", listed.Agents)
+		t.Fatalf("OpenMemory not listed: %+v", listed.Servers)
 	}
-	if got := openMemory.Meta["public_mcp_path"]; got != "/agent/openmemory/mcp" {
+	if got := openMemory["meta"].(map[string]any)["public_mcp_path"]; got != "/server/openmemory/mcp" {
 		t.Fatalf("public_mcp_path=%v", got)
 	}
-	if got := openMemory.Meta["exposed_by_default"]; got != true {
+	if got := openMemory["meta"].(map[string]any)["exposed_by_default"]; got != true {
 		t.Fatalf("exposed_by_default=%v", got)
 	}
 
-	// Both /agent/openmemory and /agent/openmemory/mcp are accepted as MCP endpoints.
-	for _, path := range []string{"/agent/openmemory", "/agent/openmemory/mcp"} {
+	// Both /server/openmemory and /server/openmemory/mcp are accepted as MCP endpoints.
+	for _, path := range []string{"/server/openmemory", "/server/openmemory/mcp"} {
 		req = httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer ctl")
 		w = httptest.NewRecorder()
@@ -263,21 +263,21 @@ func TestAgentFacadeDefaultExposesAllAgents(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("GET %s status=%d body=%s", path, w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), `"agent_id":"OpenMemory"`) {
+		if !strings.Contains(w.Body.String(), `"server_id":"OpenMemory"`) {
 			t.Fatalf("GET %s did not resolve OpenMemory: %s", path, w.Body.String())
 		}
 	}
 
 	rpc := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
-	req = httptest.NewRequest(http.MethodPost, "/agent/hub/mcp", bytes.NewReader(rpc))
+	req = httptest.NewRequest(http.MethodPost, "/server/hub/mcp", bytes.NewReader(rpc))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("hub agent mcp status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("hub server mcp status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "list_mcp_agents") {
-		t.Fatalf("hub agent tools/list missing list_mcp_agents: %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "list_mcp_servers") {
+		t.Fatalf("hub server tools/list missing list_mcp_servers: %s", w.Body.String())
 	}
 }
 
@@ -296,7 +296,7 @@ func TestAgentFacadeProxiesPinnedRelayAgent(t *testing.T) {
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rpc := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`)
-		req := httptest.NewRequest(http.MethodPost, "/agent/demo/mcp", bytes.NewReader(rpc))
+		req := httptest.NewRequest(http.MethodPost, "/server/demo/mcp", bytes.NewReader(rpc))
 		req.Header.Set("Authorization", "Bearer ctl")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
