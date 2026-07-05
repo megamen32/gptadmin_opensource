@@ -1,0 +1,54 @@
+name: GPTAdmin Hub Standby
+version: "1.0.0"
+slug: gptadmin_hub_standby
+description: "Standby GPTAdmin hub on HAOS for admin-server-100 failover"
+url: "https://gptadmin.bezrabotnyi.com"
+arch:
+  - aarch64
+startup: services
+boot: auto
+init: false
+host_network: true
+full_access: true
+protected: true
+apparmor: false
+map:
+  - config:rw
+  - ssl:rw
+  - addons:rw
+  - share:rw
+  - backup:rw
+options:
+  hub_host: "0.0.0.0"
+  hub_port: 9001
+  public_origin: "__PUBLIC_ORIGIN__"
+  mcp_resource: "__MCP_RESOURCE__"
+  hub_public_url: "__HUB_PUBLIC_URL__"
+  hub_url: "__HUB_URL__"
+  ctl_token: "__CTL_TOKEN__"
+  mcp_relay_agent_token: "__MCP_RELAY_AGENT_TOKEN__"
+  shellmcp_token: "__SHELLMCP_TOKEN__"
+  oauth_client_secret: "__OAUTH_CLIENT_SECRET__"
+  admin_password: "__ADMIN_PASSWORD__"
+  mcp_bridge_key: "__MCP_BRIDGE_KEY__"
+  oauth_permissive_redirects: "__OAUTH_PERMISSIVE_REDIRECTS__"
+  oauth_permissive_resources: "__OAUTH_PERMISSIVE_RESOURCES__"
+  mcp_relay_default_timeout: "__MCP_RELAY_DEFAULT_TIMEOUT__"
+  mcp_relay_poll_max_timeout: "__MCP_RELAY_POLL_MAX_TIMEOUT__"
+schema:
+  hub_host: str
+  hub_port: int
+  public_origin: str
+  mcp_resource: str
+  hub_public_url: str
+  hub_url: str
+  ctl_token: password
+  mcp_relay_agent_token: password
+  shellmcp_token: password
+  oauth_client_secret: password
+  admin_password: password
+  mcp_bridge_key: password
+  oauth_permissive_redirects: str
+  oauth_permissive_resources: str
+  mcp_relay_default_timeout: str
+  mcp_relay_poll_max_timeout: str
