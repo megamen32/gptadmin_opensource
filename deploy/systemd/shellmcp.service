@@ -1,24 +1,16 @@
 [Unit]
 Description=GPTAdmin ShellMCP Go transport
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-# Go ShellMCP/rootd transport layer for GPTAdmin.
-# Legacy Python shellmcp is deprecated.
-WorkingDirectory=/home/admin/gptadmin
-# Запуск из вашего .venv
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/client/shellmcp.py
-
-# Переменные окружения: агентов регистрируются у Hub по HTTPS
-Environment=SHELLMCP_TOKEN=srv_secret
-Environment=SHELLMCP_URL=http://203.0.113.10:25900
-Environment=HUB_URL=https://gptadmin.bezrabotnyi.com/heartbeat
-Environment=EXEC_TIMEOUT=300
-Environment=LOG_LIMIT_B=10485760
-Environment=SHELLMCP_TRANSPORT=webhook
+Type=simple
+User=root
+WorkingDirectory=/home/admin/gptadmin/go-shellmcp
+EnvironmentFile=/etc/gptadmin/go-shellmcp-primary.env
+ExecStart=/opt/gptadmin/bin/rootd-go-canary
 Restart=always
 RestartSec=5
-User=root
 
 [Install]
 WantedBy=multi-user.target
