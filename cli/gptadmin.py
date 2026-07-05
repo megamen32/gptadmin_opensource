@@ -127,7 +127,7 @@ if IS_MACOS:
     SERVICE_PREFIX = f'com.gptadmin{SERVICE_SUFFIX}'
     SVC_HUB_LABEL   = f'{SERVICE_PREFIX}.hub'
     SVC_SHELLMCP_LABEL = f'{SERVICE_PREFIX}.shellmcp'
-    SVC_FRPC_LABEL  = f'{SERVICE_PREFIX}.frpc'
+    SVC_FRPC_LABEL  = f'{SERVICE_PREFIX}.tunnel-frpc'
     SVC_CLOUDFLARED_LABEL = f'{SERVICE_PREFIX}.cloudflared'
     UNIT_PATH_HUB   = SERVICES_DIR / f'{SVC_HUB_LABEL}.plist'
     UNIT_PATH_SHELLMCP = SERVICES_DIR / f'{SVC_SHELLMCP_LABEL}.plist'
@@ -142,7 +142,7 @@ else:
     )).expanduser()
     SYSTEMD_HUB   = 'gptadmin-hub.service'
     SYSTEMD_SHELLMCP = 'gptadmin-shellmcp.service'
-    SYSTEMD_FRPC  = 'gptadmin-frpc.service'
+    SYSTEMD_FRPC  = 'gptadmin-tunnel-frpc.service'
     SYSTEMD_CLOUDFLARED = 'gptadmin-cloudflared.service'
     UNIT_PATH_HUB   = SYSTEMD_DIR / SYSTEMD_HUB
     UNIT_PATH_SHELLMCP = SYSTEMD_DIR / SYSTEMD_SHELLMCP
@@ -162,13 +162,13 @@ REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 # ===== FRPC defaults =====
 FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
 FRPC_BASE_URL         = os.environ.get('FRPC_BASE_URL', 'https://became.bezrabotnyi.com/frp-mirror')
-FRPC_SERVER_ADDR_DEFAULT = '203.0.113.10'
+FRPC_SERVER_ADDR_DEFAULT = 'gptadmin.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
 FRPC_TOKEN_DEFAULT    = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
 FRPC_DOMAIN_DEFAULT   = 't.gptadmin.bezrabotnyi.com'
 FRPC_SERVER_ENDPOINTS_DEFAULT = os.environ.get(
     'FRPC_SERVER_ENDPOINTS_DEFAULT',
-    'primary=203.0.113.10:7000,server-01=212.192.31.128:27000,server-01=185.240.120.152:27000'
+    'primary=gptadmin.bezrabotnyi.com:7000,server-01=server-01.bezrabotnyi.com:27000,server-01=server-01.bezrabotnyi.com:27000'
 ).strip()
 CLOUDFLARED_VERSION   = os.environ.get('CLOUDFLARED_VERSION', 'latest')
 
@@ -607,18 +607,11 @@ if IS_MACOS:
     def write_frpc_unit(frpc_bin: str):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
-        for spec in frpc_endpoint_specs(env_read()):
-            label, unit_path = frpc_unit_name_path(spec)
-            conf_path = frpc_conf_path(spec)
-            suffix = '' if spec['primary'] else f"-{spec['slug']}"
-            wrapper = BIN_DIR / f'run_frpc{suffix}.sh'
-            wrapper.write_text(
-                f'#!/bin/sh\n'
-                f'exec {frpc_bin} -c {conf_path}\n'
-            )
-            os.chmod(wrapper, 0o755)
-            UNIT_LOG = LOG_DIR / f"frpc{suffix}.log"
-            unit_path.write_text(_make_plist(label, wrapper, UNIT_LOG))
+        wrapper = BIN_DIR / 'run_frpc_all.sh'
+        wrapper.write_text(frpc_wrapper_script(frpc_bin, env_read()))
+        os.chmod(wrapper, 0o755)
+        UNIT_PATH_FRPC.write_text(_make_plist(SVC_FRPC_LABEL, wrapper, LOG_DIR / 'frpc.log'))
+
 
     def write_cloudflared_unit(cloudflared_bin: str, env: dict):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -684,7 +677,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={frpc_bin} -c {frpc_conf}
+ExecStart={frpc_bin}
 Restart=always
 RestartSec=3
 {hardening}
@@ -780,14 +773,14 @@ WantedBy={wanted_by}
 
     def write_frpc_unit(frpc_bin: str):
         UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
-        for spec in frpc_endpoint_specs(env_read()):
-            _name, unit_path = frpc_unit_name_path(spec)
-            unit_path.write_text(FRPC_UNIT_TPL.format(
-                frpc_bin=frpc_bin,
-                frpc_conf=frpc_conf_path(spec),
-                hardening=LINUX_HARDENING,
-                wanted_by=LINUX_WANTED_BY,
-            ))
+        wrapper = BIN_DIR / 'run_frpc_all.sh'
+        wrapper.write_text(frpc_wrapper_script(frpc_bin, env_read()))
+        os.chmod(wrapper, 0o755)
+        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(
+            frpc_bin=wrapper,
+            hardening=LINUX_HARDENING,
+            wanted_by=LINUX_WANTED_BY,
+        ))
 
     def write_cloudflared_unit(cloudflared_bin: str, env: dict):
         UNIT_PATH_CLOUDFLARED.parent.mkdir(parents=True, exist_ok=True)
@@ -896,45 +889,87 @@ def frpc_conf_path(spec: dict) -> Path:
     return FRPC_CONF if spec.get('primary') else ETC_DIR / f"frpc-{spec['slug']}.toml"
 
 
-def frpc_unit_name_path(spec: dict) -> tuple[str, Path]:
-    if spec.get('primary'):
-        return svc_frpc_name(), UNIT_PATH_FRPC
+def frpc_desired_unit() -> tuple[str, Path]:
+    return svc_frpc_name(), UNIT_PATH_FRPC
+
+
+def frpc_legacy_units() -> list[tuple[str, Path]]:
+    units: dict[str, tuple[str, Path]] = {}
     if IS_MACOS:
-        label = f'{SVC_FRPC_LABEL}.{spec["slug"]}'
-        return label, SERVICES_DIR / f'{label}.plist'
-    name = f'gptadmin-frpc-{spec["slug"]}.service'
-    return name, SYSTEMD_DIR / name
+        for path in SERVICES_DIR.glob('com.gptadmin*.frpc*.plist'):
+            if path != UNIT_PATH_FRPC:
+                units[str(path)] = (path.stem, path)
+    else:
+        for pattern in ('gptadmin-frpc.service', 'gptadmin-frpc-*.service'):
+            for path in SYSTEMD_DIR.glob(pattern):
+                if path != UNIT_PATH_FRPC:
+                    units[str(path)] = (path.name, path)
+    return list(units.values())
 
 
 def frpc_unit_specs(env: dict | None = None) -> list[tuple[str, Path]]:
-    return [frpc_unit_name_path(spec) for spec in frpc_endpoint_specs(env or env_read())]
+    return [frpc_desired_unit()]
 
 
 def frpc_installed_units(env: dict | None = None) -> list[tuple[str, Path]]:
-    units = {str(path): (name, path) for name, path in frpc_unit_specs(env or env_read())}
-    if IS_MACOS:
-        for path in SERVICES_DIR.glob(f'{SVC_FRPC_LABEL}*.plist'):
-            label = path.stem
-            units.setdefault(str(path), (label, path))
-    else:
-        for path in SYSTEMD_DIR.glob('gptadmin-frpc*.service'):
-            units.setdefault(str(path), (path.name, path))
+    units = {str(UNIT_PATH_FRPC): frpc_desired_unit()}
+    for name, path in frpc_legacy_units():
+        units.setdefault(str(path), (name, path))
     return list(units.values())
 
 
 def svc_frpc_enable_start_all(env: dict | None = None):
-    for name, path in frpc_unit_specs(env or env_read()):
-        svc_enable_start(name, path)
+    for name, path in frpc_legacy_units():
+        svc_disable_stop(name, path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f'WARN: не удалось удалить legacy FRP unit {path}: {e}', file=sys.stderr)
+    name, path = frpc_desired_unit()
+    svc_enable_start(name, path)
 
 
 def svc_frpc_restart_all(env: dict | None = None):
-    for name, path in frpc_unit_specs(env or env_read()):
-        svc_restart(name, path)
+    name, path = frpc_desired_unit()
+    svc_restart(name, path)
 
 
 def svc_frpc_disable_stop_all(env: dict | None = None):
     for name, path in reversed(frpc_installed_units(env or env_read())):
         svc_disable_stop(name, path)
+
+
+def frpc_wrapper_script(frpc_bin: str, env: dict) -> str:
+    confs = ' '.join(repr(str(frpc_conf_path(spec))) for spec in frpc_endpoint_specs(env))
+    return """#!/usr/bin/env bash
+set -Eeuo pipefail
+FRPC_BIN={frpc_bin!r}
+CONFS=({confs})
+pids=()
+cleanup() {{
+  trap - TERM INT EXIT
+  for pid in "${{pids[@]}}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}}
+trap cleanup TERM INT EXIT
+for conf in "${{CONFS[@]}}"; do
+  "$FRPC_BIN" -c "$conf" &
+  pids+=("$!")
+done
+while true; do
+  for pid in "${{pids[@]}}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || exit $?
+      exit 1
+    fi
+  done
+  sleep 2
+done
+""".format(frpc_bin=str(frpc_bin), confs=confs)
 
 
 def write_frpc_conf(env: dict):
@@ -1515,7 +1550,7 @@ def setup_interactive(args):
     installed = [n for n, p in [
         ('gptadmin-hub' if not IS_MACOS else SVC_HUB_LABEL, UNIT_PATH_HUB),
         (svc_shellmcp_name(), UNIT_PATH_SHELLMCP),
-        ('gptadmin-frpc' if not IS_MACOS else SVC_FRPC_LABEL,
+        (SYSTEMD_FRPC if not IS_MACOS else SVC_FRPC_LABEL,
          UNIT_PATH_FRPC if env.get('FRP_ENABLE', 'false') == 'true' else None),
         ('gptadmin-cloudflared' if not IS_MACOS else SVC_CLOUDFLARED_LABEL,
          UNIT_PATH_CLOUDFLARED if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true' else None)
