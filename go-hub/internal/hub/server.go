@@ -344,6 +344,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
 	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
+	mux.HandleFunc("/admin/api/failover/reclaim", s.requireCtl(s.adminFailoverReclaim))
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))

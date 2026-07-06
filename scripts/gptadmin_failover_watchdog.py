@@ -9,12 +9,16 @@ Before promotion it performs a second short check against the public hub URL.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -23,6 +27,7 @@ DEFAULT_CONFIG = "/etc/gptadmin/failover_config.json"
 DEFAULT_STATE = "/etc/gptadmin/failover_state.json"
 DEFAULT_RUNTIME = "/var/lib/gptadmin/failover_watchdog_state.json"
 DEFAULT_FRPC = "/etc/gptadmin/frpc-failover.toml"
+DEFAULT_FRPC_PID = "/var/lib/gptadmin/failover_frpc.pid"
 DEFAULT_SERVICE = "gptadmin-failover-frpc.service"
 
 
@@ -53,6 +58,22 @@ def http_ok(url: str, timeout: float) -> bool:
             return 200 <= int(getattr(r, "status", 0)) < 500
     except (OSError, urllib.error.URLError, urllib.error.HTTPError):
         return False
+
+
+def http_json(url: str, timeout: float, bearer: str = "") -> dict[str, Any] | None:
+    if not url:
+        return None
+    try:
+        headers = {"User-Agent": "gptadmin-failover-watchdog/1"}
+        if bearer:
+            headers["Authorization"] = "Bearer " + bearer
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - admin configured URL
+            if not (200 <= int(getattr(r, "status", 0)) < 300):
+                return None
+            return json.loads(r.read().decode())
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return None
 
 
 def choose_node(cfg: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -138,6 +159,80 @@ def run(cmd: list[str], dry_run: bool) -> None:
     subprocess.run(cmd, check=True)
 
 
+def reclaim_sig_input(action: str, node_id: str, nonce: str, issued_at: int, expires_at: int, primary_health_url: str) -> str:
+    return "\n".join([action, node_id, nonce, str(issued_at), str(expires_at), primary_health_url])
+
+
+def reclaim_secret(bundle: dict[str, Any]) -> str:
+    secrets = bundle.get("secrets") or {}
+    return str(secrets.get("bridge_key") or secrets.get("ctl_token") or "")
+
+
+def sign_reclaim(secret: str, text: str) -> str:
+    digest = hmac.new(secret.encode(), text.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def fetch_verified_reclaim(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any] | None:
+    url = str(cfg.get("primary_reclaim_url") or "")
+    if not url:
+        return None
+    sep = "&" if "?" in url else "?"
+    url = url + sep + "node_id=" + urllib.parse.quote(args.node_id, safe="")
+    timeout = float(cfg.get("public_confirm_timeout_sec") or 3)
+    token = str((bundle.get("secrets") or {}).get("ctl_token") or "")
+    payload = http_json(url, timeout, token)
+    if not payload or payload.get("action") != "demote" or payload.get("node_id") != args.node_id:
+        return None
+    secret = reclaim_secret(bundle)
+    if not secret:
+        return None
+    try:
+        issued_at = int(payload.get("issued_at"))
+        expires_at = int(payload.get("expires_at"))
+    except (TypeError, ValueError):
+        return None
+    now = int(time.time())
+    max_age = int(cfg.get("reclaim_max_age_sec") or 120)
+    if issued_at > now + 30 or expires_at < now or now - issued_at > max_age:
+        return None
+    nonce = str(payload.get("nonce") or "")
+    seen = list(runtime.get("reclaim_nonces") or [])[-64:]
+    if not nonce or nonce in seen:
+        return None
+    primary_health_url = str(payload.get("primary_health_url") or "")
+    text = reclaim_sig_input("demote", args.node_id, nonce, issued_at, expires_at, primary_health_url)
+    expected = sign_reclaim(secret, text)
+    if not hmac.compare_digest(expected, str(payload.get("signature") or "")):
+        return None
+    runtime["reclaim_nonces"] = (seen + [nonce])[-64:]
+    return payload
+
+
+def demote(args: argparse.Namespace, runtime: dict[str, Any], dry_run: bool) -> None:
+    if args.frpc_service and args.frpc_service != "none":
+        run(["systemctl", "stop", args.frpc_service], dry_run)
+    else:
+        pid = int(runtime.get("frpc_pid") or 0)
+        if not pid and Path(args.frpc_pid_file).exists():
+            try:
+                pid = int(Path(args.frpc_pid_file).read_text().strip() or "0")
+            except ValueError:
+                pid = 0
+        if pid:
+            if dry_run:
+                print("DRY-RUN kill", pid)
+            else:
+                try:
+                    os.kill(pid, 15)
+                except ProcessLookupError:
+                    pass
+        if not dry_run:
+            Path(args.frpc_pid_file).unlink(missing_ok=True)
+    runtime["frpc_pid"] = 0
+    runtime["last_demote_at"] = time.time()
+
+
 def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], node: dict[str, Any], dry_run: bool) -> None:
     local_port = int(node.get("local_hub_port") or ((bundle.get("tunnel") or {}).get("frp") or {}).get("local_port") or 9001)
     if args.hub_service and args.hub_service != "none":
@@ -159,7 +254,10 @@ def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any
         if dry_run:
             print("DRY-RUN", args.frpc_bin, "-c", args.frpc_config)
         else:
-            subprocess.Popen([args.frpc_bin, "-c", args.frpc_config], start_new_session=True)
+            proc = subprocess.Popen([args.frpc_bin, "-c", args.frpc_config], start_new_session=True)
+            Path(args.frpc_pid_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.frpc_pid_file).write_text(str(proc.pid) + "\n")
+            os.chmod(args.frpc_pid_file, 0o600)
 
 
 def check_once(args: argparse.Namespace) -> int:
@@ -171,6 +269,15 @@ def check_once(args: argparse.Namespace) -> int:
     runtime.setdefault("fail_count", 0)
     runtime.setdefault("last_promotion_at", 0)
     runtime["last_check_at"] = time.time()
+
+    reclaim = fetch_verified_reclaim(args, cfg, bundle, runtime)
+    if reclaim:
+        demote(args, runtime, args.dry_run)
+        runtime["fail_count"] = 0
+        runtime["last_decision"] = "reclaimed_primary"
+        save_json(args.runtime_state, runtime)
+        print(json.dumps({"ok": True, "decision": "reclaimed_primary", "node_id": args.node_id, "nonce": reclaim.get("nonce"), "dry_run": args.dry_run}, sort_keys=True))
+        return 0
 
     if not cfg.get("enabled") or not node.get("enabled", True):
         runtime["last_decision"] = "disabled"
@@ -231,6 +338,7 @@ def main() -> int:
     ap.add_argument("--frpc-service", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_SERVICE", DEFAULT_SERVICE))
     ap.add_argument("--frpc-config", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_CONFIG", DEFAULT_FRPC))
     ap.add_argument("--frpc-bin", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_BIN", "/opt/gptadmin/bin/frpc"))
+    ap.add_argument("--frpc-pid-file", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_PID_FILE", DEFAULT_FRPC_PID))
     ap.add_argument("--check-once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

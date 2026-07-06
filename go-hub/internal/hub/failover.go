@@ -1,7 +1,12 @@
 package hub
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,7 +29,9 @@ type FailoverConfig struct {
 	Enabled                  bool           `json:"enabled"`
 	PrimaryPublicURL         string         `json:"primary_public_url,omitempty"`
 	PrimaryHealthURL         string         `json:"primary_health_url,omitempty"`
+	PrimaryReclaimURL        string         `json:"primary_reclaim_url,omitempty"`
 	StateURL                 string         `json:"state_url,omitempty"`
+	ReclaimMaxAgeSec         int            `json:"reclaim_max_age_sec,omitempty"`
 	CheckIntervalSec         int            `json:"check_interval_sec"`
 	PublicConfirmTimeoutSec  int            `json:"public_confirm_timeout_sec"`
 	FailCountBase            int            `json:"fail_count_base"`
@@ -60,7 +67,9 @@ func (s *Server) defaultFailoverConfig() FailoverConfig {
 		Enabled:                  false,
 		PrimaryPublicURL:         strings.TrimRight(publicURL, "/"),
 		PrimaryHealthURL:         firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_HEALTH_URL"), "http://127.0.0.1:9001/healthz"),
+		PrimaryReclaimURL:        firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_RECLAIM_URL"), strings.TrimRight(publicURL, "/")+"/admin/api/failover/reclaim"),
 		StateURL:                 strings.TrimRight(publicURL, "/") + "/admin/api/failover/state?secrets=1",
+		ReclaimMaxAgeSec:         120,
 		CheckIntervalSec:         15,
 		PublicConfirmTimeoutSec:  3,
 		FailCountBase:            3,
@@ -81,6 +90,12 @@ func (s *Server) normalizeFailoverConfig(cfg FailoverConfig) FailoverConfig {
 	}
 	if cfg.StateURL == "" && cfg.PrimaryPublicURL != "" {
 		cfg.StateURL = cfg.PrimaryPublicURL + "/admin/api/failover/state?secrets=1"
+	}
+	if cfg.PrimaryReclaimURL == "" && cfg.PrimaryPublicURL != "" {
+		cfg.PrimaryReclaimURL = cfg.PrimaryPublicURL + "/admin/api/failover/reclaim"
+	}
+	if cfg.ReclaimMaxAgeSec <= 0 {
+		cfg.ReclaimMaxAgeSec = def.ReclaimMaxAgeSec
 	}
 	if cfg.CheckIntervalSec <= 0 {
 		cfg.CheckIntervalSec = def.CheckIntervalSec
@@ -225,6 +240,63 @@ func (s *Server) saveFailoverStateBundleLocked() error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (s *Server) adminFailoverReclaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	if nodeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id is required"})
+		return
+	}
+	secret := firstNonEmpty(os.Getenv("MCP_BRIDGE_KEY"), os.Getenv("CTL_TOKEN"))
+	if secret == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failover reclaim signing key is not configured"})
+		return
+	}
+	s.mu.Lock()
+	cfg := s.failover
+	s.addAuditLocked("failover_reclaim_issued", map[string]any{"node_id": nodeID})
+	s.mu.Unlock()
+	issuedAt := time.Now().Unix()
+	expiresAt := issuedAt + int64(cfg.ReclaimMaxAgeSec)
+	if expiresAt <= issuedAt {
+		expiresAt = issuedAt + 120
+	}
+	nonceBytes := make([]byte, 18)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
+	action := "demote"
+	primaryHealthURL := cfg.PrimaryHealthURL
+	sigInput := failoverReclaimSigInput(action, nodeID, nonce, issuedAt, expiresAt, primaryHealthURL)
+	sig := signFailoverReclaim(secret, sigInput)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"action":             action,
+		"node_id":            nodeID,
+		"issued_at":          issuedAt,
+		"expires_at":         expiresAt,
+		"nonce":              nonce,
+		"primary_health_url": primaryHealthURL,
+		"alg":                "hmac-sha256",
+		"signature":          sig,
+	})
+}
+
+func failoverReclaimSigInput(action, nodeID, nonce string, issuedAt, expiresAt int64, primaryHealthURL string) string {
+	return fmt.Sprintf("%s\n%s\n%s\n%d\n%d\n%s", action, nodeID, nonce, issuedAt, expiresAt, primaryHealthURL)
+}
+
+func signFailoverReclaim(secret, input string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(input))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (s *Server) adminFailover(w http.ResponseWriter, r *http.Request) {
