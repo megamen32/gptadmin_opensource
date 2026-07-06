@@ -135,8 +135,8 @@ const SERVER_CARD_CAPS_SHOWN = 5;
 const SERVER_CARD_META_KEYS_SHOWN = 5;
 const MANAGEDMCP_CARD_ARGS_SHOWN = 4;
 const MANAGEDMCP_CARD_ENV_KEYS_SHOWN = 5;
-function renderAll(){if(!state)return;const data=state;const ac=data.server_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bServers').textContent=(data.servers||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
-const targets=(data.servers||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{server_id:'hub',status:'local'}].concat(targets.filter(a=>String(a.server_id||'').startsWith('shell:')||a.meta?.transport_layer==='mcp_tunnel'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;
+function renderAll(){if(!state)return;const data=state;const ac=data.server_counts||{};$('agentCounts').innerHTML=`<span class="ok">${ac.online||0}</span><span class="muted"> / </span><span class="bad">${ac.offline||0}</span><span class="muted"> / </span><span class="warn">${ac.stale||0}</span>`;$('agentSub').innerHTML=`<span class="ok">●</span> online · <span class="bad">●</span> offline · <span class="warn">●</span> stale`;$('clientCount').textContent=data.client_count||0;$('queuedCount').textContent=(data.jobs?.queued||[]).length;$('bgCount').textContent=(data.jobs?.background||[]).length;$('bOverview').textContent='live';$('bServers').textContent=(data.servers||[]).length;$('bClients').textContent=data.client_count||0;$('bJobs').textContent=data.jobs?.count||0;$('bAudit').textContent=(data.audit||[]).length;const foc=data.failover_config||{};if($('bFailover'))$('bFailover').textContent=foc.enabled?'on':'off';$('sideMeta').innerHTML=`<div>hub: ${esc(data.now_fmt||'')}</div><div class="muted">auto refresh 15s</div>`;
+const targets=(data.servers||[]);const targetHtml=targets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('target').options.length!==targets.length)$('target').innerHTML=targetHtml;if($('resourceTarget').options.length!==targets.length)$('resourceTarget').innerHTML=targetHtml;const shellTargets=[{server_id:'hub',status:'local'}].concat(targets.filter(a=>String(a.server_id||'').startsWith('shell:')||a.meta?.transport_layer==='mcp_tunnel'));const shellHtml=shellTargets.map(a=>`<option value="${esc(a.server_id)}">${esc(a.server_id)} (${esc(a.status)})</option>`).join('');if($('mcpHost')&&$('mcpHost').options.length!==shellTargets.length)$('mcpHost').innerHTML=shellHtml;if($('failoverNodes'))renderFailoverNodes(foc,targets);
 const problems=(data.servers||[]).filter(a=>a.status!=='online');const PROBLEM_SERVER_META_KEYS_SHOWN=3;$('problemAgents').innerHTML=problems.length?`<div class="stackList">${topN(problems,12).map(r=>{const meta=(r.meta&&typeof r.meta==='object')?r.meta:{};const keys=topN(Object.keys(meta),PROBLEM_SERVER_META_KEYS_SHOWN);const more=Math.max(0,Object.keys(meta).length-PROBLEM_SERVER_META_KEYS_SHOWN);return `<article class="entryCard"><div class="entryHead"><span class="entryStatus ${cls(r.status)}">${esc(r.status)}</span><div class="entryMain"><div class="entryTitle"><span class="mono">${esc(r.server_id)}</span></div><div class="entrySub small">${keys.length?`<ul class="kvList">${keys.map(k=>`<li><span class="mono">${esc(k)}</span>: <span class="muted">${esc(metaValueForList(meta[k]))}</span></li>`).join('')}</ul>${more?`<span class="muted small">+${more} more keys</span>`:''}`:`<span class="muted small">—</span>`}</div></div></div></article>`}).join('')}</div>`:`<p class="muted">пусто</p>`;
 $('recentJobsCompact').className='';$('recentJobsCompact').innerHTML=renderRecentMini(topN(data.jobs?.recent||[],8));
 let servers=(data.servers||[]).filter(r=>includesText(r,$('agentFilter')?.value||''));const ast=$('agentStatus')?.value||'all';if(ast!=='all')servers=servers.filter(r=>r.status===ast);$('agents').innerHTML=servers.length?`<div class="stackList">${servers.map(renderServerCard).join('')}</div>`:`<p class="muted">пусто</p>`;
@@ -280,6 +280,44 @@ $('clients').innerHTML = _clients.length
   : '<p class="muted">пусто</p>';
 let jobs=(data.jobs?.recent||[]).filter(r=>includesText(r,$('jobFilter')?.value||''));const jst=$('jobStatus')?.value||'all';if(jst==='queued')jobs=jobs.filter(r=>String(r.status||'').startsWith('queued'));else if(jst!=='all')jobs=jobs.filter(r=>r.status===jst);$('jobs').innerHTML=jobs.length?`<div class="stackList">${jobs.map(renderJobCard).join('')}</div>`:'<p class="muted">пусто</p>';
 let audit=(data.audit||[]).filter(r=>includesText(r,$('auditFilter')?.value||''));$('audit').innerHTML=audit.length?`<div class="stackList">${audit.map(renderAuditCard).join('')}</div>`:'<p class="muted">пусто</p>';$('rawJson').textContent=JSON.stringify(data,null,2)}
+function renderFailoverNodes(cfg, servers){
+  if(!$('failoverNodes')) return;
+  cfg=cfg||{};servers=servers||[];
+  $('foEnabled').checked=!!cfg.enabled;
+  $('foPrimary').value=cfg.primary_public_url||'';
+  $('foBase').value=cfg.fail_count_base||3;
+  const existing={};(cfg.nodes||[]).forEach(n=>existing[n.server_id]=n);
+  const rows=servers.filter(s=>String(s.server_id||'').startsWith('shell:')).map((srv,idx)=>{
+    const n=existing[srv.server_id]||{};
+    const rank=n.rank||idx+1;
+    const checked=n.enabled?'checked':'';
+    return `<article class="entryCard"><div class="row"><label class="small"><input type="checkbox" class="foNodeEnabled" data-server="${esc(srv.server_id)}" ${checked}> fallback</label><b class="mono">${esc(srv.server_id)}</b><span class="entryStatus ${cls(srv.status)}">${esc(srv.status)}</span><label class="small">rank <input class="foNodeRank" data-server="${esc(srv.server_id)}" type="number" min="1" value="${esc(rank)}" style="width:70px"></label></div><input class="foNodeHub" data-server="${esc(srv.server_id)}" placeholder="local hub URL on fallback, e.g. http://203.0.113.10:9001" value="${esc(n.hub_url||'')}" style="width:100%;margin-top:8px"></article>`;
+  }).join('');
+  $('failoverNodes').innerHTML=rows||'<p class="muted">Нет shell-серверов</p>';
+}
+async function loadFailover(){
+  if(!$('failoverState'))return;
+  try{
+    const j=await api('/admin/api/failover');
+    $('failoverState').textContent=JSON.stringify(j.state||j,null,2);
+    if(state){state.failover_config=j.config;renderAll()}
+  }catch(e){$('failoverState').textContent='ERR '+e.message}
+}
+async function saveFailover(){
+  try{
+    const nodes=[];
+    document.querySelectorAll('.foNodeEnabled').forEach(ch=>{
+      const id=ch.dataset.server;
+      const rank=document.querySelector('.foNodeRank[data-server="'+CSS.escape(id)+'"]')?.value||'1';
+      const hub=document.querySelector('.foNodeHub[data-server="'+CSS.escape(id)+'"]')?.value||'';
+      nodes.push({server_id:id,enabled:ch.checked,rank:+rank||1,hub_url:hub.trim(),local_hub_port:9001});
+    });
+    const cfg={enabled:$('foEnabled').checked,primary_public_url:$('foPrimary').value.trim(),fail_count_base:+$('foBase').value||3,deterministic_rank_backoff:true,nodes:nodes.filter(n=>n.enabled)};
+    const j=await api('/admin/api/failover',{method:'POST',body:JSON.stringify(cfg)});
+    $('failoverState').textContent=JSON.stringify(j,null,2);
+    await loadFailover();
+  }catch(e){$('failoverState').textContent='ERR '+e.message}
+}
 async function refreshAll(){try{$('status').textContent='загрузка…';$('status').className='status-badge right';const lim=$('auditLimit')?.value||160;state=await api('/admin/api/overview?limit='+encodeURIComponent(lim));renderAll();$('status').textContent='● online';$('status').className='status-badge ok right'}catch(e){$('status').textContent='Нет связи';$('status').className='status-badge err right'}}
 async function listTools(){try{const j=await api('/mcp-relay/tools',{method:'POST',body:JSON.stringify({target:$('target').value,timeout:+$('timeout').value,background:$('background').checked})});$('result').textContent=JSON.stringify(j,null,2);const tools=(j.response?.tools)||[];$('toolSelect').innerHTML=tools.map(t=>`<option value="${esc(t.name)}">${esc(t.name)}</option>`).join('');if(tools[0])$('args').value=JSON.stringify({},null,2)}catch(e){$('result').textContent='ERR '+e.message}}
 async function callTool(){try{const args=JSON.parse($('args').value||'{}');const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({target:$('target').value,tool_name:$('toolSelect').value,arguments:args,timeout:+$('timeout').value,background:$('background').checked})});$('result').textContent=JSON.stringify(j,null,2);if(j.job_id)$('jobId').value=j.job_id;refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
@@ -357,7 +395,7 @@ async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpNa
 
 async function getJob(){try{const id=$('jobId').value.trim();const j=await api('/mcp-relay/job/'+encodeURIComponent(id)+'?verbose=true&include_raw=true');$('result').textContent=JSON.stringify(j,null,2);refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 function formatArgs(){try{$('args').value=JSON.stringify(JSON.parse($('args').value||'{}'),null,2)}catch(e){$('result').textContent='Bad JSON: '+e.message}}
-$('token').value=localStorage.getItem('gptadmin_ctl_token')||'';initMaxActiveIpsInput();showView(currentView);refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
+$('token').value=localStorage.getItem('gptadmin_ctl_token')||'';initMaxActiveIpsInput();showView(currentView);loadFailover().catch(()=>{});refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
 
 // ===== Security management =====
 async function loadSecurityEnv(){

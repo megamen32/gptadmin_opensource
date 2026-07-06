@@ -23,6 +23,7 @@
     </div>
     <div class="sidegroup"><h3>Security</h3>
       <button class="navbtn" data-view="security" onclick="showView('security')"><span>Токены и Auth</span><span class="badge">env</span></button>
+      <button class="navbtn" data-view="failover" onclick="showView('failover')"><span>Failover</span><span class="badge" id="bFailover">off</span></button>
     </div>
     <div class="sidegroup"><h3>Журналы</h3>
       <button class="navbtn" data-view="audit" onclick="showView('audit')"><span>Журнал аудита</span><span class="badge" id="bAudit">—</span></button>
@@ -131,6 +132,17 @@
         <div style="margin-top:16px"><h2 style="font-size:13px">Перезапуск</h2>
           <div class="row"><button class="cancelBtn" onclick="restartHub()">⟳ Restart hub</button><span id="secRestartStatus" class="muted small"></span></div>
         </div>
+      </div></section>
+
+
+      <!-- Failover -->
+      <section id="view-failover" class="view"><div class="grid">
+        <section class="card span8"><h2>Self-host failover</h2>
+          <p class="muted small">Выберите fallback-серверы. Rank задаёт fencing: threshold = rank × fail_count_base. Перед promotion watcher делает второй короткий public check.</p>
+          <div class="row" style="margin:10px 0"><label class="small"><input type="checkbox" id="foEnabled"> enabled</label><input id="foPrimary" placeholder="primary public URL" style="min-width:360px"><input id="foBase" type="number" min="1" value="3" style="width:95px"><button onclick="saveFailover()">Сохранить</button><button class="btn-secondary" onclick="loadFailover()">↻</button></div>
+          <div id="failoverNodes" class="stackList"><p class="muted">Загрузка…</p></div>
+        </section>
+        <section class="card span4"><h2>State bundle</h2><pre id="failoverState" class="logbox">—</pre></section>
       </div></section>
 
       <!-- Audit -->

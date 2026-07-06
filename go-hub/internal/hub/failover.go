@@ -1,0 +1,309 @@
+package hub
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type FailoverNode struct {
+	ServerID     string `json:"server_id"`
+	Rank         int    `json:"rank"`
+	Enabled      bool   `json:"enabled"`
+	CheckURL     string `json:"check_url,omitempty"`
+	HubURL       string `json:"hub_url,omitempty"`
+	LocalHubPort int    `json:"local_hub_port,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+}
+
+type FailoverConfig struct {
+	Enabled                  bool           `json:"enabled"`
+	PrimaryPublicURL         string         `json:"primary_public_url,omitempty"`
+	PrimaryHealthURL         string         `json:"primary_health_url,omitempty"`
+	StateURL                 string         `json:"state_url,omitempty"`
+	CheckIntervalSec         int            `json:"check_interval_sec"`
+	PublicConfirmTimeoutSec  int            `json:"public_confirm_timeout_sec"`
+	FailCountBase            int            `json:"fail_count_base"`
+	PromotionCooldownSec     int            `json:"promotion_cooldown_sec"`
+	DeterministicRankBackoff bool           `json:"deterministic_rank_backoff"`
+	Nodes                    []FailoverNode `json:"nodes"`
+	UpdatedAt                string         `json:"updated_at,omitempty"`
+}
+
+func (s *Server) failoverConfigPath() string {
+	if s.cfg.FailoverConfigFile != "" {
+		return s.cfg.FailoverConfigFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "failover_config.json")
+}
+
+func (s *Server) failoverStatePath() string {
+	if s.cfg.FailoverStateFile != "" {
+		return s.cfg.FailoverStateFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "failover_state.json")
+}
+
+func (s *Server) defaultFailoverConfig() FailoverConfig {
+	publicURL := firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin, s.cfg.MCPResource)
+	return FailoverConfig{
+		Enabled:                  false,
+		PrimaryPublicURL:         strings.TrimRight(publicURL, "/"),
+		PrimaryHealthURL:         firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_HEALTH_URL"), "http://127.0.0.1:9001/healthz"),
+		StateURL:                 strings.TrimRight(publicURL, "/") + "/admin/api/failover/state?secrets=1",
+		CheckIntervalSec:         15,
+		PublicConfirmTimeoutSec:  3,
+		FailCountBase:            3,
+		PromotionCooldownSec:     300,
+		DeterministicRankBackoff: true,
+		Nodes:                    []FailoverNode{},
+	}
+}
+
+func (s *Server) normalizeFailoverConfig(cfg FailoverConfig) FailoverConfig {
+	def := s.defaultFailoverConfig()
+	if cfg.PrimaryPublicURL == "" {
+		cfg.PrimaryPublicURL = def.PrimaryPublicURL
+	}
+	cfg.PrimaryPublicURL = strings.TrimRight(cfg.PrimaryPublicURL, "/")
+	if cfg.PrimaryHealthURL == "" {
+		cfg.PrimaryHealthURL = def.PrimaryHealthURL
+	}
+	if cfg.StateURL == "" && cfg.PrimaryPublicURL != "" {
+		cfg.StateURL = cfg.PrimaryPublicURL + "/admin/api/failover/state?secrets=1"
+	}
+	if cfg.CheckIntervalSec <= 0 {
+		cfg.CheckIntervalSec = def.CheckIntervalSec
+	}
+	if cfg.PublicConfirmTimeoutSec <= 0 {
+		cfg.PublicConfirmTimeoutSec = def.PublicConfirmTimeoutSec
+	}
+	if cfg.FailCountBase <= 0 {
+		cfg.FailCountBase = def.FailCountBase
+	}
+	if cfg.PromotionCooldownSec <= 0 {
+		cfg.PromotionCooldownSec = def.PromotionCooldownSec
+	}
+	if !cfg.DeterministicRankBackoff {
+		cfg.DeterministicRankBackoff = true
+	}
+	for i := range cfg.Nodes {
+		cfg.Nodes[i].ServerID = strings.TrimSpace(cfg.Nodes[i].ServerID)
+		if cfg.Nodes[i].Rank <= 0 {
+			cfg.Nodes[i].Rank = i + 1
+		}
+		if cfg.Nodes[i].LocalHubPort <= 0 {
+			cfg.Nodes[i].LocalHubPort = 9001
+		}
+	}
+	cfg.UpdatedAt = time.Now().Format(time.RFC3339)
+	return cfg
+}
+
+func (s *Server) loadFailoverConfig() FailoverConfig {
+	cfg := s.defaultFailoverConfig()
+	path := s.failoverConfigPath()
+	if path == "" {
+		return cfg
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("failover config load failed path=%s err=%v", path, err)
+		}
+		return cfg
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		log.Printf("failover config parse failed path=%s err=%v", path, err)
+		return s.defaultFailoverConfig()
+	}
+	return s.normalizeFailoverConfig(cfg)
+}
+
+func (s *Server) saveFailoverConfigLocked() error {
+	path := s.failoverConfigPath()
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(s.failover, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Server) failoverStateBundleLocked(includeSecrets bool) map[string]any {
+	agents := make(map[string]Agent, len(s.agents))
+	for id, agent := range s.agents {
+		if agent == nil {
+			continue
+		}
+		cp := *agent
+		cp.Meta = cloneMap(cp.Meta)
+		agents[id] = cp
+	}
+	frp := map[string]any{
+		"enabled":       truthyString(os.Getenv("FRP_ENABLE")),
+		"domain":        os.Getenv("FRP_DOMAIN"),
+		"subdomain":     os.Getenv("FRP_SUBDOMAIN"),
+		"server_addr":   os.Getenv("FRP_SERVER_ADDR"),
+		"server_port":   os.Getenv("FRP_SERVER_PORT"),
+		"endpoints":     splitCSV(os.Getenv("FRP_SERVER_ENDPOINTS")),
+		"local_ip":      "127.0.0.1",
+		"local_port":    firstNonEmpty(os.Getenv("HUB_PORT"), os.Getenv("GPTADMIN_HUB_PORT"), "9001"),
+		"public_url":    firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin),
+		"tunnel_mode":   os.Getenv("TUNNEL_MODE"),
+		"token_present": os.Getenv("FRP_TOKEN") != "",
+	}
+	secrets := map[string]any{}
+	if includeSecrets {
+		frp["token"] = os.Getenv("FRP_TOKEN")
+		secrets = map[string]any{
+			"ctl_token":         os.Getenv("CTL_TOKEN"),
+			"relay_agent_token": os.Getenv("MCP_RELAY_AGENT_TOKEN"),
+			"shellmcp_token":    firstNonEmpty(os.Getenv("SHELLMCP_TOKEN"), os.Getenv("SHELL_TOKEN")),
+			"oauth_secret":      os.Getenv("OAUTH_CLIENT_SECRET"),
+			"admin_password":    os.Getenv("ADMIN_PASSWORD"),
+			"bridge_key":        os.Getenv("MCP_BRIDGE_KEY"),
+		}
+	}
+	return map[string]any{
+		"ok":              true,
+		"kind":            "gptadmin_failover_state",
+		"saved_at":        nowFloat(),
+		"saved_at_fmt":    time.Now().Format(time.RFC3339),
+		"build":           map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit},
+		"public_origin":   firstNonEmpty(s.cfg.PublicOrigin, os.Getenv("PUBLIC_ORIGIN")),
+		"mcp_resource":    firstNonEmpty(s.cfg.MCPResource, os.Getenv("MCP_RESOURCE")),
+		"hub_public_url":  firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin),
+		"hub_url":         os.Getenv("HUB_URL"),
+		"registry_state":  s.registryStatePath(),
+		"failover_config": s.failover,
+		"agents":          agents,
+		"tunnel":          map[string]any{"frp": frp},
+		"secrets":         secrets,
+	}
+}
+
+func (s *Server) saveFailoverStateBundleLocked() error {
+	path := s.failoverStatePath()
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(s.failoverStateBundleLocked(true), "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Server) adminFailover(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.Lock()
+		cfg := s.failover
+		state := s.failoverStateBundleLocked(false)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state": state, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath()}})
+	case http.MethodPost:
+		var raw map[string]any
+		if err := readJSON(r, &raw); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+		payload := raw
+		if nested, ok := raw["config"].(map[string]any); ok {
+			payload = nested
+		}
+		b, _ := json.Marshal(payload)
+		var cfg FailoverConfig
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+		cfg = s.normalizeFailoverConfig(cfg)
+		s.mu.Lock()
+		s.failover = cfg
+		s.addAuditLocked("failover_config_saved", map[string]any{"enabled": cfg.Enabled, "nodes": len(cfg.Nodes), "fail_count_base": cfg.FailCountBase})
+		err1 := s.saveFailoverConfigLocked()
+		err2 := s.saveFailoverStateBundleLocked()
+		s.mu.Unlock()
+		if err1 != nil || err2 != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "config_error": errString(err1), "state_error": errString(err2)})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath()}})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+	}
+}
+
+func (s *Server) adminFailoverState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	includeSecrets := r.URL.Query().Get("secrets") == "1" || strings.EqualFold(r.URL.Query().Get("secrets"), "true")
+	s.mu.Lock()
+	state := s.failoverStateBundleLocked(includeSecrets)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, state)
+}
+
+func firstNonEmpty(items ...string) string {
+	for _, item := range items {
+		if strings.TrimSpace(item) != "" {
+			return strings.TrimSpace(item)
+		}
+	}
+	return ""
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}

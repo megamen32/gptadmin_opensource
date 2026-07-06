@@ -215,6 +215,94 @@ func TestRegistryStatePersistsAgentsAcrossRestart(t *testing.T) {
 	t.Fatalf("restored agent not listed: %+v", body.Agents)
 }
 
+func TestFailoverConfigAndStateEndpoints(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HUB_PUBLIC_URL", "https://primary.example.test")
+	t.Setenv("FRP_ENABLE", "true")
+	t.Setenv("FRP_DOMAIN", "t.example.test")
+	t.Setenv("FRP_SUBDOMAIN", "u-test")
+	t.Setenv("FRP_SERVER_ADDR", "frp.example.test")
+	t.Setenv("FRP_SERVER_PORT", "7000")
+	t.Setenv("FRP_TOKEN", "frp-secret")
+	cfg := Config{
+		CtlToken:           "ctl",
+		RelayAgentToken:    "relay",
+		ConfigDir:          tmp,
+		RegistryStateFile:  filepath.Join(tmp, "registry_state.json"),
+		FailoverConfigFile: filepath.Join(tmp, "failover_config.json"),
+		FailoverStateFile:  filepath.Join(tmp, "failover_state.json"),
+		DefaultTimeout:     time.Second,
+		PollMaxTimeout:     time.Second,
+	}
+	s := New(cfg)
+	h := s.Handler()
+
+	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://203.0.113.10:25900"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	payload := []byte(`{"enabled":true,"fail_count_base":4,"nodes":[{"server_id":"shell:haos","rank":1,"enabled":true,"hub_url":"http://203.0.113.10:9001"},{"server_id":"shell:server-01","rank":2,"enabled":true}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/failover", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer ctl")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save failover status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(cfg.FailoverConfigFile); err != nil {
+		t.Fatalf("failover config not written: %v", err)
+	}
+	if _, err := os.Stat(cfg.FailoverStateFile); err != nil {
+		t.Fatalf("failover state not written: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/failover", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get failover status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	cfgMap := got["config"].(map[string]any)
+	if cfgMap["enabled"] != true || int(cfgMap["fail_count_base"].(float64)) != 4 {
+		t.Fatalf("bad failover config: %#v", cfgMap)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/failover/state", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("state status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "frp-secret") {
+		t.Fatalf("state without secrets leaked FRP token: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "shell:haos") || !strings.Contains(w.Body.String(), "u-test") {
+		t.Fatalf("state missing agent/tunnel fields: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/failover/state?secrets=1", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("state secrets status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "frp-secret") {
+		t.Fatalf("state with secrets missing FRP token: %s", w.Body.String())
+	}
+}
+
 func pkceChallenge(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(sum[:])

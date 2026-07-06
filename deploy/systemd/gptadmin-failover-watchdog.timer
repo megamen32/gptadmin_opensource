@@ -1,0 +1,12 @@
+[Unit]
+Description=Run GPTAdmin failover watchdog
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=15s
+AccuracySec=3s
+Persistent=true
+Unit=gptadmin-failover-watchdog.service
+
+[Install]
+WantedBy=timers.target

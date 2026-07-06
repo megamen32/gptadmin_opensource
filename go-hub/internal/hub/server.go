@@ -48,6 +48,8 @@ type Config struct {
 	AuthLogSecrets           bool
 	BridgeKey                string
 	RegistryStateFile        string
+	FailoverConfigFile       string
+	FailoverStateFile        string
 }
 
 func FromEnv() Config {
@@ -77,6 +79,8 @@ func FromEnv() Config {
 		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
 		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
 		RegistryStateFile:        env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
+		FailoverConfigFile:       env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
+		FailoverStateFile:        env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
 	}
 }
 
@@ -174,6 +178,7 @@ type Server struct {
 	shellJobs   map[string]*shellJob
 	oauthCodes  map[string]oauthCode
 	audit       []auditEvent
+	failover    FailoverConfig
 }
 
 func New(cfg Config) *Server {
@@ -191,6 +196,7 @@ func New(cfg Config) *Server {
 	if err := s.loadRegistryState(); err != nil {
 		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
 	}
+	s.failover = s.loadFailoverConfig()
 	return s
 }
 
@@ -337,6 +343,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
+	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
 	mux.HandleFunc("/admin/api/clients", s.requireCtl(s.adminClients))
@@ -785,6 +793,9 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if err := s.saveRegistryStateLocked(); err != nil {
 		log.Printf("registry state save failed: %v", err)
 	}
+	if err := s.saveFailoverStateBundleLocked(); err != nil {
+		log.Printf("failover state save failed: %v", err)
+	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
 }
@@ -905,6 +916,9 @@ func (s *Server) mcpRelayRegister(w http.ResponseWriter, r *http.Request) {
 	s.addAuditLocked("mcp_register", map[string]any{"agent_id": agentID, "kind": kind, "transport": transport})
 	if err := s.saveRegistryStateLocked(); err != nil {
 		log.Printf("registry state save failed: %v", err)
+	}
+	if err := s.saveFailoverStateBundleLocked(); err != nil {
+		log.Printf("failover state save failed: %v", err)
 	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
@@ -1430,7 +1444,7 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	jobs := s.adminJobsDataLocked()
 	audit := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath()}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
 }
 
 func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
@@ -1535,6 +1549,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+}
+
+func mcpToolResult(payload any) map[string]any {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		b = []byte(`{"error":"json encode failed"}`)
+	}
+	return map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": string(b)}},
+		"structuredContent": payload,
+	}
 }
 func firstString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
@@ -2074,7 +2099,7 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 
 func (s *Server) agentToolCall(agent Agent, name string, args map[string]any) (any, any) {
 	if agent.AgentID == "hub" {
-		return s.appsSDKCall(name, args), nil
+		return mcpToolResult(s.appsSDKCall(name, args)), nil
 	}
 	if strings.HasPrefix(agent.AgentID, "shell:") {
 		return unwrapMCPUpstream(s.callShellTool(agent.AgentID, name, args, false, s.cfg.DefaultTimeout))
@@ -2188,7 +2213,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			rpcErr = map[string]any{"code": -32602, "message": "tool name is required"}
 		} else {
-			result = s.appsSDKCall(name, args)
+			result = mcpToolResult(s.appsSDKCall(name, args))
 		}
 	case "resources/list":
 		result = appsSDKResourcesList()
