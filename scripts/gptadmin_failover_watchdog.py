@@ -140,7 +140,8 @@ def run(cmd: list[str], dry_run: bool) -> None:
 
 def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], node: dict[str, Any], dry_run: bool) -> None:
     local_port = int(node.get("local_hub_port") or ((bundle.get("tunnel") or {}).get("frp") or {}).get("local_port") or 9001)
-    run(["systemctl", "start", args.hub_service], dry_run)
+    if args.hub_service and args.hub_service != "none":
+        run(["systemctl", "start", args.hub_service], dry_run)
     text = build_frpc_config(bundle, local_port, args.node_id)
     if dry_run:
         print("DRY-RUN write", args.frpc_config)
@@ -152,7 +153,13 @@ def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any
         tmp.write_text(text)
         os.chmod(tmp, 0o600)
         tmp.replace(p)
-    run(["systemctl", "restart", args.frpc_service], dry_run)
+    if args.frpc_service and args.frpc_service != "none":
+        run(["systemctl", "restart", args.frpc_service], dry_run)
+    else:
+        if dry_run:
+            print("DRY-RUN", args.frpc_bin, "-c", args.frpc_config)
+        else:
+            subprocess.Popen([args.frpc_bin, "-c", args.frpc_config], start_new_session=True)
 
 
 def check_once(args: argparse.Namespace) -> int:
@@ -223,6 +230,7 @@ def main() -> int:
     ap.add_argument("--hub-service", default=os.environ.get("GPTADMIN_FAILOVER_HUB_SERVICE", "gptadmin-hub.service"))
     ap.add_argument("--frpc-service", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_SERVICE", DEFAULT_SERVICE))
     ap.add_argument("--frpc-config", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_CONFIG", DEFAULT_FRPC))
+    ap.add_argument("--frpc-bin", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_BIN", "/opt/gptadmin/bin/frpc"))
     ap.add_argument("--check-once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
