@@ -237,7 +237,7 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 	s := New(cfg)
 	h := s.Handler()
 
-	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://203.0.113.10:25900"}}`)
+	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://203.0.113.10:25900","args":["--header","Authorization: Bearer should-not-leak"],"api_key":"should-not-leak-key"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
 	req.Header.Set("Authorization", "Bearer relay")
 	w := httptest.NewRecorder()
@@ -284,8 +284,8 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("state status=%d body=%s", w.Code, w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), "frp-secret") {
-		t.Fatalf("state without secrets leaked FRP token: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), "frp-secret") || strings.Contains(w.Body.String(), "should-not-leak") {
+		t.Fatalf("state without secrets leaked token material: %s", w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "shell:haos") || !strings.Contains(w.Body.String(), "u-test") {
 		t.Fatalf("state missing agent/tunnel fields: %s", w.Body.String())
@@ -300,6 +300,9 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "frp-secret") {
 		t.Fatalf("state with secrets missing FRP token: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "should-not-leak") {
+		t.Fatalf("state with secrets leaked agent meta token material: %s", w.Body.String())
 	}
 }
 

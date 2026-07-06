@@ -159,7 +159,7 @@ func (s *Server) failoverStateBundleLocked(includeSecrets bool) map[string]any {
 			continue
 		}
 		cp := *agent
-		cp.Meta = cloneMap(cp.Meta)
+		cp.Meta = sanitizeFailoverMeta(cp.Meta)
 		agents[id] = cp
 	}
 	frp := map[string]any{
@@ -306,4 +306,59 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func sanitizeFailoverMeta(meta map[string]any) map[string]any {
+	out := make(map[string]any, len(meta))
+	for k, v := range meta {
+		out[k] = sanitizeFailoverValue(k, v)
+	}
+	return out
+}
+
+func sanitizeFailoverValue(key string, value any) any {
+	lk := strings.ToLower(key)
+	if strings.Contains(lk, "token") || strings.Contains(lk, "secret") || strings.Contains(lk, "password") || strings.Contains(lk, "authorization") || strings.Contains(lk, "bearer") || strings.Contains(lk, "key") {
+		if value == nil || value == "" {
+			return value
+		}
+		return "<MASKED>"
+	}
+	switch v := value.(type) {
+	case string:
+		if strings.Contains(strings.ToLower(v), "bearer ") || strings.Contains(strings.ToLower(v), "authorization:") {
+			return maskBearerString(v)
+		}
+		return v
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeFailoverValue(key, item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(v))
+		for i, item := range v {
+			out[i] = maskBearerString(item)
+		}
+		return out
+	case map[string]any:
+		return sanitizeFailoverMeta(v)
+	default:
+		return v
+	}
+}
+
+func maskBearerString(v string) string {
+	parts := strings.Fields(v)
+	for i := 0; i < len(parts); i++ {
+		if strings.EqualFold(parts[i], "Bearer") && i+1 < len(parts) {
+			parts[i+1] = "<MASKED>"
+		}
+	}
+	masked := strings.Join(parts, " ")
+	if strings.Contains(strings.ToLower(masked), "authorization:") && !strings.Contains(masked, "<MASKED>") {
+		return "Authorization: Bearer <MASKED>"
+	}
+	return masked
 }
