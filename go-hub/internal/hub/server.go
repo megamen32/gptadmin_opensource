@@ -29,27 +29,28 @@ var BuildVersion = "go-dev"
 var GitCommit = "worktree"
 
 type Config struct {
-	Addr                     string
-	ConfigDir                string
-	PublicDir                string
-	ArtifactDir              string
-	CtlToken                 string
-	RelayAgentToken          string
-	ShellToken               string
-	DefaultTimeout           time.Duration
-	PollMaxTimeout           time.Duration
-	OutputDir                string
-	PublicOrigin             string
-	MCPResource              string
-	AdminPassword            string
-	OAuthClientSecret        string
-	OAuthPermissiveRedirects bool
-	OAuthPermissiveResources bool
-	AuthLogSecrets           bool
-	BridgeKey                string
-	RegistryStateFile        string
-	FailoverConfigFile       string
-	FailoverStateFile        string
+	Addr                       string
+	ConfigDir                  string
+	PublicDir                  string
+	ArtifactDir                string
+	CtlToken                   string
+	RelayAgentToken            string
+	ShellToken                 string
+	DefaultTimeout             time.Duration
+	PollMaxTimeout             time.Duration
+	OutputDir                  string
+	PublicOrigin               string
+	MCPResource                string
+	AdminPassword              string
+	OAuthClientSecret          string
+	OAuthPermissiveRedirects   bool
+	OAuthPermissiveResources   bool
+	AuthLogSecrets             bool
+	BridgeKey                  string
+	RegistryStateFile          string
+	FailoverConfigFile         string
+	FailoverStateFile          string
+	FailoverReclaimCommandFile string
 }
 
 func FromEnv() Config {
@@ -60,27 +61,28 @@ func FromEnv() Config {
 	defTimeout := secondsEnv("MCP_RELAY_DEFAULT_TIMEOUT", 30)
 	pollTimeout := secondsEnv("MCP_RELAY_POLL_MAX_TIMEOUT", 55)
 	return Config{
-		Addr:                     host + ":" + port,
-		ConfigDir:                cfgDir,
-		PublicDir:                env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
-		ArtifactDir:              env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
-		CtlToken:                 env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
-		RelayAgentToken:          env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
-		ShellToken:               env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
-		DefaultTimeout:           time.Duration(defTimeout) * time.Second,
-		PollMaxTimeout:           time.Duration(pollTimeout) * time.Second,
-		OutputDir:                env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
-		PublicOrigin:             strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
-		MCPResource:              strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
-		AdminPassword:            env("ADMIN_PASSWORD", ""),
-		OAuthClientSecret:        env("OAUTH_CLIENT_SECRET", env("ADMIN_PASSWORD", env("CTL_TOKEN", "gptadmin-dev-secret"))),
-		OAuthPermissiveRedirects: truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
-		OAuthPermissiveResources: truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
-		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
-		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
-		RegistryStateFile:        env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
-		FailoverConfigFile:       env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
-		FailoverStateFile:        env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
+		Addr:                       host + ":" + port,
+		ConfigDir:                  cfgDir,
+		PublicDir:                  env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
+		ArtifactDir:                env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
+		CtlToken:                   env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
+		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
+		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
+		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
+		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
+		OutputDir:                  env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
+		PublicOrigin:               strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
+		MCPResource:                strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
+		AdminPassword:              env("ADMIN_PASSWORD", ""),
+		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", env("ADMIN_PASSWORD", env("CTL_TOKEN", "gptadmin-dev-secret"))),
+		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
+		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
+		AuthLogSecrets:             truthyString(env("AUTH_LOG_SECRETS", "0")),
+		BridgeKey:                  env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
+		RegistryStateFile:          env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
+		FailoverConfigFile:         env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
+		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
+		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
 	}
 }
 
@@ -344,6 +346,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
 	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
+	mux.HandleFunc("/admin/api/failover/reclaim/accept", s.adminFailoverReclaimAccept)
 	mux.HandleFunc("/admin/api/failover/reclaim", s.requireCtl(s.adminFailoverReclaim))
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))

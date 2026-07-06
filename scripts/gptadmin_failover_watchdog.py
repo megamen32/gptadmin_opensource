@@ -28,6 +28,7 @@ DEFAULT_STATE = "/etc/gptadmin/failover_state.json"
 DEFAULT_RUNTIME = "/var/lib/gptadmin/failover_watchdog_state.json"
 DEFAULT_FRPC = "/etc/gptadmin/frpc-failover.toml"
 DEFAULT_FRPC_PID = "/var/lib/gptadmin/failover_frpc.pid"
+DEFAULT_RECLAIM_COMMAND = "/var/lib/gptadmin/failover_reclaim_command.json"
 DEFAULT_SERVICE = "gptadmin-failover-frpc.service"
 
 
@@ -173,15 +174,11 @@ def sign_reclaim(secret: str, text: str) -> str:
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
-def fetch_verified_reclaim(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any] | None:
-    url = str(cfg.get("primary_reclaim_url") or "")
-    if not url:
+def load_verified_reclaim_command(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any] | None:
+    path = Path(args.reclaim_command_file)
+    if not path.exists():
         return None
-    sep = "&" if "?" in url else "?"
-    url = url + sep + "node_id=" + urllib.parse.quote(args.node_id, safe="")
-    timeout = float(cfg.get("public_confirm_timeout_sec") or 3)
-    token = str((bundle.get("secrets") or {}).get("ctl_token") or "")
-    payload = http_json(url, timeout, token)
+    payload = load_json(str(path), {})
     if not payload or payload.get("action") != "demote" or payload.get("node_id") != args.node_id:
         return None
     secret = reclaim_secret(bundle)
@@ -195,10 +192,18 @@ def fetch_verified_reclaim(args: argparse.Namespace, cfg: dict[str, Any], bundle
     now = int(time.time())
     max_age = int(cfg.get("reclaim_max_age_sec") or 120)
     if issued_at > now + 30 or expires_at < now or now - issued_at > max_age:
+        try:
+            path.rename(path.with_suffix(path.suffix + f".expired.{now}"))
+        except OSError:
+            pass
         return None
     nonce = str(payload.get("nonce") or "")
     seen = list(runtime.get("reclaim_nonces") or [])[-64:]
     if not nonce or nonce in seen:
+        try:
+            path.unlink()
+        except OSError:
+            pass
         return None
     primary_health_url = str(payload.get("primary_health_url") or "")
     text = reclaim_sig_input("demote", args.node_id, nonce, issued_at, expires_at, primary_health_url)
@@ -206,6 +211,13 @@ def fetch_verified_reclaim(args: argparse.Namespace, cfg: dict[str, Any], bundle
     if not hmac.compare_digest(expected, str(payload.get("signature") or "")):
         return None
     runtime["reclaim_nonces"] = (seen + [nonce])[-64:]
+    try:
+        path.rename(path.with_suffix(path.suffix + f".handled.{nonce}"))
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
     return payload
 
 
@@ -270,7 +282,7 @@ def check_once(args: argparse.Namespace) -> int:
     runtime.setdefault("last_promotion_at", 0)
     runtime["last_check_at"] = time.time()
 
-    reclaim = fetch_verified_reclaim(args, cfg, bundle, runtime)
+    reclaim = load_verified_reclaim_command(args, cfg, bundle, runtime)
     if reclaim:
         demote(args, runtime, args.dry_run)
         runtime["fail_count"] = 0
@@ -339,6 +351,7 @@ def main() -> int:
     ap.add_argument("--frpc-config", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_CONFIG", DEFAULT_FRPC))
     ap.add_argument("--frpc-bin", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_BIN", "/opt/gptadmin/bin/frpc"))
     ap.add_argument("--frpc-pid-file", default=os.environ.get("GPTADMIN_FAILOVER_FRPC_PID_FILE", DEFAULT_FRPC_PID))
+    ap.add_argument("--reclaim-command-file", default=os.environ.get("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", DEFAULT_RECLAIM_COMMAND))
     ap.add_argument("--check-once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

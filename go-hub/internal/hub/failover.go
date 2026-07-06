@@ -30,6 +30,7 @@ type FailoverConfig struct {
 	PrimaryPublicURL         string         `json:"primary_public_url,omitempty"`
 	PrimaryHealthURL         string         `json:"primary_health_url,omitempty"`
 	PrimaryReclaimURL        string         `json:"primary_reclaim_url,omitempty"`
+	PrimaryReclaimAcceptURL  string         `json:"primary_reclaim_accept_url,omitempty"`
 	StateURL                 string         `json:"state_url,omitempty"`
 	ReclaimMaxAgeSec         int            `json:"reclaim_max_age_sec,omitempty"`
 	CheckIntervalSec         int            `json:"check_interval_sec"`
@@ -61,6 +62,16 @@ func (s *Server) failoverStatePath() string {
 	return filepath.Join(s.cfg.ConfigDir, "failover_state.json")
 }
 
+func (s *Server) failoverReclaimCommandPath() string {
+	if s.cfg.FailoverReclaimCommandFile != "" {
+		return s.cfg.FailoverReclaimCommandFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "failover_reclaim_command.json")
+}
+
 func (s *Server) defaultFailoverConfig() FailoverConfig {
 	publicURL := firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin, s.cfg.MCPResource)
 	return FailoverConfig{
@@ -68,6 +79,7 @@ func (s *Server) defaultFailoverConfig() FailoverConfig {
 		PrimaryPublicURL:         strings.TrimRight(publicURL, "/"),
 		PrimaryHealthURL:         firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_HEALTH_URL"), "http://127.0.0.1:9001/healthz"),
 		PrimaryReclaimURL:        firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_RECLAIM_URL"), strings.TrimRight(publicURL, "/")+"/admin/api/failover/reclaim"),
+		PrimaryReclaimAcceptURL:  firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_RECLAIM_ACCEPT_URL"), strings.TrimRight(publicURL, "/")+"/admin/api/failover/reclaim/accept"),
 		StateURL:                 strings.TrimRight(publicURL, "/") + "/admin/api/failover/state?secrets=1",
 		ReclaimMaxAgeSec:         120,
 		CheckIntervalSec:         15,
@@ -93,6 +105,9 @@ func (s *Server) normalizeFailoverConfig(cfg FailoverConfig) FailoverConfig {
 	}
 	if cfg.PrimaryReclaimURL == "" && cfg.PrimaryPublicURL != "" {
 		cfg.PrimaryReclaimURL = cfg.PrimaryPublicURL + "/admin/api/failover/reclaim"
+	}
+	if cfg.PrimaryReclaimAcceptURL == "" && cfg.PrimaryPublicURL != "" {
+		cfg.PrimaryReclaimAcceptURL = cfg.PrimaryPublicURL + "/admin/api/failover/reclaim/accept"
 	}
 	if cfg.ReclaimMaxAgeSec <= 0 {
 		cfg.ReclaimMaxAgeSec = def.ReclaimMaxAgeSec
@@ -299,6 +314,102 @@ func signFailoverReclaim(secret, input string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+func (s *Server) adminFailoverReclaimAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var payload map[string]any
+	if err := readJSON(r, &payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	action := strings.TrimSpace(fmt.Sprint(payload["action"]))
+	nodeID := strings.TrimSpace(fmt.Sprint(payload["node_id"]))
+	nonce := strings.TrimSpace(fmt.Sprint(payload["nonce"]))
+	primaryHealthURL := strings.TrimSpace(fmt.Sprint(payload["primary_health_url"]))
+	sig := strings.TrimSpace(fmt.Sprint(payload["signature"]))
+	issuedAt, ok1 := int64FromAny(payload["issued_at"])
+	expiresAt, ok2 := int64FromAny(payload["expires_at"])
+	if action != "demote" || nodeID == "" || nonce == "" || sig == "" || !ok1 || !ok2 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "invalid reclaim payload"})
+		return
+	}
+	now := time.Now().Unix()
+	if issuedAt > now+30 || expiresAt < now || expiresAt-issuedAt > 600 {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "detail": "expired or invalid reclaim window"})
+		return
+	}
+	secret := firstNonEmpty(os.Getenv("MCP_BRIDGE_KEY"), os.Getenv("CTL_TOKEN"))
+	if secret == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": "failover reclaim signing key is not configured"})
+		return
+	}
+	expected := signFailoverReclaim(secret, failoverReclaimSigInput(action, nodeID, nonce, issuedAt, expiresAt, primaryHealthURL))
+	if !hmac.Equal([]byte(expected), []byte(sig)) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "detail": "bad signature"})
+		return
+	}
+	configuredNodeID := strings.TrimSpace(os.Getenv("GPTADMIN_FAILOVER_NODE_ID"))
+	if configuredNodeID == "" || configuredNodeID != nodeID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": false, "reason": "not_this_node", "configured_node_id": configuredNodeID, "node_id": nodeID})
+		return
+	}
+	cmdPath := s.failoverReclaimCommandPath()
+	if cmdPath == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": "reclaim command path is not configured"})
+		return
+	}
+	payload["received_at"] = now
+	payload["accepted_by"] = configuredNodeID
+	if err := writeJSONFile0600(cmdPath, payload); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
+		return
+	}
+	s.mu.Lock()
+	s.addAuditLocked("failover_reclaim_accepted", map[string]any{"node_id": nodeID, "nonce": nonce})
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": true, "node_id": nodeID, "command_file": cmdPath})
+}
+
+func int64FromAny(v any) (int64, bool) {
+	switch t := v.(type) {
+	case int:
+		return int64(t), true
+	case int64:
+		return t, true
+	case float64:
+		return int64(t), true
+	case json.Number:
+		n, err := t.Int64()
+		return n, err == nil
+	case string:
+		var n int64
+		_, err := fmt.Sscanf(t, "%d", &n)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func writeJSONFile0600(path string, data any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func (s *Server) adminFailover(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -306,7 +417,7 @@ func (s *Server) adminFailover(w http.ResponseWriter, r *http.Request) {
 		cfg := s.failover
 		state := s.failoverStateBundleLocked(false)
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state": state, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath()}})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state": state, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath(), "reclaim_command": s.failoverReclaimCommandPath()}})
 	case http.MethodPost:
 		var raw map[string]any
 		if err := readJSON(r, &raw); err != nil {
@@ -334,7 +445,7 @@ func (s *Server) adminFailover(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "config_error": errString(err1), "state_error": errString(err2)})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath()}})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "state_files": map[string]any{"config": s.failoverConfigPath(), "state": s.failoverStatePath(), "reclaim_command": s.failoverReclaimCommandPath()}})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 	}
