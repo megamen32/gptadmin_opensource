@@ -485,3 +485,94 @@ func TestAgentFacadeProxiesPinnedRelayAgent(t *testing.T) {
 		t.Fatalf("agent facade did not return upstream tools: %s", w.Body.String())
 	}
 }
+
+func TestAppsSDKMetadataAndWidget(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", AdminPassword: "pw", OAuthClientSecret: "oauth-secret", PublicOrigin: "https://hub.example", MCPResource: "https://hub.example", OAuthPermissiveRedirects: true, OAuthPermissiveResources: true, DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	h := s.Handler()
+
+	token, err := s.signJWT(map[string]any{"sub": "admin", "aud": "https://hub.example", "resource": "https://hub.example", "scope": "gptadmin.read gptadmin.exec", "client_id": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("tools/list status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	result := body["result"].(map[string]any)
+	tools := result["tools"].([]any)
+	renderTools := 0
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		meta := tool["_meta"].(map[string]any)
+		if _, ok := tool["outputSchema"]; !ok {
+			t.Fatalf("tool %s missing outputSchema", tool["name"])
+		}
+		if _, ok := tool["securitySchemes"]; !ok {
+			t.Fatalf("tool %s missing securitySchemes", tool["name"])
+		}
+		if _, ok := meta["securitySchemes"]; !ok {
+			t.Fatalf("tool %s missing _meta.securitySchemes", tool["name"])
+		}
+		if tool["name"] == "render_gptadmin_dashboard" {
+			renderTools++
+			ui := meta["ui"].(map[string]any)
+			if meta["openai/widgetAccessible"] != true {
+				t.Fatalf("render tool is not widget-accessible")
+			}
+			if ui["resourceUri"] != "ui://widget/admin-v3.html" || meta["openai/outputTemplate"] != "ui://widget/admin-v3.html" {
+				t.Fatalf("render tool missing UI template metadata: %#v", meta)
+			}
+		} else {
+			if _, ok := meta["openai/outputTemplate"]; ok {
+				t.Fatalf("data tool %s must not attach outputTemplate", tool["name"])
+			}
+			if _, ok := meta["ui"]; ok {
+				t.Fatalf("data tool %s must not attach ui metadata", tool["name"])
+			}
+			if _, ok := meta["openai/widgetAccessible"]; ok {
+				t.Fatalf("data tool %s must not be widget-accessible", tool["name"])
+			}
+		}
+	}
+	if len(tools) != 5 {
+		t.Fatalf("got %d Apps SDK tools, want 5", len(tools))
+	}
+	if renderTools != 1 {
+		t.Fatalf("got %d render tools, want 1", renderTools)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"ui://widget/admin-v3.html"}}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("resources/read status=%d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	contents := body["result"].(map[string]any)["contents"].([]any)
+	content := contents[0].(map[string]any)
+	if content["mimeType"] != "text/html;profile=mcp-app" {
+		t.Fatalf("bad mime: %v", content["mimeType"])
+	}
+	htmlText := content["text"].(string)
+	for _, want := range []string{"GPTAdmin MCP", "ui/notifications/tool-result", "tools/call", "list_mcp_servers"} {
+		if !strings.Contains(htmlText, want) {
+			t.Fatalf("widget html missing %q", want)
+		}
+	}
+	meta := content["_meta"].(map[string]any)
+	ui := meta["ui"].(map[string]any)
+	if ui["domain"] == "" || ui["csp"] == nil || meta["openai/widgetCSP"] == nil {
+		t.Fatalf("resource missing widget metadata: %#v", meta)
+	}
+}

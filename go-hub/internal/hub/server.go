@@ -828,7 +828,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchShellPollLocked(name, r)
 	for {
+		s.touchShellPollLocked(name, r)
 		if q := s.shellQueues[name]; len(q) > 0 {
 			id := q[0]
 			s.shellQueues[name] = q[1:]
@@ -850,6 +852,55 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 	}
 }
 
+func (s *Server) touchShellPollLocked(name string, r *http.Request) {
+	if name == "" {
+		return
+	}
+	now := nowFloat()
+	agentID := "shell:" + name
+	mode := strings.TrimSpace(r.URL.Query().Get("mode"))
+	if mode == "" {
+		mode = "long_poll"
+	}
+	meta := map[string]any{
+		"mode":                  mode,
+		"transport_role":        firstNonEmpty(r.URL.Query().Get("transport_role"), "shellmcp_transport_layer"),
+		"backend":               firstNonEmpty(r.URL.Query().Get("backend"), "local"),
+		"poll_heartbeat":        true,
+		"heartbeat_best_effort": true,
+	}
+	for _, key := range []string{"server_id", "public_key", "fingerprint", "base_url", "os", "git_commit", "default_user", "default_home", "default_cwd"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+			meta[key] = v
+		}
+	}
+	for _, key := range []string{"cores", "mem_mb", "build_version"} {
+		if v := intFromString(r.URL.Query().Get(key)); v > 0 {
+			meta[key] = v
+		}
+	}
+	if a := s.agents[agentID]; a != nil {
+		a.Status = "online"
+		a.LastSeen = now
+		a.Transport = mode
+		if a.Meta == nil {
+			a.Meta = map[string]any{}
+		}
+		for k, v := range meta {
+			a.Meta[k] = v
+		}
+		return
+	}
+	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: mode, Status: "online", LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
+	s.addAuditLocked("queue_poll_register", map[string]any{"agent_id": agentID, "transport": mode})
+	if err := s.saveRegistryStateLocked(); err != nil {
+		log.Printf("registry state save failed: %v", err)
+	}
+	if err := s.saveFailoverStateBundleLocked(); err != nil {
+		log.Printf("failover state save failed: %v", err)
+	}
+}
+
 func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name string) {
 	var res struct {
 		ID     string `json:"id"`
@@ -861,6 +912,7 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	s.mu.Lock()
+	s.touchShellPollLocked(name, r)
 	job := s.shellJobs[res.ID]
 	if job == nil {
 		s.mu.Unlock()
@@ -1448,7 +1500,20 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	jobs := s.adminJobsDataLocked()
 	audit := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
+	hubPublicURL := firstNonEmpty(os.Getenv("HUB_PUBLIC_URL"), s.cfg.PublicOrigin, s.origin(r))
+	tunnel := map[string]any{
+		"mode":       os.Getenv("TUNNEL_MODE"),
+		"public_url": hubPublicURL,
+		"frp": map[string]any{
+			"enabled":       truthyString(os.Getenv("FRP_ENABLE")),
+			"domain":        os.Getenv("FRP_DOMAIN"),
+			"subdomain":     os.Getenv("FRP_SUBDOMAIN"),
+			"server_addr":   os.Getenv("FRP_SERVER_ADDR"),
+			"server_port":   os.Getenv("FRP_SERVER_PORT"),
+			"token_present": os.Getenv("FRP_TOKEN") != "",
+		},
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
 }
 
 func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
@@ -1623,6 +1688,11 @@ func timeoutFromReq(req map[string]any, def time.Duration) time.Duration {
 		return time.Duration(v) * time.Second
 	}
 	return def
+}
+
+func intFromString(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
 }
 
 func intFromAny(v any) int {
@@ -2297,6 +2367,17 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	switch name {
+	case "render_gptadmin_dashboard", "renderGptadminDashboard":
+		s.mu.Lock()
+		servers := s.publicServersLocked(nil)
+		s.mu.Unlock()
+		return map[string]any{
+			"status":       "ready",
+			"app":          "GPTAdmin MCP",
+			"server_count": len(servers),
+			"servers":      servers,
+			"hint":         "Interactive dashboard rendered. The widget can call list_mcp_servers, list_mcp_tools, call_mcp_tool, and get_mcp_job through the MCP Apps bridge.",
+		}
 	case "list_mcp_servers", "listMcpServers":
 		s.mu.Lock()
 		servers := s.publicServersLocked(nil)
@@ -2354,16 +2435,110 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 }
 
 func appsSDKTools() []map[string]any {
+	readScopes := []string{"gptadmin.read"}
+	execScopes := []string{"gptadmin.read", "gptadmin.exec"}
+	readSecurity := []map[string]any{{"type": "oauth2", "scopes": readScopes}}
+	execSecurity := []map[string]any{{"type": "oauth2", "scopes": execScopes}}
+	readMeta := map[string]any{
+		"securitySchemes":                readSecurity,
+		"openai/toolInvocation/invoking": "Loading…",
+		"openai/toolInvocation/invoked":  "Loaded.",
+	}
+	execMeta := map[string]any{
+		"securitySchemes":                execSecurity,
+		"openai/toolInvocation/invoking": "Running…",
+		"openai/toolInvocation/invoked":  "Done.",
+	}
+	renderMeta := map[string]any{
+		"securitySchemes":                readSecurity,
+		"ui":                             map[string]any{"resourceUri": "ui://widget/admin-v3.html", "visibility": []string{"model", "app"}},
+		"openai/outputTemplate":          "ui://widget/admin-v3.html",
+		"openai/widgetAccessible":        true,
+		"openai/toolInvocation/invoking": "Opening GPTAdmin…",
+		"openai/toolInvocation/invoked":  "GPTAdmin ready.",
+	}
 	return []map[string]any{
-		{"name": "list_mcp_servers", "title": "List servers", "description": "List real MCP servers, shell servers, and the internal hub.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
-		{"name": "list_mcp_tools", "title": "List tools", "description": "List tools for an explicit server target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}}},
-		{"name": "call_mcp_tool", "title": "Call tool", "description": "Call a tool on an explicit server target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool_name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}}, "required": []string{"target", "tool_name"}}},
-		{"name": "get_mcp_job", "title": "Get job", "description": "Read a queued/running/completed MCP job.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"job_id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}}, "required": []string{"job_id"}}},
+		{
+			"name":            "render_gptadmin_dashboard",
+			"title":           "Open GPTAdmin dashboard",
+			"description":     "Render the interactive GPTAdmin Apps SDK dashboard. Use this when the user asks to open AdminGpt/GPTAdmin UI or when an interactive server/tool console would help. This is the only render tool; data tools return structuredContent without a widget template.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"status": map[string]any{"type": "string"}, "app": map[string]any{"type": "string"}, "server_count": map[string]any{"type": "integer"}, "servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}, "hint": map[string]any{"type": "string"}}, "required": []string{"status", "app"}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           renderMeta,
+		},
+		{
+			"name":            "list_mcp_servers",
+			"title":           "List servers",
+			"description":     "List real MCP servers, shell servers, and the internal hub. Data-first tool: returns structuredContent only; call render_gptadmin_dashboard when an interactive UI is needed.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}}, "required": []string{"servers"}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "list_mcp_tools",
+			"title":           "List tools",
+			"description":     "List tools available on an explicitly selected GPTAdmin MCP target. Never use target=default; call list_mcp_servers first.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string", "description": "Explicit target/server_id/agent_id, for example shell:admin-server-100 or hub."}}, "required": []string{"target"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "additionalProperties": true}}, "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "call_mcp_tool",
+			"title":           "Call tool",
+			"description":     "Call exactly one tool on exactly one explicit GPTAdmin MCP target. For shell commands use target shell:<server>, tool_name shell_exec, and arguments {cmd,cwd?,timeout?}. This may execute commands or change remote systems.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool_name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}}, "required": []string{"target", "tool_name"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
+			"name":            "get_mcp_job",
+			"title":           "Get job",
+			"description":     "Read a queued, running, completed, or failed GPTAdmin MCP job by job_id. Use after background calls.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"job_id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}}, "required": []string{"job_id"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
 	}
 }
 
 func appsSDKResourcesList() map[string]any {
-	return map[string]any{"resources": []map[string]any{{"uri": "ui://widget/admin-v3.html", "name": "GPTAdmin dashboard widget", "mimeType": "text/html;profile=mcp-app"}, {"uri": "gptadmin://servers", "name": "GPTAdmin servers", "mimeType": "application/json"}}}
+	return map[string]any{"resources": []map[string]any{
+		{
+			"uri":         "ui://widget/admin-v3.html",
+			"name":        "GPTAdmin dashboard widget",
+			"title":       "GPTAdmin MCP",
+			"description": "Interactive GPTAdmin dashboard for servers, tools, shell commands, and jobs.",
+			"mimeType":    "text/html;profile=mcp-app",
+			"_meta":       appsSDKWidgetMeta(),
+		},
+		{"uri": "gptadmin://servers", "name": "GPTAdmin servers", "mimeType": "application/json"},
+	}}
+}
+
+func appsSDKWidgetMeta() map[string]any {
+	connectDomains := []string{"https://gptadmin.bezrabotnyi.com", "https://gptadminmcp.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}
+	resourceDomains := []string{"https://u-f1102930.t.gptadmin.bezrabotnyi.com", "https://gptadmin.bezrabotnyi.com", "https://persistent.oaistatic.com"}
+	return map[string]any{
+		"ui": map[string]any{
+			"domain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+			"prefersBorder": true,
+			"csp":           map[string]any{"connectDomains": connectDomains, "resourceDomains": resourceDomains},
+		},
+		"openai/widgetDescription":   "Interactive GPTAdmin dashboard for selecting MCP servers, listing tools, running calls, and polling jobs.",
+		"openai/widgetPrefersBorder": true,
+		"openai/widgetDomain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://gptadmin.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}},
+	}
 }
 
 func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
@@ -2374,8 +2549,59 @@ func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any
 		b, _ := json.Marshal(map[string]any{"servers": servers})
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
 	}
-	widget := `<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;padding:12px}.ok{color:#22c55e}</style></head><body><b class="ok">GPTAdmin Go Hub</b><p>Connected to ` + html.EscapeString(s.origin(r)) + `</p></body></html>`
-	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": widget}}}
+	if uri != "ui://widget/admin-v3.html" {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "unknown GPTAdmin resource"}}}
+	}
+	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": appsSDKWidgetHTML(s.origin(r)), "_meta": appsSDKWidgetMeta()}}}
+}
+
+func appsSDKWidgetHTML(origin string) string {
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPTAdmin MCP</title>
+<style>
+:root{color-scheme:dark;--bg:#070a12;--card:#0f1623;--card2:#111827;--line:#243244;--text:#dbeafe;--muted:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--bad:#fb7185;--accent:#8b5cf6;--accent2:#38bdf8}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#050711,#0b1020);color:var(--text);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:10px}.wrap{display:grid;gap:10px}.card{background:rgba(15,22,35,.95);border:1px solid var(--line);border-radius:14px;padding:12px;box-shadow:0 10px 30px rgba(0,0,0,.22)}.top{display:flex;align-items:center;gap:10px}.logo{font-weight:800;color:#fff;font-size:16px}.pill{font-size:11px;color:#c4b5fd;border:1px solid #4c1d95;background:#2e1065;border-radius:999px;padding:2px 8px}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(210px,.9fr) minmax(260px,1.1fr);gap:10px}@media(max-width:720px){.grid{grid-template-columns:1fr}}button,input,select,textarea{font:inherit}button{border:1px solid var(--line);background:#172033;color:var(--text);border-radius:9px;padding:7px 10px;cursor:pointer}button:hover{border-color:var(--accent2);color:white}button.primary{background:linear-gradient(135deg,#4f46e5,#7c3aed);border-color:#6d5dfc}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.stack{display:grid;gap:8px}.list{display:grid;gap:6px;max-height:310px;overflow:auto}.item{border:1px solid var(--line);background:var(--card2);border-radius:10px;padding:8px;cursor:pointer}.item:hover,.item.sel{border-color:var(--accent2)}.title{font-weight:700}.small{font-size:11px}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}input,select,textarea{width:100%;border:1px solid var(--line);background:#08111f;color:var(--text);border-radius:9px;padding:8px}textarea{min-height:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;resize:vertical}.pre{white-space:pre-wrap;word-break:break-word;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#bfdbfe;background:#06101e;border:1px solid var(--line);border-radius:10px;padding:9px;max-height:260px;overflow:auto}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 8px}.dot{width:8px;height:8px;border-radius:99px;background:var(--ok);display:inline-block}.dot.w{background:var(--warn)}.dot.b{background:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card top"><span id="dot" class="dot"></span><div><div class="logo">GPTAdmin MCP</div><div id="status" class="muted small">loading...</div></div><span class="pill">Apps SDK</span><button id="refresh" style="margin-left:auto">Refresh</button></div>
+  <div class="grid">
+    <div class="card stack"><div class="row"><button id="serversBtn" class="primary">Servers</button></div><input id="filter" placeholder="filter servers..."><div id="servers" class="list"></div></div>
+    <div class="card stack"><div class="kv small"><div class="muted">Target</div><div id="target">—</div><div class="muted">Tools</div><div id="toolCount">—</div></div><select id="tool"></select><textarea id="args" spellcheck="false">{}</textarea><div class="row"><button id="listTools">List tools</button><button id="call" class="primary">Call tool</button><button id="poll" style="display:none">Poll job</button></div><div id="out" class="pre">Waiting for tool result...</div></div>
+  </div>
+</div>
+<script>
+(function(){
+var ORIGIN='` + html.EscapeString(origin) + `';
+var state={servers:[],target:'',tools:[],job_id:''};
+var seq=1,pending={};
+function el(id){return document.getElementById(id)}
+function setStatus(t,k){el('status').textContent=t;el('dot').className='dot'+(k==='w'?' w':k==='b'?' b':'')}
+function redact(v){var re=/(token|secret|password|authorization|bearer|api[_-]?key|jwt)/i;if(Array.isArray(v))return v.map(redact);if(v&&typeof v==='object'){var o={};Object.keys(v).forEach(function(k){o[k]=re.test(k)?'***':redact(v[k])});return o}if(typeof v==='string'&&/Bearer\s+/.test(v))return v.replace(/Bearer\s+\S+/g,'Bearer ***');return v}
+function pretty(v){try{return JSON.stringify(redact(v),null,2)}catch(e){return String(v)}}
+function show(v){el('out').textContent=pretty(v);var j=v&&((v.structuredContent&&v.structuredContent.job_id)||v.job_id||(v.response&&v.response.job_id));if(j){state.job_id=j;el('poll').style.display='inline-block'}}
+function resize(){try{if(window.openai&&window.openai.notifyIntrinsicHeight)window.openai.notifyIntrinsicHeight(Math.min(document.body.scrollHeight+8,760))}catch(e){}}
+function rpc(method,params){return new Promise(function(resolve,reject){var id=seq++;pending[id]={resolve:resolve,reject:reject};window.parent.postMessage({jsonrpc:'2.0',id:id,method:method,params:params||{}},'*');setTimeout(function(){if(pending[id]){delete pending[id];reject(new Error('MCP Apps bridge timeout'))}},30000)})}
+window.addEventListener('message',function(event){if(event.source!==window.parent)return;var m=event.data||{};if(m.id&&pending[m.id]){var p=pending[m.id];delete pending[m.id];if(m.error)p.reject(m.error);else p.resolve(m.result);return}if(m.jsonrpc==='2.0'&&m.method==='ui/notifications/tool-result'){show(m.params||{});setStatus('tool result','');resize()}if(m.jsonrpc==='2.0'&&m.method==='ui/notifications/tool-input'){setStatus('tool input','w')}});
+async function callTool(name,args){setStatus('calling '+name+'...','w');var r;if(window.openai&&window.openai.callTool){r=await window.openai.callTool(name,args||{})}else{r=await rpc('tools/call',{name:name,arguments:args||{}})}var sc=(r&&r.structuredContent)||r;show(sc);setStatus('ready','');resize();return sc}
+function normalizeResult(r,key){if(!r)return[];if(r[key])return r[key];if(r.structuredContent&&r.structuredContent[key])return r.structuredContent[key];if(r.response&&r.response[key])return r.response[key];return[]}
+function renderServers(items){var q=el('filter').value.toLowerCase();var box=el('servers');box.innerHTML='';items.filter(function(a){return !q||pretty(a).toLowerCase().indexOf(q)>=0}).forEach(function(a){var id=a.agent_id||a.server_id||a.id||'';var d=document.createElement('div');d.className='item'+(id===state.target?' sel':'');d.innerHTML='<div class="title">'+id.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div><div class="small muted">'+(a.status||'')+' · '+(a.kind||'')+' · '+(a.name||'')+'</div>';d.onclick=function(){state.target=id;el('target').textContent=id;renderServers(items);listTools()};box.appendChild(d)});resize()}
+async function loadServers(){var r=await callTool('list_mcp_servers',{});state.servers=normalizeResult(r,'servers');renderServers(state.servers);return state.servers}
+async function listTools(){if(!state.target){setStatus('choose target','w');return}var r=await callTool('list_mcp_tools',{target:state.target});var tools=normalizeResult(r.response||r,'tools');state.tools=tools;el('toolCount').textContent=String(tools.length);var sel=el('tool');sel.innerHTML='';tools.forEach(function(t){var o=document.createElement('option');o.value=t.name;o.textContent=t.name+(t.description?' — '+t.description.slice(0,80):'');sel.appendChild(o)});if(tools.length){sel.value=tools[0].name;fillArgs()}resize()}
+function fillArgs(){var name=el('tool').value;if(name==='shell_exec')el('args').value=JSON.stringify({cmd:'pwd',cwd:null,timeout:30},null,2);else el('args').value='{}'}
+async function callSelected(){if(!state.target){setStatus('choose target','w');return}var args={};try{args=JSON.parse(el('args').value||'{}')}catch(e){setStatus('bad JSON: '+e.message,'b');return}await callTool('call_mcp_tool',{target:state.target,tool_name:el('tool').value,arguments:args})}
+async function poll(){if(!state.job_id){setStatus('no job','w');return}await callTool('get_mcp_job',{job_id:state.job_id,ack:false})}
+el('refresh').onclick=loadServers;el('serversBtn').onclick=loadServers;el('filter').oninput=function(){renderServers(state.servers)};el('listTools').onclick=listTools;el('call').onclick=callSelected;el('poll').onclick=poll;el('tool').onchange=fillArgs;
+try{setStatus('ready at '+ORIGIN,'');var initial=(window.openai&&(window.openai.toolOutput||window.openai.toolResponseMetadata));if(initial)show(initial);loadServers().catch(function(e){setStatus(String(e.message||e),'b');show({error:String(e.message||e)})})}catch(e){setStatus(String(e),'b');show({error:String(e)})}
+})();
+</script>
+</body>
+</html>`
 }
 
 func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, error) {
