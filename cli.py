@@ -537,7 +537,7 @@ if IS_MACOS:
     def _wrapper_script(name: str, bin_path: Path) -> Path:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = BIN_DIR / f'run_{name}.sh'
-        if name == 'shellmcp':
+        if name == 'shellmcp' and not _binary_looks_native(bin_path):
             exec_line = f'PYTHONPATH={INSTALL_DIR}/client${{PYTHONPATH:+:$PYTHONPATH}} exec {_mac_python()} {bin_path}'
         else:
             exec_line = f'exec {bin_path}'
@@ -603,9 +603,16 @@ if IS_MACOS:
         _launchctl_capture(['launchctl', 'bootout', domain, str(unit_path)])
         run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False, timeout=10)
         run(['launchctl', 'enable', _launchd_service_target(label)], check=False, timeout=10)
-        # kickstart can block for long-running LaunchAgents on some macOS versions;
-        # bootstrap already starts the job, so keep this as a short best-effort nudge.
-        run(['launchctl', 'kickstart', '-k', _launchd_service_target(label)], check=False, timeout=int(os.environ.get('GPTADMIN_LAUNCHCTL_KICKSTART_TIMEOUT', '2')))
+        # kickstart can block for long-running LaunchAgents on some macOS versions.
+        # bootstrap already starts the job; keep kickstart as silent best-effort only.
+        try:
+            subprocess.run(
+                ['launchctl', 'kickstart', '-k', _launchd_service_target(label)],
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=int(os.environ.get('GPTADMIN_LAUNCHCTL_KICKSTART_TIMEOUT', '2')),
+            )
+        except subprocess.TimeoutExpired:
+            pass
         if not _launchd_is_loaded(label):
             run(['launchctl', 'load', '-w', str(unit_path)], check=False)
         if not _launchd_is_loaded(label):
@@ -669,15 +676,18 @@ if IS_MACOS:
             if not path.exists():
                 print(f'  {c_bold(label):<40} {c_red("● missing")}')
                 continue
-            r = run(['launchctl', 'list', label], check=False)
+            r = _launchctl_capture(['launchctl', 'list', label])
             out = r.stdout or ''
             pid = '0'
-            status = 'unknown'
+            status = 'not loaded' if r.returncode != 0 else 'unknown'
             for line in out.splitlines():
-                if line.startswith('\t"PID"'):
-                    pid = line.split('=')[-1].strip().rstrip(';')
-                elif line.startswith('\t"state"'):
-                    status = line.split('=')[-1].strip().strip('"').rstrip(';')
+                stripped = line.strip()
+                if stripped.startswith('"PID"'):
+                    pid = stripped.split('=')[-1].strip().rstrip(';')
+                elif stripped.startswith('"state"'):
+                    status = stripped.split('=')[-1].strip().strip('"').rstrip(';')
+            if status == 'unknown' and pid not in ('', '0'):
+                status = 'running'
             if status == 'running':
                 status_str = c_green('● running')
             elif status in ('exited',):
@@ -1278,16 +1288,25 @@ def configure_shellmcp_transport(env: dict, install_hub: bool, install_shellmcp:
     hub = env['HUB_URL'].rstrip('/')
     if ch == '2':
         env['SHELLMCP_TRANSPORT'] = 'webhook'
+        env['SHELLMCP_QUEUE'] = '0'
+        env['SHELLMCP_HEARTBEAT'] = '1'
+        env['HB_INTERVAL_S'] = '3600'
         env.pop('QUEUE_URL', None)
         shellmcp_url_default = env.get('SHELLMCP_URL') or f"http://{first_ip()}:{env.get('SHELLMCP_PORT', '25900')}"
         env['SHELLMCP_URL'] = ask('Введите SHELLMCP_URL, доступный хабу', shellmcp_url_default)
     elif ch == '3':
         env['SHELLMCP_TRANSPORT'] = 'websocket'
+        env['SHELLMCP_QUEUE'] = '0'
+        env['SHELLMCP_HEARTBEAT'] = '1'
+        env['HB_INTERVAL_S'] = '3600'
         env.pop('QUEUE_URL', None)
         env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/shellmcp'
         env['SHELLMCP_URL'] = ''
     else:
         env['SHELLMCP_TRANSPORT'] = 'polling'
+        env['SHELLMCP_QUEUE'] = '1'
+        env['SHELLMCP_HEARTBEAT'] = '0'
+        env['HB_INTERVAL_S'] = '3600'
         env['QUEUE_URL'] = hub + '/queue'
         env['SHELLMCP_URL'] = ''
         env.setdefault('SHELLMCP_BIND', '127.0.0.1')
@@ -1303,15 +1322,24 @@ def configure_shellmcp_transport_noninteractive(env: dict, transport: str | None
         die('HUB_URL is required for non-interactive ShellMCP transport setup')
     if transport == 'webhook':
         env['SHELLMCP_TRANSPORT'] = 'webhook'
+        env['SHELLMCP_QUEUE'] = '0'
+        env['SHELLMCP_HEARTBEAT'] = '1'
+        env['HB_INTERVAL_S'] = '3600'
         env.pop('QUEUE_URL', None)
         env.setdefault('SHELLMCP_URL', f"http://{first_ip()}:{env.get('SHELLMCP_PORT', '25900')}")
     elif transport == 'websocket':
         env['SHELLMCP_TRANSPORT'] = 'websocket'
+        env['SHELLMCP_QUEUE'] = '0'
+        env['SHELLMCP_HEARTBEAT'] = '1'
+        env['HB_INTERVAL_S'] = '3600'
         env.pop('QUEUE_URL', None)
         env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/shellmcp'
         env['SHELLMCP_URL'] = ''
     elif transport == 'polling':
         env['SHELLMCP_TRANSPORT'] = 'polling'
+        env['SHELLMCP_QUEUE'] = '1'
+        env['SHELLMCP_HEARTBEAT'] = '0'
+        env['HB_INTERVAL_S'] = '3600'
         env['QUEUE_URL'] = hub + '/queue'
         env['SHELLMCP_URL'] = ''
         env.setdefault('SHELLMCP_BIND', '127.0.0.1')
@@ -1746,6 +1774,9 @@ def setup_interactive(args):
             local_hub = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
             env['HUB_URL'] = local_hub
             env['SHELLMCP_TRANSPORT'] = 'polling'
+            env['SHELLMCP_QUEUE'] = '1'
+            env['SHELLMCP_HEARTBEAT'] = '0'
+            env['HB_INTERVAL_S'] = '3600'
             env['QUEUE_URL'] = local_hub.rstrip('/') + '/queue'
             env['SHELLMCP_URL'] = ''
             env['SHELLMCP_UPDATE_MANIFEST_URL'] = public_url.rstrip('/') + '/artifacts/shellmcp.json'
@@ -2504,13 +2535,22 @@ def cmd_config_shellmcp(args):
         hub = env['HUB_URL'].rstrip('/')
         env['SHELLMCP_TRANSPORT'] = transport
         if transport == 'polling':
+            env['SHELLMCP_QUEUE'] = '1'
+            env['SHELLMCP_HEARTBEAT'] = '0'
+            env['HB_INTERVAL_S'] = '3600'
             env['QUEUE_URL'] = hub + '/queue'
             env['SHELLMCP_URL'] = ''
             env.setdefault('SHELLMCP_BIND', '127.0.0.1')
         elif transport == 'webhook':
+            env['SHELLMCP_QUEUE'] = '0'
+            env['SHELLMCP_HEARTBEAT'] = '1'
+            env['HB_INTERVAL_S'] = '3600'
             env.pop('QUEUE_URL', None)
             env['SHELLMCP_URL'] = args.shellmcp_url or env.get('SHELLMCP_URL') or f"http://{first_ip()}:{env.get('SHELLMCP_PORT', '25900')}"
         elif transport == 'websocket':
+            env['SHELLMCP_QUEUE'] = '0'
+            env['SHELLMCP_HEARTBEAT'] = '1'
+            env['HB_INTERVAL_S'] = '3600'
             env.pop('QUEUE_URL', None)
             env['WS_URL'] = hub.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/shellmcp'
             env['SHELLMCP_URL'] = ''

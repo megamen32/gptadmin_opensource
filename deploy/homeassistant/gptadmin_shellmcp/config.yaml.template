@@ -34,7 +34,7 @@ options:
   shell_token: "__SHELLMCP_TOKEN__"
   port: 25900
   queue: true
-  heartbeat: true
+  heartbeat: false
   default_cwd: "/config"
   exec_timeout: 300
   log_limit_b: 8192

@@ -55,7 +55,7 @@ func FromEnv() Config {
 	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))
 	name := env("SHELL_NAME", env("SHELLMCP_NAME", ""))
 	baseURL := env("SHELL_URL", env("SHELLMCP_URL", "http://127.0.0.1:"+port))
-	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "60"))
+	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "3600"))
 	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
 	mode := env("SHELL_MODE", env("SHELLMCP_MODE", ""))
 	if mode == "" {
@@ -69,7 +69,7 @@ func FromEnv() Config {
 	defaultUser := env("SHELL_DEFAULT_USER", env("SHELLMCP_DEFAULT_USER", ""))
 	defaultHome := env("SHELL_DEFAULT_HOME", env("SHELLMCP_DEFAULT_HOME", ""))
 	defaultCwd := env("SHELL_DEFAULT_CWD", env("SHELLMCP_DEFAULT_CWD", defaultHome))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: time.Duration(hbInt) * time.Second, QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
 }
 
 func env(k, d string) string {
@@ -78,6 +78,13 @@ func env(k, d string) string {
 	}
 	return d
 }
+func normalizeHeartbeatInterval(seconds int) time.Duration {
+	if seconds <= 0 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func truthy(v string) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
@@ -337,28 +344,36 @@ func (s *Server) sendHeartbeat(ctx context.Context) {
 	if s.hub == nil {
 		return
 	}
+	beat := s.newBeat()
+	beatCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	resp, body, err := s.hub.Heartbeat(beatCtx, beat)
+	if err != nil {
+		log.Printf("heartbeat best-effort failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("heartbeat best-effort HTTP %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+func (s *Server) newBeat() hub.Beat {
 	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, parseBuildVersion(BuildVersion))
 	beat.GitCommit = GitCommit
 	beat.DefaultUser = s.cfg.DefaultUser
 	beat.DefaultHome = s.cfg.DefaultHome
 	beat.DefaultCwd = s.cfg.DefaultCwd
-	resp, body, err := s.hub.Heartbeat(ctx, beat)
-	if err != nil {
-		log.Printf("heartbeat failed: %v", err)
-		return
-	}
-	resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("heartbeat HTTP %d: %s", resp.StatusCode, string(body))
-	}
+	return beat
 }
+
 func (s *Server) queueLoop(ctx context.Context) {
 	if s.hub == nil {
 		return
 	}
 	for {
 		s.flushOutbox(ctx)
-		q, ok, err := s.hub.PollQueue(ctx, s.cfg.Name, s.cfg.QueueTimeout)
+		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.cfg.QueueTimeout)
 		if err != nil {
 			log.Printf("queue poll failed: %v", err)
 			time.Sleep(5 * time.Second)

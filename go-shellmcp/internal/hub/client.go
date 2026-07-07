@@ -62,10 +62,60 @@ type TaskResult struct {
 func (c *Client) Heartbeat(ctx context.Context, beat Beat) (*http.Response, []byte, error) {
 	return c.doJSON(ctx, http.MethodPost, "/heartbeat", beat)
 }
-func (c *Client) PollQueue(ctx context.Context, name string, timeout int) (QueueJob, bool, error) {
+func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJob, bool, error) {
+	name := beat.Name
 	p := "/queue/" + url.PathEscape(name)
+	q := url.Values{}
 	if timeout > 0 {
-		p += fmt.Sprintf("?timeout=%d", timeout)
+		q.Set("timeout", fmt.Sprintf("%d", timeout))
+	}
+	if beat.ServerID != "" {
+		q.Set("server_id", beat.ServerID)
+	}
+	if beat.PublicKey != "" {
+		q.Set("public_key", beat.PublicKey)
+	}
+	if beat.Fingerprint != "" {
+		q.Set("fingerprint", beat.Fingerprint)
+	}
+	if beat.BaseURL != "" {
+		q.Set("base_url", beat.BaseURL)
+	}
+	if beat.Mode != "" {
+		q.Set("mode", beat.Mode)
+	}
+	if beat.TransportRole != "" {
+		q.Set("transport_role", beat.TransportRole)
+	}
+	if beat.Backend != "" {
+		q.Set("backend", beat.Backend)
+	}
+	if beat.OS != "" {
+		q.Set("os", beat.OS)
+	}
+	if beat.Cores > 0 {
+		q.Set("cores", fmt.Sprintf("%d", beat.Cores))
+	}
+	if beat.MemMB > 0 {
+		q.Set("mem_mb", fmt.Sprintf("%d", beat.MemMB))
+	}
+	if beat.BuildVersion > 0 {
+		q.Set("build_version", fmt.Sprintf("%d", beat.BuildVersion))
+	}
+	if beat.GitCommit != "" {
+		q.Set("git_commit", beat.GitCommit)
+	}
+	if beat.DefaultUser != "" {
+		q.Set("default_user", beat.DefaultUser)
+	}
+	if beat.DefaultHome != "" {
+		q.Set("default_home", beat.DefaultHome)
+	}
+	if beat.DefaultCwd != "" {
+		q.Set("default_cwd", beat.DefaultCwd)
+	}
+	if enc := q.Encode(); enc != "" {
+		p += "?" + enc
 	}
 	resp, body, err := c.do(ctx, http.MethodGet, p, nil)
 	if err != nil {

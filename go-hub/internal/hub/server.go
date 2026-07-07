@@ -2054,8 +2054,12 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown exposed MCP agent", "slug": slug})
 		return
 	}
-	if tail != "" && tail != "mcp" && tail != "card" && tail != "health" {
-		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown agent endpoint", "endpoint": tail})
+	if tail != "" && tail != "mcp" && tail != "card" && tail != "health" && !strings.HasPrefix(tail, "actions/") {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown server endpoint", "endpoint": tail})
+		return
+	}
+	if tail == "actions/openapi.yaml" || tail == "actions/openapi.yml" || tail == "actions/openapi.json" {
+		s.serverActionsOpenAPI(w, r, agent)
 		return
 	}
 	if !s.mcpAuth(w, r) {
@@ -2067,6 +2071,10 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	if tail == "health" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": agent.Status == "online" || agent.AgentID == "hub", "server_id": agent.AgentID, "status": agent.Status})
+		return
+	}
+	if strings.HasPrefix(tail, "actions/tools/") {
+		s.serverActionToolCall(w, r, agent, tail)
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -2118,6 +2126,237 @@ func (s *Server) agentCard(r *http.Request, agent Agent) map[string]any {
 		"tools_endpoint":      path,
 		"drop_in_replacement": true,
 	}
+}
+
+func (s *Server) serverActionsOpenAPI(w http.ResponseWriter, r *http.Request, agent Agent) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	result, rpcErr := s.agentToolsList(agent)
+	if rpcErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "failed to list MCP server tools", "server_id": agent.AgentID, "error": rpcErr})
+		return
+	}
+	tools := mcpToolsFromResult(result)
+	slug := agentSlug(agent.AgentID)
+	if slug == "" {
+		slug = agentSlug(agent.Name)
+	}
+	body := buildServerActionsOpenAPI(s.origin(r), slug, agent, tools)
+	ct := "application/yaml; charset=utf-8"
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		ct = "application/json; charset=utf-8"
+		body = buildServerActionsOpenAPIJSON(s.origin(r), slug, agent, tools)
+	}
+	b := []byte(body)
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
+func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, agent Agent, tail string) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	toolName, _ := url.PathUnescape(strings.TrimPrefix(tail, "actions/tools/"))
+	toolName = strings.Trim(toolName, "/")
+	if toolName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing tool name"})
+		return
+	}
+	args := map[string]any{}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := readJSON(r, &args); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	result, rpcErr := s.agentToolCall(agent, toolName, args)
+	if rpcErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "failed", "error": rpcErr})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "completed", "response": result})
+}
+
+func mcpToolsFromResult(v any) []map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := m["tools"]
+	if !ok {
+		return nil
+	}
+	switch items := raw.(type) {
+	case []map[string]any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if tool, ok := item.(map[string]any); ok {
+				out = append(out, tool)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func buildServerActionsOpenAPI(origin, slug string, agent Agent, tools []map[string]any) string {
+	var b strings.Builder
+	serverPath := "/server/" + slug + "/actions/tools/"
+	b.WriteString("openapi: 3.1.0\n")
+	b.WriteString("info:\n")
+	b.WriteString("  title: " + yamlQuote("GPTAdmin proxy for "+agent.Name) + "\n")
+	b.WriteString("  version: " + yamlQuote(BuildVersion) + "\n")
+	b.WriteString("  description: " + yamlQuote("OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: "+agent.AgentID) + "\n")
+	b.WriteString("servers:\n")
+	b.WriteString("  - url: " + yamlQuote(origin) + "\n")
+	b.WriteString("security:\n")
+	b.WriteString("  - bearerAuth: []\n")
+	b.WriteString("paths:\n")
+	if len(tools) == 0 {
+		b.WriteString("  {}\n")
+	} else {
+		used := map[string]int{}
+		for _, tool := range tools {
+			name := firstString(tool, "name")
+			if name == "" {
+				continue
+			}
+			opID := openAPIActionOperationID(name, used)
+			desc := firstString(tool, "description", "title")
+			if desc == "" {
+				desc = "Call MCP tool " + name
+			}
+			schema := openAPIActionInputSchema(tool)
+			b.WriteString("  " + yamlQuote(serverPath+url.PathEscape(name)) + ":\n")
+			b.WriteString("    post:\n")
+			b.WriteString("      operationId: " + yamlQuote(opID) + "\n")
+			b.WriteString("      summary: " + yamlQuote(name) + "\n")
+			b.WriteString("      description: " + yamlQuote(desc) + "\n")
+			b.WriteString("      requestBody:\n")
+			b.WriteString("        required: true\n")
+			b.WriteString("        content:\n")
+			b.WriteString("          application/json:\n")
+			b.WriteString("            schema: " + compactJSON(schema) + "\n")
+			b.WriteString("      responses:\n")
+			b.WriteString("        \"200\":\n")
+			b.WriteString("          description: MCP tool result\n")
+			b.WriteString("          content:\n")
+			b.WriteString("            application/json:\n")
+			b.WriteString("              schema: {\"type\":\"object\",\"additionalProperties\":true}\n")
+		}
+	}
+	b.WriteString("components:\n")
+	b.WriteString("  securitySchemes:\n")
+	b.WriteString("    bearerAuth:\n")
+	b.WriteString("      type: http\n")
+	b.WriteString("      scheme: bearer\n")
+	return b.String()
+}
+
+func buildServerActionsOpenAPIJSON(origin, slug string, agent Agent, tools []map[string]any) string {
+	paths := map[string]any{}
+	used := map[string]int{}
+	for _, tool := range tools {
+		name := firstString(tool, "name")
+		if name == "" {
+			continue
+		}
+		desc := firstString(tool, "description", "title")
+		if desc == "" {
+			desc = "Call MCP tool " + name
+		}
+		paths["/server/"+slug+"/actions/tools/"+url.PathEscape(name)] = map[string]any{"post": map[string]any{
+			"operationId": openAPIActionOperationID(name, used),
+			"summary":     name,
+			"description": desc,
+			"requestBody": map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": openAPIActionInputSchema(tool)}}},
+			"responses":   map[string]any{"200": map[string]any{"description": "MCP tool result", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "additionalProperties": true}}}}},
+		}}
+	}
+	payload := map[string]any{
+		"openapi":    "3.1.0",
+		"info":       map[string]any{"title": "GPTAdmin proxy for " + agent.Name, "version": BuildVersion, "description": "OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: " + agent.AgentID},
+		"servers":    []map[string]any{{"url": origin}},
+		"security":   []map[string]any{{"bearerAuth": []any{}}},
+		"paths":      paths,
+		"components": map[string]any{"securitySchemes": map[string]any{"bearerAuth": map[string]any{"type": "http", "scheme": "bearer"}}},
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "{}\n"
+	}
+	return string(b) + "\n"
+}
+
+func openAPIActionInputSchema(tool map[string]any) map[string]any {
+	if schema, ok := tool["inputSchema"].(map[string]any); ok && schema != nil {
+		return schema
+	}
+	if schema, ok := tool["input_schema"].(map[string]any); ok && schema != nil {
+		return schema
+	}
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": true}
+}
+
+func openAPIActionOperationID(name string, used map[string]int) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_-")
+	if out == "" {
+		out = "call_tool"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "call_" + out
+	}
+	used[out]++
+	if used[out] > 1 {
+		return out + "_" + strconv.Itoa(used[out])
+	}
+	return out
+}
+
+func yamlQuote(v string) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
+
+func compactJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"type":"object","additionalProperties":true}`
+	}
+	return string(b)
 }
 
 func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]any) (any, any, bool) {

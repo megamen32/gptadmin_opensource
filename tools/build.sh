@@ -378,7 +378,8 @@ archive_component_hub() {
 }
 archive_component_shellmcp() {
   step "Archive: gptadmin-shellmcp.tar.gz"
-  (cd "$ART_DIR" && tar -czf gptadmin-shellmcp.tar.gz.tmp.$$ shellmcp cli agents client && mv -f gptadmin-shellmcp.tar.gz.tmp.$$ gptadmin-shellmcp.tar.gz)
+  build_go_shellmcp_cross_platforms
+  (cd "$ART_DIR" && tar -czf gptadmin-shellmcp.tar.gz.tmp.$$ shellmcp go-shellmcp cli agents client && mv -f gptadmin-shellmcp.tar.gz.tmp.$$ gptadmin-shellmcp.tar.gz)
   sha256sum "$ART_DIR/gptadmin-shellmcp.tar.gz" > "$ART_DIR/gptadmin-shellmcp.sha256"
   python3 - <<PY
 import json, pathlib
@@ -416,6 +417,11 @@ make_platform_archive() {
     rm -rf "$tmp"; return 0
   fi
   for d in cli agents hub_source client; do [[ -d "$ART_DIR/$d" ]] && cp -a "$ART_DIR/$d" "$tmp/"; done
+  if [[ -d "$ART_DIR/go-shellmcp/${platform}_${arch}" ]]; then
+    mkdir -p "$tmp/go-shellmcp/${platform}_${arch}" "$tmp/shellmcp/${platform}_${arch}"
+    cp -a "$ART_DIR/go-shellmcp/${platform}_${arch}/." "$tmp/go-shellmcp/${platform}_${arch}/"
+    cp -a "$ART_DIR/go-shellmcp/${platform}_${arch}/." "$tmp/shellmcp/${platform}_${arch}/"
+  fi
   if [[ "$platform" == linux && -d "$ART_DIR/shellmcp" ]]; then cp -a "$ART_DIR/shellmcp" "$tmp/"; fi
   tar -C "$tmp" -czf "$ART_DIR/$out.tmp.$$" .
   mv -f "$ART_DIR/$out.tmp.$$" "$ART_DIR/$out"
@@ -428,6 +434,25 @@ archive_platforms() {
   make_platform_archive linux arm64 linux_arm64
   make_platform_archive darwin arm64 darwin_arm64
   make_platform_archive darwin amd64 darwin_amd64
+}
+
+build_go_shellmcp_cross_platforms() {
+  step "Cross-build Go ShellMCP platform binaries"
+  mkdir -p \
+    "$ART_DIR/go-shellmcp/linux_amd64" \
+    "$ART_DIR/go-shellmcp/linux_arm64" \
+    "$ART_DIR/go-shellmcp/darwin_amd64" \
+    "$ART_DIR/go-shellmcp/darwin_arm64"
+  pushd go-shellmcp > /dev/null
+  export CGO_ENABLED=0
+  GOOS=linux GOARCH=amd64 go build "${GO_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/linux_amd64/shellmcp-go" ./cmd/shellmcp-go
+  GOOS=linux GOARCH=arm64 go build "${GO_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/linux_arm64/shellmcp-go" ./cmd/shellmcp-go
+  GOOS=darwin GOARCH=amd64 go build "${GO_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/darwin_amd64/shellmcp-go" ./cmd/shellmcp-go
+  GOOS=darwin GOARCH=arm64 go build "${GO_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/darwin_arm64/shellmcp-go" ./cmd/shellmcp-go
+  popd > /dev/null
+  chmod 755 "$ART_DIR/go-shellmcp"/*/shellmcp-go
+  cp -a "$ART_DIR/go-shellmcp/." "$ART_DIR/shellmcp/"
+  find "$ART_DIR/go-shellmcp" "$ART_DIR/shellmcp" -maxdepth 2 -type f -name shellmcp-go -exec file {} \;
 }
 
 build_windows_shellmcp() {

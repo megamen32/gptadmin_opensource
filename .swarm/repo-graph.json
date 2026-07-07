@@ -1,0 +1,3434 @@
+{
+  "schema_version": "1.2.0",
+  "workspaceRoot": "/home/admin/gptadmin",
+  "nodes": {
+    "/home/admin/gptadmin/cli.py": {
+      "filePath": "/home/admin/gptadmin/cli.py",
+      "moduleName": "cli.py",
+      "exports": [
+        "c_green",
+        "c_red",
+        "c_yellow",
+        "c_cyan",
+        "c_dim",
+        "c_bold",
+        "c_mag",
+        "c_ok",
+        "c_err",
+        "c_warn",
+        "c_info",
+        "print_ok",
+        "print_err",
+        "print_warn",
+        "print_info",
+        "print_header",
+        "die",
+        "need_root",
+        "have",
+        "run",
+        "env_read",
+        "env_set_many",
+        "env_remove_keys",
+        "gen_hex",
+        "gen_subdomain",
+        "first_ip",
+        "ensure_https",
+        "download",
+        "extract_tgz",
+        "platform_pkg_url_default",
+        "install_component_from_pkg",
+        "svc_daemon_reload",
+        "svc_enable_start",
+        "svc_restart",
+        "svc_disable_stop",
+        "svc_status_multi",
+        "svc_start_multi",
+        "svc_stop_multi",
+        "svc_logs_one",
+        "svc_logs_all",
+        "write_hub_unit",
+        "write_shellmcp_unit",
+        "write_frpc_unit",
+        "write_cloudflared_unit",
+        "svc_hub_name",
+        "svc_shellmcp_name",
+        "svc_frpc_name",
+        "svc_cloudflared_name",
+        "svc_daemon_reload",
+        "svc_enable_start",
+        "svc_restart",
+        "svc_disable_stop",
+        "svc_status_multi",
+        "svc_start_multi",
+        "svc_stop_multi",
+        "svc_logs_one",
+        "svc_logs_all",
+        "write_hub_unit",
+        "write_shellmcp_unit",
+        "write_frpc_unit",
+        "write_cloudflared_unit",
+        "svc_hub_name",
+        "svc_shellmcp_name",
+        "svc_frpc_name",
+        "svc_cloudflared_name",
+        "detect_arch",
+        "ensure_frpc_installed",
+        "write_frpc_conf",
+        "ensure_cloudflared_installed",
+        "cloudflared_log_file",
+        "wait_cloudflare_quick_url",
+        "wait_cloudflare_public_health",
+        "ask",
+        "configure_shellmcp_transport",
+        "shellmcp_identity_dir_default",
+        "ensure_shellmcp_identity_env",
+        "sync_oauth_origin_env",
+        "wait_local_hub_health",
+        "maybe_autoapprove_local_shellmcp",
+        "setup_interactive",
+        "cmd_mcp_list",
+        "cmd_mcp_add",
+        "cmd_mcp_remove",
+        "cmd_mcp_edit",
+        "cmd_mcp_render",
+        "cmd_mcp_install",
+        "cmd_mcp_status",
+        "cmd_mcp_cat",
+        "cmd_mcp_import",
+        "cmd_mcp_export",
+        "cmd_mcp_sync",
+        "maybe_import_and_install_mcp_from_desktop_clients",
+        "installed_units",
+        "cmd_config_shellmcp",
+        "cmd_version",
+        "cmd_doctor",
+        "cmd_status",
+        "cmd_start",
+        "cmd_stop",
+        "cmd_restart",
+        "cmd_enable",
+        "cmd_disable",
+        "cmd_logs",
+        "cmd_tokens",
+        "cmd_rotate",
+        "cmd_port",
+        "cmd_seturl",
+        "cmd_tunnel_status",
+        "cmd_tunnel_logs",
+        "cmd_tunnel_enable",
+        "cmd_tunnel_disable",
+        "cmd_update",
+        "make_mcp_bearer_token",
+        "issue_mcp_bearer",
+        "cmd_mcp_token",
+        "configure_ai_mcp_clients",
+        "cmd_mcp_connect",
+        "auto_configure_ai_mcp_clients",
+        "safe_rm",
+        "cmd_uninstall",
+        "main"
+      ],
+      "exportLines": {
+        "c_green": 42,
+        "c_red": 43,
+        "c_yellow": 44,
+        "c_cyan": 45,
+        "c_dim": 46,
+        "c_bold": 47,
+        "c_mag": 48,
+        "c_ok": 50,
+        "c_err": 51,
+        "c_warn": 52,
+        "c_info": 53,
+        "print_ok": 55,
+        "print_err": 56,
+        "print_warn": 57,
+        "print_info": 58,
+        "print_header": 59,
+        "die": 173,
+        "need_root": 177,
+        "have": 183,
+        "run": 186,
+        "env_read": 199,
+        "env_set_many": 211,
+        "env_remove_keys": 220,
+        "gen_hex": 235,
+        "gen_subdomain": 242,
+        "first_ip": 247,
+        "ensure_https": 261,
+        "download": 267,
+        "extract_tgz": 288,
+        "platform_pkg_url_default": 324,
+        "install_component_from_pkg": 377,
+        "svc_daemon_reload": 708,
+        "svc_enable_start": 711,
+        "svc_restart": 715,
+        "svc_disable_stop": 718,
+        "svc_status_multi": 721,
+        "svc_start_multi": 742,
+        "svc_stop_multi": 747,
+        "svc_logs_one": 752,
+        "svc_logs_all": 755,
+        "write_hub_unit": 762,
+        "write_shellmcp_unit": 767,
+        "write_frpc_unit": 772,
+        "write_cloudflared_unit": 776,
+        "svc_hub_name": 782,
+        "svc_shellmcp_name": 783,
+        "svc_frpc_name": 784,
+        "svc_cloudflared_name": 785,
+        "detect_arch": 790,
+        "ensure_frpc_installed": 800,
+        "write_frpc_conf": 827,
+        "ensure_cloudflared_installed": 852,
+        "cloudflared_log_file": 881,
+        "wait_cloudflare_quick_url": 885,
+        "wait_cloudflare_public_health": 904,
+        "ask": 936,
+        "configure_shellmcp_transport": 942,
+        "shellmcp_identity_dir_default": 971,
+        "ensure_shellmcp_identity_env": 996,
+        "sync_oauth_origin_env": 1001,
+        "wait_local_hub_health": 1016,
+        "maybe_autoapprove_local_shellmcp": 1105,
+        "setup_interactive": 1193,
+        "cmd_mcp_list": 1593,
+        "cmd_mcp_add": 1655,
+        "cmd_mcp_remove": 1698,
+        "cmd_mcp_edit": 1717,
+        "cmd_mcp_render": 1730,
+        "cmd_mcp_install": 1738,
+        "cmd_mcp_status": 1753,
+        "cmd_mcp_cat": 1761,
+        "cmd_mcp_import": 1944,
+        "cmd_mcp_export": 1957,
+        "cmd_mcp_sync": 1977,
+        "maybe_import_and_install_mcp_from_desktop_clients": 1984,
+        "installed_units": 2029,
+        "cmd_config_shellmcp": 2037,
+        "cmd_version": 2079,
+        "cmd_doctor": 2094,
+        "cmd_status": 2147,
+        "cmd_start": 2163,
+        "cmd_stop": 2167,
+        "cmd_restart": 2171,
+        "cmd_enable": 2176,
+        "cmd_disable": 2181,
+        "cmd_logs": 2191,
+        "cmd_tokens": 2224,
+        "cmd_rotate": 2252,
+        "cmd_port": 2271,
+        "cmd_seturl": 2288,
+        "cmd_tunnel_status": 2303,
+        "cmd_tunnel_logs": 2314,
+        "cmd_tunnel_enable": 2326,
+        "cmd_tunnel_disable": 2352,
+        "cmd_update": 2498,
+        "make_mcp_bearer_token": 2637,
+        "issue_mcp_bearer": 2674,
+        "cmd_mcp_token": 2685,
+        "configure_ai_mcp_clients": 2717,
+        "cmd_mcp_connect": 2753,
+        "auto_configure_ai_mcp_clients": 2840,
+        "safe_rm": 2860,
+        "cmd_uninstall": 2869,
+        "main": 2915
+      },
+      "exportRanges": {
+        "c_green": {
+          "startLine": 42,
+          "endLine": 42
+        },
+        "c_red": {
+          "startLine": 43,
+          "endLine": 43
+        },
+        "c_yellow": {
+          "startLine": 44,
+          "endLine": 44
+        },
+        "c_cyan": {
+          "startLine": 45,
+          "endLine": 45
+        },
+        "c_dim": {
+          "startLine": 46,
+          "endLine": 46
+        },
+        "c_bold": {
+          "startLine": 47,
+          "endLine": 47
+        },
+        "c_mag": {
+          "startLine": 48,
+          "endLine": 48
+        },
+        "c_ok": {
+          "startLine": 50,
+          "endLine": 50
+        },
+        "c_err": {
+          "startLine": 51,
+          "endLine": 51
+        },
+        "c_warn": {
+          "startLine": 52,
+          "endLine": 52
+        },
+        "c_info": {
+          "startLine": 53,
+          "endLine": 53
+        },
+        "print_ok": {
+          "startLine": 55,
+          "endLine": 55
+        },
+        "print_err": {
+          "startLine": 56,
+          "endLine": 56
+        },
+        "print_warn": {
+          "startLine": 57,
+          "endLine": 57
+        },
+        "print_info": {
+          "startLine": 58,
+          "endLine": 58
+        },
+        "print_header": {
+          "startLine": 59,
+          "endLine": 59
+        },
+        "die": {
+          "startLine": 173,
+          "endLine": 175
+        },
+        "need_root": {
+          "startLine": 177,
+          "endLine": 181
+        },
+        "have": {
+          "startLine": 183,
+          "endLine": 184
+        },
+        "run": {
+          "startLine": 186,
+          "endLine": 195
+        },
+        "env_read": {
+          "startLine": 199,
+          "endLine": 209
+        },
+        "env_set_many": {
+          "startLine": 211,
+          "endLine": 217
+        },
+        "env_remove_keys": {
+          "startLine": 220,
+          "endLine": 231
+        },
+        "gen_hex": {
+          "startLine": 235,
+          "endLine": 240
+        },
+        "gen_subdomain": {
+          "startLine": 242,
+          "endLine": 243
+        },
+        "first_ip": {
+          "startLine": 247,
+          "endLine": 256
+        },
+        "ensure_https": {
+          "startLine": 261,
+          "endLine": 263
+        },
+        "download": {
+          "startLine": 267,
+          "endLine": 286
+        },
+        "extract_tgz": {
+          "startLine": 288,
+          "endLine": 290
+        },
+        "platform_pkg_url_default": {
+          "startLine": 324,
+          "endLine": 326
+        },
+        "install_component_from_pkg": {
+          "startLine": 377,
+          "endLine": 409
+        },
+        "svc_daemon_reload": {
+          "startLine": 708,
+          "endLine": 709
+        },
+        "svc_enable_start": {
+          "startLine": 711,
+          "endLine": 713
+        },
+        "svc_restart": {
+          "startLine": 715,
+          "endLine": 716
+        },
+        "svc_disable_stop": {
+          "startLine": 718,
+          "endLine": 719
+        },
+        "svc_status_multi": {
+          "startLine": 721,
+          "endLine": 740
+        },
+        "svc_start_multi": {
+          "startLine": 742,
+          "endLine": 745
+        },
+        "svc_stop_multi": {
+          "startLine": 747,
+          "endLine": 750
+        },
+        "svc_logs_one": {
+          "startLine": 752,
+          "endLine": 753
+        },
+        "svc_logs_all": {
+          "startLine": 755,
+          "endLine": 760
+        },
+        "write_hub_unit": {
+          "startLine": 762,
+          "endLine": 765
+        },
+        "write_shellmcp_unit": {
+          "startLine": 767,
+          "endLine": 770
+        },
+        "write_frpc_unit": {
+          "startLine": 772,
+          "endLine": 774
+        },
+        "write_cloudflared_unit": {
+          "startLine": 776,
+          "endLine": 780
+        },
+        "svc_hub_name": {
+          "startLine": 782,
+          "endLine": 782
+        },
+        "svc_shellmcp_name": {
+          "startLine": 783,
+          "endLine": 783
+        },
+        "svc_frpc_name": {
+          "startLine": 784,
+          "endLine": 784
+        },
+        "svc_cloudflared_name": {
+          "startLine": 785,
+          "endLine": 785
+        },
+        "detect_arch": {
+          "startLine": 790,
+          "endLine": 798
+        },
+        "ensure_frpc_installed": {
+          "startLine": 800,
+          "endLine": 825
+        },
+        "write_frpc_conf": {
+          "startLine": 827,
+          "endLine": 847
+        },
+        "ensure_cloudflared_installed": {
+          "startLine": 852,
+          "endLine": 878
+        },
+        "cloudflared_log_file": {
+          "startLine": 881,
+          "endLine": 882
+        },
+        "wait_cloudflare_quick_url": {
+          "startLine": 885,
+          "endLine": 900
+        },
+        "wait_cloudflare_public_health": {
+          "startLine": 904,
+          "endLine": 933
+        },
+        "ask": {
+          "startLine": 936,
+          "endLine": 939
+        },
+        "configure_shellmcp_transport": {
+          "startLine": 942,
+          "endLine": 967
+        },
+        "shellmcp_identity_dir_default": {
+          "startLine": 971,
+          "endLine": 993
+        },
+        "ensure_shellmcp_identity_env": {
+          "startLine": 996,
+          "endLine": 999
+        },
+        "sync_oauth_origin_env": {
+          "startLine": 1001,
+          "endLine": 1013
+        },
+        "wait_local_hub_health": {
+          "startLine": 1016,
+          "endLine": 1029
+        },
+        "maybe_autoapprove_local_shellmcp": {
+          "startLine": 1105,
+          "endLine": 1191
+        },
+        "setup_interactive": {
+          "startLine": 1193,
+          "endLine": 1420
+        },
+        "cmd_mcp_list": {
+          "startLine": 1593,
+          "endLine": 1607
+        },
+        "cmd_mcp_add": {
+          "startLine": 1655,
+          "endLine": 1696
+        },
+        "cmd_mcp_remove": {
+          "startLine": 1698,
+          "endLine": 1714
+        },
+        "cmd_mcp_edit": {
+          "startLine": 1717,
+          "endLine": 1727
+        },
+        "cmd_mcp_render": {
+          "startLine": 1730,
+          "endLine": 1735
+        },
+        "cmd_mcp_install": {
+          "startLine": 1738,
+          "endLine": 1750
+        },
+        "cmd_mcp_status": {
+          "startLine": 1753,
+          "endLine": 1758
+        },
+        "cmd_mcp_cat": {
+          "startLine": 1761,
+          "endLine": 1766
+        },
+        "cmd_mcp_import": {
+          "startLine": 1944,
+          "endLine": 1954
+        },
+        "cmd_mcp_export": {
+          "startLine": 1957,
+          "endLine": 1974
+        },
+        "cmd_mcp_sync": {
+          "startLine": 1977,
+          "endLine": 1981
+        },
+        "maybe_import_and_install_mcp_from_desktop_clients": {
+          "startLine": 1984,
+          "endLine": 2026
+        },
+        "installed_units": {
+          "startLine": 2029,
+          "endLine": 2035
+        },
+        "cmd_config_shellmcp": {
+          "startLine": 2037,
+          "endLine": 2073
+        },
+        "cmd_version": {
+          "startLine": 2079,
+          "endLine": 2092
+        },
+        "cmd_doctor": {
+          "startLine": 2094,
+          "endLine": 2145
+        },
+        "cmd_status": {
+          "startLine": 2147,
+          "endLine": 2161
+        },
+        "cmd_start": {
+          "startLine": 2163,
+          "endLine": 2165
+        },
+        "cmd_stop": {
+          "startLine": 2167,
+          "endLine": 2169
+        },
+        "cmd_restart": {
+          "startLine": 2171,
+          "endLine": 2174
+        },
+        "cmd_enable": {
+          "startLine": 2176,
+          "endLine": 2179
+        },
+        "cmd_disable": {
+          "startLine": 2181,
+          "endLine": 2184
+        },
+        "cmd_logs": {
+          "startLine": 2191,
+          "endLine": 2222
+        },
+        "cmd_tokens": {
+          "startLine": 2224,
+          "endLine": 2250
+        },
+        "cmd_rotate": {
+          "startLine": 2252,
+          "endLine": 2269
+        },
+        "cmd_port": {
+          "startLine": 2271,
+          "endLine": 2286
+        },
+        "cmd_seturl": {
+          "startLine": 2288,
+          "endLine": 2299
+        },
+        "cmd_tunnel_status": {
+          "startLine": 2303,
+          "endLine": 2312
+        },
+        "cmd_tunnel_logs": {
+          "startLine": 2314,
+          "endLine": 2324
+        },
+        "cmd_tunnel_enable": {
+          "startLine": 2326,
+          "endLine": 2350
+        },
+        "cmd_tunnel_disable": {
+          "startLine": 2352,
+          "endLine": 2359
+        },
+        "cmd_update": {
+          "startLine": 2498,
+          "endLine": 2624
+        },
+        "make_mcp_bearer_token": {
+          "startLine": 2637,
+          "endLine": 2659
+        },
+        "issue_mcp_bearer": {
+          "startLine": 2674,
+          "endLine": 2682
+        },
+        "cmd_mcp_token": {
+          "startLine": 2685,
+          "endLine": 2714
+        },
+        "configure_ai_mcp_clients": {
+          "startLine": 2717,
+          "endLine": 2750
+        },
+        "cmd_mcp_connect": {
+          "startLine": 2753,
+          "endLine": 2767
+        },
+        "auto_configure_ai_mcp_clients": {
+          "startLine": 2840,
+          "endLine": 2856
+        },
+        "safe_rm": {
+          "startLine": 2860,
+          "endLine": 2867
+        },
+        "cmd_uninstall": {
+          "startLine": 2869,
+          "endLine": 2911
+        },
+        "main": {
+          "startLine": 2915,
+          "endLine": 3098
+        }
+      },
+      "imports": [
+        "argparse",
+        "os",
+        "sys",
+        "tarfile",
+        "tempfile",
+        "base64",
+        "hmac",
+        "hashlib",
+        "json",
+        "subprocess",
+        "shutil",
+        "socket",
+        "re",
+        "secrets",
+        "time",
+        "urllib.request",
+        "urllib.error",
+        "pwd",
+        "pathlib",
+        "tomllib",
+        "platform",
+        "socket"
+      ],
+      "language": "python",
+      "mtime": "2026-07-01T05:31:27.889Z",
+      "ontology": {
+        "roles": [
+          "api_route"
+        ],
+        "packageBoundary": "cli.py",
+        "routes": [
+          {
+            "method": "GET",
+            "path": "payload",
+            "line": 1061,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "server_id",
+            "line": 1070,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "public_key",
+            "line": 1071,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "status",
+            "line": 1076,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "server_id",
+            "line": 1080,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "agent_id",
+            "line": 1471,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "name",
+            "line": 1496,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "hub_url",
+            "line": 1497,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "token_file",
+            "line": 1498,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "args",
+            "line": 1500,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "env",
+            "line": 1501,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "cwd",
+            "line": 1502,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "stdio_format",
+            "line": 1503,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "run_as_user",
+            "line": 1504,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "auto_start",
+            "line": 1505,
+            "source": "router_call"
+          }
+        ],
+        "dataOperations": [
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 213,
+            "evidence": "cur.update(upd)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 469,
+            "evidence": "# a LaunchAgent after bootout during in-place update. Prefer bootstrap into"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 473,
+            "evidence": "# A missing/unloaded launchd job is normal during update or first install."
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 476,
+            "evidence": "# like an update failure."
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 519,
+            "evidence": "['launchctl', 'remove', label],"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 522,
+            "evidence": "attempts.insert(1, ['launchctl', 'bootout', _launchd_domain(), str(unit_path)])"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 976,
+            "evidence": "update, prefer an existing identity to avoid changing server_id/fingerprint"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1579,
+            "evidence": "die(f'MCP runtime is not installed. Expected generic_stdio_mcp_relay under one of: {expected}. Install/update GPTAdmin package first.')"
+          },
+          {
+            "operation": "write",
+            "access": "filesystem",
+            "line": 1711,
+            "evidence": "(MCP_AGENTS_DIR / f'{_mcp_slug(args.name)}.json').unlink(missing_ok=True)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1939,
+            "evidence": "data['mcpServers'].update(cfg.get('mcpServers') or {})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2292,
+            "evidence": "env = env_read(); env.update({'HUB_PUBLIC_URL': url, 'HUB_URL': url, 'FRP_ENABLE': 'false', 'CLOUDFLARE_TUNNEL_ENABLE': 'false', 'TUNNEL_MODE': 'manual'}); sync"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2460,
+            "evidence": "print(f'WARNING: update manifest unavailable, continuing with download: {exc}', file=sys.stderr)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2555,
+            "evidence": "print('Use `gptadmin update --force` to reinstall anyway.')"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2558,
+            "evidence": "print('Stopping installed GPTAdmin services for safe in-place update...')"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 2624,
+            "evidence": "print('Next for Codex if it cached old discovery: codex mcp remove gptadmin && codex mcp add gptadmin --url <Hub URL>/mcp')"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 2697,
+            "evidence": "save = not bool(getattr(args, 'no_save', False))"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2698,
+            "evidence": "update = {"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 2705,
+            "evidence": "if save:"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2706,
+            "evidence": "update[env_key] = token"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2707,
+            "evidence": "env_set_many(update)"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 2708,
+            "evidence": "if save:"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 2712,
+            "evidence": "print(f'Env: {env_key}' + ('' if save else '  # not saved'))"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2729,
+            "evidence": "env.update(tokens)"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 2791,
+            "evidence": "_run_quiet(['codex', 'mcp', 'remove', 'gptadmin'], env=env)"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 2802,
+            "evidence": "_run_quiet(['claude', 'mcp', 'remove', '--scope', 'user', 'gptadmin'], env=env)"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 2803,
+            "evidence": "_run_quiet(['claude', 'mcp', 'remove', '--scope', 'local', 'gptadmin'], env=env)"
+          },
+          {
+            "operation": "write",
+            "access": "filesystem",
+            "line": 2863,
+            "evidence": "p.unlink(missing_ok=True)"
+          },
+          {
+            "operation": "write",
+            "access": "filesystem",
+            "line": 2895,
+            "evidence": "CLI_PATH.unlink()"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2936,
+            "evidence": "ap_update = sub.add_parser('update', help='Обновить установленную версию')"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2943,
+            "evidence": "ap_update.add_argument('--no-hub', action='store_true', help='Do not update hub component')"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2944,
+            "evidence": "ap_update.add_argument('--no-shellmcp', action='store_true', help='Do not update ShellMCP component')"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 2989,
+            "evidence": "ap_mcp_token_top.add_argument('--no-save', action='store_true', help='Только напечатать token, не сохранять в gptadmin.env')"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 3021,
+            "evidence": "ap_mcp_token.add_argument('--no-save', action='store_true')"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 3045,
+            "evidence": "ap_mcp_rm = mcp_sub.add_parser('remove', aliases=['rm'], help='Удалить MCP-сервер из конфига')"
+          }
+        ],
+        "security": [
+          {
+            "kind": "secret_handling",
+            "line": 113,
+            "evidence": "MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 834,
+            "evidence": "token = \"{env['FRP_TOKEN']}\"",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 1007,
+            "evidence": "the wrong authorization server/password.",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1007,
+            "evidence": "the wrong authorization server/password.",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1119,
+            "evidence": "token = env.get('CTL_TOKEN') or ''",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1121,
+            "evidence": "if not token:",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 1132,
+            "evidence": "headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1132,
+            "evidence": "headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1480,
+            "evidence": "token = env.get('CTL_TOKEN') or os.environ.get('GPTADMIN_MCP_RELAY_TOKEN') or gen_hex()",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1482,
+            "evidence": "MCP_TOKEN_FILE.write_text(token.strip() + '\\n', encoding='utf-8')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2237,
+            "evidence": "# ShellMCP token",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2249,
+            "evidence": "print(c_dim('  Issue new MCP token:  gptadmin token issue <name>'))",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2250,
+            "evidence": "print(c_dim('  Rotate tokens:        gptadmin token rotate [hub|shellmcp|mcp]'))",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2258,
+            "evidence": "die('unknown token target. Use: hub or shellmcp')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2269,
+            "evidence": "print('ShellMCP token rotated (значение не выводится).')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2638,
+            "evidence": "secret = env.get('OAUTH_CLIENT_SECRET') or ''",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2639,
+            "evidence": "if not secret:",
+            "confidence": "low"
+          },
+          {
+            "kind": "authentication",
+            "line": 2647,
+            "evidence": "header = {'alg': 'HS256', 'typ': 'JWT'}",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2658,
+            "evidence": "sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2681,
+            "evidence": "token = make_mcp_bearer_token(env, client_id, ttl_days=ttl_days)",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2682,
+            "evidence": "return token, _mcp_client_url(env), _client_token_env_key(client_id)",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2693,
+            "evidence": "client_id = ask('MCP token name / client_id', 'custom-mcp-client').strip() or 'custom-mcp-client'",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2695,
+            "evidence": "token, url, default_key = issue_mcp_bearer(env, client_id, ttl_days=ttl_days)",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2706,
+            "evidence": "update[env_key] = token",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2709,
+            "evidence": "_set_process_env_for_gui_clients({env_key: token})",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2710,
+            "evidence": "print(f'MCP token issued: {client_id}')",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2714,
+            "evidence": "print(f'Authorization: Bearer {token}')",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2714,
+            "evidence": "print(f'Authorization: Bearer {token}')",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2767,
+            "evidence": "print(f'Custom MCP Authorization: Bearer {custom}')",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2776,
+            "evidence": "for key, token in (tokens or {}).items():",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2777,
+            "evidence": "child_env[key] = token",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2783,
+            "evidence": "for key, token in tokens.items():",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2784,
+            "evidence": "_run_quiet(['launchctl', 'setenv', key, token])",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2787,
+            "evidence": "def _configure_codex_mcp(url: str, token: str) -> str:",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2790,
+            "evidence": "env = _merge_env_for_client({'GPTADMIN_CODEX_MCP_BEARER': token})",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2792,
+            "evidence": "res = _run_quiet(['codex', 'mcp', 'add', 'gptadmin', '--url', url, '--bearer-token-env-var', 'GPTADMIN_CODEX_MCP_BEARER'], env=env)",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2798,
+            "evidence": "def _configure_claude_code_mcp(url: str, token: str) -> str:",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2801,
+            "evidence": "env = _merge_env_for_client({'GPTADMIN_CLAUDE_MCP_BEARER': token})",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2804,
+            "evidence": "res = _run_quiet(['claude', 'mcp', 'add', '--scope', 'user', '--transport', 'http', 'gptadmin', url, '--header', f'Authorization: Bearer {token}'], env=env)",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2804,
+            "evidence": "res = _run_quiet(['claude', 'mcp', 'add', '--scope', 'user', '--transport', 'http', 'gptadmin', url, '--header', f'Authorization: Bearer {token}'], env=env)",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2810,
+            "evidence": "def _configure_opencode_mcp(url: str, token: str) -> str:",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2827,
+            "evidence": "'headers': {'Authorization': f'Bearer {token}'},",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2827,
+            "evidence": "'headers': {'Authorization': f'Bearer {token}'},",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2854,
+            "evidence": "print(f'  Authorization: Bearer {custom}')",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2985,
+            "evidence": "ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить Bearer-токен для MCP-клиента')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2989,
+            "evidence": "ap_mcp_token_top.add_argument('--no-save', action='store_true', help='Только напечатать token, не сохранять в gptadmin.env')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2995,
+            "evidence": "ap_mcp_connect_top.add_argument('--no-print-token', action='store_true', help='Не печатать custom Bearer token')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 3017,
+            "evidence": "ap_mcp_token = mcp_sub.add_parser('token', help='Выпустить Bearer-токен для MCP-клиента')",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 3027,
+            "evidence": "ap_mcp_connect.add_argument('--no-print-token', action='store_true')",
+            "confidence": "low"
+          }
+        ],
+        "conventions": [],
+        "findings": [
+          {
+            "code": "multiple_writes_without_detected_transaction",
+            "severity": "low",
+            "message": "Multiple write/delete operations were detected without a transaction fact.",
+            "line": 213
+          }
+        ]
+      }
+    },
+    "/home/admin/gptadmin/gptadmin_build_info.py": {
+      "filePath": "/home/admin/gptadmin/gptadmin_build_info.py",
+      "moduleName": "gptadmin_build_info.py",
+      "exports": [
+        "build_info"
+      ],
+      "exportLines": {
+        "build_info": 6
+      },
+      "exportRanges": {
+        "build_info": {
+          "startLine": 6,
+          "endLine": 12
+        }
+      },
+      "imports": [],
+      "language": "python",
+      "mtime": "2026-07-02T23:10:10.428Z",
+      "ontology": {
+        "roles": [
+          "source_module"
+        ],
+        "packageBoundary": "gptadmin_build_info.py",
+        "routes": [],
+        "dataOperations": [],
+        "security": [],
+        "conventions": [],
+        "findings": []
+      }
+    },
+    "/home/admin/gptadmin/gptadmin_hub.py": {
+      "filePath": "/home/admin/gptadmin/gptadmin_hub.py",
+      "moduleName": "gptadmin_hub.py",
+      "exports": [
+        "build_info",
+        "rid",
+        "audit_request_context",
+        "scrub_headers",
+        "scrub_query",
+        "scrub_payload",
+        "ensure_license",
+        "check_ctl_token",
+        "validation_handler",
+        "Beat",
+        "BulkExec",
+        "ExecReq",
+        "TaskResult",
+        "TaskEdit",
+        "McpRelayRegister",
+        "McpRelayResult",
+        "McpRelayToolsReq",
+        "McpRelayCallReq",
+        "McpRelayResourcesListReq",
+        "McpRelayResourceReadReq",
+        "AdminMcpManageReq",
+        "AccessLogMiddleware",
+        "dispatch",
+        "version",
+        "actions_openapi_yaml",
+        "shellmcp_artifact_manifest",
+        "shellmcp_artifact_download",
+        "heartbeat",
+        "list_servers",
+        "bulk_exec",
+        "ws_exec",
+        "shellmcp_ws",
+        "queue_poll",
+        "queue_progress",
+        "queue_result",
+        "proxy",
+        "mcp_relay_register",
+        "mcp_relay_poll",
+        "mcp_relay_result",
+        "mcp_relay_agents_list",
+        "mcp_relay_list_mcp_agents_alias",
+        "mcp_relay_list_mcp_tools_alias",
+        "mcp_relay_call_mcp_tool_alias",
+        "mcp_relay_get_mcp_job_alias",
+        "mcp_relay_tools",
+        "mcp_relay_call",
+        "mcp_relay_job_status",
+        "admin_dashboard",
+        "admin_api_overview",
+        "admin_api_audit",
+        "admin_api_clients",
+        "admin_revoke_client",
+        "admin_revoke_all_clients",
+        "admin_api_jobs",
+        "admin_mcp_manage",
+        "admin_mcp_resources_list",
+        "admin_mcp_resource_read",
+        "oauth_protected_resource",
+        "oauth_authorization_server",
+        "oauth_register",
+        "oauth_authorize_get",
+        "oauth_authorize_post",
+        "oauth_token",
+        "mcp_options",
+        "mcp_get",
+        "mcp_post",
+        "get_task",
+        "ack_task",
+        "edit_task_endpoint",
+        "list_tasks",
+        "admin_static",
+        "http_exception_handler",
+        "generic_exception_handler",
+        "mcp_prompt",
+        "mcp_prompt_call"
+      ],
+      "exportLines": {
+        "build_info": 83,
+        "rid": 119,
+        "audit_request_context": 123,
+        "scrub_headers": 139,
+        "scrub_query": 143,
+        "scrub_payload": 147,
+        "ensure_license": 1008,
+        "check_ctl_token": 1012,
+        "validation_handler": 1035,
+        "Beat": 1041,
+        "BulkExec": 1075,
+        "ExecReq": 1088,
+        "TaskResult": 1095,
+        "TaskEdit": 1100,
+        "McpRelayRegister": 1109,
+        "McpRelayResult": 1118,
+        "McpRelayToolsReq": 1125,
+        "McpRelayCallReq": 1132,
+        "McpRelayResourcesListReq": 1141,
+        "McpRelayResourceReadReq": 1148,
+        "AdminMcpManageReq": 1156,
+        "AccessLogMiddleware": 1366,
+        "dispatch": 1367,
+        "version": 1703,
+        "actions_openapi_yaml": 2038,
+        "shellmcp_artifact_manifest": 2045,
+        "shellmcp_artifact_download": 2072,
+        "heartbeat": 2080,
+        "list_servers": 2137,
+        "bulk_exec": 2452,
+        "ws_exec": 2468,
+        "shellmcp_ws": 2492,
+        "queue_poll": 2572,
+        "queue_progress": 2588,
+        "queue_result": 2646,
+        "proxy": 2657,
+        "mcp_relay_register": 4802,
+        "mcp_relay_poll": 4819,
+        "mcp_relay_result": 4839,
+        "mcp_relay_agents_list": 4879,
+        "mcp_relay_list_mcp_agents_alias": 4889,
+        "mcp_relay_list_mcp_tools_alias": 4894,
+        "mcp_relay_call_mcp_tool_alias": 4899,
+        "mcp_relay_get_mcp_job_alias": 4904,
+        "mcp_relay_tools": 4909,
+        "mcp_relay_call": 4931,
+        "mcp_relay_job_status": 5113,
+        "admin_dashboard": 5377,
+        "admin_api_overview": 5386,
+        "admin_api_audit": 5391,
+        "admin_api_clients": 5396,
+        "admin_revoke_client": 5403,
+        "admin_revoke_all_clients": 5414,
+        "admin_api_jobs": 5440,
+        "admin_mcp_manage": 5445,
+        "admin_mcp_resources_list": 5450,
+        "admin_mcp_resource_read": 5455,
+        "oauth_protected_resource": 5702,
+        "oauth_authorization_server": 5712,
+        "oauth_register": 5728,
+        "oauth_authorize_get": 5755,
+        "oauth_authorize_post": 5827,
+        "oauth_token": 5849,
+        "mcp_options": 6181,
+        "mcp_get": 6186,
+        "mcp_post": 6197,
+        "get_task": 6253,
+        "ack_task": 6261,
+        "edit_task_endpoint": 6268,
+        "list_tasks": 6273,
+        "admin_static": 6278,
+        "http_exception_handler": 6302,
+        "generic_exception_handler": 6314,
+        "mcp_prompt": 6442,
+        "mcp_prompt_call": 6491
+      },
+      "exportRanges": {
+        "build_info": {
+          "startLine": 83,
+          "endLine": 89
+        },
+        "rid": {
+          "startLine": 119,
+          "endLine": 120
+        },
+        "audit_request_context": {
+          "startLine": 123,
+          "endLine": 125
+        },
+        "scrub_headers": {
+          "startLine": 139,
+          "endLine": 140
+        },
+        "scrub_query": {
+          "startLine": 143,
+          "endLine": 144
+        },
+        "scrub_payload": {
+          "startLine": 147,
+          "endLine": 152
+        },
+        "ensure_license": {
+          "startLine": 1008,
+          "endLine": 1009
+        },
+        "check_ctl_token": {
+          "startLine": 1012,
+          "endLine": 1024
+        },
+        "validation_handler": {
+          "startLine": 1035,
+          "endLine": 1039
+        },
+        "Beat": {
+          "startLine": 1041,
+          "endLine": 1072
+        },
+        "BulkExec": {
+          "startLine": 1075,
+          "endLine": 1085
+        },
+        "ExecReq": {
+          "startLine": 1088,
+          "endLine": 1092
+        },
+        "TaskResult": {
+          "startLine": 1095,
+          "endLine": 1097
+        },
+        "TaskEdit": {
+          "startLine": 1100,
+          "endLine": 1106
+        },
+        "McpRelayRegister": {
+          "startLine": 1109,
+          "endLine": 1115
+        },
+        "McpRelayResult": {
+          "startLine": 1118,
+          "endLine": 1122
+        },
+        "McpRelayToolsReq": {
+          "startLine": 1125,
+          "endLine": 1129
+        },
+        "McpRelayCallReq": {
+          "startLine": 1132,
+          "endLine": 1138
+        },
+        "McpRelayResourcesListReq": {
+          "startLine": 1141,
+          "endLine": 1145
+        },
+        "McpRelayResourceReadReq": {
+          "startLine": 1148,
+          "endLine": 1153
+        },
+        "AdminMcpManageReq": {
+          "startLine": 1156,
+          "endLine": 1175
+        },
+        "AccessLogMiddleware": {
+          "startLine": 1366,
+          "endLine": 1424
+        },
+        "dispatch": {
+          "startLine": 1367,
+          "endLine": 1424
+        },
+        "version": {
+          "startLine": 1703,
+          "endLine": 1716
+        },
+        "actions_openapi_yaml": {
+          "startLine": 2038,
+          "endLine": 2042
+        },
+        "shellmcp_artifact_manifest": {
+          "startLine": 2045,
+          "endLine": 2069
+        },
+        "shellmcp_artifact_download": {
+          "startLine": 2072,
+          "endLine": 2077
+        },
+        "heartbeat": {
+          "startLine": 2080,
+          "endLine": 2119
+        },
+        "list_servers": {
+          "startLine": 2137,
+          "endLine": 2161
+        },
+        "bulk_exec": {
+          "startLine": 2452,
+          "endLine": 2465
+        },
+        "ws_exec": {
+          "startLine": 2468,
+          "endLine": 2489
+        },
+        "shellmcp_ws": {
+          "startLine": 2492,
+          "endLine": 2546
+        },
+        "queue_poll": {
+          "startLine": 2572,
+          "endLine": 2585
+        },
+        "queue_progress": {
+          "startLine": 2588,
+          "endLine": 2643
+        },
+        "queue_result": {
+          "startLine": 2646,
+          "endLine": 2654
+        },
+        "proxy": {
+          "startLine": 2657,
+          "endLine": 2692
+        },
+        "mcp_relay_register": {
+          "startLine": 4802,
+          "endLine": 4816
+        },
+        "mcp_relay_poll": {
+          "startLine": 4819,
+          "endLine": 4836
+        },
+        "mcp_relay_result": {
+          "startLine": 4839,
+          "endLine": 4876
+        },
+        "mcp_relay_agents_list": {
+          "startLine": 4879,
+          "endLine": 4886
+        },
+        "mcp_relay_list_mcp_agents_alias": {
+          "startLine": 4889,
+          "endLine": 4891
+        },
+        "mcp_relay_list_mcp_tools_alias": {
+          "startLine": 4894,
+          "endLine": 4896
+        },
+        "mcp_relay_call_mcp_tool_alias": {
+          "startLine": 4899,
+          "endLine": 4901
+        },
+        "mcp_relay_get_mcp_job_alias": {
+          "startLine": 4904,
+          "endLine": 4906
+        },
+        "mcp_relay_tools": {
+          "startLine": 4909,
+          "endLine": 4928
+        },
+        "mcp_relay_call": {
+          "startLine": 4931,
+          "endLine": 4968
+        },
+        "mcp_relay_job_status": {
+          "startLine": 5113,
+          "endLine": 5154
+        },
+        "admin_dashboard": {
+          "startLine": 5377,
+          "endLine": 5383
+        },
+        "admin_api_overview": {
+          "startLine": 5386,
+          "endLine": 5388
+        },
+        "admin_api_audit": {
+          "startLine": 5391,
+          "endLine": 5393
+        },
+        "admin_api_clients": {
+          "startLine": 5396,
+          "endLine": 5400
+        },
+        "admin_revoke_client": {
+          "startLine": 5403,
+          "endLine": 5411
+        },
+        "admin_revoke_all_clients": {
+          "startLine": 5414,
+          "endLine": 5437
+        },
+        "admin_api_jobs": {
+          "startLine": 5440,
+          "endLine": 5442
+        },
+        "admin_mcp_manage": {
+          "startLine": 5445,
+          "endLine": 5447
+        },
+        "admin_mcp_resources_list": {
+          "startLine": 5450,
+          "endLine": 5452
+        },
+        "admin_mcp_resource_read": {
+          "startLine": 5455,
+          "endLine": 5459
+        },
+        "oauth_protected_resource": {
+          "startLine": 5702,
+          "endLine": 5709
+        },
+        "oauth_authorization_server": {
+          "startLine": 5712,
+          "endLine": 5725
+        },
+        "oauth_register": {
+          "startLine": 5728,
+          "endLine": 5752
+        },
+        "oauth_authorize_get": {
+          "startLine": 5755,
+          "endLine": 5824
+        },
+        "oauth_authorize_post": {
+          "startLine": 5827,
+          "endLine": 5846
+        },
+        "oauth_token": {
+          "startLine": 5849,
+          "endLine": 5864
+        },
+        "mcp_options": {
+          "startLine": 6181,
+          "endLine": 6183
+        },
+        "mcp_get": {
+          "startLine": 6186,
+          "endLine": 6194
+        },
+        "mcp_post": {
+          "startLine": 6197,
+          "endLine": 6245
+        },
+        "get_task": {
+          "startLine": 6253,
+          "endLine": 6258
+        },
+        "ack_task": {
+          "startLine": 6261,
+          "endLine": 6265
+        },
+        "edit_task_endpoint": {
+          "startLine": 6268,
+          "endLine": 6270
+        },
+        "list_tasks": {
+          "startLine": 6273,
+          "endLine": 6275
+        },
+        "admin_static": {
+          "startLine": 6278,
+          "endLine": 6293
+        },
+        "http_exception_handler": {
+          "startLine": 6302,
+          "endLine": 6311
+        },
+        "generic_exception_handler": {
+          "startLine": 6314,
+          "endLine": 6321
+        },
+        "mcp_prompt": {
+          "startLine": 6442,
+          "endLine": 6488
+        },
+        "mcp_prompt_call": {
+          "startLine": 6491,
+          "endLine": 6536
+        }
+      },
+      "imports": [
+        "asyncio",
+        "base64",
+        "datetime",
+        "hashlib",
+        "hmac",
+        "html",
+        "json",
+        "logging",
+        "os",
+        "re",
+        "secrets",
+        "shlex",
+        "socket",
+        "subprocess",
+        "sys",
+        "time",
+        "traceback",
+        "uuid",
+        "contextlib",
+        "contextvars",
+        "pathlib",
+        "logging.handlers",
+        "typing",
+        "urllib.parse",
+        "httpx",
+        "cryptography.hazmat.primitives",
+        "cryptography.hazmat.primitives.asymmetric",
+        "fastapi",
+        "fastapi.security",
+        "pydantic",
+        "starlette.middleware.base",
+        "starlette.responses",
+        "gptadmin_build_info",
+        "headroom.compress",
+        "fastapi.exceptions",
+        "secrets",
+        "uvicorn"
+      ],
+      "language": "python",
+      "mtime": "2026-07-03T05:12:51.446Z",
+      "ontology": {
+        "roles": [
+          "api_route"
+        ],
+        "packageBoundary": "gptadmin_hub.py",
+        "routes": [
+          {
+            "method": "GET",
+            "path": "/version",
+            "line": 1703,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/actions/openapi.yaml",
+            "line": 2038,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/artifacts/shellmcp.json",
+            "line": 2045,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/artifacts/shellmcp.tar.gz",
+            "line": 2072,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/heartbeat",
+            "line": 2080,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/servers",
+            "line": 2137,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/bulk/exec",
+            "line": 2452,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/queue/{srv}",
+            "line": 2572,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/queue/{srv}/progress",
+            "line": 2588,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/queue/{srv}/result",
+            "line": 2646,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "enabled",
+            "line": 3306,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "agent_id",
+            "line": 3307,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "command",
+            "line": 3308,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "args",
+            "line": 3309,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "stdio_format",
+            "line": 3310,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "cwd",
+            "line": 3311,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "run_as_user",
+            "line": 3312,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "agent_id",
+            "line": 3368,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/register",
+            "line": 4802,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp-relay/poll/{agent_id}",
+            "line": 4819,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/result/{agent_id}",
+            "line": 4839,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp-relay/agents",
+            "line": 4879,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp-relay/list_mcp_agents",
+            "line": 4889,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/list_mcp_tools",
+            "line": 4894,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/call_mcp_tool",
+            "line": 4899,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp-relay/get_mcp_job/{job_id}",
+            "line": 4904,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/tools",
+            "line": 4909,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp-relay/call",
+            "line": 4931,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp-relay/job/{job_id}",
+            "line": 5113,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin",
+            "line": 5377,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin/",
+            "line": 5378,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin/api/overview",
+            "line": 5386,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin/api/audit",
+            "line": 5391,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin/api/clients",
+            "line": 5396,
+            "source": "router_call"
+          },
+          {
+            "method": "DELETE",
+            "path": "/admin/api/clients/{client_key}",
+            "line": 5403,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/admin/api/clients/revoke-all",
+            "line": 5414,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/admin/api/jobs",
+            "line": 5440,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/admin/api/mcp/manage",
+            "line": 5445,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/admin/api/mcp/resources/list",
+            "line": 5450,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/admin/api/mcp/resources/read",
+            "line": 5455,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/.well-known/oauth-protected-resource",
+            "line": 5702,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/.well-known/oauth-authorization-server",
+            "line": 5712,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/register",
+            "line": 5728,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/authorize",
+            "line": 5755,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/authorize",
+            "line": 5827,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/token",
+            "line": 5849,
+            "source": "router_call"
+          },
+          {
+            "method": "OPTIONS",
+            "path": "/mcp",
+            "line": 6181,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/mcp",
+            "line": 6186,
+            "source": "router_call"
+          },
+          {
+            "method": "POST",
+            "path": "/mcp",
+            "line": 6197,
+            "source": "router_call"
+          },
+          {
+            "method": "GET",
+            "path": "/tasks/{srv}/{tid}",
+            "line": 6253,
+            "source": "router_call"
+          }
+        ],
+        "dataOperations": [
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 573,
+            "evidence": "log.error(\"state: save failed: %s\", e)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 586,
+            "evidence": "task.update({\"status\": \"expired\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": \"deferred task expired\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 600,
+            "evidence": "job.update({\"status\": \"expired\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": {\"message\": \"MCP relay job expired before delivery\"}})"
+          },
+          {
+            "operation": "write",
+            "access": "filesystem",
+            "line": 622,
+            "evidence": "f.unlink()"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 654,
+            "evidence": "sys.path.insert(0, path)"
+          },
+          {
+            "operation": "read",
+            "access": "unknown",
+            "line": 713,
+            "evidence": "lines = content.count(\"\\n\") + (1 if content and not content.endswith(\"\\n\") else 0)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 982,
+            "evidence": "approved_servers.update(_load_json_dict(APPROVED_SERVERS_FILE))"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 983,
+            "evidence": "pending_servers.update(_load_json_dict(PENDING_SERVERS_FILE))"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 1158,
+            "evidence": "action: str = Field(\"list\", pattern=\"^(list|add|remove|install|status|cat)$\")"
+          },
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 1271,
+            "evidence": "out.remove(value)"
+          },
+          {
+            "operation": "write",
+            "access": "unknown",
+            "line": 1329,
+            "evidence": "log.debug(\"auth clients: save failed: %s\", e)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1512,
+            "evidence": "task.update({"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1570,
+            "evidence": "task.update({\"status\": \"cancelled\", \"completed_at\": int(now), \"cancelled_at\": int(now), \"cancel_reason\": reason})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1574,
+            "evidence": "task.update({\"status\": \"queued_ready\", \"not_before\": now, \"next_attempt_at\": now, \"retry_reason\": reason})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1578,
+            "evidence": "task.update({\"status\": \"queued_deferred\", \"pause_reason\": reason})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1605,
+            "evidence": "task.update({\"status\": \"expired\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": \"deferred task expired\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1611,
+            "evidence": "task.update({\"status\": \"failed\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": \"deferred task max attempts exceeded\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1613,
+            "evidence": "task.update({\"status\": \"running\", \"attempts\": attempts, \"started_at\": int(now), \"updated_at\": int(now)})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1631,
+            "evidence": "task.update({\"status\": \"expired\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": \"deferred task expired\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1637,
+            "evidence": "task.update({\"status\": \"failed\", \"completed_at\": int(now), \"updated_at\": int(now), \"error\": \"deferred task missing payload\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1639,
+            "evidence": "task.update({\"status\": \"dispatching\", \"updated_at\": int(now)})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1652,
+            "evidence": "headers.update(extra)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1699,
+            "evidence": "h.update(chunk)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 1706,
+            "evidence": "data.update("
+          },
+          {
+            "operation": "read",
+            "access": "unknown",
+            "line": 1857,
+            "evidence": "in: query"
+          },
+          {
+            "operation": "read",
+            "access": "unknown",
+            "line": 1927,
+            "evidence": "in: query"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2061,
+            "evidence": "meta.update({k: v for k, v in loaded.items() if k not in {\"sha256\", \"size\", \"url\"}})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2064,
+            "evidence": "meta.update({"
+          },
+          {
+            "operation": "read",
+            "access": "unknown",
+            "line": 2193,
+            "evidence": "return {\"ok\": True, \"pending\": list(pending_servers.values()), \"count\": len(pending_servers)}"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2261,
+            "evidence": "\"\"\"Run webhook command through shellmcp /exec/live and update task stdout/stderr while it runs.\"\"\""
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2270,
+            "evidence": "slot.update({\"status\": \"running\", \"updated_at\": int(time.time())})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2325,
+            "evidence": "task.update({\"status\": \"expired\", \"completed_at\": int(time.time()), \"updated_at\": int(time.time()), \"error\": \"deferred task expired\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2327,
+            "evidence": "task.update({\"status\": \"failed\", \"completed_at\": int(time.time()), \"updated_at\": int(time.time()), \"error\": \"server offline and retry_policy=none\"})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2329,
+            "evidence": "task.update({\"status\": \"queued_deferred\" if float(task.get(\"not_before\") or 0) > time.time() else \"queued_offline\", \"updated_at\": int(time.time())})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2333,
+            "evidence": "task.update({\"status\": \"queued_ready\", \"updated_at\": int(time.time())})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2341,
+            "evidence": "task.update({\"status\": \"queued_offline\", \"attempts\": attempts, \"next_attempt_at\": time.time() + _deferred_backoff_s(attempts), \"last_error\": \"websocket not conn"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2343,
+            "evidence": "task.update({\"status\": \"failed\", \"attempts\": attempts, \"completed_at\": int(time.time()), \"last_error\": \"websocket not connected\", \"error\": \"websocket not connec"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2346,
+            "evidence": "task.update({\"status\": \"running\", \"attempts\": attempts, \"started_at\": int(time.time()), \"updated_at\": int(time.time())})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2355,
+            "evidence": "background_tasks.setdefault(srv, {})[tid].update({\"status\": \"completed\", \"result\": _spill_single_result(srv, result, str(payload.get(\"cmd\") or \"\")), \"completed_"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2361,
+            "evidence": "task.update({\"status\": \"queued_offline\", \"attempts\": attempts, \"next_attempt_at\": time.time() + _deferred_backoff_s(attempts), \"last_error\": started, \"updated_a"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2363,
+            "evidence": "task.update({\"status\": \"failed\", \"attempts\": attempts, \"completed_at\": int(time.time()), \"last_error\": started, \"error\": \"callback start failed and retry_policy"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2367,
+            "evidence": "task.update({\"status\": \"running\", \"attempts\": attempts, \"delivery\": \"callback_outbox\", \"shellmcp_start\": started, \"started_at\": int(time.time()), \"updated_at\": "
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2372,
+            "evidence": "task.update({\"status\": \"queued_offline\", \"attempts\": attempts, \"next_attempt_at\": time.time() + _deferred_backoff_s(attempts), \"last_error\": str(e), \"updated_at"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2374,
+            "evidence": "task.update({\"status\": \"failed\", \"attempts\": attempts, \"completed_at\": int(time.time()), \"last_error\": str(e), \"error\": \"dispatch exception and retry_policy doe"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2414,
+            "evidence": "_task_slot(srv, tid).update({\"cmd\": req.cmd, \"cwd\": req.cwd})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2435,
+            "evidence": "_task_slot(srv, tid).update({\"cmd\": req.cmd, \"cwd\": req.cwd})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2440,
+            "evidence": "background_tasks.setdefault(srv, {})[tid].update({\"status\": \"completed\", \"result\": _spill_single_result(srv, result, str(payload.get(\"cmd\") or \"\")), \"completed_"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2442,
+            "evidence": "background_tasks.setdefault(srv, {})[tid].update({\"status\": \"failed\", \"error\": str(e), \"completed_at\": int(time.time())})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2473,
+            "evidence": "_task_slot(srv, tid).update({\"cmd\": payload.get(\"cmd\"), \"cwd\": payload.get(\"cwd\")})"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 2480,
+            "evidence": "background_tasks.setdefault(srv, {})[tid].update({\"status\": \"completed\", \"result\": _spill_single_result(srv, result, str(payload.get(\"cmd\") or \"\")), \"completed_"
+          }
+        ],
+        "security": [
+          {
+            "kind": "secret_handling",
+            "line": 22,
+            "evidence": "CTL_TOKEN                  Bearer token for GPT Actions / admin API",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 27,
+            "evidence": "MCP_RELAY_AGENT_TOKEN       Token for real local MCP relay agents",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 128,
+            "evidence": "SENSITIVE_KEYS = {\"authorization\", \"shellmcp_token\", \"token\", \"ctl_token\", \"password\", \"client_secret\"}",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 128,
+            "evidence": "SENSITIVE_KEYS = {\"authorization\", \"shellmcp_token\", \"token\", \"ctl_token\", \"password\", \"client_secret\"}",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 194,
+            "evidence": "[\"x-gptadmin-response-token-limit\", \"x-gptadmin-max-response-tokens\", \"x-response-token-limit\"],",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 335,
+            "evidence": "# it; use the conservative token budget below for ChatGPT.",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1018,
+            "evidence": "raise HTTPException(401, \"bad token\")",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1019,
+            "evidence": "_remember_auth_client(request, token_kind=\"ctl_bearer\", subject=\"control\", client_id=\"ctl-token\", scope=\"gptadmin.read gptadmin.exec\")",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 1184,
+            "evidence": "auth = request.headers.get(\"authorization\") or request.headers.get(\"Authorization\") or \"\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1188,
+            "evidence": "token = parts[1] if len(parts) == 2 else auth",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1189,
+            "evidence": "if not token:",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1191,
+            "evidence": "return \"sha256:\" + hashlib.sha256(token.encode(\"utf-8\", \"ignore\")).hexdigest()[:16]",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 1197,
+            "evidence": "auth = request.headers.get(\"authorization\") or request.headers.get(\"Authorization\") or \"\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 1201,
+            "evidence": "return \"authorization\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1737,
+            "evidence": "X-GPTAdmin-Response-Token-Limit: approximate output token budget before spilling to file_path",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1769,
+            "evidence": "name: X-GPTAdmin-Response-Token-Limit",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1772,
+            "evidence": "description: Approximate output token budget before spilling to file_path.",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1806,
+            "evidence": "name: X-GPTAdmin-Response-Token-Limit",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1809,
+            "evidence": "description: Approximate output token budget before spilling to file_path.",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 1841,
+            "evidence": "name: X-GPTAdmin-Response-Token-Limit",
+            "confidence": "low"
+          },
+          {
+            "kind": "authentication",
+            "line": 2471,
+            "evidence": "raise HTTPException(503, \"websocket session is not connected\")",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 2679,
+            "evidence": "headers.pop(\"authorization\", None)",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 2701,
+            "evidence": "auth = request.headers.get(\"authorization\", \"\")",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2704,
+            "evidence": "raise HTTPException(401, \"bad relay token\")",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2754,
+            "evidence": "_SECRET_KEY_RE = re.compile(r\"(token|secret|password|passwd|api[_-]?key|authorization|bearer|x-api-key)\", re.I)",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2754,
+            "evidence": "_SECRET_KEY_RE = re.compile(r\"(token|secret|password|passwd|api[_-]?key|authorization|bearer|x-api-key)\", re.I)",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 2756,
+            "evidence": "r\"(?i)(Authorization\\s*:\\s*(?:Bearer|ApiKey|Basic)\\s+)[^\\s,'\\\"\\]]+|\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2756,
+            "evidence": "r\"(?i)(Authorization\\s*:\\s*(?:Bearer|ApiKey|Basic)\\s+)[^\\s,'\\\"\\]]+|\"",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2757,
+            "evidence": "r\"((?:Bearer|ApiKey|Basic)\\s+)[^\\s,'\\\"\\]]+|\"",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2758,
+            "evidence": "r\"((?:token|secret|password|passwd|api[_-]?key)\\s*[=:]\\s*)[^\\s,'\\\"\\]]+\"",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2766,
+            "evidence": "headers, API keys, passwords or token-like values there; shellmcp/relay may",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2783,
+            "evidence": "if isinstance(item, str) and item.lower() in {\"--header\", \"--token\", \"--api-key\", \"--password\", \"--secret\"}:",
+            "confidence": "low"
+          },
+          {
+            "kind": "input_validation",
+            "line": 2919,
+            "evidence": "\"\"\"Validate and normalize an explicit MCP target.",
+            "confidence": "high"
+          },
+          {
+            "kind": "input_validation",
+            "line": 2925,
+            "evidence": "The validated target id.",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 2987,
+            "evidence": "_MCP_RUNTIME_BOOTSTRAP_PY = \"import hashlib\\nimport json\\nimport os\\nimport pathlib\\nimport stat\\nimport sys\\nimport tarfile\\nimport tempfile\\nimport urllib.par",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 2987,
+            "evidence": "_MCP_RUNTIME_BOOTSTRAP_PY = \"import hashlib\\nimport json\\nimport os\\nimport pathlib\\nimport stat\\nimport sys\\nimport tarfile\\nimport tempfile\\nimport urllib.par",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 3917,
+            "evidence": "info[\"env\"] = {name: (_mask_secret_value(os.getenv(name)) if name in SENSITIVE_KEYS or \"TOKEN\" in name or \"SECRET\" in name or \"PASSWORD\" in name else os.getenv(",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 4589,
+            "evidence": "py = 'import json, os, pathlib, subprocess, sys, socket\\n\\ndef red(v):\\n    keys=(\"token\",\"secret\",\"password\",\"passwd\",\"api_key\",\"apikey\",\"authorization\",\"beare",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 4589,
+            "evidence": "py = 'import json, os, pathlib, subprocess, sys, socket\\n\\ndef red(v):\\n    keys=(\"token\",\"secret\",\"password\",\"passwd\",\"api_key\",\"apikey\",\"authorization\",\"beare",
+            "confidence": "low"
+          },
+          {
+            "kind": "authentication",
+            "line": 5416,
+            "evidence": "\"\"\"Revoke ALL OAuth clients and rotate OAUTH_CLIENT_SECRET (invalidates all JWT tokens).\"\"\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "authentication",
+            "line": 5420,
+            "evidence": "# Rotate OAUTH_CLIENT_SECRET to invalidate all existing JWT tokens",
+            "confidence": "high"
+          },
+          {
+            "kind": "authentication",
+            "line": 5476,
+            "evidence": "header = {\"alg\": \"HS256\", \"typ\": \"JWT\"}",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 5484,
+            "evidence": "def _verify_jwt(token: str) -> Dict[str, Any]:",
+            "confidence": "low"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 5486,
+            "evidence": "h, p, sig = token.split(\".\")",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 5674,
+            "evidence": "auth = request.headers.get(\"authorization\", \"\")",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 5712,
+            "evidence": "@app.get(\"/.well-known/oauth-authorization-server\")",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 5716,
+            "evidence": "\"authorization_endpoint\": f\"{PUBLIC_ORIGIN}/authorize\",",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 5717,
+            "evidence": "\"token_endpoint\": f\"{PUBLIC_ORIGIN}/token\",",
+            "confidence": "low"
+          },
+          {
+            "kind": "authorization",
+            "line": 5755,
+            "evidence": "@app.get(\"/authorize\")",
+            "confidence": "high"
+          },
+          {
+            "kind": "authorization",
+            "line": 5779,
+            "evidence": "<title>Authorize GPTAdmin MCP</title>",
+            "confidence": "high"
+          }
+        ],
+        "conventions": [],
+        "findings": [
+          {
+            "code": "multiple_writes_without_detected_transaction",
+            "severity": "low",
+            "message": "Multiple write/delete operations were detected without a transaction fact.",
+            "line": 573
+          }
+        ]
+      }
+    },
+    "/home/admin/gptadmin/gptadmin_security.py": {
+      "filePath": "/home/admin/gptadmin/gptadmin_security.py",
+      "moduleName": "gptadmin_security.py",
+      "exports": [
+        "b64e",
+        "b64d",
+        "now_ts",
+        "random_nonce",
+        "public_key_to_b64",
+        "public_key_from_b64",
+        "private_key_to_pem",
+        "private_key_from_pem",
+        "fingerprint_public_key_b64",
+        "load_or_create_ed25519_private_key",
+        "write_public_key",
+        "load_public_key_b64",
+        "load_or_create_identity",
+        "canonical_request",
+        "sign_request",
+        "verify_signature",
+        "NonceCache",
+        "check_and_store"
+      ],
+      "exportLines": {
+        "b64e": 17,
+        "b64d": 21,
+        "now_ts": 26,
+        "random_nonce": 30,
+        "public_key_to_b64": 34,
+        "public_key_from_b64": 38,
+        "private_key_to_pem": 42,
+        "private_key_from_pem": 50,
+        "fingerprint_public_key_b64": 54,
+        "load_or_create_ed25519_private_key": 58,
+        "write_public_key": 69,
+        "load_public_key_b64": 76,
+        "load_or_create_identity": 80,
+        "canonical_request": 122,
+        "sign_request": 127,
+        "verify_signature": 134,
+        "NonceCache": 145,
+        "check_and_store": 150
+      },
+      "exportRanges": {
+        "b64e": {
+          "startLine": 17,
+          "endLine": 18
+        },
+        "b64d": {
+          "startLine": 21,
+          "endLine": 23
+        },
+        "now_ts": {
+          "startLine": 26,
+          "endLine": 27
+        },
+        "random_nonce": {
+          "startLine": 30,
+          "endLine": 31
+        },
+        "public_key_to_b64": {
+          "startLine": 34,
+          "endLine": 35
+        },
+        "public_key_from_b64": {
+          "startLine": 38,
+          "endLine": 39
+        },
+        "private_key_to_pem": {
+          "startLine": 42,
+          "endLine": 47
+        },
+        "private_key_from_pem": {
+          "startLine": 50,
+          "endLine": 51
+        },
+        "fingerprint_public_key_b64": {
+          "startLine": 54,
+          "endLine": 55
+        },
+        "load_or_create_ed25519_private_key": {
+          "startLine": 58,
+          "endLine": 66
+        },
+        "write_public_key": {
+          "startLine": 69,
+          "endLine": 73
+        },
+        "load_public_key_b64": {
+          "startLine": 76,
+          "endLine": 77
+        },
+        "load_or_create_identity": {
+          "startLine": 80,
+          "endLine": 119
+        },
+        "canonical_request": {
+          "startLine": 122,
+          "endLine": 124
+        },
+        "sign_request": {
+          "startLine": 127,
+          "endLine": 131
+        },
+        "verify_signature": {
+          "startLine": 134,
+          "endLine": 142
+        },
+        "NonceCache": {
+          "startLine": 145,
+          "endLine": 159
+        },
+        "check_and_store": {
+          "startLine": 150,
+          "endLine": 159
+        }
+      },
+      "imports": [
+        "base64",
+        "hashlib",
+        "json",
+        "os",
+        "time",
+        "uuid",
+        "pathlib",
+        "typing",
+        "cryptography.hazmat.primitives",
+        "cryptography.hazmat.primitives.asymmetric.ed25519",
+        "cryptography.exceptions"
+      ],
+      "language": "python",
+      "mtime": "2026-06-28T01:21:56.358Z",
+      "ontology": {
+        "roles": [
+          "source_module"
+        ],
+        "packageBoundary": "gptadmin_security.py",
+        "routes": [],
+        "dataOperations": [],
+        "security": [
+          {
+            "kind": "secret_handling",
+            "line": 51,
+            "evidence": "return serialization.load_pem_private_key(data, password=None)",
+            "confidence": "low"
+          }
+        ],
+        "conventions": [],
+        "findings": []
+      }
+    },
+    "/home/admin/gptadmin/hub_watchdog.py": {
+      "filePath": "/home/admin/gptadmin/hub_watchdog.py",
+      "moduleName": "hub_watchdog.py",
+      "exports": [
+        "utc_ts",
+        "local_ts",
+        "append_log",
+        "json_log",
+        "healthy",
+        "run_command",
+        "read_stamp",
+        "write_stamp",
+        "check_once",
+        "terminate_process",
+        "supervise",
+        "parse_args",
+        "main"
+      ],
+      "exportLines": {
+        "utc_ts": 31,
+        "local_ts": 35,
+        "append_log": 39,
+        "json_log": 52,
+        "healthy": 58,
+        "run_command": 72,
+        "read_stamp": 87,
+        "write_stamp": 94,
+        "check_once": 100,
+        "terminate_process": 130,
+        "supervise": 147,
+        "parse_args": 208,
+        "main": 235
+      },
+      "exportRanges": {
+        "utc_ts": {
+          "startLine": 31,
+          "endLine": 32
+        },
+        "local_ts": {
+          "startLine": 35,
+          "endLine": 36
+        },
+        "append_log": {
+          "startLine": 39,
+          "endLine": 49
+        },
+        "json_log": {
+          "startLine": 52,
+          "endLine": 55
+        },
+        "healthy": {
+          "startLine": 58,
+          "endLine": 69
+        },
+        "run_command": {
+          "startLine": 72,
+          "endLine": 84
+        },
+        "read_stamp": {
+          "startLine": 87,
+          "endLine": 91
+        },
+        "write_stamp": {
+          "startLine": 94,
+          "endLine": 97
+        },
+        "check_once": {
+          "startLine": 100,
+          "endLine": 127
+        },
+        "terminate_process": {
+          "startLine": 130,
+          "endLine": 144
+        },
+        "supervise": {
+          "startLine": 147,
+          "endLine": 205
+        },
+        "parse_args": {
+          "startLine": 208,
+          "endLine": 232
+        },
+        "main": {
+          "startLine": 235,
+          "endLine": 239
+        }
+      },
+      "imports": [
+        "argparse",
+        "datetime",
+        "json",
+        "os",
+        "pathlib",
+        "signal",
+        "subprocess",
+        "sys",
+        "time",
+        "urllib.error",
+        "urllib.request",
+        "typing"
+      ],
+      "language": "python",
+      "mtime": "2026-06-29T14:55:56.244Z",
+      "ontology": {
+        "roles": [
+          "source_module"
+        ],
+        "packageBoundary": "hub_watchdog.py",
+        "routes": [],
+        "dataOperations": [],
+        "security": [],
+        "conventions": [],
+        "findings": []
+      }
+    },
+    "/home/admin/gptadmin/server_for_installer.py": {
+      "filePath": "/home/admin/gptadmin/server_for_installer.py",
+      "moduleName": "server_for_installer.py",
+      "exports": [
+        "load_script",
+        "get_install_sh",
+        "get_install_shellmcp_sh",
+        "get_install_win_ps1",
+        "get_install_android_sh",
+        "get_openapi_json",
+        "get_all",
+        "get_cli",
+        "get_android_arm64",
+        "get_platform_bundle",
+        "get_hub",
+        "get_shellmcp",
+        "get_shellmcp_win",
+        "get_frp_mirror_artifact",
+        "get_cli_py",
+        "get_shellmcp_pure_py",
+        "get_shellmcp_py",
+        "get_shellmcp_py_meta",
+        "get_shellmcp_pure_py_meta",
+        "get_manifest_json",
+        "get_mcp_bridge_userscript",
+        "get_userscript",
+        "mcp_help_page"
+      ],
+      "exportLines": {
+        "load_script": 132,
+        "get_install_sh": 140,
+        "get_install_shellmcp_sh": 146,
+        "get_install_win_ps1": 152,
+        "get_install_android_sh": 158,
+        "get_openapi_json": 163,
+        "get_all": 175,
+        "get_cli": 180,
+        "get_android_arm64": 185,
+        "get_platform_bundle": 190,
+        "get_hub": 197,
+        "get_shellmcp": 202,
+        "get_shellmcp_win": 207,
+        "get_frp_mirror_artifact": 212,
+        "get_cli_py": 219,
+        "get_shellmcp_pure_py": 224,
+        "get_shellmcp_py": 229,
+        "get_shellmcp_py_meta": 234,
+        "get_shellmcp_pure_py_meta": 239,
+        "get_manifest_json": 244,
+        "get_mcp_bridge_userscript": 271,
+        "get_userscript": 276,
+        "mcp_help_page": 282
+      },
+      "exportRanges": {
+        "load_script": {
+          "startLine": 132,
+          "endLine": 137
+        },
+        "get_install_sh": {
+          "startLine": 140,
+          "endLine": 143
+        },
+        "get_install_shellmcp_sh": {
+          "startLine": 146,
+          "endLine": 149
+        },
+        "get_install_win_ps1": {
+          "startLine": 152,
+          "endLine": 155
+        },
+        "get_install_android_sh": {
+          "startLine": 158,
+          "endLine": 161
+        },
+        "get_openapi_json": {
+          "startLine": 163,
+          "endLine": 166
+        },
+        "get_all": {
+          "startLine": 175,
+          "endLine": 177
+        },
+        "get_cli": {
+          "startLine": 180,
+          "endLine": 182
+        },
+        "get_android_arm64": {
+          "startLine": 185,
+          "endLine": 187
+        },
+        "get_platform_bundle": {
+          "startLine": 190,
+          "endLine": 195
+        },
+        "get_hub": {
+          "startLine": 197,
+          "endLine": 199
+        },
+        "get_shellmcp": {
+          "startLine": 202,
+          "endLine": 204
+        },
+        "get_shellmcp_win": {
+          "startLine": 207,
+          "endLine": 209
+        },
+        "get_frp_mirror_artifact": {
+          "startLine": 212,
+          "endLine": 216
+        },
+        "get_cli_py": {
+          "startLine": 219,
+          "endLine": 221
+        },
+        "get_shellmcp_pure_py": {
+          "startLine": 224,
+          "endLine": 226
+        },
+        "get_shellmcp_py": {
+          "startLine": 229,
+          "endLine": 231
+        },
+        "get_shellmcp_py_meta": {
+          "startLine": 234,
+          "endLine": 236
+        },
+        "get_shellmcp_pure_py_meta": {
+          "startLine": 239,
+          "endLine": 241
+        },
+        "get_manifest_json": {
+          "startLine": 244,
+          "endLine": 246
+        },
+        "get_mcp_bridge_userscript": {
+          "startLine": 271,
+          "endLine": 273
+        },
+        "get_userscript": {
+          "startLine": 276,
+          "endLine": 279
+        },
+        "mcp_help_page": {
+          "startLine": 282,
+          "endLine": 287
+        }
+      },
+      "imports": [
+        "logging",
+        "hashlib",
+        "re",
+        "tarfile",
+        "pathlib",
+        "fastapi",
+        "fastapi.responses",
+        "fastapi.staticfiles",
+        "uvicorn"
+      ],
+      "language": "python",
+      "mtime": "2026-06-30T12:16:21.946Z",
+      "ontology": {
+        "roles": [
+          "source_module"
+        ],
+        "packageBoundary": "server_for_installer.py",
+        "routes": [],
+        "dataOperations": [
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 40,
+            "evidence": "h.update(chunk)"
+          },
+          {
+            "operation": "write",
+            "access": "sql",
+            "line": 105,
+            "evidence": "meta.update(_artifact_build_info(path))"
+          }
+        ],
+        "security": [],
+        "conventions": [],
+        "findings": [
+          {
+            "code": "multiple_writes_without_detected_transaction",
+            "severity": "low",
+            "message": "Multiple write/delete operations were detected without a transaction fact.",
+            "line": 40
+          }
+        ]
+      }
+    },
+    "/home/admin/gptadmin/telegram_logs_bot.py": {
+      "filePath": "/home/admin/gptadmin/telegram_logs_bot.py",
+      "moduleName": "telegram_logs_bot.py",
+      "exports": [
+        "require_env",
+        "require_chat_id",
+        "load_config",
+        "save_config",
+        "HttpProxySession",
+        "make_request",
+        "run_command",
+        "parse_fail2ban_jails",
+        "unban_ip_from_all_jails",
+        "main_menu",
+        "cmd_start",
+        "cmd_cancel",
+        "cmd_unban",
+        "cmd_keywords",
+        "cmd_ignore",
+        "enter_edit_mode",
+        "callbacks",
+        "any_text",
+        "log_watcher",
+        "main"
+      ],
+      "exportLines": {
+        "require_env": 46,
+        "require_chat_id": 54,
+        "load_config": 70,
+        "save_config": 81,
+        "HttpProxySession": 90,
+        "make_request": 97,
+        "run_command": 134,
+        "parse_fail2ban_jails": 146,
+        "unban_ip_from_all_jails": 154,
+        "main_menu": 189,
+        "cmd_start": 209,
+        "cmd_cancel": 221,
+        "cmd_unban": 232,
+        "cmd_keywords": 264,
+        "cmd_ignore": 271,
+        "enter_edit_mode": 278,
+        "callbacks": 298,
+        "any_text": 343,
+        "log_watcher": 393,
+        "main": 514
+      },
+      "exportRanges": {
+        "require_env": {
+          "startLine": 46,
+          "endLine": 51
+        },
+        "require_chat_id": {
+          "startLine": 54,
+          "endLine": 62
+        },
+        "load_config": {
+          "startLine": 70,
+          "endLine": 78
+        },
+        "save_config": {
+          "startLine": 81,
+          "endLine": 84
+        },
+        "HttpProxySession": {
+          "startLine": 90,
+          "endLine": 126
+        },
+        "make_request": {
+          "startLine": 97,
+          "endLine": 126
+        },
+        "run_command": {
+          "startLine": 134,
+          "endLine": 143
+        },
+        "parse_fail2ban_jails": {
+          "startLine": 146,
+          "endLine": 151
+        },
+        "unban_ip_from_all_jails": {
+          "startLine": 154,
+          "endLine": 185
+        },
+        "main_menu": {
+          "startLine": 189,
+          "endLine": 205
+        },
+        "cmd_start": {
+          "startLine": 209,
+          "endLine": 218
+        },
+        "cmd_cancel": {
+          "startLine": 221,
+          "endLine": 229
+        },
+        "cmd_unban": {
+          "startLine": 232,
+          "endLine": 260
+        },
+        "cmd_keywords": {
+          "startLine": 264,
+          "endLine": 268
+        },
+        "cmd_ignore": {
+          "startLine": 271,
+          "endLine": 275
+        },
+        "enter_edit_mode": {
+          "startLine": 278,
+          "endLine": 294
+        },
+        "callbacks": {
+          "startLine": 298,
+          "endLine": 339
+        },
+        "any_text": {
+          "startLine": 343,
+          "endLine": 389
+        },
+        "log_watcher": {
+          "startLine": 393,
+          "endLine": 510
+        },
+        "main": {
+          "startLine": 514,
+          "endLine": 516
+        }
+      },
+      "imports": [
+        "asyncio",
+        "ipaddress",
+        "json",
+        "os",
+        "re",
+        "subprocess",
+        "datetime",
+        "pathlib",
+        "typing",
+        "aiogram",
+        "aiogram.client.session.aiohttp",
+        "aiogram.filters",
+        "aiogram.methods",
+        "aiogram.types",
+        "aiogram.types"
+      ],
+      "language": "python",
+      "mtime": "2026-06-10T13:17:49.155Z",
+      "ontology": {
+        "roles": [
+          "source_module"
+        ],
+        "packageBoundary": "telegram_logs_bot.py",
+        "routes": [],
+        "dataOperations": [
+          {
+            "operation": "delete",
+            "access": "unknown",
+            "line": 377,
+            "evidence": "cur_set.remove(w)"
+          }
+        ],
+        "security": [
+          {
+            "kind": "authentication",
+            "line": 13,
+            "evidence": "from aiogram.client.session.aiohttp import AiohttpSession",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 65,
+            "evidence": "TOKEN = require_env(\"TELEGRAM_BOT_TOKEN\")",
+            "confidence": "low"
+          },
+          {
+            "kind": "authentication",
+            "line": 91,
+            "evidence": "\"\"\"Aiogram session that routes Telegram API requests through an HTTP proxy.\"\"\"",
+            "confidence": "high"
+          },
+          {
+            "kind": "authentication",
+            "line": 103,
+            "evidence": "session = await self.create_session()",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 104,
+            "evidence": "url = self.api.api_url(token=bot.token, method=method.__api_method__)",
+            "confidence": "low"
+          },
+          {
+            "kind": "authentication",
+            "line": 108,
+            "evidence": "async with session.post(",
+            "confidence": "high"
+          },
+          {
+            "kind": "authentication",
+            "line": 130,
+            "evidence": "bot = Bot(token=TOKEN, session=bot_session)",
+            "confidence": "high"
+          },
+          {
+            "kind": "secret_handling",
+            "line": 130,
+            "evidence": "bot = Bot(token=TOKEN, session=bot_session)",
+            "confidence": "low"
+          }
+        ],
+        "conventions": [],
+        "findings": []
+      }
+    }
+  },
+  "edges": [],
+  "metadata": {
+    "generatedAt": "2026-07-03T11:41:44.167Z",
+    "generator": "repo-graph",
+    "nodeCount": 7,
+    "edgeCount": 0
+  },
+  "diagnostics": {
+    "extractionFailures": [],
+    "unresolvedImports": [],
+    "oversizedFiles": [],
+    "unsupportedFiles": [],
+    "binaryFiles": [],
+    "unreadableFiles": [],
+    "lowConfidenceEdgeCount": 0
+  }
+}

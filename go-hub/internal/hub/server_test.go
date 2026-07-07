@@ -576,3 +576,116 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 		t.Fatalf("resource missing widget metadata: %#v", meta)
 	}
 }
+
+func TestServerActionsOpenAPIProxyForPinnedMCPServer(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", RelayAgentToken: "relay", PublicOrigin: "https://hub.example", DefaultTimeout: 2 * time.Second, PollMaxTimeout: 2 * time.Second})
+	h := s.Handler()
+	register := []byte(`{"server_id":"OpenMemory","name":"OpenMemory","kind":"real_mcp","transport":"stdio","capabilities":["tools/list","tools/call"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	doneSchema := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/server/openmemory/actions/openapi.yaml", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		doneSchema <- w
+	}()
+	time.Sleep(30 * time.Millisecond)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/poll/OpenMemory?timeout=1", nil)
+	req.Header.Set("Authorization", "Bearer relay")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("poll tools/list status=%d body=%s", w.Code, w.Body.String())
+	}
+	var job map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := job["id"].(string)
+	if jobID == "" || job["method"] != "tools/list" {
+		t.Fatalf("bad tools/list job: %v", job)
+	}
+	result := []byte(`{"id":"` + jobID + `","result":{"tools":[{"name":"openmemory_query","description":"Query OpenMemory","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}]}}`)
+	req = httptest.NewRequest(http.MethodPost, "/mcp-relay/result/OpenMemory", bytes.NewReader(result))
+	req.Header.Set("Authorization", "Bearer relay")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("result tools/list status=%d body=%s", w.Code, w.Body.String())
+	}
+	select {
+	case w = <-doneSchema:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("actions openapi request timed out")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("actions openapi status=%d body=%s", w.Code, w.Body.String())
+	}
+	schema := w.Body.String()
+	for _, want := range []string{"openapi: 3.1.0", "/server/openmemory/actions/tools/openmemory_query", "operationId: \"openmemory_query\"", "Query OpenMemory", "bearerAuth"} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("openapi schema missing %q:\n%s", want, schema)
+		}
+	}
+	if strings.Contains(schema, "list_mcp_tools") || strings.Contains(schema, "call_mcp_tool") {
+		t.Fatalf("per-server action schema leaked GPTAdmin relay tools: %s", schema)
+	}
+
+	doneCall := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/server/openmemory/actions/tools/openmemory_query", bytes.NewReader([]byte(`{"query":"hello"}`)))
+		req.Header.Set("Authorization", "Bearer ctl")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		doneCall <- w
+	}()
+	time.Sleep(30 * time.Millisecond)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/poll/OpenMemory?timeout=1", nil)
+	req.Header.Set("Authorization", "Bearer relay")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("poll tools/call status=%d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ = job["id"].(string)
+	if jobID == "" || job["method"] != "tools/call" {
+		t.Fatalf("bad tools/call job: %v", job)
+	}
+	params := job["params"].(map[string]any)
+	if params["name"] != "openmemory_query" {
+		t.Fatalf("bad proxied tool name: %v", params)
+	}
+	args := params["arguments"].(map[string]any)
+	if args["query"] != "hello" {
+		t.Fatalf("bad proxied args: %v", args)
+	}
+	result = []byte(`{"id":"` + jobID + `","result":{"structuredContent":{"answer":"world"},"content":[{"type":"text","text":"world"}]}}`)
+	req = httptest.NewRequest(http.MethodPost, "/mcp-relay/result/OpenMemory", bytes.NewReader(result))
+	req.Header.Set("Authorization", "Bearer relay")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("result tools/call status=%d body=%s", w.Code, w.Body.String())
+	}
+	select {
+	case w = <-doneCall:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("actions tool call timed out")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("actions tool call status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "world") || !strings.Contains(w.Body.String(), "openmemory_query") {
+		t.Fatalf("bad actions tool response: %s", w.Body.String())
+	}
+}

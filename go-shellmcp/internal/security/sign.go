@@ -25,24 +25,53 @@ type Identity struct {
 }
 
 func LoadIdentity(dir, name string) (*Identity, error) {
+	if name == "" {
+		if h, err := os.Hostname(); err == nil {
+			name = h
+		}
+	}
 	keyPath := filepath.Join(dir, "shellmcp_ed25519")
+	pubPath := filepath.Join(dir, "shellmcp_ed25519.pub")
 	identPath := filepath.Join(dir, "shellmcp_identity.json")
+	if dir == "" {
+		return nil, fmt.Errorf("identity dir is empty")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+
 	pemBytes, err := os.ReadFile(keyPath)
+	var priv ed25519.PrivateKey
 	if err != nil {
-		return nil, err
+		_, generated, genErr := ed25519.GenerateKey(rand.Reader)
+		if genErr != nil {
+			return nil, genErr
+		}
+		priv = generated
+		pkcs8, marshalErr := x509.MarshalPKCS8PrivateKey(priv)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		pemBytes = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+		if writeErr := os.WriteFile(keyPath, pemBytes, 0o600); writeErr != nil {
+			return nil, writeErr
+		}
+	} else {
+		block, _ := pem.Decode(pemBytes)
+		if block == nil {
+			return nil, fmt.Errorf("invalid PEM private key %s", keyPath)
+		}
+		keyAny, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		parsed, ok := keyAny.(ed25519.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("private key is %T, not ed25519", keyAny)
+		}
+		priv = parsed
 	}
-	block, _ := pem.Decode(pemBytes)
-	if block == nil {
-		return nil, fmt.Errorf("invalid PEM private key %s", keyPath)
-	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	priv, ok := keyAny.(ed25519.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("private key is %T, not ed25519", keyAny)
-	}
+
 	ident := Identity{Name: name, PrivateKey: priv}
 	if b, err := os.ReadFile(identPath); err == nil {
 		_ = json.Unmarshal(b, &ident)
@@ -56,6 +85,16 @@ func LoadIdentity(dir, name string) (*Identity, error) {
 	if ident.ServerID == "" {
 		ident.ServerID = "go-shellmcp-" + randomHex(8)
 	}
+
+	_ = os.WriteFile(pubPath, []byte(ident.PublicKey+"\n"), 0o644)
+	identJSON, _ := json.MarshalIndent(map[string]any{
+		"created_at":  time.Now().Unix(),
+		"fingerprint": ident.Fingerprint,
+		"name":        ident.Name,
+		"public_key":  ident.PublicKey,
+		"server_id":   ident.ServerID,
+	}, "", "  ")
+	_ = os.WriteFile(identPath, append(identJSON, '\n'), 0o600)
 	return &ident, nil
 }
 
