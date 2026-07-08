@@ -9,7 +9,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/output"
 )
+
+func TestFromEnvDefaultLogLimit(t *testing.T) {
+	t.Setenv("LOG_LIMIT_B", "")
+	cfg := FromEnv()
+	if cfg.LogLimit != output.DefaultInlineTailBytes {
+		t.Fatalf("LogLimit=%d want %d", cfg.LogLimit, output.DefaultInlineTailBytes)
+	}
+}
 
 func TestExecEndpoint(t *testing.T) {
 	s := New(Config{Token: "t", LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir()})

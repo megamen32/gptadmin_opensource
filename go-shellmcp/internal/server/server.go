@@ -16,6 +16,7 @@ import (
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/job"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/output"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
@@ -50,7 +51,7 @@ type Config struct {
 func FromEnv() Config {
 	port := env("SHELL_PORT", env("SHELLMCP_PORT", env("PORT", "25900")))
 	host := env("SHELL_HOST", env("SHELLMCP_HOST", ""))
-	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", "65536"), 10, 64)
+	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", strconv.FormatInt(output.DefaultInlineTailBytes, 10)), 10, 64)
 	timeout, _ := strconv.Atoi(env("EXEC_TIMEOUT", "300"))
 	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))
 	name := env("SHELL_NAME", env("SHELLMCP_NAME", ""))
