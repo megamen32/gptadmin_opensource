@@ -58,7 +58,9 @@ HUB_URL=http://your-hub:25900 \
 | `SHELLMCP_NAME` | no | hostname | Agent name shown in the hub |
 | `SHELLMCP_LISTEN` | no | 25901 | Local listen port |
 | `EXEC_TIMEOUT` | no | 120 | Max command execution time (seconds) |
-| `LOG_LIMIT_B` | no | 1048576 | Max output size before truncation (bytes) |
+| `LOG_LIMIT_B` | no | 65536 | Max inline stdout/stderr tail returned by this ShellMCP agent before the full stream is spooled to disk (bytes) |
+
+`LOG_LIMIT_B` is per ShellMCP agent. It controls the local `/exec` result tail and does not replace hub/client response budgets; the hub may still apply different response budgets for ChatGPT Actions, Claude, or other MCP clients.
 
 ## Operations exposed
 

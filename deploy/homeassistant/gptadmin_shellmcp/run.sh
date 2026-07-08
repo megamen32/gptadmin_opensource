@@ -28,7 +28,7 @@ SHELL_QUEUE="$(opt queue 'true')"
 SHELL_HEARTBEAT="$(opt heartbeat 'true')"
 SHELL_DEFAULT_CWD="$(opt default_cwd '/config')"
 EXEC_TIMEOUT="$(opt exec_timeout '300')"
-LOG_LIMIT_B="$(opt log_limit_b '8192')"
+LOG_LIMIT_B="$(opt log_limit_b '65536')"
 
 if [[ -z "$SHELL_TOKEN" ]]; then
   if [[ -f /data/shell_token ]]; then

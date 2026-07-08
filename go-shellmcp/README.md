@@ -62,3 +62,10 @@ SHELL_DEFAULT_CWD=/home/admin
 ```
 
 Commands containing a `sudo` token stay in the service/root context, so privileged operations can still be requested explicitly with `sudo ...`.
+
+## Output size and client budgets
+
+`LOG_LIMIT_B` is a per-agent ShellMCP setting. It controls how much stdout/stderr tail is returned inline from `/exec`; full larger output is still written to the spool file and returned through `stdout_path`/`stderr_path`. The default is `65536` bytes.
+
+This is separate from GPTAdmin hub client budgets. The hub can apply different response budgets for ChatGPT Actions, Claude, or other MCP clients, so increasing one ShellMCP agent's `LOG_LIMIT_B` does not globally change every client or every agent.
+
