@@ -156,3 +156,30 @@ Long stdout/stderr is chunked. The response includes:
 
 The AI can read more on demand via a follow-up call. This saves tokens — the
 AI only reads what it needs to answer.
+
+
+## Per-server MCP and OpenAPI Action proxy
+
+GPTAdmin exposes each registered MCP server through authenticated per-server routes. Replace `{slug}` with `meta.public_mcp_slug` from `GET /mcp-relay/servers`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` / `POST` | `/server/{slug}/mcp` | MCP-compatible endpoint for one server |
+| `GET` | `/server/{slug}/card` | Server discovery card |
+| `GET` | `/server/{slug}/health` | Server health |
+| `GET` | `/server/{slug}/actions/openapi.yaml` | Generated OpenAPI schema for Custom GPT Actions |
+| `GET` | `/server/{slug}/actions/openapi.json` | Same schema as JSON |
+| `POST` | `/server/{slug}/actions/tools/{tool_name}` | Proxy an OpenAPI Action call to one MCP tool |
+
+The Action schema is generated from the selected MCP server's `tools/list`. Each operation request body is the MCP tool `inputSchema`. The Action call response wraps the upstream MCP result:
+
+```json
+{
+  "server_id": "OpenMemory",
+  "tool_name": "openmemory_query",
+  "status": "completed",
+  "response": {"content": []}
+}
+```
+
+See [MCP Proxy Relay](./MCP_PROXY_RELAY.md) for examples.

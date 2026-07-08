@@ -54,6 +54,18 @@ Rotate immediately if a token leaks. The repo's history-scrubbing
 (see [Open-Core Plan](./OPEN_CORE_PLAN.md) Stage 0) is a one-time measure —
 rotate to be safe.
 
+
+## Gateway mode for MCP servers
+
+When GPTAdmin is used as a secure proxy/relay, external clients should connect to GPTAdmin, not directly to private stdio or LAN-only MCP servers. Prefer per-server URLs when the client only needs one capability:
+
+```text
+/server/{slug}/mcp
+/server/{slug}/actions/openapi.yaml
+```
+
+This keeps the upstream MCP server private while GPTAdmin applies HTTPS, bearer/OAuth auth, audit logging, routing and queue handling. Use the full `/server/hub/mcp` surface only for trusted clients that need cross-server relay/admin capabilities.
+
 ## Production hardening checklist
 
 - [ ] `CTL_TOKEN` is a strong random value (`openssl rand -hex 32`)

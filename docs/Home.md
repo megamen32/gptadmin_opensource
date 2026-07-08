@@ -19,6 +19,7 @@ adapters.
 | [Install Paths](./INSTALL_PATHS.md) | Where GPT‑Админ lives on Linux/macOS/Windows |
 | [Configuration](./CONFIGURATION.md) | Full env-var reference, auth model, OAuth |
 | [API Reference](./API_REFERENCE.md) | REST + MCP endpoints |
+| [MCP Proxy Relay](./MCP_PROXY_RELAY.md) | Use GPTAdmin as a secure per-server MCP and OpenAPI Action proxy |
 | [Security](./SECURITY.md) | Auth, tokens, OAuth, responsible disclosure |
 | [Tunnels](./TUNNELS.md) | FRP and Cloudflare tunnels to expose the hub |
 | [Roadmap](./ROADMAP.md) | What's built, what's coming, open-core split |

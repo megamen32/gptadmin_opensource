@@ -163,3 +163,13 @@ advanced panel, support) will live in a separate repo — the core stays open.
 - 🌐 Website & docs: https://gptadmin.bezrabotnyi.com
 - 💬 Telegram: [@careviolan](https://t.me/careviolan)
 - 📦 Other projects: https://bezrabotnyi.com
+
+## Secure MCP proxy/relay
+
+GPTAdmin can be used as a secured gateway in front of any registered MCP server. Each server gets two authenticated public faces:
+
+- an MCP-compatible endpoint: `https://your-hub/server/{slug}/mcp`;
+- an OpenAPI Action schema for Custom GPTs: `https://your-hub/server/{slug}/actions/openapi.yaml`.
+
+Use this when a GPT should see only one tool/server, for example OpenMemory, instead of the full GPTAdmin relay surface. The OpenAPI schema is generated automatically from that server's MCP `tools/list` response. See [MCP Proxy Relay](./docs/MCP_PROXY_RELAY.md).
+

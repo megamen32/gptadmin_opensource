@@ -253,3 +253,18 @@ To add a new site, append a `@match` line to `apps/chatgpt-admin-app/public/user
 - **Browser extension doesn't inject** — userscript manager permissions: Tampermonkey Dashboard → "Allow user scripts" must be on; iOS Safari → Settings → Safari → Extensions → Userscripts → Allow; Android Firefox → add-on enabled for the current site.
 - **OAuth consent page 500s** — `PUBLIC_ORIGIN` in `config/gptadmin.env` doesn't match the URL the client is calling. Set it to the **exact** origin (scheme + host + port) the client uses.
 - **Quick pick by client.** ChatGPT (Plus/Team/Custom GPT) → [§1](#1-openai-action-custom-gpt). Claude Desktop / Codex / OpenCode / Mavis → [§2](#2-mcp-remote-streamable-http). Free web chat (DeepSeek / Qwen / Alice / ChatGPT free) → [§4](#4-browser-extension). Still stuck → [FAQ](./FAQ.md), [SECURITY_DOCS.md](./SECURITY_DOCS.md), or `https://<your-hub>/admin` per-section help panels.
+
+
+## Secure MCP proxy/relay
+
+For a single-purpose integration, expose one registered MCP server instead of the whole GPTAdmin relay. Every server has:
+
+```text
+/server/{slug}/mcp
+/server/{slug}/actions/openapi.yaml
+/server/{slug}/actions/tools/{tool_name}
+```
+
+Use `/server/openmemory/actions/openapi.yaml` for a Custom GPT that should only access OpenMemory. Use `/server/openmemory/mcp` for MCP-compatible clients. The OpenAPI schema is generated from the selected server's `tools/list`, so it stays aligned with the real MCP tools.
+
+See [MCP Proxy Relay](./MCP_PROXY_RELAY.md).
