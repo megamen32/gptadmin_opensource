@@ -22,6 +22,7 @@ adapters.
 | [MCP Proxy Relay](./MCP_PROXY_RELAY.md) | Use GPTAdmin as a secure per-server MCP and OpenAPI Action proxy |
 | [Security](./SECURITY.md) | Auth, tokens, OAuth, responsible disclosure |
 | [Tunnels](./TUNNELS.md) | FRP and Cloudflare tunnels to expose the hub |
+| [Failover](./FAILOVER.md) | How fallback nodes keep GPTAdmin alive in degraded mode and how to recover |
 | [Roadmap](./ROADMAP.md) | What's built, what's coming, open-core split |
 | [FAQ](./FAQ.md) | Common questions |
 | [Open-Core Plan](./OPEN_CORE_PLAN.md) | Internal launch plan (living doc) |
@@ -32,3 +33,4 @@ adapters.
 - **Want to understand the design?** Read [Architecture](./ARCHITECTURE.md).
 - **Connecting a specific AI?** Jump to [Adapters](./ADAPTERS.md).
 - **Going to production?** See [Security](./SECURITY.md) and [Tunnels](./TUNNELS.md).
+- **Planning resilience?** Read [Failover](./FAILOVER.md) after [Tunnels](./TUNNELS.md).

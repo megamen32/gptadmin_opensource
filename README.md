@@ -164,6 +164,14 @@ advanced panel, support) will live in a separate repo — the core stays open.
 - 💬 Telegram: [@careviolan](https://t.me/careviolan)
 - 📦 Other projects: https://bezrabotnyi.com
 
+## Failover: alive and degraded
+
+GPTAdmin can keep a fallback control plane available when the primary hub dies. A fallback node watches the public health URL, promotes only after a failure threshold, and keeps enough of the service online to inspect logs, reach surviving servers, and restore the primary.
+
+This is graceful degradation, not magic multi-master replication: recent in-memory counters or jobs running exactly on the dead node can be stale. But queues, background job metadata, large stdout/stderr spill files, shellmcp spool files, outbox responses, registry snapshots and failover logs are written to disk, so the recovery trail is not lost forever.
+
+See **[docs/FAILOVER.md](./docs/FAILOVER.md)**.
+
 ## Show current public URLs
 
 Use the CLI to print the active hub URL, tunnel mode, MCP endpoints and per-server OpenAPI Action schema URLs:
