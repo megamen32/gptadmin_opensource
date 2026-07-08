@@ -184,7 +184,7 @@ The hub's `/authorize` page lists the requested scopes; the user types the admin
 }
 ```
 
-> **Redirect URI allow-list.** `/authorize` accepts only `https://chatgpt.com/.../connector/oauth/...` and `*.chatgpt.com` by default. For other clients, edit `_is_chatgpt_redirect` in `gptadmin_hub.py` (around line 5500) — no per-client allow-list endpoint today.
+> **Redirect URI allow-list.** `/authorize` accepts only `https://chatgpt.com/.../connector/oauth/...` and `*.chatgpt.com` by default. For other clients, configure the Go hub OAuth redirect allow-list.
 
 ### Troubleshooting
 
@@ -248,7 +248,7 @@ To add a new site, append a `@match` line to `apps/chatgpt-admin-app/public/user
 
 - **Where is `CTL_TOKEN`?** On the hub host: `grep ^CTL_TOKEN config/gptadmin.env`. Rotate by editing the file and `systemctl restart gptadmin-hub`.
 - **Hub isn't reachable from ChatGPT / Claude / my client** — must be public HTTPS. Localhost and LAN IPs work for manual testing but not for ChatGPT Actions or remote MCP clients. Use a Cloudflare Tunnel (see [TUNNELS.md](./TUNNELS.md)) or a reverse proxy with a real domain.
-- **MCP connects but every tool returns "unauthorized"** — open `https://<your-hub>/.well-known/oauth-authorization-server` in a browser; if it 404s the OAuth routes aren't enabled in your hub build. Re-check `apps/chatgpt-admin-app/` is deployed (or that `gptadmin_hub.py` has the `oauth_*` handlers).
+- **MCP connects but every tool returns "unauthorized"** — open `https://<your-hub>/.well-known/oauth-authorization-server` in a browser; if it 404s the OAuth routes aren't enabled in your hub build. Re-check `apps/chatgpt-admin-app/` is deployed (or that the Go hub OAuth handlers are enabled).
 - **Custom GPT doesn't see the action** — verify the schema URL is public: `curl -I https://<your-hub>/actions/openapi.yaml` from outside your network. If 4xx/5xx, the tunnel / DNS isn't pointing at the hub.
 - **Browser extension doesn't inject** — userscript manager permissions: Tampermonkey Dashboard → "Allow user scripts" must be on; iOS Safari → Settings → Safari → Extensions → Userscripts → Allow; Android Firefox → add-on enabled for the current site.
 - **OAuth consent page 500s** — `PUBLIC_ORIGIN` in `config/gptadmin.env` doesn't match the URL the client is calling. Set it to the **exact** origin (scheme + host + port) the client uses.

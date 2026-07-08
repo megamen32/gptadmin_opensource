@@ -6,7 +6,7 @@ What's built, what's coming, and the open-core split.
 
 ### ✅ Built and working
 
-- **Hub** (`gptadmin_hub.py`) — MCP remote SSE, admin API, OAuth, web panel
+- **Hub** (`go-hub/`) — MCP remote SSE, admin API, OAuth, web panel
 - **ShellMCP** (Go + Python) — agent for Linux/macOS/Windows
 - **Three adapters**:
   - MCP client (Claude Desktop, Codex, OpenCode)

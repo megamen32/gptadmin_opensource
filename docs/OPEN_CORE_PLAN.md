@@ -62,7 +62,7 @@ gptadmin/
 3. **`.gitignore` is broken** — contains conflict markers `<<<<<<< HEAD` / `=======` / `>>>>>>> headroom-spill-integration` (unresolved merge)
 4. **Private configs in repo**: `deploy/nginx/became.bezrabotnyi.com.conf` (real domain/paths) — verify it's not in history
 5. **Archives in root**: `gptadmin_refactor_2026-05-11_15-18-03.tar.gz` (44KB), `root_hub_license_refactor.zip` (13KB) — repo junk
-6. **Root-level sprawl**: `cli.py` (72KB), `gptadmin_hub.py` (289KB), `gptadmin_security.py`, `server_for_installer.py`, `hub_watchdog.py`, `telegram_logs_bot.py`, `mcp-add` — all in root, no structure
+6. **Root-level sprawl**: `cli.py`, `go-hub/`, `gptadmin_security.py`, `server_for_installer.py`, `telegram_logs_bot.py`, `mcp-add` — all in root, no structure
 
 ### ⚠️ Must verify
 7. **Secrets in commit history** — critical to scan `git log --all -p` for `github_pat_`, `gh[po]_`, `sk-`, `token=`, `password=`. If found → `git filter-repo` to rewrite (BEFORE going public), then rotate all tokens
@@ -139,8 +139,7 @@ git push --force origin main
 
 **2.1** Move root-level files into folders:
 ```
-gptadmin_hub.py            → hub/proxy.py
-hub_watchdog.py         → hub/watchdog.py
+go-hub/                  → hub/proxy + control plane
 server_for_installer.py → hub/install_server.py
 cli.py                  → cli/gptadmin.py
 gptadmin_security.py    → hub/security.py

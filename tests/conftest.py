@@ -177,52 +177,7 @@ def _stop_service(managed: ManagedProcess) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def start_services():
-    """Start isolated local services for the legacy HTTP integration tests."""
-    if not _MANAGE_LOCAL_SERVICES:
-        yield
-        return
-
-    hub_script = REPO_DIR / "gptadmin_hub.py"
-    shellmcp_script = REPO_DIR / "client" / "shellmcp_pure.py"
-    if not hub_script.is_file():
-        raise RuntimeError(f"Missing hub proxy script: {hub_script}")
-    if not shellmcp_script.is_file():
-        raise RuntimeError(f"Missing shellmcp script: {shellmcp_script}")
-
-    managed: list[ManagedProcess] = []
-    try:
-        hub_env = os.environ.copy()
-        hub_env["PYTHONUNBUFFERED"] = "1"
-        hub_env["CTL_TOKEN"] = os.environ["CTL_TOKEN"]
-        hub_env["HUB_PORT"] = os.environ["HUB_PORT"]
-        hub = _start_service("hub", hub_script, hub_env)
-        managed.append(hub)
-        _wait_for_http(f"{os.environ['HUB_URL']}/version", process=hub.process, log_path=hub.log_path)
-
-        shell_env = os.environ.copy()
-        shell_env["PYTHONUNBUFFERED"] = "1"
-        shell_env["SHELLMCP_TOKEN"] = os.environ["SHELLMCP_TOKEN"]
-        shell_env["SHELLMCP_PORT"] = os.environ["SHELLMCP_PORT"]
-        shell_env["PORT"] = os.environ["PORT"]
-        shell_env["SHELLMCP_URL"] = os.environ["SHELLMCP_URL"]
-        shell_env["SHELLMCP_DEFAULT_HOME"] = os.environ["SHELLMCP_DEFAULT_HOME"]
-        shell_env["SHELL_DEFAULT_HOME"] = os.environ["SHELL_DEFAULT_HOME"]
-        shell_env["SHELLMCP_DEFAULT_CWD"] = os.environ["SHELLMCP_DEFAULT_CWD"]
-        shell_env["SHELL_DEFAULT_CWD"] = os.environ["SHELL_DEFAULT_CWD"]
-        shell_env["SHELLMCP_DEFAULT_USER"] = os.environ.get("SHELLMCP_DEFAULT_USER", "")
-        shell_env["SHELL_DEFAULT_USER"] = os.environ.get("SHELL_DEFAULT_USER", "")
-        shell_env["HUB_URL"] = ""
-        shell_env["QUEUE_URL"] = ""
-        shell = _start_service("shellmcp", shellmcp_script, shell_env)
-        managed.append(shell)
-        _wait_for_http(
-            f"{os.environ['SHELLMCP_URL']}/system/info",
-            process=shell.process,
-            log_path=shell.log_path,
-            headers={"Authorization": f"Bearer {os.environ['SHELLMCP_TOKEN']}"},
-        )
-
-        yield
-    finally:
-        for item in reversed(managed):
-            _stop_service(item)
+    """Legacy Python hub autostart was removed; Go hub tests manage their own process."""
+    if _MANAGE_LOCAL_SERVICES:
+        raise RuntimeError("GPTADMIN_MANAGE_TEST_SERVICES used to start the removed Python hub; use Go hub test harness instead")
+    yield

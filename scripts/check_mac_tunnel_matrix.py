@@ -37,7 +37,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 DEFAULT_REPORT_ROOT = REPO_ROOT / "logs" / "mac_tunnel_matrix"
 
 SNAPSHOT_FILES = (
-    "gptadmin_hub.py",
+    "go-hub/cmd/gptadmin-hub",
     "gptadmin_security.py",
     "gptadmin_build_info.py",
     "client/shellmcp_pure.py",
@@ -1049,7 +1049,7 @@ PY
             . {shlex.quote(str(runtime["env_path"]))}
             set +a
             cd {shlex.quote(str(runtime["src_dir"]))}
-            exec {shlex.quote(python_bin)} gptadmin_hub.py
+            exec go run ./go-hub/cmd/gptadmin-hub
             """
         )
         shell_wrapper = textwrap.dedent(

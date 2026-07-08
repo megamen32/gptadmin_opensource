@@ -1,4 +1,4 @@
-# Hub (`gptadmin_hub.py`)
+# Hub (`go-hub/`)
 
 The hub is the central process of GPT‑Админ. It proxies commands from AIs to
 shellmcp agents, handles auth, and serves the web panel.
@@ -20,7 +20,7 @@ shellmcp agents, handles auth, and serves the web panel.
 ## Running
 
 ```bash
-CTL_TOKEN=your-token python gptadmin_hub.py
+CTL_TOKEN=your-token go run ./go-hub/cmd/gptadmin-hub
 ```
 
 By default it listens on `0.0.0.0:25900`. Change with `--port` or `HUB_PORT`.
@@ -63,13 +63,12 @@ See [Configuration](./CONFIGURATION.md) for the full list. The essentials:
 | `PUBLIC_ORIGIN` | recommended | — | Public base URL (for OAuth, OpenAPI) |
 | `HUB_PORT` | no | 25900 | Listen port |
 
-## Watchdog
+## Supervision
 
-`hub_watchdog.py` keeps the hub alive. In systemd deployments it's a separate
-unit that restarts the hub on failure. Run manually:
+The Go hub is supervised directly by systemd with `Restart=always`. Legacy Python watchdog units were removed. Restart manually:
 
 ```bash
-python hub_watchdog.py --supervise -- python gptadmin_hub.py
+systemctl restart gptadmin-hub.service
 ```
 
 ## See also

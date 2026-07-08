@@ -112,8 +112,7 @@ Cloudflare gives a public URL.
 ## Project layout
 
 ```
-gptadmin_hub.py            # the MCP hub — proxies commands to agents
-hub_watchdog.py         # keeps the hub alive
+go-hub/                  # the Go MCP hub — proxies commands to agents
 server_for_installer.py # serves install scripts + OpenAPI
 gptadmin_security.py    # auth, OAuth, token validation
 cli.py                  # `gptadmin` CLI (setup, tunnel, status, logs)
@@ -136,7 +135,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install fastapi uvicorn requests
 
 # hub (terminal 1)
-CTL_TOKEN=your-token python gptadmin_hub.py
+CTL_TOKEN=your-token go run ./go-hub/cmd/gptadmin-hub
 
 # agent on a target machine (terminal 2)
 SHELLMCP_TOKEN=agent-token HUB_URL=http://127.0.0.1:25900 python client/shellmcp.py

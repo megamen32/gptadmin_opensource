@@ -2,7 +2,7 @@
 
 Full environment-variable reference, auth model, and OAuth setup.
 
-## Hub env vars (`gptadmin_hub.py`)
+## Hub env vars (`go-hub/`)
 
 ### Auth
 

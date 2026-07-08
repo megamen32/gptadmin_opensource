@@ -1381,7 +1381,7 @@ def sync_oauth_origin_env(env: dict) -> None:
     """Point OAuth discovery to this hub's public URL.
 
     Remote MCP clients such as Codex discover OAuth from the MCP endpoint.
-    Leaving PUBLIC_ORIGIN/MCP_RESOURCE unset makes gptadmin_hub.py use the
+    Leaving PUBLIC_ORIGIN/MCP_RESOURCE unset makes the Go hub use the
     legacy global default gptadminmcp.bezrabotnyi.com, which redirects users to
     the wrong authorization server/password.
     """

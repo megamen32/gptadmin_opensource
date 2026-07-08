@@ -30,9 +30,9 @@ GPTAdmin состоит из нескольких компонентов с ра
   - Зависимости: `fastapi`, `uvicorn`, `pydantic`, `requests`, `starlette`
   - Запуск: `uv run python shellmcp.py`
   
-- **`gptadmin_hub.py`** — Hub прокси-сервер
+- **`go-hub/`** — Go Hub прокси-сервер
   - Зависимости: `fastapi`, `httpx`, `pydantic`, `cryptography`, `starlette`
-  - Запуск: `uv run python gptadmin_hub.py`
+  - Запуск: `go run ./go-hub/cmd/gptadmin-hub`
 
 ## Установка и использование uv
 
@@ -53,7 +53,7 @@ uv sync
 ```bash
 # Запуск с автоматической активацией виртуального окружения
 uv run python shellmcp.py
-uv run python gptadmin_hub.py
+go run ./go-hub/cmd/gptadmin-hub
 uv run python shellmcp_linux.py
 
 # Запуск тестов

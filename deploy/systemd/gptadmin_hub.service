@@ -6,7 +6,7 @@ Requires=gptadmin_hub.socket
 [Service]
 Type=notify
 WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/.venv/bin/python /home/admin/gptadmin/gptadmin_hub.py
+ExecStart=/opt/gptadmin/bin/gptadmin_hub
 Environment=CTL_TOKEN=chatgpt_secret
 Restart=always
 RestartSec=5

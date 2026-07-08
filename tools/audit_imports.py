@@ -30,7 +30,7 @@ def collect(path: str):
 
 if __name__ == "__main__":
     import pathlib
-    default_path = pathlib.Path(__file__).resolve().parents[1] / "services" / "gptadmin_hub.py"
+    default_path = pathlib.Path(__file__).resolve().parents[1] / "cli.py"
     path = sys.argv[1] if len(sys.argv) > 1 else str(default_path)
     mods = collect(path)
     third = [m for m in mods if not is_stdlib(m)]

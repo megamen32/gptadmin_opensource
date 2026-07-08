@@ -16,7 +16,6 @@ SKIP_FILES = {
     "docs/OPEN_CORE_PLAN.md",
     "CHANGELOG.md",
     "scripts/check_mac_tunnel_matrix.py",  # generates runtime passwords via secrets.token_urlsafe
-    "gptadmin_hub.py",  # contains password validation logic, not hardcoded secrets
 }
 
 # Real secret patterns (high specificity)
@@ -35,7 +34,7 @@ STATIC_PASSWORD_RE = re.compile(
 SAFE_VALUES = {
     "changeme", "example", "password", "secret", "your-password",
     "choose-a-strong-password", "generate-a-strong-random-token",
-    "your_token", "your-token", "test", "demo", "placeholder",
+    "your_token", "your-token", "test", "demo", "placeholder", "__admin_password__",
 }
 
 
@@ -86,6 +85,6 @@ def test_no_static_passwords():
                 continue
             # Skip values that look dynamically generated (contain + or function calls)
             ctx = content[m.start():m.end()+30]
-            if "+" in ctx or "secrets." in ctx or "token_urlsafe" in ctx or "os.environ" in content[max(0,m.start()-60):m.start()]:
+            if "+" in ctx or "secrets." in ctx or "token_urlsafe" in ctx or "$(" in ctx or "os.environ" in content[max(0,m.start()-60):m.start()]:
                 continue
             assert False, f"potential hardcoded password in {fpath.name}: '{m.group(1)[:15]}'"
