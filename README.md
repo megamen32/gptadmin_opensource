@@ -164,6 +164,18 @@ advanced panel, support) will live in a separate repo — the core stays open.
 - 💬 Telegram: [@careviolan](https://t.me/careviolan)
 - 📦 Other projects: https://bezrabotnyi.com
 
+## Show current public URLs
+
+Use the CLI to print the active hub URL, tunnel mode, MCP endpoints and per-server OpenAPI Action schema URLs:
+
+```bash
+sudo gptadmin urls
+sudo gptadmin urls --all
+sudo gptadmin urls --json
+```
+
+The default output focuses on the hub and ShellMCP endpoints. `--all` also includes every registered MCP server such as OpenMemory, FileShare and Chrome DevTools.
+
 ## Secure MCP proxy/relay
 
 GPTAdmin can be used as a secured gateway in front of any registered MCP server. Each server gets two authenticated public faces:

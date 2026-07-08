@@ -2809,6 +2809,195 @@ def cmd_tunnel_status(_):
     else:
         print('Tunnel не сконфигурирован. Запусти: gptadmin setup')
 
+
+def _read_env_file(path: Path) -> dict:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return out
+    except PermissionError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _urls_env() -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    try:
+        env = env_read()
+    except PermissionError:
+        env = {}
+        warnings.append(f'cannot read {ENV_FILE}; try sudo gptadmin --system urls')
+    system_env = Path('/etc/gptadmin/gptadmin.env')
+    if not env and ENV_FILE != system_env and system_env.exists():
+        fallback = _read_env_file(system_env)
+        if fallback:
+            env = fallback
+            warnings.append('using /etc/gptadmin/gptadmin.env fallback')
+        else:
+            warnings.append('system config exists but is not readable; try sudo gptadmin --system urls')
+    return env, warnings
+
+
+def _rstrip_url(url: str) -> str:
+    return str(url or '').strip().rstrip('/')
+
+
+def _join_url(base: str, path: str) -> str:
+    base = _rstrip_url(base)
+    if not base:
+        return ''
+    return base + '/' + path.lstrip('/')
+
+
+def _url_http_json(url: str, bearer: str = '', timeout: float = 5.0) -> dict | None:
+    if not url:
+        return None
+    try:
+        headers = {'User-Agent': 'gptadmin-cli-urls/1'}
+        if bearer:
+            headers['Authorization'] = 'Bearer ' + bearer
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - admin configured URL
+            if not (200 <= int(getattr(r, 'status', 0)) < 300):
+                return None
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+def _urls_local_hub(env: dict) -> str:
+    hub = _rstrip_url(env.get('HUB_URL') or '')
+    if hub:
+        return hub
+    port = str(env.get('HUB_PORT') or '9001').strip() or '9001'
+    return f'http://127.0.0.1:{port}'
+
+
+def _urls_public_hub(env: dict) -> str:
+    for key in ('HUB_PUBLIC_URL', 'PUBLIC_ORIGIN', 'MCP_RESOURCE'):
+        value = _rstrip_url(env.get(key) or '')
+        if value:
+            return value
+    hub = _rstrip_url(env.get('HUB_URL') or '')
+    return hub if hub.startswith('https://') else ''
+
+
+def _urls_overview(local_hub: str, env: dict) -> dict | None:
+    token = env.get('CTL_TOKEN') or env.get('GPTADMIN_CTL_TOKEN') or ''
+    if not token:
+        return None
+    return _url_http_json(_join_url(local_hub, '/admin/api/overview?limit=1'), token, timeout=5.0)
+
+
+def _urls_server_rows(overview: dict | None) -> list[dict]:
+    if not isinstance(overview, dict):
+        return []
+    rows = overview.get('servers') or overview.get('agents') or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _urls_endpoint_rows(public_hub: str, servers: list[dict], include_all: bool) -> list[dict]:
+    rows: list[dict] = []
+    if public_hub:
+        rows.append({'kind': 'hub', 'name': 'public hub', 'url': public_hub})
+        rows.append({'kind': 'hub', 'name': 'health', 'url': _join_url(public_hub, '/healthz')})
+        rows.append({'kind': 'hub', 'name': 'admin', 'url': _join_url(public_hub, '/admin')})
+        rows.append({'kind': 'mcp', 'name': 'full hub MCP', 'url': _join_url(public_hub, '/server/hub/mcp')})
+        rows.append({'kind': 'action', 'name': 'full hub OpenAPI Action', 'url': _join_url(public_hub, '/actions/openapi.yaml')})
+    for item in servers:
+        sid = str(item.get('server_id') or item.get('agent_id') or item.get('id') or '')
+        meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+        slug = str(meta.get('public_mcp_slug') or '').strip()
+        endpoint = str(meta.get('public_mcp_endpoint') or '').strip()
+        if not endpoint and public_hub and slug:
+            endpoint = _join_url(public_hub, f'/server/{slug}/mcp')
+        is_shell = sid.startswith('shell:') or str(item.get('kind') or '').startswith('virtual_shell')
+        if not include_all and not is_shell:
+            continue
+        if endpoint:
+            rows.append({'kind': 'shellmcp' if is_shell else 'mcp', 'name': sid, 'status': item.get('status'), 'url': endpoint})
+        if public_hub and slug:
+            rows.append({'kind': 'action', 'name': sid + ' OpenAPI Action', 'status': item.get('status'), 'url': _join_url(public_hub, f'/server/{slug}/actions/openapi.yaml')})
+    return rows
+
+
+def cmd_urls(args):
+    env, warnings = _urls_env()
+    local_hub = _urls_local_hub(env)
+    public_hub = _urls_public_hub(env)
+    overview = _urls_overview(local_hub, env)
+    if isinstance(overview, dict):
+        public_hub = _rstrip_url(overview.get('hub_public_url') or overview.get('public_origin') or public_hub)
+    servers = _urls_server_rows(overview)
+    endpoints = _urls_endpoint_rows(public_hub, servers, bool(getattr(args, 'all', False)))
+    payload = {
+        'install_scope': INSTALL_SCOPE,
+        'env_file': str(ENV_FILE),
+        'local_hub_url': local_hub,
+        'public_hub_url': public_hub,
+        'tunnel_mode': env.get('TUNNEL_MODE') or ('frp' if env.get('FRP_ENABLE', '').lower() == 'true' else ('cloudflare' if env.get('CLOUDFLARE_TUNNEL_ENABLE', '').lower() == 'true' else '')),
+        'server_count': len(servers),
+        'endpoints': endpoints,
+        'warnings': warnings,
+    }
+    if getattr(args, 'json', False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    print_header('GPTAdmin URLs')
+    print(f'  install scope: {payload["install_scope"]}')
+    print(f'  env file:      {payload["env_file"]}')
+    print(f'  local hub:     {local_hub or "—"}')
+    print(f'  public hub:    {public_hub or "—"}')
+    print(f'  tunnel:        {payload["tunnel_mode"] or "—"}')
+    if warnings:
+        for w in warnings:
+            print_warn(w)
+    print()
+    if public_hub:
+        print_header('Hub')
+        for label, url in [
+            ('admin', _join_url(public_hub, '/admin')),
+            ('health', _join_url(public_hub, '/healthz')),
+            ('version', _join_url(public_hub, '/version')),
+            ('legacy MCP', _join_url(public_hub, '/mcp')),
+            ('full hub MCP', _join_url(public_hub, '/server/hub/mcp')),
+            ('OpenAPI Action', _join_url(public_hub, '/actions/openapi.yaml')),
+        ]:
+            print(f'  {label:<18} {url}')
+    else:
+        print_warn('public hub URL is not configured')
+    if servers:
+        print()
+        print_header('Per-server MCP via GPTAdmin tunnel')
+        for item in servers:
+            sid = str(item.get('server_id') or item.get('agent_id') or item.get('id') or '')
+            meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+            slug = str(meta.get('public_mcp_slug') or '').strip()
+            endpoint = str(meta.get('public_mcp_endpoint') or '').strip()
+            is_shell = sid.startswith('shell:') or str(item.get('kind') or '').startswith('virtual_shell')
+            if not getattr(args, 'all', False) and not is_shell:
+                continue
+            if not endpoint and public_hub and slug:
+                endpoint = _join_url(public_hub, f'/server/{slug}/mcp')
+            if not endpoint:
+                continue
+            status = str(item.get('status') or '?')
+            label = 'shellmcp' if is_shell else 'mcp'
+            print(f'  {sid} ({label}, {status})')
+            print(f'    mcp:    {endpoint}')
+            if public_hub and slug:
+                print(f'    action: {_join_url(public_hub, f"/server/{slug}/actions/openapi.yaml")}')
+    else:
+        print()
+        print_warn('server list is unavailable; set CTL_TOKEN in config or run with sudo/--system')
+
 def cmd_tunnel_logs(_):
     env = env_read()
     if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
@@ -3489,6 +3678,11 @@ def main():
     ap_conf.add_argument('--hub-url')
     ap_conf.add_argument('--shellmcp-url', '--shell-url', dest='shellmcp_url', help='URL ShellMCP agent для webhook режима')
     ap_conf.set_defaults(func=cmd_config_shellmcp)
+
+    ap_urls = sub.add_parser('urls', help='Показать текущие публичные URL хаба, MCP и Actions')
+    ap_urls.add_argument('--json', action='store_true')
+    ap_urls.add_argument('--all', action='store_true', help='Показать не только shellmcp, но и все MCP-серверы')
+    ap_urls.set_defaults(func=cmd_urls)
 
     sub.add_parser('status', help='Статус сервисов').set_defaults(func=cmd_status)
     sub.add_parser('start', help='Запустить сервисы').set_defaults(func=cmd_start)
