@@ -169,6 +169,76 @@ func TestAdminOverviewShape(t *testing.T) {
 	}
 }
 
+func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
+	tmp := t.TempDir()
+	adminDir := filepath.Join(tmp, "admin")
+	if err := os.MkdirAll(adminDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "index.html"), []byte("secret-admin"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "app.js"), []byte("console.log('secret')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{CtlToken: "ctl", AdminPassword: "pw", OAuthClientSecret: "oauth-secret", PublicDir: tmp, DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unauthorized admin page status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Введите admin-пароль") || strings.Contains(w.Body.String(), "secret-admin") {
+		t.Fatalf("unauthorized admin page leaked content or missed login form: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/app.js", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized static asset status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	form := "password=pw&next=%2Fadmin%2F"
+	req = httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("login status=%d body=%s", w.Code, w.Body.String())
+	}
+	var session *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			session = c
+			break
+		}
+	}
+	if session == nil || session.Value == "" || !session.HttpOnly {
+		t.Fatalf("missing secure-ish admin session cookie: %#v", session)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.AddCookie(session)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "secret-admin") {
+		t.Fatalf("authenticated admin static status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/servers", nil)
+	req.AddCookie(session)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin cookie did not authorize relay API: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestRegistryStatePersistsAgentsAcrossRestart(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := Config{CtlToken: "ctl", RelayAgentToken: "relay", ConfigDir: tmp, RegistryStateFile: filepath.Join(tmp, "registry_state.json"), DefaultTimeout: time.Second, PollMaxTimeout: time.Second}
@@ -629,7 +699,7 @@ func TestServerActionsOpenAPIProxyForPinnedMCPServer(t *testing.T) {
 		t.Fatalf("actions openapi status=%d body=%s", w.Code, w.Body.String())
 	}
 	schema := w.Body.String()
-	for _, want := range []string{"openapi: 3.1.0", "/server/openmemory/actions/tools/openmemory_query", "operationId: \"openmemory_query\"", "Query OpenMemory", "bearerAuth"} {
+	for _, want := range []string{"openapi: 3.0.3", "/server/openmemory/actions/tools/openmemory_query", "operationId: \"openmemory_query\"", "Query OpenMemory", "bearerAuth"} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("openapi schema missing %q:\n%s", want, schema)
 		}

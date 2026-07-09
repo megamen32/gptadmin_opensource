@@ -36,9 +36,12 @@
     <header class="topbar">
       <button class="mobileMenu" onclick="toggleSidebar()">☰</button>
       <b id="viewTitle" class="topbar-title">Обзор</b>
-      <input id="token" class="token" type="password" placeholder="CTL_TOKEN" autocomplete="off" spellcheck="false">
-      <button class="btn-primary" onclick="saveToken()">Сохранить</button>
+      <form class="tokenForm" onsubmit="saveToken();return false" style="display:contents">
+        <input id="token" class="token" type="password" placeholder="optional CTL_TOKEN" autocomplete="off" spellcheck="false">
+        <button class="btn-primary" type="submit">Сохранить</button>
+      </form>
       <button class="btn-secondary" onclick="refreshAll()">Обновить</button>
+      <button class="btn-secondary" onclick="location.href='/admin/logout'">Выйти</button>
       <label class="auto-toggle"><input type="checkbox" id="autoRefresh" checked><span class="toggle-slider"></span>auto</label>
       <span id="status" class="status-badge right">—</span>
     </header>

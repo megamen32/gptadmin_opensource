@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -126,14 +129,18 @@ func TestMCPHTTPEndpointToolsAndShellExec(t *testing.T) {
 	}
 	result := toolsBody["result"].(map[string]any)
 	foundShellExec := false
+	foundFileBackup := false
 	for _, raw := range result["tools"].([]any) {
 		tool := raw.(map[string]any)
 		if tool["name"] == "shell_exec" {
 			foundShellExec = true
 		}
+		if tool["name"] == "file_backup" {
+			foundFileBackup = true
+		}
 	}
-	if !foundShellExec {
-		t.Fatalf("tools/list missing shell_exec: %s", toolsRec.Body.String())
+	if !foundShellExec || !foundFileBackup {
+		t.Fatalf("tools/list missing expected tools shell_exec=%v file_backup=%v: %s", foundShellExec, foundFileBackup, toolsRec.Body.String())
 	}
 
 	callReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell_exec","arguments":{"cmd":"printf real_mcp_ok","timeout":5}}}`))
@@ -183,5 +190,64 @@ func TestMCPStdioNDJSON(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "protocolVersion") || !strings.Contains(lines[1], "shell_exec") {
 		t.Fatalf("bad stdio output: %q", out.String())
+	}
+}
+
+func TestMCPFileBackupBackupListRestoreCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHELLMCP_FILE_BACKUP_ROOT", "")
+	t.Setenv("GPTADMIN_FILE_BACKUP_ROOT", "")
+	s := New(Config{Token: "t", Name: "unit-host", DefaultHome: home, LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir()})
+	target := filepath.Join(t.TempDir(), "config.txt")
+	if err := os.WriteFile(target, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backupBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"file_backup","arguments":{"action":"backup","path":%q,"ttl_days":7,"label":"unit"}}}`, target)
+	backupReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(backupBody))
+	backupReq.Header.Set("Authorization", "Bearer t")
+	backupRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(backupRec, backupReq)
+	if backupRec.Code != 200 {
+		t.Fatalf("file_backup backup status=%d body=%s", backupRec.Code, backupRec.Body.String())
+	}
+	var backupResp map[string]any
+	if err := json.Unmarshal(backupRec.Body.Bytes(), &backupResp); err != nil {
+		t.Fatal(err)
+	}
+	backupResult := backupResp["result"].(map[string]any)
+	backupStructured := backupResult["structuredContent"].(map[string]any)
+	backupID := backupStructured["backup_id"].(string)
+	artifact := backupStructured["artifact"].(string)
+	if artifact == "" || backupID == "" {
+		t.Fatalf("missing artifact/backup_id: %s", backupRec.Body.String())
+	}
+	data, err := os.ReadFile(artifact)
+	if err != nil || string(data) != "before" {
+		t.Fatalf("bad artifact data=%q err=%v", data, err)
+	}
+
+	if err := os.WriteFile(target, []byte("after"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"file_backup","arguments":{"action":"restore","backup_id":%q,"overwrite":true}}}`, backupID)
+	restoreReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(restoreBody))
+	restoreReq.Header.Set("Authorization", "Bearer t")
+	restoreRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != 200 {
+		t.Fatalf("file_backup restore status=%d body=%s", restoreRec.Code, restoreRec.Body.String())
+	}
+	restored, err := os.ReadFile(target)
+	if err != nil || string(restored) != "before" {
+		t.Fatalf("restore failed data=%q err=%v", restored, err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"file_backup","arguments":{"action":"list","limit":5}}}`))
+	listReq.Header.Set("Authorization", "Bearer t")
+	listRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(listRec, listReq)
+	if listRec.Code != 200 || !strings.Contains(listRec.Body.String(), backupID) {
+		t.Fatalf("file_backup list failed status=%d body=%s", listRec.Code, listRec.Body.String())
 	}
 }

@@ -2,6 +2,8 @@ from pathlib import Path
 
 
 ADMIN_HTML = Path(__file__).resolve().parents[1] / "public" / "admin_dashboard.html"
+ADMIN_INDEX = Path(__file__).resolve().parents[1] / "public" / "admin" / "index.html"
+ADMIN_APP_JS = Path(__file__).resolve().parents[1] / "public" / "admin" / "app.js"
 
 
 def _line_no(text: str, needle: str) -> int:
@@ -42,3 +44,31 @@ def test_max_active_ips_helpers_are_top_level_before_render_all():
         assert line < render_all_line, f"{name} must be top-level before renderAll (line {line})"
         assert line < bootstrap_line, f"{name} must be initialized before bootstrap (line {line})"
 
+
+
+
+def test_split_admin_problem_servers_id_matches_render_target():
+    """Regression for TypeError: Cannot set properties of null (setting 'innerHTML')."""
+    index = ADMIN_INDEX.read_text(encoding="utf-8")
+    js = ADMIN_APP_JS.read_text(encoding="utf-8")
+
+    assert 'id="problemServers"' in index
+    assert "$('problemServers').innerHTML" in js
+    assert "problemAgents" not in js
+
+
+def test_split_admin_password_token_is_inside_form():
+    """Chrome warns when the password token input is not contained in a form."""
+    index = ADMIN_INDEX.read_text(encoding="utf-8")
+    form_start = index.find('<form class="tokenForm"')
+    token = index.find('id="token"')
+    form_end = index.find('</form>', token)
+
+    assert form_start != -1
+    assert token != -1
+    assert form_start < token < form_end
+
+
+def test_split_admin_show_view_knows_failover_title():
+    js = ADMIN_APP_JS.read_text(encoding="utf-8")
+    assert "failover:'Failover'" in js

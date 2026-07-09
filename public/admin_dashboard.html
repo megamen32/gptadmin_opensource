@@ -563,9 +563,12 @@ button{height:32px;padding:0 12px;font-size:13px;border-radius:var(--radius-sm);
 <header class="topbar">
   <button class="mobileMenu" onclick="toggleSidebar()">☰</button>
   <b id="viewTitle" class="topbar-title">Обзор</b>
-  <input id="token" class="token" type="password" placeholder="CTL_TOKEN" autocomplete="off" spellcheck="false">
-  <button class="btn-primary" onclick="saveToken()">Сохранить</button>
+  <form class="tokenForm" onsubmit="saveToken();return false" style="display:contents">
+    <input id="token" class="token" type="password" placeholder="optional CTL_TOKEN" autocomplete="off" spellcheck="false">
+    <button class="btn-primary" type="submit">Сохранить</button>
+  </form>
   <button class="btn-secondary" onclick="refreshAll()">Обновить</button>
+      <button class="btn-secondary" onclick="location.href='/admin/logout'">Выйти</button>
   <label class="auto-toggle"><input type="checkbox" id="autoRefresh" checked><span class="toggle-slider"></span>auto</label>
   <span id="status" class="status-badge right">—</span>
 </header>
@@ -762,7 +765,7 @@ function renderAuditCard(row){
   </article>`;
 }
 async function handleResponseToggle(details){if(!details.open||details.dataset.loaded||details.dataset.loading||!details.dataset.jobId)return;details.dataset.loading='1';const pre=details.querySelector('pre');const empty=details.querySelector('.responseEmpty');if(pre)pre.textContent='loading…';if(empty)empty.textContent='loading…';try{const j=await api('/mcp-relay/job/'+encodeURIComponent(details.dataset.jobId)+'?verbose=true&include_raw=true');const payload=('response' in j)?j.response:('result' in j?j.result:j);const textHtml=prettyJsonHtml(payload);const next=`<pre class="responseBody mono">${textHtml||'—'}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next);details.dataset.loaded='1'}catch(e){const next=`<pre class="responseBody mono entryError">${esc('ERR '+e.message)}</pre>`;if(pre)pre.outerHTML=next;else if(empty)empty.outerHTML=next;else details.insertAdjacentHTML('beforeend',next)}finally{delete details.dataset.loading}}
-function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Серверы','agent-detail':'Детали сервера',clients:'Клиенты и Auth',jobs:'Jobs и очереди','job-detail':'Детали job',tools:'Tools тестер',resources:'Ресурсы',mcpmanage:'MCP менеджер',security:'Токены и Auth',audit:'Журнал аудита',raw:'Сырой JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
+function showView(v){currentView=v;localStorage.setItem('gptadmin_view',v);document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.navbtn').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('view-'+v)?.classList.add('active');$('viewTitle').textContent=({overview:'Обзор',agents:'Серверы','agent-detail':'Детали сервера',clients:'Клиенты и Auth',jobs:'Jobs и очереди','job-detail':'Детали job',tools:'Tools тестер',resources:'Ресурсы',mcpmanage:'MCP менеджер',security:'Токены и Auth',failover:'Failover',audit:'Журнал аудита',raw:'Сырой JSON'}[v]||v);$('sidebar').classList.remove('open');renderAll()}
 function includesText(row,q){return !q||JSON.stringify(row).toLowerCase().includes(q.toLowerCase())}
 // getMaxActiveIps / onMaxActiveIpsChange — client-side tolerance for token IP count.
 // These helpers are used by renderClientCard(), inline onchange handlers and page bootstrap,

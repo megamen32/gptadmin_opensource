@@ -277,6 +277,25 @@ func (s *Server) mcpTools() []map[string]any {
 			},
 		},
 		{
+			"name":        "file_backup",
+			"description": "Create, list, cleanup, or restore managed file backups under ~/.gptadmin/file-backups before edits.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":       map[string]any{"type": "string", "enum": []string{"backup", "list", "cleanup", "restore"}, "default": "backup"},
+					"path":         map[string]any{"type": []string{"string", "null"}},
+					"backup_id":    map[string]any{"type": []string{"string", "null"}},
+					"ttl_days":     map[string]any{"type": []string{"integer", "null"}, "default": 30},
+					"label":        map[string]any{"type": []string{"string", "null"}},
+					"use_sudo":     map[string]any{"type": "boolean", "default": false},
+					"overwrite":    map[string]any{"type": "boolean", "default": false},
+					"limit":        map[string]any{"type": []string{"integer", "null"}},
+					"max_age_days": map[string]any{"type": []string{"integer", "null"}},
+				},
+				"additionalProperties": false,
+			},
+		},
+		{
 			"name":        "tasks",
 			"description": "List or read background shell_exec jobs kept by this ShellMCP process.",
 			"inputSchema": map[string]any{
@@ -304,6 +323,8 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 	switch name {
 	case "shell_exec":
 		return s.mcpShellExec(ctx, args)
+	case "file_backup":
+		return s.mcpFileBackup(args)
 	case "tasks":
 		return s.mcpTasks(args)
 	case "system_info":

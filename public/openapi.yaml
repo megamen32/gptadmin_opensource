@@ -1,8 +1,7 @@
-openapi: 3.1.0
-
+openapi: 3.0.3
 info:
   title: GPTAdmin MCP Relay
-  version: 4.0.0
+  version: go-dev
   description: |
     Universal MCP relay for GPTAdmin.
 
@@ -12,25 +11,18 @@ info:
       3. callMcpTool — call exactly one tool on exactly one target.
       4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
 
-    Private shell servers are exposed as real MCP servers with stable target ids like shell:<server_name>.
+    Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
-
-    Every listed server is also exposed by default as a pinned MCP server facade at /server/{slug}/mcp.
-    For example: /server/hub/mcp, /server/openmemory/mcp, /server/fileshare/mcp, /server/shell-admin-server-100/mcp.
-    listMcpServers includes public_mcp_slug/public_mcp_path/public_mcp_endpoint metadata for discovery.
-
 servers:
-  - url: https://gptadmin.bezrabotnyi.com
-
+  - url: https://u-f1102930.t.gptadmin.bezrabotnyi.com
 security:
   - bearerAuth: []
-
 paths:
   /mcp-relay/servers:
     get:
       operationId: listMcpServers
       summary: List MCP servers
-      description: Lists real MCP servers, tunnel-backed private MCP servers, and the built-in hub server.
+      description: Lists real MCP servers, virtual shell servers, and the built-in hub server.
       responses:
         "200":
           description: Available MCP servers
@@ -38,11 +30,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListMcpServersResponse"
-
   /mcp-relay/tools:
     post:
       operationId: listMcpTools
-      summary: List tools for one MCP target
+      summary: List tools for one MCP server target
       description: Requests tools/list from an explicitly selected MCP server. Call listMcpServers first and pass one returned server_id as target. There is no default target; never use target="default".
       requestBody:
         required: true
@@ -57,11 +48,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/McpToolResponse"
-
   /mcp-relay/call:
     post:
       operationId: callMcpTool
-      summary: Call one tool on one MCP target
+      summary: Call one tool on one MCP server target
       description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several servers must be used.
       requestBody:
         required: true
@@ -76,7 +66,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/McpToolResponse"
-
   /mcp-relay/job/{job_id}:
     get:
       operationId: getMcpJob
@@ -103,33 +92,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/McpJobResponse"
-
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-
   schemas:
     ListMcpServersResponse:
       type: object
       additionalProperties: false
-      required:
-        - servers
+      required: [servers]
       properties:
         servers:
           type: array
           items:
             $ref: "#/components/schemas/McpServer"
-
     McpServer:
       type: object
-      additionalProperties: false
-      required:
-        - server_id
-        - name
-        - kind
-        - status
+      additionalProperties: true
+      required: [server_id, name, kind, status]
       properties:
         server_id:
           type: string
@@ -138,60 +119,44 @@ components:
           type: string
         kind:
           type: string
-          enum:
-            - real_mcp
-            - virtual_hub
+          enum: [real_mcp, virtual_shell, virtual_hub, hub]
         transport:
-          type:
-            - string
-            - "null"
-          description: Agent transport, for example stdio, http, shell, or internal.
+          type: string
+          nullable: true
         status:
           type: string
-          enum:
-            - online
-            - offline
+          enum: [online, offline, stale]
         last_seen:
-          type:
-            - number
-            - "null"
+          type: number
+          nullable: true
         capabilities:
           type: array
           items:
             type: string
         meta:
           type: object
-          properties: {}
           additionalProperties: true
-
     ListMcpToolsRequest:
       type: object
       additionalProperties: false
-      required:
-        - target
+      required: [target]
       properties:
         target:
           type: string
           description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         timeout:
-          type:
-            - integer
-            - "null"
+          type: integer
+          nullable: true
           minimum: 1
           maximum: 35
           default: 30
-          description: Synchronous wait timeout in seconds.
         background:
           type: boolean
           default: false
-          description: If true, queue tools/list and return job_id immediately.
-
     CallMcpToolRequest:
       type: object
       additionalProperties: false
-      required:
-        - target
-        - tool_name
+      required: [target, tool_name]
       properties:
         target:
           type: string
@@ -199,112 +164,77 @@ components:
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
-        arguments:
+        args:
           type: object
-          properties: {}
           additionalProperties: true
           default: {}
-          description: Arguments matching the selected tool input schema.
+          description: Tool input object for the selected tool. Use this field exactly for ChatGPT Actions.
         timeout:
-          type:
-            - integer
-            - "null"
+          type: integer
+          nullable: true
           minimum: 1
           maximum: 35
           default: 30
-          description: Synchronous wait timeout in seconds.
         background:
           type: boolean
           default: false
-          description: If true, queue the tool call and return job_id immediately.
-
     McpToolResponse:
       type: object
-      additionalProperties: false
-      required:
-        - server_id
-        - status
+      additionalProperties: true
+      required: [server_id, status]
       properties:
         server_id:
           type: string
         status:
           type: string
-          enum:
-            - completed
-            - running
-            - failed
-            - running_or_unknown
+          enum: [completed, running, failed, running_or_unknown]
         response:
-          type:
-            - object
-            - "null"
-          properties: {}
+          type: object
+          nullable: true
           additionalProperties: true
-          description: Tool response. For tools/list this usually contains a tools array.
         background:
           type: boolean
-          description: True when the operation continues in background and job_id should be polled.
         job_id:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         message:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         error:
-          oneOf:
-            - $ref: "#/components/schemas/McpError"
-            - type: string
-            - type: "null"
-
+          type: object
+          nullable: true
+          additionalProperties: true
     McpJobResponse:
       type: object
-      additionalProperties: false
-      required:
-        - job_id
-        - status
+      additionalProperties: true
+      required: [job_id, status]
       properties:
         job_id:
           type: string
         status:
           type: string
-          enum:
-            - queued
-            - running
-            - completed
-            - failed
-            - orphaned
-            - running_or_unknown
+          enum: [queued, running, completed, failed, orphaned, running_or_unknown]
         server_id:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         response:
-          type:
-            - object
-            - "null"
-          properties: {}
+          type: object
+          nullable: true
           additionalProperties: true
         error:
-          oneOf:
-            - $ref: "#/components/schemas/McpError"
-            - type: string
-            - type: "null"
+          type: object
+          nullable: true
+          additionalProperties: true
         acked:
           type: boolean
           default: false
-
     McpError:
       type: object
       additionalProperties: true
       properties:
         message:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         code:
-          type:
-            - string
-            - integer
-            - "null"
+          type: string
+          nullable: true

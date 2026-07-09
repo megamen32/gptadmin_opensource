@@ -352,6 +352,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
 	mux.HandleFunc("/admin/api/clients", s.requireCtl(s.adminClients))
+	mux.HandleFunc("/admin/login", s.adminLogin)
+	mux.HandleFunc("/admin/logout", s.adminLogout)
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
 	return withCORS(mux)
@@ -382,6 +384,11 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.CtlToken == "" || tokenMatches(r, s.cfg.CtlToken) {
 			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
+			next(w, r)
+			return
+		}
+		if s.adminSessionValid(r) {
+			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "admin_cookie"})
 			next(w, r)
 			return
 		}
@@ -431,7 +438,7 @@ func tokenMatches(r *http.Request, expected string) bool {
 
 func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
 	origin := s.origin(r)
-	yaml := fmt.Sprintf(`openapi: 3.1.0
+	yaml := fmt.Sprintf(`openapi: 3.0.3
 info:
   title: GPTAdmin MCP Relay
   version: %s
@@ -554,12 +561,14 @@ components:
           type: string
           enum: [real_mcp, virtual_shell, virtual_hub, hub]
         transport:
-          type: [string, "null"]
+          type: string
+          nullable: true
         status:
           type: string
           enum: [online, offline, stale]
         last_seen:
-          type: [number, "null"]
+          type: number
+          nullable: true
         capabilities:
           type: array
           items:
@@ -576,7 +585,8 @@ components:
           type: string
           description: Explicit server id from listMcpServers. There is no default target. Never use "default".
         timeout:
-          type: [integer, "null"]
+          type: integer
+          nullable: true
           minimum: 1
           maximum: 35
           default: 30
@@ -594,12 +604,14 @@ components:
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
-        arguments:
+        args:
           type: object
           additionalProperties: true
           default: {}
+          description: Tool input object for the selected tool. Use this field exactly for ChatGPT Actions.
         timeout:
-          type: [integer, "null"]
+          type: integer
+          nullable: true
           minimum: 1
           maximum: 35
           default: 30
@@ -617,19 +629,21 @@ components:
           type: string
           enum: [completed, running, failed, running_or_unknown]
         response:
-          type: [object, "null"]
+          type: object
+          nullable: true
           additionalProperties: true
         background:
           type: boolean
         job_id:
-          type: [string, "null"]
+          type: string
+          nullable: true
         message:
-          type: [string, "null"]
+          type: string
+          nullable: true
         error:
-          oneOf:
-            - $ref: "#/components/schemas/McpError"
-            - type: string
-            - type: "null"
+          type: object
+          nullable: true
+          additionalProperties: true
     McpJobResponse:
       type: object
       additionalProperties: true
@@ -641,15 +655,16 @@ components:
           type: string
           enum: [queued, running, completed, failed, orphaned, running_or_unknown]
         server_id:
-          type: [string, "null"]
+          type: string
+          nullable: true
         response:
-          type: [object, "null"]
+          type: object
+          nullable: true
           additionalProperties: true
         error:
-          oneOf:
-            - $ref: "#/components/schemas/McpError"
-            - type: string
-            - type: "null"
+          type: object
+          nullable: true
+          additionalProperties: true
         acked:
           type: boolean
           default: false
@@ -658,9 +673,11 @@ components:
       additionalProperties: true
       properties:
         message:
-          type: [string, "null"]
+          type: string
+          nullable: true
         code:
-          type: [string, integer, "null"]
+          type: string
+          nullable: true
 `, BuildVersion, origin)
 	b := []byte(yaml)
 	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
@@ -1568,18 +1585,147 @@ func serverStatusCounts(servers []map[string]any) map[string]int {
 	return counts
 }
 
+const adminSessionCookieName = "gptadmin_admin_session"
+const adminSessionTTL = 12 * time.Hour
+
 func (s *Server) adminIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.adminSessionValid(r) {
+		s.renderAdminLogin(w, r, "")
 		return
 	}
 	http.Redirect(w, r, "/admin/index.html", http.StatusFound)
 }
 
 func (s *Server) adminStatic(w http.ResponseWriter, r *http.Request) {
+	if !s.adminSessionValid(r) {
+		if wantsHTML(r) || r.URL.Path == "/admin/" || r.URL.Path == "/admin/index.html" {
+			s.renderAdminLogin(w, r, "")
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	root := filepath.Join(s.cfg.PublicDir, "admin")
 	fs := http.StripPrefix("/admin/", http.FileServer(http.Dir(root)))
 	fs.ServeHTTP(w, r)
+}
+
+func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if s.adminSessionValid(r) {
+			http.Redirect(w, r, safeAdminNext(r.FormValue("next")), http.StatusFound)
+			return
+		}
+		s.renderAdminLogin(w, r, "")
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			s.renderAdminLogin(w, r, "bad request")
+			return
+		}
+		password := r.FormValue("password")
+		if s.cfg.AdminPassword == "" || !hmac.Equal([]byte(password), []byte(s.cfg.AdminPassword)) {
+			s.authAudit("admin_login_denied", r, map[string]any{"reason": "bad_password"})
+			s.renderAdminLogin(w, r, "неверный пароль")
+			return
+		}
+		expires := time.Now().Add(adminSessionTTL)
+		http.SetCookie(w, &http.Cookie{
+			Name:     adminSessionCookieName,
+			Value:    s.signAdminSession(expires),
+			Path:     "/",
+			Expires:  expires,
+			MaxAge:   int(adminSessionTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   isSecureRequest(r) || strings.HasPrefix(s.origin(r), "https://"),
+			SameSite: http.SameSiteLaxMode,
+		})
+		s.authAudit("admin_login_ok", r, map[string]any{"auth_kind": "admin_password"})
+		http.Redirect(w, r, safeAdminNext(r.FormValue("next")), http.StatusFound)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: adminSessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: isSecureRequest(r) || strings.HasPrefix(s.origin(r), "https://"), SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, "/admin/login", http.StatusFound)
+}
+
+func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	next := safeAdminNext(r.URL.Query().Get("next"))
+	if next == "/admin/login" || next == "/admin/logout" {
+		next = "/admin/"
+	}
+	errHTML := ""
+	if errMsg != "" {
+		errHTML = `<div class="err">` + html.EscapeString(errMsg) + `</div>`
+	}
+	page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(430px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Введите admin-пароль. Без cookie-сессии админка и её API не отдаются.</p>` + errHTML + `<form method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
+	_, _ = io.WriteString(w, page)
+}
+
+func (s *Server) adminSessionValid(r *http.Request) bool {
+	if s.cfg.AdminPassword == "" {
+		return true
+	}
+	c, err := r.Cookie(adminSessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	parts := strings.Split(c.Value, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || exp < time.Now().Unix() {
+		return false
+	}
+	mac, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	want := s.adminSessionMAC(parts[0])
+	return hmac.Equal(mac, want)
+}
+
+func (s *Server) signAdminSession(expires time.Time) string {
+	payload := strconv.FormatInt(expires.Unix(), 10)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(s.adminSessionMAC(payload))
+}
+
+func (s *Server) adminSessionMAC(payload string) []byte {
+	secret := firstNonEmpty(s.cfg.OAuthClientSecret, s.cfg.AdminPassword, s.cfg.CtlToken, "gptadmin-admin-session")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("admin-session:" + payload))
+	return mac.Sum(nil)
+}
+
+func wantsHTML(r *http.Request) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "text/html")
+}
+
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on")
+}
+
+func safeAdminNext(v string) string {
+	if v == "" {
+		return "/admin/"
+	}
+	if !strings.HasPrefix(v, "/admin/") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/admin/api/") {
+		return "/admin/"
+	}
+	return v
 }
 
 func (s *Server) addAuditLocked(name string, fields map[string]any) {
@@ -2224,7 +2370,7 @@ func mcpToolsFromResult(v any) []map[string]any {
 func buildServerActionsOpenAPI(origin, slug string, agent Agent, tools []map[string]any) string {
 	var b strings.Builder
 	serverPath := "/server/" + slug + "/actions/tools/"
-	b.WriteString("openapi: 3.1.0\n")
+	b.WriteString("openapi: 3.0.3\n")
 	b.WriteString("info:\n")
 	b.WriteString("  title: " + yamlQuote("GPTAdmin proxy for "+agent.Name) + "\n")
 	b.WriteString("  version: " + yamlQuote(BuildVersion) + "\n")
