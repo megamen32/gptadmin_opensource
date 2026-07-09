@@ -308,12 +308,7 @@ func (s *Server) mcpTools() []map[string]any {
 		},
 		{
 			"name":        "system_info",
-			"description": "Return OS, CPU, memory and hostname information for this ShellMCP host.",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
-		},
-		{
-			"name":        "capability_registry",
-			"description": "Describe ShellMCP as a real MCP server and its separate transport layer.",
+			"description": "Return OS, CPU, memory, hostname and ShellMCP capability/transport metadata for this host.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		},
 	}
@@ -329,10 +324,11 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 		return s.mcpTasks(args)
 	case "system_info":
 		info := system.Get()
-		return mcpText(fmt.Sprintf("system info for %s", info.Host), info), nil
-	case "capability_registry":
-		registry := s.mcpCapabilityRegistry()
-		return mcpText("ShellMCP real MCP capability registry", registry), nil
+		payload := map[string]any{
+			"system":              info,
+			"capability_registry": s.mcpCapabilityRegistry(),
+		}
+		return mcpText(fmt.Sprintf("system info for %s", info.Host), payload), nil
 	default:
 		return nil, fmt.Errorf("unknown tool %s", name)
 	}

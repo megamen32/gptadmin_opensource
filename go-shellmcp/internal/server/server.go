@@ -187,7 +187,7 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_http", "mcp_stdio"}})
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_transport_http", "mcp_transport_stdio"}})
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

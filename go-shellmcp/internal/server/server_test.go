@@ -128,19 +128,36 @@ func TestMCPHTTPEndpointToolsAndShellExec(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := toolsBody["result"].(map[string]any)
-	foundShellExec := false
-	foundFileBackup := false
+	names := map[string]bool{}
 	for _, raw := range result["tools"].([]any) {
 		tool := raw.(map[string]any)
-		if tool["name"] == "shell_exec" {
-			foundShellExec = true
-		}
-		if tool["name"] == "file_backup" {
-			foundFileBackup = true
+		name := tool["name"].(string)
+		names[name] = true
+	}
+	if !names["shell_exec"] || !names["file_backup"] || !names["tasks"] || !names["system_info"] {
+		t.Fatalf("tools/list missing expected tools: names=%v body=%s", names, toolsRec.Body.String())
+	}
+	for _, hidden := range []string{"capability_registry", "mcp_http", "mcp_stdio", "mcp_transport_http", "mcp_transport_stdio"} {
+		if names[hidden] {
+			t.Fatalf("tools/list exposed hidden/internal tool %q: %s", hidden, toolsRec.Body.String())
 		}
 	}
-	if !foundShellExec || !foundFileBackup {
-		t.Fatalf("tools/list missing expected tools shell_exec=%v file_backup=%v: %s", foundShellExec, foundFileBackup, toolsRec.Body.String())
+
+	systemReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"system_info","arguments":{}}}`))
+	systemReq.Header.Set("Authorization", "Bearer t")
+	systemRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(systemRec, systemReq)
+	if systemRec.Code != 200 {
+		t.Fatalf("system_info status=%d body=%s", systemRec.Code, systemRec.Body.String())
+	}
+	var systemBody map[string]any
+	if err := json.Unmarshal(systemRec.Body.Bytes(), &systemBody); err != nil {
+		t.Fatal(err)
+	}
+	systemResult := systemBody["result"].(map[string]any)
+	systemStructured := systemResult["structuredContent"].(map[string]any)
+	if systemStructured["system"] == nil || systemStructured["capability_registry"] == nil {
+		t.Fatalf("system_info did not include merged system/capability data: %s", systemRec.Body.String())
 	}
 
 	callReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell_exec","arguments":{"cmd":"printf real_mcp_ok","timeout":5}}}`))
@@ -159,6 +176,23 @@ func TestMCPHTTPEndpointToolsAndShellExec(t *testing.T) {
 	payload := structured["result"].(map[string]any)
 	if payload["stdout"] != "real_mcp_ok" {
 		t.Fatalf("bad mcp shell_exec payload: %s", callRec.Body.String())
+	}
+}
+
+func TestVersionUsesTransportFeatureNames(t *testing.T) {
+	s := New(Config{Token: "t", Name: "unit-host", LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir()})
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("version status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"mcp_http"`) || strings.Contains(body, `"mcp_stdio"`) {
+		t.Fatalf("/version exposed ambiguous MCP feature names: %s", body)
+	}
+	if !strings.Contains(body, `"mcp_transport_http"`) || !strings.Contains(body, `"mcp_transport_stdio"`) {
+		t.Fatalf("/version missing transport feature names: %s", body)
 	}
 }
 
