@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path"
@@ -335,6 +336,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/_services/", s.httpServiceEndpoint)
 	mux.HandleFunc("/server/", s.serverMCPEndpoint)
 	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
@@ -359,6 +361,109 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
 	return withCORS(mux)
+}
+
+func (s *Server) httpServiceEndpoint(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/_services/")
+	parts := strings.SplitN(trimmed, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	serviceSlug, endpointName := parts[0], parts[1]
+	var endpoint map[string]any
+	s.mu.Lock()
+	for _, a := range s.agents {
+		if agentSlug(a.AgentID) != serviceSlug && agentSlug(a.Name) != serviceSlug {
+			continue
+		}
+		for _, raw := range sliceValue(a.Meta["http_endpoints"]) {
+			ep := mapValue(raw)
+			if firstString(ep, "name") == endpointName {
+				endpoint = ep
+				break
+			}
+		}
+		break
+	}
+	s.mu.Unlock()
+	if endpoint == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Only endpoints that explicitly opt in as a public capability are exposed
+	// through the tunnel. This prevents a private MCP that happens to register an
+	// http_endpoints entry from accidentally becoming publicly reachable.
+	if !isPublicCapability(endpoint) {
+		http.NotFound(w, r)
+		return
+	}
+	targetRaw := firstString(endpoint, "local_url")
+	target, err := url.Parse(targetRaw)
+	if err != nil || target.Scheme != "http" || !isLoopbackServiceHost(target.Hostname()) || target.Port() == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "invalid service endpoint"})
+		return
+	}
+	prefix := "/_services/" + serviceSlug + "/" + endpointName
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		if truthyAny(endpoint["strip_prefix"]) {
+			rest := strings.TrimPrefix(req.URL.Path, prefix)
+			if rest == "" {
+				rest = "/"
+			}
+			req.URL.Path = rest
+		}
+		req.Header.Set("X-Forwarded-Prefix", prefix)
+		req.Header.Set("X-Forwarded-Proto", requestScheme(r))
+		req.Header.Set("X-Forwarded-Host", r.Host)
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("http service proxy failed agent=%s endpoint=%s target=%s err=%v", serviceSlug, endpointName, targetRaw, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "service unavailable"})
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func isLoopbackServiceHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// isPublicCapability reports whether an http_endpoints entry has explicitly
+// opted in to being reachable through the public tunnel ingress.
+func isPublicCapability(endpoint map[string]any) bool {
+	return strings.TrimSpace(strings.ToLower(firstString(endpoint, "visibility"))) == "public-capability"
+}
+
+func truthyAny(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return truthyString(x)
+	default:
+		return false
+	}
+}
+
+func sliceValue(v any) []any {
+	if xs, ok := v.([]any); ok {
+		return xs
+	}
+	return nil
+}
+
+func requestScheme(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); v != "" {
+		return v
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 func withCORS(next http.Handler) http.HandlerFunc {

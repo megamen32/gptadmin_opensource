@@ -14,11 +14,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/audit"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/job"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/output"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/sshexec"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
 )
 
@@ -26,26 +29,37 @@ var BuildVersion = "3"
 var GitCommit = "go-shellmcp"
 
 type Config struct {
-	Addr              string
-	Token             string
-	LogLimit          int64
-	ExecTimeout       int
-	SpillDir          string
-	Name              string
-	BaseURL           string
-	HubURL            string
-	IdentityDir       string
-	HeartbeatEnabled  bool
-	HeartbeatInterval time.Duration
-	QueueEnabled      bool
-	QueueTimeout      int
-	Mode              string
-	OutboxDir         string
-	DefaultUser       string
-	DefaultHome       string
-	DefaultCwd        string
-	HubPublicKeyFile  string
-	HubPublicKey      string
+	Addr                 string
+	Token                string
+	LogLimit             int64
+	ExecTimeout          int
+	SpillDir             string
+	Name                 string
+	BaseURL              string
+	HubURL               string
+	IdentityDir          string
+	HeartbeatEnabled     bool
+	HeartbeatInterval    time.Duration
+	QueueEnabled         bool
+	QueueTimeout         int
+	Mode                 string
+	OutboxDir            string
+	DefaultUser          string
+	DefaultHome          string
+	DefaultCwd           string
+	HubPublicKeyFile     string
+	HubPublicKey         string
+	AuditLog             string
+	NonceTTL             time.Duration
+	PreserveFileMetadata bool
+	PreserveMetadataMaxFiles int
+	MCPConfig            string
+	PollInterval         time.Duration
+	SSHHost              string
+	SSHPort              int
+	SSHUser              string
+	SSHPassword          string
+	SSHKeyPath           string
 }
 
 func FromEnv() Config {
@@ -70,7 +84,26 @@ func FromEnv() Config {
 	defaultUser := env("SHELL_DEFAULT_USER", env("SHELLMCP_DEFAULT_USER", ""))
 	defaultHome := env("SHELL_DEFAULT_HOME", env("SHELLMCP_DEFAULT_HOME", ""))
 	defaultCwd := env("SHELL_DEFAULT_CWD", env("SHELLMCP_DEFAULT_CWD", defaultHome))
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", "")}
+	auditLogPath := env("SHELLMCP_AUDIT_LOG", "")
+	nonceTTL := parseSecondsEnvWithDefault("SHELLMCP_NONCE_TTL_S", 300)
+	preserve := truthy(env("SHELLMCP_PRESERVE_FILE_METADATA", ""))
+	preserveMax := parseIntEnv("SHELLMCP_PRESERVE_METADATA_MAX_FILES", 1000)
+	mcpConfig := env("SHELLMCP_MCP_CONFIG", env("GPTADMIN_MCP_CONFIG", env("GPTADMIN_MCP_AGENTS_DIR", "")))
+	pollInterval := parseSecondsEnvWithDefault("POLL_INTERVAL_S", 5)
+	sshHost := env("SSH_HOST", "")
+	sshPort := 22
+	if raw := strings.TrimSpace(os.Getenv("SSH_PORT")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			sshPort = n
+		}
+	}
+	sshUser := env("SSH_USER", "")
+	sshPassword := os.Getenv("SSH_PASSWORD")
+	sshKeyPath := os.Getenv("SSH_KEY_PATH")
+	if sshKeyPath == "" {
+		sshKeyPath = os.Getenv("SSH_KEY")
+	}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath}
 }
 
 func env(k, d string) string {
@@ -99,11 +132,58 @@ func parseBuildVersion(v string) int {
 	return n
 }
 
+func parseSecondsEnvWithDefault(name string, fallbackSec int) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	return time.Duration(n) * time.Second
+}
+
+func parseIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// firstToken returns the first whitespace-delimited token of s, or s
+// itself when there is no whitespace. Used to redact arbitrary shell
+// command strings to a searchable prefix in audit logs without leaking
+// arguments that may contain secrets.
+func firstToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 type Server struct {
-	cfg      Config
-	jobs     *job.Manager
-	identity *security.Identity
-	hub      *hub.Client
+	cfg         Config
+	jobs        *job.Manager
+	identity    *security.Identity
+	hub         *hub.Client
+	auditLog    *audit.Logger
+	nonces      *security.NonceCache
+	supervisor  *supervisor.Manager
+	preserveMeta bool
+	preserveMax  int
+	sshClient   *sshexec.Client
 }
 
 func New(cfg Config) *Server {
@@ -126,7 +206,78 @@ func New(cfg Config) *Server {
 	if cfg.HubURL != "" {
 		hc = hub.New(cfg.HubURL, ident)
 	}
-	return &Server{cfg: cfg, jobs: job.New(cfg.LogLimit), identity: ident, hub: hc}
+
+	auditLog, auditErr := audit.New(cfg.AuditLog)
+	if auditErr != nil {
+		log.Printf("audit logger disabled: %v", auditErr)
+	}
+
+	nonces := security.NewNonceCache(cfg.NonceTTL)
+
+	var agents []supervisor.Agent
+	if cfg.MCPConfig != "" {
+		var loadErr error
+		agents, loadErr = supervisor.LoadAgents(cfg.MCPConfig)
+		if loadErr != nil {
+			log.Printf("supervisor: load agents failed: %v", loadErr)
+		}
+	}
+	mgr := supervisor.New(agents)
+
+	maxFiles := cfg.PreserveMetadataMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 1000
+	}
+
+	var sshClient *sshexec.Client
+	if strings.TrimSpace(cfg.SSHHost) != "" && strings.TrimSpace(cfg.SSHUser) != "" {
+		sshCfg := sshexec.Config{
+			Host:     cfg.SSHHost,
+			Port:     cfg.SSHPort,
+			User:     cfg.SSHUser,
+			Password: cfg.SSHPassword,
+			KeyPath:  cfg.SSHKeyPath,
+			Timeout:  parseSecondsEnvWithDefault("SSH_TIMEOUT_S", 300),
+		}
+		if sshCfg.Port == 0 {
+			sshCfg.Port = 22
+		}
+		client, sshErr := sshexec.New(sshCfg)
+		if sshErr != nil {
+			log.Printf("ssh client disabled: %v", sshErr)
+		} else {
+			sshClient = client
+			log.Printf("ssh client connected host=%s:%d user=%s", cfg.SSHHost, sshCfg.Port, cfg.SSHUser)
+		}
+	}
+
+	return &Server{
+		cfg:          cfg,
+		jobs:         job.New(cfg.LogLimit),
+		identity:     ident,
+		hub:          hc,
+		auditLog:     auditLog,
+		nonces:       nonces,
+		supervisor:   mgr,
+		preserveMeta: cfg.PreserveFileMetadata,
+		preserveMax:  maxFiles,
+		sshClient:    sshClient,
+	}
+}
+
+// Close releases the audit logger and best-effort stops every supervisor
+// agent. Safe to call multiple times and idempotent w.r.t. nil resources.
+func (s *Server) Close() error {
+	if s.auditLog != nil {
+		_ = s.auditLog.Close()
+	}
+	if s.supervisor != nil {
+		_ = s.supervisor.KillAll()
+	}
+	if s.sshClient != nil {
+		_ = s.sshClient.Close()
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -138,10 +289,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp", s.authed(s.mcpHTTP))
 	mux.HandleFunc("/exec", s.authed(s.exec))
 	mux.HandleFunc("/exec/live", s.authed(s.execLive))
+	mux.HandleFunc("/exec/stream", s.authed(s.execStream))
 	mux.HandleFunc("/exec/callback", s.authed(s.execCallback))
 	mux.HandleFunc("/jobs", s.authed(s.jobsList))
 	mux.HandleFunc("/jobs/", s.authed(s.jobGet))
 	mux.HandleFunc("/file", s.authed(s.fileGet))
+	mux.HandleFunc("/capabilities/mcp/", s.authed(s.supervisorHandler))
 	return mux
 }
 
@@ -154,6 +307,8 @@ func (s *Server) ListenAndServe() error {
 	if s.cfg.QueueEnabled {
 		go s.queueLoop(ctx)
 	}
+	s.startUpdateLoop(ctx)
+	s.startAutoStartAgents()
 	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("shellmcp-go listening addr=%s name=%s heartbeat=%v queue=%v", s.cfg.Addr, s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
 	return srv.ListenAndServe()
@@ -167,6 +322,11 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
+		s.auditLog.Event(audit.AuthFail, map[string]any{
+			"path":   r.URL.Path,
+			"method": r.Method,
+			"reason": "auth_reject",
+		})
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 	}
 }
@@ -184,7 +344,26 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 			pub = loaded
 		}
 	}
-	return security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute) == nil
+	if err := security.Verify(pub, r.Method, r.URL.Path, r.Header.Get("X-GPTAdmin-Timestamp"), r.Header.Get("X-GPTAdmin-Nonce"), body, r.Header.Get("X-GPTAdmin-Signature"), 5*time.Minute); err != nil {
+		return false
+	}
+	// Signature is valid: additionally enforce nonce replay protection.
+	nonce := r.Header.Get("X-GPTAdmin-Nonce")
+	if nonce != "" {
+		if s.nonces == nil || !s.nonces.CheckAndRemember(nonce) {
+			s.auditLog.Event(audit.AuthFail, map[string]any{
+				"path":   r.URL.Path,
+				"method": r.Method,
+				"reason": "nonce_replay",
+			})
+			return false
+		}
+	}
+	s.auditLog.Event(audit.AuthOK, map[string]any{
+		"path":   r.URL.Path,
+		"method": r.Method,
+	})
+	return true
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_transport_http", "mcp_transport_stdio"}})
@@ -194,7 +373,19 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"shell": true, "system": true, "tasks": true, "logs": true, "file_backup": true, "go_shellmcp": true, "real_mcp": true, "mcp_transports": []string{"stdio", "streamable-http-poll"}, "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit})
+	writeJSON(w, 200, map[string]any{
+		"shell":           true,
+		"system":          true,
+		"tasks":           true,
+		"logs":            true,
+		"file_backup":     true,
+		"go_shellmcp":     true,
+		"real_mcp":        true,
+		"mcp_transports":  []string{"stdio", "streamable-http-poll"},
+		"build_version":   parseBuildVersion(BuildVersion),
+		"git_commit":      GitCommit,
+		"mcp_agents":      s.mcpAgentsForCapabilities(),
+	})
 }
 
 func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Request, bool) {
@@ -221,6 +412,88 @@ func (s *Server) applyDefaults(req *shell.Request) {
 	}
 }
 
+// runShell dispatches a synchronous exec to the configured backend.
+// When SSH is configured (s.sshClient != nil) the request is composed
+// via sshexec.ComposeCmd and run on the remote host; otherwise the
+// existing local shell.Run path is used. Both branches produce the
+// same shell.Result so the JSON response shape is unchanged.
+func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
+	if s.sshClient == nil {
+		return shell.Run(ctx, req, s.cfg.LogLimit)
+	}
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	composed := sshexec.ComposeCmd(req.Cmd, req.Cwd, req.Env)
+	sshRes, _ := s.sshClient.Run(runCtx, composed, timeout)
+	return sshexecResultToShell(sshRes, req, timeout)
+}
+
+// runShellStream is the streaming analogue of runShell. The emit
+// callback receives shell.Event values with the same shape the local
+// shell.RunLive path emits (stdout/stderr "chunk" events + final
+// "exit") so the SSE / NDJSON response shape is unchanged.
+func (s *Server) runShellStream(ctx context.Context, req shell.Request, emit func(shell.Event)) shell.Result {
+	if s.sshClient == nil {
+		return shell.RunLive(ctx, req, s.cfg.LogLimit, emit)
+	}
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	composed := sshexec.ComposeCmd(req.Cmd, req.Cwd, req.Env)
+	var last shell.Result
+	s.sshClient.RunStream(runCtx, composed, timeout, func(e map[string]any) {
+		t, _ := e["type"].(string)
+		switch t {
+		case "stdout":
+			if data, ok := e["data"].(string); ok {
+				emit(shell.Event{Type: "chunk", Stream: "stdout", Data: data})
+			}
+		case "stderr":
+			if data, ok := e["data"].(string); ok {
+				emit(shell.Event{Type: "chunk", Stream: "stderr", Data: data})
+			}
+		case "exit":
+			rc, _ := e["code"].(int)
+			errStr, _ := e["error"].(string)
+			timedOut, _ := e["timed_out"].(bool)
+			last = shell.Result{
+				ReturnCode: rc,
+				Error:      errStr,
+				TimedOut:   timedOut,
+			}
+		}
+	})
+	return last
+}
+
+// sshexecResultToShell maps the SSH result into a shell.Result so the
+// JSON wire format is identical to the local-exec path. Fields that
+// have no meaningful remote equivalent (Spilled / StdoutPath / Files)
+// stay empty.
+func sshexecResultToShell(r sshexec.Result, req shell.Request, timeout time.Duration) shell.Result {
+	cwd := req.Cwd
+	if cwd == "" {
+		cwd = req.DefaultCwd
+	}
+	_ = timeout
+	return shell.Result{
+		ReturnCode: r.ReturnCode,
+		Stdout:     r.Stdout,
+		Stderr:     r.Stderr,
+		Error:      r.Error,
+		TimedOut:   r.TimedOut,
+		Cwd:        cwd,
+		RunAsUser:  req.RunAsUser,
+	}
+}
+
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
@@ -230,16 +503,56 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	cmdField := firstToken(req.Cmd)
+	startFields := map[string]any{
+		"cmd":        cmdField,
+		"user":       req.RunAsUser,
+		"background": req.Background,
+	}
+	s.auditLog.Event(audit.ExecStart, startFields)
 	if req.Background {
 		j := s.jobs.Start(req)
 		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID})
 		return
 	}
-	res := shell.Run(context.Background(), req, s.cfg.LogLimit)
+
+	// Best-effort metadata snapshot for sync (non-background) runs when the
+	// caller enabled the feature and supplied a cwd.
+	var snapshot *shell.Snapshot
+	if s.preserveMeta && req.Cwd != "" {
+		snap, err := shell.SnapshotDir(req.Cwd, s.preserveMax)
+		if err == nil && snap != nil {
+			snapshot = snap
+		}
+	}
+	restore := func() (restored, failed int) {
+		if snapshot == nil {
+			return 0, 0
+		}
+		return snapshot.Restore()
+	}
+
+	startTime := time.Now()
+	res := s.runShell(context.Background(), req)
+	restored, failed := restore()
+	elapsedMS := time.Since(startTime).Milliseconds()
 	status := 200
 	if res.Error != "" && res.ReturnCode == -1 {
 		status = 500
 	}
+	endFields := map[string]any{
+		"cmd":          cmdField,
+		"user":         req.RunAsUser,
+		"background":   false,
+		"return_code":  res.ReturnCode,
+		"elapsed_ms":   elapsedMS,
+		"restored":     restored,
+		"failed_files": failed,
+	}
+	if res.Error != "" {
+		endFields["error"] = res.Error
+	}
+	s.auditLog.Event(audit.ExecEnd, endFields)
 	writeJSON(w, status, res)
 }
 func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
@@ -275,11 +588,19 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	cmdField := firstToken(req.Cmd)
+	s.auditLog.Event(audit.ExecStart, map[string]any{
+		"cmd":             cmdField,
+		"user":            req.RunAsUser,
+		"background":      req.Background,
+		"transport":       "ndjson",
+	})
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	startTime := time.Now()
 	emit := func(e shell.Event) {
 		b, _ := json.Marshal(e)
 		_, _ = w.Write(b)
@@ -288,7 +609,20 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
-	shell.RunLive(r.Context(), req, s.cfg.LogLimit, emit)
+	res := s.runShellStream(r.Context(), req, emit)
+	elapsedMS := time.Since(startTime).Milliseconds()
+	endFields := map[string]any{
+		"cmd":             cmdField,
+		"user":            req.RunAsUser,
+		"background":      req.Background,
+		"return_code":     res.ReturnCode,
+		"elapsed_ms":      elapsedMS,
+		"transport":       "ndjson",
+	}
+	if res.Error != "" {
+		endFields["error"] = res.Error
+	}
+	s.auditLog.Event(audit.ExecEnd, endFields)
 }
 func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -388,7 +722,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 	}
 }
 func (s *Server) runCallbackJob(jobID string, req shell.Request) {
-	res := shell.Run(context.Background(), req, s.cfg.LogLimit)
+	res := s.runShell(context.Background(), req)
 	if s.hub == nil {
 		return
 	}
@@ -399,15 +733,49 @@ func (s *Server) runCallbackJob(jobID string, req shell.Request) {
 	}
 }
 
+// Outbox retry tuning. Mirrors the Python shellmcp exponential-backoff
+// hint so a flapping hub cannot cause a tight retry loop.
+const (
+	outboxBackoffBase = 5 * time.Second
+	outboxBackoffCap  = 10 * time.Minute
+)
+
 func (s *Server) spoolOutbox(jobID string, payload hub.TaskResult, cause error) {
 	if s.cfg.OutboxDir == "" {
 		return
 	}
 	_ = os.MkdirAll(s.cfg.OutboxDir, 0o700)
 	path := filepath.Join(s.cfg.OutboxDir, jobID+".json")
-	entry := map[string]any{"job_id": jobID, "payload": payload, "created_at": time.Now().Unix(), "last_error": cause.Error()}
+	now := time.Now()
+	entry := map[string]any{
+		"job_id":          jobID,
+		"payload":         payload,
+		"created_at":      now.Unix(),
+		"last_error":      cause.Error(),
+		"attempts":        0,
+		"next_attempt_at": 0,
+	}
 	b, _ := json.Marshal(entry)
 	_ = os.WriteFile(path, b, 0o600)
+}
+
+// computeOutboxBackoff returns the wait time for the given attempt number
+// using a 5s base doubling each retry, capped at 10m, for parity with the
+// Python shellmcp outbox behavior.
+func computeOutboxBackoff(attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	// Cap attempts to avoid overflow when shifting.
+	const maxAttempts = 30
+	if attempts > maxAttempts {
+		attempts = maxAttempts
+	}
+	wait := outboxBackoffBase * (1 << attempts)
+	if wait > outboxBackoffCap || wait < 0 {
+		wait = outboxBackoffCap
+	}
+	return wait
 }
 
 func (s *Server) flushOutbox(ctx context.Context) {
@@ -418,6 +786,7 @@ func (s *Server) flushOutbox(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	now := time.Now()
 	for _, ent := range entries {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
@@ -428,16 +797,47 @@ func (s *Server) flushOutbox(ctx context.Context) {
 			continue
 		}
 		var entry struct {
-			Payload hub.TaskResult `json:"payload"`
+			JobID          string      `json:"job_id"`
+			Payload        hub.TaskResult `json:"payload"`
+			Attempts       int         `json:"attempts"`
+			NextAttemptAt  int64       `json:"next_attempt_at"`
 		}
 		if json.Unmarshal(b, &entry) != nil || entry.Payload.ID == "" {
 			continue
 		}
-		if err := s.hub.PostResult(ctx, s.cfg.Name, entry.Payload); err == nil {
-			_ = os.Remove(path)
-		} else {
-			log.Printf("outbox retry failed file=%s err=%v", path, err)
+		// Skip entries whose next_attempt_at is in the future.
+		if entry.NextAttemptAt > 0 && now.Unix() < entry.NextAttemptAt {
+			continue
 		}
+		if s.hub == nil {
+			continue
+		}
+		postErr := s.hub.PostResult(ctx, s.cfg.Name, entry.Payload)
+		if postErr == nil {
+			_ = os.Remove(path)
+			continue
+		}
+		// Bump attempt counter and set next_attempt_at to the backoff window.
+		newAttempts := entry.Attempts + 1
+		nextAt := now.Add(computeOutboxBackoff(newAttempts)).Unix()
+		updated := map[string]any{
+			"job_id":          entry.JobID,
+			"payload":         entry.Payload,
+			"created_at":      now.Unix(),
+			"last_error":      postErr.Error(),
+			"attempts":        newAttempts,
+			"next_attempt_at": nextAt,
+		}
+		raw, mErr := json.Marshal(updated)
+		if mErr != nil {
+			log.Printf("outbox retry marshal failed file=%s err=%v", path, mErr)
+			continue
+		}
+		if wErr := os.WriteFile(path, raw, 0o600); wErr != nil {
+			log.Printf("outbox retry persist failed file=%s err=%v", path, wErr)
+			continue
+		}
+		log.Printf("outbox retry failed file=%s err=%v attempts=%d next_attempt_in=%s", path, err, newAttempts, computeOutboxBackoff(newAttempts))
 	}
 }
 

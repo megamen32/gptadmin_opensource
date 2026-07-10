@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -47,8 +48,13 @@ func TestOutputLimitKeepsTailAndSpills(t *testing.T) {
 }
 
 func TestRunLiveEvents(t *testing.T) {
+	var mu sync.Mutex
 	var events []Event
-	res := RunLive(context.Background(), Request{Cmd: "echo out; echo err >&2", SpillDir: t.TempDir()}, 8192, func(e Event) { events = append(events, e) })
+	res := RunLive(context.Background(), Request{Cmd: "echo out; echo err >&2", SpillDir: t.TempDir()}, 8192, func(e Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
 	if res.ReturnCode != 0 {
 		t.Fatalf("bad res %+v", res)
 	}

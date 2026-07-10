@@ -923,3 +923,71 @@ func TestServerActionsOpenAPIProxyForPinnedMCPServer(t *testing.T) {
 		t.Fatalf("bad actions tool response: %s", w.Body.String())
 	}
 }
+
+func TestHTTPServiceEndpointProxiesRegisteredLoopbackService(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/hello" {
+			t.Fatalf("backend path=%q", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Forwarded-Prefix"); got != "/_services/demo/files" {
+			t.Fatalf("prefix=%q", got)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"` + backend.URL + `","strip_prefix":true,"visibility":"public-capability"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register=%d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/hello", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "ok" {
+		t.Fatalf("proxy=%d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestHTTPServiceEndpointRejectsNonLoopback(t *testing.T) {
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"http://192.168.2.1:80","strip_prefix":true,"visibility":"public-capability"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/x", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// An http_endpoints entry without visibility=public-capability must NOT be
+// reachable through the public ingress, even if it targets a loopback backend.
+func TestHTTPServiceEndpointRejectsPrivateCapability(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("leaked"))
+	}))
+	defer backend.Close()
+
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"` + backend.URL + `","strip_prefix":true}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/x", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("private endpoint should be hidden, got status=%d body=%s", w.Code, w.Body.String())
+	}
+}

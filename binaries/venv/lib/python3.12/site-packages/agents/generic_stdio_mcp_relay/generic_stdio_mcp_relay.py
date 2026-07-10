@@ -487,6 +487,7 @@ class Relay:
                 "args": self.server_spec.get("args", []),
                 "requested_stdio_format": self.client.requested_stdio_format,
                 "effective_stdio_format": self.client.stdio_format,
+                "http_endpoints": self.server_spec.get("http_endpoints", []),
             },
         }
         log(f"relay register agent_id={self.agent_id} hub={self.hub}", enabled=self.verbose)
