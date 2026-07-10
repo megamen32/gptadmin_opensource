@@ -326,6 +326,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp-relay/tools", s.requireCtl(s.mcpRelayTools))
 	mux.HandleFunc("/mcp-relay/call_mcp_tool", s.requireCtl(s.mcpRelayCall))
 	mux.HandleFunc("/mcp-relay/call", s.requireCtl(s.mcpRelayCall))
+	mux.HandleFunc("/mcp-relay/shell_exec", s.requireCtl(s.mcpRelayShellExec))
 	mux.HandleFunc("/mcp-relay/get_mcp_job/", s.requireCtl(s.mcpRelayJob))
 	mux.HandleFunc("/mcp-relay/job/", s.requireCtl(s.mcpRelayJob))
 	mux.HandleFunc("/.well-known/oauth-protected-resource", s.oauthProtectedResource)
@@ -340,6 +341,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
 	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
 	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.adminMCPManage))
+	mux.HandleFunc("/admin/api/mcp/issue-token", s.requireCtl(s.adminMCPIssueToken))
 	mux.HandleFunc("/admin/api/mcp/resources/list", s.requireCtl(s.adminMCPResourcesList))
 	mux.HandleFunc("/admin/api/mcp/resources/read", s.requireCtl(s.adminMCPResourceRead))
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
@@ -399,7 +401,7 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 		} else {
 			s.authAudit("ctl_auth_denied", r, map[string]any{"reason": err.Error()})
 		}
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
+		s.writeCtlUnauthorized(w, r)
 	}
 }
 
@@ -438,10 +440,10 @@ func tokenMatches(r *http.Request, expected string) bool {
 
 func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
 	origin := s.origin(r)
-	yaml := fmt.Sprintf(`openapi: 3.0.3
+	yaml := fmt.Sprintf(`openapi: 3.1.0
 info:
   title: GPTAdmin MCP Relay
-  version: %s
+  version: "1.0.0"
   description: |
     Universal MCP relay for GPTAdmin.
 
@@ -595,7 +597,7 @@ components:
           default: false
     CallMcpToolRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [target, tool_name]
       properties:
         target:
@@ -604,11 +606,28 @@ components:
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: Tool input object for the selected tool. Optional; common tool fields can also be sent as top-level fields.
         args:
           type: object
           additionalProperties: true
           default: {}
-          description: Tool input object for the selected tool. Use this field exactly for ChatGPT Actions.
+          description: Short alias for arguments. Also accepted for compatibility.
+        cmd:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to shell_exec as cmd.
+        query:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to tools like OpenMemory query as query.
+        cwd:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to shell_exec as cwd.
         timeout:
           type: integer
           nullable: true
@@ -678,7 +697,7 @@ components:
         code:
           type: string
           nullable: true
-`, BuildVersion, origin)
+`, origin)
 	b := []byte(yaml)
 	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
@@ -1172,11 +1191,11 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target == "hub" {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
+		writeJSON(w, http.StatusOK, withActionToolHints(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}, target))
 		return
 	}
 	if strings.HasPrefix(target, "shell:") {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
+		writeJSON(w, http.StatusOK, withActionToolHints(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}, target))
 		return
 	}
 	jobID := s.enqueueRelay(target, "tools/list", nil)
@@ -1184,7 +1203,7 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
-	resp := s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout))
+	resp := withActionToolHints(s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)), target)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1203,6 +1222,9 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 	args := mapValue(req["arguments"])
 	if len(args) == 0 {
 		args = mapValue(req["args"])
+	}
+	if len(args) == 0 {
+		args = toolArgsFromTopLevel(req)
 	}
 	if target == "" || toolName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target or tool_name"})
@@ -1225,6 +1247,91 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func toolArgsFromTopLevel(req map[string]any) map[string]any {
+	reserved := map[string]bool{
+		"target": true, "server_id": true, "agent_id": true,
+		"tool_name": true, "name": true,
+		"arguments": true, "args": true,
+		"background": true,
+	}
+	args := map[string]any{}
+	for k, v := range req {
+		if reserved[k] || v == nil {
+			continue
+		}
+		args[k] = v
+	}
+	return args
+}
+
+func withActionToolHints(resp map[string]any, target string) map[string]any {
+	response := mapValue(resp["response"])
+	rawTools, ok := response["tools"].([]map[string]any)
+	if !ok {
+		if items, ok := response["tools"].([]any); ok {
+			rawTools = make([]map[string]any, 0, len(items))
+			for _, item := range items {
+				if tool, ok := item.(map[string]any); ok {
+					rawTools = append(rawTools, tool)
+				}
+			}
+		}
+	}
+	for _, tool := range rawTools {
+		name := firstString(tool, "name")
+		if name == "" {
+			continue
+		}
+		hint := map[string]any{"operationId": "callMcpTool", "target": target, "tool_name": name}
+		for _, field := range actionShortcutFields(tool) {
+			hint[field] = "<" + field + ">"
+		}
+		tool["gptadmin_action_call"] = hint
+	}
+	return resp
+}
+
+func actionShortcutFields(tool map[string]any) []string {
+	schema := mapValue(tool["inputSchema"])
+	props := mapValue(schema["properties"])
+	out := []string{}
+	for _, key := range []string{"cmd", "query", "cwd", "timeout"} {
+		if _, ok := props[key]; ok {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	target := firstString(req, "target", "server_id", "agent_id")
+	cmd := firstString(req, "cmd", "command")
+	if target == "" || cmd == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target or cmd"})
+		return
+	}
+	if !strings.HasPrefix(target, "shell:") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "target must be a shell:* agent"})
+		return
+	}
+	args := map[string]any{
+		"cmd":     cmd,
+		"cwd":     req["cwd"],
+		"timeout": req["timeout"],
+	}
+	resp := s.callShellTool(target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout))
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1533,6 +1640,55 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
 }
 
+func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req struct {
+		ClientID string `json:"client_id"`
+		TTLDays  int    `json:"ttl_days"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	clientID := strings.TrimSpace(req.ClientID)
+	if clientID == "" {
+		clientID = "custom-mcp-client"
+	}
+	ttlDays := req.TTLDays
+	if ttlDays <= 0 {
+		ttlDays = 365
+	}
+	origin := s.origin(r)
+	resource := s.resource(r)
+	token, err := s.signJWT(map[string]any{
+		"sub":       "admin",
+		"scope":     "gptadmin.read gptadmin.exec",
+		"client_id": clientID,
+		"iss":       origin,
+		"aud":       resource,
+		"resource":  resource,
+		"exp":       time.Now().Add(time.Duration(ttlDays) * 24 * time.Hour).Unix(),
+		"iat":       time.Now().Unix(),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"client_id":    clientID,
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   ttlDays * 24 * 3600,
+		"issuer":       origin,
+		"audience":     resource,
+		"mcp_url":      origin + "/mcp",
+	})
+}
+
 func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	jobs := s.adminJobsDataLocked()
@@ -1669,7 +1825,7 @@ func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg
 		errHTML = `<div class="err">` + html.EscapeString(errMsg) + `</div>`
 	}
 	page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(430px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Введите admin-пароль. Без cookie-сессии админка и её API не отдаются.</p>` + errHTML + `<form method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.hint{margin:0 0 18px;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Введите admin-пароль. Без cookie-сессии админка и её API не отдаются.</p><div class="hint">Для браузерной админки нужен <strong>admin-пароль</strong>. Для Custom GPT / generated Action schema используйте <code>Authorization: Bearer &lt;CTL_TOKEN&gt;</code> или Bearer JWT, выпущенный через OAuth.</div>` + errHTML + `<form method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
 	_, _ = io.WriteString(w, page)
 }
 
@@ -2019,7 +2175,7 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	if scope == "" {
 		scope = "gptadmin.read gptadmin.exec"
 	}
-	page := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize GPTAdmin MCP</title><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:28px;border:1px solid #1e293b;border-radius:24px;background:#0f1623}input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:14px;margin-top:10px}input{background:#111827;color:#fff;border:1px solid #334155}button{border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;font-weight:800}.muted{color:#94a3b8;word-break:break-all}</style></head><body><main class="card"><h1>Authorize GPTAdmin MCP</h1><p class="muted">Client: ` + html.EscapeString(q.Get("client_id")) + `</p><p class="muted">Resource: ` + html.EscapeString(resource) + `</p><p>Scopes: ` + html.EscapeString(scope) + `</p><form method="POST" action="/authorize">` + hidden + `<label>Admin password</label><input type="password" name="password" autofocus required autocomplete="current-password"><button type="submit">Authorize</button></form></main></body></html>`
+	page := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize GPTAdmin MCP</title><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:28px;border:1px solid #1e293b;border-radius:24px;background:#0f1623}.hint{margin:16px 0;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:14px;margin-top:10px}input{background:#111827;color:#fff;border:1px solid #334155}button{border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;font-weight:800}.muted{color:#94a3b8;word-break:break-all}</style></head><body><main class="card"><h1>Authorize GPTAdmin MCP</h1><p class="muted">Client: ` + html.EscapeString(q.Get("client_id")) + `</p><p class="muted">Resource: ` + html.EscapeString(resource) + `</p><p>Scopes: ` + html.EscapeString(scope) + `</p><div class="hint">Эта страница выпускает Bearer JWT для MCP/Custom GPT. Если у вас уже есть <code>CTL_TOKEN</code> или готовый Bearer JWT, можете использовать его напрямую в generated Action schema без повторной авторизации.</div><form method="POST" action="/authorize">` + hidden + `<label>Admin password</label><input type="password" name="password" autofocus required autocomplete="current-password"><button type="submit">Authorize</button></form></main></body></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(page))
 }
@@ -2370,10 +2526,10 @@ func mcpToolsFromResult(v any) []map[string]any {
 func buildServerActionsOpenAPI(origin, slug string, agent Agent, tools []map[string]any) string {
 	var b strings.Builder
 	serverPath := "/server/" + slug + "/actions/tools/"
-	b.WriteString("openapi: 3.0.3\n")
+	b.WriteString("openapi: 3.1.0\n")
 	b.WriteString("info:\n")
 	b.WriteString("  title: " + yamlQuote("GPTAdmin proxy for "+agent.Name) + "\n")
-	b.WriteString("  version: " + yamlQuote(BuildVersion) + "\n")
+	b.WriteString("  version: \"1.0.0\"\n")
 	b.WriteString("  description: " + yamlQuote("OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: "+agent.AgentID) + "\n")
 	b.WriteString("servers:\n")
 	b.WriteString("  - url: " + yamlQuote(origin) + "\n")
@@ -2443,7 +2599,7 @@ func buildServerActionsOpenAPIJSON(origin, slug string, agent Agent, tools []map
 	}
 	payload := map[string]any{
 		"openapi":    "3.1.0",
-		"info":       map[string]any{"title": "GPTAdmin proxy for " + agent.Name, "version": BuildVersion, "description": "OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: " + agent.AgentID},
+		"info":       map[string]any{"title": "GPTAdmin proxy for " + agent.Name, "version": "1.0.0", "description": "OpenAPI action proxy generated from MCP tools/list for one GPTAdmin MCP server: " + agent.AgentID},
 		"servers":    []map[string]any{{"url": origin}},
 		"security":   []map[string]any{{"bearerAuth": []any{}}},
 		"paths":      paths,
@@ -3130,6 +3286,19 @@ func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
 	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 	return false
+}
+
+func (s *Server) writeCtlUnauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{
+		"detail": "unauthorized",
+		"auth": map[string]any{
+			"admin_login":          s.origin(r) + "/admin/login",
+			"oauth_authorize":      s.origin(r) + "/authorize",
+			"oauth_resource_meta":  s.origin(r) + "/.well-known/oauth-protected-resource",
+			"accepts_bearer_token": true,
+		},
+	})
 }
 
 func (s *Server) adminPasswordOK(v string) bool {

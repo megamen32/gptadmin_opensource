@@ -49,7 +49,7 @@ func TestRelayToolsRoundTrip(t *testing.T) {
 		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	call := []byte(`{"target":"demo","tool_name":"ping","arguments":{"x":1},"background":true}`)
+	call := []byte(`{"target":"demo","tool_name":"ping","query":"hello","background":true}`)
 	req = httptest.NewRequest(http.MethodPost, "/mcp-relay/call_mcp_tool", bytes.NewReader(call))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w = httptest.NewRecorder()
@@ -79,6 +79,11 @@ func TestRelayToolsRoundTrip(t *testing.T) {
 	}
 	if job["id"] != jobID || job["method"] != "tools/call" {
 		t.Fatalf("bad relay job: %v", job)
+	}
+	params := job["params"].(map[string]any)
+	args := params["arguments"].(map[string]any)
+	if args["query"] != "hello" {
+		t.Fatalf("top-level query was not forwarded as tool argument: %v", job)
 	}
 }
 
@@ -145,6 +150,90 @@ func TestOAuthAndMCPJSONRPC(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte("list_mcp_servers")) {
 		t.Fatalf("tools/list missing expected server tool: %s", w.Body.String())
+	}
+}
+
+func TestAdminIssueMCPTokenUsesPublicOriginAndWorksForRelay(t *testing.T) {
+	s := New(Config{
+		CtlToken:                 "ctl",
+		AdminPassword:            "pw",
+		OAuthClientSecret:        "oauth-secret",
+		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		OAuthPermissiveRedirects: true,
+		OAuthPermissiveResources: true,
+		DefaultTimeout:           time.Second,
+		PollMaxTimeout:           time.Second,
+	})
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/mcp/issue-token", bytes.NewBufferString(`{"client_id":"chatgpt","ttl_days":365}`))
+	req.Header.Set("Authorization", "Bearer ctl")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("issue-token status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	access, _ := body["access_token"].(string)
+	if access == "" {
+		t.Fatalf("missing access_token: %v", body)
+	}
+	claims, err := s.verifyJWT(access)
+	if err != nil {
+		t.Fatalf("verifyJWT err=%v", err)
+	}
+	if claims["iss"] != "https://u-f1102930.t.gptadmin.bezrabotnyi.com" {
+		t.Fatalf("iss=%v", claims["iss"])
+	}
+	if claims["aud"] != "https://u-f1102930.t.gptadmin.bezrabotnyi.com" {
+		t.Fatalf("aud=%v", claims["aud"])
+	}
+	if claims["client_id"] != "chatgpt" {
+		t.Fatalf("client_id=%v", claims["client_id"])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/mcp-relay/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("relay with issued token status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"servers"`) {
+		t.Fatalf("relay body missing servers: %s", w.Body.String())
+	}
+}
+
+func TestGeneratedActionEndpointsAdvertiseOAuthWhenUnauthorized(t *testing.T) {
+	s := New(Config{
+		CtlToken:                 "<PRIVATE_SECRET>",
+		AdminPassword:            "<PRIVATE_SECRET>",
+		OAuthClientSecret:        "<PRIVATE_SECRET>",
+		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		OAuthPermissiveRedirects: true,
+		OAuthPermissiveResources: true,
+		DefaultTimeout:           time.Second,
+		PollMaxTimeout:           time.Second,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/mcp-relay/servers", nil)
+	req.Host = "u-f1102930.t.gptadmin.bezrabotnyi.com"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	got := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(got, `resource_metadata="https://u-f1102930.t.gptadmin.bezrabotnyi.com/.well-known/oauth-protected-resource"`) {
+		t.Fatalf("missing oauth resource metadata in WWW-Authenticate: %q", got)
+	}
+	if !strings.Contains(got, `scope="gptadmin.read gptadmin.exec"`) {
+		t.Fatalf("missing scope hint in WWW-Authenticate: %q", got)
 	}
 }
 
@@ -236,6 +325,48 @@ func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin cookie did not authorize relay API: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuthPagesExplainAdminPasswordAndBearerOptions(t *testing.T) {
+	s := New(Config{
+		CtlToken:                 "<PRIVATE_SECRET>",
+		AdminPassword:            "<PRIVATE_SECRET>",
+		OAuthClientSecret:        "<PRIVATE_SECRET>",
+		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		OAuthPermissiveRedirects: true,
+		OAuthPermissiveResources: true,
+		DefaultTimeout:           time.Second,
+		PollMaxTimeout:           time.Second,
+	})
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin login status=%d body=%s", w.Code, w.Body.String())
+	}
+	loginPage := w.Body.String()
+	for _, want := range []string{"admin-пароль", "CTL_TOKEN", "JWT"} {
+		if !strings.Contains(loginPage, want) {
+			t.Fatalf("admin login page missing %q: %s", want, loginPage)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/authorize?client_id=chatgpt&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fcb&resource=https%3A%2F%2Fu-f1102930.t.gptadmin.bezrabotnyi.com&scope=gptadmin.read+gptadmin.exec&code_challenge="+pkceChallenge("verifier"), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorize page status=%d body=%s", w.Code, w.Body.String())
+	}
+	authorizePage := w.Body.String()
+	for _, want := range []string{"Admin password", "CTL_TOKEN", "JWT"} {
+		if !strings.Contains(authorizePage, want) {
+			t.Fatalf("authorize page missing %q: %s", want, authorizePage)
+		}
 	}
 }
 
@@ -415,6 +546,39 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if !strings.Contains(w.Body.String(), tc.needle) {
 			t.Fatalf("%s %s missing %q in %s", tc.method, tc.path, tc.needle, w.Body.String())
 		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/actions/openapi.yaml", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	for _, want := range []string{"openapi: 3.1.0", "version: \"1.0.0\"", "additionalProperties: true", "cmd:", "query:", "cwd:", "arguments:", "common tool fields can also be sent as top-level fields", "args:", "Short alias for arguments."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/actions/openapi.yaml missing %q in %s", want, body)
+		}
+	}
+	if strings.Contains(body, "operationId: shellExec") || strings.Contains(body, "/mcp-relay/shell_exec") || strings.Contains(body, "ShellExecRequest") {
+		t.Fatalf("/actions/openapi.yaml leaked special shellExec action: %s", body)
+	}
+}
+
+func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-server-100","tool_name":"shell_exec","cmd":"pwd"}`)))
+	req.Header.Set("Authorization", "Bearer ctl")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("callMcpTool shell_exec status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"server_id":"shell:admin-server-100"`) {
+		t.Fatalf("callMcpTool shell_exec bad response: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "missing cmd") {
+		t.Fatalf("callMcpTool did not forward top-level cmd: %s", w.Body.String())
 	}
 }
 
@@ -699,7 +863,7 @@ func TestServerActionsOpenAPIProxyForPinnedMCPServer(t *testing.T) {
 		t.Fatalf("actions openapi status=%d body=%s", w.Code, w.Body.String())
 	}
 	schema := w.Body.String()
-	for _, want := range []string{"openapi: 3.0.3", "/server/openmemory/actions/tools/openmemory_query", "operationId: \"openmemory_query\"", "Query OpenMemory", "bearerAuth"} {
+	for _, want := range []string{"openapi: 3.1.0", "version: \"1.0.0\"", "/server/openmemory/actions/tools/openmemory_query", "operationId: \"openmemory_query\"", "Query OpenMemory", "bearerAuth"} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("openapi schema missing %q:\n%s", want, schema)
 		}

@@ -36,10 +36,6 @@
     <header class="topbar">
       <button class="mobileMenu" onclick="toggleSidebar()">☰</button>
       <b id="viewTitle" class="topbar-title">Обзор</b>
-      <form class="tokenForm" onsubmit="saveToken();return false" style="display:contents">
-        <input id="token" class="token" type="password" placeholder="optional CTL_TOKEN" autocomplete="off" spellcheck="false">
-        <button class="btn-primary" type="submit">Сохранить</button>
-      </form>
       <button class="btn-secondary" onclick="refreshAll()">Обновить</button>
       <button class="btn-secondary" onclick="location.href='/admin/logout'">Выйти</button>
       <label class="auto-toggle"><input type="checkbox" id="autoRefresh" checked><span class="toggle-slider"></span>auto</label>
@@ -123,6 +119,7 @@
       <!-- Security -->
       <section id="view-security" class="view"><div class="card">
         <h2>Токены и Auth</h2>
+        <p class="muted small">Подробная инструкция по Bearer CTL, JWT, OAuth, `openapi.yaml` и подключению как ChatGPT app: <a href="https://became.bezrabotnyi.com/#/docs" target="_blank" rel="noreferrer">became.bezrabotnyi.com/#/docs</a>.</p>
         <div class="row" style="margin:12px 0"><button class="btn-secondary" onclick="loadSecurityEnv()">↻ Обновить</button><button class="cancelBtn" onclick="rotateCtlToken()">↻ Ротировать CTL_TOKEN</button><button class="cancelBtn" onclick="rotateOAuth()">↻ Ротировать OAUTH_SECRET</button></div>
         <div id="securityEnv" class="stackList"><p class="muted">Нажмите «Обновить»</p></div>
         <div style="margin-top:16px"><h2 style="font-size:13px">Установить значение</h2>
@@ -130,6 +127,8 @@
         </div>
         <div style="margin-top:16px"><h2 style="font-size:13px">MCP bearer-токен</h2>
           <div class="row"><input id="secMcpTokenName" placeholder="client_id" style="min-width:200px"><button onclick="issueMcpTokenFromPanel()">Выпустить</button></div>
+          <p class="muted small">Токен выпускает текущий hub, поэтому issuer и audience совпадают с live PUBLIC_ORIGIN, а не с локальным `127.0.0.1`.</p>
+          <p class="muted small">`/authorize` не является обычной landing page: он открывается внутри OAuth flow и должен получать `client_id`, `redirect_uri`, `resource`, `code_challenge` и `code_challenge_method=S256`.</p>
           <pre id="secMcpTokenResult" style="min-height:60px">—</pre>
         </div>
         <div style="margin-top:16px"><h2 style="font-size:13px">Перезапуск</h2>

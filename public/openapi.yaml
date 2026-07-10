@@ -1,7 +1,7 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
   title: GPTAdmin MCP Relay
-  version: go-dev
+  version: "1.0.0"
   description: |
     Universal MCP relay for GPTAdmin.
 
@@ -155,7 +155,7 @@ components:
           default: false
     CallMcpToolRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [target, tool_name]
       properties:
         target:
@@ -164,11 +164,28 @@ components:
         tool_name:
           type: string
           description: Tool name returned by listMcpTools.
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: Tool input object for the selected tool. Optional; common tool fields can also be sent as top-level fields.
         args:
           type: object
           additionalProperties: true
           default: {}
-          description: Tool input object for the selected tool. Use this field exactly for ChatGPT Actions.
+          description: Short alias for arguments. Also accepted for compatibility.
+        cmd:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to shell_exec as cmd.
+        query:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to tools like OpenMemory query as query.
+        cwd:
+          type: string
+          nullable: true
+          description: Top-level shortcut passed to shell_exec as cwd.
         timeout:
           type: integer
           nullable: true

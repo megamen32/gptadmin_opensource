@@ -64,7 +64,8 @@ def test_openapi_schema_exists():
     p = ROOT / "public" / "openapi.yaml"
     assert p.exists(), "public/openapi.yaml not found"
     content = p.read_text()
-    assert "openapi:" in content or "openapi:" in content, "invalid OpenAPI header"
+    assert "openapi: 3.1.0" in content, "public/openapi.yaml should use OpenAPI 3.1.0"
+    assert 'version: "1.0.0"' in content, "public/openapi.yaml should use a stable semver info.version"
 
 
 def test_userscript_installable_url():
