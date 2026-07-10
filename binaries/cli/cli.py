@@ -2527,10 +2527,13 @@ def autoupdate_unit_pairs():
 
 
 def svc_autoupdate_enable_start(env: dict):
+    # Always write the service unit (needed for manual update button).
+    write_autoupdate_unit(env)
+
     if not auto_update_enabled(env):
         svc_autoupdate_disable_stop()
         return
-    write_autoupdate_unit(env)
+
     svc_daemon_reload()
     if IS_MACOS:
         timer_enable(SVC_AUTO_UPDATE_LABEL)
