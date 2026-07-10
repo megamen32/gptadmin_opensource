@@ -161,8 +161,6 @@ PKG_BASE_URL_DEFAULT = os.environ.get('PKG_BASE_URL', 'https://became.bezrabotny
 PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   f'{PKG_BASE_URL_DEFAULT}/gptadmin.tar.gz')
 PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   f'{PKG_BASE_URL_DEFAULT}/gptadmin-hub.tar.gz')
 PKG_SHELLMCP_URL_DEFAULT = os.environ.get('PKG_SHELLMCP_URL', f'{PKG_BASE_URL_DEFAULT}/gptadmin-shellmcp.tar.gz')
-SHELLMCP_PURE_URL_DEFAULT = os.environ.get('SHELLMCP_PURE_URL', f'{PKG_BASE_URL_DEFAULT}/shellmcp_pure.py')
-
 REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
 
 # ===== FRPC defaults =====
@@ -464,6 +462,7 @@ def _shellmcp_go_binary_candidates(tdp: Path) -> list[Path]:
 
 
 def _install_shellmcp_binary_from_pkg(tdp: Path) -> None:
+    # ShellMCP is now Go-only (go-shellmcp). Legacy Python/PyInstaller fallback removed.
     for c in _shellmcp_go_binary_candidates(tdp):
         if c.exists() and c.is_file():
             BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,33 +471,7 @@ def _install_shellmcp_binary_from_pkg(tdp: Path) -> None:
             os.chmod(dst, 0o755)
             _macos_unquarantine_and_codesign(dst)
             return
-
-    allow_legacy = os.environ.get('GPTADMIN_ALLOW_LEGACY_SHELLMCP', '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    if not allow_legacy:
-        die('Go ShellMCP/rootd binary not found in package. Refusing legacy Python/PyInstaller shellmcp by default. Set GPTADMIN_ALLOW_LEGACY_SHELLMCP=1 only for emergency rollback.')
-
-    if IS_MACOS:
-        legacy = [tdp / 'client' / 'shellmcp_pure.py']
-    else:
-        legacy = [tdp / 'shellmcp' / 'dist' / 'shellmcp', tdp / 'build' / 'shellmcp' / 'dist' / 'shellmcp']
-    for c in legacy:
-        if c.exists() and c.is_file():
-            BIN_DIR.mkdir(parents=True, exist_ok=True)
-            dst = BIN_DIR / 'shellmcp'
-            shutil.copy2(c, dst)
-            os.chmod(dst, 0o755)
-            _macos_unquarantine_and_codesign(dst)
-            print('WARNING: installed legacy Python/PyInstaller ShellMCP because GPTADMIN_ALLOW_LEGACY_SHELLMCP=1', file=sys.stderr)
-            return
-    if IS_MACOS:
-        BIN_DIR.mkdir(parents=True, exist_ok=True)
-        dst = BIN_DIR / 'shellmcp'
-        download(SHELLMCP_PURE_URL_DEFAULT, dst)
-        os.chmod(dst, 0o755)
-        _macos_unquarantine_and_codesign(dst)
-        print('WARNING: downloaded legacy pure-Python ShellMCP because GPTADMIN_ALLOW_LEGACY_SHELLMCP=1', file=sys.stderr)
-        return
-    die('shellmcp binary not found in package')
+    die('Go ShellMCP/rootd binary not found in package. Legacy Python/PyInstaller shellmcp has been removed; ensure the package contains go-shellmcp/<platform>/<arch>/shellmcp-go or rootd-go.')
 
 
 def _cleanup_obsolete_runtime_files():
@@ -514,6 +487,7 @@ def _cleanup_obsolete_runtime_files():
         BIN_DIR / 'shellmcp-go',
         BIN_DIR / 'gptadmin_hub.py',
         BIN_DIR / 'shellmcp.py',
+        BIN_DIR / 'shellmcp_pure.py',
         CLI_PATH.with_name(CLI_PATH.name + '.new'),
     ]
     for path in obsolete:
