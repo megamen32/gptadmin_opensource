@@ -637,9 +637,14 @@ if IS_MACOS:
         # stderr in that case; suppress it so a harmless pre-cleanup does not look
         # like an update failure.
         _launchctl_capture(['launchctl', 'bootout', _launchd_service_target(label)])
-        _launchctl_capture(['launchctl', 'bootout', domain, str(unit_path)])
-        run(['launchctl', 'bootstrap', domain, str(unit_path)], check=False, timeout=10)
-        run(['launchctl', 'enable', _launchd_service_target(label)], check=False, timeout=10)
+        bootstrap = _launchctl_capture(['launchctl', 'bootstrap', domain, str(unit_path)])
+        if bootstrap.returncode != 0 and not _launchd_is_loaded(label):
+            # A stale launchd registration can transiently return EIO. Retry once
+            # after removing the label, while keeping harmless output quiet.
+            _launchctl_capture(['launchctl', 'remove', label])
+            time.sleep(0.2)
+            bootstrap = _launchctl_capture(['launchctl', 'bootstrap', domain, str(unit_path)])
+        _launchctl_capture(['launchctl', 'enable', _launchd_service_target(label)])
         # kickstart can block for long-running LaunchAgents on some macOS versions.
         # bootstrap already starts the job; keep kickstart as silent best-effort only.
         try:
@@ -3238,8 +3243,8 @@ def cmd_update(args):
     if not env and not any(p.exists() for p in (UNIT_PATH_HUB, UNIT_PATH_SHELLMCP, CLI_PATH, BIN_DIR / 'gptadmin_hub', BIN_DIR / 'shellmcp')):
         die('GPTAdmin installation was not found. Run: gptadmin setup')
 
-    install_hub = bool(UNIT_PATH_HUB.exists() or (BIN_DIR / 'gptadmin_hub').exists() or env.get('INSTALL_HUB') == 'true')
-    install_shellmcp = bool(UNIT_PATH_SHELLMCP.exists() or (BIN_DIR / 'shellmcp').exists() or env.get('INSTALL_SHELLMCP') == 'true')
+    install_hub = (env.get('INSTALL_HUB') == 'true') if 'INSTALL_HUB' in env else bool(UNIT_PATH_HUB.exists() or (BIN_DIR / 'gptadmin_hub').exists())
+    install_shellmcp = (env.get('INSTALL_SHELLMCP') == 'true') if 'INSTALL_SHELLMCP' in env else bool(UNIT_PATH_SHELLMCP.exists() or (BIN_DIR / 'shellmcp').exists())
     if args.hub:
         install_hub = True
     if args.shellmcp:
@@ -3353,9 +3358,9 @@ def cmd_update(args):
         svc_enable_start(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
     if not getattr(args, 'auto', False):
         svc_autoupdate_enable_start(env_read())
-    maybe_autoapprove_local_shellmcp(env_read(), install_hub, install_shellmcp)
-    if not getattr(args, 'auto', False):
-        auto_configure_ai_mcp_clients(env_read(), install_hub)
+    # Updating binaries and service definitions must not change authorization
+    # state or rewrite external AI-client configuration. Those are explicit setup/
+    # mcp-connect operations, not update operations.
 
     env = env_read()
     print('GPTAdmin updated in-place.')
