@@ -785,13 +785,42 @@ if IS_MACOS:
             f'exec {CLI_PATH} --{INSTALL_SCOPE} update --auto\n'
         )
         os.chmod(wrapper, 0o755)
-        UNIT_PATH_AUTO_UPDATE.write_text(_make_interval_plist(
-            SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log', auto_update_interval_seconds(env)))
+        UNIT_PATH_AUTO_UPDATE.write_text(_make_plist(SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log'))
 
     def svc_hub_name():  return SVC_HUB_LABEL
     def svc_shellmcp_name(): return SVC_SHELLMCP_LABEL
     def svc_frpc_name():  return SVC_FRPC_LABEL
     def svc_cloudflared_name(): return SVC_CLOUDFLARED_LABEL
+
+    def timer_enable(timer_unit: str):
+        env = env_read()
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        wrapper = BIN_DIR / 'run_auto_update.sh'
+        wrapper.write_text(
+            f'#!/bin/sh\n'
+            f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
+            f'exec {CLI_PATH} --{INSTALL_SCOPE} update --auto\n'
+        )
+        os.chmod(wrapper, 0o755)
+        UNIT_PATH_AUTO_UPDATE.write_text(_make_interval_plist(
+            SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log', auto_update_interval_seconds(env)))
+        svc_enable_start(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
+
+    def timer_disable(timer_unit: str):
+        svc_disable_stop(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
+        UNIT_PATH_AUTO_UPDATE.write_text(_make_plist(
+            SVC_AUTO_UPDATE_LABEL, BIN_DIR / 'run_auto_update.sh', LOG_DIR / 'auto-update.log'))
+
+    def timer_status(timer_unit: str, timer_path: Path):
+        if not _launchd_is_loaded(SVC_AUTO_UPDATE_LABEL):
+            print(f'  LaunchAgent {SVC_AUTO_UPDATE_LABEL} not loaded')
+            return
+        # For macOS, the status is shown as part of the service unit
+        is_active = _launchd_is_loaded(SVC_AUTO_UPDATE_LABEL)
+        active_str = c_green('● loaded') if is_active else c_red('● not loaded')
+        print(f'  {c_bold(SVC_AUTO_UPDATE_LABEL):<40} {active_str}')
 
 else:
     # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
@@ -981,15 +1010,45 @@ WantedBy=timers.target
         UNIT_PATH_AUTO_UPDATE.parent.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_AUTO_UPDATE.write_text(AUTO_UPDATE_SERVICE_TPL.format(
             env_file=ENV_FILE, cli_path=CLI_PATH, install_scope=INSTALL_SCOPE))
-        UNIT_PATH_AUTO_UPDATE_TIMER.write_text(AUTO_UPDATE_TIMER_TPL.format(
-            interval_sec=auto_update_interval_seconds(env),
-            random_delay_sec=auto_update_randomized_delay_seconds(env),
-            service_name=SYSTEMD_AUTO_UPDATE))
 
     def svc_hub_name():   return SYSTEMD_HUB
     def svc_shellmcp_name(): return SYSTEMD_SHELLMCP
     def svc_frpc_name():  return SYSTEMD_FRPC
     def svc_cloudflared_name(): return SYSTEMD_CLOUDFLARED
+
+    def timer_enable(timer_unit: str):
+        UNIT_PATH_AUTO_UPDATE_TIMER.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH_AUTO_UPDATE_TIMER.write_text(AUTO_UPDATE_TIMER_TPL.format(
+            interval_sec=auto_update_interval_seconds(env_read()),
+            random_delay_sec=auto_update_randomized_delay_seconds(env_read()),
+            service_name=SYSTEMD_AUTO_UPDATE))
+        run(_systemctl_cmd('enable', '--now', timer_unit))
+
+    def timer_disable(timer_unit: str):
+        run(_systemctl_cmd('disable', '--now', timer_unit), check=False)
+        safe_rm(UNIT_PATH_AUTO_UPDATE_TIMER)
+
+    def timer_status(timer_unit: str, timer_path: Path):
+        if not timer_path.exists():
+            print(f'  Timer {timer_unit} not found on disk')
+            return
+        is_active = run(_systemctl_cmd('is-active', timer_unit), check=False)
+        active = is_active.stdout.strip() if is_active.stdout else 'unknown'
+        is_enabled = run(_systemctl_cmd('is-enabled', timer_unit), check=False)
+        enabled = is_enabled.stdout.strip() if is_enabled.stdout else 'unknown'
+        next_run = run(_systemctl_cmd('show', timer_unit, '--property=NextElapseUSecMonotonic', '--value'), check=False)
+        next_str = next_run.stdout.strip() if next_run.stdout else 'N/A'
+        if active == 'active':
+            status_str = c_green('● active')
+        elif active in ('inactive', 'deactivating'):
+            status_str = c_red('● inactive')
+        elif active in ('failed',):
+            status_str = c_red('● failed')
+        else:
+            status_str = c_yellow('● ' + active)
+        print(f'  {c_bold(timer_unit):<40} {status_str}  {c_dim("enabled" if enabled == "enabled" else enabled)}')
+        if next_str != 'N/A':
+            print(f'  {c_dim("Next run:")} {c_dim(next_str)}')
 
 
 # ===== FRP helpers =====
@@ -2474,19 +2533,16 @@ def svc_autoupdate_enable_start(env: dict):
     write_autoupdate_unit(env)
     svc_daemon_reload()
     if IS_MACOS:
-        svc_enable_start(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
+        timer_enable(SVC_AUTO_UPDATE_LABEL)
     else:
-        run(_systemctl_cmd('enable', '--now', SYSTEMD_AUTO_UPDATE_TIMER))
+        timer_enable(SYSTEMD_AUTO_UPDATE_TIMER)
 
 
 def svc_autoupdate_disable_stop():
     if IS_MACOS:
-        svc_disable_stop(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
-        safe_rm(UNIT_PATH_AUTO_UPDATE)
+        timer_disable(SVC_AUTO_UPDATE_LABEL)
     else:
-        run(_systemctl_cmd('disable', '--now', SYSTEMD_AUTO_UPDATE_TIMER), check=False)
-        safe_rm(UNIT_PATH_AUTO_UPDATE_TIMER)
-        safe_rm(UNIT_PATH_AUTO_UPDATE)
+        timer_disable(SYSTEMD_AUTO_UPDATE_TIMER)
         svc_daemon_reload()
 
 
