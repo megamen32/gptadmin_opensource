@@ -1,8 +1,8 @@
 {
   "component": "shellmcp",
-  "build_version": 119,
-  "build_ts": "2026-07-10T16:16:47Z",
-  "git_commit": "3b22fa3",
+  "build_version": 120,
+  "build_ts": "2026-07-10T16:18:59Z",
+  "git_commit": "575a600",
   "platform": "linux",
   "arch": "x86_64",
   "artifact_type": "binary-runtime+source",
@@ -19,6 +19,6 @@
     "client/gptadmin_security.py",
     "client/gptadmin_build_info.py"
   ],
-  "sha256": "b0f30befdea2b510672354387119555a9e5ff105bb2a954a23b9917a4fbcae3c",
+  "sha256": "b0e3f39d0c034076053abfb59cfbe5b4324a111c5bc78ccf8e177a42e7256671",
   "url": "/gptadmin-shellmcp.tar.gz"
 }
