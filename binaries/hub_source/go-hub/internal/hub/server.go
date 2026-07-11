@@ -182,6 +182,10 @@ type Server struct {
 	oauthCodes  map[string]oauthCode
 	audit       []auditEvent
 	failover    FailoverConfig
+
+	updateStatePath string
+	updateLockPath  string
+	updateLauncher  *UpdateLauncher
 }
 
 func New(cfg Config) *Server {
@@ -200,6 +204,14 @@ func New(cfg Config) *Server {
 		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
 	}
 	s.failover = s.loadFailoverConfig()
+	home := os.Getenv("GPTADMIN_HOME")
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		home = userHome + "/.gptadmin"
+	}
+	s.updateStatePath = home + "/update_state.json"
+	s.updateLockPath = home + "/update.lock"
+	s.updateLauncher = DefaultUpdateLauncher()
 	return s
 }
 
@@ -349,6 +361,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/update", s.requireCtl(s.adminTriggerUpdate))
 	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
 	mux.HandleFunc("/admin/api/failover/reclaim/accept", s.adminFailoverReclaimAccept)
 	mux.HandleFunc("/admin/api/failover/reclaim", s.requireCtl(s.adminFailoverReclaim))
@@ -1742,7 +1755,123 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 			"token_present": os.Getenv("FRP_TOKEN") != "",
 		},
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
+	// Aggregate shell builds from heartbeat data.
+	shellBuilds := map[string]any{
+		"latest":   0,
+		"oldest":   0,
+		"versions": map[string]int{},
+	}
+	{
+		buildCounts := map[string]int{}
+		for _, srv := range servers {
+			if meta, ok := srv["meta"].(map[string]any); ok {
+				if bv, ok := meta["build_version"]; ok && bv != nil {
+					ver := fmt.Sprintf("%v", bv)
+					if f, ok := bv.(float64); ok {
+						ver = fmt.Sprintf("%d", int(f))
+					}
+					if ver != "" && ver != "0" {
+						buildCounts[ver]++
+					}
+				}
+			}
+		}
+		versions := map[string]int{}
+		latest := 0
+		oldest := 0
+		for ver, count := range buildCounts {
+			versions[ver] = count
+			v, _ := strconv.Atoi(ver)
+			if v > latest {
+				latest = v
+			}
+			if oldest == 0 || (v > 0 && v < oldest) {
+				oldest = v
+			}
+		}
+		shellBuilds["latest"] = latest
+		shellBuilds["oldest"] = oldest
+		shellBuilds["versions"] = versions
+	}
+	// Read update state.
+	updateState := map[string]any{
+		"current":     map[string]string{"status": "idle"},
+		"last_result": nil,
+	}
+	if st, err := ReadUpdateState(s.updateStatePath); err == nil {
+		st = EnsureDefaultUpdateState(st)
+		updateState["current"] = map[string]string{"status": st.Current.Status}
+		if st.LastResult != nil {
+			updateState["last_result"] = st.LastResult
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "shell_builds": shellBuilds, "update": updateState, "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
+}
+
+func (s *Server) adminTriggerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+
+	// Check if an update is already running.
+	st, _ := ReadUpdateState(s.updateStatePath)
+	st = EnsureDefaultUpdateState(st)
+	if st.Current.Status == "running" || (s.updateLauncher != nil && s.updateLauncher.CheckUpdateRunning()) {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Try to acquire lock.
+	lock, err := AcquireUpdateLock(s.updateLockPath)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Mark running in state file.
+	st.Current.Status = "running"
+	now := time.Now().Unix()
+	if st.LastResult != nil {
+		st.LastResult.StartedAt = now
+	} else {
+		st.LastResult = &UpdateResult{StartedAt: now}
+	}
+	if err := WriteUpdateState(s.updateStatePath, st); err != nil {
+		ReleaseUpdateLock(lock)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to write state"})
+		return
+	}
+	ReleaseUpdateLock(lock) // release — the external supervisor holds its own lifecycle
+
+	// Launch via external supervisor.
+	if s.updateLauncher == nil {
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    "update launcher not initialized",
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "update launcher not configured"})
+		return
+	}
+	if err := s.updateLauncher.LaunchUpdate(); err != nil {
+		// Reset state on launch failure.
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    err.Error(),
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to start update"})
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "running"})
 }
 
 func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {

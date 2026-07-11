@@ -109,6 +109,10 @@ BIN_DIR = INSTALL_DIR / 'bin'
 ENV_FILE = ETC_DIR / 'gptadmin.env'
 INSTALLED_BUILD_FILE = INSTALL_DIR / 'gptadmin_installed_build.json'
 MCP_CONFIG_FILE = ETC_DIR / 'mcp.json'
+UPDATE_CHECK_CACHE = INSTALL_DIR / 'update_check.json'
+UPDATE_CHECK_COOLDOWN_S = 3600       # 1 hour after failed network attempt
+UPDATE_CHECK_FRESH_S = 86400         # 24 hours for successful check
+UPDATE_CHECK_TIMEOUT_S = 3           # manifest fetch timeout
 MCP_AGENTS_DIR = ETC_DIR / 'mcp-agents.d'
 MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
 MCP_RUNTIME_DIR = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay'
@@ -162,6 +166,71 @@ PKG_ALL_URL_DEFAULT   = os.environ.get('PKG_ALL_URL',   f'{PKG_BASE_URL_DEFAULT}
 PKG_HUB_URL_DEFAULT   = os.environ.get('PKG_HUB_URL',   f'{PKG_BASE_URL_DEFAULT}/gptadmin-hub.tar.gz')
 PKG_SHELLMCP_URL_DEFAULT = os.environ.get('PKG_SHELLMCP_URL', f'{PKG_BASE_URL_DEFAULT}/gptadmin-shellmcp.tar.gz')
 REQUIRED_CMDS = ['curl', 'launchctl' if IS_MACOS else 'systemctl']
+
+# ===== macOS plist + launchctl helpers (module-level for cross-platform testability) =====
+# These helpers live at module level so they can be unit-tested on Linux even
+# though they generate launchd-only artifacts. The Darwin-only branch below
+# composes them; Linux never imports them.
+
+def _plist_oneshot(label: str, wrapper: Path, log_file: Path, interval: int | None = None) -> str:
+    """Generate a launchd plist for the auto-update oneshot job.
+
+    Semantics:
+      - RunAtLoad=false and KeepAlive=false: the job does NOT start on its own
+        and does NOT auto-restart. It must be triggered explicitly via
+        `launchctl kickstart` (which is what we use for both periodic and
+        manual update triggers).
+      - AbandonProcessGroup=true: prevents launchd from sending SIGTERM to
+        the wrapper's process group on bootout. The job is therefore allowed
+        to complete even if the parent launchd job is unloaded mid-run.
+        Children are *abandoned*, not cleaned up. The wrapper `exec`s into
+        the CLI without forking, so we have no children to worry about;
+        the flag is set for bootout-resilience, not for cleanup.
+      - StartInterval (optional): if provided, launchd schedules the job to
+        run every <interval> seconds. When omitted, the plist is a pure
+        "service unit always present" that does nothing until kicked.
+    """
+    interval_line = (
+        f'    <key>StartInterval</key><integer>{int(interval)}</integer>\n'
+        if interval is not None else ''
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+        ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        f'    <key>Label</key><string>{label}</string>\n'
+        '    <key>ProgramArguments</key><array>\n'
+        '        <string>/bin/sh</string>\n'
+        f'        <string>{wrapper}</string>\n'
+        '    </array>\n'
+        '    <key>RunAtLoad</key><false/>\n'
+        '    <key>KeepAlive</key><false/>\n'
+        '    <key>AbandonProcessGroup</key><true/>\n'
+        f'{interval_line}'
+        f'    <key>StandardOutPath</key><string>{log_file}</string>\n'
+        f'    <key>StandardErrorPath</key><string>{log_file}</string>\n'
+        '</dict></plist>\n'
+    )
+
+
+def _launchctl_kickstart_cmd(label: str, is_user: bool) -> list[str]:
+    """Return the argv for `launchctl kickstart -k <domain>/<label>`.
+
+    The `-k` flag kills any existing instance first, then starts a fresh one.
+    That makes the same invocation safe for both "first ever run" and
+    "already-running, restart" — which is exactly what the auto-update path
+    needs.
+    """
+    if is_user:
+        try:
+            uid = str(os.getuid())
+        except Exception:
+            uid = '0'
+        domain = f'gui/{uid}'
+    else:
+        domain = 'system'
+    return ['launchctl', 'kickstart', '-k', f'{domain}/{label}']
 
 # ===== FRPC defaults =====
 FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
@@ -561,6 +630,10 @@ if IS_MACOS:
         return script
 
     def _make_plist(label: str, wrapper: Path, log_file: Path) -> str:
+        # Long-running launchd service plist (hub / shellmcp / frpc / cloudflared):
+        # KeepAlive=true so launchd respawns the job if it exits, and RunAtLoad
+        # so it boots with the system. The auto-update path does NOT use this
+        # template — see _plist_oneshot at module level for oneshot semantics.
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
@@ -578,33 +651,30 @@ if IS_MACOS:
             '</dict></plist>\n'
         )
 
-
     def _make_interval_plist(label: str, wrapper: Path, log_file: Path, interval: int) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
-            ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            '<plist version="1.0"><dict>\n'
-            f'    <key>Label</key><string>{label}</string>\n'
-            '    <key>ProgramArguments</key><array>\n'
-            '        <string>/bin/sh</string>\n'
-            f'        <string>{wrapper}</string>\n'
-            '    </array>\n'
-            '    <key>RunAtLoad</key><true/>\n'
-            f'    <key>StartInterval</key><integer>{interval}</integer>\n'
-            f'    <key>StandardOutPath</key><string>{log_file}</string>\n'
-            f'    <key>StandardErrorPath</key><string>{log_file}</string>\n'
-            '</dict></plist>\n'
-        )
+        # Kept as a thin wrapper for backwards compatibility with any external
+        # caller. New auto-update code calls module-level _plist_oneshot
+        # directly so the template is testable on Linux.
+        return _plist_oneshot(label, wrapper, log_file, interval=interval)
 
     def svc_daemon_reload():
         pass  # launchd has no daemon-reload
 
-    def svc_enable_start(label: str, unit_path: Path):
-        # macOS launchctl load/unload is legacy and can silently fail to restore
-        # a LaunchAgent after bootout during in-place update. Prefer bootstrap into
-        # the explicit domain, then kickstart; keep load -w as fallback for older
-        # systems.
+    def svc_enable(label: str, unit_path: Path):
+        # Load the (possibly rewritten) plist into launchd WITHOUT starting
+        # the job. This is the right primitive for "I just changed the plist
+        # config — pick up the new file but do not run the job now." Used by:
+        #   * write_autoupdate_unit (install-time registration; we want the
+        #     job loaded so manual kickstart works, but we do NOT want a
+        #     surprise update to fire at install time).
+        #   * timer_disable (user said "stop periodic updates" — we rewrite
+        #     the plist without StartInterval; loading it must not run the
+        #     job because that would violate the user's intent).
+        #
+        # macOS launchctl load/unload is legacy and can silently fail to
+        # restore a LaunchAgent after bootout during in-place update. Prefer
+        # bootstrap into the explicit domain, then enable; keep load -w as
+        # fallback for older systems.
         domain = _launchd_domain()
         # A missing/unloaded launchd job is normal during update or first install.
         # `launchctl bootout` prints "Boot-out failed: 3: No such process" to
@@ -619,8 +689,21 @@ if IS_MACOS:
             time.sleep(0.2)
             bootstrap = _launchctl_capture(['launchctl', 'bootstrap', domain, str(unit_path)])
         _launchctl_capture(['launchctl', 'enable', _launchd_service_target(label)])
-        # kickstart can block for long-running LaunchAgents on some macOS versions.
-        # bootstrap already starts the job; keep kickstart as silent best-effort only.
+        if not _launchd_is_loaded(label):
+            run(['launchctl', 'load', '-w', str(unit_path)], check=False)
+        if not _launchd_is_loaded(label):
+            raise RuntimeError(f'launchd service did not load: {_launchd_service_target(label)}')
+
+    def svc_enable_start(label: str, unit_path: Path):
+        # Load the plist AND kickstart it. Used for long-running services
+        # (hub / shellmcp / frpc / cloudflared) where RunAtLoad + KeepAlive
+        # semantics mean "bootstrap should also start the job now." Do NOT
+        # use this for oneshot plists whose purpose is to be triggered only
+        # on explicit kickstart (e.g., auto-update) — calling it there
+        # would fire one unintended run per config reload.
+        svc_enable(label, unit_path)
+        # kickstart can block for long-running LaunchAgents on some macOS
+        # versions; keep kickstart as silent best-effort only.
         try:
             subprocess.run(
                 ['launchctl', 'kickstart', '-k', _launchd_service_target(label)],
@@ -629,10 +712,6 @@ if IS_MACOS:
             )
         except subprocess.TimeoutExpired:
             pass
-        if not _launchd_is_loaded(label):
-            run(['launchctl', 'load', '-w', str(unit_path)], check=False)
-        if not _launchd_is_loaded(label):
-            raise RuntimeError(f'launchd service did not load: {_launchd_service_target(label)}')
 
     def svc_restart(label: str, unit_path: Path):
         svc_disable_stop(label, unit_path)
@@ -785,7 +864,20 @@ if IS_MACOS:
             f'exec {CLI_PATH} --{INSTALL_SCOPE} update --auto\n'
         )
         os.chmod(wrapper, 0o755)
-        UNIT_PATH_AUTO_UPDATE.write_text(_make_plist(SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log'))
+        # Always present, oneshot-style: RunAtLoad/KeepAlive are false so the
+        # job does nothing on its own. StartInterval is omitted entirely so we
+        # never accidentally auto-run until timer_enable rewrites the plist
+        # with an interval. Keep the wrapper around for both periodic and
+        # manual `launchctl kickstart` invocations.
+        UNIT_PATH_AUTO_UPDATE.write_text(
+            _plist_oneshot(SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log'))
+        # Register the job with launchd so manual `launchctl kickstart` works
+        # on a fresh install. We use the LOAD-ONLY path (svc_enable, no
+        # kickstart) on purpose: a freshly installed auto-update must not
+        # fire on its own. The first kick only happens when the user clicks
+        # "update now" or when timer_enable rewrites the plist with a
+        # StartInterval and explicitly kicks once.
+        svc_enable(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
 
     def svc_hub_name():  return SVC_HUB_LABEL
     def svc_shellmcp_name(): return SVC_SHELLMCP_LABEL
@@ -804,23 +896,47 @@ if IS_MACOS:
             f'exec {CLI_PATH} --{INSTALL_SCOPE} update --auto\n'
         )
         os.chmod(wrapper, 0o755)
-        UNIT_PATH_AUTO_UPDATE.write_text(_make_interval_plist(
-            SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log', auto_update_interval_seconds(env)))
+        # Rewrite the plist WITH StartInterval so launchd schedules the
+        # periodic trigger, then (re)load via the existing helper. The job
+        # was previously either absent or loaded without StartInterval; the
+        # enable_start path handles bootout + bootstrap so the new plist
+        # content is picked up.
+        UNIT_PATH_AUTO_UPDATE.write_text(
+            _plist_oneshot(SVC_AUTO_UPDATE_LABEL, wrapper, LOG_DIR / 'auto-update.log',
+                           interval=auto_update_interval_seconds(env)))
         svc_enable_start(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
 
     def timer_disable(timer_unit: str):
-        svc_disable_stop(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
-        UNIT_PATH_AUTO_UPDATE.write_text(_make_plist(
-            SVC_AUTO_UPDATE_LABEL, BIN_DIR / 'run_auto_update.sh', LOG_DIR / 'auto-update.log'))
+        # Rewrite the plist WITHOUT StartInterval so launchd stops scheduling
+        # periodic runs. Keep the job loaded (do NOT call svc_disable_stop
+        # here) so manual `launchctl kickstart` invocations still work.
+        UNIT_PATH_AUTO_UPDATE.write_text(
+            _plist_oneshot(SVC_AUTO_UPDATE_LABEL, BIN_DIR / 'run_auto_update.sh',
+                           LOG_DIR / 'auto-update.log'))
+        # Reload to pick up the StartInterval removal. Use the LOAD-ONLY
+        # path (svc_enable, no kickstart) on purpose: the user just said
+        # "stop periodic updates" — booting the new plist must NOT fire an
+        # update. The job is still loaded afterwards; only its schedule
+        # changed.
+        svc_enable(SVC_AUTO_UPDATE_LABEL, UNIT_PATH_AUTO_UPDATE)
 
     def timer_status(timer_unit: str, timer_path: Path):
         if not _launchd_is_loaded(SVC_AUTO_UPDATE_LABEL):
             print(f'  LaunchAgent {SVC_AUTO_UPDATE_LABEL} not loaded')
             return
-        # For macOS, the status is shown as part of the service unit
-        is_active = _launchd_is_loaded(SVC_AUTO_UPDATE_LABEL)
-        active_str = c_green('● loaded') if is_active else c_red('● not loaded')
-        print(f'  {c_bold(SVC_AUTO_UPDATE_LABEL):<40} {active_str}')
+        # Distinguish periodic vs manual mode by reading the StartInterval
+        # key from the on-disk plist. Periodic = enabled, no key = disabled
+        # but still present (manual kickstart still works).
+        on_disk = UNIT_PATH_AUTO_UPDATE
+        has_interval = False
+        if on_disk.exists():
+            try:
+                plist_xml = on_disk.read_text()
+                has_interval = '<key>StartInterval</key>' in plist_xml
+            except Exception:
+                pass
+        mode_str = c_green('● enabled (periodic)') if has_interval else c_yellow('● disabled (manual kickstart)')
+        print(f'  {c_bold(SVC_AUTO_UPDATE_LABEL):<40} {mode_str}')
 
 else:
     # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
@@ -1775,7 +1891,24 @@ def setup_interactive(args):
 
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
-    env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
+
+    if not silent:
+        existing_in_file = env_read().get('GPTADMIN_AUTO_UPDATE', '')
+        if existing_in_file and existing_in_file.lower() in ('false', '0', 'no'):
+            default_choice = 'n'
+        else:
+            default_choice = 'y'
+        print()
+        print(c_bold('  Автообновление'))
+        ch = ask('Включить автообновление (проверка каждые 6ч, systemd timer / launchd)?', default_choice)
+        if ch.lower() in ('n', 'no', 'нет'):
+            env['GPTADMIN_AUTO_UPDATE'] = 'false'
+            print(f'  {c_dim("Автообновление выключено. Включить потом:")} {c_green("gptadmin auto-update enable")}')
+        else:
+            env['GPTADMIN_AUTO_UPDATE'] = 'true'
+    else:
+        env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
+
     env.setdefault('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC', '21600')
     sync_oauth_origin_env(env)
     env_set_many(env)
@@ -3178,6 +3311,30 @@ def _write_installed_build_marker(info: dict, package_url: str):
         print(f'WARNING: could not write installed build marker: {exc}', file=sys.stderr)
 
 
+def _read_update_cache():
+    """Return update check cache dict or None on any error (missing, corrupt, parse failure)."""
+    try:
+        raw = UPDATE_CHECK_CACHE.read_text(encoding='utf-8')
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _write_update_cache(data: dict):
+    """Atomically write update check cache (0600)."""
+    tmp = UPDATE_CHECK_CACHE.with_name(UPDATE_CHECK_CACHE.name + '.tmp')
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, UPDATE_CHECK_CACHE)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+
 def _installed_build_info(env: dict, install_hub: bool) -> dict:
     marker_info = _read_installed_build_marker()
     if marker_info:
@@ -3695,6 +3852,104 @@ def cmd_uninstall(args):
 
 # ===== Main =====
 
+def maybe_update_hint(args):
+    """Check for available update and print hint to stderr (best-effort).
+
+    Only runs when auto-update is disabled and a newer version may exist.
+    Uses local cache to avoid network requests on every CLI invocation.
+    """
+    # Skip when auto-update is enabled — no hint needed.
+    try:
+        from_env = env_read()
+        if auto_update_enabled(from_env):
+            return
+    except Exception:
+        return
+
+    # Skip for certain commands.
+    cmd = getattr(args, 'command', None)
+    if cmd in ('update', 'auto-update'):
+        return
+    if getattr(args, 'auto', False):
+        return
+
+    # Read cache.
+    cache = _read_update_cache()
+    now = int(time.time())
+
+    last_success = cache.get('last_success_ts', 0) if cache else 0
+    last_attempt = cache.get('last_attempt_ts', 0) if cache else 0
+    age_success = now - last_success
+    age_attempt = now - last_attempt
+
+    remote_version = None
+    remote_sha = ''
+
+    if cache and 0 <= age_success < UPDATE_CHECK_FRESH_S:
+        # Cache still fresh — use cached remote version.
+        remote_version = cache.get('remote_version')
+        remote_sha = cache.get('remote_sha256', '')
+    elif age_attempt < UPDATE_CHECK_COOLDOWN_S and age_success >= UPDATE_CHECK_FRESH_S:
+        # Recent failed attempt — cooldown active, skip network check.
+        return
+    else:
+        # Need network check.
+        try:
+            pkg_url = platform_pkg_url_default()
+            info = _remote_artifact_build_info(pkg_url)
+            if info:
+                remote_version = info.get('build_version')
+                if isinstance(remote_version, str):
+                    remote_version = int(remote_version)
+                remote_sha = info.get('sha256', '')
+            cache_data = {
+                'last_success_ts': now,
+                'last_attempt_ts': now,
+                'remote_version': remote_version,
+                'remote_sha256': remote_sha or '',
+            }
+            _write_update_cache(cache_data)
+        except Exception:
+            # Network error — record attempt for cooldown.
+            cache_data = {
+                'last_success_ts': last_success,
+                'last_attempt_ts': now,
+                'remote_version': remote_version,
+                'remote_sha256': remote_sha or '',
+            }
+            _write_update_cache(cache_data)
+            return
+
+    if remote_version is None:
+        return
+
+    # Compare with installed version.
+    try:
+        marker = _read_installed_build_marker()
+        if not marker:
+            return
+        installed_v = marker.get('build_version')
+        if isinstance(installed_v, str):
+            installed_v = int(installed_v)
+        if installed_v is None or installed_v == 0:
+            return
+        installed_v = int(installed_v)
+        remote_v = int(remote_version)
+    except (TypeError, ValueError, Exception):
+        return
+
+    if remote_v <= installed_v:
+        return  # already up to date
+
+    # Print hint to stderr.
+    print(
+        f'\nℹ {c_yellow("Доступно обновление")}: build {installed_v} → {remote_v}.',
+        f'  {c_dim("Обновить:")}          {c_green("gptadmin update")}',
+        f'  {c_dim("Включить авто:")}     {c_green("gptadmin auto-update enable")}',
+        sep='\n', file=sys.stderr,
+    )
+
+
 def main():
     # Backward-compatible command aliases, hidden from help.
     if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-shellmcp'):
@@ -3901,6 +4156,11 @@ def main():
         ap.print_help(); return
     if args.cmd == 'mcp' and not getattr(args, 'mcp_cmd', None):
         ap_mcp.print_help(); return
+    # Best-effort update hint (silent on any error, auto-update off, new version available).
+    try:
+        maybe_update_hint(args)
+    except Exception:
+        pass
     args.func(args)
 
 if __name__ == '__main__':

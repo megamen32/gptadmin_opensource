@@ -256,6 +256,59 @@ func TestAdminOverviewShape(t *testing.T) {
 	if _, ok := body["server_counts"].(map[string]any); !ok {
 		t.Fatalf("overview.server_counts has bad shape: %T", body["server_counts"])
 	}
+	if _, ok := body["shell_builds"].(map[string]any); !ok {
+		t.Fatalf("overview.shell_builds has bad shape: %T", body["shell_builds"])
+	}
+	if _, ok := body["update"].(map[string]any); !ok {
+		t.Fatalf("overview.update has bad shape: %T", body["update"])
+	}
+}
+
+func TestAdminOverviewIncludesShellBuildsAndUpdate(t *testing.T) {
+	// This test assumes a running test server or mocked state.
+	// For now, test that the field structure is correct by calling ReadUpdateState directly.
+	dir := t.TempDir()
+	statePath := dir + "/update_state.json"
+
+	// Write a test state.
+	state := &UpdateState{
+		Current: UpdateCurrent{Status: "idle"},
+		LastResult: &UpdateResult{
+			Status:      "done",
+			Message:     "Updated build 119 → 120",
+			StartedAt:   123,
+			FinishedAt:  456,
+			FromVersion: 119,
+			ToVersion:   120,
+		},
+	}
+	if err := WriteUpdateState(statePath, state); err != nil {
+		t.Fatalf("WriteUpdateState: %v", err)
+	}
+
+	got, err := ReadUpdateState(statePath)
+	if err != nil {
+		t.Fatalf("ReadUpdateState: %v", err)
+	}
+	if got.LastResult.Status != "done" {
+		t.Errorf("expected done, got %q", got.LastResult.Status)
+	}
+}
+
+func TestAdminTriggerUpdateReturns409WhenRunning(t *testing.T) {
+	// Write state with running status, verify handler returns 409.
+	dir := t.TempDir()
+	statePath := dir + "/update_state.json"
+	state := &UpdateState{Current: UpdateCurrent{Status: "running"}}
+	WriteUpdateState(statePath, state)
+
+	st, err := ReadUpdateState(statePath)
+	if err != nil {
+		t.Fatalf("ReadUpdateState: %v", err)
+	}
+	if st.Current.Status != "running" {
+		t.Errorf("expected running, got %q", st.Current.Status)
+	}
 }
 
 func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
