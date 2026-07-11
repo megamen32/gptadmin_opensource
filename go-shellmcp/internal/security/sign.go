@@ -129,6 +129,9 @@ func (i *Identity) Sign(method, path string, body []byte) map[string]string {
 	return map[string]string{"X-GPTAdmin-Timestamp": ts, "X-GPTAdmin-Nonce": nonce, "X-GPTAdmin-Signature": B64(sig), "X-GPTAdmin-Server": i.Name, "X-GPTAdmin-Server-ID": i.ServerID}
 }
 
+// Verify checks the cryptographic signature and timestamp skew of a signed
+// request. TODO: integrate NonceCache (internal/security/nonce.go) here to
+// reject replayed nonces within the configured TTL window.
 func Verify(publicKeyB64, method, path, ts, nonce string, body []byte, sigB64 string, maxSkew time.Duration) error {
 	if publicKeyB64 == "" || ts == "" || nonce == "" || sigB64 == "" {
 		return fmt.Errorf("missing signed request fields")

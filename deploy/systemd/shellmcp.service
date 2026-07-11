@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/admin/gptadmin/go-shellmcp
+WorkingDirectory=/home/roomhacker/gptadmin/go-shellmcp
 EnvironmentFile=/etc/gptadmin/go-shellmcp-primary.env
 ExecStart=/opt/gptadmin/bin/rootd-go-canary
 Restart=always

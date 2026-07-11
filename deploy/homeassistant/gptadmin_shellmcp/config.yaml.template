@@ -8,7 +8,7 @@ arch:
 startup: services
 boot: auto
 init: false
-server-01_api: true
+homeassistant_api: true
 hassio_api: true
 hassio_role: admin
 auth_api: true

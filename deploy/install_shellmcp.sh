@@ -23,7 +23,8 @@ TMP_DIR=$(mktemp -d)
 echo "Downloading package..."
 curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$TMP_DIR"
-SHELLMCP_BIN="$TMP_DIR/shellmcp/dist/shellmcp"
+SHELLMCP_BIN="$TMP_DIR/shellmcp/linux_amd64/shellmcp-go"
+[[ -x "$SHELLMCP_BIN" ]] || SHELLMCP_BIN="$TMP_DIR/go-shellmcp/linux_amd64/shellmcp-go"
 chmod +x "$SHELLMCP_BIN"
 
 echo "Generated SHELLMCP token: $TOKEN"

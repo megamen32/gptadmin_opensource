@@ -1,7 +1,7 @@
 name: GPTAdmin Hub Standby
 version: "1.0.0"
 slug: gptadmin_hub_standby
-description: "Standby GPTAdmin hub on HAOS for admin-server-100 failover"
+description: "Standby GPTAdmin hub on HAOS for roomhacker-server-100 failover"
 url: "https://gptadmin.bezrabotnyi.com"
 arch:
   - aarch64

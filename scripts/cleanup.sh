@@ -2,7 +2,7 @@
 # Cleanup old gptadmin outputs and logs (older than 7 days)
 set -euo pipefail
 
-PROJECT_DIR="/home/admin/gptadmin"
+PROJECT_DIR="/home/roomhacker/gptadmin"
 DAYS=7
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting cleanup..."

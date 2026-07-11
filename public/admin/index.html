@@ -30,12 +30,27 @@
       <button class="navbtn" data-view="raw" onclick="showView('raw')"><span>Сырой JSON</span><span class="badge">json</span></button>
     </div>
     <div class="sidegroup small muted" id="sideMeta">—</div>
+    <div class="sidegroup" id="sideVersion">
+      <div class="muted small">hub: <span id="hubVersion">—</span></div>
+      <div class="muted small">shells: <span id="shellVersion">—</span></div>
+      <button class="navbtn" id="btnUpdate" onclick="triggerUpdate()" style="margin-top:6px;width:100%">
+        <span id="btnUpdateLabel">Обновить этот узел</span>
+      </button>
+      <div class="muted" id="updateHint" style="font-size:10px;margin-top:2px">
+        Обновляет hub и локальный shell на этом сервере
+      </div>
+    </div>
+    <div class="sidegroup" id="updateStatus" style="display:none">
+      <div class="muted small" id="updateStatusText"></div>
+      <div class="muted" id="updateResult" style="font-size:11px;margin-top:4px"></div>
+    </div>
   </aside>
 
   <div class="content">
     <header class="topbar">
       <button class="mobileMenu" onclick="toggleSidebar()">☰</button>
       <b id="viewTitle" class="topbar-title">Обзор</b>
+      <a class="btn-secondary" href="https://became.bezrabotnyi.com/#/docs" target="_blank" rel="noreferrer">📖 Доки</a>
       <button class="btn-secondary" onclick="refreshAll()">Обновить</button>
       <button class="btn-secondary" onclick="location.href='/admin/logout'">Выйти</button>
       <label class="auto-toggle"><input type="checkbox" id="autoRefresh" checked><span class="toggle-slider"></span>auto</label>

@@ -4,35 +4,27 @@
 
 GPTAdmin состоит из нескольких компонентов с разными требованиями к зависимостям:
 
-### Без зависимостей (только стандартная библиотека Python)
+### Без зависимостей (Go binaries)
 
-- **`shellmcp_pure.py`** — минимальный root-демон для голой ОС
-  - Использует только `http.server`, `urllib`, `json`, `subprocess`
-  - Запуск: `python3 shellmcp_pure.py`
-  
-- **`gptadmin.py`** — CLI утилита
+- **`go-shellmcp/`** — Go ShellMCP root-демон (Linux/macOS/Windows/Android)
+  - Использует только Go stdlib + минимальный набор сторонних пакетов
+  - Сборка: `tools/build.sh shellmcp` → `build/go-shellmcp/<platform>/<arch>/shellmcp-go`
+  - Запуск собранного бинаря: `./build/go-shellmcp/linux_amd64/shellmcp-go`
+
+- **`gptadmin.py`** — CLI утилита (Python)
   - Использует только стандартную библиотеку
   - Запуск: `python3 gptadmin.py`
 
-### С минимальными зависимостями
+### Go-сервисы
 
-- **`shellmcp_linux.py`** — Linux root-демон
-  - Зависимости: `psutil`
-  - Запуск: `uv run python shellmcp_linux.py`
-  
-- **`shellmcp_win.py`** — Windows root-демон
-  - Зависимости: `psutil`
-  - Запуск: `uv run python shellmcp_win.py`
-
-### С полным набором зависимостей
-
-- **`shellmcp.py`** — полный root-демон с FastAPI
-  - Зависимости: `fastapi`, `uvicorn`, `pydantic`, `requests`, `starlette`
-  - Запуск: `uv run python shellmcp.py`
-  
 - **`go-hub/`** — Go Hub прокси-сервер
-  - Зависимости: `fastapi`, `httpx`, `pydantic`, `cryptography`, `starlette`
-  - Запуск: `go run ./go-hub/cmd/gptadmin-hub`
+  - Зависимости: `fastapi`, `httpx`, `pydantic`, `cryptography`, `starlette` (используются тестами хаба на Python)
+  - Сборка: `tools/build.sh hub` → `build/gptadmin_hub/dist/gptadmin_hub`
+  - Запуск собранного бинаря: `./build/gptadmin_hub/dist/gptadmin_hub`
+
+> **Примечание.** Legacy Python `shellmcp*.py` (`shellmcp.py`, `shellmcp_pure.py`,
+> `shellmcp_linux.py`, `shellmcp_win.py`, `shellmcp_mac.py`, `shellmcp_ssh.py`)
+> удалены из дерева исходников; единственный путь развертывания ShellMCP — Go-бинарь.
 
 ## Установка и использование uv
 
@@ -52,9 +44,8 @@ uv sync
 
 ```bash
 # Запуск с автоматической активацией виртуального окружения
-uv run python shellmcp.py
+go run ./go-shellmcp/cmd/shellmcp-go
 go run ./go-hub/cmd/gptadmin-hub
-uv run python shellmcp_linux.py
 
 # Запуск тестов
 uv run pytest tests/
@@ -67,22 +58,13 @@ uv run gptadmin --help
 
 ```bash
 source .venv/bin/activate
-python shellmcp.py
 ```
 
 ## Для голой ОС (без зависимостей)
 
-Если нужно запустить GPTAdmin на системе без установленных зависимостей:
-
-```bash
-# Копируем только shellmcp_pure.py
-curl -O https://your-server/shellmcp_pure.py
-
-# Запускаем без установки зависимостей
-python3 shellmcp_pure.py
-```
-
-Это работает на любой системе с Python 3.10+ без дополнительных пакетов.
+ShellMCP поставляется как статически собранный Go-бинарь и не требует Python
+на хосте. Достаточно одного бинаря `shellmcp-go` (`go-shellmcp/<platform>/<arch>/`)
+— никаких дополнительных зависимостей.
 
 ## Обновление зависимостей
 

@@ -15,9 +15,10 @@ hub, executes commands locally, and returns real output.
 
 | Impl | Status | Location | When to use |
 |------|--------|----------|-------------|
-| Go (`go-shellmcp/`) | **Primary** | `go-shellmcp/` | New deployments — faster, single binary |
-| Python (`client/shellmcp.py`) | Legacy | `client/` | Compatibility with older setups |
-| Python pure (`client/shellmcp_pure.py`) | Minimal | `client/` | No external deps, any Unix |
+| Go (`go-shellmcp/`) | **Primary (only)** | `go-shellmcp/` | New deployments — faster, single binary |
+
+> **Примечание.** Legacy Python implementations (`client/shellmcp*.py`) удалены
+> из дерева исходников. Все инсталляции теперь используют Go-бинарь `shellmcp-go`.
 
 ## Install on a target machine
 
@@ -35,15 +36,7 @@ The installer:
 ## Running manually
 
 ```bash
-# Register with a hub
-SHELLMCP_TOKEN=agent-secret \
-HUB_URL=http://your-hub:25900 \
-python client/shellmcp.py
-```
-
-Or the Go binary:
-
-```bash
+# Register with a hub using the Go binary
 SHELLMCP_TOKEN=agent-secret \
 HUB_URL=http://your-hub:25900 \
 ./go-shellmcp/shellmcp

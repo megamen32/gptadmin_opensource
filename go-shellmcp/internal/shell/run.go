@@ -70,6 +70,9 @@ func RunLive(ctx context.Context, req Request, limitBytes int64, emit func(Event
 }
 
 func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(Event)) (Result, error) {
+	// TODO: wire SnapshotDir/Restore here (see fsmeta.go). Snapshot cwd's
+	// file metadata before cmd.Start() and Restore() in a defer so metadata
+	// is repaired on every exit path (success, error, timeout).
 	started := time.Now()
 	if limitBytes <= 0 {
 		limitBytes = DefaultLimitBytes

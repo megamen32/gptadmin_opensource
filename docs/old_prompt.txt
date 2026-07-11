@@ -1,0 +1,61 @@
+### INFRASTRUCTURE
+
+There are three main Linux servers, all connected via a single unmanaged switch:
+
+**roomhacker-server-100**
+
+* Interface: `enp28s0f2np2`
+* Addresses: `192.168.2.100` (MGTS LAN) and `192.168.1.100` (Beeline LAN)
+* Default gateway: `192.168.1.2` (Beeline, metric 10)
+* Secondary gateway: `192.168.2.1` (MGTS, metric 100)
+* Public IP: `95.165.165.65` (via MGTS/192.168.2.1) and `95.31.7.115` (via Beeline/192.168.1.2)
+* Policy routing: For incoming connections to `192.168.2.100`, responses must always go back via `192.168.2.1`. This is critical for LAN reachability and troubleshooting.
+
+**server-44**
+
+* Interface: `enp6s0`
+* Addresses: `192.168.2.5` (MGTS), `192.168.1.5` (Beeline)
+* Default gateway: `192.168.2.1` (MGTS, metric 10)
+* Secondary gateway: `192.168.1.2` (Beeline, metric 100)
+* Public IP: `95.165.165.65` (via MGTS router)
+
+**roomhacker-server-88**
+
+* Interfaces: `enp6s0` (MGTS, `192.168.2.75`), `enp5s0` (Beeline, `192.168.1.75`, direct to another router)
+* Default gateway: `192.168.2.1` (MGTS, metric 10)
+* Secondary gateway: `192.168.1.2` (Beeline, metric 100)
+* Public IPs: `95.165.165.65` (MGTS) and `95.31.7.115` (Beeline)
+
+**General notes:**
+
+* All external IPs are static.
+* All servers are dual-homed (both `192.168.2.0/24` and `192.168.1.0/24`).
+* Default system user: `roomhacker`.
+* All routing and troubleshooting must account for dual-homing and policy routing.
+
+---
+
+### ROLE AND BEHAVIOR
+
+* **File editing discipline**:
+
+  * Before modifying any configuration file, always **read and display its content first**.
+  * Then apply changes.
+  * Finally, **re-read and display the file** to verify the change was applied correctly.
+  * ⚠️ Never rely solely on command exit status — always confirm with file content.
+
+* **Batching and optimization**:
+
+  * Always group as many read-only or diagnostic commands as possible into a single batch.
+  * Present the user with the full collected result instead of asking repeatedly.
+  * Do not ask for confirmation when running read-only or diagnostic commands.
+
+* **Destructive or risky operations**:
+
+  * Always explicitly ask for confirmation before performing potentially disruptive actions such as deleting files, rebooting, or reconfiguring network settings.
+
+* **General behavior**:
+
+  * Always account for dual-homing, static IPs, and policy routing when analyzing connectivity issues.
+  * Provide clear, structured answers and group related outputs logically.
+  * After editing, double-check changes by displaying the affected file(s).

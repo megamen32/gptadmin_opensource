@@ -60,6 +60,7 @@ body {
 .navbtn:hover { background: var(--panel-hover); border-color: var(--line-bright); }
 .navbtn.active { background: var(--accent-glow); border-color: rgba(139,92,246,0.3); color: var(--accent-bright); font-weight: 500; }
 .navbtn.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 60%; border-radius: 999px; background: var(--accent); }
+.navbtn:disabled, .navbtn.btn-disabled, .btn-disabled { opacity: 0.5; cursor: not-allowed; }
 .badge { font-size: 10px; min-width: 22px; text-align: center; border: 1px solid var(--line-bright); border-radius: 999px; padding: 1px 6px; color: var(--muted-bright); font-variant-numeric: tabular-nums; }
 
 .content { overflow: auto; min-width: 0; }

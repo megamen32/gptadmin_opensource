@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /home/admin/gptadmin/website
+cd /home/roomhacker/gptadmin/website
 echo "=== git pull ==="
 git pull --no-edit
 echo "=== build ==="

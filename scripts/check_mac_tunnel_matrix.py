@@ -38,9 +38,9 @@ DEFAULT_REPORT_ROOT = REPO_ROOT / "logs" / "mac_tunnel_matrix"
 
 SNAPSHOT_FILES = (
     "go-hub/cmd/gptadmin-hub",
+    "go-shellmcp/cmd/shellmcp-go",
     "gptadmin_security.py",
     "gptadmin_build_info.py",
-    "client/shellmcp_pure.py",
     "public/admin_dashboard.html",
     "public/openapi.yaml",
 )
@@ -1041,7 +1041,6 @@ PY
 
     def _write_remote_wrappers_and_plists(self, runtime: Mapping[str, Any], ssh_log: Path) -> None:
         """Create wrapper scripts and launchd plists for hub, shellmcp, and tunnel."""
-        python_bin = str(runtime["python"])
         hub_wrapper = textwrap.dedent(
             f"""\
             #!/bin/sh
@@ -1059,7 +1058,7 @@ PY
             . {shlex.quote(str(runtime["env_path"]))}
             set +a
             cd {shlex.quote(str(runtime["src_dir"]))}
-            exec {shlex.quote(python_bin)} client/shellmcp_pure.py
+            exec go run ./go-shellmcp/cmd/shellmcp-go
             """
         )
         tunnel_wrapper = self._render_tunnel_wrapper(runtime)

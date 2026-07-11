@@ -1,6 +1,6 @@
 # Adding GPTAdmin MCP stdio servers
 
-Use this from `~/gptadmin` on `admin-server-100`.
+Use this from `~/gptadmin` on `roomhacker-server-100`.
 
 ## One-command add + install
 
@@ -22,9 +22,9 @@ The helper writes `/etc/gptadmin/mcp.json`, renders `/etc/gptadmin/mcp-agents.d/
 
 ```bash
 ./mcp-add chrome-devtools-88 \
-  --agent-id ChromeDevTools-admin-server-88 \
-  --run-as-user admin \
-  --cwd /home/admin \
+  --agent-id ChromeDevTools-roomhacker-server-88 \
+  --run-as-user roomhacker \
+  --cwd /home/roomhacker \
   --stdio-format ndjson \
   --env NO_PROXY=127.0.0.1,localhost \
   --env no_proxy=127.0.0.1,localhost \

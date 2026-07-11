@@ -5,18 +5,92 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 from typing import Any, Dict
 
 PUBLIC_ROOT = Path(os.environ.get("GPTADMIN_FILESHARE_PUBLIC_ROOT", "/var/www/gptadmin-downloads"))
 STATE_DIR = Path(os.environ.get("GPTADMIN_FILESHARE_STATE_DIR", "/var/lib/gptadmin-file-share"))
-BASE_URL = os.environ.get("GPTADMIN_FILESHARE_BASE_URL", "https://gptadmin.bezrabotnyi.com/_files")
+BASE_URL = os.environ.get("GPTADMIN_FILESHARE_BASE_URL", "https://your-subdomain.t.gptadmin.bezrabotnyi.com/_files")
 MAX_SIZE_MB_DEFAULT = int(os.environ.get("GPTADMIN_FILESHARE_MAX_SIZE_MB", "1024"))
+HTTP_HOST = os.environ.get("GPTADMIN_FILESHARE_HTTP_HOST", "127.0.0.1")
+HTTP_PORT = int(os.environ.get("GPTADMIN_FILESHARE_HTTP_PORT", "18082"))
+# Background cleanup interval for expired links. Set to <=0 to disable the
+# background sweeper (expired files then only removed when a client calls the
+# cleanup_expired_public_file_links tool).
+CLEANUP_INTERVAL = float(os.environ.get("GPTADMIN_FILESHARE_CLEANUP_INTERVAL", "3600"))
 INDEX_FILE = STATE_DIR / "index.json"
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Serializes load -> modify -> save of INDEX_FILE. ThreadingHTTPServer serves
+# downloads concurrently with tool calls (create/revoke/cleanup) that mutate the
+# index; without this lock two concurrent mutations would lose each other's update.
+INDEX_LOCK = threading.RLock()
+
+
+class FileHandler(BaseHTTPRequestHandler):
+    server_version = "GPTAdminFileShare/1.1"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"fileshare_http {self.address_string()} {fmt % args}", file=sys.stderr, flush=True)
+
+    def do_HEAD(self) -> None:
+        self._serve(send_body=False)
+
+    def do_GET(self) -> None:
+        self._serve(send_body=True)
+
+    def _serve(self, send_body: bool) -> None:
+        rel = unquote(self.path.split("?", 1)[0]).lstrip("/")
+        parts = rel.split("/", 1)
+        if len(parts) != 2:
+            self.send_error(404)
+            return
+        token = re.sub(r"[^A-Za-z0-9_-]", "", parts[0])
+        filename = sanitize_filename(parts[1])
+        target = (PUBLIC_ROOT / token / filename).resolve()
+        root = PUBLIC_ROOT.resolve()
+        if root not in target.parents or not target.is_file():
+            self.send_error(404)
+            return
+        data = load_index().get("links", {}).get(token)
+        if not data or data.get("filename") != filename:
+            self.send_error(404)
+            return
+        exp = data.get("expires_at_epoch")
+        if exp and exp < time.time():
+            self.send_error(410)
+            return
+        stat = target.stat()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(stat.st_size))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "private, no-store")
+        self.end_headers()
+        if send_body:
+            with target.open("rb") as f:
+                shutil.copyfileobj(f, self.wfile, length=1024 * 1024)
+
+
+def start_http_server() -> "ThreadingHTTPServer | None":
+    # Bind is best-effort: the MCP tool surface (create/list/revoke) must keep
+    # working even if the HTTP download server cannot bind (port in use, etc.).
+    # Downloads simply won't resolve until the bind issue is fixed.
+    try:
+        server = ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), FileHandler)
+    except OSError as e:
+        print(f"fileshare_http NOT listening: cannot bind {HTTP_HOST}:{HTTP_PORT}: {e}", file=sys.stderr, flush=True)
+        return None
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, name="fileshare-http", daemon=True)
+    thread.start()
+    print(f"fileshare_http listening http://{HTTP_HOST}:{HTTP_PORT}", file=sys.stderr, flush=True)
+    return server
 
 
 def now_iso() -> str:
@@ -79,21 +153,22 @@ def create_public_file_link(args: Dict[str, Any]) -> Dict[str, Any]:
         ttl_days = 14
     expires_at = None if ttl_days <= 0 else time.time() + ttl_days * 86400
     url = f"{BASE_URL.rstrip('/')}/{token}/{filename}"
-    data = load_index()
-    data.setdefault("links", {})[token] = {
-        "token": token,
-        "url": url,
-        "filename": filename,
-        "source_path": str(src),
-        "public_path": str(dst),
-        "size": size,
-        "sha256": digest,
-        "created_at": now_iso(),
-        "expires_at_epoch": expires_at,
-        "expires_at": None if expires_at is None else datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
-        "note": str(args.get("note") or ""),
-    }
-    save_index(data)
+    with INDEX_LOCK:
+        data = load_index()
+        data.setdefault("links", {})[token] = {
+            "token": token,
+            "url": url,
+            "filename": filename,
+            "source_path": str(src),
+            "public_path": str(dst),
+            "size": size,
+            "sha256": digest,
+            "created_at": now_iso(),
+            "expires_at_epoch": expires_at,
+            "expires_at": None if expires_at is None else datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+            "note": str(args.get("note") or ""),
+        }
+        save_index(data)
     return data["links"][token]
 
 
@@ -101,22 +176,26 @@ def revoke_public_file_link(args: Dict[str, Any]) -> Dict[str, Any]:
     token = str(args.get("token") or "")
     url = str(args.get("url") or "")
     if not token and url:
-        m = re.search(r"/_files/([^/]+)/", url)
-        if m:
-            token = m.group(1)
+        # A public link ends with /<token>/<filename>. Extract the second-to-last
+        # path segment regardless of the URL prefix (/_files/, /_services/.../files/, etc.).
+        path = url.split("?", 1)[0].rstrip("/")
+        segs = [s for s in path.split("/") if s]
+        if len(segs) >= 2:
+            token = segs[-2]
     if not token:
         raise ValueError("token or url is required")
     token = re.sub(r"[^A-Za-z0-9_-]", "", token)
-    data = load_index()
-    meta = data.get("links", {}).pop(token, None)
-    removed_files = []
-    target_dir = PUBLIC_ROOT / token
-    if target_dir.exists() and target_dir.is_dir():
-        for p in target_dir.iterdir():
-            if p.is_file():
-                removed_files.append(str(p))
-        shutil.rmtree(target_dir)
-    save_index(data)
+    with INDEX_LOCK:
+        data = load_index()
+        meta = data.get("links", {}).pop(token, None)
+        removed_files = []
+        target_dir = PUBLIC_ROOT / token
+        if target_dir.exists() and target_dir.is_dir():
+            for p in target_dir.iterdir():
+                if p.is_file():
+                    removed_files.append(str(p))
+            shutil.rmtree(target_dir)
+        save_index(data)
     return {"token": token, "revoked": bool(meta or removed_files), "removed_files": removed_files, "meta": meta}
 
 
@@ -129,18 +208,30 @@ def list_public_file_links(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def cleanup_expired_public_file_links(args: Dict[str, Any]) -> Dict[str, Any]:
-    data = load_index(); links = data.get("links", {})
-    now = time.time(); removed = []
-    for token, meta in list(links.items()):
-        exp = meta.get("expires_at_epoch")
-        if exp and exp < now:
-            target_dir = PUBLIC_ROOT / token
-            if target_dir.exists() and target_dir.is_dir():
-                shutil.rmtree(target_dir)
-            removed.append(meta)
-            links.pop(token, None)
-    save_index(data)
+    with INDEX_LOCK:
+        data = load_index(); links = data.get("links", {})
+        now = time.time(); removed = []
+        for token, meta in list(links.items()):
+            exp = meta.get("expires_at_epoch")
+            if exp and exp < now:
+                target_dir = PUBLIC_ROOT / token
+                if target_dir.exists() and target_dir.is_dir():
+                    shutil.rmtree(target_dir)
+                removed.append(meta)
+                links.pop(token, None)
+        save_index(data)
     return {"removed_count": len(removed), "removed": removed}
+
+
+def cleanup_expired_loop(interval: float) -> None:
+    """Daemon thread: periodically delete links whose TTL has elapsed so public
+    URLs actually disappear on time even if no client calls the cleanup tool."""
+    while True:
+        time.sleep(interval)
+        try:
+            cleanup_expired_public_file_links({})
+        except Exception as e:
+            print(f"fileshare cleanup loop error: {e}", file=sys.stderr, flush=True)
 
 TOOLS = {
     "create_public_file_link": {
@@ -216,6 +307,10 @@ def handle(req: Dict[str, Any]) -> None:
 def main() -> None:
     PUBLIC_ROOT.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    start_http_server()
+    if CLEANUP_INTERVAL > 0:
+        threading.Thread(target=cleanup_expired_loop, args=(CLEANUP_INTERVAL,), name="fileshare-cleanup", daemon=True).start()
+        print(f"fileshare_cleanup interval={int(CLEANUP_INTERVAL)}s", file=sys.stderr, flush=True)
     for line in sys.stdin:
         line = line.strip()
         if not line:

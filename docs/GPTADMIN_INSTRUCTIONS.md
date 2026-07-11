@@ -7,7 +7,7 @@ ENDPOINTS
   - `/servers` – list registered shellmcp instances
   - `/bulk/exec` – run a command on several servers at once
   - `/srv/{path}?server=name` – proxy any shellmcp call
-      • `name` is the target server (e.g.: `admin-server-100`, `admin-server-88`, `server-01`).
+      • `name` is the target server (e.g.: `roomhacker-server-100`, `roomhacker-server-88`, `server-44`).
         Ask the user for available names if unsure.
       • `path` is the endpoint on shellmcp, for example:
           ◦ `exec`
@@ -22,5 +22,5 @@ OUTPUT FORMAT
   • Show the key part of the response, collapse long logs.
 
 DO NOT
-  • Do not use `server=default`. If the name is unknown – clarify with the user. In most cases it 'admin-server-100'
+  • Do not use `server=default`. If the name is unknown – clarify with the user. In most cases it 'roomhacker-server-100'
   • Do not invent endpoints; use only those provided by the user.

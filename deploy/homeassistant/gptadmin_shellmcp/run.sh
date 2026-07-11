@@ -20,8 +20,8 @@ opt() {
 }
 
 HUB_URL="$(opt hub_url 'https://gptadmin.bezrabotnyi.com')"
-SHELL_NAME="$(opt shell_name 'server-01')"
-SHELL_URL="$(opt shell_url 'http://203.0.113.10:25900')"
+SHELL_NAME="$(opt shell_name 'homeassistant')"
+SHELL_URL="$(opt shell_url 'http://192.168.2.101:25900')"
 SHELL_TOKEN="$(opt shell_token '')"
 SHELL_PORT="$(opt port '25900')"
 SHELL_QUEUE="$(opt queue 'true')"
@@ -68,7 +68,7 @@ fingerprint = 'SHA256:' + base64.urlsafe_b64encode(hashlib.sha256(pub).digest())
 identity = {
     'created_at': int(time.time()),
     'fingerprint': fingerprint,
-    'name': os.environ.get('SHELL_NAME') or 'server-01',
+    'name': os.environ.get('SHELL_NAME') or 'homeassistant',
     'public_key': public_key,
     'server_id': 'haos-' + str(uuid.uuid4()),
 }

@@ -25,7 +25,7 @@ Create `page-agent.mcp.json` from the example and put your real key in it:
 Run:
 
 ```bash
-export GPTADMIN_MCP_RELAY_TOKEN="$(ssh admin@203.0.113.10 'cat /home/admin/gptadmin/config/mcp_relay_agent_token')"
+export GPTADMIN_MCP_RELAY_TOKEN="$(ssh roomhacker@192.168.2.100 'cat /home/roomhacker/gptadmin/config/mcp_relay_agent_token')"
 export GPTADMIN_MCP_RELAY_HUB="https://gptadminmcp.bezrabotnyi.com"
 export GPTADMIN_MCP_RELAY_AGENT_ID="$(hostname -s)-page-agent"
 

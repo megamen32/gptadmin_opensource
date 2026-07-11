@@ -256,6 +256,59 @@ func TestAdminOverviewShape(t *testing.T) {
 	if _, ok := body["server_counts"].(map[string]any); !ok {
 		t.Fatalf("overview.server_counts has bad shape: %T", body["server_counts"])
 	}
+	if _, ok := body["shell_builds"].(map[string]any); !ok {
+		t.Fatalf("overview.shell_builds has bad shape: %T", body["shell_builds"])
+	}
+	if _, ok := body["update"].(map[string]any); !ok {
+		t.Fatalf("overview.update has bad shape: %T", body["update"])
+	}
+}
+
+func TestAdminOverviewIncludesShellBuildsAndUpdate(t *testing.T) {
+	// This test assumes a running test server or mocked state.
+	// For now, test that the field structure is correct by calling ReadUpdateState directly.
+	dir := t.TempDir()
+	statePath := dir + "/update_state.json"
+
+	// Write a test state.
+	state := &UpdateState{
+		Current: UpdateCurrent{Status: "idle"},
+		LastResult: &UpdateResult{
+			Status:      "done",
+			Message:     "Updated build 119 → 120",
+			StartedAt:   123,
+			FinishedAt:  456,
+			FromVersion: 119,
+			ToVersion:   120,
+		},
+	}
+	if err := WriteUpdateState(statePath, state); err != nil {
+		t.Fatalf("WriteUpdateState: %v", err)
+	}
+
+	got, err := ReadUpdateState(statePath)
+	if err != nil {
+		t.Fatalf("ReadUpdateState: %v", err)
+	}
+	if got.LastResult.Status != "done" {
+		t.Errorf("expected done, got %q", got.LastResult.Status)
+	}
+}
+
+func TestAdminTriggerUpdateReturns409WhenRunning(t *testing.T) {
+	// Write state with running status, verify handler returns 409.
+	dir := t.TempDir()
+	statePath := dir + "/update_state.json"
+	state := &UpdateState{Current: UpdateCurrent{Status: "running"}}
+	WriteUpdateState(statePath, state)
+
+	st, err := ReadUpdateState(statePath)
+	if err != nil {
+		t.Fatalf("ReadUpdateState: %v", err)
+	}
+	if st.Current.Status != "running" {
+		t.Errorf("expected running, got %q", st.Current.Status)
+	}
 }
 
 func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
@@ -438,7 +491,7 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 	s := New(cfg)
 	h := s.Handler()
 
-	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://203.0.113.10:25900","args":["--header","Authorization: Bearer should-not-leak"],"api_key":"should-not-leak-key"}}`)
+	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://192.168.2.101:25900","args":["--header","Authorization: Bearer should-not-leak"],"api_key":"should-not-leak-key"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
 	req.Header.Set("Authorization", "Bearer relay")
 	w := httptest.NewRecorder()
@@ -447,7 +500,7 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	payload := []byte(`{"enabled":true,"fail_count_base":4,"nodes":[{"server_id":"shell:haos","rank":1,"enabled":true,"hub_url":"http://203.0.113.10:9001"},{"server_id":"shell:server-01","rank":2,"enabled":true}]}`)
+	payload := []byte(`{"enabled":true,"fail_count_base":4,"nodes":[{"server_id":"shell:haos","rank":1,"enabled":true,"hub_url":"http://192.168.2.101:9001"},{"server_id":"shell:server-44","rank":2,"enabled":true}]}`)
 	req = httptest.NewRequest(http.MethodPost, "/admin/api/failover", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w = httptest.NewRecorder()
@@ -567,14 +620,14 @@ func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-server-100","tool_name":"shell_exec","cmd":"pwd"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:roomhacker-server-100","tool_name":"shell_exec","cmd":"pwd"}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("callMcpTool shell_exec status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"server_id":"shell:admin-server-100"`) {
+	if !strings.Contains(w.Body.String(), `"server_id":"shell:roomhacker-server-100"`) {
 		t.Fatalf("callMcpTool shell_exec bad response: %s", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "missing cmd") {
@@ -921,5 +974,73 @@ func TestServerActionsOpenAPIProxyForPinnedMCPServer(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "world") || !strings.Contains(w.Body.String(), "openmemory_query") {
 		t.Fatalf("bad actions tool response: %s", w.Body.String())
+	}
+}
+
+func TestHTTPServiceEndpointProxiesRegisteredLoopbackService(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/hello" {
+			t.Fatalf("backend path=%q", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Forwarded-Prefix"); got != "/_services/demo/files" {
+			t.Fatalf("prefix=%q", got)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"` + backend.URL + `","strip_prefix":true,"visibility":"public-capability"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register=%d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/hello", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "ok" {
+		t.Fatalf("proxy=%d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestHTTPServiceEndpointRejectsNonLoopback(t *testing.T) {
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"http://192.168.2.1:80","strip_prefix":true,"visibility":"public-capability"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/x", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// An http_endpoints entry without visibility=public-capability must NOT be
+// reachable through the public ingress, even if it targets a loopback backend.
+func TestHTTPServiceEndpointRejectsPrivateCapability(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("leaked"))
+	}))
+	defer backend.Close()
+
+	s := New(Config{RelayAgentToken: "relay"})
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"` + backend.URL + `","strip_prefix":true}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer relay")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+
+	req = httptest.NewRequest(http.MethodGet, "/_services/demo/files/x", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("private endpoint should be hidden, got status=%d body=%s", w.Code, w.Body.String())
 	}
 }

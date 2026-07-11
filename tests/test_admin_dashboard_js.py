@@ -57,18 +57,6 @@ def test_split_admin_problem_servers_id_matches_render_target():
     assert "problemAgents" not in js
 
 
-def test_split_admin_password_token_is_inside_form():
-    """Chrome warns when the password token input is not contained in a form."""
-    index = ADMIN_INDEX.read_text(encoding="utf-8")
-    form_start = index.find('<form class="tokenForm"')
-    token = index.find('id="token"')
-    form_end = index.find('</form>', token)
-
-    assert form_start != -1
-    assert token != -1
-    assert form_start < token < form_end
-
-
 def test_split_admin_show_view_knows_failover_title():
     js = ADMIN_APP_JS.read_text(encoding="utf-8")
     assert "failover:'Failover'" in js

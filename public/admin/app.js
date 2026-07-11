@@ -2,7 +2,7 @@
    GPTAdmin Dashboard — app.js
    ═══════════════════════════════════════════════════════════════ */
 
-const $=(id)=>document.getElementById(id);let state=null,currentView=localStorage.getItem('gptadmin_view')||'overview';
+const $=(id)=>document.getElementById(id);let state=null,currentView=localStorage.getItem('gptadmin_view')||'overview',updateStartedFromBuild=null;
 function token(){const input=$('token');return (input?.value||'').trim()||localStorage.getItem('gptadmin_ctl_token')||''}function saveToken(){const input=$('token');if(!input)return;localStorage.setItem('gptadmin_ctl_token',input.value.trim());refreshAll()}function hdr(){const h={'Content-Type':'application/json'};const t=token();if(t)h.Authorization='Bearer '+t;return h}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}function displayKind(kind){return kind==='virtual_hub'?'hub':kind}function toggleSidebar(){ $('sidebar').classList.toggle('open') }
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...hdr(),...(opts.headers||{})}});const t=await r.text();let j;try{j=JSON.parse(t)}catch{j={text:t}}if(!r.ok)throw new Error((j&&j.detail)||j.error||t||r.status);return j}
 function asTable(rows,cols){if(!rows||!rows.length)return '<p class="muted">пусто</p>';return '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c[0])+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
@@ -279,7 +279,7 @@ $('clients').innerHTML = _clients.length
   ? '<div class="stackList">' + _clients.map(renderClientCard).join('') + '</div>'
   : '<p class="muted">пусто</p>';
 let jobs=(data.jobs?.recent||[]).filter(r=>includesText(r,$('jobFilter')?.value||''));const jst=$('jobStatus')?.value||'all';if(jst==='queued')jobs=jobs.filter(r=>String(r.status||'').startsWith('queued'));else if(jst!=='all')jobs=jobs.filter(r=>r.status===jst);$('jobs').innerHTML=jobs.length?`<div class="stackList">${jobs.map(renderJobCard).join('')}</div>`:'<p class="muted">пусто</p>';
-let audit=(data.audit||[]).filter(r=>includesText(r,$('auditFilter')?.value||''));$('audit').innerHTML=audit.length?`<div class="stackList">${audit.map(renderAuditCard).join('')}</div>`:'<p class="muted">пусто</p>';$('rawJson').textContent=JSON.stringify(data,null,2)}
+let audit=(data.audit||[]).filter(r=>includesText(r,$('auditFilter')?.value||''));$('audit').innerHTML=audit.length?`<div class="stackList">${audit.map(renderAuditCard).join('')}</div>`:'<p class="muted">пусто</p>';$('rawJson').textContent=JSON.stringify(data,null,2);const hv=$('hubVersion'),sv=$('shellVersion');if(hv){const b=state.build||{};hv.textContent='build '+(b.build_version||'—')+' ('+(b.git_commit||'').slice(0,7)+')'}if(sv){const sb=state.shell_builds||{},vs=sb.versions||{},p=[];for(const[v,c]of Object.entries(vs))p.push(v+'×'+c);sv.textContent=p.length?p.join(', '):'—'}const upd=state.update||{},cur=upd.current||{},lr=upd.last_result,btn=$('btnUpdate'),bl=$('btnUpdateLabel'),sd=$('updateStatus'),st=$('updateStatusText'),rd=$('updateResult');if(cur.status==='running'){if(btn){btn.disabled=true;btn.classList.add('btn-disabled')}if(bl)bl.textContent='Обновляю…';if(sd)sd.style.display='block';if(st)st.textContent='Сервис перезапускается…'}else{if(btn){btn.disabled=false;btn.classList.remove('btn-disabled')}if(bl)bl.textContent='Обновить этот узел'}if(lr&&lr.status==='done'){if(sd)sd.style.display='block';if(st)st.textContent='';if(rd)rd.textContent=lr.message||'Обновление завершено'}else if(lr&&lr.status==='error'){if(sd)sd.style.display='block';if(rd){rd.textContent=lr.message||'Ошибка обновления';rd.style.color='var(--red,#e74c3c)'}}}
 function renderFailoverNodes(cfg, servers){
   if(!$('failoverNodes')) return;
   cfg=cfg||{};servers=servers||[];
@@ -291,7 +291,7 @@ function renderFailoverNodes(cfg, servers){
     const n=existing[srv.server_id]||{};
     const rank=n.rank||idx+1;
     const checked=n.enabled?'checked':'';
-    return `<article class="entryCard"><div class="row"><label class="small"><input type="checkbox" class="foNodeEnabled" data-server="${esc(srv.server_id)}" ${checked}> fallback</label><b class="mono">${esc(srv.server_id)}</b><span class="entryStatus ${cls(srv.status)}">${esc(srv.status)}</span><label class="small">rank <input class="foNodeRank" data-server="${esc(srv.server_id)}" type="number" min="1" value="${esc(rank)}" style="width:70px"></label></div><input class="foNodeHub" data-server="${esc(srv.server_id)}" placeholder="local hub URL on fallback, e.g. http://203.0.113.10:9001" value="${esc(n.hub_url||'')}" style="width:100%;margin-top:8px"></article>`;
+    return `<article class="entryCard"><div class="row"><label class="small"><input type="checkbox" class="foNodeEnabled" data-server="${esc(srv.server_id)}" ${checked}> fallback</label><b class="mono">${esc(srv.server_id)}</b><span class="entryStatus ${cls(srv.status)}">${esc(srv.status)}</span><label class="small">rank <input class="foNodeRank" data-server="${esc(srv.server_id)}" type="number" min="1" value="${esc(rank)}" style="width:70px"></label></div><input class="foNodeHub" data-server="${esc(srv.server_id)}" placeholder="local hub URL on fallback, e.g. http://192.168.2.101:9001" value="${esc(n.hub_url||'')}" style="width:100%;margin-top:8px"></article>`;
   }).join('');
   $('failoverNodes').innerHTML=rows||'<p class="muted">Нет shell-серверов</p>';
 }
@@ -318,7 +318,8 @@ async function saveFailover(){
     await loadFailover();
   }catch(e){$('failoverState').textContent='ERR '+e.message}
 }
-async function refreshAll(){try{$('status').textContent='загрузка…';$('status').className='status-badge right';const lim=$('auditLimit')?.value||160;state=await api('/admin/api/overview?limit='+encodeURIComponent(lim));renderAll();$('status').textContent='● online';$('status').className='status-badge ok right'}catch(e){$('status').textContent='Нет связи';$('status').className='status-badge err right'}}
+async function triggerUpdate(){const btn=$('btnUpdate'),bl=$('btnUpdateLabel');if(btn)btn.disabled=true;if(bl)bl.textContent='Запуск…';try{await api('/admin/api/update',{method:'POST'});updateStartedFromBuild=state&&state.build?state.build.build_version:null;if(bl)bl.textContent='Обновляю…';if(btn)btn.classList.add('btn-disabled')}catch(e){if(e.message&&e.message.indexOf('already running')>-1){if(bl)bl.textContent='Уже идёт...';if(btn)btn.disabled=true}else{alert('Ошибка: '+(e.message||'неизвестная ошибка'));if(btn)btn.disabled=false;if(bl)bl.textContent='Обновить этот узел'}}}
+async function refreshAll(){try{$('status').textContent='загрузка…';$('status').className='status-badge right';const lim=$('auditLimit')?.value||160;state=await api('/admin/api/overview?limit='+encodeURIComponent(lim));renderAll();$('status').textContent='● online';$('status').className='status-badge ok right';if(updateStartedFromBuild!==null&&state.build){const nb=state.build.build_version;if(nb!=updateStartedFromBuild){const rd=$('updateResult');if(rd)rd.textContent='Обновлено: build '+updateStartedFromBuild+' → '+nb;updateStartedFromBuild=null;const btn=$('btnUpdate'),bl=$('btnUpdateLabel');if(btn)btn.disabled=false;if(bl)bl.textContent='Обновить этот узел'}}}catch(e){if(updateStartedFromBuild!==null){$('status').textContent='…перезапуск';$('status').className='status-badge warn right';const st=$('updateStatusText');if(st)st.textContent='Сервис перезапускается…';const sd=$('updateStatus');if(sd)sd.style.display='block'}else{$('status').textContent='Нет связи';$('status').className='status-badge err right'}}}
 async function listTools(){try{const j=await api('/mcp-relay/tools',{method:'POST',body:JSON.stringify({target:$('target').value,timeout:+$('timeout').value,background:$('background').checked})});$('result').textContent=JSON.stringify(j,null,2);const tools=(j.response?.tools)||[];$('toolSelect').innerHTML=tools.map(t=>`<option value="${esc(t.name)}">${esc(t.name)}</option>`).join('');if(tools[0])$('args').value=JSON.stringify({},null,2)}catch(e){$('result').textContent='ERR '+e.message}}
 async function callTool(){try{const args=JSON.parse($('args').value||'{}');const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({target:$('target').value,tool_name:$('toolSelect').value,arguments:args,timeout:+$('timeout').value,background:$('background').checked})});$('result').textContent=JSON.stringify(j,null,2);if(j.job_id)$('jobId').value=j.job_id;refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 async function listResources(){try{const j=await api('/admin/api/mcp/resources/list',{method:'POST',body:JSON.stringify({target:$('resourceTarget').value,timeout:+($('timeout')?.value||30),background:false})});$('resourceResult').textContent=JSON.stringify(j,null,2);const res=(j.response?.resources)||j.response?.result?.resources||[];if(res[0]?.uri)$('resourceUri').value=res[0].uri}catch(e){$('resourceResult').textContent='ERR '+e.message}}
@@ -404,7 +405,7 @@ async function loadSecurityEnv(){
   try{
     // Read env file via shell_exec on hub
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd:'cat /etc/gptadmin/gptadmin.env 2>/dev/null || cat ~/.config/gptadmin/gptadmin.env 2>/dev/null || echo NOT_FOUND'}
     })});
@@ -442,7 +443,7 @@ async function setEnvVar(){
   try{
     const cmd=`grep -v '^${realKey}=' /etc/gptadmin/gptadmin.env 2>/dev/null > /tmp/_gptadmin.env.tmp && echo '${realKey}=${val.replace(/'/g,"'\''")}' >> /tmp/_gptadmin.env.tmp && mv /tmp/_gptadmin.env.tmp /etc/gptadmin/gptadmin.env && echo OK || echo FAIL`;
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd,sudo:true}
     })});
@@ -491,7 +492,7 @@ async function restartHub(){
   $('secRestartStatus').textContent='Перезапуск…';
   try{
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd:'sudo systemctl restart gptadmin_hub 2>&1; echo exit=$?',sudo:true}
     })});

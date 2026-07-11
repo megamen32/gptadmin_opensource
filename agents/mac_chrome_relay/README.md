@@ -35,7 +35,7 @@ osascript -e 'quit app "Google Chrome"'
 Copy the relay token from the server:
 
 ```bash
-ssh admin@203.0.113.10 'cat /home/admin/gptadmin/config/mcp_relay_agent_token'
+ssh roomhacker@192.168.2.100 'cat /home/roomhacker/gptadmin/config/mcp_relay_agent_token'
 ```
 
 Then on Mac:

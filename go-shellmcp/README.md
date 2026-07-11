@@ -56,9 +56,9 @@ REQUESTS=120 WORKERS=20 ./scripts/stress-local.sh
 When `SHELL_DEFAULT_USER` is set and a request does not explicitly set `run_as_user`/`user`, shellmcp-go runs commands that do not mention `sudo` as that user:
 
 ```bash
-SHELL_DEFAULT_USER=admin
-SHELL_DEFAULT_HOME=/home/admin
-SHELL_DEFAULT_CWD=/home/admin
+SHELL_DEFAULT_USER=roomhacker
+SHELL_DEFAULT_HOME=/home/roomhacker
+SHELL_DEFAULT_CWD=/home/roomhacker
 ```
 
 Commands containing a `sudo` token stay in the service/root context, so privileged operations can still be requested explicitly with `sudo ...`.

@@ -15,7 +15,7 @@ curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/gptadmin.tar.gz"
 sudo mkdir -p "$INSTALL_DIR"
 sudo tar -xzf "$TMP_DIR/gptadmin.tar.gz" -C "$INSTALL_DIR"
 rm -rf "$TMP_DIR"
-sudo chmod +x "$INSTALL_DIR/shellmcp/dist/shellmcp" "$INSTALL_DIR/gptadmin_hub/dist/gptadmin_hub"
+sudo chmod +x "$INSTALL_DIR/shellmcp/linux_amd64/shellmcp-go" "$INSTALL_DIR/gptadmin_hub/dist/gptadmin_hub"
 
 # Prepare logs
 sudo mkdir -p "$LOG_DIR"
@@ -28,7 +28,7 @@ Description=Root Daemon for GPT Control (shellmcp)
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_DIR/shellmcp/dist/shellmcp
+ExecStart=$INSTALL_DIR/shellmcp/linux_amd64/shellmcp-go
 Environment=SHELLMCP_TOKEN=$BEARER_TOKEN
 Environment=SHELLMCP_URL=http://\$(hostname):25900
 Environment=HUB_URL=http://127.0.0.1:8000/heartbeat

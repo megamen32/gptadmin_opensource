@@ -48,3 +48,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 exclude = ["build", "tests", ".venv", ".buildcache", ".claude", ".serena", "docs"]
+
+[tool.pytest.ini_options]
+# Default pytest discovery is "test_*.py" / "*_test.py". Allow our explicitly-named
+# real-launchd harness at tests/mac/launchd_verify.py to be discovered as well.
+python_files = ["test_*.py", "*_test.py", "launchd_verify.py"]

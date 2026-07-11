@@ -113,7 +113,7 @@ For a single upstream server, use its slug:
 
 ```text
 https://hub.example.com/server/fileshare/mcp
-https://hub.example.com/server/chromedevtools-admin-server-100/mcp
+https://hub.example.com/server/chromedevtools-roomhacker-server-100/mcp
 https://hub.example.com/server/openmemory/mcp
 ```
 

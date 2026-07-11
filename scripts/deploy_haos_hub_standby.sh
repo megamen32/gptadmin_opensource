@@ -14,24 +14,24 @@ With --deploy, copies it to HAOS and installs/starts via Supervisor API over Adv
 Environment:
   ENV_FILE=/etc/gptadmin/gptadmin.env
   OUT_DIR=build/haos-gptadmin-hub-standby
-  HAOS_HOST=203.0.113.10
+  HAOS_HOST=192.168.2.101
   HAOS_SSH_PORT=2228
   HAOS_SSH_USER=root
-  HAOS_SSH_KEY=/home/admin/.ssh/id_rsa
+  HAOS_SSH_KEY=/home/roomhacker/.ssh/id_rsa
   HAOS_ADDON_DIR=/addons/gptadmin_hub_standby
 USAGE
   exit 0
 fi
 
 ROOT=$(git rev-parse --show-toplevel)
-SRC="$ROOT/deploy/server-01/gptadmin_hub_standby"
+SRC="$ROOT/deploy/homeassistant/gptadmin_hub_standby"
 OUT_DIR="${OUT_DIR:-$ROOT/build/haos-gptadmin-hub-standby}"
 ENV_FILE="${ENV_FILE:-/etc/gptadmin/gptadmin.env}"
 GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
-HAOS_HOST="${HAOS_HOST:-203.0.113.10}"
+HAOS_HOST="${HAOS_HOST:-192.168.2.101}"
 HAOS_SSH_PORT="${HAOS_SSH_PORT:-2228}"
 HAOS_SSH_USER="${HAOS_SSH_USER:-root}"
-HAOS_SSH_KEY="${HAOS_SSH_KEY:-/home/admin/.ssh/id_rsa}"
+HAOS_SSH_KEY="${HAOS_SSH_KEY:-/home/roomhacker/.ssh/id_rsa}"
 HAOS_ADDON_DIR="${HAOS_ADDON_DIR:-/addons/gptadmin_hub_standby}"
 BUILD_VERSION="${BUILD_VERSION:-haos-standby}"
 GIT_COMMIT="${GIT_COMMIT:-$(git -C "$ROOT" rev-parse --short HEAD)}"

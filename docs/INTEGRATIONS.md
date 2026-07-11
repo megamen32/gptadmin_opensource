@@ -40,7 +40,7 @@ curl -sS -X POST https://<your-hub>/mcp-relay/list_mcp_agents \
 ```text
 POST /mcp-relay/call_mcp_tool
 {
-  "agent_id": "shell:admin-server-100",
+  "agent_id": "shell:roomhacker-server-100",
   "tool_name": "shell_exec",
   "arguments": { "cmd": "uptime" }
 }

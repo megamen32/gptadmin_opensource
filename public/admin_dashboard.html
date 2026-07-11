@@ -1025,7 +1025,7 @@ async function loadSecurityEnv(){
   try{
     // Read env file via shell_exec on hub
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd:'cat /etc/gptadmin/gptadmin.env 2>/dev/null || cat ~/.config/gptadmin/gptadmin.env 2>/dev/null || echo NOT_FOUND'}
     })});
@@ -1063,7 +1063,7 @@ async function setEnvVar(){
   try{
     const cmd=`grep -v '^${realKey}=' /etc/gptadmin/gptadmin.env 2>/dev/null > /tmp/_gptadmin.env.tmp && echo '${realKey}=${val.replace(/'/g,"'\''")}' >> /tmp/_gptadmin.env.tmp && mv /tmp/_gptadmin.env.tmp /etc/gptadmin/gptadmin.env && echo OK || echo FAIL`;
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd,sudo:true}
     })});
@@ -1102,9 +1102,9 @@ async function issueMcpTokenFromPanel(){
   const el=$('secMcpTokenResult');
   el.textContent='Выпускаю…';
   try{
-    const cmd=`cd /home/admin/gptadmin 2>/dev/null && python3 cli.py mcp token '${name.replace(/'/g,"'\''")}' --no-save 2>&1 || echo FALLBACK`;
+    const cmd=`cd /home/roomhacker/gptadmin 2>/dev/null && python3 cli.py mcp token '${name.replace(/'/g,"'\''")}' --no-save 2>&1 || echo FALLBACK`;
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd}
     })});
@@ -1119,7 +1119,7 @@ async function restartHub(){
   $('secRestartStatus').textContent='Перезапуск…';
   try{
     const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:admin-server-100',
+      target:'shell:roomhacker-server-100',
       tool_name:'shell_exec',
       arguments:{cmd:'sudo systemctl restart gptadmin_hub 2>&1; echo exit=$?',sudo:true}
     })});

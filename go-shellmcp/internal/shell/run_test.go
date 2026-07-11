@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -47,8 +48,13 @@ func TestOutputLimitKeepsTailAndSpills(t *testing.T) {
 }
 
 func TestRunLiveEvents(t *testing.T) {
+	var mu sync.Mutex
 	var events []Event
-	res := RunLive(context.Background(), Request{Cmd: "echo out; echo err >&2", SpillDir: t.TempDir()}, 8192, func(e Event) { events = append(events, e) })
+	res := RunLive(context.Background(), Request{Cmd: "echo out; echo err >&2", SpillDir: t.TempDir()}, 8192, func(e Event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
 	if res.ReturnCode != 0 {
 		t.Fatalf("bad res %+v", res)
 	}
@@ -70,13 +76,13 @@ func TestRunLiveEvents(t *testing.T) {
 }
 
 func TestDefaultUserSelection(t *testing.T) {
-	if got, explicit := targetRunUser(Request{Cmd: "id", DefaultUser: "admin"}); got != "admin" || explicit {
+	if got, explicit := targetRunUser(Request{Cmd: "id", DefaultUser: "roomhacker"}); got != "roomhacker" || explicit {
 		t.Fatalf("default user not selected: got=%q explicit=%v", got, explicit)
 	}
-	if got, _ := targetRunUser(Request{Cmd: "sudo id", DefaultUser: "admin"}); got != "" {
+	if got, _ := targetRunUser(Request{Cmd: "sudo id", DefaultUser: "roomhacker"}); got != "" {
 		t.Fatalf("sudo command should not use default user, got %q", got)
 	}
-	if got, explicit := targetRunUser(Request{Cmd: "id", RunAsUser: "root", DefaultUser: "admin"}); got != "root" || !explicit {
+	if got, explicit := targetRunUser(Request{Cmd: "id", RunAsUser: "root", DefaultUser: "roomhacker"}); got != "root" || !explicit {
 		t.Fatalf("explicit user not selected: got=%q explicit=%v", got, explicit)
 	}
 }

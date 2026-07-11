@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path"
@@ -181,6 +182,10 @@ type Server struct {
 	oauthCodes  map[string]oauthCode
 	audit       []auditEvent
 	failover    FailoverConfig
+
+	updateStatePath string
+	updateLockPath  string
+	updateLauncher  *UpdateLauncher
 }
 
 func New(cfg Config) *Server {
@@ -199,6 +204,14 @@ func New(cfg Config) *Server {
 		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
 	}
 	s.failover = s.loadFailoverConfig()
+	home := os.Getenv("GPTADMIN_HOME")
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		home = userHome + "/.gptadmin"
+	}
+	s.updateStatePath = home + "/update_state.json"
+	s.updateLockPath = home + "/update.lock"
+	s.updateLauncher = DefaultUpdateLauncher()
 	return s
 }
 
@@ -335,6 +348,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/_services/", s.httpServiceEndpoint)
 	mux.HandleFunc("/server/", s.serverMCPEndpoint)
 	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
@@ -347,6 +361,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/update", s.requireCtl(s.adminTriggerUpdate))
 	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
 	mux.HandleFunc("/admin/api/failover/reclaim/accept", s.adminFailoverReclaimAccept)
 	mux.HandleFunc("/admin/api/failover/reclaim", s.requireCtl(s.adminFailoverReclaim))
@@ -359,6 +374,109 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
 	return withCORS(mux)
+}
+
+func (s *Server) httpServiceEndpoint(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/_services/")
+	parts := strings.SplitN(trimmed, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	serviceSlug, endpointName := parts[0], parts[1]
+	var endpoint map[string]any
+	s.mu.Lock()
+	for _, a := range s.agents {
+		if agentSlug(a.AgentID) != serviceSlug && agentSlug(a.Name) != serviceSlug {
+			continue
+		}
+		for _, raw := range sliceValue(a.Meta["http_endpoints"]) {
+			ep := mapValue(raw)
+			if firstString(ep, "name") == endpointName {
+				endpoint = ep
+				break
+			}
+		}
+		break
+	}
+	s.mu.Unlock()
+	if endpoint == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Only endpoints that explicitly opt in as a public capability are exposed
+	// through the tunnel. This prevents a private MCP that happens to register an
+	// http_endpoints entry from accidentally becoming publicly reachable.
+	if !isPublicCapability(endpoint) {
+		http.NotFound(w, r)
+		return
+	}
+	targetRaw := firstString(endpoint, "local_url")
+	target, err := url.Parse(targetRaw)
+	if err != nil || target.Scheme != "http" || !isLoopbackServiceHost(target.Hostname()) || target.Port() == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "invalid service endpoint"})
+		return
+	}
+	prefix := "/_services/" + serviceSlug + "/" + endpointName
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		if truthyAny(endpoint["strip_prefix"]) {
+			rest := strings.TrimPrefix(req.URL.Path, prefix)
+			if rest == "" {
+				rest = "/"
+			}
+			req.URL.Path = rest
+		}
+		req.Header.Set("X-Forwarded-Prefix", prefix)
+		req.Header.Set("X-Forwarded-Proto", requestScheme(r))
+		req.Header.Set("X-Forwarded-Host", r.Host)
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("http service proxy failed agent=%s endpoint=%s target=%s err=%v", serviceSlug, endpointName, targetRaw, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "service unavailable"})
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func isLoopbackServiceHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// isPublicCapability reports whether an http_endpoints entry has explicitly
+// opted in to being reachable through the public tunnel ingress.
+func isPublicCapability(endpoint map[string]any) bool {
+	return strings.TrimSpace(strings.ToLower(firstString(endpoint, "visibility"))) == "public-capability"
+}
+
+func truthyAny(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return truthyString(x)
+	default:
+		return false
+	}
+}
+
+func sliceValue(v any) []any {
+	if xs, ok := v.([]any); ok {
+		return xs
+	}
+	return nil
+}
+
+func requestScheme(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); v != "" {
+		return v
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 func withCORS(next http.Handler) http.HandlerFunc {
@@ -1637,7 +1755,123 @@ func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 			"token_present": os.Getenv("FRP_TOKEN") != "",
 		},
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
+	// Aggregate shell builds from heartbeat data.
+	shellBuilds := map[string]any{
+		"latest":   0,
+		"oldest":   0,
+		"versions": map[string]int{},
+	}
+	{
+		buildCounts := map[string]int{}
+		for _, srv := range servers {
+			if meta, ok := srv["meta"].(map[string]any); ok {
+				if bv, ok := meta["build_version"]; ok && bv != nil {
+					ver := fmt.Sprintf("%v", bv)
+					if f, ok := bv.(float64); ok {
+						ver = fmt.Sprintf("%d", int(f))
+					}
+					if ver != "" && ver != "0" {
+						buildCounts[ver]++
+					}
+				}
+			}
+		}
+		versions := map[string]int{}
+		latest := 0
+		oldest := 0
+		for ver, count := range buildCounts {
+			versions[ver] = count
+			v, _ := strconv.Atoi(ver)
+			if v > latest {
+				latest = v
+			}
+			if oldest == 0 || (v > 0 && v < oldest) {
+				oldest = v
+			}
+		}
+		shellBuilds["latest"] = latest
+		shellBuilds["oldest"] = oldest
+		shellBuilds["versions"] = versions
+	}
+	// Read update state.
+	updateState := map[string]any{
+		"current":     map[string]string{"status": "idle"},
+		"last_result": nil,
+	}
+	if st, err := ReadUpdateState(s.updateStatePath); err == nil {
+		st = EnsureDefaultUpdateState(st)
+		updateState["current"] = map[string]string{"status": st.Current.Status}
+		if st.LastResult != nil {
+			updateState["last_result"] = st.LastResult
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "build": map[string]any{"name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit}, "now": time.Now().Unix(), "now_fmt": time.Now().Format("2006-01-02 15:04:05 MST"), "hub_public_url": hubPublicURL, "public_origin": s.cfg.PublicOrigin, "mcp_resource": s.resource(r), "tunnel": tunnel, "servers": servers, "server_counts": serverStatusCounts(servers), "shell_builds": shellBuilds, "update": updateState, "clients": []any{}, "client_count": 0, "clients_with_multiple_ips": []any{}, "jobs": jobs, "audit": audit, "state_files": map[string]any{"mode": "go-persistent", "registry_state": s.registryStatePath(), "failover_config": s.failoverConfigPath(), "failover_state": s.failoverStatePath()}, "failover_config": s.failover})
+}
+
+func (s *Server) adminTriggerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+
+	// Check if an update is already running.
+	st, _ := ReadUpdateState(s.updateStatePath)
+	st = EnsureDefaultUpdateState(st)
+	if st.Current.Status == "running" || (s.updateLauncher != nil && s.updateLauncher.CheckUpdateRunning()) {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Try to acquire lock.
+	lock, err := AcquireUpdateLock(s.updateLockPath)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "update already running"})
+		return
+	}
+
+	// Mark running in state file.
+	st.Current.Status = "running"
+	now := time.Now().Unix()
+	if st.LastResult != nil {
+		st.LastResult.StartedAt = now
+	} else {
+		st.LastResult = &UpdateResult{StartedAt: now}
+	}
+	if err := WriteUpdateState(s.updateStatePath, st); err != nil {
+		ReleaseUpdateLock(lock)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to write state"})
+		return
+	}
+	ReleaseUpdateLock(lock) // release — the external supervisor holds its own lifecycle
+
+	// Launch via external supervisor.
+	if s.updateLauncher == nil {
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    "update launcher not initialized",
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "update launcher not configured"})
+		return
+	}
+	if err := s.updateLauncher.LaunchUpdate(); err != nil {
+		// Reset state on launch failure.
+		st.Current.Status = "idle"
+		st.LastResult = &UpdateResult{
+			Status:     "error",
+			Message:    err.Error(),
+			StartedAt:  now,
+			FinishedAt: time.Now().Unix(),
+		}
+		WriteUpdateState(s.updateStatePath, st)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to start update"})
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": "running"})
 }
 
 func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
@@ -3023,7 +3257,7 @@ func appsSDKTools() []map[string]any {
 			"name":            "list_mcp_tools",
 			"title":           "List tools",
 			"description":     "List tools available on an explicitly selected GPTAdmin MCP target. Never use target=default; call list_mcp_servers first.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string", "description": "Explicit target/server_id/agent_id, for example shell:admin-server-100 or hub."}}, "required": []string{"target"}, "additionalProperties": false},
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string", "description": "Explicit target/server_id/agent_id, for example shell:roomhacker-server-100 or hub."}}, "required": []string{"target"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "additionalProperties": true}}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,

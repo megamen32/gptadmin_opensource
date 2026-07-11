@@ -109,8 +109,6 @@ def _artifact_meta(path: Path, route: str) -> dict:
 def _artifact_manifest() -> dict:
     candidates = {
         "gptadmin.py": (BUILD_DIR / "cli" / "gptadmin.py", "/gptadmin.py"),
-        "shellmcp.py": (REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py"),
-        "shellmcp_pure.py": (REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py"),
         "gptadmin.tar.gz": (BUILD_DIR / "gptadmin.tar.gz", "/gptadmin.tar.gz"),
         "gptadmin-cli.tar.gz": (BUILD_DIR / "gptadmin-cli.tar.gz", "/gptadmin-cli.tar.gz"),
         "gptadmin-android-arm64.tar.gz": (BUILD_DIR / "gptadmin-android-arm64.tar.gz", "/gptadmin-android-arm64.tar.gz"),
@@ -219,26 +217,6 @@ async def get_frp_mirror_artifact(filename: str):
 @app.api_route('/gptadmin.py', methods=['GET', 'HEAD'])
 async def get_cli_py():
     return _bin(BUILD_DIR / "cli" / "gptadmin.py", "gptadmin.py", "text/x-python")
-
-
-@app.api_route('/shellmcp_pure.py', methods=['GET', 'HEAD'])
-async def get_shellmcp_pure_py():
-    return _bin(REPO_DIR / "client" / "shellmcp_pure.py", "shellmcp_pure.py", "text/x-python")
-
-
-@app.api_route('/shellmcp.py', methods=['GET', 'HEAD'])
-async def get_shellmcp_py():
-    return _bin(REPO_DIR / "client" / "shellmcp.py", "shellmcp.py", "text/x-python")
-
-
-@app.api_route('/shellmcp.py.json', methods=['GET', 'HEAD'])
-async def get_shellmcp_py_meta():
-    return _artifact_meta(REPO_DIR / "client" / "shellmcp.py", "/shellmcp.py")
-
-
-@app.api_route('/shellmcp_pure.py.json', methods=['GET', 'HEAD'])
-async def get_shellmcp_pure_py_meta():
-    return _artifact_meta(REPO_DIR / "client" / "shellmcp_pure.py", "/shellmcp_pure.py")
 
 
 @app.api_route('/manifest.json', methods=['GET', 'HEAD'])

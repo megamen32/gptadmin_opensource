@@ -53,7 +53,7 @@ Examples:
 - `/agent/hub/mcp` — aggregate GPTAdmin hub MCP tools, same as `/mcp`.
 - `/agent/openmemory/mcp` — pinned MCP facade for the `OpenMemory` agent.
 - `/agent/fileshare/mcp` — pinned MCP facade for the `FileShare` agent.
-- `/agent/shell-admin-server-100/mcp` — pinned MCP facade for the shell agent.
+- `/agent/shell-roomhacker-server-100/mcp` — pinned MCP facade for the shell agent.
 
 `list_mcp_agents` and `/mcp-relay/list_mcp_agents` now include default exposure metadata in each agent card: `public_mcp_slug`, `public_mcp_path`, `public_mcp_endpoint`, `exposed_by_default`, and `public_mcp_auth`. The facade accepts the same Bearer/OAuth authentication as `/mcp` for now. Future admin UI work should turn these defaults into explicit expose aliases with per-alias security policy: Bearer on/off, OAuth on/off, tool allowlist/denylist, and eventually per-client policy.
 

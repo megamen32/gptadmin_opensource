@@ -15,4 +15,4 @@ EOF
 fi
 name="$1"; shift
 if [[ "${1:-}" == "--" ]]; then shift; fi
-exec sudo python3 /home/admin/gptadmin/cli/gptadmin.py mcp add "$name" --force --install --status "$@"
+exec sudo python3 /home/roomhacker/gptadmin/cli/gptadmin.py mcp add "$name" --force --install --status "$@"

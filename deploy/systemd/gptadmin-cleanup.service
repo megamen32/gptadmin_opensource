@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=oneshot
-User=admin
-Group=admin
-WorkingDirectory=/home/admin/gptadmin
-ExecStart=/home/admin/gptadmin/scripts/cleanup.sh
+User=roomhacker
+Group=roomhacker
+WorkingDirectory=/home/roomhacker/gptadmin
+ExecStart=/home/roomhacker/gptadmin/scripts/cleanup.sh
 StandardOutput=journal
 StandardError=journal
