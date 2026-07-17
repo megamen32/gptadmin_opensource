@@ -87,6 +87,16 @@ func TestDefaultUserSelection(t *testing.T) {
 	}
 }
 
+func TestRootProcessWithoutDefaultUserIsRejected(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires a root test process")
+	}
+	res := Run(context.Background(), Request{Cmd: "id -u", SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode == 0 || !strings.Contains(res.Error, "default user") {
+		t.Fatalf("root process must reject an implicit root command: %+v", res)
+	}
+}
+
 func TestAndroidPrivilegeModeAndShizukuHelpers(t *testing.T) {
 	if got := androidPrivilegeMode(Request{Cmd: "id"}); got != "auto" {
 		t.Fatalf("default mode should be auto: %q", got)
@@ -111,5 +121,20 @@ func TestShellNameForAndroidFallsBackToSystemShell(t *testing.T) {
 	t.Setenv("PREFIX", "")
 	if got := shellNameForGOOS("android"); got != "/system/bin/sh" {
 		t.Fatalf("bad android shell fallback: %q", got)
+	}
+}
+
+func TestRunRemovesCaptureFilesWhenOutputDidNotSpill(t *testing.T) {
+	dir := t.TempDir()
+	res := Run(context.Background(), Request{Cmd: "printf small", SpillDir: dir}, 1024)
+	if res.Spilled {
+		t.Fatalf("unexpected spill: %+v", res)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("non-spilled capture files remain: %#v", entries)
 	}
 }

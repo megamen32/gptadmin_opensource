@@ -15,32 +15,36 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
 )
 
 // Standard event type constants. Event type names mirror the Python
 // implementation where a stable name exists so log consumers keep
 // working across the rewrite.
 const (
-	ExecStart      = "exec_start"
-	ExecEnd        = "exec_end"
-	AuthOK         = "auth_ok"
-	AuthFail       = "auth_fail"
-	UpdateApplied  = "update_applied"
-	UpdateFailed   = "update_failed"
-	ServiceAction  = "service_action"
-	HeartbeatSent  = "heartbeat_sent"
-	PollJob        = "poll_job"
-	GenericError   = "error"
+	ExecStart     = "exec_start"
+	ExecEnd       = "exec_end"
+	AuthOK        = "auth_ok"
+	AuthFail      = "auth_fail"
+	UpdateApplied = "update_applied"
+	UpdateFailed  = "update_failed"
+	ServiceAction = "service_action"
+	HeartbeatSent = "heartbeat_sent"
+	PollJob       = "poll_job"
+	GenericError  = "error"
 )
 
 // Logger writes one JSON line per Event to an append-only file. A nil
 // *Logger is a valid no-op so callers can call Event unconditionally
 // without checking for nil. All exported methods are goroutine-safe.
 type Logger struct {
-	mu     sync.Mutex
-	enc    *json.Encoder
-	file   io.Closer
-	closed bool
+	mu       sync.Mutex
+	enc      *json.Encoder
+	file     *os.File
+	path     string
+	maxBytes int64
+	closed   bool
 }
 
 // New opens path in append-only mode, creating parent directories as
@@ -50,6 +54,17 @@ type Logger struct {
 // the error so the caller can decide to log the failure but still keep
 // running.
 func New(path string) (*Logger, error) {
+	if path == "" {
+		return &Logger{}, nil
+	}
+	limit, err := storagebudget.FilesystemLimit(filepath.Dir(path))
+	if err != nil {
+		limit = 500 << 20
+	}
+	return NewWithLimit(path, limit)
+}
+
+func NewWithLimit(path string, maxBytes int64) (*Logger, error) {
 	if path == "" {
 		return &Logger{}, nil
 	}
@@ -63,11 +78,8 @@ func New(path string) (*Logger, error) {
 		return &Logger{}, fmt.Errorf("audit: open %q: %w", path, err)
 	}
 	enc := json.NewEncoder(f)
-	// Match the Python output: keys sorted, no HTML escaping, no
-	// trailing newline (we add one explicitly so each event is a
-	// single line).
 	enc.SetEscapeHTML(false)
-	return &Logger{enc: enc, file: f}, nil
+	return &Logger{enc: enc, file: f, path: path, maxBytes: maxBytes}, nil
 }
 
 // Event writes a single audit record as one JSON line. Calling Event
@@ -92,6 +104,13 @@ func (l *Logger) Event(typ string, fields map[string]any) {
 	defer l.mu.Unlock()
 	if l.closed {
 		return
+	}
+	if l.maxBytes > 0 {
+		if info, err := l.file.Stat(); err == nil && info.Size() >= l.maxBytes {
+			if err := l.file.Truncate(0); err == nil {
+				_, _ = l.file.Seek(0, io.SeekStart)
+			}
+		}
 	}
 	if err := l.enc.Encode(fields); err != nil {
 		// Best-effort: drop the record silently rather than crashing

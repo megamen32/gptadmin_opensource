@@ -81,6 +81,28 @@ A compact fallback can run a loop like this:
 
 The exact paths are deployment-specific, but the logic is the same: watchdog checks primary, promotes a fallback only after threshold/confirmation, keeps disk state, and accepts a signed reclaim when primary returns.
 
+## Black-box regression coverage
+
+The Docker suite runs in CI and can be run locally without a deployed FRP
+server:
+
+```bash
+docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-container-exit --exit-code-from failover-e2e
+```
+
+It verifies these boundaries separately before testing the combined outage:
+
+- tunnel loss alone does not promote a healthy primary;
+- primary hub loss promotes the fallback through a live tunnel;
+- simultaneous hub and tunnel loss recovers after the tunnel returns;
+- signed primary reclaim removes the fallback route after recovery.
+- rank 1 promotion fences rank 2 through the healthy public endpoint;
+- rank 2 promotes only after its longer threshold when rank 1 is unavailable.
+
+The suite uses real Go hubs, watchdog and proxy processes. Its local ingress
+and FRP-client doubles isolate the repository-owned failover contract from the
+external FRP service.
+
 ## Design rule
 
 Prefer "alive and degraded" over "perfect and down". During an outage, GPTAdmin should keep enough of itself reachable to answer: what is alive, what died, what jobs were running, where the logs are, and how to restore the primary.

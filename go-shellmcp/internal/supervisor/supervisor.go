@@ -50,9 +50,30 @@ type Agent struct {
 	// User is forwarded to systemd / launchd when present; the in-process
 	// manager ignores it because we run as the caller's uid.
 	User string `json:"user,omitempty"`
+	// Transport selects how the child MCP is reached. Local processes use
+	// "stdio"; remote servers use "streamable-http" or "sse".
+	Transport string `json:"transport,omitempty"`
+	// URL is required for remote transports and empty for stdio children.
+	URL string `json:"url,omitempty"`
+	// Headers are attached to remote MCP requests. Values may reference
+	// environment variables using the ${NAME} form; resolution happens only
+	// at request time so persisted config does not need to contain secrets.
+	Headers map[string]string `json:"headers,omitempty"`
 	// Enabled corresponds to spec.get("enabled", True) in Python; kept here
 	// so callers can introspect the registry verbatim.
 	Enabled bool `json:"enabled"`
+}
+
+// UnmarshalJSON preserves the configuration contract that an MCP server is
+// enabled unless the author explicitly writes "enabled": false.
+func (a *Agent) UnmarshalJSON(data []byte) error {
+	type agentAlias Agent
+	decoded := agentAlias{Enabled: true}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*a = Agent(decoded)
+	return nil
 }
 
 // AgentStatus is the snapshot returned by Manager.Status. ExitedAt is the
@@ -75,9 +96,10 @@ type AgentStatus struct {
 //
 // The zero value is not usable; construct with New.
 type Manager struct {
-	mu       sync.Mutex
-	agents   map[string]Agent
-	process  map[string]*tracked
+	mu         sync.Mutex
+	agents     map[string]Agent
+	process    map[string]*tracked
+	configPath string
 }
 
 // tracked is the per-agent runtime record. process is nil while the agent is
@@ -99,9 +121,16 @@ var ErrUnknownRef = errors.New("supervisor: unknown agent ref")
 // New returns a Manager pre-loaded with the supplied agents. Stored agents
 // are copied so caller-side mutation does not affect the registry.
 func New(agents []Agent) *Manager {
+	return NewPersistent(agents, "")
+}
+
+// NewPersistent creates a manager whose registry mutations are atomically
+// written to configPath. An empty path keeps the registry in memory only.
+func NewPersistent(agents []Agent, configPath string) *Manager {
 	m := &Manager{
-		agents:  make(map[string]Agent, len(agents)),
-		process: make(map[string]*tracked, len(agents)),
+		agents:     make(map[string]Agent, len(agents)),
+		process:    make(map[string]*tracked, len(agents)),
+		configPath: configPath,
 	}
 	for _, a := range agents {
 		if a.Ref == "" {
@@ -117,9 +146,169 @@ func New(agents []Agent) *Manager {
 				cp.Env[k] = v
 			}
 		}
+		if a.Headers != nil {
+			cp.Headers = make(map[string]string, len(a.Headers))
+			for k, v := range a.Headers {
+				cp.Headers[k] = v
+			}
+		}
 		m.agents[cp.Ref] = cp
 	}
 	return m
+}
+
+// Upsert validates and persists a local or remote MCP server definition.
+func (m *Manager) Upsert(agent Agent) error {
+	agent = normalizeAgent(agent)
+	if err := validateAgent(agent); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous, existed := m.agents[agent.Ref]
+	m.agents[agent.Ref] = cloneAgent(agent)
+	if err := m.persistLocked(); err != nil {
+		if existed {
+			m.agents[agent.Ref] = previous
+		} else {
+			delete(m.agents, agent.Ref)
+		}
+		return err
+	}
+	return nil
+}
+
+// Remove deletes a stopped MCP server definition and persists the registry.
+func (m *Manager) Remove(ref string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous, ok := m.agents[ref]
+	if !ok {
+		return ErrUnknownRef
+	}
+	if running := m.process[ref]; running != nil && running.cmd != nil {
+		return fmt.Errorf("supervisor: cannot remove running agent %q", ref)
+	}
+	delete(m.agents, ref)
+	if err := m.persistLocked(); err != nil {
+		m.agents[ref] = previous
+		return err
+	}
+	return nil
+}
+
+// SetEnabled changes the desired persistent state. Process lifecycle remains
+// explicit so callers can stop a process before disabling it.
+func (m *Manager) SetEnabled(ref string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	agent, ok := m.agents[ref]
+	if !ok {
+		return ErrUnknownRef
+	}
+	previous := agent.Enabled
+	agent.Enabled = enabled
+	m.agents[ref] = agent
+	if err := m.persistLocked(); err != nil {
+		agent.Enabled = previous
+		m.agents[ref] = agent
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) persistLocked() error {
+	if m.configPath == "" {
+		return nil
+	}
+	agents := make([]Agent, 0, len(m.agents))
+	keys := make([]string, 0, len(m.agents))
+	for ref := range m.agents {
+		keys = append(keys, ref)
+	}
+	sortStrings(keys)
+	for _, ref := range keys {
+		agents = append(agents, cloneAgent(m.agents[ref]))
+	}
+	data, err := json.MarshalIndent(agents, "", "  ")
+	if err != nil {
+		return fmt.Errorf("supervisor: encode registry: %w", err)
+	}
+	dir := filepath.Dir(m.configPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("supervisor: create config directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".mcp-agents-*.tmp")
+	if err != nil {
+		return fmt.Errorf("supervisor: create temporary config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(append(data, '\n'))
+	}
+	closeErr := tmp.Close()
+	if err != nil {
+		return fmt.Errorf("supervisor: write config: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("supervisor: close config: %w", closeErr)
+	}
+	if err := os.Rename(tmpPath, m.configPath); err != nil {
+		return fmt.Errorf("supervisor: replace config: %w", err)
+	}
+	return nil
+}
+
+func normalizeAgent(agent Agent) Agent {
+	agent.Ref = strings.TrimSpace(agent.Ref)
+	agent.Name = strings.TrimSpace(agent.Name)
+	if agent.Name == "" {
+		agent.Name = agent.Ref
+	}
+	agent.Transport = strings.ToLower(strings.TrimSpace(agent.Transport))
+	if agent.Transport == "" {
+		agent.Transport = transportFor(agent.Command, agent.URL)
+	}
+	return agent
+}
+
+func validateAgent(agent Agent) error {
+	if agent.Ref == "" {
+		return errors.New("supervisor: agent ref is required")
+	}
+	switch agent.Transport {
+	case "stdio":
+		if strings.TrimSpace(agent.Command) == "" {
+			return errors.New("supervisor: stdio agent command is required")
+		}
+	case "streamable-http", "sse":
+		if strings.TrimSpace(agent.URL) == "" {
+			return fmt.Errorf("supervisor: %s agent URL is required", agent.Transport)
+		}
+	default:
+		return fmt.Errorf("supervisor: unsupported MCP transport %q", agent.Transport)
+	}
+	return nil
+}
+
+func cloneAgent(agent Agent) Agent {
+	agent.Args = append([]string(nil), agent.Args...)
+	if agent.Env != nil {
+		agent.Env = cloneStringMap(agent.Env)
+	}
+	if agent.Headers != nil {
+		agent.Headers = cloneStringMap(agent.Headers)
+	}
+	return agent
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 // Agents returns a snapshot copy of the registered agent definitions. Safe to
@@ -138,9 +327,26 @@ func (m *Manager) Agents() []Agent {
 				cp.Env[k] = v
 			}
 		}
+		if a.Headers != nil {
+			cp.Headers = make(map[string]string, len(a.Headers))
+			for k, v := range a.Headers {
+				cp.Headers[k] = v
+			}
+		}
 		out = append(out, cp)
 	}
 	return out
+}
+
+// Agent returns a defensive copy of one registered definition.
+func (m *Manager) Agent(ref string) (Agent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	agent, ok := m.agents[ref]
+	if !ok {
+		return Agent{}, ErrUnknownRef
+	}
+	return cloneAgent(agent), nil
 }
 
 // Start launches the agent's command as a child of the supervisor and records
@@ -324,14 +530,14 @@ func (m *Manager) Status(ref string) (AgentStatus, error) {
 func (m *Manager) KillAll() error {
 	m.mu.Lock()
 	procs := make([]struct {
-		ref  string
-		t    *tracked
+		ref string
+		t   *tracked
 	}, 0, len(m.process))
 	for ref, t := range m.process {
 		if t != nil && t.cmd != nil && t.cmd.Process != nil {
 			procs = append(procs, struct {
-				ref  string
-				t    *tracked
+				ref string
+				t   *tracked
 			}{ref: ref, t: t})
 		}
 	}
@@ -415,15 +621,18 @@ func tryDecodeObject(data []byte) ([]Agent, bool) {
 func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 	var obj struct {
 		MCPServers map[string]struct {
-			Ref      string            `json:"ref"`
-			AgentID  string            `json:"agent_id"`
-			Name     string            `json:"name"`
-			Command  string            `json:"command"`
-			Args     []string          `json:"args"`
-			Env      map[string]string `json:"env"`
-			Cwd      string            `json:"cwd"`
-			User     string            `json:"user"`
-			Enabled  bool              `json:"enabled"`
+			Ref       string            `json:"ref"`
+			AgentID   string            `json:"agent_id"`
+			Name      string            `json:"name"`
+			Command   string            `json:"command"`
+			Args      []string          `json:"args"`
+			Env       map[string]string `json:"env"`
+			Cwd       string            `json:"cwd"`
+			User      string            `json:"user"`
+			Transport string            `json:"transport"`
+			URL       string            `json:"url"`
+			Headers   map[string]string `json:"headers"`
+			Enabled   *bool             `json:"enabled"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
@@ -443,14 +652,17 @@ func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 		// best-effort; no sort possible means we still iterate in some order
 		for k, v := range obj.MCPServers {
 			out = append(out, Agent{
-				Ref:     firstNonEmpty(v.AgentID, v.Ref, k),
-				Name:    firstNonEmpty(v.Name, k),
-				Command: v.Command,
-				Args:    v.Args,
-				Env:     v.Env,
-				Cwd:     v.Cwd,
-				User:    v.User,
-				Enabled: v.Enabled,
+				Ref:       firstNonEmpty(v.AgentID, v.Ref, k),
+				Name:      firstNonEmpty(v.Name, k),
+				Command:   v.Command,
+				Args:      v.Args,
+				Env:       v.Env,
+				Cwd:       v.Cwd,
+				User:      v.User,
+				Transport: firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
+				URL:       v.URL,
+				Headers:   v.Headers,
+				Enabled:   enabledOrDefault(v.Enabled),
 			})
 		}
 		return out, true
@@ -458,22 +670,40 @@ func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 	for _, k := range keys {
 		v := obj.MCPServers[k]
 		out = append(out, Agent{
-			Ref:     firstNonEmpty(v.AgentID, v.Ref, k),
-			Name:    firstNonEmpty(v.Name, k),
-			Command: v.Command,
-			Args:    v.Args,
-			Env:     v.Env,
-			Cwd:     v.Cwd,
-			User:    v.User,
-			Enabled: v.Enabled,
+			Ref:       firstNonEmpty(v.AgentID, v.Ref, k),
+			Name:      firstNonEmpty(v.Name, k),
+			Command:   v.Command,
+			Args:      v.Args,
+			Env:       v.Env,
+			Cwd:       v.Cwd,
+			User:      v.User,
+			Transport: firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
+			URL:       v.URL,
+			Headers:   v.Headers,
+			Enabled:   enabledOrDefault(v.Enabled),
 		})
 	}
 	return out, true
 }
 
+func enabledOrDefault(enabled *bool) bool {
+	return enabled == nil || *enabled
+}
+
+func transportFor(command string, url string) string {
+	if command != "" {
+		return "stdio"
+	}
+	if url != "" {
+		return "streamable-http"
+	}
+	return ""
+}
+
 func normalizeAgents(in []Agent) []Agent {
 	out := make([]Agent, 0, len(in))
 	for _, a := range in {
+		a = normalizeAgent(a)
 		if a.Ref == "" {
 			continue
 		}

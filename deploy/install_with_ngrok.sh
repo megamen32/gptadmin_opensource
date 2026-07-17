@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/gptadmin"
-ARCHIVE_URL=${PACKAGE_URL:-"https://became.bezrabotnyi.com/gptadmin.tar.gz"}
+ARCHIVE_URL=${PACKAGE_URL:-"https://github.com/megamen32/gptadmin_opensource/releases/latest/download/gptadmin.tar.gz"}
 LOG_DIR="/var/log/gptadmin"
 
 read -rp "Enter Bearer token for API: " BEARER_TOKEN

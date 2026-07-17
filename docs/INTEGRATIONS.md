@@ -9,7 +9,7 @@ Four ways to connect an AI client to your GPTAdmin hub.
 | 3 | [OAuth handshake](#3-oauth-handshake) | the auth flow that feeds #1 and #2 | PKCE S256 |
 | 4 | [Browser extension](#4-browser-extension) | DeepSeek / Qwen / Alice / any web chat | `Bridge Key` = `CTL_TOKEN` |
 
-All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md) (older three-way overview) and [GPTADMIN_INSTRUCTIONS.md](./GPTADMIN_INSTRUCTIONS.md) (read-only reference for AI agents).
+All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md) (older three-way overview) and [GPTADMIN_INSTRUCTIONS.md]() (read-only reference for AI agents).
 
 ---
 
@@ -17,7 +17,7 @@ All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md)
 
 **When to use.** ChatGPT-family clients only: `chat.openai.com`, ChatGPT Desktop, Plus/Team. Any tool that imports an OpenAPI 3.x schema. Right pick when you want a Custom GPT that calls your hub without Codex-style per-hour tool-call quotas.
 
-**Protocol.** REST + OpenAPI 3.1, Bearer auth, over the `/mcp-relay/*` family (`list_mcp_agents`, `list_mcp_tools`, `call_mcp_tool`, `get_mcp_job`, `resources/list`, `resources/read`).
+**Protocol.** REST + OpenAPI 3.1, Bearer auth. The compact control flow is `discover → schema → execute`; `job` polls background work. Legacy long names remain accepted but are not advertised.
 
 **Schema URL.** `https://<your-hub>/actions/openapi.yaml` — the canonical, live-served spec. The repo also ships `public/openapi.json` (synonym of the same spec) so you can `curl` it locally.
 
@@ -32,17 +32,17 @@ All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md)
 ### Example
 
 ```bash
-curl -sS -X POST https://<your-hub>/mcp-relay/list_mcp_agents \
+curl -sS -X GET https://<your-hub>/mcp-relay/servers \
   -H "Authorization: Bearer $CTL_TOKEN" \
   -H "Content-Type: application/json" -d '{}'
 ```
 
 ```text
-POST /mcp-relay/call_mcp_tool
+POST /mcp-relay/call
 {
-  "agent_id": "shell:roomhacker-server-100",
-  "tool_name": "shell_exec",
-  "arguments": { "cmd": "uptime" }
+  "target": "shell:roomhacker-server-100",
+  "tool": "shell_exec",
+  "args": { "cmd": "uptime" }
 }
 ```
 
@@ -87,7 +87,7 @@ POST /mcp-relay/call_mcp_tool
 }
 ```
 
-Restart Claude Desktop. The `gptadmin` server shows up with `list_mcp_agents`, `list_mcp_tools`, `call_mcp_tool`, `get_mcp_job`, `resources/list`, `resources/read`.
+Restart Claude Desktop. The `gptadmin` server exposes `discover`, `schema`, `execute`, `job`, `inspect`, and `ui`.
 
 #### Mavis
 
@@ -142,7 +142,7 @@ Clients that support [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) / [RFC 9
 **Scopes.**
 
 - `gptadmin.read` — list servers / tools, read resources, read jobs.
-- `gptadmin.exec` — call tools (`call_mcp_tool`), enqueue jobs.
+- `gptadmin.exec` — execute tools (`execute`), enqueue jobs.
 
 The hub's `/authorize` page lists the requested scopes; the user types the admin password to consent.
 
@@ -219,7 +219,7 @@ Two buttons added to the web-chat UI:
 - **MCP All** (`Alt+M`) — inserts a compact description of every agent and its tools into the chat input, and copies the same prompt to clipboard.
 - **MCP** — opens a panel to pick a specific agent with detailed tool docs.
 
-When the AI responds with a ` ```mcp ` fenced JSON block, the script highlights it, POSTs the call to `<Bridge URL>/mcp-relay/call_mcp_tool`, and replaces the block with the hub's response.
+When the AI responds with a ` ```mcp ` fenced JSON block, the script highlights it, POSTs the call to `<Bridge URL>/mcp-relay/call`, and replaces the block with the hub's response.
 
 > If auto-insert fails on a site with a custom editor, the prompt is always on the clipboard — <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd>.
 
@@ -247,7 +247,7 @@ To add a new site, append a `@match` line to `apps/chatgpt-admin-app/public/user
 ## Cross-adapter troubleshooting
 
 - **Where is `CTL_TOKEN`?** On the hub host: `grep ^CTL_TOKEN config/gptadmin.env`. Rotate by editing the file and `systemctl restart gptadmin-hub`.
-- **Hub isn't reachable from ChatGPT / Claude / my client** — must be public HTTPS. Localhost and LAN IPs work for manual testing but not for ChatGPT Actions or remote MCP clients. Use a Cloudflare Tunnel (see [TUNNELS.md](./TUNNELS.md)) or a reverse proxy with a real domain.
+- **Hub isn't reachable from ChatGPT / Claude / my client** — must be public HTTPS. Localhost and LAN IPs work for manual testing but not for ChatGPT Actions or remote MCP clients. Use a Cloudflare Tunnel (see [TUNNELS.md](./TUNNELS_DOCS.md)) or a reverse proxy with a real domain.
 - **MCP connects but every tool returns "unauthorized"** — open `https://<your-hub>/.well-known/oauth-authorization-server` in a browser; if it 404s the OAuth routes aren't enabled in your hub build. Re-check `apps/chatgpt-admin-app/` is deployed (or that the Go hub OAuth handlers are enabled).
 - **Custom GPT doesn't see the action** — verify the schema URL is public: `curl -I https://<your-hub>/actions/openapi.yaml` from outside your network. If 4xx/5xx, the tunnel / DNS isn't pointing at the hub.
 - **Browser extension doesn't inject** — userscript manager permissions: Tampermonkey Dashboard → "Allow user scripts" must be on; iOS Safari → Settings → Safari → Extensions → Userscripts → Allow; Android Firefox → add-on enabled for the current site.

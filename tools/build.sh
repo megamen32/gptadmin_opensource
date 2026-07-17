@@ -428,6 +428,7 @@ EOF
   (cd "$ART_DIR/android-arm64" && tar -czf "../gptadmin-android-arm64.tar.gz.tmp.$$" bin install_android.sh README.android.md)
   mv -f "$ART_DIR/gptadmin-android-arm64.tar.gz.tmp.$$" "$ART_DIR/gptadmin-android-arm64.tar.gz"
   sha256sum "$ART_DIR/gptadmin-android-arm64.tar.gz" > "$ART_DIR/gptadmin-android-arm64.sha256"
+  printf '%s\n' "$BUILD_VERSION" > "$ART_DIR/gptadmin-android-arm64.version"
   echo "built: $ART_DIR/gptadmin-android-arm64.tar.gz"
 }
 

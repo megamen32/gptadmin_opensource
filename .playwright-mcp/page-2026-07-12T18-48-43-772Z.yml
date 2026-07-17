@@ -1,0 +1,146 @@
+- generic [active] [ref=f2e1]:
+  - generic [ref=f2e2]:
+    - banner [ref=f2e3]:
+      - generic [ref=f2e4]:
+        - link "header.brandHome" [ref=f2e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=f2e9]: GPT‑Админ
+        - generic [ref=f2e10]:
+          - button "Switch language" [ref=f2e12]:
+            - generic [ref=f2e17]: RU
+          - link "header.brandGitHub" [ref=f2e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=f2e22]: GitHub
+          - button "header.openMenu" [ref=f2e23]
+    - main [ref=f2e25]:
+      - generic [ref=f2e28]:
+        - generic [ref=f2e29]:
+          - generic [ref=f2e30]:
+            - generic [ref=f2e31]: hero.kicker
+            - link "GitHub" [ref=f2e34] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+          - heading "hero.titleLead hero.titleAccent" [level=1] [ref=f2e38]
+          - paragraph [ref=f2e39]: hero.body
+          - button "hero.ctaPrimary" [ref=f2e41]
+          - generic [ref=f2e50]:
+            - tablist "Выберите операционную систему" [ref=f2e51]:
+              - tab "macOS / Linux" [selected] [ref=f2e52]
+              - tab "Windows" [ref=f2e56]
+            - generic [ref=f2e60]:
+              - generic [ref=f2e61]: $
+              - code [ref=f2e62]: curl -s https://became.bezrabotnyi.com/install.sh | bash
+              - button "Скопировать команду" [ref=f2e63]
+          - generic [ref=f2e67]:
+            - generic [ref=f2e68]: hero.trustNoSudo
+            - generic [ref=f2e72]: hero.trustPlatforms
+            - generic [ref=f2e74]: hero.trustNoDomain
+        - generic [ref=f2e80]:
+          - paragraph [ref=f2e81]: ваш AI
+          - generic [ref=f2e82]:
+            - link [ref=f2e84] [cursor=pointer]:
+              - /url: "#/mcp-server"
+              - generic [ref=f2e98]:
+                - paragraph [ref=f2e99]: Claude · Codex
+                - paragraph [ref=f2e100]: MCP-клиент
+            - link [ref=f2e102] [cursor=pointer]:
+              - /url: "#/mcp-extension"
+              - generic [ref=f2e107]:
+                - paragraph [ref=f2e108]: DeepSeek · Qwen
+                - paragraph [ref=f2e109]: расширение
+            - link [ref=f2e111] [cursor=pointer]:
+              - /url: "#/chatgpt"
+              - generic [ref=f2e115]:
+                - paragraph [ref=f2e116]: ChatGPT · OpenUI
+                - paragraph [ref=f2e117]: OpenAI Action
+          - generic [ref=f2e118]:
+            - generic [ref=f2e119]:
+              - generic [ref=f2e120]: Streamable HTTP
+              - generic [ref=f2e123]: HTTPS
+              - generic [ref=f2e126]: REST
+            - generic [ref=f2e136]:
+              - paragraph [ref=f2e137]: через туннель
+              - paragraph [ref=f2e138]: через туннель
+              - paragraph [ref=f2e139]: через туннель
+          - generic [ref=f2e146]:
+            - paragraph [ref=f2e147]: GPT‑Админ
+            - paragraph [ref=f2e148]: MCP hub
+          - generic [ref=f2e149]:
+            - generic [ref=f2e150]:
+              - generic [ref=f2e151]: long-poll
+              - generic [ref=f2e157]: webhook
+              - generic [ref=f2e163]: queue
+            - generic [ref=f2e176]:
+              - paragraph [ref=f2e177]: пробивает любой NAT
+              - paragraph [ref=f2e178]: нулевая задержка
+              - paragraph [ref=f2e179]: надёжная доставка
+          - paragraph [ref=f2e180]: ваши серверы
+          - generic [ref=f2e181]:
+            - generic [ref=f2e182]:
+              - generic [ref=f2e183]:
+                - paragraph [ref=f2e189]: OpenWRT
+                - paragraph [ref=f2e190]: router
+              - generic [ref=f2e191]:
+                - generic [ref=f2e192]: firewall
+                - generic [ref=f2e196]: wifi
+                - generic [ref=f2e202]: vpn
+            - generic [ref=f2e210]:
+              - generic [ref=f2e211]:
+                - paragraph [ref=f2e216]: server-02
+                - paragraph [ref=f2e217]: Windows
+              - generic [ref=f2e218]:
+                - generic [ref=f2e219]: minecraft
+                - generic [ref=f2e223]: powershell
+                - generic [ref=f2e227]: rcon
+            - generic [ref=f2e235]:
+              - generic [ref=f2e236]:
+                - paragraph [ref=f2e241]: server-03
+                - paragraph [ref=f2e242]: Windows
+              - generic [ref=f2e243]:
+                - generic [ref=f2e244]: git
+                - generic [ref=f2e250]: postgres
+                - generic [ref=f2e256]: openmemory
+          - generic [ref=f2e268]: shellmcp поднимает MCP и передаёт в хаб
+      - generic [ref=f2e283]:
+        - paragraph [ref=f2e284]: author.eyebrow
+        - generic [ref=f2e285]:
+          - paragraph [ref=f2e286]: author.body1
+          - paragraph [ref=f2e287]: author.body2
+        - link "t.me/careviolan" [ref=f2e288] [cursor=pointer]:
+          - /url: https://t.me/careviolan
+      - generic [ref=f2e294]:
+        - generic [ref=f2e295]: useCases.eyebrow
+        - heading "useCases.titleLead useCases.titleAccent" [level=2] [ref=f2e297]
+        - paragraph [ref=f2e298]: useCases.body
+      - generic [ref=f2e301]:
+        - generic [ref=f2e302]: adapters.eyebrow
+        - heading "adapters.titleLead adapters.titleAccent" [level=2] [ref=f2e304]
+        - paragraph [ref=f2e305]: adapters.body
+    - contentinfo [ref=f2e306]:
+      - generic [ref=f2e307]:
+        - generic [ref=f2e308]:
+          - link "GPT‑Админ" [ref=f2e309] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "Подвал" [ref=f2e314]:
+            - link "Как работает" [ref=f2e315] [cursor=pointer]:
+              - /url: "#how"
+            - link "Функции" [ref=f2e316] [cursor=pointer]:
+              - /url: "#features"
+            - link "FAQ" [ref=f2e317] [cursor=pointer]:
+              - /url: "#faq"
+            - link "Документация и Privacy" [ref=f2e318] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "GitHub" [ref=f2e319] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "bezrabotnyi.com" [ref=f2e323] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "@careviolan" [ref=f2e327] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=f2e331]:
+          - paragraph [ref=f2e332]: © 2025–2026 GPT‑Админ · в разработке с мая 2025
+          - generic [ref=f2e333]:
+            - link "bezrabotnyi.com — все проекты" [ref=f2e334] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=f2e338]: ·
+            - paragraph [ref=f2e339]: Сделано для тех, кто устал копипастить команды
+  - region "Notifications (F8)":
+    - list

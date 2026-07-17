@@ -116,10 +116,13 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 	out := make([]map[string]any, 0, len(agents))
 	for _, a := range agents {
 		out = append(out, map[string]any{
-			"ref":     a.Ref,
-			"name":    a.Name,
-			"command": a.Command,
-			"args":    a.Args,
+			"ref":       a.Ref,
+			"name":      a.Name,
+			"transport": a.Transport,
+			"command":   a.Command,
+			"args":      a.Args,
+			"url":       a.URL,
+			"enabled":   a.Enabled,
 		})
 	}
 	return out

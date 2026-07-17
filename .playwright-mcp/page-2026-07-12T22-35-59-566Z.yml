@@ -1,0 +1,141 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - banner [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - link "header.brandHome" [ref=f1e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=f1e9]: GPT‑Admin
+        - generic [ref=f1e10]:
+          - button "Switch language" [ref=f1e12]:
+            - generic [ref=f1e17]: EN
+          - link "header.brandGitHub" [ref=f1e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=f1e22]: GitHub
+          - button "header.openMenu" [ref=f1e23]
+    - main [ref=f1e25]:
+      - generic [ref=f1e28]:
+        - generic [ref=f1e29]:
+          - generic [ref=f1e30]:
+            - generic [ref=f1e31]: hero.kicker
+            - link "GitHub" [ref=f1e34] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+          - heading "hero.titleLead hero.titleAccent" [level=1] [ref=f1e38]
+          - paragraph [ref=f1e39]: hero.body
+          - button "hero.ctaPrimary" [ref=f1e41]
+          - generic [ref=f1e50]:
+            - tablist "Выберите операционную систему" [ref=f1e51]:
+              - tab "macOS / Linux" [selected] [ref=f1e52]
+              - tab "Windows" [ref=f1e56]
+            - generic [ref=f1e60]:
+              - generic [ref=f1e61]: $
+              - code [ref=f1e62]: curl -s https://became.bezrabotnyi.com/install.sh | bash
+              - button "Скопировать команду" [ref=f1e63]
+          - generic [ref=f1e67]:
+            - generic [ref=f1e68]: hero.trustNoSudo
+            - generic [ref=f1e72]: hero.trustPlatforms
+            - generic [ref=f1e74]: hero.trustNoDomain
+        - generic [ref=f1e80]:
+          - paragraph [ref=f1e81]: ваш AI
+          - generic [ref=f1e82]:
+            - link [ref=f1e84] [cursor=pointer]:
+              - /url: "#/mcp-server"
+              - generic [ref=f1e98]:
+                - paragraph [ref=f1e99]: Claude · Codex
+                - paragraph [ref=f1e100]: MCP-клиент
+            - link [ref=f1e102] [cursor=pointer]:
+              - /url: "#/mcp-extension"
+              - generic [ref=f1e107]:
+                - paragraph [ref=f1e108]: DeepSeek · Qwen
+                - paragraph [ref=f1e109]: расширение
+            - link [ref=f1e111] [cursor=pointer]:
+              - /url: "#/chatgpt"
+              - generic [ref=f1e115]:
+                - paragraph [ref=f1e116]: ChatGPT · OpenUI
+                - paragraph [ref=f1e117]: OpenAI Action
+          - generic [ref=f1e118]:
+            - generic [ref=f1e119]:
+              - generic [ref=f1e120]: Streamable HTTP
+              - generic [ref=f1e123]: HTTPS
+              - generic [ref=f1e126]: REST
+            - generic [ref=f1e136]:
+              - paragraph [ref=f1e137]: через туннель
+              - paragraph [ref=f1e138]: через туннель
+              - paragraph [ref=f1e139]: через туннель
+          - generic [ref=f1e146]:
+            - paragraph [ref=f1e147]: GPT‑Админ
+            - paragraph [ref=f1e148]: MCP hub
+          - generic [ref=f1e149]:
+            - generic [ref=f1e150]:
+              - generic [ref=f1e151]: long-poll
+              - generic [ref=f1e157]: webhook
+              - generic [ref=f1e163]: queue
+            - generic [ref=f1e176]:
+              - paragraph [ref=f1e177]: пробивает любой NAT
+              - paragraph [ref=f1e178]: нулевая задержка
+              - paragraph [ref=f1e179]: надёжная доставка
+          - paragraph [ref=f1e180]: ваши серверы
+          - generic [ref=f1e181]:
+            - generic [ref=f1e182]:
+              - generic [ref=f1e183]:
+                - paragraph [ref=f1e189]: OpenWRT
+                - paragraph [ref=f1e190]: router
+              - generic [ref=f1e191]:
+                - generic [ref=f1e192]: firewall
+                - generic [ref=f1e196]: wifi
+                - generic [ref=f1e202]: vpn
+            - generic [ref=f1e210]:
+              - generic [ref=f1e211]:
+                - paragraph [ref=f1e216]: server-02
+                - paragraph [ref=f1e217]: Windows
+              - generic [ref=f1e218]:
+                - generic [ref=f1e219]: minecraft
+                - generic [ref=f1e223]: powershell
+                - generic [ref=f1e227]: rcon
+            - generic [ref=f1e235]:
+              - generic [ref=f1e236]:
+                - paragraph [ref=f1e241]: server-03
+                - paragraph [ref=f1e242]: Windows
+              - generic [ref=f1e243]:
+                - generic [ref=f1e244]: git
+                - generic [ref=f1e250]: postgres
+                - generic [ref=f1e256]: openmemory
+          - generic [ref=f1e268]: shellmcp поднимает MCP и передаёт в хаб
+      - generic [ref=f1e283]:
+        - paragraph [ref=f1e284]: author.eyebrow
+        - generic [ref=f1e285]:
+          - paragraph [ref=f1e286]: author.body1
+          - paragraph [ref=f1e287]: author.body2
+        - link "t.me/careviolan" [ref=f1e288] [cursor=pointer]:
+          - /url: https://t.me/careviolan
+      - generic [ref=f1e294]:
+        - generic [ref=f1e295]: useCases.eyebrow
+        - heading "useCases.titleLead useCases.titleAccent" [level=2] [ref=f1e297]
+        - paragraph [ref=f1e298]: useCases.body
+      - generic [ref=f1e301]:
+        - generic [ref=f1e302]: adapters.eyebrow
+        - heading "adapters.titleLead adapters.titleAccent" [level=2] [ref=f1e304]
+        - paragraph [ref=f1e305]: adapters.body
+    - contentinfo [ref=f1e306]:
+      - generic [ref=f1e307]:
+        - generic [ref=f1e308]:
+          - link "GPT‑Admin" [ref=f1e309] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "footer.ariaLabel" [ref=f1e314]:
+            - link "footer.links.docs" [ref=f1e315] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "footer.links.github" [ref=f1e316] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "footer.links.website" [ref=f1e320] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "footer.links.telegram" [ref=f1e324] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=f1e328]:
+          - paragraph [ref=f1e329]: footer.copyright
+          - generic [ref=f1e330]:
+            - link "footer.projects" [ref=f1e331] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=f1e335]: ·
+            - paragraph [ref=f1e336]: footer.tagline
+  - region "Notifications (F8)":
+    - list
+  - alert [ref=f1e338]

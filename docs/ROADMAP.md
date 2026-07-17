@@ -74,6 +74,5 @@ PRs welcome — see [CONTRIBUTING.md](../CONTRIBUTING.md). Areas that need love:
 
 ## See also
 
-- [Open-Core Plan](./OPEN_CORE_PLAN.md) — the internal launch plan
 - [Architecture](./ARCHITECTURE.md) — how it's built
 - [CHANGELOG.md](../CHANGELOG.md) — what changed

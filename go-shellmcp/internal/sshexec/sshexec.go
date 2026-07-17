@@ -415,8 +415,8 @@ func buildHostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
 		// Mirror Python's AutoAddPolicy stance: not safe, but the
 		// tool is typically deployed in known networks. Log loudly
 		// so operators notice.
-		log.Printf("sshexec WARNING: no SSH_KNOWN_HOSTS_FILE configured; "+
-			"host keys will be accepted without verification. "+
+		log.Printf("sshexec WARNING: no SSH_KNOWN_HOSTS_FILE configured; " +
+			"host keys will be accepted without verification. " +
 			"Set SSH_KNOWN_HOSTS_FILE to enable safe verification.")
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
@@ -434,6 +434,13 @@ func buildHostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
 // intentionally unexported-but-package-internal so it can be unit
 // tested without an SSH server.
 func ComposeCmd(cmd, cwd string, env map[string]string) string {
+	return ComposeCmdForUser(cmd, cwd, env, "", "")
+}
+
+// ComposeCmdForUser applies the effective ShellMCP user even when the
+// transport itself authenticates as root. A missing remote sudo capability
+// fails the command instead of writing user workspaces as root.
+func ComposeCmdForUser(cmd, cwd string, env map[string]string, runAsUser, transportUser string) string {
 	if strings.TrimSpace(cmd) == "" {
 		return ""
 	}
@@ -458,11 +465,20 @@ func ComposeCmd(cmd, cwd string, env map[string]string) string {
 	}
 	b.WriteString("bash -lc ")
 	quoteShellArg(&b, cmd)
+	composed := b.String()
+	if runAsUser == "" || runAsUser == "root" || runAsUser == transportUser {
+		return composed
+	}
+	b.Reset()
+	b.WriteString("sudo -H -u ")
+	quoteShellArg(&b, runAsUser)
+	b.WriteString(" -- bash -lc ")
+	quoteShellArg(&b, composed)
 	return b.String()
 }
 
 // quoteShellArg writes s to b wrapped in single quotes, escaping any
-// embedded single quotes via the standard '\'' trick. Kept as a
+// embedded single quotes via the standard '\” trick. Kept as a
 // package-private helper to keep allocations low in the streaming
 // path.
 func quoteShellArg(b *strings.Builder, s string) {

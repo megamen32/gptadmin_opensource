@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
 )
 
 const DefaultLimitBytes int64 = 8192
@@ -86,6 +88,9 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := ImplicitRootExecutionError(req); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	}
 
 	cmd, runAsUser := buildCommand(ctx, req)
 	if req.Cwd != "" {
@@ -149,18 +154,33 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		cwd = abs
 	}
 	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd, RunAsUser: runAsUser}
+	stdoutSpilled := stdout.Spilled()
+	stderrSpilled := stderr.Spilled()
+	_ = stdout.Close()
+	_ = stderr.Close()
+	if !stdoutSpilled {
+		_ = os.Remove(stdout.Path())
+	}
+	if !stderrSpilled {
+		_ = os.Remove(stderr.Path())
+	}
 	files := make([]string, 0, 2)
-	if stdout.Spilled() {
+	if stdoutSpilled {
 		res.Spilled = true
 		res.StdoutPath = stdout.Path()
 		files = append(files, stdout.Path())
 	}
-	if stderr.Spilled() {
+	if stderrSpilled {
 		res.Spilled = true
 		res.StderrPath = stderr.Path()
 		files = append(files, stderr.Path())
 	}
 	res.Files = files
+	protected := make(map[string]bool, len(files))
+	for _, path := range files {
+		protected[path] = true
+	}
+	_, _ = storagebudget.Enforce(spillDir, protected)
 	if ctx.Err() == context.DeadlineExceeded {
 		res.Error = "timeout"
 		res.TimedOut = true
@@ -260,6 +280,18 @@ func targetRunUser(req Request) (string, bool) {
 	}
 	return "", false
 }
+
+func ImplicitRootExecutionError(req Request) error {
+	// A system service is often launched as root so it can serve privileged
+	// maintenance requests. Ordinary commands must not silently inherit that
+	// identity and leave root-owned files in a user's workspace.
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 && req.DefaultUser == "" && req.RunAsUser == "" && req.User == "" && !commandMentionsSudo(req.Cmd) {
+		return errors.New("root shellmcp requires SHELLMCP_DEFAULT_USER for ordinary commands; use run_as_user=root or sudo explicitly for privileged commands")
+	}
+	return nil
+}
+
+func TargetRunUser(req Request) (string, bool) { return targetRunUser(req) }
 
 func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
 	user, explicit := targetRunUser(req)

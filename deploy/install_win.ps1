@@ -2,8 +2,8 @@
 <#
 GPT Admin shellmcp Windows public installer.
 
-Installs the obfuscated PyInstaller/PyArmor Windows artifact from a public URL.
-No git checkout, no private repo, no local Python runtime.
+Installs the Go ShellMCP Windows artifact from a public URL.
+No git checkout, no private repo, no local Go or Python runtime.
 Autostart uses built-in Windows Task Scheduler.
 
 Usage:
@@ -98,15 +98,16 @@ function Download-And-InstallArtifact {
 
 function Write-Config {
     Set-Content -Path $HubPublicKeyFile -Value $HubPublicKey -Encoding ASCII
+    $queueEnabled = if ($ShellmcpTransport -eq 'polling') { '1' } else { '0' }
     @(
         "SHELLMCP_TOKEN=$ShellmcpToken",
         "HUB_URL=$HubUrl",
         "SHELLMCP_PORT=$ShellmcpPort",
-        "SHELLMCP_BIND=$ShellmcpBind",
+        "SHELLMCP_HOST=$ShellmcpBind",
         "SHELLMCP_TRANSPORT=$ShellmcpTransport",
         "SHELLMCP_URL=$ShellmcpUrl",
         "SHELLMCP_NAME=$ShellmcpName",
-        "QUEUE_URL=1",
+        "SHELLMCP_QUEUE=$queueEnabled",
         "HUB_PUBLIC_KEY_FILE=$HubPublicKeyFile",
         "SHELLMCP_SERVICE_NAME=$TaskName",
         "SHELLMCP_SERVICE_SCOPE=$(if ($UserMode) { 'user' } else { 'system' })",
@@ -121,11 +122,11 @@ function Write-Config {
 `$env:SHELLMCP_TOKEN = '$ShellmcpToken'
 `$env:HUB_URL = '$HubUrl'
 `$env:SHELLMCP_PORT = '$ShellmcpPort'
-`$env:SHELLMCP_BIND = '$ShellmcpBind'
+`$env:SHELLMCP_HOST = '$ShellmcpBind'
 `$env:SHELLMCP_TRANSPORT = '$ShellmcpTransport'
 `$env:SHELLMCP_URL = '$ShellmcpUrl'
 `$env:SHELLMCP_NAME = '$ShellmcpName'
-`$env:QUEUE_URL = '1'
+`$env:SHELLMCP_QUEUE = '$queueEnabled'
 `$env:HUB_PUBLIC_KEY_FILE = '$HubPublicKeyFile'
 `$env:SHELLMCP_SERVICE_NAME = '$TaskName'
 `$env:SHELLMCP_SERVICE_SCOPE = '$(if ($UserMode) { 'user' } else { 'system' })'

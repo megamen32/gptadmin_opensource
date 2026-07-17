@@ -20,10 +20,11 @@ type Client struct {
 	BaseURL  string
 	HTTP     *http.Client
 	Identity *security.Identity
+	Token    string
 }
 
-func New(base string, id *security.Identity) *Client {
-	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, HTTP: &http.Client{Timeout: 90 * time.Second}}
+func New(base string, id *security.Identity, token string) *Client {
+	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: &http.Client{Timeout: 90 * time.Second}}
 }
 
 type Beat struct {
@@ -47,11 +48,13 @@ type Beat struct {
 }
 
 type QueueJob struct {
-	ID      string            `json:"id"`
-	Cmd     string            `json:"cmd"`
-	Cwd     string            `json:"cwd"`
-	Timeout int               `json:"timeout"`
-	Env     map[string]string `json:"env"`
+	ID        string            `json:"id"`
+	ToolName  string            `json:"tool_name,omitempty"`
+	Arguments map[string]any    `json:"arguments,omitempty"`
+	Cmd       string            `json:"cmd,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	Timeout   int               `json:"timeout,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
 }
 
 type TaskResult struct {
@@ -132,8 +135,16 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	if err := json.Unmarshal(body, &job); err != nil {
 		return QueueJob{}, false, err
 	}
-	return job, job.ID != "" && job.Cmd != "", nil
+	return job, job.ID != "" && (job.Cmd != "" || job.ToolName != ""), nil
 }
+
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("result HTTP %d: %s", e.StatusCode, e.Body) }
+
 func (c *Client) PostResult(ctx context.Context, name string, res TaskResult) error {
 	p := "/queue/" + url.PathEscape(name) + "/result"
 	resp, body, err := c.doJSON(ctx, http.MethodPost, p, res)
@@ -142,7 +153,7 @@ func (c *Client) PostResult(ctx context.Context, name string, res TaskResult) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("result HTTP %d: %s", resp.StatusCode, string(body))
+		return &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	return nil
 }
@@ -186,6 +197,9 @@ func (c *Client) do(ctx context.Context, method, p string, body []byte) (*http.R
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	if c.Identity != nil {
 		for k, v := range c.Identity.Sign(method, u.EscapedPath(), body) {

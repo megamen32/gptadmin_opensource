@@ -496,10 +496,15 @@ class Relay:
         log(f"relay register ok result={short_json(result, 800)}", enabled=self.verbose)
 
     def run(self) -> None:
-        self.register()
         log(f"relay poll loop start agent_id={self.agent_id}", enabled=self.verbose)
+        retry_delay = 1
+        registered = False
         while not STOP:
             try:
+                if not registered:
+                    self.register()
+                    registered = True
+                    retry_delay = 1
                 job = http_json(
                     "GET",
                     f"{self.hub}/mcp-relay/poll/{urllib.parse.quote(self.agent_id)}?timeout=55",
@@ -540,9 +545,15 @@ class Relay:
                     }
                 http_json("POST", f"{self.hub}/mcp-relay/result/{urllib.parse.quote(self.agent_id)}", self.token, payload, timeout=30)
                 log(f"relay job result posted id={job_id} ok={payload.get('ok')}", enabled=self.verbose)
+                retry_delay = 1
             except Exception as e:
                 log(f"relay loop error: {e}", enabled=True)
-                time.sleep(3)
+                # A public Hub URL can be switched to a fresh fallback that has
+                # no in-memory relay registry. Re-register before polling again
+                # so the agent becomes callable without a service restart.
+                registered = False
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30)
         log("relay stop requested", enabled=self.verbose)
 
 

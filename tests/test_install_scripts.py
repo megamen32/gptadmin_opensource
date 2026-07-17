@@ -34,6 +34,15 @@ def test_install_sh_references_download_url():
         f"install.sh should reference {EXPECTED_URL_FRAGMENT}"
 
 
+def test_android_installer_configures_platform_specific_auto_update():
+    """Android must poll its raw-binary manifest and restart after a swap."""
+    content = (DEPLOY / "install_android.sh").read_text()
+    assert "SHELLMCP_AUTO_UPDATE=1" in content
+    assert "SHELLMCP_UPDATE_MANIFEST_URL=$HUB_URL/artifacts/shellmcp-android-arm64.json" in content
+    assert "SHELLMCP_UPDATE_TOKEN=$SHELLMCP_TOKEN" in content
+    assert "SHELLMCP_RESTART_CMD='kill -TERM $PPID'" in content
+
+
 def test_install_win_exists():
     """Windows install script should exist in deploy/ or public/."""
     p1 = DEPLOY / "install_win.ps1"

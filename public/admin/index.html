@@ -138,12 +138,13 @@
         <div class="row" style="margin:12px 0"><button class="btn-secondary" onclick="loadSecurityEnv()">↻ Обновить</button><button class="cancelBtn" onclick="rotateCtlToken()">↻ Ротировать CTL_TOKEN</button><button class="cancelBtn" onclick="rotateOAuth()">↻ Ротировать OAUTH_SECRET</button></div>
         <div id="securityEnv" class="stackList"><p class="muted">Нажмите «Обновить»</p></div>
         <div style="margin-top:16px"><h2 style="font-size:13px">Установить значение</h2>
-          <div class="row"><select id="secEnvKey"><option>CTL_TOKEN</option><option>ADMIN_PASSWORD</option><option>OAUTH_CLIENT_SECRET</option><option>MCP_BRIDGE_KEY</option><option>HUB_URL</option><option>PUBLIC_ORIGIN</option><option>MCP_RESOURCE</option><option value="_custom">— своя —</option></select><input id="secEnvVal" placeholder="новое значение" style="min-width:280px"><button onclick="setEnvVar()">Установить</button></div>
+          <div class="row"><select id="secEnvKey"><option>CTL_TOKEN</option><option>ADMIN_PASSWORD</option><option>OAUTH_CLIENT_SECRET</option><option>MCP_BRIDGE_KEY</option><option>HUB_URL</option><option>PUBLIC_ORIGIN</option><option>MCP_RESOURCE</option><option>SHELLMCP_HEARTBEAT</option><option value="_custom">— своя —</option></select><input id="secEnvVal" placeholder="новое значение" style="min-width:280px"><button onclick="setEnvVar()">Установить</button></div>
+          <div class="row"><label class="small"><input type="checkbox" id="shellHeartbeatEnabled" onchange="setShellHeartbeatFromPanel(this.checked)"> ShellMCP heartbeat</label><span class="muted small">по умолчанию выключен</span></div>
+          <p class="muted small">Long-poll и webhook сами обновляют active. Включайте heartbeat только при отдельной диагностической необходимости.</p>
         </div>
-        <div style="margin-top:16px"><h2 style="font-size:13px">MCP bearer-токен</h2>
-          <div class="row"><input id="secMcpTokenName" placeholder="client_id" style="min-width:200px"><button onclick="issueMcpTokenFromPanel()">Выпустить</button></div>
-          <p class="muted small">Токен выпускает текущий hub, поэтому issuer и audience совпадают с live PUBLIC_ORIGIN, а не с локальным `127.0.0.1`.</p>
-          <p class="muted small">`/authorize` не является обычной landing page: он открывается внутри OAuth flow и должен получать `client_id`, `redirect_uri`, `resource`, `code_challenge` и `code_challenge_method=S256`.</p>
+        <div style="margin-top:16px"><h2 style="font-size:13px">JWT для клиента без OAuth</h2>
+          <div class="row"><input id="secMcpTokenName" placeholder="client_id" style="min-width:200px"><select id="secMcpAccessMode"><option value="readonly" selected>Только просмотр (рекомендуется для ChatGPT)</option><option value="full">Полный доступ</option></select><button onclick="issueMcpTokenFromPanel()">Выпустить</button></div>
+          <p class="muted small">Большинство клиентов подключаются сами через OAuth. Для ChatGPT безопаснее начать с «Только просмотр»: команды и изменения недоступны, а найденные токены автоматически скрываются. Полный доступ используйте для Codex и других клиентов, которым действительно нужны изменения.</p>
           <pre id="secMcpTokenResult" style="min-height:60px">—</pre>
         </div>
         <div style="margin-top:16px"><h2 style="font-size:13px">Перезапуск</h2>

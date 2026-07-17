@@ -2,10 +2,12 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -291,4 +293,31 @@ func readLines(t *testing.T, path string) []map[string]any {
 		t.Fatalf("scan %s: %v", path, err)
 	}
 	return out
+}
+func TestLoggerRotatesWhenLimitReached(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	logger, err := NewWithLimit(path, 160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		logger.Event("test", map[string]any{"payload": strings.Repeat("x", 40), "n": i})
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 320 {
+		t.Fatalf("audit log did not rotate, size=%d", info.Size())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"n":19`)) {
+		t.Fatalf("latest event missing: %s", data)
+	}
 }

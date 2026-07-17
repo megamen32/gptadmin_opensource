@@ -16,7 +16,8 @@ curl -s https://became.bezrabotnyi.com/install.sh | bash
 iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
-The installer prints your **Hub URL** and **CTL_TOKEN** — save them.
+The installer creates the Hub, starts a Tunnel when needed, and prints one
+**Hub URL**. Keep that URL: it is the normal connection point for GPTAdmin.
 
 > No domain needed: choose the auto-tunnel option (FRP or Cloudflare) and you
 > get a public URL. See [Tunnels](./TUNNELS_DOCS.md).
@@ -33,9 +34,21 @@ Pick "agent only" when prompted. The agent registers with your hub automatically
 
 ## 3. Connect your AI
 
-Pick one adapter (you can use all three with the same hub):
+The installer and every `gptadmin update` automatically register the Hub as an
+MCP server in locally installed **Codex**, **Claude Code**, **OpenCode**, and
+**VS Code**. No URL, transport mode, or bearer token needs to be copied into
+those clients. The registration uses the Hub's public URL, even when the local
+agent uses a loopback service URL.
 
-- **Claude Desktop / Codex / OpenCode** → [MCP client setup](./ADAPTERS.md#1-mcp-client)
+To register a client installed after setup, run:
+
+```bash
+gptadmin connect-mcp
+```
+
+For other clients, pick an adapter (you can use all of them with the same Hub):
+
+- **Claude Desktop / other MCP clients** → [MCP client setup](./ADAPTERS.md#1-mcp-client)
 - **DeepSeek / Qwen / Alice / GigaChat** (free web chats) → [Browser extension](./ADAPTERS.md#2-browser-extension)
 - **ChatGPT Custom GPT / Open WebUI** → [OpenAI Action](./ADAPTERS.md#3-openai-action)
 

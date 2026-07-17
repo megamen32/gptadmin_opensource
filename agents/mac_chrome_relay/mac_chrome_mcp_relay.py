@@ -40,7 +40,7 @@ except Exception as e:  # pragma: no cover
 
 
 DEFAULT_HUB = "https://gptadminmcp.bezrabotnyi.com"
-DEFAULT_CHROME_CDP = "http://127.0.0.1:9222"
+DEFAULT_CHROME_CDP_PORTS = (9222, 9223, 9333)
 STOP = False
 
 
@@ -68,6 +68,32 @@ def http_json(method: str, url: str, token: str, data: Optional[Dict[str, Any]] 
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
         raise RuntimeError(f"HTTP {e.code} {url}: {raw}") from e
+
+
+def discover_chrome_cdp(explicit_url: Optional[str]) -> str:
+    """Return a reachable local Chrome DevTools endpoint.
+
+    An explicitly supplied URL is never silently replaced: it usually denotes a
+    deliberate browser/profile choice.  Without one, probe the ports used by
+    GPTAdmin's launcher and by an already-running user Chrome instance.
+    """
+    candidates = [explicit_url] if explicit_url else [f"http://127.0.0.1:{port}" for port in DEFAULT_CHROME_CDP_PORTS]
+    failures: List[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        url = candidate.rstrip("/")
+        try:
+            with urllib.request.urlopen(f"{url}/json/version", timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("webSocketDebuggerUrl"):
+                return url
+            failures.append(f"{url}: /json/version has no webSocketDebuggerUrl")
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            failures.append(f"{url}: {error}")
+    if explicit_url:
+        raise RuntimeError(f"Chrome DevTools is unavailable at {explicit_url}: {failures[0]}")
+    raise RuntimeError("Chrome DevTools is unavailable; checked " + "; ".join(failures))
 
 
 @dataclass
@@ -303,7 +329,7 @@ def main() -> int:
     parser.add_argument("--token", default=os.getenv("GPTADMIN_MCP_RELAY_TOKEN"))
     parser.add_argument("--agent-id", default=os.getenv("GPTADMIN_MCP_RELAY_AGENT_ID", os.uname().nodename + "-chrome"))
     parser.add_argument("--name", default=os.getenv("GPTADMIN_MCP_RELAY_NAME", "Mac logged-in Chrome"))
-    parser.add_argument("--cdp", default=os.getenv("GPTADMIN_CHROME_CDP", DEFAULT_CHROME_CDP))
+    parser.add_argument("--cdp", default=os.getenv("GPTADMIN_CHROME_CDP"), help="Chrome DevTools URL; auto-discovers 9222, 9223, then 9333 when omitted")
     parser.add_argument("--poll-timeout", type=int, default=55)
     args = parser.parse_args()
 
@@ -312,7 +338,12 @@ def main() -> int:
         return 2
 
     hub = args.hub.rstrip("/")
-    chrome = ChromeAgent(args.cdp)
+    try:
+        cdp_url = discover_chrome_cdp(args.cdp)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    chrome = ChromeAgent(cdp_url)
     try:
         # Fail fast if Chrome CDP is not reachable.
         chrome.connect()
@@ -321,7 +352,7 @@ def main() -> int:
             "name": args.name,
             "transport": "stdio",
             "capabilities": ["tools/list", "tools/call", "logged-in-chrome", "playwright-cdp"],
-            "meta": {"cdp": args.cdp, "pid_host": os.uname().nodename},
+            "meta": {"cdp": cdp_url, "pid_host": os.uname().nodename},
         }
         print(f"Registering {args.agent_id} at {hub} ...", flush=True)
         print(json.dumps(http_json("POST", f"{hub}/mcp-relay/register", args.token, register_payload), ensure_ascii=False), flush=True)

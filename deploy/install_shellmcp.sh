@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_URL=${PACKAGE_URL:-https://became.bezrabotnyi.com/gptadmin.tar.gz}
+PACKAGE_URL=${PACKAGE_URL:-https://github.com/megamen32/gptadmin_opensource/releases/latest/download/gptadmin.tar.gz}
 
 ROOT_DIR=$(dirname "$0")
 cd "$ROOT_DIR"

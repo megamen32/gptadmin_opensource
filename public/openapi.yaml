@@ -3,13 +3,7 @@ info:
   title: GPTAdmin MCP Relay
   version: "1.0.0"
   description: |
-    Universal MCP relay for GPTAdmin.
-
-    Use this API as a single interface for remote servers:
-      1. listMcpServers — choose an online server.
-      2. listMcpTools — inspect tools available on that server.
-      3. callMcpTool — call exactly one tool on exactly one target.
-      4. If background=true and job_id is returned, poll getMcpJob until status is completed or failed.
+    Compact control API: discover → schema → execute. Poll job when background=true.
 
     Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
@@ -20,62 +14,72 @@ security:
 paths:
   /mcp-relay/servers:
     get:
-      operationId: listMcpServers
-      summary: List MCP servers
-      description: Lists real MCP servers, virtual shell servers, and the built-in hub server.
+      operationId: discover
+      summary: Discover targets
+      description: List compact MCP targets. Add detail=full only when metadata is needed.
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: Opt in to transport, capabilities and metadata.
+          schema:
+            type: string
+            enum: [full]
       responses:
         "200":
           description: Available MCP servers
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ListMcpServersResponse"
+                $ref: "#/components/schemas/DiscoverResponse"
   /mcp-relay/tools:
     post:
-      operationId: listMcpTools
-      summary: List tools for one MCP server target
-      description: Requests tools/list from an explicitly selected MCP server. Call listMcpServers first and pass one returned server_id as target. There is no default target; never use target="default".
+      operationId: schema
+      summary: Get target schema
+      description: List tools for one target from discover. Never use target="default".
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ListMcpToolsRequest"
+              $ref: "#/components/schemas/SchemaRequest"
       responses:
         "200":
           description: Tool list response or background job reference
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/McpToolResponse"
+                $ref: "#/components/schemas/Result"
   /mcp-relay/call:
     post:
-      operationId: callMcpTool
-      summary: Call one tool on one MCP server target
-      description: Calls one tool on one selected target. Do not use this as bulk API; call it once per target when several servers must be used.
+      operationId: execute
+      summary: Execute one tool
+      description: Execute one tool on one selected target. Use schema first.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CallMcpToolRequest"
+              $ref: "#/components/schemas/ExecuteRequest"
       responses:
         "200":
           description: Tool call response or background job reference
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/McpToolResponse"
+                $ref: "#/components/schemas/Result"
+        "403":
+          description: The JWT is read-only and the selected tool can modify state or execute commands.
   /mcp-relay/job/{job_id}:
     get:
-      operationId: getMcpJob
-      summary: Get MCP background job status
-      description: Polls a background MCP job. Set ack=true after reading a completed or failed result to remove it from hub memory.
+      operationId: job
+      summary: Get job
+      description: Read a background job by id.
       parameters:
         - name: job_id
           in: path
           required: true
-          description: Job id returned by listMcpTools or callMcpTool.
+          description: Job id returned by execute.
           schema:
             type: string
         - name: ack
@@ -91,14 +95,14 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/McpJobResponse"
+                $ref: "#/components/schemas/Job"
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
   schemas:
-    ListMcpServersResponse:
+    DiscoverResponse:
       type: object
       additionalProperties: false
       required: [servers]
@@ -114,7 +118,7 @@ components:
       properties:
         server_id:
           type: string
-          description: Target id to use in listMcpTools and callMcpTool.
+                  description: Target id to use in schema and execute.
         name:
           type: string
         kind:
@@ -136,14 +140,14 @@ components:
         meta:
           type: object
           additionalProperties: true
-    ListMcpToolsRequest:
+    SchemaRequest:
       type: object
       additionalProperties: false
       required: [target]
       properties:
         target:
           type: string
-          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
+          description: Target id from discover. Never use "default".
         timeout:
           type: integer
           nullable: true
@@ -153,39 +157,36 @@ components:
         background:
           type: boolean
           default: false
-    CallMcpToolRequest:
+    ExecuteRequest:
       type: object
       additionalProperties: true
-      required: [target, tool_name]
+      required: [target, tool]
       properties:
         target:
           type: string
-          description: Explicit server id from listMcpServers. There is no default target. Never use "default".
+          description: Target id from discover. Never use "default".
+        tool:
+          type: string
+          description: Tool name from schema.
         tool_name:
           type: string
-          description: Tool name returned by listMcpTools.
         arguments:
           type: object
           additionalProperties: true
           default: {}
-          description: Tool input object for the selected tool. Optional; common tool fields can also be sent as top-level fields.
         args:
           type: object
           additionalProperties: true
           default: {}
-          description: Short alias for arguments. Also accepted for compatibility.
         cmd:
           type: string
           nullable: true
-          description: Top-level shortcut passed to shell_exec as cmd.
         query:
           type: string
           nullable: true
-          description: Top-level shortcut passed to tools like OpenMemory query as query.
         cwd:
           type: string
           nullable: true
-          description: Top-level shortcut passed to shell_exec as cwd.
         timeout:
           type: integer
           nullable: true
@@ -195,7 +196,12 @@ components:
         background:
           type: boolean
           default: false
-    McpToolResponse:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Reuse only for the same operation.
+    Result:
       type: object
       additionalProperties: true
       required: [server_id, status]
@@ -221,7 +227,7 @@ components:
           type: object
           nullable: true
           additionalProperties: true
-    McpJobResponse:
+    Job:
       type: object
       additionalProperties: true
       required: [job_id, status]

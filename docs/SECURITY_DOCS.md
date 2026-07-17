@@ -51,7 +51,7 @@ sudo systemctl restart gptadmin_hub  # or: systemctl --user restart gptadmin_hub
 ```
 
 Rotate immediately if a token leaks. The repo's history-scrubbing
-(see [Open-Core Plan](./OPEN_CORE_PLAN.md) Stage 0) is a one-time measure —
+ is a one-time measure —
 rotate to be safe.
 
 

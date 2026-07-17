@@ -1,0 +1,788 @@
+- generic [active] [ref=f3e1]:
+  - generic [ref=f3e2]:
+    - banner [ref=f3e3]:
+      - generic [ref=f3e4]:
+        - link "GPT‑Админ — на главную" [ref=f3e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=f3e9]: GPT‑Админ
+        - generic [ref=f3e10]:
+          - button "Switch language" [ref=f3e12]:
+            - generic [ref=f3e17]: CN
+          - link "GPT‑Админ на GitHub — opensource" [ref=f3e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=f3e22]: GitHub
+            - generic [ref=f3e467]: "8"
+          - button "Открыть меню" [ref=f3e23]
+    - main [ref=f3e25]:
+      - generic [ref=f3e471]:
+        - generic [ref=f3e472]:
+          - button "返回首页" [ref=f3e473]
+          - generic [ref=f3e476]: 文档
+          - heading "使用 GPT‑Админ 所需的全部资料" [level=1] [ref=f3e478]
+          - paragraph [ref=f3e479]: 从左侧选择主题。所有文档均已自动翻译；可使用右上角的语言切换器切换。
+        - button "Switch language" [ref=f3e482]:
+          - generic [ref=f3e487]: CN
+      - generic [ref=f3e489]:
+        - complementary [ref=f3e490]:
+          - generic [ref=f3e491]:
+            - generic [ref=f3e492]: 文档目录
+            - list [ref=f3e496]:
+              - listitem [ref=f3e497]:
+                - link "Overview" [ref=f3e498] [cursor=pointer]:
+                  - /url: "#/docs/Home"
+              - listitem [ref=f3e503]:
+                - link "Getting Started" [ref=f3e504] [cursor=pointer]:
+                  - /url: "#/docs/GETTING_STARTED"
+              - listitem [ref=f3e509]:
+                - link "Architecture" [ref=f3e510] [cursor=pointer]:
+                  - /url: "#/docs/ARCHITECTURE"
+              - listitem [ref=f3e515]:
+                - link "Adapters" [ref=f3e516] [cursor=pointer]:
+                  - /url: "#/docs/ADAPTERS"
+              - listitem [ref=f3e521]:
+                - link "Hub" [ref=f3e522] [cursor=pointer]:
+                  - /url: "#/docs/HUB"
+              - listitem [ref=f3e527]:
+                - link "ShellMCP" [ref=f3e528] [cursor=pointer]:
+                  - /url: "#/docs/SHELLMCP"
+              - listitem [ref=f3e533]:
+                - link "Install Paths" [ref=f3e534] [cursor=pointer]:
+                  - /url: "#/docs/INSTALL_PATHS"
+              - listitem [ref=f3e539]:
+                - link "Configuration" [ref=f3e540] [cursor=pointer]:
+                  - /url: "#/docs/CONFIGURATION"
+              - listitem [ref=f3e545]:
+                - link "API Reference" [ref=f3e546] [cursor=pointer]:
+                  - /url: "#/docs/API_REFERENCE"
+              - listitem [ref=f3e551]:
+                - link "MCP Proxy Relay" [ref=f3e552] [cursor=pointer]:
+                  - /url: "#/docs/MCP_PROXY_RELAY"
+              - listitem [ref=f3e557]:
+                - link "Integrations" [ref=f3e558] [cursor=pointer]:
+                  - /url: "#/docs/INTEGRATIONS"
+              - listitem [ref=f3e563]:
+                - link "Tunnels" [ref=f3e564] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+              - listitem [ref=f3e569]:
+                - link "Failover" [ref=f3e570] [cursor=pointer]:
+                  - /url: "#/docs/FAILOVER"
+              - listitem [ref=f3e575]:
+                - link "Security" [ref=f3e576] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+              - listitem [ref=f3e581]:
+                - link "File Backups" [ref=f3e582] [cursor=pointer]:
+                  - /url: "#/docs/FILE_BACKUPS"
+              - listitem [ref=f3e587]:
+                - link "Roadmap" [ref=f3e588] [cursor=pointer]:
+                  - /url: "#/docs/ROADMAP"
+              - listitem [ref=f3e593]:
+                - link "FAQ" [ref=f3e594] [cursor=pointer]:
+                  - /url: "#/docs/FAQ"
+        - article [ref=f3e599]:
+          - generic [ref=f3e600]:
+            - heading "集成" [level=1] [ref=f3e601]
+            - paragraph [ref=f3e602]: 把 AI 客户端连到你的 GPTAdmin hub 有四种方式。
+            - table [ref=f3e604]:
+              - rowgroup [ref=f3e605]:
+                - row [ref=f3e606]:
+                  - columnheader "#" [ref=f3e607]
+                  - columnheader "适配器" [ref=f3e608]
+                  - columnheader "最适合" [ref=f3e609]
+                  - columnheader "鉴权" [ref=f3e610]
+              - rowgroup [ref=f3e611]:
+                - row [ref=f3e612]:
+                  - cell "1" [ref=f3e613]
+                  - cell [ref=f3e614]:
+                    - link "OpenAI Action" [ref=f3e615] [cursor=pointer]:
+                      - /url: "#1-openai-action-custom-gpt"
+                  - cell "ChatGPT（Plus/Team/Desktop）的 Custom GPT" [ref=f3e616]
+                  - cell [ref=f3e617]:
+                    - text: Bearer
+                    - code [ref=f3e618]: CTL_TOKEN
+                    - text: 或 OAuth
+                - row [ref=f3e619]:
+                  - cell "2" [ref=f3e620]
+                  - cell [ref=f3e621]:
+                    - link "MCP remote" [ref=f3e622] [cursor=pointer]:
+                      - /url: "#2-mcp-remote-streamable-http"
+                  - cell "Claude Desktop / Codex / OpenCode / Mavis" [ref=f3e623]
+                  - cell "Bearer JWT（OAuth）" [ref=f3e624]
+                - row [ref=f3e625]:
+                  - cell "3" [ref=f3e626]
+                  - cell [ref=f3e627]:
+                    - link "OAuth 握手" [ref=f3e628] [cursor=pointer]:
+                      - /url: "#3-oauth-handshake"
+                  - 'cell "给 #1 和 #2 提供凭证的鉴权流程" [ref=f3e629]'
+                  - cell "PKCE S256" [ref=f3e630]
+                - row [ref=f3e631]:
+                  - cell "4" [ref=f3e632]
+                  - cell [ref=f3e633]:
+                    - link "浏览器扩展" [ref=f3e634] [cursor=pointer]:
+                      - /url: "#4-browser-extension"
+                  - cell "DeepSeek / Qwen / Alice / 任何网页聊天" [ref=f3e635]
+                  - cell [ref=f3e636]:
+                    - code [ref=f3e637]: Bridge Key
+                    - text: =
+                    - code [ref=f3e638]: CTL_TOKEN
+            - paragraph [ref=f3e639]:
+              - text: 这四种方式最终都连到同一个 hub、同样的工具集。详见
+              - link "ADAPTERS.md" [ref=f3e640] [cursor=pointer]:
+                - /url: "#/docs/ADAPTERS"
+              - text: （旧的三个分类总览）和
+              - link "GPTADMIN_INSTRUCTIONS.md" [ref=f3e641] [cursor=pointer]:
+                - /url: ""
+              - text: （给 AI 代理的只读参考）。
+            - separator [ref=f3e642]
+            - heading "1. OpenAI Action（Custom GPT）" [level=2] [ref=f3e643]
+            - paragraph [ref=f3e644]:
+              - strong [ref=f3e645]: 何时使用。
+              - text: 只适用于 ChatGPT 家族客户端：
+              - code [ref=f3e646]: chat.openai.com
+              - text: 、ChatGPT Desktop、Plus/Team。任何能导入 OpenAPI 3.x schema 的工具都行。当你想要一个能调用 hub、但又不受 Codex 那样的每小时工具调用配额限制的 Custom GPT 时，这是首选。
+            - paragraph [ref=f3e647]:
+              - strong [ref=f3e648]: 协议。
+              - text: REST + OpenAPI 3.1、Bearer 鉴权，跑在
+              - code [ref=f3e649]: /mcp-relay/*
+              - text: 系列（
+              - code [ref=f3e650]: list_mcp_agents
+              - text: 、
+              - code [ref=f3e651]: list_mcp_tools
+              - text: 、
+              - code [ref=f3e652]: call_mcp_tool
+              - text: 、
+              - code [ref=f3e653]: get_mcp_job
+              - text: 、
+              - code [ref=f3e654]: resources/list
+              - text: 、
+              - code [ref=f3e655]: resources/read
+              - text: ）。
+            - paragraph [ref=f3e656]:
+              - strong [ref=f3e657]: Schema URL。
+              - code [ref=f3e658]: https://<your-hub>/actions/openapi.yaml
+              - text: —— 官方在线 serving 的规范。仓库里也带一份
+              - code [ref=f3e659]: public/openapi.json
+              - text: （和上面的规范同义），方便本地
+              - code [ref=f3e660]: curl
+              - text: 。
+            - heading "连接步骤" [level=3] [ref=f3e661]
+            - list [ref=f3e662]:
+              - listitem [ref=f3e663]:
+                - text: 打开
+                - code [ref=f3e664]: https://chatgpt.com/gpts/editor
+                - text: →
+                - strong [ref=f3e665]: Create
+                - text: 或编辑一个 GPT。
+              - listitem [ref=f3e666]:
+                - strong [ref=f3e667]: Configure → Actions → Create new action。
+              - listitem [ref=f3e668]:
+                - strong [ref=f3e669]: Import OpenAPI by URL
+                - text: →
+                - code [ref=f3e670]: https://<your-hub>/actions/openapi.yaml
+                - text: 。
+              - listitem [ref=f3e671]:
+                - strong [ref=f3e672]: Authentication → API key → Bearer
+                - text: → 粘贴
+                - code [ref=f3e673]: CTL_TOKEN
+                - text: （在 hub 主机上的
+                - code [ref=f3e674]: config/gptadmin.env
+                - text: ）。
+              - listitem [ref=f3e675]:
+                - strong [ref=f3e676]: Save。
+                - text: Custom GPT 现在把每个操作暴露为一个工具。
+            - heading "例子" [level=3] [ref=f3e677]
+            - code [ref=f3e679]: "curl -sS -X POST https://<your-hub>/mcp-relay/list_mcp_agents \\ -H \"Authorization: Bearer $CTL_TOKEN\" \\ -H \"Content-Type: application/json\" -d '{}'"
+            - code [ref=f3e681]: "POST /mcp-relay/call_mcp_tool { \"agent_id\": \"shell:roomhacker-server-100\", \"tool_name\": \"shell_exec\", \"arguments\": { \"cmd\": \"uptime\" } }"
+            - blockquote [ref=f3e682]:
+              - paragraph [ref=f3e683]:
+                - strong [ref=f3e684]: Bearer vs OAuth。
+                - text: 现在 hub 在
+                - code [ref=f3e685]: /mcp-relay/*
+                - text: 上同时接受 Bearer
+                - code [ref=f3e686]: CTL_TOKEN
+                - text: ，方便快速上手。生产环境（每个客户端独立 scope、轮换、审计、撤销）请把鉴权块切换到 OAuth（
+                - link "§3" [ref=f3e687] [cursor=pointer]:
+                  - /url: "#3-oauth-handshake"
+                - text: ）。接口一样，鉴权更强。
+            - heading "排错" [level=3] [ref=f3e688]
+            - list [ref=f3e689]:
+              - listitem [ref=f3e690]:
+                - strong [ref=f3e691]: "\"Action not found\""
+                - text: —— schema URL 在 ChatGPT 那边无法访问。hub 必须在公开的 HTTPS 上（Cloudflare Tunnel、公网域名或
+                - code [ref=f3e692]: become.bezrabotnyi.com
+                - text: 那种镜像）；
+                - code [ref=f3e693]: http://localhost
+                - text: 不行。
+              - listitem [ref=f3e694]:
+                - strong [ref=f3e695]: 每次调用都 401
+                - text: ——
+                - code [ref=f3e696]: CTL_TOKEN
+                - text: 不对，或者从剪贴板复制时夹带了空白 / 换行。
+              - listitem [ref=f3e697]:
+                - strong [ref=f3e698]: schema 导入了，但工具不显示
+                - text: —— GPT 编辑器对 schema 缓存得很激进。重新导入。
+              - listitem [ref=f3e699]:
+                - strong [ref=f3e700]: 细节参考
+                - text: —— 看
+                - code [ref=f3e701]: docs/CHATGPT_ACTION.md
+                - text: （旧版）和
+                - code [ref=f3e702]: public/openapi.json
+                - text: ，里面有完整操作列表。
+            - separator [ref=f3e703]
+            - heading "2. MCP remote（Streamable HTTP）" [level=2] [ref=f3e704]
+            - paragraph [ref=f3e705]:
+              - strong [ref=f3e706]: 何时使用。
+              - text: 任何支持 MCP 的客户端 —— Claude Desktop、Codex、OpenCode、Mavis、Cherry Studio、现代 AI IDE/CLI。2026 年 AI 工具链的主线适配器。
+            - paragraph [ref=f3e707]:
+              - strong [ref=f3e708]: 协议。
+              - text: MCP over Streamable HTTP，JSON-RPC 2.0。
+            - paragraph [ref=f3e709]:
+              - strong [ref=f3e710]: 端点。
+              - code [ref=f3e711]: POST https://<your-hub>/mcp
+              - text: （同时也支持
+              - code [ref=f3e712]: GET
+              - text: 用于
+              - code [ref=f3e713]: initialize
+              - text: 发现）。
+            - paragraph [ref=f3e714]:
+              - strong [ref=f3e715]: 鉴权。
+              - text: Bearer JWT，hub 用
+              - code [ref=f3e716]: OAUTH_CLIENT_SECRET
+              - text: 通过 HS256 签名，有效期 12 h，
+              - code [ref=f3e717]: iss = PUBLIC_ORIGIN
+              - text: ，
+              - code [ref=f3e718]: aud = MCP_RESOURCE
+              - text: 。通过
+              - link "§3" [ref=f3e719] [cursor=pointer]:
+                - /url: "#3-oauth-handshake"
+              - text: 获取。
+            - blockquote [ref=f3e720]:
+              - paragraph [ref=f3e721]:
+                - code [ref=f3e722]: /mcp
+                - text: 只接受 OAuth 颁发的 JWT；
+                - code [ref=f3e723]: CTL_TOKEN
+                - text: 用于 REST/admin API。本地例外：hub 主机本地的
+                - code [ref=f3e724]: http://localhost:<port>/mcp
+                - text: ，hub 会放宽鉴权（方便
+                - code [ref=f3e725]: claude_desktop_config.json
+                - text: 调试）。
+            - heading "连接步骤" [level=3] [ref=f3e726]
+            - heading [level=4] [ref=f3e727]:
+              - text: Claude Desktop ——
+              - code [ref=f3e728]: claude_desktop_config.json
+            - code [ref=f3e730]: "{ \"mcpServers\": { \"gptadmin\": { \"type\": \"http\", \"url\": \"https://<your-hub>/mcp\", \"headers\": { \"Authorization\": \"Bearer <paste JWT here>\" } } } }"
+            - paragraph [ref=f3e731]:
+              - text: 重启 Claude Desktop。
+              - code [ref=f3e732]: gptadmin
+              - text: 服务器出现在工具列表里，包含
+              - code [ref=f3e733]: list_mcp_agents
+              - text: 、
+              - code [ref=f3e734]: list_mcp_tools
+              - text: 、
+              - code [ref=f3e735]: call_mcp_tool
+              - text: 、
+              - code [ref=f3e736]: get_mcp_job
+              - text: 、
+              - code [ref=f3e737]: resources/list
+              - text: 、
+              - code [ref=f3e738]: resources/read
+              - text: 。
+            - heading "Mavis" [level=4] [ref=f3e739]
+            - code [ref=f3e741]: "mavis mcp add gptadmin '{\"url\":\"https://<your-hub>/mcp\"}' mavis mcp auth login gptadmin # 打开浏览器 → 跑 OAuth 流程 → 写入 JWT"
+            - heading "Codex / OpenCode / 其他" [level=4] [ref=f3e742]
+            - paragraph [ref=f3e743]:
+              - text: 形态一样：HTTP 类型的 MCP server 指向
+              - code [ref=f3e744]: https://<your-hub>/mcp
+              - text: ，并配
+              - code [ref=f3e745]: "Authorization: Bearer <JWT>"
+              - text: 。
+            - heading "OAuth 发现" [level=3] [ref=f3e746]
+            - paragraph [ref=f3e747]: 现代 MCP 客户端会自动发现鉴权服务器：
+            - code [ref=f3e749]: curl -sS https://<your-hub>/.well-known/oauth-authorization-server
+            - code [ref=f3e751]: "{ \"issuer\": \"https://<your-hub>\", \"authorization_endpoint\": \"https://<your-hub>/authorize\", \"token_endpoint\": \"https://<your-hub>/token\", \"response_types_supported\": [\"code\"], \"grant_types_supported\": [\"authorization_code\"], \"code_challenge_methods_supported\": [\"S256\"], \"token_endpoint_auth_methods_supported\": [\"none\"], \"client_id_metadata_document_supported\": true, \"registration_endpoint\": \"https://<your-hub>/register\", \"scopes_supported\": [\"gptadmin.read\", \"gptadmin.exec\"] }"
+            - paragraph [ref=f3e752]:
+              - text: 支持
+              - link "RFC 8414" [ref=f3e753] [cursor=pointer]:
+                - /url: https://www.rfc-editor.org/rfc/rfc8414
+              - text: /
+              - link "RFC 9728" [ref=f3e754] [cursor=pointer]:
+                - /url: https://www.rfc-editor.org/rfc/rfc9728
+              - text: 的客户端会拉这份元数据，在
+              - code [ref=f3e755]: /register
+              - text: 注册，跑 PKCE
+              - code [ref=f3e756]: authorize → callback → token
+              - text: ，然后展示 hub 自己的同意页。
+            - heading "排错" [level=3] [ref=f3e757]
+            - list [ref=f3e758]:
+              - listitem [ref=f3e759]:
+                - strong [ref=f3e760]: 每次请求都 401
+                - text: —— JWT 过期（12 h TTL），或者签名用的
+                - code [ref=f3e761]: OAUTH_CLIENT_SECRET
+                - text: 不对。重跑 OAuth 流程。
+              - listitem [ref=f3e762]:
+                - strong [ref=f3e763]: "\"Transport not supported\""
+                - text: —— 客户端只支持 stdio。用
+                - code [ref=f3e764]: mcp-remote
+                - text: 包一层（
+                - code [ref=f3e765]: npx -y mcp-remote https://<your-hub>/mcp
+                - text: ），或者换一个适配器。
+              - listitem [ref=f3e766]:
+                - strong [ref=f3e767]: 流式调用中途卡住
+                - text: —— 公司代理在缓冲 SSE / chunked 响应。强制客户端走轮询模式，或者用一个不缓冲的隧道。
+            - separator [ref=f3e768]
+            - heading "3. OAuth 握手" [level=2] [ref=f3e769]
+            - paragraph [ref=f3e770]:
+              - strong [ref=f3e771]: 何时使用。
+              - text: 任何时候 —— 你（或一个 MCP 客户端）需要给
+              - code [ref=f3e772]: /mcp
+              - text: "（适配器 #2）拿一个 Bearer JWT，或者想把 OpenAI Action 的鉴权块从"
+              - code [ref=f3e773]: CTL_TOKEN
+              - text: "切换到 OAuth（适配器 #1）。"
+              - strong [ref=f3e774]: 握手本身不是客户端适配器
+              - text: ，它是给前两个
+              - strong [ref=f3e775]: 喂凭证
+              - text: 的流程。
+            - paragraph [ref=f3e776]:
+              - strong [ref=f3e777]: 授权类型。
+              - code [ref=f3e778]: authorization_code
+              - text: 配合 PKCE。
+              - strong [ref=f3e779]:
+                - text: 仅支持
+                - code [ref=f3e780]: S256
+              - text: —— 提交明文 verifier 会被拒绝。
+            - paragraph [ref=f3e781]:
+              - strong [ref=f3e782]: Scopes。
+            - list [ref=f3e783]:
+              - listitem [ref=f3e784]:
+                - code [ref=f3e785]: gptadmin.read
+                - text: —— 列出 server / 工具、读取资源、读取任务。
+              - listitem [ref=f3e786]:
+                - code [ref=f3e787]: gptadmin.exec
+                - text: —— 调用工具（
+                - code [ref=f3e788]: call_mcp_tool
+                - text: ）、把任务排进队列。
+            - paragraph [ref=f3e789]:
+              - text: hub 的
+              - code [ref=f3e790]: /authorize
+              - text: 页面会列出请求的 scope，用户输入管理员密码来同意。
+            - heading "端点" [level=3] [ref=f3e791]
+            - table [ref=f3e793]:
+              - rowgroup [ref=f3e794]:
+                - row [ref=f3e795]:
+                  - columnheader "端点" [ref=f3e796]
+                  - columnheader "方法" [ref=f3e797]
+                  - columnheader "用途" [ref=f3e798]
+              - rowgroup [ref=f3e799]:
+                - row [ref=f3e800]:
+                  - cell [ref=f3e801]:
+                    - code [ref=f3e802]: /.well-known/oauth-authorization-server
+                  - cell [ref=f3e803]:
+                    - code [ref=f3e804]: GET
+                  - cell "RFC 8414 issuer 元数据。" [ref=f3e805]
+                - row [ref=f3e806]:
+                  - cell [ref=f3e807]:
+                    - code [ref=f3e808]: /.well-known/oauth-protected-resource
+                  - cell [ref=f3e809]:
+                    - code [ref=f3e810]: GET
+                  - cell "RFC 9728 资源元数据。" [ref=f3e811]
+                - row [ref=f3e812]:
+                  - cell [ref=f3e813]:
+                    - code [ref=f3e814]: /register
+                  - cell [ref=f3e815]:
+                    - code [ref=f3e816]: POST
+                  - cell [ref=f3e817]:
+                    - text: 动态客户端注册 —— 返回
+                    - code [ref=f3e818]: client_id = "chatgpt-dynamic"
+                    - text: 。
+                - row [ref=f3e819]:
+                  - cell [ref=f3e820]:
+                    - code [ref=f3e821]: /authorize
+                  - cell [ref=f3e822]:
+                    - code [ref=f3e823]: GET
+                  - cell "渲染同意页（在浏览器里打开）。" [ref=f3e824]
+                - row [ref=f3e825]:
+                  - cell [ref=f3e826]:
+                    - code [ref=f3e827]: /authorize
+                  - cell [ref=f3e828]:
+                    - code [ref=f3e829]: POST
+                  - cell [ref=f3e830]:
+                    - text: 提交同意表单（
+                    - code [ref=f3e831]: password
+                    - text: = 管理员密码）。
+                - row [ref=f3e832]:
+                  - cell [ref=f3e833]:
+                    - code [ref=f3e834]: /token
+                  - cell [ref=f3e835]:
+                    - code [ref=f3e836]: POST
+                  - cell [ref=f3e837]:
+                    - text: 用
+                    - code [ref=f3e838]: code
+                    - text: +
+                    - code [ref=f3e839]: code_verifier
+                    - text: 换 JWT
+                    - code [ref=f3e840]: access_token
+                    - text: 。
+            - heading "流程" [level=3] [ref=f3e841]
+            - list [ref=f3e842]:
+              - listitem [ref=f3e843]:
+                - text: 客户端生成
+                - code [ref=f3e844]: code_verifier
+                - text: （随机 43–128 字符）和
+                - code [ref=f3e845]: code_challenge = BASE64URL(SHA256(verifier))
+                - text: 。
+              - listitem [ref=f3e846]:
+                - text: 客户端
+                - code [ref=f3e847]: POST /register
+                - text: 带
+                - code [ref=f3e848]: redirect_uris
+                - text: （例如
+                - code [ref=f3e849]: https://chatgpt.com/connector/oauth/...
+                - text: ，或者本地 CLI 客户端的
+                - code [ref=f3e850]: http://127.0.0.1:<port>/callback
+                - text: ） → 收到
+                - code [ref=f3e851]: client_id
+                - text: 。
+              - listitem [ref=f3e852]:
+                - text: 浏览器打开
+                - code [ref=f3e853]: GET /authorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256&resource=<hub>&scope=gptadmin.read+gptadmin.exec
+                - text: 。
+              - listitem [ref=f3e854]: 用户看一眼 scope → 输入管理员密码 → 提交。
+              - listitem [ref=f3e855]:
+                - text: Hub 302 跳到
+                - code [ref=f3e856]: redirect_uri?code=...&state=...
+                - text: 。
+              - listitem [ref=f3e857]:
+                - text: 客户端
+                - code [ref=f3e858]: POST /token
+                - text: 带
+                - code [ref=f3e859]: code
+                - text: 、
+                - code [ref=f3e860]: code_verifier
+                - text: 、
+                - code [ref=f3e861]: redirect_uri
+                - text: 、
+                - code [ref=f3e862]: client_id
+                - text: → 拿到
+                - code [ref=f3e863]: access_token
+                - text: （JWT） → 存进 MCP 配置。
+              - listitem [ref=f3e864]:
+                - text: 之后每次
+                - code [ref=f3e865]: /mcp
+                - text: 调用都带上
+                - code [ref=f3e866]: "Authorization: Bearer <access_token>"
+                - text: 。
+            - heading "JWT 结构" [level=3] [ref=f3e867]
+            - code [ref=f3e869]: "{ \"sub\": \"<user-entered name, optional>\", \"client_id\": \"chatgpt-dynamic\", \"scope\": \"gptadmin.read gptadmin.exec\", \"iss\": \"<PUBLIC_ORIGIN>\", \"aud\": \"<MCP_RESOURCE>\", \"iat\": 1719820000, \"exp\": 1719863200 }"
+            - blockquote [ref=f3e870]:
+              - paragraph [ref=f3e871]:
+                - strong [ref=f3e872]: redirect_uri 白名单。
+                - code [ref=f3e873]: /authorize
+                - text: 默认只接受
+                - code [ref=f3e874]: https://chatgpt.com/.../connector/oauth/...
+                - text: 和
+                - code [ref=f3e875]: "*.chatgpt.com"
+                - text: 。其他客户端需要在 Go hub OAuth 的 redirect 白名单里加上。
+            - heading "排错" [level=3] [ref=f3e876]
+            - list [ref=f3e877]:
+              - listitem [ref=f3e878]:
+                - strong [ref=f3e879]:
+                  - code [ref=f3e880]: "invalid_request: invalid redirect_uri"
+                - text: —— 不在白名单里。用规范的
+                - code [ref=f3e881]: https://chatgpt.com/connector/oauth/...
+                - text: ，或者放宽 hub 上的白名单。
+              - listitem [ref=f3e882]:
+                - strong [ref=f3e883]:
+                  - code [ref=f3e884]: invalid_grant
+                  - text: "on"
+                  - code [ref=f3e885]: /token
+                - text: ——
+                - code [ref=f3e886]: code_verifier
+                - text: 跟
+                - code [ref=f3e887]: code_challenge
+                - text: 对不上，或超过了 5 分钟的 code 窗口。重跑
+                - code [ref=f3e888]: /authorize
+                - text: 。
+              - listitem [ref=f3e889]:
+                - strong [ref=f3e890]: 每次调用都 "expired"
+                - text: —— JWT 的 TTL 是 12 h。大部分 MCP 客户端会默默重跑流程。
+              - listitem [ref=f3e891]:
+                - strong [ref=f3e892]: 一键撤销所有凭证
+                - text: —— 在
+                - code [ref=f3e893]: https://<your-hub>/admin
+                - text: →
+                - strong [ref=f3e894]: Security → Revoke all
+                - text: 重置
+                - code [ref=f3e895]: OAUTH_CLIENT_SECRET
+                - text: ，让所有在线 JWT 全部失效。
+            - separator [ref=f3e896]
+            - heading "4. 浏览器扩展" [level=2] [ref=f3e897]
+            - paragraph [ref=f3e898]:
+              - strong [ref=f3e899]: 何时使用。
+              - text: 不原生支持 MCP 的免费网页聊天 AI —— DeepSeek、Qwen、通义千问、Yandex Alice、ChatGPT（免费版）。扩展把"任何网页聊天"变成 gptadmin 客户端：拦截 AI 输出里的
+              - code [ref=f3e900]: "```mcp"
+              - text: 代码块，POST 到你的 hub，把结果粘贴回去。
+            - paragraph [ref=f3e901]:
+              - strong [ref=f3e902]: 产物。
+              - code [ref=f3e903]: apps/chatgpt-admin-app/
+              - text: —— 一个 Tampermonkey / Userscripts 用户脚本；发布版镜像在
+              - code [ref=f3e904]: public/mcp-bridge.user.js
+              - text: 。
+            - heading "连接步骤" [level=3] [ref=f3e905]
+            - list [ref=f3e906]:
+              - listitem [ref=f3e907]:
+                - strong [ref=f3e908]: 安装用户脚本管理器：
+                - list [ref=f3e909]:
+                  - listitem [ref=f3e910]:
+                    - text: 桌面 Chrome / Edge / Brave →
+                    - link "Tampermonkey" [ref=f3e911] [cursor=pointer]:
+                      - /url: https://www.tampermonkey.net/
+                    - text: 。
+                  - listitem [ref=f3e912]:
+                    - text: iPhone / iPad → Safari +
+                    - link "Userscripts" [ref=f3e913] [cursor=pointer]:
+                      - /url: https://apps.apple.com/app/userscripts/id1463298887
+                    - text: app；在 Safari → 扩展里启用。
+                  - listitem [ref=f3e914]:
+                    - text: Android → 从 Google Play 装 Firefox + 从
+                    - link "tampermonkey.net" [ref=f3e915] [cursor=pointer]:
+                      - /url: https://www.tampermonkey.net/
+                    - text: 装 Tampermonkey。
+              - listitem [ref=f3e916]:
+                - strong [ref=f3e917]: 安装脚本
+                - text: —— 打开
+                - code [ref=f3e918]: https://<your-hub>/mcp-bridge.user.js
+                - text: （或者从
+                - code [ref=f3e919]: apps/chatgpt-admin-app/
+                - text: 直接加载文件）。Tampermonkey 读到
+                - code [ref=f3e920]: "@userscript"
+                - text: 元数据块 →
+                - strong [ref=f3e921]: Install
+                - text: 。
+              - listitem [ref=f3e922]:
+                - strong [ref=f3e923]: 配置：
+                - text: 按 Alt+K（或者右下角的图标按钮）：
+                - list [ref=f3e924]:
+                  - listitem [ref=f3e925]:
+                    - strong [ref=f3e926]: Bridge URL
+                    - text: ——
+                    - code [ref=f3e927]: https://<your-hub>
+                    - text: （不带末尾斜杠）。
+                  - listitem [ref=f3e928]:
+                    - strong [ref=f3e929]: Bridge Key
+                    - text: —— 你的
+                    - code [ref=f3e930]: CTL_TOKEN
+                    - text: （和 §1 同一个）。
+            - heading "工作方式" [level=3] [ref=f3e931]
+            - paragraph [ref=f3e932]: 在网页聊天界面加两个按钮：
+            - list [ref=f3e933]:
+              - listitem [ref=f3e934]:
+                - strong [ref=f3e935]: MCP All
+                - text: （
+                - code [ref=f3e936]: Alt+M
+                - text: ）—— 把每个 agent 及其工具的简述插到聊天输入框，并复制同样的提示词到剪贴板。
+              - listitem [ref=f3e937]:
+                - strong [ref=f3e938]: MCP
+                - text: —— 打开一个面板，选定某个具体 agent，里面有详细的工具说明。
+            - paragraph [ref=f3e939]:
+              - text: 当 AI 用一个
+              - code [ref=f3e940]: "```mcp"
+              - text: 围栏的 JSON 块回复时，脚本会高亮它，把它 POST 到
+              - code [ref=f3e941]: <Bridge URL>/mcp-relay/call_mcp_tool
+              - text: ，然后把 block 替换成 hub 返回的结果。
+            - blockquote [ref=f3e942]:
+              - paragraph [ref=f3e943]: 如果某个站点用了自定义编辑器导致自动插入失败，提示词始终在剪贴板里 —— Ctrl/⌘+V 粘贴。
+            - heading [level=3] [ref=f3e944]:
+              - text: 支持的站点（来自
+              - code [ref=f3e945]: "@match"
+              - text: 指令）
+            - table [ref=f3e947]:
+              - rowgroup [ref=f3e948]:
+                - row [ref=f3e949]:
+                  - columnheader "站点" [ref=f3e950]
+                  - columnheader "状态" [ref=f3e951]
+              - rowgroup [ref=f3e952]:
+                - row [ref=f3e953]:
+                  - cell [ref=f3e954]:
+                    - code [ref=f3e955]: chatgpt.com
+                  - cell "完整支持" [ref=f3e956]
+                - row [ref=f3e957]:
+                  - cell [ref=f3e958]:
+                    - code [ref=f3e959]: chat.deepseek.com
+                  - cell "完整支持" [ref=f3e960]
+                - row [ref=f3e961]:
+                  - cell [ref=f3e962]:
+                    - code [ref=f3e963]: tongyi.aliyun.com
+                  - cell "完整支持" [ref=f3e964]
+                - row [ref=f3e965]:
+                  - cell [ref=f3e966]:
+                    - code [ref=f3e967]: qwenlm.github.io
+                    - text: 、
+                    - code [ref=f3e968]: chat.qwenlm.ai
+                    - text: 、
+                    - code [ref=f3e969]: chat.qwen.ai
+                  - cell "完整支持" [ref=f3e970]
+                - row [ref=f3e971]:
+                  - cell [ref=f3e972]:
+                    - code [ref=f3e973]: ya.ru
+                    - text: 、
+                    - code [ref=f3e974]: yandex.ru
+                    - text: 、
+                    - code [ref=f3e975]: alice.yandex.ru
+                    - text: 、
+                    - code [ref=f3e976]: chat.yandex.ru
+                  - cell "完整支持" [ref=f3e977]
+            - paragraph [ref=f3e978]:
+              - text: 要加新站点，就在
+              - code [ref=f3e979]: apps/chatgpt-admin-app/public/userscript-header
+              - text: （或者已发布的
+              - code [ref=f3e980]: mcp-bridge.user.js
+              - text: ）里追加一行
+              - code [ref=f3e981]: "@match"
+              - text: ，然后重装。
+            - heading "排错" [level=3] [ref=f3e982]
+            - list [ref=f3e983]:
+              - listitem [ref=f3e984]:
+                - strong [ref=f3e985]: 按钮不出现
+                - text: —— 用户脚本管理器没在该站点启用，或者脚本崩了（Tampermonkey 面板 → 脚本 → Errors）。
+              - listitem [ref=f3e986]:
+                - strong [ref=f3e987]: 从 bridge 返回 401
+                - text: ——
+                - code [ref=f3e988]: CTL_TOKEN
+                - text: 不对，或者 hub 在没隧道、只有 localhost 的状态下（hub 只在
+                - code [ref=f3e989]: 127.0.0.1
+                - text: 上放宽鉴权）。
+              - listitem [ref=f3e990]:
+                - strong [ref=f3e991]: 没有自动插入
+                - text: —— AI 没有用
+                - code [ref=f3e992]: "```mcp"
+                - text: 围栏输出代码块。重新提示它：
+                - emphasis [ref=f3e993]:
+                  - text: "\"respond with the call inside a fenced block tagged"
+                  - code [ref=f3e994]: mcp
+                  - text: ."
+                - text: 备用方案：从剪贴板粘贴。
+              - listitem [ref=f3e995]:
+                - strong [ref=f3e996]:
+                  - code [ref=f3e997]: GM_xmlhttpRequest
+                  - text: 被拦截
+                - text: —— Tampermonkey 脚本设置：把
+                - strong [ref=f3e998]: Run at
+                - text: 设成
+                - code [ref=f3e999]: document-idle
+                - text: ，确保元数据块里有
+                - code [ref=f3e1000]: "@grant GM_xmlhttpRequest"
+                - text: 。
+            - separator [ref=f3e1001]
+            - heading "跨适配器排错" [level=2] [ref=f3e1002]
+            - list [ref=f3e1003]:
+              - listitem [ref=f3e1004]:
+                - strong [ref=f3e1005]:
+                  - code [ref=f3e1006]: CTL_TOKEN
+                  - text: 在哪？
+                - text: 在 hub 主机上：
+                - code [ref=f3e1007]: grep ^CTL_TOKEN config/gptadmin.env
+                - text: 。修改文件后
+                - code [ref=f3e1008]: systemctl restart gptadmin-hub
+                - text: 即可轮换。
+              - listitem [ref=f3e1009]:
+                - strong [ref=f3e1010]: ChatGPT / Claude / 我的客户端连不上 hub
+                - text: —— 必须是公网 HTTPS。localhost 和 LAN IP 只能手动测试，ChatGPT Actions 和远端 MCP 客户端都不行。用 Cloudflare Tunnel（见
+                - link "TUNNELS_DOCS.md" [ref=f3e1011] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+                - text: ）或带真域名的反向代理。
+              - listitem [ref=f3e1012]:
+                - strong [ref=f3e1013]: MCP 连上了，但每个工具都返回 "unauthorized"
+                - text: —— 在浏览器里打开
+                - code [ref=f3e1014]: https://<your-hub>/.well-known/oauth-authorization-server
+                - text: ；如果 404，说明 hub 版本里 OAuth 路由没启用。检查
+                - code [ref=f3e1015]: apps/chatgpt-admin-app/
+                - text: 是否部署了（或者 Go hub 的 OAuth handler 是启用状态）。
+              - listitem [ref=f3e1016]:
+                - strong [ref=f3e1017]: Custom GPT 看不到 Action
+                - text: —— 确认 schema URL 是公开的：从外网
+                - code [ref=f3e1018]: curl -I https://<your-hub>/actions/openapi.yaml
+                - text: 。如果 4xx/5xx，隧道 / DNS 没指向 hub。
+              - listitem [ref=f3e1019]:
+                - strong [ref=f3e1020]: 浏览器扩展没有注入
+                - text: —— 用户脚本管理器权限：Tampermonkey Dashboard 里 "Allow user scripts" 必须打开；iOS Safari → Settings → Safari → Extensions → Userscripts → Allow；Android Firefox → 给当前站点启用该扩展。
+              - listitem [ref=f3e1021]:
+                - strong [ref=f3e1022]: OAuth 同意页 500
+                - text: ——
+                - code [ref=f3e1023]: config/gptadmin.env
+                - text: 里的
+                - code [ref=f3e1024]: PUBLIC_ORIGIN
+                - text: 和客户端实际访问的 URL 不一致。把它设成客户端实际用的 origin（scheme + host + port）完全一致。
+              - listitem [ref=f3e1025]:
+                - strong [ref=f3e1026]: 按客户端快速选择。
+                - text: ChatGPT（Plus/Team/Custom GPT）→
+                - link "§1" [ref=f3e1027] [cursor=pointer]:
+                  - /url: "#1-openai-action-custom-gpt"
+                - text: 。Claude Desktop / Codex / OpenCode / Mavis →
+                - link "§2" [ref=f3e1028] [cursor=pointer]:
+                  - /url: "#2-mcp-remote-streamable-http"
+                - text: 。免费网页聊天（DeepSeek / Qwen / Alice / ChatGPT 免费版）→
+                - link "§4" [ref=f3e1029] [cursor=pointer]:
+                  - /url: "#4-browser-extension"
+                - text: 。还是卡住 →
+                - link "FAQ" [ref=f3e1030] [cursor=pointer]:
+                  - /url: "#/docs/FAQ"
+                - text: 、
+                - link "SECURITY_DOCS.md" [ref=f3e1031] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+                - text: ，或者
+                - code [ref=f3e1032]: https://<your-hub>/admin
+                - text: 上各小节的帮助面板。
+            - heading "安全 MCP 代理/中继" [level=2] [ref=f3e1033]
+            - paragraph [ref=f3e1034]: 对于单一用途的集成，单独暴露一个已注册的 MCP server，而不是把整个 GPTAdmin 中继都开出来。每个 server 都有：
+            - code [ref=f3e1036]: "/server/{slug}/mcp /server/{slug}/actions/openapi.yaml /server/{slug}/actions/tools/{tool_name}"
+            - paragraph [ref=f3e1037]:
+              - text: 如果 Custom GPT 只该访问 OpenMemory，就用
+              - code [ref=f3e1038]: /server/openmemory/actions/openapi.yaml
+              - text: 。如果 MCP 兼容客户端只该访问 OpenMemory，就用
+              - code [ref=f3e1039]: /server/openmemory/mcp
+              - text: 。OpenAPI schema 是从所选 server 的
+              - code [ref=f3e1040]: tools/list
+              - text: 生成的，所以它会跟着实际的 MCP 工具走。
+            - paragraph [ref=f3e1041]:
+              - text: 见
+              - link "MCP Proxy Relay" [ref=f3e1042] [cursor=pointer]:
+                - /url: "#/docs/MCP_PROXY_RELAY"
+              - text: 。
+          - navigation "Pagination" [ref=f3e1043]:
+            - button "上一篇 API Reference" [ref=f3e1057]:
+              - generic [ref=f3e1047]:
+                - generic [ref=f3e1048]: 上一篇
+                - generic [ref=f3e1049]: API Reference
+            - button "下一篇 Integrations" [ref=f3e1058]:
+              - generic [ref=f3e1051]:
+                - generic [ref=f3e1052]: 下一篇
+                - generic [ref=f3e1053]: Integrations
+    - contentinfo [ref=f3e432]:
+      - generic [ref=f3e433]:
+        - generic [ref=f3e434]:
+          - link "GPT‑Админ" [ref=f3e435] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "Подвал" [ref=f3e440]:
+            - link "Как работает" [ref=f3e441] [cursor=pointer]:
+              - /url: "#how"
+            - link "Функции" [ref=f3e442] [cursor=pointer]:
+              - /url: "#features"
+            - link "FAQ" [ref=f3e443] [cursor=pointer]:
+              - /url: "#faq"
+            - link "Документация и Privacy" [ref=f3e444] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "GitHub" [ref=f3e445] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "bezrabotnyi.com" [ref=f3e449] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "@careviolan" [ref=f3e453] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=f3e457]:
+          - paragraph [ref=f3e458]: © 2025–2026 GPT‑Админ · в разработке с мая 2025
+          - generic [ref=f3e459]:
+            - link "bezrabotnyi.com — все проекты" [ref=f3e460] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=f3e464]: ·
+            - paragraph [ref=f3e465]: Сделано для тех, кто устал копипастить команды
+  - region "Notifications (F8)":
+    - list
+  - alert [ref=f3e1056]

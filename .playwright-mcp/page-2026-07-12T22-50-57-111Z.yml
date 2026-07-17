@@ -1,0 +1,184 @@
+- generic [active] [ref=f7e1]:
+  - generic [ref=f7e2]:
+    - banner [ref=f7e3]:
+      - generic [ref=f7e4]:
+        - link "GPT‑Admin — back to home" [ref=f7e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=f7e9]: GPT‑Admin
+        - generic [ref=f7e10]:
+          - button "Switch language" [ref=f7e12]:
+            - generic [ref=f7e17]: EN
+          - link "GPT‑Admin on GitHub — opensource" [ref=f7e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=f7e22]: GitHub
+          - button "Open menu" [ref=f7e23]
+    - main [ref=f7e25]:
+      - generic [ref=f7e28]:
+        - generic [ref=f7e29]:
+          - generic [ref=f7e30]:
+            - generic [ref=f7e31]: Open Source · AGPL‑3.0
+            - link "GitHub" [ref=f7e34] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+          - heading "One hub — any AI runs your infrastructure" [level=1] [ref=f7e38]
+          - paragraph [ref=f7e39]: GPT‑Admin is an MCP hub. Plug your servers and any MCP (chrome‑devtools, openmemory) into it, and your favourite AI connects to the hub in one of three ways. Manage everything from web search to spinning up subagents.
+          - button "How to connect AI" [ref=f7e41]
+          - generic [ref=f7e50]:
+            - tablist "Выберите операционную систему" [ref=f7e51]:
+              - tab "macOS / Linux" [selected] [ref=f7e52]
+              - tab "Windows" [ref=f7e56]
+            - generic [ref=f7e60]:
+              - generic [ref=f7e61]: $
+              - code [ref=f7e62]: curl -s https://became.bezrabotnyi.com/install.sh | bash
+              - button "Скопировать команду" [ref=f7e63]
+          - generic [ref=f7e67]:
+            - generic [ref=f7e68]: No sudo by default
+            - generic [ref=f7e72]: Linux · macOS · Windows
+            - generic [ref=f7e74]: No own domain needed
+        - generic [ref=f7e80]:
+          - paragraph [ref=f7e81]: ваш AI
+          - generic [ref=f7e82]:
+            - link [ref=f7e84] [cursor=pointer]:
+              - /url: "#/mcp-server"
+              - generic [ref=f7e98]:
+                - paragraph [ref=f7e99]: Claude · Codex
+                - paragraph [ref=f7e100]: MCP-клиент
+            - link [ref=f7e102] [cursor=pointer]:
+              - /url: "#/mcp-extension"
+              - generic [ref=f7e107]:
+                - paragraph [ref=f7e108]: DeepSeek · Qwen
+                - paragraph [ref=f7e109]: расширение
+            - link [ref=f7e111] [cursor=pointer]:
+              - /url: "#/chatgpt"
+              - generic [ref=f7e115]:
+                - paragraph [ref=f7e116]: ChatGPT · OpenUI
+                - paragraph [ref=f7e117]: OpenAI Action
+          - generic [ref=f7e118]:
+            - generic [ref=f7e119]:
+              - generic [ref=f7e120]: Streamable HTTP
+              - generic [ref=f7e123]: HTTPS
+              - generic [ref=f7e126]: REST
+            - generic [ref=f7e136]:
+              - paragraph [ref=f7e137]: через туннель
+              - paragraph [ref=f7e138]: через туннель
+              - paragraph [ref=f7e139]: через туннель
+          - generic [ref=f7e146]:
+            - paragraph [ref=f7e147]: GPT‑Админ
+            - paragraph [ref=f7e148]: MCP hub
+          - generic [ref=f7e149]:
+            - generic [ref=f7e150]:
+              - generic [ref=f7e151]: long-poll
+              - generic [ref=f7e157]: webhook
+              - generic [ref=f7e163]: queue
+            - generic [ref=f7e176]:
+              - paragraph [ref=f7e177]: пробивает любой NAT
+              - paragraph [ref=f7e178]: нулевая задержка
+              - paragraph [ref=f7e179]: надёжная доставка
+          - paragraph [ref=f7e180]: ваши серверы
+          - generic [ref=f7e181]:
+            - generic [ref=f7e182]:
+              - generic [ref=f7e183]:
+                - paragraph [ref=f7e189]: OpenWRT
+                - paragraph [ref=f7e190]: router
+              - generic [ref=f7e191]:
+                - generic [ref=f7e192]: firewall
+                - generic [ref=f7e196]: wifi
+                - generic [ref=f7e202]: vpn
+            - generic [ref=f7e210]:
+              - generic [ref=f7e211]:
+                - paragraph [ref=f7e216]: server-02
+                - paragraph [ref=f7e217]: Windows
+              - generic [ref=f7e218]:
+                - generic [ref=f7e219]: minecraft
+                - generic [ref=f7e223]: powershell
+                - generic [ref=f7e227]: rcon
+            - generic [ref=f7e235]:
+              - generic [ref=f7e236]:
+                - paragraph [ref=f7e241]: server-03
+                - paragraph [ref=f7e242]: Windows
+              - generic [ref=f7e243]:
+                - generic [ref=f7e244]: git
+                - generic [ref=f7e250]: postgres
+                - generic [ref=f7e256]: openmemory
+          - generic [ref=f7e268]: shellmcp поднимает MCP и передаёт в хаб
+      - generic [ref=f7e283]:
+        - paragraph [ref=f7e284]: From the author
+        - generic [ref=f7e285]:
+          - paragraph [ref=f7e286]: Hey, I'm not a corporation. I'm a real person doing this solo — for fun and for myself. I've been using the project for over a year; it's more convenient than Codex or Claude for infrastructure work.
+          - paragraph [ref=f7e287]: It's not a full replacement, it's a complement — a tool for servers and admin work. I have 8B tokens in Codex and 2B in Claude, but for my own machines this is faster. Bugs are possible — write me, I'll fix it.
+        - link "t.me/careviolan" [ref=f7e288] [cursor=pointer]:
+          - /url: https://t.me/careviolan
+      - generic [ref=f7e293]:
+        - generic [ref=f7e294]:
+          - generic [ref=f7e295]: What the hub can do
+          - heading "Any AI — in any way" [level=2] [ref=f7e297]
+          - paragraph [ref=f7e298]: The capabilities come from the hub itself, not from a specific adapter. Whatever AI you connect — Claude, DeepSeek or ChatGPT — it gets access to all of it.
+        - generic [ref=f7e299]:
+          - generic [ref=f7e301]:
+            - heading "Server administration" [level=3] [ref=f7e315]
+            - paragraph [ref=f7e316]: Restart systemd, firewall, nginx, fail2ban, sshd. Install software, edit configs, open ports — and verify the result.
+            - generic [ref=f7e317]: systemd · nginx · ufw
+          - generic [ref=f7e319]:
+            - heading "Writing and running code" [level=3] [ref=f7e327]
+            - paragraph [ref=f7e328]: Edits code, runs checks, can spawn a subagent — "run codex to fix this bug" while you do something else.
+            - generic [ref=f7e329]: subagents
+          - generic [ref=f7e331]:
+            - heading "Fix and clean up PRs" [level=3] [ref=f7e338]
+            - paragraph [ref=f7e339]: Finds the fork in memory, keeps a single feature commit, runs type-check/lint/build and force-pushes over SSH.
+            - generic [ref=f7e340]: git · force-with-lease
+          - generic [ref=f7e342]:
+            - heading "Log inspection" [level=3] [ref=f7e348]
+            - paragraph [ref=f7e349]: Parses journalctl, nginx, postgres logs, finds anomalies, suggests fixes and applies them after confirmation.
+            - generic [ref=f7e350]: journalctl · grep
+          - generic [ref=f7e352]:
+            - heading "Web search" [level=3] [ref=f7e358]
+            - paragraph [ref=f7e359]: Through the chrome-devtools MCP — the agent itself opens pages, reads docs and searches for a solution, without leaving the chat.
+            - generic [ref=f7e360]: chrome-devtools mcp
+          - generic [ref=f7e362]:
+            - heading "Incident diagnostics" [level=3] [ref=f7e374]
+            - paragraph [ref=f7e375]: Finds the failed service itself, reads logs, understands the cause (ECONNREFUSED, 503, OOM) and fixes it — with a report and checks.
+            - generic [ref=f7e376]: auto-diagnose
+      - generic [ref=f7e378]:
+        - generic [ref=f7e379]:
+          - generic [ref=f7e380]: Three adapters to the hub
+          - heading "One hub — three ways to connect AI" [level=2] [ref=f7e382]
+          - paragraph [ref=f7e383]: These aren't three separate products, they are three adapters to the same hub. Pick the one that fits your AI — capabilities are the same.
+        - generic [ref=f7e384]:
+          - button "OpenAI Action ChatGPT · Open WebUI Custom GPT, Open WebUI or Apps SDK widget right in chat. ChatGPT itself figures out when to run a command. No paid Codex limits. How to connect" [ref=f7e386]:
+            - generic [ref=f7e387]: OpenAI Action
+            - heading "ChatGPT · Open WebUI" [level=3] [ref=f7e392]
+            - paragraph [ref=f7e393]: Custom GPT, Open WebUI or Apps SDK widget right in chat. ChatGPT itself figures out when to run a command. No paid Codex limits.
+            - generic [ref=f7e394]: How to connect
+          - button "MCP client Claude · Codex · OpenCode GPT‑Admin works as MCP remote SSE. Connect it in your client settings — and the AI gets native tool calls across your entire infrastructure. Instructions" [ref=f7e398]:
+            - generic [ref=f7e399]: MCP client
+            - heading "Claude · Codex · OpenCode" [level=3] [ref=f7e414]
+            - paragraph [ref=f7e415]: GPT‑Admin works as MCP remote SSE. Connect it in your client settings — and the AI gets native tool calls across your entire infrastructure.
+            - generic [ref=f7e416]: Instructions
+          - button "Browser extension DeepSeek · Qwen · Alice A userscript for Tampermonkey / Firefox adds MCP buttons to free web AIs. No paid API needed — just a free web chat. Install extension" [ref=f7e420]:
+            - generic [ref=f7e421]: Browser extension
+            - heading "DeepSeek · Qwen · Alice" [level=3] [ref=f7e427]
+            - paragraph [ref=f7e428]: A userscript for Tampermonkey / Firefox adds MCP buttons to free web AIs. No paid API needed — just a free web chat.
+            - generic [ref=f7e429]: Install extension
+    - contentinfo [ref=f7e432]:
+      - generic [ref=f7e433]:
+        - generic [ref=f7e434]:
+          - link "GPT‑Admin" [ref=f7e435] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "Footer" [ref=f7e440]:
+            - link "Documentation & Privacy" [ref=f7e441] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "GitHub" [ref=f7e442] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "bezrabotnyi.com" [ref=f7e446] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "@careviolan" [ref=f7e450] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=f7e454]:
+          - paragraph [ref=f7e455]: © 2025–2026 GPT‑Admin · in development since May 2025
+          - generic [ref=f7e456]:
+            - link "bezrabotnyi.com — all projects" [ref=f7e457] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=f7e461]: ·
+            - paragraph [ref=f7e462]: Built for those tired of copy-pasting commands
+  - region "Notifications (F8)":
+    - list
+  - alert [ref=f7e464]

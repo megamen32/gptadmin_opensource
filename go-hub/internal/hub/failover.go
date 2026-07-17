@@ -80,7 +80,7 @@ func (s *Server) defaultFailoverConfig() FailoverConfig {
 		PrimaryHealthURL:         firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_HEALTH_URL"), "http://127.0.0.1:9001/healthz"),
 		PrimaryReclaimURL:        firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_RECLAIM_URL"), strings.TrimRight(publicURL, "/")+"/admin/api/failover/reclaim"),
 		PrimaryReclaimAcceptURL:  firstNonEmpty(os.Getenv("GPTADMIN_PRIMARY_RECLAIM_ACCEPT_URL"), strings.TrimRight(publicURL, "/")+"/admin/api/failover/reclaim/accept"),
-		StateURL:                 strings.TrimRight(publicURL, "/") + "/admin/api/failover/state?secrets=1",
+		StateURL:                 strings.TrimRight(publicURL, "/") + "/admin/api/failover/state",
 		ReclaimMaxAgeSec:         120,
 		CheckIntervalSec:         15,
 		PublicConfirmTimeoutSec:  3,
@@ -101,7 +101,7 @@ func (s *Server) normalizeFailoverConfig(cfg FailoverConfig) FailoverConfig {
 		cfg.PrimaryHealthURL = def.PrimaryHealthURL
 	}
 	if cfg.StateURL == "" && cfg.PrimaryPublicURL != "" {
-		cfg.StateURL = cfg.PrimaryPublicURL + "/admin/api/failover/state?secrets=1"
+		cfg.StateURL = cfg.PrimaryPublicURL + "/admin/api/failover/state"
 	}
 	if cfg.PrimaryReclaimURL == "" && cfg.PrimaryPublicURL != "" {
 		cfg.PrimaryReclaimURL = cfg.PrimaryPublicURL + "/admin/api/failover/reclaim"
@@ -205,18 +205,10 @@ func (s *Server) failoverStateBundleLocked(includeSecrets bool) map[string]any {
 		"tunnel_mode":   os.Getenv("TUNNEL_MODE"),
 		"token_present": os.Getenv("FRP_TOKEN") != "",
 	}
-	secrets := map[string]any{}
-	if includeSecrets {
-		frp["token"] = os.Getenv("FRP_TOKEN")
-		secrets = map[string]any{
-			"ctl_token":         os.Getenv("CTL_TOKEN"),
-			"relay_agent_token": os.Getenv("MCP_RELAY_AGENT_TOKEN"),
-			"shellmcp_token":    firstNonEmpty(os.Getenv("SHELLMCP_TOKEN"), os.Getenv("SHELL_TOKEN")),
-			"oauth_secret":      os.Getenv("OAUTH_CLIENT_SECRET"),
-			"admin_password":    os.Getenv("ADMIN_PASSWORD"),
-			"bridge_key":        os.Getenv("MCP_BRIDGE_KEY"),
-		}
-	}
+	// Credentials are intentionally never included in failover state. The state
+	// bundle may be replicated to another node and must not become a secret
+	// distribution channel. Keep the parameter for API compatibility.
+	_ = includeSecrets
 	return map[string]any{
 		"ok":              true,
 		"kind":            "gptadmin_failover_state",
@@ -231,7 +223,6 @@ func (s *Server) failoverStateBundleLocked(includeSecrets bool) map[string]any {
 		"failover_config": s.failover,
 		"agents":          agents,
 		"tunnel":          map[string]any{"frp": frp},
-		"secrets":         secrets,
 	}
 }
 
@@ -243,7 +234,7 @@ func (s *Server) saveFailoverStateBundleLocked() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(s.failoverStateBundleLocked(true), "", "  ")
+	b, err := json.MarshalIndent(s.failoverStateBundleLocked(false), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -456,9 +447,8 @@ func (s *Server) adminFailoverState(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	includeSecrets := r.URL.Query().Get("secrets") == "1" || strings.EqualFold(r.URL.Query().Get("secrets"), "true")
 	s.mu.Lock()
-	state := s.failoverStateBundleLocked(includeSecrets)
+	state := s.failoverStateBundleLocked(false)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, state)
 }

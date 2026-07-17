@@ -365,3 +365,40 @@ func TestOutboxBackoffMonotonicAndCapped(t *testing.T) {
 		prev = got
 	}
 }
+
+func TestOutboxDropsHubNotFoundResult(t *testing.T) {
+	requests := 0
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/queue/unit-host/result" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		http.Error(w, `{"error":"unknown job"}`, http.StatusNotFound)
+	}))
+	defer hubServer.Close()
+
+	outboxDir := t.TempDir()
+	s := New(Config{Name: "unit-host", HubURL: hubServer.URL, OutboxDir: outboxDir, SpillDir: t.TempDir()})
+	defer s.Close()
+	entry := map[string]any{
+		"job_id":   "stale-job",
+		"payload":  map[string]any{"id": "stale-job", "returncode": 0},
+		"attempts": 0,
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(outboxDir, "stale-job.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.flushOutbox(context.Background())
+	if requests != 1 {
+		t.Fatalf("requests=%d", requests)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale outbox file remains: %v", err)
+	}
+}

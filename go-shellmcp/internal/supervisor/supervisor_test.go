@@ -83,6 +83,84 @@ func TestLoadAgents_ObjectSchema(t *testing.T) {
 	}
 }
 
+func TestLoadAgents_OmittedEnabledDefaultsToTrue(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"agents":     `{"agents":[{"ref":"local","command":"example"}]}`,
+		"mcpServers": `{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			agents, err := LoadAgents(path)
+			if err != nil {
+				t.Fatalf("LoadAgents: %v", err)
+			}
+			if len(agents) != 1 || !agents[0].Enabled {
+				t.Fatalf("omitted enabled must default to true: %#v", agents)
+			}
+		})
+	}
+}
+
+func TestLoadAgents_ExplicitDisabledRemainsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	body := `{"agents":[{"ref":"disabled","command":"example","enabled":false}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := LoadAgents(path)
+	if err != nil {
+		t.Fatalf("LoadAgents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Enabled {
+		t.Fatalf("explicit enabled=false must be preserved: %#v", agents)
+	}
+}
+
+func TestManager_PersistentRegistryMutations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	m := NewPersistent(nil, path)
+	remote := Agent{Ref: "docs", Name: "Docs", Transport: "sse", URL: "https://example.test/sse", Enabled: true}
+	if err := m.Upsert(remote); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := m.SetEnabled("docs", false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	agents, err := LoadAgents(path)
+	if err != nil {
+		t.Fatalf("LoadAgents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Enabled || agents[0].Transport != "sse" || agents[0].URL != remote.URL {
+		t.Fatalf("unexpected persisted agent: %#v", agents)
+	}
+	if err := m.Remove("docs"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	agents, err = LoadAgents(path)
+	if err != nil || len(agents) != 0 {
+		t.Fatalf("removed registry must persist empty list: agents=%#v err=%v", agents, err)
+	}
+}
+
+func TestManager_RejectsInvalidTransportConfiguration(t *testing.T) {
+	m := NewPersistent(nil, filepath.Join(t.TempDir(), "agents.json"))
+	invalid := []Agent{
+		{Ref: "missing-command", Transport: "stdio", Enabled: true},
+		{Ref: "missing-url", Transport: "streamable-http", Enabled: true},
+		{Ref: "unknown", Transport: "websocket", URL: "https://example.test", Enabled: true},
+	}
+	for _, agent := range invalid {
+		if err := m.Upsert(agent); err == nil {
+			t.Fatalf("expected invalid agent to fail: %#v", agent)
+		}
+	}
+}
+
 func TestLoadAgents_EmptyPathReturnsEmpty(t *testing.T) {
 	got, err := LoadAgents("")
 	if err != nil {

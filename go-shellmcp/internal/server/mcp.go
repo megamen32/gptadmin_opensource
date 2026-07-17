@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	inspecthost "github.com/megamen32/gptadmin/go-shellmcp/internal/inspect"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
 )
 
@@ -260,6 +262,55 @@ func mcpText(text string, structured any) map[string]any {
 func (s *Server) mcpTools() []map[string]any {
 	return []map[string]any{
 		{
+			"name":        "mcp_manage",
+			"description": "Persist and manage local stdio or remote Streamable HTTP/SSE MCP servers. upsert creates or replaces a definition; enable/disable persist desired state.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}},
+					"ref":    map[string]any{"type": []string{"string", "null"}},
+					"config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
+				},
+				"required":             []string{"action"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			"name":        "mcp_tools",
+			"description": "List tools exposed by one enabled child MCP server.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"ref": map[string]any{"type": "string"}},
+				"required":   []string{"ref"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "mcp_call",
+			"description": "Call a tool on one enabled child MCP server.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ref":       map[string]any{"type": "string"},
+					"name":      map[string]any{"type": "string"},
+					"arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
+				},
+				"required": []string{"ref", "name"}, "additionalProperties": false,
+			},
+		},
+		{
+			"name":        "system_inspect",
+			"description": "Read bounded, automatically redacted host diagnostics without executing a command. Supports read_file and list_directory on Linux, macOS, Windows and Android.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action":    map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}},
+					"path":      map[string]any{"type": "string"},
+					"max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576},
+				},
+				"required": []string{"action", "path"}, "additionalProperties": false,
+			},
+		},
+		{
 			"name":        "shell_exec",
 			"description": "Execute a shell command on this ShellMCP host; use background=true for local async jobs.",
 			"inputSchema": map[string]any{
@@ -316,8 +367,16 @@ func (s *Server) mcpTools() []map[string]any {
 
 func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
 	switch name {
+	case "mcp_manage":
+		return s.mcpManage(args)
+	case "mcp_tools":
+		return s.mcpChildTools(ctx, args)
+	case "mcp_call":
+		return s.mcpChildCall(ctx, args)
 	case "shell_exec":
 		return s.mcpShellExec(ctx, args)
+	case "system_inspect":
+		return s.mcpSystemInspect(args)
 	case "file_backup":
 		return s.mcpFileBackup(args)
 	case "tasks":
@@ -332,6 +391,114 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 	default:
 		return nil, fmt.Errorf("unknown tool %s", name)
 	}
+}
+
+func (s *Server) mcpSystemInspect(args map[string]any) (map[string]any, error) {
+	var req inspecthost.Request
+	b, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &req); err != nil {
+		return nil, err
+	}
+	req.AllowedRoots = append([]string(nil), s.cfg.InspectRoots...)
+	result, err := inspecthost.Run(req)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Read-only system inspection completed.", map[string]any{"server": s.cfg.Name, "inspection": result}), nil
+}
+
+func (s *Server) mcpManage(args map[string]any) (map[string]any, error) {
+	action, _ := args["action"].(string)
+	ref, _ := args["ref"].(string)
+	if action == "list" {
+		return mcpText("MCP supervisors", map[string]any{"agents": s.mcpAgentsForCapabilities()}), nil
+	}
+	if action == "upsert" {
+		config, ok := args["config"].(map[string]any)
+		if !ok {
+			return nil, errors.New("mcp_manage upsert requires config")
+		}
+		data, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("encode MCP config: %w", err)
+		}
+		var agent supervisor.Agent
+		if err := json.Unmarshal(data, &agent); err != nil {
+			return nil, fmt.Errorf("decode MCP config: %w", err)
+		}
+		_ = s.childMCP.Close(agent.Ref)
+		if err := s.supervisor.Upsert(agent); err != nil {
+			return nil, err
+		}
+		return mcpText("MCP definition saved", map[string]any{"action": action, "ref": agent.Ref}), nil
+	}
+	if ref == "" {
+		return nil, errors.New("mcp_manage requires ref for action " + action)
+	}
+	var err error
+	switch action {
+	case "enable":
+		err = s.setMCPEnabled(ref, true)
+	case "disable":
+		err = s.setMCPEnabled(ref, false)
+	case "restart":
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		if agent.Transport != "stdio" {
+			return nil, fmt.Errorf("mcp_manage restart only applies to stdio servers, got %s", agent.Transport)
+		}
+		err = s.supervisor.Restart(ref)
+	case "remove":
+		_ = s.childMCP.Close(ref)
+		err = s.supervisor.Remove(ref)
+	case "status":
+		status, statusErr := s.supervisor.Status(ref)
+		if statusErr != nil {
+			return nil, statusErr
+		}
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		return mcpText("MCP status", map[string]any{"agent": agent, "status": status}), nil
+	case "config":
+		agent, agentErr := s.supervisor.Agent(ref)
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		return mcpText("MCP config", map[string]any{"agent": agent}), nil
+	default:
+		return nil, fmt.Errorf("unknown mcp_manage action %s", action)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("MCP action completed", map[string]any{"action": action, "ref": ref}), nil
+}
+
+func (s *Server) setMCPEnabled(ref string, enabled bool) error {
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return err
+	}
+	if !enabled && agent.Transport == "stdio" {
+		_ = s.childMCP.Close(ref)
+		if err := s.supervisor.Stop(ref); err != nil {
+			return err
+		}
+	}
+	if err := s.supervisor.SetEnabled(ref, enabled); err != nil {
+		return err
+	}
+	if enabled && agent.Transport == "stdio" {
+		return s.supervisor.Start(ref)
+	}
+	return nil
 }
 
 func (s *Server) mcpShellExec(ctx context.Context, args map[string]any) (map[string]any, error) {
@@ -438,4 +605,38 @@ func (s *Server) ServeMCPStdio(ctx context.Context, in io.Reader, out io.Writer)
 		}
 	}
 	return scanner.Err()
+}
+
+func (s *Server) mcpChildTools(ctx context.Context, args map[string]any) (map[string]any, error) {
+	ref, _ := args["ref"].(string)
+	if strings.TrimSpace(ref) == "" {
+		return nil, errors.New("mcp_tools requires ref")
+	}
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := s.childMCP.ListTools(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Child MCP tools", map[string]any{"ref": ref, "tools": tools}), nil
+}
+
+func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[string]any, error) {
+	ref, _ := args["ref"].(string)
+	name, _ := args["name"].(string)
+	if strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
+		return nil, errors.New("mcp_call requires ref and name")
+	}
+	arguments, _ := args["arguments"].(map[string]any)
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.childMCP.CallTool(ctx, agent, name, arguments)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Child MCP tool completed", map[string]any{"ref": ref, "name": name, "result": result}), nil
 }

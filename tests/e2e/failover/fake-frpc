@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The external FRP server is outside this repository. This test double models
+# only the client-side observable contract: a successful fallback client makes
+# the public ingress route to the fallback, and stopping it removes that route.
+route_file="${E2E_ROUTE_FILE:?E2E_ROUTE_FILE is required}"
+route_value="${E2E_ROUTE_VALUE:-fallback}"
+printf '%s\n' "$route_value" >"$route_file"
+trap 'rm -f "$route_file"; exit 0' TERM INT EXIT
+while :; do sleep 1; done

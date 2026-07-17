@@ -1,0 +1,240 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - link "GPT‑Админ — на главную" [ref=e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=e9]: GPT‑Админ
+        - generic [ref=e10]:
+          - button "Switch language" [ref=e12]:
+            - generic [ref=e17]: EN
+          - link "GPT‑Админ на GitHub — opensource" [ref=e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=e22]: GitHub
+            - generic [ref=e467]: "8"
+          - button "Открыть меню" [ref=e23]
+    - main [ref=e25]:
+      - generic [ref=e472]:
+        - generic [ref=e473]:
+          - button "Back to home" [ref=e719]
+          - generic [ref=e477]: Documentation
+          - heading "Everything you need to run GPT‑Админ" [level=1] [ref=e720]
+          - paragraph [ref=e480]: Pick a topic on the left. All docs are translated automatically; switch language at the top right.
+        - button "Switch language" [ref=e483]:
+          - generic [ref=e487]: EN
+      - generic [ref=e489]:
+        - complementary [ref=e490]:
+          - generic [ref=e491]:
+            - generic [ref=e492]: Browse docs
+            - list [ref=e496]:
+              - listitem [ref=e497]:
+                - link "Overview" [ref=e498] [cursor=pointer]:
+                  - /url: "#/docs/Home"
+              - listitem [ref=e503]:
+                - link "Getting Started" [ref=e504] [cursor=pointer]:
+                  - /url: "#/docs/GETTING_STARTED"
+              - listitem [ref=e509]:
+                - link "Architecture" [ref=e510] [cursor=pointer]:
+                  - /url: "#/docs/ARCHITECTURE"
+              - listitem [ref=e515]:
+                - link "Adapters" [ref=e516] [cursor=pointer]:
+                  - /url: "#/docs/ADAPTERS"
+              - listitem [ref=e521]:
+                - link "Hub" [ref=e522] [cursor=pointer]:
+                  - /url: "#/docs/HUB"
+              - listitem [ref=e527]:
+                - link "ShellMCP" [ref=e528] [cursor=pointer]:
+                  - /url: "#/docs/SHELLMCP"
+              - listitem [ref=e533]:
+                - link "Install Paths" [ref=e534] [cursor=pointer]:
+                  - /url: "#/docs/INSTALL_PATHS"
+              - listitem [ref=e539]:
+                - link "Configuration" [ref=e540] [cursor=pointer]:
+                  - /url: "#/docs/CONFIGURATION"
+              - listitem [ref=e545]:
+                - link "API Reference" [ref=e546] [cursor=pointer]:
+                  - /url: "#/docs/API_REFERENCE"
+              - listitem [ref=e551]:
+                - link "MCP Proxy Relay" [ref=e552] [cursor=pointer]:
+                  - /url: "#/docs/MCP_PROXY_RELAY"
+              - listitem [ref=e557]:
+                - link "Integrations" [ref=e558] [cursor=pointer]:
+                  - /url: "#/docs/INTEGRATIONS"
+              - listitem [ref=e563]:
+                - link "Tunnels" [ref=e564] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+              - listitem [ref=e569]:
+                - link "Failover" [ref=e570] [cursor=pointer]:
+                  - /url: "#/docs/FAILOVER"
+              - listitem [ref=e575]:
+                - link "Security" [ref=e576] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+              - listitem [ref=e581]:
+                - link "File Backups" [ref=e582] [cursor=pointer]:
+                  - /url: "#/docs/FILE_BACKUPS"
+              - listitem [ref=e587]:
+                - link "Roadmap" [ref=e588] [cursor=pointer]:
+                  - /url: "#/docs/ROADMAP"
+              - listitem [ref=e593]:
+                - link "FAQ" [ref=e594] [cursor=pointer]:
+                  - /url: "#/docs/FAQ"
+        - article [ref=e599]:
+          - generic [ref=e722]:
+            - heading "GPT‑Админ — Documentation" [level=1] [ref=e723]
+            - paragraph [ref=e724]: "Welcome to the GPT‑Админ docs. GPT‑Админ is a self-hosted MCP hub: plug your servers and any MCP tools into it, then connect any AI via one of three adapters."
+            - paragraph [ref=e725]:
+              - strong [ref=e726]: "Website:"
+              - link "https://gptadmin.bezrabotnyi.com" [ref=e727] [cursor=pointer]:
+                - /url: https://gptadmin.bezrabotnyi.com
+              - strong [ref=e728]: "Install:"
+              - code [ref=e729]: curl -s https://became.bezrabotnyi.com/install.sh | bash
+            - heading "Table of contents" [level=2] [ref=e730]
+            - table [ref=e732]:
+              - rowgroup [ref=e733]:
+                - row [ref=e734]:
+                  - columnheader "Page" [ref=e735]
+                  - columnheader "What's inside" [ref=e736]
+              - rowgroup [ref=e737]:
+                - row [ref=e738]:
+                  - cell [ref=e739]:
+                    - link "Architecture" [ref=e740] [cursor=pointer]:
+                      - /url: "#/docs/ARCHITECTURE"
+                  - cell "How the hub, shellmcp, and 3 adapters fit together" [ref=e741]
+                - row [ref=e742]:
+                  - cell [ref=e743]:
+                    - link "Getting Started" [ref=e744] [cursor=pointer]:
+                      - /url: "#/docs/GETTING_STARTED"
+                  - cell "Install + first command in 5 minutes" [ref=e745]
+                - row [ref=e746]:
+                  - cell [ref=e747]:
+                    - link "Adapters" [ref=e748] [cursor=pointer]:
+                      - /url: "#/docs/ADAPTERS"
+                  - cell "The 3 ways to connect your AI (MCP / extension / Custom GPT)" [ref=e749]
+                - row [ref=e750]:
+                  - cell [ref=e751]:
+                    - link "Hub" [ref=e752] [cursor=pointer]:
+                      - /url: "#/docs/HUB"
+                  - 'cell "gptadmin_hub: config, env vars, endpoints, web panel" [ref=e753]'
+                - row [ref=e754]:
+                  - cell [ref=e755]:
+                    - link "ShellMCP" [ref=e756] [cursor=pointer]:
+                      - /url: "#/docs/SHELLMCP"
+                  - cell "The agent that runs on target machines" [ref=e757]
+                - row [ref=e758]:
+                  - cell [ref=e759]:
+                    - link "Install Paths" [ref=e760] [cursor=pointer]:
+                      - /url: "#/docs/INSTALL_PATHS"
+                  - cell "Where GPT‑Админ lives on Linux/macOS/Windows" [ref=e761]
+                - row [ref=e762]:
+                  - cell [ref=e763]:
+                    - link "Configuration" [ref=e764] [cursor=pointer]:
+                      - /url: "#/docs/CONFIGURATION"
+                  - cell "Full env-var reference, auth model, OAuth" [ref=e765]
+                - row [ref=e766]:
+                  - cell [ref=e767]:
+                    - link "API Reference" [ref=e768] [cursor=pointer]:
+                      - /url: "#/docs/API_REFERENCE"
+                  - cell "REST + MCP endpoints" [ref=e769]
+                - row [ref=e770]:
+                  - cell [ref=e771]:
+                    - link "MCP Proxy Relay" [ref=e772] [cursor=pointer]:
+                      - /url: "#/docs/MCP_PROXY_RELAY"
+                  - cell "Use GPTAdmin as a secure per-server MCP and OpenAPI Action proxy" [ref=e773]
+                - row [ref=e774]:
+                  - cell [ref=e775]:
+                    - link "Security" [ref=e776] [cursor=pointer]:
+                      - /url: "#/docs/SECURITY_DOCS"
+                  - cell "Auth, tokens, OAuth, responsible disclosure" [ref=e777]
+                - row [ref=e778]:
+                  - cell [ref=e779]:
+                    - link "Tunnels" [ref=e780] [cursor=pointer]:
+                      - /url: "#/docs/TUNNELS_DOCS"
+                  - cell "FRP and Cloudflare tunnels to expose the hub" [ref=e781]
+                - row [ref=e782]:
+                  - cell [ref=e783]:
+                    - link "Failover" [ref=e784] [cursor=pointer]:
+                      - /url: "#/docs/FAILOVER"
+                  - cell "How fallback nodes keep GPTAdmin alive in degraded mode and how to recover" [ref=e785]
+                - row [ref=e786]:
+                  - cell [ref=e787]:
+                    - link "Roadmap" [ref=e788] [cursor=pointer]:
+                      - /url: "#/docs/ROADMAP"
+                  - cell "What's built, what's coming, open-core split" [ref=e789]
+                - row [ref=e790]:
+                  - cell [ref=e791]:
+                    - link "FAQ" [ref=e792] [cursor=pointer]:
+                      - /url: "#/docs/FAQ"
+                  - cell "Common questions" [ref=e793]
+            - heading "Quick links" [level=2] [ref=e794]
+            - list [ref=e795]:
+              - listitem [ref=e796]:
+                - strong [ref=e797]: New here?
+                - text: Start with
+                - link "Getting Started" [ref=e798] [cursor=pointer]:
+                  - /url: "#/docs/GETTING_STARTED"
+                - text: .
+              - listitem [ref=e799]:
+                - strong [ref=e800]: Want to understand the design?
+                - text: Read
+                - link "Architecture" [ref=e801] [cursor=pointer]:
+                  - /url: "#/docs/ARCHITECTURE"
+                - text: .
+              - listitem [ref=e802]:
+                - strong [ref=e803]: Connecting a specific AI?
+                - text: Jump to
+                - link "Adapters" [ref=e804] [cursor=pointer]:
+                  - /url: "#/docs/ADAPTERS"
+                - text: .
+              - listitem [ref=e805]:
+                - strong [ref=e806]: Going to production?
+                - text: See
+                - link "Security" [ref=e807] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+                - text: and
+                - link "Tunnels" [ref=e808] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+                - text: .
+              - listitem [ref=e809]:
+                - strong [ref=e810]: Planning resilience?
+                - text: Read
+                - link "Failover" [ref=e811] [cursor=pointer]:
+                  - /url: "#/docs/FAILOVER"
+                - text: after
+                - link "Tunnels" [ref=e812] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+                - text: .
+          - navigation "Pagination" [ref=e609]:
+            - button "Next Getting Started" [ref=e813]:
+              - generic [ref=e611]:
+                - generic [ref=e612]: Next
+                - generic [ref=e613]: Getting Started
+    - contentinfo [ref=e432]:
+      - generic [ref=e433]:
+        - generic [ref=e434]:
+          - link "GPT‑Админ" [ref=e435] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "Подвал" [ref=e440]:
+            - link "Как работает" [ref=e441] [cursor=pointer]:
+              - /url: "#how"
+            - link "Функции" [ref=e442] [cursor=pointer]:
+              - /url: "#features"
+            - link "FAQ" [ref=e443] [cursor=pointer]:
+              - /url: "#faq"
+            - link "Документация и Privacy" [ref=e444] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "GitHub" [ref=e445] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "bezrabotnyi.com" [ref=e449] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "@careviolan" [ref=e453] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=e457]:
+          - paragraph [ref=e458]: © 2025–2026 GPT‑Админ · в разработке с мая 2025
+          - generic [ref=e459]:
+            - link "bezrabotnyi.com — все проекты" [ref=e460] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=e464]: ·
+            - paragraph [ref=e465]: Сделано для тех, кто устал копипастить команды
+  - region "Notifications (F8)":
+    - list
+  - alert [ref=e470]

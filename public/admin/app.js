@@ -229,13 +229,17 @@ function renderClientCard(r) {
     '<div class="entryCard">' +
       '<div class="entryHead"><div class="entryMain">' +
         '<div class="entryTitle">' +
-          '<span class="mono">' + esc(r.token_id) + '</span> ' +
+          '<span class="mono">' + esc(r.token_id || r.id || r.key || 'client') + '</span> ' +
           (r.token_kind ? '<span class="pill">' + esc(r.token_kind) + '</span>' : '') +
+          (r.access_mode ? '<span class="pill">' + esc(r.access_mode === 'readonly' ? 'только просмотр' : 'полный доступ') + '</span>' : '') +
           (r.client_id ? ' <span class="muted small">' + esc(r.client_id) + '</span>' : '') +
         '</div>' +
-        '<div class="row" style="margin-top:6px">' +
-        '<button class="bad" onclick="revokeClient(\'' + esc(r.key || r.token_id) + '\')">отозвать</button>' +
-        '</div>' +
+        (r.token_kind === 'legacy_ctl' ?
+          '<div class="entrySub warn small">Переходный CTL: значение не показывается и не ротируется как JWT. Выпустите новый JWT после проверки OAuth.</div>' :
+          '<div class="row" style="margin-top:6px">' +
+          '<button onclick="rotateClient(\'' + esc(r.id || r.key || r.token_id) + '\')">ротировать</button>' +
+          '<button class="bad" onclick="revokeClient(\'' + esc(r.id || r.key || r.token_id) + '\')">отозвать</button>' +
+          '</div>') +
         '<div class="entrySub muted small">' +
           'last seen <b>' + esc(r.last_seen_fmt || '') + '</b>' +
           (r.seen_count != null ? ' · seen ' + esc(String(r.seen_count)) : '') +
@@ -403,30 +407,13 @@ async function loadSecurityEnv(){
   const el=$('securityEnv');
   el.innerHTML='<p class="muted">Загрузка…</p>';
   try{
-    // Read env file via shell_exec on hub
-    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:roomhacker-server-100',
-      tool_name:'shell_exec',
-      arguments:{cmd:'cat /etc/gptadmin/gptadmin.env 2>/dev/null || cat ~/.config/gptadmin/gptadmin.env 2>/dev/null || echo NOT_FOUND'}
-    })});
-    const sc=j.response?.structuredContent||j.structuredContent||{};
-    const result=sc.result||{};
-    const stdout=result.stdout||'';
-    if(stdout.trim()==='NOT_FOUND'||!stdout.trim()){
-      el.innerHTML='<p class="muted">env-файл не найден. Возможно хаб использует другой путь.</p>';
-      return;
-    }
-    const lines=stdout.trim().split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
-    const sensitive=['CTL_TOKEN','ADMIN_PASSWORD','OAUTH_CLIENT_SECRET','SHELLMCP_TOKEN','MCP_BRIDGE_KEY'];
-    el.innerHTML=lines.map(line=>{
-      const eq=line.indexOf('=');
-      if(eq<0)return '';
-      const key=line.substring(0,eq).trim();
-      const val=line.substring(eq+1).trim();
-      const isSensitive=sensitive.some(s=>key.includes(s))||key.includes('TOKEN')||key.includes('SECRET')||key.includes('PASSWORD')||key.includes('BEARER');
-      const displayVal=isSensitive?(val.substring(0,8)+'••••••••'+(val.length>20?'...':'')):val;
-      const valClass=isSensitive?'warn':'';
-      return `<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">${esc(key)}</span><span class="muted small">${isSensitive?'sensitive':''}</span></div><div class="mono ${valClass}">${esc(displayVal)}</div></div>`;
+    const j=await api('/admin/api/security/env');
+    const variables=Array.isArray(j.variables)?j.variables:[];
+    const heartbeatInput=$('shellHeartbeatEnabled');
+    if(heartbeatInput)heartbeatInput.checked=!!j.shellmcp_heartbeat;
+    el.innerHTML=variables.map(v=>{
+      const label=v.sensitive?'sensitive · value hidden':(v.present?'set':'empty');
+      return `<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">${esc(v.key)}</span><span class="muted small">${label}</span></div><div class="mono">${v.present?'length '+esc(String(v.length)):'not set'}</div></div>`;
     }).join('');
   }catch(e){
     el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>';
@@ -460,6 +447,12 @@ async function setEnvVar(){
   }catch(e){alert('ERR '+e.message)}
 }
 
+function setShellHeartbeatFromPanel(enabled){
+  $('secEnvKey').value='SHELLMCP_HEARTBEAT';
+  $('secEnvVal').value=enabled?'1':'0';
+  setEnvVar();
+}
+
 async function rotateCtlToken(){
   if(!confirm('Сгенерировать новый CTL_TOKEN? Старый перестанет работать!'))return;
   const newToken=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -470,19 +463,21 @@ async function rotateCtlToken(){
 
 async function rotateOAuth(){
   if(!confirm('Сгенерировать новый OAUTH_CLIENT_SECRET? Все MCP-клиенты нужно будет переподключить!'))return;
-  const newSecret=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
-  $('secEnvKey').value='OAUTH_CLIENT_SECRET';
-  $('secEnvVal').value=newSecret;
-  alert('Новый OAUTH_CLIENT_SECRET сгенерирован. Нажмите «Установить» чтобы применить, затем перезапустите хаб.');
+  try{
+    const j=await api('/admin/api/auth/rotate-oauth',{method:'POST'});
+    alert(j.message||'OAuth secret rotated. Перезапустите хаб.');
+    loadSecurityEnv();
+  }catch(e){alert('ERR '+e.message)}
 }
 
 async function issueMcpTokenFromPanel(){
   const name=$('secMcpTokenName').value.trim();
   if(!name){alert('Введите client_id');return}
+  const accessMode=$('secMcpAccessMode').value||'readonly';
   const el=$('secMcpTokenResult');
   el.textContent='Выпускаю…';
   try{
-    const j=await api('/admin/api/mcp/issue-token',{method:'POST',body:JSON.stringify({client_id:name,ttl_days:365})});
+    const j=await api('/admin/api/mcp/issue-token',{method:'POST',body:JSON.stringify({client_id:name,ttl_days:365,access_mode:accessMode})});
     el.textContent=JSON.stringify(j,null,2);
   }catch(e){el.textContent='ERR '+e.message}
 }
@@ -511,12 +506,22 @@ async function revokeClient(key){
     refreshAll();
   }catch(e){alert('ERR '+e.message)}
 }
+async function rotateClient(key){
+  if(!confirm('Выпустить замену для этого JWT? Старый сразу перестанет работать.'))return;
+  try{
+    const j=await api('/admin/api/mcp/tokens/'+encodeURIComponent(key)+'/rotate',{method:'POST'});
+    const el=$('secMcpTokenResult');
+    if(el)el.textContent=JSON.stringify(j,null,2);
+    showView('security');
+    refreshAll();
+  }catch(e){alert('ERR '+e.message)}
+}
 async function revokeAllClients(){
-  if(!confirm('Отозвать ВСЕХ клиентов и ротировать OAUTH_CLIENT_SECRET?\n\nВсе MCP-клиенты (Claude, Codex, OpenCode) должны будут заново авторизоваться!'))return;
+  if(!confirm('Отозвать ВСЕ управляемые JWT? Клиенты с этими токенами нужно будет подключить заново.'))return;
   if(!confirm('Точно? Это действие необратимо.'))return;
   try{
     const j=await api('/admin/api/clients/revoke-all',{method:'POST'});
-    alert('Отозвано клиентов: '+j.revoked_count+'\nOAuth secret ротирован: '+(j.oauth_secret_rotated?'да':'нет')+'\n\nПерезапустите хаб для применения.');
+    alert('Отозвано JWT: '+j.revoked_count);
     refreshAll();
   }catch(e){alert('ERR '+e.message)}
 }

@@ -300,6 +300,16 @@ func TestComposeCmd(t *testing.T) {
 	})
 }
 
+func TestComposeCmdForUserDropsRootTransportPrivileges(t *testing.T) {
+	got := ComposeCmdForUser("touch marker", "/home/roomhacker", nil, "roomhacker", "root")
+	if !strings.HasPrefix(got, "sudo -H -u 'roomhacker' -- bash -lc ") {
+		t.Fatalf("remote root transport did not downshift user: %q", got)
+	}
+	if !strings.Contains(got, "touch marker") {
+		t.Fatalf("wrapped command missing: %q", got)
+	}
+}
+
 // ---------- Enabled truth table ----------
 
 func TestConfigEnabledTruthTable(t *testing.T) {

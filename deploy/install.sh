@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Packages live on GitHub Releases (canonical, versioned); the install
+# bootstrap script (gptadmin.py) is still served from the legacy host.
+RELEASES_URL=${RELEASES_URL:-https://github.com/megamen32/gptadmin_opensource/releases/latest/download}
 BASE_URL=${BASE_URL:-https://became.bezrabotnyi.com}
 CLI_URL=${CLI_URL:-$BASE_URL/gptadmin.py}
-PKG_FALLBACK_URL=${PKG_FALLBACK_URL:-$BASE_URL/gptadmin.tar.gz}
-PKG_HUB_URL=${PKG_HUB_URL:-$BASE_URL/gptadmin-hub.tar.gz}
-PKG_SHELLMCP_URL=${PKG_SHELLMCP_URL:-$BASE_URL/gptadmin-shellmcp.tar.gz}
+PKG_FALLBACK_URL=${PKG_FALLBACK_URL:-$RELEASES_URL/gptadmin.tar.gz}
+PKG_HUB_URL=${PKG_HUB_URL:-$RELEASES_URL/gptadmin-hub.tar.gz}
+PKG_SHELLMCP_URL=${PKG_SHELLMCP_URL:-$RELEASES_URL/gptadmin-shellmcp.tar.gz}
 
 _os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$_os" in
@@ -19,7 +22,7 @@ case "$_arch" in
   x86_64|amd64) GPTADMIN_ARCH=amd64 ;;
   *) GPTADMIN_ARCH="$_arch" ;;
 esac
-PKG_ALL_URL=${PKG_ALL_URL:-$BASE_URL/gptadmin-${GPTADMIN_PLATFORM}-${GPTADMIN_ARCH}.tar.gz}
+PKG_ALL_URL=${PKG_ALL_URL:-$RELEASES_URL/gptadmin-${GPTADMIN_PLATFORM}-${GPTADMIN_ARCH}.tar.gz}
 
 err(){ echo "ERROR: $*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }

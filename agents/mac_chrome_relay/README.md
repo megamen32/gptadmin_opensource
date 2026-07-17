@@ -24,6 +24,10 @@ This uses your real Chrome profile:
 ~/Library/Application Support/Google/Chrome
 ```
 
+The relay discovers a running DevTools endpoint on ports `9222`, `9223`, then
+`9333`. To require one specific endpoint, pass `--cdp http://127.0.0.1:9223`
+or set `GPTADMIN_CHROME_CDP`.
+
 If Chrome refuses because profile is already running, fully quit Chrome first:
 
 ```bash

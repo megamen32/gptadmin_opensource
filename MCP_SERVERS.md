@@ -2,6 +2,15 @@
 
 Use this from `~/gptadmin` on `roomhacker-server-100`.
 
+For a Mac that has only ShellMCP installed, setup must receive the target
+Hub's `MCP_RELAY_AGENT_TOKEN`; a locally generated `CTL_TOKEN` is not a relay
+credential and will be rejected by that Hub:
+
+```bash
+sudo gptadmin setup --shellmcp --no-hub --hub-url https://hub.example \
+  --mcp-relay-token "$MCP_RELAY_AGENT_TOKEN"
+```
+
 ## One-command add + install
 
 Remote HTTP/SSE MCP via `mcp-remote`:
@@ -35,11 +44,11 @@ The helper writes `/etc/gptadmin/mcp.json`, renders `/etc/gptadmin/mcp-agents.d/
 ## Useful commands
 
 ```bash
-python3 cli/gptadmin.py mcp list
-sudo python3 cli/gptadmin.py mcp add NAME --install --status -- npx -y package
-sudo python3 cli/gptadmin.py mcp install NAME
-python3 cli/gptadmin.py mcp status NAME
-python3 cli/gptadmin.py mcp cat NAME
+python3 cli.py mcp list
+sudo python3 cli.py mcp add NAME --install --status -- npx -y package
+sudo python3 cli.py mcp install NAME
+python3 cli.py mcp status NAME
+python3 cli.py mcp cat NAME
 ```
 
 Files:

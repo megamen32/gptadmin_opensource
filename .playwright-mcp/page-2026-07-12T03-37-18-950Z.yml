@@ -1,0 +1,244 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - banner [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - link "GPT‑Админ — на главную" [ref=f1e5] [cursor=pointer]:
+          - /url: "#/"
+          - generic [ref=f1e9]: GPT‑Админ
+        - generic [ref=f1e10]:
+          - button "Switch language" [ref=f1e12]:
+            - generic [ref=f1e17]: CN
+          - link "GPT‑Админ на GitHub — opensource" [ref=f1e18] [cursor=pointer]:
+            - /url: https://github.com/megamen32/gptadmin_opensource
+            - generic [ref=f1e22]: GitHub
+            - generic [ref=f1e467]: "8"
+          - button "Открыть меню" [ref=f1e23]
+    - main [ref=f1e25]:
+      - generic [ref=f1e471]:
+        - generic [ref=f1e472]:
+          - button "返回首页" [ref=f1e473]
+          - generic [ref=f1e476]: 文档
+          - heading "使用 GPT‑Админ 所需的全部资料" [level=1] [ref=f1e478]
+          - paragraph [ref=f1e479]: 从左侧选择主题。所有文档均已自动翻译；可使用右上角的语言切换器切换。
+        - button "Switch language" [ref=f1e482]:
+          - generic [ref=f1e487]: CN
+      - generic [ref=f1e489]:
+        - complementary [ref=f1e490]:
+          - generic [ref=f1e491]:
+            - generic [ref=f1e492]: 文档目录
+            - list [ref=f1e496]:
+              - listitem [ref=f1e497]:
+                - link "Overview" [ref=f1e498] [cursor=pointer]:
+                  - /url: "#/docs/Home"
+              - listitem [ref=f1e503]:
+                - link "Getting Started" [ref=f1e504] [cursor=pointer]:
+                  - /url: "#/docs/GETTING_STARTED"
+              - listitem [ref=f1e509]:
+                - link "Architecture" [ref=f1e510] [cursor=pointer]:
+                  - /url: "#/docs/ARCHITECTURE"
+              - listitem [ref=f1e515]:
+                - link "Adapters" [ref=f1e516] [cursor=pointer]:
+                  - /url: "#/docs/ADAPTERS"
+              - listitem [ref=f1e521]:
+                - link "Hub" [ref=f1e522] [cursor=pointer]:
+                  - /url: "#/docs/HUB"
+              - listitem [ref=f1e527]:
+                - link "ShellMCP" [ref=f1e528] [cursor=pointer]:
+                  - /url: "#/docs/SHELLMCP"
+              - listitem [ref=f1e533]:
+                - link "Install Paths" [ref=f1e534] [cursor=pointer]:
+                  - /url: "#/docs/INSTALL_PATHS"
+              - listitem [ref=f1e539]:
+                - link "Configuration" [ref=f1e540] [cursor=pointer]:
+                  - /url: "#/docs/CONFIGURATION"
+              - listitem [ref=f1e545]:
+                - link "API Reference" [ref=f1e546] [cursor=pointer]:
+                  - /url: "#/docs/API_REFERENCE"
+              - listitem [ref=f1e551]:
+                - link "MCP Proxy Relay" [ref=f1e552] [cursor=pointer]:
+                  - /url: "#/docs/MCP_PROXY_RELAY"
+              - listitem [ref=f1e557]:
+                - link "Integrations" [ref=f1e558] [cursor=pointer]:
+                  - /url: "#/docs/INTEGRATIONS"
+              - listitem [ref=f1e563]:
+                - link "Tunnels" [ref=f1e564] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+              - listitem [ref=f1e569]:
+                - link "Failover" [ref=f1e570] [cursor=pointer]:
+                  - /url: "#/docs/FAILOVER"
+              - listitem [ref=f1e575]:
+                - link "Security" [ref=f1e576] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+              - listitem [ref=f1e581]:
+                - link "File Backups" [ref=f1e582] [cursor=pointer]:
+                  - /url: "#/docs/FILE_BACKUPS"
+              - listitem [ref=f1e587]:
+                - link "Roadmap" [ref=f1e588] [cursor=pointer]:
+                  - /url: "#/docs/ROADMAP"
+              - listitem [ref=f1e593]:
+                - link "FAQ" [ref=f1e594] [cursor=pointer]:
+                  - /url: "#/docs/FAQ"
+        - article [ref=f1e599]:
+          - generic [ref=f1e600]:
+            - heading "GPT-Admin — 文档" [level=1] [ref=f1e601]
+            - paragraph [ref=f1e602]: 欢迎使用 GPT-Admin 文档。GPT-Admin 是一个自托管的 MCP 中心：将您的服务器和任何 MCP 工具连接到它，然后通过三个适配器连接任何 AI。
+            - paragraph [ref=f1e603]:
+              - strong [ref=f1e604]: "网站:"
+              - link "https://gptadmin.bezrabotnyi.com" [ref=f1e605] [cursor=pointer]:
+                - /url: https://gptadmin.bezrabotnyi.com
+              - strong [ref=f1e606]: "安装:"
+              - code [ref=f1e607]: curl -s https://became.bezrabotnyi.com/install.sh | bash
+            - heading "目录" [level=2] [ref=f1e608]
+            - table [ref=f1e610]:
+              - rowgroup [ref=f1e611]:
+                - row [ref=f1e612]:
+                  - columnheader "页面" [ref=f1e613]
+                  - columnheader "内容" [ref=f1e614]
+              - rowgroup [ref=f1e615]:
+                - row [ref=f1e616]:
+                  - cell [ref=f1e617]:
+                    - link "Architecture" [ref=f1e618] [cursor=pointer]:
+                      - /url: "#/docs/ARCHITECTURE"
+                  - cell "中心、shellmcp 和 3 个适配器如何协同工作" [ref=f1e619]
+                - row [ref=f1e620]:
+                  - cell [ref=f1e621]:
+                    - link "Getting Started" [ref=f1e622] [cursor=pointer]:
+                      - /url: "#/docs/GETTING_STARTED"
+                  - cell "5 分钟内完成安装和第一个命令" [ref=f1e623]
+                - row [ref=f1e624]:
+                  - cell [ref=f1e625]:
+                    - link "Adapters" [ref=f1e626] [cursor=pointer]:
+                      - /url: "#/docs/ADAPTERS"
+                  - cell "连接 AI 的 3 种方式 (MCP / extension / Custom GPT)" [ref=f1e627]
+                - row [ref=f1e628]:
+                  - cell [ref=f1e629]:
+                    - link "Hub" [ref=f1e630] [cursor=pointer]:
+                      - /url: "#/docs/HUB"
+                  - cell "gptadmin_hub：配置、环境变量、端点、Web 面板" [ref=f1e631]
+                - row [ref=f1e632]:
+                  - cell [ref=f1e633]:
+                    - link "ShellMCP" [ref=f1e634] [cursor=pointer]:
+                      - /url: "#/docs/SHELLMCP"
+                  - cell "在目标机器上运行的代理" [ref=f1e635]
+                - row [ref=f1e636]:
+                  - cell [ref=f1e637]:
+                    - link "Install Paths" [ref=f1e638] [cursor=pointer]:
+                      - /url: "#/docs/INSTALL_PATHS"
+                  - cell "GPT-Admin 在 Linux/macOS/Windows 上的位置" [ref=f1e639]
+                - row [ref=f1e640]:
+                  - cell [ref=f1e641]:
+                    - link "Configuration" [ref=f1e642] [cursor=pointer]:
+                      - /url: "#/docs/CONFIGURATION"
+                  - cell "完整的环境变量参考、认证模型、OAuth" [ref=f1e643]
+                - row [ref=f1e644]:
+                  - cell [ref=f1e645]:
+                    - link "API Reference" [ref=f1e646] [cursor=pointer]:
+                      - /url: "#/docs/API_REFERENCE"
+                  - cell "REST + MCP 端点" [ref=f1e647]
+                - row [ref=f1e648]:
+                  - cell [ref=f1e649]:
+                    - link "MCP Proxy Relay" [ref=f1e650] [cursor=pointer]:
+                      - /url: "#/docs/MCP_PROXY_RELAY"
+                  - cell "将 GPTAdmin 用作安全的每服务器 MCP 和 OpenAPI Action 代理" [ref=f1e651]
+                - row [ref=f1e652]:
+                  - cell [ref=f1e653]:
+                    - link "Security" [ref=f1e654] [cursor=pointer]:
+                      - /url: "#/docs/SECURITY_DOCS"
+                  - cell "认证、令牌、OAuth、负责任披露" [ref=f1e655]
+                - row [ref=f1e656]:
+                  - cell [ref=f1e657]:
+                    - link "Tunnels" [ref=f1e658] [cursor=pointer]:
+                      - /url: "#/docs/TUNNELS_DOCS"
+                  - cell "用于暴露中心的 FRP 和 Cloudflare 隧道" [ref=f1e659]
+                - row [ref=f1e660]:
+                  - cell [ref=f1e661]:
+                    - link "Failover" [ref=f1e662] [cursor=pointer]:
+                      - /url: "#/docs/FAILOVER"
+                  - cell "了解故障转移节点如何在降级模式下保持 GPTAdmin 的运行以及如何恢复" [ref=f1e663]
+                - row [ref=f1e664]:
+                  - cell [ref=f1e665]:
+                    - link "Roadmap" [ref=f1e666] [cursor=pointer]:
+                      - /url: "#/docs/ROADMAP"
+                  - cell "已构建的功能、即将推出的功能、核心开源分离" [ref=f1e667]
+                - row [ref=f1e668]:
+                  - cell [ref=f1e669]:
+                    - link "FAQ" [ref=f1e670] [cursor=pointer]:
+                      - /url: "#/docs/FAQ"
+                  - cell "常见问题" [ref=f1e671]
+            - heading "快速链接" [level=2] [ref=f1e672]
+            - list [ref=f1e673]:
+              - listitem [ref=f1e674]:
+                - strong [ref=f1e675]: 新手？
+                - text: 从
+                - link "Getting Started" [ref=f1e676] [cursor=pointer]:
+                  - /url: "#/docs/GETTING_STARTED"
+                - text: 开始。
+              - listitem [ref=f1e677]:
+                - strong [ref=f1e678]: 想了解设计？
+                - text: 阅读
+                - link "Architecture" [ref=f1e679] [cursor=pointer]:
+                  - /url: "#/docs/ARCHITECTURE"
+                - text: 。
+              - listitem [ref=f1e680]:
+                - strong [ref=f1e681]: 连接特定 AI？
+                - text: 跳转到
+                - link "Adapters" [ref=f1e682] [cursor=pointer]:
+                  - /url: "#/docs/ADAPTERS"
+                - text: 。
+              - listitem [ref=f1e683]:
+                - strong [ref=f1e684]: 准备投入生产环境？
+                - text: 查看
+                - link "Security" [ref=f1e685] [cursor=pointer]:
+                  - /url: "#/docs/SECURITY_DOCS"
+                - text: 和
+                - link "Tunnels" [ref=f1e686] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+                - text: 。
+              - listitem [ref=f1e687]:
+                - strong [ref=f1e688]: 规划弹性？
+                - text: 在阅读
+                - link "Tunnels" [ref=f1e689] [cursor=pointer]:
+                  - /url: "#/docs/TUNNELS_DOCS"
+                - text: 后阅读
+                - link "Failover" [ref=f1e690] [cursor=pointer]:
+                  - /url: "#/docs/FAILOVER"
+                - text: 。
+          - navigation "Pagination" [ref=f1e691]:
+            - button "上一篇 Hub" [ref=f1e699]:
+              - generic [ref=f1e702]:
+                - generic [ref=f1e703]: 上一篇
+                - generic [ref=f1e704]: Hub
+            - button "下一篇 Install Paths" [ref=f1e705]:
+              - generic [ref=f1e693]:
+                - generic [ref=f1e694]: 下一篇
+                - generic [ref=f1e695]: Install Paths
+    - contentinfo [ref=f1e432]:
+      - generic [ref=f1e433]:
+        - generic [ref=f1e434]:
+          - link "GPT‑Админ" [ref=f1e435] [cursor=pointer]:
+            - /url: "#top"
+          - navigation "Подвал" [ref=f1e440]:
+            - link "Как работает" [ref=f1e441] [cursor=pointer]:
+              - /url: "#how"
+            - link "Функции" [ref=f1e442] [cursor=pointer]:
+              - /url: "#features"
+            - link "FAQ" [ref=f1e443] [cursor=pointer]:
+              - /url: "#faq"
+            - link "Документация и Privacy" [ref=f1e444] [cursor=pointer]:
+              - /url: "#/docs"
+            - link "GitHub" [ref=f1e445] [cursor=pointer]:
+              - /url: https://github.com/megamen32/gptadmin_opensource
+            - link "bezrabotnyi.com" [ref=f1e449] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - link "@careviolan" [ref=f1e453] [cursor=pointer]:
+              - /url: https://t.me/careviolan
+        - generic [ref=f1e457]:
+          - paragraph [ref=f1e458]: © 2025–2026 GPT‑Админ · в разработке с мая 2025
+          - generic [ref=f1e459]:
+            - link "bezrabotnyi.com — все проекты" [ref=f1e460] [cursor=pointer]:
+              - /url: https://bezrabotnyi.com
+            - generic [ref=f1e464]: ·
+            - paragraph [ref=f1e465]: Сделано для тех, кто устал копипастить команды
+  - region "Notifications (F8)":
+    - list
+  - alert [ref=f1e698]

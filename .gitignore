@@ -18,6 +18,7 @@ build/
 # --- Runtime data & config ---
 config/
 logs/
+trash/
 logs_config.json
 *.log
 *.db
@@ -44,6 +45,10 @@ scripts/check_mac_tunnel_matrix.env
 # --- AI assistant settings (private) ---
 .claude/
 .serena/
+
+# --- Private infrastructure prompts ---
+public/gptadmin_instructions_under_8000.md
+public/gptadmin_infrastructure_mcp_instructions.md
 
 # --- Archives belong in releases, not the repo ---
 *.tar.gz
