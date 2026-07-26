@@ -27,10 +27,13 @@
   // ═══════════════════════════════════════════════════════════════
   //  CONFIG
   // ═══════════════════════════════════════════════════════════════
-  const DEFAULT_BRIDGE = 'https://gptadminmcp.bezrabotnyi.com';
+  const DEFAULT_HUB = 'https://gptadminmcp.bezrabotnyi.com';
 
-  function bridgeUrl()   { return GM_getValue('bridge_url', DEFAULT_BRIDGE); }
-  function bridgeKey()   { return GM_getValue('bridge_key', ''); }
+  function hubUrl()       { return GM_getValue('hub_url', DEFAULT_HUB); }
+  function accessToken()  { return GM_getValue('oauth_access_token', ''); }
+  function oauthClientId(){ return GM_getValue('oauth_client_id', ''); }
+  function oauthState()   { return GM_getValue('oauth_state', ''); }
+  function oauthVerifier(){ return GM_getValue('oauth_verifier', ''); }
   function autoEnter()   { return GM_getValue('auto_enter', false); }
   function compactMode() { return GM_getValue('compact_prompt', true); }
   function toolbarPosition() { return GM_getValue('toolbar_position', 'top-center'); }
@@ -144,20 +147,23 @@
   // ═══════════════════════════════════════════════════════════════
   //  BRIDGE API (GM_xmlhttpRequest — no CORS issues)
   // ═══════════════════════════════════════════════════════════════
-  function requireBridgeKey(action = 'MCP data') {
-    const key = bridgeKey();
-    if (key) return key;
-    toast(`${action} is locked: set Bridge Key in ⚙ settings`, 5000);
+  function requireOAuthConnection(action = 'MCP data') {
+    const token = accessToken();
+    if (token) return token;
+    toast(`${action} is locked: connect this Hub from ⚙ settings`, 5000);
     openSettings();
     return null;
   }
 
   function api(method, path, body) {
     return new Promise((resolve, reject) => {
-      const url = bridgeUrl() + path;
+      const url = hubUrl() + path;
+      const headers = { 'Content-Type': 'application/json' };
+      const token = accessToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
       GM_xmlhttpRequest({
         method, url,
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         data: body ? JSON.stringify(body) : undefined,
         timeout: 40000,
         onload(r) {
@@ -170,6 +176,93 @@
         ontimeout() { reject(new Error('bridge timeout')); },
       });
     });
+  }
+
+  function randomBase64Url(bytes = 32) {
+    const data = crypto.getRandomValues(new Uint8Array(bytes));
+    let binary = '';
+    data.forEach(byte => { binary += String.fromCharCode(byte); });
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  async function pkceChallenge(verifier) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    let binary = '';
+    new Uint8Array(digest).forEach(byte => { binary += String.fromCharCode(byte); });
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function oauthForm(path, fields) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: hubUrl() + path,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        data: new URLSearchParams(fields).toString(),
+        timeout: 40000,
+        onload(r) {
+          try { resolve(JSON.parse(r.responseText)); }
+          catch { reject(new Error('Hub returned invalid OAuth data')); }
+        },
+        onerror: reject,
+        ontimeout() { reject(new Error('OAuth connection timeout')); },
+      });
+    });
+  }
+
+  async function connectOAuth() {
+    const callback = `${hubUrl()}/connect/callback`;
+    const verifier = randomBase64Url(48);
+    const state = randomBase64Url(24);
+    const challenge = await pkceChallenge(verifier);
+    const registration = await api('POST', '/register', { redirect_uris: [callback] });
+    if (!registration.client_id) throw new Error(registration.error_description || 'Hub did not register this client');
+    GM_setValue('oauth_client_id', registration.client_id);
+    GM_setValue('oauth_state', state);
+    GM_setValue('oauth_verifier', verifier);
+    const query = new URLSearchParams({
+      response_type: 'code', client_id: registration.client_id, redirect_uri: callback,
+      resource: hubUrl(), scope: 'gptadmin.read gptadmin.exec', state,
+      code_challenge: challenge, code_challenge_method: 'S256',
+    });
+    const popup = window.open(`${hubUrl()}/oauth/authorize?${query}`, 'gptadmin-oauth', 'popup,width=560,height=720');
+    if (!popup) throw new Error('Allow the OAuth popup and try again');
+    toast('Complete authorization in the Hub popup');
+  }
+
+  window.addEventListener('message', async (event) => {
+    if (event.origin !== new URL(hubUrl()).origin || event.data?.type !== 'gptadmin-oauth-callback') return;
+    if (!event.data.state || event.data.state !== oauthState()) { toast('OAuth state mismatch', 5000); return; }
+    try {
+      const token = await oauthForm('/oauth/token', {
+        grant_type: 'authorization_code', code: event.data.code,
+        client_id: oauthClientId(), redirect_uri: `${hubUrl()}/connect/callback`,
+        resource: hubUrl(), code_verifier: oauthVerifier(),
+      });
+      if (!token.access_token) throw new Error(token.error_description || 'Hub did not issue a connection');
+      GM_setValue('oauth_access_token', token.access_token);
+      GM_setValue('oauth_state', '');
+      GM_setValue('oauth_verifier', '');
+      refreshToolbarVisibility();
+      toast('Hub connection ready');
+    } catch (error) { toast(`OAuth error: ${error.message}`, 5000); }
+  });
+
+  async function mcpCall(name, argumentsValue = {}) {
+    const response = await api('POST', '/mcp', {
+      jsonrpc: '2.0', id: Date.now(), method: 'tools/call',
+      params: { name, arguments: argumentsValue },
+    });
+    if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
+    return response.result?.structuredContent || response.result || response;
+  }
+
+  async function promptForTarget(target, compact) {
+    const schema = await mcpCall('schema', { target });
+    const tools = schema.response?.tools || schema.tools || [];
+    const lines = [`Tools for ${target}:`];
+    for (const tool of tools) lines.push(`  ${tool.name || 'tool'}(${compact ? 'args' : JSON.stringify(tool.inputSchema || {})})`);
+    return lines.join('\n');
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -217,9 +310,8 @@
   //  EXECUTE MCP CALL
   // ═══════════════════════════════════════════════════════════════
   async function execMcp(cmd, inlineBtn) {
-    const key = bridgeKey();
-    if (!key) {
-      toast('No bridge key! Click ⚙ to set it', 4000);
+    const token = requireOAuthConnection('MCP execution');
+    if (!token) {
       if (inlineBtn) { flashBtn(inlineBtn, 'error'); }
       return;
     }
@@ -231,10 +323,9 @@
     let resultStr, isError = false;
 
     try {
-      const result = await api('POST', `/mcp-prompt/call?key=${encodeURIComponent(key)}`, {
-        target: cmd.target,
-        tool: cmd.tool,
-        args: cmd.args || {},
+      const result = await mcpCall('execute', {
+        target: cmd.target, tool: cmd.tool, args: cmd.args || {},
+        idempotency_key: `browser-extension-${Date.now()}`,
       });
 
       if (result && result.error) {
@@ -689,18 +780,18 @@
   }
 
   function renderSettingsContent(panel) {
-    const key = bridgeKey();
+    const connected = Boolean(accessToken());
     panel.innerHTML = `
       <h3>⚙ MCP Bridge Settings</h3>
 
       <div class="mcp-field">
-        <label>Bridge URL</label>
-        <input type="text" id="mcp-cfg-url" value="${esc(bridgeUrl())}" placeholder="${DEFAULT_BRIDGE}">
+        <label>Hub URL</label>
+        <input type="text" id="mcp-cfg-url" value="${esc(hubUrl())}" placeholder="${DEFAULT_HUB}">
       </div>
 
       <div class="mcp-field">
-        <label>Bridge Key <span style="color:${key ? '#a6e3a1' : '#f38ba8'}">(${key ? 'set: ' + key.slice(0, 6) + '...' : 'NOT SET — calls will fail'})</span></label>
-        <input type="password" id="mcp-cfg-key" value="${esc(key)}" placeholder="mcpk_...">
+        <label>Hub connection <span style="color:${connected ? '#a6e3a1' : '#f38ba8'}">(${connected ? 'ready' : 'not connected'})</span></label>
+        <button type="button" id="mcp-connect">${connected ? 'Reconnect with OAuth' : 'Connect with OAuth'}</button>
       </div>
 
       <label class="mcp-check">
@@ -736,30 +827,30 @@
 
     panel.querySelector('#mcp-cfg-save').addEventListener('click', () => {
       const url = document.getElementById('mcp-cfg-url').value.trim().replace(/\/+$/, '');
-      const newKey = document.getElementById('mcp-cfg-key').value.trim();
-      GM_setValue('bridge_url', url || DEFAULT_BRIDGE);
-      GM_setValue('bridge_key', newKey);
+      GM_setValue('hub_url', url || DEFAULT_HUB);
       GM_setValue('auto_enter', document.getElementById('mcp-cfg-autoenter').checked);
       GM_setValue('compact_prompt', document.getElementById('mcp-cfg-compact').checked);
       GM_setValue('toolbar_position', document.getElementById('mcp-cfg-position').value);
       applyToolbarPosition();
       refreshToolbarVisibility();
       panel.classList.remove('open');
-      toast('Settings saved' + (newKey ? '' : ' — key is empty, MCP actions are hidden'));
+      toast('Settings saved');
+    });
+    panel.querySelector('#mcp-connect').addEventListener('click', () => {
+      connectOAuth().catch(error => toast(`OAuth error: ${error.message}`, 5000));
     });
   }
 
   function updateKeyDot() {
     const dot = document.querySelector('.key-dot');
     if (!dot) return;
-    const key = bridgeKey();
-    dot.className = 'key-dot ' + (key ? 'set' : 'unset');
+    dot.className = 'key-dot ' + (accessToken() ? 'set' : 'unset');
   }
 
   function refreshToolbarVisibility() {
     const toolbar = document.getElementById('mcp-toolbar');
     if (!toolbar) return;
-    toolbar.classList.toggle('mcp-no-key', !bridgeKey());
+    toolbar.classList.toggle('mcp-no-key', !accessToken());
     updateKeyDot();
   }
 
@@ -828,8 +919,8 @@
     // ── Settings gear ──
     const btnGear = document.createElement('button');
     btnGear.className = 'mcp-btn mcp-btn-gear mcp-action';
-    const key = bridgeKey();
-    btnGear.innerHTML = `<span class="icon">⚙</span><span class="key-dot ${key ? 'set' : 'unset'}"></span>`;
+    const connected = Boolean(accessToken());
+    btnGear.innerHTML = `<span class="icon">⚙</span><span class="key-dot ${connected ? 'set' : 'unset'}"></span>`;
     btnGear.title = 'MCP Bridge Settings (Alt+K)';
     btnGear.addEventListener('click', () => {
       const panel = document.getElementById('mcp-settings');
@@ -861,17 +952,23 @@
   // ═══════════════════════════════════════════════════════════════
   //  MCP ALL
   // ═══════════════════════════════════════════════════════════════
-  async function injectAll() {
-    const key = requireBridgeKey('MCP All');
-    if (!key) return;
+async function injectAll() {
+    const token = requireOAuthConnection('MCP All');
+    if (!token) return;
     const btn = document.querySelector('.mcp-btn-all');
     const orig = btn.innerHTML;
     btn.innerHTML = '<span class="icon">⏳</span> Loading...';
     btn.disabled = true;
     try {
-      const compact = compactMode() ? '1' : '0';
-      const prompt = await api('GET', `/mcp-prompt/prompt?target=all&compact=${compact}&key=${encodeURIComponent(key)}`);
-      const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+      const compact = compactMode();
+      const discovered = await mcpCall('discover', {});
+      const servers = discovered.servers || [];
+      const parts = ['GPTAdmin MCP targets:'];
+      for (const server of servers) {
+        const target = server.server_id || server.agent_id || server.name;
+        if (target) parts.push(await promptForTarget(target, compact));
+      }
+      const text = parts.join('\n\n');
       await copyToClipboard(text);
       const inserted = setInputText(text);
       toast('MCP All' + (inserted ? ' — pasted + clipboard' : ' — clipboard only'));
@@ -889,15 +986,13 @@
 
   function toggleAgentDropdown(e) {
     e.stopPropagation();
-    const key = requireBridgeKey('MCP agent list');
-    if (!key) return;
+    if (!requireOAuthConnection('MCP agent list')) return;
     const dropdown = document.querySelector('.mcp-dropdown');
     if (dropdown.classList.contains('open')) {
       dropdown.classList.remove('open');
       return;
     }
 
-    // Position dropdown near the MCP button, clamped to viewport.
     const btn = e.currentTarget;
     const rect = btn.getBoundingClientRect();
     const dropdownWidth = 280;
@@ -911,8 +1006,7 @@
 
     dropdown.innerHTML = '<div class="mcp-dropdown-item" style="color:#6c7086">Loading agents...</div>';
     dropdown.classList.add('open');
-
-    loadAgents(dropdown, key);
+    loadAgents(dropdown);
   }
 
   // Parse compact prompt lines — handles agent IDs containing colons
@@ -924,64 +1018,38 @@
     return { agent_id: match[1], display: match[1] };
   }
 
-  async function loadAgents(dropdown, key) {
-    key = key || requireBridgeKey('MCP agent list');
-    if (!key) {
-      dropdown.classList.remove('open');
-      return;
-    }
+  async function loadAgents(dropdown) {
     try {
-      const prompt = await api('GET', `/mcp-prompt/prompt?target=all&compact=0&key=${encodeURIComponent(key)}`);
-      const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
-
-      // Parse agent IDs from prompt text
-      const agents = [];
-      const seen = new Set();
-      // Method 1: parse compact lines
-      const lines = text.split('\n');
-      for (const l of lines) {
-        const parsed = parseAgentLine(l);
-        if (parsed && !seen.has(parsed.agent_id)) {
-          seen.add(parsed.agent_id);
-          agents.push(parsed);
-        }
-      }
-      // Method 2: regex for "--- Agent: id" sections
-      const sectionRe = /---\s*Agent:\s*([a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)*)/gi;
-      let m;
-      while ((m = sectionRe.exec(text)) !== null) {
-        if (!seen.has(m[1])) { seen.add(m[1]); agents.push({ agent_id: m[1], display: m[1] }); }
-      }
-
+      const discovered = await mcpCall('discover', {});
+      const agents = (discovered.servers || []).map(server => ({
+        agent_id: server.server_id || server.agent_id || server.name,
+        display: server.name || server.server_id || server.agent_id,
+      })).filter(agent => agent.agent_id);
       if (!agents.length) {
         dropdown.innerHTML = '<div class="mcp-dropdown-item" style="color:#f38ba8">No agents found</div>';
         return;
       }
-
       dropdown.innerHTML = '';
-      for (const a of agents.sort((a, b) => a.agent_id.localeCompare(b.agent_id))) {
+      for (const agent of agents.sort((a, b) => a.agent_id.localeCompare(b.agent_id))) {
         const item = document.createElement('div');
         item.className = 'mcp-dropdown-item';
-        item.innerHTML = `<span class="agent-id">${esc(a.display)}</span><span class="agent-arrow">→</span>`;
+        item.innerHTML = `<span class="agent-id">${esc(agent.display)}</span><span class="agent-arrow">→</span>`;
         item.addEventListener('click', () => {
           dropdown.classList.remove('open');
-          injectAgent(a.agent_id);
+          injectAgent(agent.agent_id);
         });
         dropdown.appendChild(item);
       }
     } catch (e) {
-      dropdown.innerHTML = `<div class="mcp-dropdown-item" style="color:#f38ba8">Error: ${esc(e.message)}</div>`;
+      dropdown.innerHTML = `<div class="mcp-dropdown-item" style="color:#f38a8a">Error: ${esc(e.message)}</div>`;
     }
   }
 
   async function injectAgent(agentId) {
-    const key = requireBridgeKey(`MCP ${agentId}`);
-    if (!key) return;
+    if (!requireOAuthConnection(`MCP ${agentId}`)) return;
     toast(`Loading ${agentId}...`);
     try {
-      const compact = compactMode() ? '1' : '0';
-      const prompt = await api('GET', `/mcp-prompt/prompt?target=${encodeURIComponent(agentId)}&compact=${compact}&key=${encodeURIComponent(key)}`);
-      const text = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+      const text = await promptForTarget(agentId, compactMode());
       await copyToClipboard(text);
       const inserted = setInputText(text);
       toast(`MCP ${agentId}` + (inserted ? ' — pasted + clipboard' : ' — clipboard only'));
@@ -1033,8 +1101,8 @@
     renderSettingsContent(panel);
     panel.classList.add('open');
     setTimeout(() => {
-      const keyInput = document.getElementById('mcp-cfg-key');
-      if (keyInput) keyInput.focus();
+      const connectButton = document.getElementById('mcp-connect');
+      if (connectButton) connectButton.focus();
     }, 50);
   }
 
@@ -1075,8 +1143,8 @@
     observer.observe(document.body, { childList: true, subtree: true });
     scanAndInjectPlayButtons();
     setupMenu();
-    if (!bridgeKey()) {
-      setTimeout(() => toast('MCP Bridge: click ⚙ to set key (Alt+K)', 5000), 2000);
+    if (!accessToken()) {
+      setTimeout(() => toast('MCP Bridge: connect this Hub in ⚙ settings (Alt+K)', 5000), 2000);
     }
   }
 

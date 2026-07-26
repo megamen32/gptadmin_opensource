@@ -1,7 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=/tmp/gptadmin-failover-e2e
+root=${GPTADMIN_FAILOVER_E2E_ROOT:-/tmp/gptadmin-failover-e2e-$$}
+
+choose_port_base() {
+  python3 - <<'PY'
+import socket
+
+offsets = (0, 1, 2, 10, 11, 79)
+for base in range(20000, 60000, 20):
+    sockets = []
+    try:
+        for offset in offsets:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", base + offset))
+            sockets.append(sock)
+        print(base)
+        break
+    except OSError:
+        continue
+    finally:
+        for sock in sockets:
+            sock.close()
+else:
+    raise SystemExit("no free failover port range")
+PY
+}
+
+port_base="${GPTADMIN_FAILOVER_E2E_PORT_BASE:-$(choose_port_base)}"
+primary_port=$port_base
+fallback_one_port=$((port_base + 1))
+fallback_two_port=$((port_base + 2))
+fallback_one_proxy_port=$((port_base + 10))
+fallback_two_proxy_port=$((port_base + 11))
+public_port=$((port_base + 79))
+primary_url="http://127.0.0.1:${primary_port}"
+fallback_one_url="http://127.0.0.1:${fallback_one_port}"
+fallback_two_url="http://127.0.0.1:${fallback_two_port}"
+public_url="http://127.0.0.1:${public_port}"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ -f "$script_dir/../../../go-hub/go.mod" ]]; then
+  repo_dir=$(cd "$script_dir/../../.." && pwd)
+  hub_bin="/tmp/gptadmin-failover-hub-$$"
+  watchdog_script="$repo_dir/scripts/gptadmin_failover_watchdog.py"
+  proxy_script="$repo_dir/scripts/gptadmin_failover_proxy.py"
+  reclaim_script="$repo_dir/scripts/gptadmin_failover_reclaim_push.py"
+  relay_script="$repo_dir/agents/generic_stdio_mcp_relay/generic_stdio_mcp_relay.py"
+  fake_frpc="$repo_dir/tests/e2e/failover/fake-frpc"
+else
+  hub_bin=/usr/local/bin/gptadmin_hub
+  watchdog_script=/usr/local/bin/gptadmin_failover_watchdog.py
+  proxy_script=/usr/local/bin/gptadmin_failover_proxy.py
+  reclaim_script=/usr/local/bin/gptadmin_failover_reclaim_push.py
+  relay_script=/e2e/generic_stdio_mcp_relay.py
+  fake_frpc="$script_dir/fake-frpc"
+fi
 route_file="$root/route"
 runtime_file="$root/runtime.json"
 reclaim_file="$root/reclaim.json"
@@ -10,15 +63,26 @@ state_file="$root/state.json"
 pids=()
 
 cleanup() {
-  for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  for pid in "${pids[@]:-}"; do kill_group "$pid"; done
+  for pid in "${pids[@]:-}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap cleanup EXIT
+trap 'cleanup; if [[ "$hub_bin" == /tmp/gptadmin-failover-hub-* ]]; then rm -f "$hub_bin"; fi' EXIT
+
+if [[ "$hub_bin" == /tmp/gptadmin-failover-hub-* ]]; then
+  (cd "$repo_dir/go-hub" && go build -buildvcs=false -o "$hub_bin" ./cmd/gptadmin-hub)
+fi
 
 start() {
-  "$@" >/tmp/failover-e2e-"${#pids[@]}".log 2>&1 &
+  # A process group makes EXIT cleanup effective even when a service forks a
+  # helper; unique defaults keep an externally interrupted run isolated.
+  E2E_RUNNER_PID=$$ setsid "$@" >/tmp/failover-e2e-"${#pids[@]}".log 2>&1 &
   pids+=("$!")
   printf '%s\n' "$!"
+}
+
+kill_group() {
+  local pid="$1"
+  kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
 }
 
 wait_http() {
@@ -48,7 +112,7 @@ wait_mcp_server() {
       -H 'Authorization: Bearer test-ctl' \
       -H 'Content-Type: application/json' \
       --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_mcp_servers","arguments":{}}}' \
-      http://127.0.0.1:18080/mcp \
+      "${public_url}/mcp" \
       | jq -e --arg server_id "$server_id" '.result.structuredContent.servers | any(.server_id == $server_id and .status == "online")' >/dev/null && return 0
     sleep 0.1
   done
@@ -61,29 +125,30 @@ assert_mcp_echo() {
     -H 'Authorization: Bearer test-ctl' \
     -H 'Content-Type: application/json' \
     --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_mcp_tool","arguments":{"target":"e2e-survivor","tool_name":"echo","arguments":{"text":"survived"}}}}' \
-    http://127.0.0.1:18080/mcp \
+    "${public_url}/mcp" \
     | jq -e '.result.structuredContent.response.content | any(.text == "survived")' >/dev/null
 }
 
 start_relay() {
   cat >"$root/relay.json" <<JSON
 {
-  "hub_url": "http://127.0.0.1:18080",
+  "hub_url": "$public_url",
   "token": "test-relay",
   "agent_id": "e2e-survivor",
   "name": "E2E survivor",
   "command": "python3",
-  "args": ["/e2e/fake_mcp_stdio.py"],
+  "args": ["$script_dir/fake_mcp_stdio.py"],
   "stdio_format": "ndjson"
 }
 JSON
-  start python3 /e2e/generic_stdio_mcp_relay.py --agent-config "$root/relay.json" >/dev/null
+  start python3 "$relay_script" --agent-config "$root/relay.json" >/dev/null
   wait_mcp_server e2e-survivor
 }
 
 start_ingress() {
-  start python3 /e2e/ingress.py --route-file "$route_file" >/dev/null
-  wait_http http://127.0.0.1:18080/healthz
+  start python3 "$script_dir/ingress.py" --route-file "$route_file" --listen "$public_port" \
+    --primary "$primary_url" --fallback-one "$fallback_one_url" --fallback-two "$fallback_two_url" >/dev/null
+  wait_http "${public_url}/healthz"
 }
 
 watchdog() {
@@ -95,9 +160,9 @@ watchdog_node() {
   local runtime_path="$2"
   local pid_path="$3"
   local route_value="$4"
-  E2E_ROUTE_FILE="$route_file" E2E_ROUTE_VALUE="$route_value" python3 /usr/local/bin/gptadmin_failover_watchdog.py \
+  E2E_RUNNER_PID=$$ E2E_ROUTE_FILE="$route_file" E2E_ROUTE_VALUE="$route_value" python3 "$watchdog_script" \
     --check-once --config "$config_file" --state "$state_file" --runtime-state "$runtime_path" \
-    --node-id "$node_id" --hub-service none --frpc-service none --frpc-bin /e2e/fake-frpc \
+    --node-id "$node_id" --hub-service none --frpc-service none --frpc-bin "$fake_frpc" \
     --frpc-config "$root/${node_id//:/-}.toml" --frpc-pid-file "$pid_path" \
     --reclaim-command-file "$reclaim_file"
 }
@@ -107,30 +172,30 @@ fresh_topology() {
   pids=()
   rm -rf "$root"
   mkdir -p "$root/primary" "$root/fallback"
-  cat >"$config_file" <<'JSON'
+  cat >"$config_file" <<JSON
 {
   "enabled": true,
-  "primary_health_url": "http://127.0.0.1:9001/healthz",
-  "primary_public_url": "http://127.0.0.1:18080",
-  "primary_reclaim_accept_url": "http://127.0.0.1:18080/admin/api/failover/reclaim/accept",
+  "primary_health_url": "$primary_url/healthz",
+  "primary_public_url": "$public_url",
+  "primary_reclaim_accept_url": "$public_url/admin/api/failover/reclaim/accept",
   "fail_count_base": 2,
   "promotion_cooldown_sec": 1,
   "reclaim_max_age_sec": 120,
-  "nodes": [{"server_id":"shell:fallback","rank":1,"enabled":true,"local_hub_port":9002}]
+  "nodes": [{"server_id":"shell:fallback","rank":1,"enabled":true,"local_hub_port":$fallback_one_port}]
 }
 JSON
-  cat >"$state_file" <<'JSON'
+  cat >"$state_file" <<JSON
 {
-  "hub_public_url": "http://127.0.0.1:18080",
-  "tunnel": {"frp": {"token":"test-token","subdomain":"hub","endpoints":["test=127.0.0.1:7000"],"local_port":9002}},
+  "hub_public_url": "$public_url",
+  "tunnel": {"frp": {"token":"test-token","subdomain":"hub","endpoints":["test=127.0.0.1:7000"],"local_port":$fallback_one_port}},
   "secrets": {"bridge_key":"test-ctl"}
 }
 JSON
   start_primary
-  start env HUB_PORT=9002 HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl MCP_RELAY_AGENT_TOKEN=test-relay GPTADMIN_CONFIG_DIR="$root/fallback" GPTADMIN_FAILOVER_NODE_ID=shell:fallback GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE="$reclaim_file" /usr/local/bin/gptadmin_hub >/dev/null
-  start python3 /usr/local/bin/gptadmin_failover_proxy.py --listen 127.0.0.1:9101 --upstream http://127.0.0.1:9002 --command-file "$reclaim_file" --node-id shell:fallback >/dev/null
-  wait_http http://127.0.0.1:9001/healthz
-  wait_http http://127.0.0.1:9002/healthz
+  start env HUB_PORT="$fallback_one_port" HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl MCP_RELAY_AGENT_TOKEN=test-relay GPTADMIN_CONFIG_DIR="$root/fallback" GPTADMIN_FAILOVER_NODE_ID=shell:fallback GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE="$reclaim_file" "$hub_bin" >/dev/null
+  start python3 "$proxy_script" --listen "127.0.0.1:${fallback_one_proxy_port}" --upstream "$fallback_one_url" --command-file "$reclaim_file" --node-id shell:fallback >/dev/null
+  wait_http "${primary_url}/healthz"
+  wait_http "${fallback_one_url}/healthz"
   start_ingress
 }
 
@@ -140,66 +205,66 @@ fresh_two_fallback_topology() {
   pids=()
   rm -rf "$root"
   mkdir -p "$root/primary" "$root/fallback-1" "$root/fallback-2"
-  cat >"$config_file" <<'JSON'
+  cat >"$config_file" <<JSON
 {
   "enabled": true,
-  "primary_health_url": "http://127.0.0.1:9001/healthz",
-  "primary_public_url": "http://127.0.0.1:18080",
+  "primary_health_url": "$primary_url/healthz",
+  "primary_public_url": "$public_url",
   "fail_count_base": 2,
   "promotion_cooldown_sec": 1,
   "nodes": [
-    {"server_id":"shell:fallback-1","rank":1,"enabled":true,"local_hub_port":9002},
-    {"server_id":"shell:fallback-2","rank":2,"enabled":true,"local_hub_port":9003}
+    {"server_id":"shell:fallback-1","rank":1,"enabled":true,"local_hub_port":$fallback_one_port},
+    {"server_id":"shell:fallback-2","rank":2,"enabled":true,"local_hub_port":$fallback_two_port}
   ]
 }
 JSON
-  cat >"$state_file" <<'JSON'
+  cat >"$state_file" <<JSON
 {
-  "hub_public_url": "http://127.0.0.1:18080",
+  "hub_public_url": "$public_url",
   "tunnel": {"frp": {"token":"test-token","subdomain":"hub","endpoints":["test=127.0.0.1:7000"]}},
   "secrets": {"bridge_key":"test-ctl"}
 }
 JSON
   start_primary
   if [[ "$start_rank_one" == true ]]; then
-    start env HUB_PORT=9002 HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl GPTADMIN_CONFIG_DIR="$root/fallback-1" /usr/local/bin/gptadmin_hub >/dev/null
-    start python3 /usr/local/bin/gptadmin_failover_proxy.py --listen 127.0.0.1:9101 --upstream http://127.0.0.1:9002 --command-file "$root/reclaim-1.json" --node-id shell:fallback-1 >/dev/null
-    wait_http http://127.0.0.1:9002/healthz
+    start env HUB_PORT="$fallback_one_port" HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl GPTADMIN_CONFIG_DIR="$root/fallback-1" "$hub_bin" >/dev/null
+    start python3 "$proxy_script" --listen "127.0.0.1:${fallback_one_proxy_port}" --upstream "$fallback_one_url" --command-file "$root/reclaim-1.json" --node-id shell:fallback-1 >/dev/null
+    wait_http "${fallback_one_url}/healthz"
   fi
-  start env HUB_PORT=9003 HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl GPTADMIN_CONFIG_DIR="$root/fallback-2" /usr/local/bin/gptadmin_hub >/dev/null
-  start python3 /usr/local/bin/gptadmin_failover_proxy.py --listen 127.0.0.1:9102 --upstream http://127.0.0.1:9003 --command-file "$root/reclaim-2.json" --node-id shell:fallback-2 >/dev/null
-  wait_http http://127.0.0.1:9003/healthz
+  start env HUB_PORT="$fallback_two_port" HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl GPTADMIN_CONFIG_DIR="$root/fallback-2" "$hub_bin" >/dev/null
+  start python3 "$proxy_script" --listen "127.0.0.1:${fallback_two_proxy_port}" --upstream "$fallback_two_url" --command-file "$root/reclaim-2.json" --node-id shell:fallback-2 >/dev/null
+  wait_http "${fallback_two_url}/healthz"
   start_ingress
 }
 
 start_primary() {
-  start env HUB_PORT=9001 HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl MCP_RELAY_AGENT_TOKEN=test-relay GPTADMIN_CONFIG_DIR="$root/primary" /usr/local/bin/gptadmin_hub >/dev/null
-  wait_http http://127.0.0.1:9001/healthz
+  start env HUB_PORT="$primary_port" HUB_HOST=127.0.0.1 CTL_TOKEN=test-ctl MCP_RELAY_AGENT_TOKEN=test-relay GPTADMIN_CONFIG_DIR="$root/primary" "$hub_bin" >/dev/null
+  wait_http "${primary_url}/healthz"
 }
 
 kill_primary() {
-  kill "${pids[0]}"
+  kill_group "${pids[0]}"
   wait "${pids[0]}" 2>/dev/null || true
 }
 
 kill_ingress() {
   local pid="${pids[-1]}"
-  kill "$pid"
+  kill_group "$pid"
   wait "$pid" 2>/dev/null || true
 }
 
 assert_public_down() {
-  ! curl -fsS --max-time 1 http://127.0.0.1:18080/healthz >/dev/null
+  ! curl -fsS --max-time 1 "${public_url}/healthz" >/dev/null
 }
 
 scenario_tunnel_only() {
   fresh_topology
   kill_ingress
-  wait_http http://127.0.0.1:9001/healthz
+  wait_http "${primary_url}/healthz"
   watchdog | grep -q '"decision": "primary_ok"'
   test ! -e "$route_file"
   start_ingress
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   echo 'ok: tunnel failure leaves primary hub active and does not promote fallback'
 }
 
@@ -211,7 +276,7 @@ scenario_hub_only() {
   test ! -e "$route_file"
   watchdog | grep -q '"decision": "promote"'
   test "$(cat "$route_file")" = fallback
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   echo 'ok: hub failure promotes fallback through a live tunnel'
 }
 
@@ -224,7 +289,7 @@ scenario_hub_and_tunnel() {
   test "$(cat "$route_file")" = fallback
   assert_public_down
   start_ingress
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   echo 'ok: combined hub and tunnel failure recovers after tunnel restart'
 }
 
@@ -235,7 +300,7 @@ scenario_agent_reregisters_after_hub_failover() {
   kill_primary
   watchdog >/dev/null
   watchdog | grep -q '"decision": "promote"'
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   wait_mcp_server e2e-survivor
   assert_mcp_echo
   echo 'ok: a live stdio MCP relay re-registers and remains callable after hub failover'
@@ -248,10 +313,10 @@ scenario_primary_reclaim() {
   watchdog >/dev/null
   test "$(cat "$route_file")" = fallback
   start_primary
-  CTL_TOKEN=test-ctl python3 /usr/local/bin/gptadmin_failover_reclaim_push.py --config "$config_file" --env /dev/null --attempts 1 --delay 0 | grep -q '"accepted": true'
+  CTL_TOKEN=test-ctl python3 "$reclaim_script" --config "$config_file" --env /dev/null --attempts 1 --delay 0 | grep -q '"accepted": true'
   watchdog | grep -q '"decision": "reclaimed_primary"'
   wait_for_absent "$route_file"
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   echo 'ok: signed reclaim demotes fallback after primary recovery'
 }
 
@@ -262,7 +327,7 @@ scenario_rank_one_prevents_second_promotion() {
   watchdog_node shell:fallback-1 "$root/runtime-1.json" "$root/frpc-1.pid" fallback-1 | grep -q '"decision": "waiting_rank_threshold"'
   watchdog_node shell:fallback-1 "$root/runtime-1.json" "$root/frpc-1.pid" fallback-1 | grep -q '"decision": "promote"'
   test "$(cat "$route_file")" = fallback-1
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   watchdog_node shell:fallback-2 "$root/runtime-2.json" "$root/frpc-2.pid" fallback-2 | grep -q '"decision": "waiting_rank_threshold"'
   watchdog_node shell:fallback-2 "$root/runtime-2.json" "$root/frpc-2.pid" fallback-2 | grep -q '"decision": "waiting_rank_threshold"'
   watchdog_node shell:fallback-2 "$root/runtime-2.json" "$root/frpc-2.pid" fallback-2 | grep -q '"decision": "public_confirm_ok"'
@@ -279,7 +344,7 @@ scenario_rank_two_promotes_when_rank_one_unavailable() {
   done
   watchdog_node shell:fallback-2 "$root/runtime-2.json" "$root/frpc-2.pid" fallback-2 | grep -q '"decision": "promote"'
   test "$(cat "$route_file")" = fallback-2
-  wait_http http://127.0.0.1:18080/healthz
+  wait_http "${public_url}/healthz"
   echo 'ok: rank 2 promotes when rank 1 is unavailable'
 }
 

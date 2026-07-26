@@ -42,18 +42,18 @@ connect:
 
 See [Adapters](./ADAPTERS.md).
 
-## Why is it called CTL_TOKEN?
+## How are credentials handled?
 
-Historical naming. `CTL_TOKEN` is the admin bearer token for the hub API +
-web panel. It's confusing — we may rename it in 1.0 (with a migration path).
-See [Configuration → naming](./CONFIGURATION.md).
+You remember only the `AdminPassword`. The Hub creates short-lived scoped
+OAuth connections for MCP clients and manages agent device credentials in the
+service configuration. Normal setup never asks you to copy an internal key.
 
 ## `/mcp` returns 401 — why?
 
-`/mcp` doesn't accept `CTL_TOKEN` directly. It needs an OAuth bearer token
-signed via `OAUTH_CLIENT_SECRET`. MCP clients handle this automatically via
-the OAuth flow. For local dev, the hub relaxes auth on localhost. See
-[Configuration → OAuth](./CONFIGURATION.md#oauth).
+`/mcp` requires a scoped OAuth connection. Re-open the Hub connection page and
+complete the OAuth flow; MCP clients handle the connection automatically. For
+local development, the Hub may relax auth on localhost. See [Configuration →
+OAuth](./CONFIGURATION.md#oauth).
 
 ## Do I need my own domain?
 

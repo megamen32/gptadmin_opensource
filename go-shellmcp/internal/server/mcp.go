@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,12 +56,12 @@ type resourceReadParams struct {
 }
 
 func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
-	s.setMCPHeaders(w, r)
+	w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
 	switch r.Method {
 	case http.MethodPost:
 		s.mcpHTTPPost(w, r)
 	case http.MethodGet:
-		s.mcpHTTPPoll(w, r)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "server-initiated SSE stream is not available"})
 	case http.MethodOptions:
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -93,86 +91,24 @@ func (s *Server) mcpHTTPPost(w http.ResponseWriter, r *http.Request) {
 		}
 		responses := make([]any, 0, len(raw))
 		for _, item := range raw {
-			resp, reply := s.handleMCPJSON(context.Background(), item)
+			resp, reply := s.handleMCPJSON(r.Context(), item)
 			if reply {
 				responses = append(responses, resp)
 			}
 		}
 		if len(responses) == 0 {
-			w.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		writeJSON(w, http.StatusOK, responses)
 		return
 	}
-	resp, reply := s.handleMCPJSON(context.Background(), trimmed)
+	resp, reply := s.handleMCPJSON(r.Context(), trimmed)
 	if !reply {
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// mcpHTTPPoll is a deliberately thin streamable-http-like polling transport.
-// ShellMCP does not need server-initiated capability messages yet, but MCP
-// clients that expect a GET side channel can poll this endpoint and receive a
-// short SSE transport descriptor instead of a hard 404.
-func (s *Server) mcpHTTPPoll(w http.ResponseWriter, r *http.Request) {
-	acceptsSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || truthy(r.URL.Query().Get("sse"))
-	if !acceptsSSE {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"transport": map[string]any{
-				"protocol":   "mcp",
-				"kind":       "streamable-http-poll",
-				"mode":       "poll",
-				"post_path":  "/mcp",
-				"session_id": sessionIDFromRequest(r),
-			},
-		})
-		return
-	}
-	timeout := parseSmallTimeout(r.URL.Query().Get("timeout"), 0, 60)
-	if timeout > 0 {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(time.Duration(timeout) * time.Second):
-		}
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	payload := map[string]any{
-		"protocol":   "mcp",
-		"kind":       "streamable-http-poll",
-		"mode":       "poll",
-		"post_path":  "/mcp",
-		"session_id": sessionIDFromRequest(r),
-		"time":       time.Now().Unix(),
-	}
-	b, _ := json.Marshal(payload)
-	_, _ = fmt.Fprintf(w, "event: transport\ndata: %s\n\n", b)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-func (s *Server) setMCPHeaders(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
-	w.Header().Set("Mcp-Session-Id", sessionIDFromRequest(r))
-}
-
-func sessionIDFromRequest(r *http.Request) string {
-	if v := strings.TrimSpace(r.Header.Get("Mcp-Session-Id")); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(r.URL.Query().Get("session_id")); v != "" {
-		return v
-	}
-	var b [12]byte
-	_, _ = rand.Read(b[:])
-	return "shellmcp-" + hex.EncodeToString(b[:])
 }
 
 func parseSmallTimeout(raw string, def, max int) int {
@@ -429,8 +365,10 @@ func (s *Server) mcpManage(args map[string]any) (map[string]any, error) {
 		if err := json.Unmarshal(data, &agent); err != nil {
 			return nil, fmt.Errorf("decode MCP config: %w", err)
 		}
-		_ = s.childMCP.Close(agent.Ref)
 		if err := s.supervisor.Upsert(agent); err != nil {
+			return nil, err
+		}
+		if err := s.childMCP.Close(agent.Ref); err != nil {
 			return nil, err
 		}
 		return mcpText("MCP definition saved", map[string]any{"action": action, "ref": agent.Ref}), nil
@@ -452,19 +390,20 @@ func (s *Server) mcpManage(args map[string]any) (map[string]any, error) {
 		if agent.Transport != "stdio" {
 			return nil, fmt.Errorf("mcp_manage restart only applies to stdio servers, got %s", agent.Transport)
 		}
-		err = s.supervisor.Restart(ref)
+		restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err = s.childMCP.Restart(restartCtx, agent)
 	case "remove":
-		_ = s.childMCP.Close(ref)
 		err = s.supervisor.Remove(ref)
-	case "status":
-		status, statusErr := s.supervisor.Status(ref)
-		if statusErr != nil {
-			return nil, statusErr
+		if err == nil {
+			err = s.childMCP.Close(ref)
 		}
+	case "status":
 		agent, agentErr := s.supervisor.Agent(ref)
 		if agentErr != nil {
 			return nil, agentErr
 		}
+		status := s.childMCP.Status(ref)
 		return mcpText("MCP status", map[string]any{"agent": agent, "status": status}), nil
 	case "config":
 		agent, agentErr := s.supervisor.Agent(ref)
@@ -486,17 +425,11 @@ func (s *Server) setMCPEnabled(ref string, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	if !enabled && agent.Transport == "stdio" {
-		_ = s.childMCP.Close(ref)
-		if err := s.supervisor.Stop(ref); err != nil {
-			return err
-		}
-	}
 	if err := s.supervisor.SetEnabled(ref, enabled); err != nil {
 		return err
 	}
-	if enabled && agent.Transport == "stdio" {
-		return s.supervisor.Start(ref)
+	if !enabled && agent.Transport == "stdio" {
+		return s.childMCP.Close(ref)
 	}
 	return nil
 }

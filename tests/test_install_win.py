@@ -1,18 +1,23 @@
-"""Regression checks for the Windows installer-to-Go ShellMCP contract."""
-
 from pathlib import Path
 
 
-INSTALLER = Path(__file__).resolve().parents[1] / "deploy" / "install_win.ps1"
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_windows_installer_writes_canonical_go_shellmcp_environment() -> None:
-    """Polling installs must configure the variables read by Go ShellMCP."""
-    script = INSTALLER.read_text(encoding="utf-8")
+def test_windows_installer_never_echoes_shell_token() -> None:
+    """Normal Windows completion output must not expose a bearer credential."""
 
-    assert '"SHELLMCP_QUEUE=$queueEnabled"' in script
-    assert "SHELLMCP_HOST=$ShellmcpBind" in script
-    assert "$env:SHELLMCP_QUEUE = '$queueEnabled'" in script
-    assert "$env:SHELLMCP_HOST = '$ShellmcpBind'" in script
-    assert "QUEUE_URL=1" not in script
-    assert "$env:QUEUE_URL = '1'" not in script
+    source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    assert 'Write-Host "Token:' not in source
+    assert 'Write-Host "SHELLMCP_TOKEN:' not in source
+
+
+def test_public_install_and_adapter_docs_use_oauth_product_language() -> None:
+    """Public onboarding must direct users to the Hub connection flow."""
+
+    install_docs = (ROOT / "docs" / "INSTALL_PATHS.md").read_text(encoding="utf-8")
+    adapter_docs = (ROOT / "docs" / "ADAPTERS.md").read_text(encoding="utf-8")
+    combined = install_docs + "\n" + adapter_docs
+    assert "CTL_TOKEN" not in combined
+    assert "SHELLMCP_TOKEN" not in combined
+    assert "/connect" in combined or "OAuth" in combined

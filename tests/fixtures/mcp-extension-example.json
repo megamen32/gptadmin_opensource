@@ -1,0 +1,25 @@
+{
+  "schema": "gptadmin.mcp-extension/v1",
+  "id": "example.echo",
+  "version": "1.0.0",
+  "kind": "stdio",
+  "protocol": "mcp-jsonrpc",
+  "entrypoint": ["python3", "tests/fixtures/mcp_extension_reference.py"],
+  "capabilities": [
+    {
+      "name": "echo",
+      "description": "Return a bounded non-secret message.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"message": {"type": "string", "maxLength": 256}},
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "scopes": ["gptadmin.read"],
+  "network_needs": [],
+  "risk_level": "low",
+  "maintenance_owner": "Example Maintainers",
+  "provenance": "example:local-fixture"
+}

@@ -17,7 +17,7 @@ This is not magic multi-master replication. Some fresh in-memory state can be st
 
 1. The fallback watchdog checks the primary public health endpoint on an interval.
 2. After the configured failure threshold, the fallback confirms the public URL is still unhealthy.
-3. The fallback promotes itself by starting its local hub/proxy and tunnel client.
+3. The fallback keeps its local Hub and reclaim-aware proxy alive, then starts one FRP client per configured endpoint. This is required because modern `frpc` accepts one client server block per process/config.
 4. Existing AI clients and admins continue to reach GPTAdmin through the public URL, but the system is in degraded mode.
 5. Surviving shell/MCP servers reconnect or continue polling. Dead servers are shown as offline/stale and can be repaired from the fallback control plane.
 6. When the primary is healthy again, the primary sends a signed reclaim message. The active fallback demotes and returns to standby/client mode.
@@ -69,17 +69,24 @@ Look for spool, outbox, runtime and journal files. They are the recovery trail.
 
 ## Current HAOS-style layout
 
-A compact fallback can run a loop like this:
+The supported HAOS add-on owns the complete fallback runtime:
 
 ```text
-/data/gptadmin-failover/loop.sh
-/data/gptadmin-failover/gptadmin-failover-proxy.py --listen 127.0.0.1:9101 --upstream http://127.0.0.1:9001
-/data/gptadmin-failover/runtime.json
-/data/gptadmin-failover/failover_state.json
-/data/gptadmin-failover/logs/watchdog.log
+/opt/gptadmin/failover/failover_config.json
+/opt/gptadmin/failover/failover_state.json
+/usr/local/bin/gptadmin_failover_runtime.py
+/usr/local/bin/gptadmin_failover_proxy.py  # 0.0.0.0:9101 -> 127.0.0.1:9001
+/usr/local/bin/gptadmin_failover_watchdog.py
+/usr/local/bin/frpc                     # linux/arm64
+/data/config/frpc-failover-1.toml       # one file/process per FRP endpoint
+/data/config/failover_frpc.pid
 ```
 
-The exact paths are deployment-specific, but the logic is the same: watchdog checks primary, promotes a fallback only after threshold/confirmation, keeps disk state, and accepts a signed reclaim when primary returns.
+The add-on keeps the standby Hub and proxy available even before promotion.
+Its systemd-free runtime runs the watchdog loop, promotes only after
+threshold/confirmation, and accepts signed reclaim when the primary returns.
+The deployment source must provide a real Linux/ARM64 `frpc`; copying the
+primary x86-64 binary silently produces a non-working standby.
 
 ## Black-box regression coverage
 
@@ -101,7 +108,10 @@ It verifies these boundaries separately before testing the combined outage:
 
 The suite uses real Go hubs, watchdog and proxy processes. Its local ingress
 and FRP-client doubles isolate the repository-owned failover contract from the
-external FRP service.
+external FRP service. It does not replace the physical HAOS drill: that drill
+must verify `:9001`, `:9101`, one live `frpc` process per configured endpoint,
+the public health route after stopping `server-100`, and signed reclaim after
+the primary returns.
 
 ## Design rule
 

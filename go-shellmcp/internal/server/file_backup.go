@@ -48,6 +48,7 @@ type fileBackupMeta struct {
 }
 
 func (s *Server) mcpFileBackup(args map[string]any) (map[string]any, error) {
+	defer func() { _ = s.enforceStorage(nil) }()
 	var req fileBackupArgs
 	b, _ := json.Marshal(args)
 	if err := json.Unmarshal(b, &req); err != nil {

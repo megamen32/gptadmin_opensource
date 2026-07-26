@@ -1,11 +1,12 @@
 # CLAUDE.md — gptadmin
 
 ## What this is
-Self-hosted MCP hub. Two Go binaries + one Python CLI + vanilla-JS admin UI.
+Self-hosted MCP hub. Two Go binaries + one Python CLI + legacy vanilla-JS admin UI.
 - `go-hub/` — hub/proxy (stores metadata, auth, routes MCP calls). `BuildVersion` via ldflags.
 - `go-shellmcp/` — shell execution agent (parity port of the old Python `services/shellmcp.py`, deleted in PR #22).
 - `cli.py` — single-file (~3900 lines) Python installer + CLI (`gptadmin setup/update/auto-update/...`). Platform-aware: systemd on Linux, launchd on macOS.
 - `public/admin/` — vanilla JS SPA (no framework). `app.js` `renderAll()` reads `/admin/api/overview`.
+- `admin-ui/` — source for the new React+TypeScript+Vite admin UI. Node is build-time only; runtime receives compiled static only after an explicit parity gate. Until then, `public/admin/` remains production.
 - `tools/build.sh` — build/release: bumps VERSION, Go ldflags inject version, packages tarballs.
 
 ## Plan and multi-agent work
@@ -15,11 +16,39 @@ Self-hosted MCP hub. Two Go binaries + one Python CLI + vanilla-JS admin UI.
 - The canonical product philosophy is [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md).
   New MCP surfaces keep a minimal stable context and lazily load only data the
   current task actually selects.
+- Admin profile and external workspace boundaries are defined in
+  [`docs/ADMIN_PROFILES.md`](docs/ADMIN_PROFILES.md). Keep instance-specific
+  machine IDs and paths out of the public repository.
 - The canonical append-only handoff log is [`docs/WORKLOG.md`](docs/WORKLOG.md).
 - Before implementing work directly, the orchestrator explicitly asks whether a
   bounded slice can be delegated to a subagent with clear instructions.
   Delegate independent diagnosis, tests or isolated edits; retain integration,
   risky decisions, deployment and acceptance in the primary agent.
+- The orchestrator must give each subagent a self-contained, detailed task
+  brief, never a short prompt. The brief includes: milestone goal and user
+  reason; confirmed current state and pre-fix evidence; exact contract and
+  examples; files, symbols and tests to inspect; permitted write scope and
+  other agents' ownership; non-goals, privacy/compatibility constraints and
+  known dirty files; TDD/verification commands and the observable acceptance
+  result. End with the required handoff format: assumptions, changed files,
+  exact test commands and results, risks and one next action. Full context in
+  the prompt is cheaper and more reliable than interrupting an agent for
+  clarification.
+- Do not interrupt a working subagent merely because it has not replied after a
+  minute, has not made a git change, or the orchestrator wants to narrow its
+  task. Give an isolated implementation/TDD slice at least 10 uninterrupted
+  minutes; give repo/runtime reconnaissance or a cross-cutting slice at least
+  15-20 minutes. Do not duplicate its tests, searches or edits in parallel.
+- Use a real blocking wait for a working subagent for as long as the original
+  assignment needs. Do not ask for heartbeats or repeatedly poll merely because
+  the agent is quiet; silence is not a blocker. Do not rewrite the task in the
+  middle of its cycle without need.
+- Interrupt or re-scope only when the user explicitly cancels or redirects,
+  there is an ownership conflict or data risk, the agent reports a blocker, or
+  a hard failure is evidenced (a repeated test/build error) and it needs a new
+  contract. If a slice is wider than expected, obtain a normal handoff or a
+  non-interrupting boundary first, then create the next slice; never abort a
+  productive TDD cycle.
 - Before substantial work, read both files, select one milestone and create an
   `active` entry using the worklog template. Before finishing, replace it with
   a factual `completed`, `blocked` or `handed-off` entry containing tests,
@@ -28,6 +57,14 @@ Self-hosted MCP hub. Two Go binaries + one Python CLI + vanilla-JS admin UI.
   pre-fix evidence before implementation, then focused and full verification.
   Do not mark a milestone or stage complete without its listed exit gate.
 - Never record tokens, private URLs, customer data or raw logs in the worklog.
+- **Proactive bug handling:** whenever a bug or unexpected behavior is found,
+  immediately add an entry to [`docs/BUGS.md`](docs/BUGS.md) with an immutable
+  evidence path or ID, confirmed facts, a root-cause hypothesis, status, and
+  one next action. Never record secrets or raw logs. As soon as the current
+  goal is complete, process every actionable open entry and fix it before
+  handoff; do not defer a known fixable bug without an explicit external
+  blocker. Close entries only after focused verification, and for behavior
+  changes record pre-fix evidence or a failing regression test first.
 - Do not edit files or runtime surfaces owned by another active agent without
   explicit coordination. Keep this section aligned with `AGENTS.md`.
 - Product-surface vocabulary is **Hub**, **MCP clients** and **Tunnel**. Do not
@@ -98,4 +135,4 @@ No C toolchain needed (CGO disabled). Cross-builds run on a plain Linux box.
 ## Style
 - Go: follow existing `internal/hub` / `internal/server` patterns.
 - Python: f-strings, explicit logging, match surrounding code.
-- Admin UI: no build step, no framework — edit `app.js`/`index.html`/`style.css` directly.
+- Admin UI: `admin-ui/` is the source for the new React+TypeScript+Vite admin UI. Node is build-time only; runtime receives compiled static only after an explicit parity gate. Until then, `public/admin/` remains production.

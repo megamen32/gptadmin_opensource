@@ -5,7 +5,7 @@ hub, executes commands locally, and returns real output.
 
 ## What it does
 
-- **Registers** with the hub via `POST /heartbeat` (sends URL + token + hostname)
+- **Registers** with the Hub via a managed device connection
 - **Executes** shell commands, file operations, systemd actions
 - **Returns** real stdout/stderr (the hub truncates long output to save tokens)
 - **Runs** in user-mode by default (no sudo), system-mode when needed
@@ -31,22 +31,19 @@ The installer:
 - Auto-detects mode: no sudo → user-mode (`~/.local/share/gptadmin`),
   with sudo → system-mode (`/opt/gptadmin`)
 - Registers a user service (`systemctl --user` on Linux, `LaunchAgents` on macOS)
-- Prints the agent URL + `SHELLMCP_TOKEN`
+  - Prints the Hub URL and agent name; connection credentials stay managed by
+    the installer and service
 
 ## Running manually
 
-```bash
-# Register with a hub using the Go binary
-SHELLMCP_TOKEN=agent-secret \
-HUB_URL=http://your-hub:25900 \
-./go-shellmcp/shellmcp
-```
+For a manual agent-only setup, run `gptadmin setup --no-hub --shellmcp` and
+complete the Hub connection page when prompted. Do not copy a service
+credential into a terminal or chat.
 
 ## Environment variables
 
 | Var | Required | Default | Purpose |
 |-----|----------|---------|---------|
-| `SHELLMCP_TOKEN` | yes | — | Bearer token (must match what the hub expects) |
 | `HUB_URL` | yes | — | Hub URL to register with |
 | `SHELLMCP_NAME` | no | hostname | Agent name shown in the hub |
 | `SHELLMCP_LISTEN` | no | 25901 | Local listen port |
@@ -75,7 +72,7 @@ See [API Reference](./API_REFERENCE.md) for the exact schema.
 
 ## Security
 
-- The agent only accepts requests bearing its `SHELLMCP_TOKEN`
+- The agent accepts only its managed device connection
 - By default runs as the installing user (not root) — system-mode with sudo
   is opt-in
 - IP allowlist and command allowlist can be configured

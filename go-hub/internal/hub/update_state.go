@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"syscall"
 )
 
 // UpdateState represents the persistent update state file.
@@ -59,29 +58,6 @@ func WriteUpdateState(path string, s *UpdateState) error {
 		return fmt.Errorf("rename update state: %w", err)
 	}
 	return nil
-}
-
-// AcquireUpdateLock takes an exclusive flock on the lock file.
-// Returns the open file handle (caller must ReleaseUpdateLock).
-func AcquireUpdateLock(lockPath string) (*os.File, error) {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("open lock file: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("acquire lock: %w", err)
-	}
-	return f, nil
-}
-
-// ReleaseUpdateLock releases the flock and closes the file.
-func ReleaseUpdateLock(f *os.File) error {
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
-		f.Close()
-		return fmt.Errorf("release lock: %w", err)
-	}
-	return f.Close()
 }
 
 // EnsureDefaultUpdateState returns a state with idle current if s is nil.

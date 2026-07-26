@@ -1,10 +1,11 @@
 # go-shellmcp
 
-Primary GPTAdmin `shellmcp` / `shellmcp` transport.
+Primary GPTAdmin ShellMCP runtime and standalone MCP host.
 
-The old Python `client/shellmcp.py` / `client/shellmcp.py` transport is deprecated and kept only as a compatibility fallback for old/source installs. New deployments should use `go-shellmcp` / `shellmcp-go-canary`.
+The old Python runtime is deprecated. New deployments use the Go
+`shellmcp` binary installed by GPTAdmin.
 
-Implemented in this prototype:
+Implemented:
 
 - `/version`
 - `/system/info`
@@ -17,7 +18,7 @@ Implemented in this prototype:
 - token auth compatibility bootstrap
 - optional signed long-poll queue runner
 - durable queue result outbox under `SHELL_OUTBOX_DIR`
-- `SHELL_MODE=long_poll|webhook` heartbeat mode
+- `SHELL_MODE=long_poll|webhook` transport selection
 - optional signed heartbeat to GPTAdmin hub
 - `/file?path=...` for authenticated spool file retrieval
 
@@ -83,7 +84,7 @@ Example client configuration:
 {
   "mcpServers": {
     "shellmcp": {
-      "command": "/opt/gptadmin/bin/rootd-go-canary",
+      "command": "/opt/gptadmin/bin/shellmcp",
       "args": ["--mcp-stdio"],
       "env": {
         "SHELLMCP_MCP_CONFIG": "/etc/gptadmin/shellmcp-mcp.json",
@@ -93,6 +94,13 @@ Example client configuration:
   }
 }
 ```
+
+For a user-scope install, the binary is normally under
+`~/.local/share/gptadmin/bin/shellmcp`. On macOS and Linux, run the normal
+GPTAdmin setup/update flow first; it installs the native Go binary and applies
+the platform service definition. Direct MCP clients do not need Hub, an
+inbound port, heartbeat, or a service: launch the binary with `--mcp-stdio` as
+shown above.
 
 The child-MCP tools are:
 
@@ -130,7 +138,9 @@ Example `mcp_manage` arguments:
 ```
 
 Stdio sessions are persistent and serialized per `ref`. Updating, disabling,
-or removing a definition closes the old child process.
+removing, or restarting a definition closes the actual protocol session.
+Enable only changes persistent desired state; the process starts lazily on the
+first discovery or call.
 
 ### Remote Streamable HTTP MCP
 
@@ -153,12 +163,17 @@ Use `"transport": "sse"` for legacy SSE endpoints. Header and environment
 values are expanded from the ShellMCP process environment at request time, so
 secrets do not need to be written into the registry.
 
+Streamable HTTP sessions reuse the negotiated protocol version and session ID,
+recover once from a server-side session reset, and send DELETE when closed.
+Legacy SSE uses its long-lived GET event stream and the endpoint it advertises
+for POST requests.
+
 ### Resource bounds
 
-Disposable spool and outbox files are pruned oldest-first under a shared limit
-of `min(500 MiB, 5% of filesystem capacity)`. Active spill results are
-protected. Non-spilled stdout/stderr capture files are removed immediately.
-Audit output rotates at the same filesystem-derived bound.
+ShellMCP-owned spool, outbox, audit, and managed-backup files share one
+oldest-first limit of `min(500 MiB, 5% of filesystem capacity)`. Exact-file
+roots prevent ShellMCP from pruning unrelated sibling logs. Child stderr kept
+in memory is capped at 64 KiB.
 
 ### Hub polling
 
@@ -166,6 +181,9 @@ When `SHELLMCP_QUEUE=1`, ShellMCP opens no inbound listener. It polls Hub and
 accepts the same `shell_exec`, `mcp_manage`, `mcp_tools`, and `mcp_call`
 operations through the outbound queue. Results use the durable outbox; Hub 404
 responses for expired jobs are treated as terminal and removed.
+
+Heartbeat is disabled by default and is independent of long-poll activity.
+Enable it explicitly only when the extra diagnostic signal is useful.
 
 Important variables:
 

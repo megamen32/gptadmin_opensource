@@ -65,7 +65,6 @@ grep -q "com.gptadmin.shellmcp.*running" /tmp/gptadmin-install-status.txt
 grep -q "com.gptadmin.tunnel-frpc.*running" /tmp/gptadmin-install-status.txt
 file "$HOME/.local/share/gptadmin/bin/shellmcp" | grep -q "Mach-O"
 TOKEN=$(grep ^CTL_TOKEN= "$HOME/.config/gptadmin/gptadmin.env" | cut -d= -f2-)
-SHELL_TOKEN=$(grep ^SHELLMCP_TOKEN= "$HOME/.config/gptadmin/gptadmin.env" | cut -d= -f2-)
 HUB_PUBLIC_URL=$(grep ^HUB_PUBLIC_URL= "$HOME/.config/gptadmin/gptadmin.env" | cut -d= -f2-)
 curl -fsS http://127.0.0.1:9001/version >/tmp/gptadmin-install-hub-version.json
 curl -fsS http://127.0.0.1:9001/servers -H "Authorization: Bearer $TOKEN" >/tmp/gptadmin-install-servers.json
@@ -76,13 +75,10 @@ assert len(s.get("servers", [])) >= 1, s
 assert not s.get("pending"), s
 assert any(x.get("status") == "active" and x.get("alive") for x in s.get("servers", [])), s
 PY
-curl -fsS http://127.0.0.1:25900/version >/tmp/gptadmin-install-shell-version.json
-curl -fsS http://127.0.0.1:25900/system/health -H "Authorization: Bearer $SHELL_TOKEN" >/tmp/gptadmin-install-shell-health.json
-python3 - <<PY
-import json
-h=json.load(open("/tmp/gptadmin-install-shell-health.json"))
-assert h.get("ok") is True and h.get("queue") is True and h.get("heartbeat") is True, h
-PY
+if lsof -nP -iTCP:25900 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "queue-mode ShellMCP unexpectedly opened port 25900" >&2
+  exit 1
+fi
 curl -k -fsS "$HUB_PUBLIC_URL/version" >/tmp/gptadmin-install-public-version.json
 printf "OK user install: %s\n" "$HUB_PUBLIC_URL"'
 

@@ -43,6 +43,23 @@ def test_android_installer_configures_platform_specific_auto_update():
     assert "SHELLMCP_RESTART_CMD='kill -TERM $PPID'" in content
 
 
+def test_android_installer_reuses_existing_shellmcp_credentials():
+    """Rerunning Android install must not rotate the stored agent credential."""
+    content = (DEPLOY / "install_android.sh").read_text()
+    assert '"$ENV_FILE"' in content
+    assert 'SHELLMCP_TOKEN=$(read_existing_env SHELLMCP_TOKEN)' in content
+    assert 'HUB_URL=$(read_existing_env HUB_URL)' in content
+
+
+def test_standalone_shellmcp_installer_persists_credentials_without_printing_them():
+    """Standalone installer must reuse a state-file credential on upgrades."""
+    content = (DEPLOY / "install_shellmcp.sh").read_text()
+    assert 'SHELLMCP_TOKEN_FILE=' in content
+    assert 'SHELLMCP_TOKEN=$(cat "$SHELLMCP_TOKEN_FILE")' in content
+    assert 'printf \'%s\\n\' "$SHELLMCP_TOKEN"' in content
+    assert 'Use SHELLMCP_TOKEN=$TOKEN' not in content
+
+
 def test_install_win_exists():
     """Windows install script should exist in deploy/ or public/."""
     p1 = DEPLOY / "install_win.ps1"
@@ -66,6 +83,20 @@ def test_cli_has_version():
     v = ROOT / "VERSION"
     assert v.exists(), "VERSION file not found"
     assert v.read_text().strip(), "VERSION file is empty"
+
+
+def test_cli_setup_completion_does_not_print_raw_bearer_credentials():
+    """Setup completion must keep the AdminPassword/OAuth boundary secret-safe."""
+    content = (ROOT / "cli.py").read_text(encoding="utf-8")
+    assert "API-Ключ (Bearer)" not in content
+    assert "вставьте ключ" not in content
+
+
+def test_install_completion_uses_product_auth_vocabulary():
+    """The installer quickstart must not teach operators legacy credential names."""
+    content = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    assert "CTL_TOKEN" not in content
+    assert "AdminPassword/OAuth" in content
 
 
 def test_openapi_schema_exists():

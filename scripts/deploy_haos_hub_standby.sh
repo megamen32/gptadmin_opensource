@@ -35,10 +35,22 @@ HAOS_SSH_KEY="${HAOS_SSH_KEY:-/home/roomhacker/.ssh/id_rsa}"
 HAOS_ADDON_DIR="${HAOS_ADDON_DIR:-/addons/gptadmin_hub_standby}"
 BUILD_VERSION="${BUILD_VERSION:-haos-standby}"
 GIT_COMMIT="${GIT_COMMIT:-$(git -C "$ROOT" rev-parse --short HEAD)}"
+FAILOVER_CONFIG_FILE="${FAILOVER_CONFIG_FILE:-/etc/gptadmin/failover_config.json}"
+FAILOVER_STATE_FILE="${FAILOVER_STATE_FILE:-/etc/gptadmin/failover_state.json}"
+FRPC_BIN="${FRPC_BIN:-/opt/gptadmin/build/frpc-linux-arm64}"
+
+[[ -x "$FRPC_BIN" ]] || { echo "missing executable linux/arm64 FRPC_BIN: $FRPC_BIN" >&2; exit 2; }
+file "$FRPC_BIN" | grep -Eqi 'ARM aarch64|ARM64' || {
+  echo "FRPC_BIN is not an ARM64 Linux binary: $FRPC_BIN" >&2
+  exit 2
+}
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/build" "$OUT_DIR/public"
 cp "$SRC/Dockerfile" "$SRC/run.sh" "$OUT_DIR/"
+cp "$ROOT/scripts/gptadmin_failover_watchdog.py" "$ROOT/scripts/gptadmin_failover_proxy.py" \
+  "$SRC/gptadmin_failover_runtime.py" "$SRC/gptadmin_failover_config.py" "$OUT_DIR/"
+cp "$FRPC_BIN" "$OUT_DIR/frpc"
 chmod 0755 "$OUT_DIR/run.sh"
 cat > "$OUT_DIR/public/index.html" <<'HTML'
 <!doctype html><title>GPTAdmin HAOS Standby Hub</title><h1>GPTAdmin HAOS Standby Hub</h1>
@@ -54,6 +66,26 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$GO_BIN" build \
   -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$GIT_COMMIT" \
   -o "$OUT_DIR/gptadmin_hub" ./cmd/gptadmin-hub
 chmod 0755 "$OUT_DIR/gptadmin_hub"
+
+python3 - "$FAILOVER_CONFIG_FILE" "$FAILOVER_STATE_FILE" "$OUT_DIR" <<'PY'
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+config_path, state_path, out_dir = map(Path, sys.argv[1:])
+
+def copy_protected(source: Path, destination: Path) -> None:
+    try:
+        payload = source.read_bytes()
+    except PermissionError:
+        payload = subprocess.check_output(["sudo", "-n", "cat", str(source)])
+    destination.write_bytes(payload)
+    destination.chmod(0o600)
+
+copy_protected(config_path, out_dir / "failover_config.json")
+copy_protected(state_path, out_dir / "failover_state.json")
+PY
 
 python3 - "$SRC/config.yaml.template" "$OUT_DIR/config.yaml" "$ENV_FILE" <<'PY'
 import os
@@ -84,6 +116,18 @@ if env_path.exists():
 def get(key, default=''):
     return vals.get(key, default)
 
+def protected_text(path):
+    try:
+        return Path(path).read_text(encoding='utf-8', errors='ignore')
+    except PermissionError:
+        return subprocess.check_output(['sudo', '-n', 'cat', str(path)], text=True)
+
+frp_token = get('FRP_TOKEN')
+if not frp_token:
+    import re
+    match = re.search(r'^\s*token\s*=\s*["\']([^"\']+)["\']\s*$', protected_text('/etc/gptadmin/frpc.toml'), re.MULTILINE)
+    frp_token = match.group(1) if match else ''
+
 public = get('HUB_PUBLIC_URL') or get('PUBLIC_ORIGIN') or 'https://u-f1102930.t.gptadmin.bezrabotnyi.com'
 repl = {
     '__PUBLIC_ORIGIN__': public,
@@ -100,6 +144,7 @@ repl = {
     '__OAUTH_PERMISSIVE_RESOURCES__': get('OAUTH_PERMISSIVE_RESOURCES', '1'),
     '__MCP_RELAY_DEFAULT_TIMEOUT__': get('MCP_RELAY_DEFAULT_TIMEOUT', '30'),
     '__MCP_RELAY_POLL_MAX_TIMEOUT__': get('MCP_RELAY_POLL_MAX_TIMEOUT', '55'),
+    '__FAILOVER_FRP_TOKEN__': frp_token,
 }
 s = template.read_text()
 for k, v in repl.items():
@@ -163,6 +208,10 @@ PY
 api POST /addons/reload '{}'
 api GET /addons/local_gptadmin_hub_standby/info
 api POST /addons/local_gptadmin_hub_standby/install '{}'
+sleep 3
+api POST /addons/local_gptadmin_hub_standby/stop '{}'
+sleep 3
+api POST /addons/local_gptadmin_hub_standby/update '{}'
 sleep 3
 api POST /addons/local_gptadmin_hub_standby/start '{}'
 sleep 5

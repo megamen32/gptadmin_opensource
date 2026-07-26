@@ -1,0 +1,344 @@
+{
+  "proxy": [
+    {
+      "id": "go-shellmcp-network-policy",
+      "command": "cd go-shellmcp && go test ./internal/networkproxy -run 'TestPolicy|TestPullAndWebhook' -count=1",
+      "evidence": "allowlisted LAN/internet proxy targets and signed offer verification"
+    },
+    {
+      "id": "go-proxyrelay-blackbox",
+      "command": "cd go-proxyrelay && go test ./blackbox ./internal/relay ./internal/ticket -count=1",
+      "evidence": "real relay stream and ticket contract"
+    },
+    {
+      "id": "go-proxyrelay-process-blackbox",
+      "command": "cd go-proxyrelay && go test ./blackbox -run TestProxyRelayProcessMetricsAndStreamRoundTrip -count=1",
+      "evidence": "built ProxyRelay process exposes bounded metrics and carries a signed client-agent frame round trip"
+    },
+    {
+      "id": "go-proxyrelay-metrics",
+      "command": "cd go-proxyrelay && go test ./internal/relay -run 'TestMetricsEndpointExposesBoundedRelayCounters|TestRelayPairsExactlyOneClientAndAgent' -count=1",
+      "evidence": "secret-free bounded relay counters expose auth, active sessions, pairs, resets and queue depth"
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "oauth-canonical-pkce",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestCanonicalOAuthEndpointsRequirePKCEAndBindClient' -count=1",
+      "evidence": "canonical /oauth authorization and token discovery, mandatory PKCE S256, and authorization-code client/redirect binding"
+    },
+    {
+      "id": "hub-http-contract",
+      "command": "python3 -m pytest tests/test_hub_contract.py -q",
+      "evidence": "health/version/auth/OpenAPI/MCP endpoint behavior"
+    },
+    {
+      "id": "schema-digest-process",
+      "command": "python3 -m pytest tests/test_hub_contract.py -k relay_and_openapi -q",
+      "evidence": "real Hub schema endpoint returns version/digest and execute rejects a stale digest before tool invocation"
+    },
+    {
+      "id": "shellmcp-http-contract",
+      "command": "python3 -m pytest tests/test_shellmcp_contract.py -q",
+      "evidence": "ShellMCP authenticated endpoint and service contract"
+    },
+    {
+      "id": "canonical-connection-page",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestConnectionPageExposesCanonicalClientChoicesWithoutSecrets' -count=1",
+      "evidence": "one Hub URL, MCP/OAuth discovery links and Codex/Claude/ChatGPT choices without bearer or password material"
+    },
+    {
+      "id": "typed-admin-security-controls",
+      "command": "python3 -m pytest tests/test_admin_ui.py tests/test_shellmcp_heartbeat_config.py -q",
+      "evidence": "admin UI uses typed Hub security endpoints and contains no shell env mutation or internal credential controls"
+    }
+  ],
+  "hooks": [
+    {
+      "id": "webhook-gateway",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestWebhookGateway' -count=1",
+      "evidence": "token/HMAC ingress, replay window, dispatch and callback"
+    },
+    {
+      "id": "webhook-http-surface",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestWebhook(RoutesCRUD|JobsSurviveRestart|JobEndpointRequiresRouteAuth|CallbackRetries)' -count=1",
+      "evidence": "authenticated job endpoint and durable delivery state"
+    },
+    {
+      "id": "webhook-process-round-trip",
+      "command": "python3 -m pytest tests/test_hub_contract.py -k webhook_route_job_and_callback_through_process -q",
+      "evidence": "real Go Hub process accepts authenticated webhook ingress, dispatches safe MCP work and delivers a callback without route-token leakage"
+    }
+  ],
+  "mcp_forwarding": [
+    {
+      "id": "hub-mcp-forwarding",
+      "command": "python3 -m pytest tests/test_hub_contract.py -k 'global_mcp or per_server_mcp_and_action_proxy' -q",
+      "evidence": "global/per-server list and call result propagation"
+    },
+    {
+      "id": "queued-mcp-forwarding",
+      "command": "cd go-shellmcp && go test ./internal/server -run 'TestQueueExecutesGenericMCPToolAndPostsResult' -count=1",
+      "evidence": "queue-to-MCP tool execution and result postback"
+    },
+    {
+      "id": "mcp-integration-conformance",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestMCPIntegrationDiscoverSchemaExecuteConformance' -count=1",
+      "evidence": "canonical discover -> schema -> execute flow reaches the safe Hub target through the request-scoped policy path"
+    }
+  ],
+  "operations": [
+    {
+      "id": "doctor-readiness-json",
+      "command": "python3 -m pytest tests/test_doctor_json.py -q",
+      "evidence": "local unit/config, Hub health, remote clock and permission readiness without secrets"
+    },
+    {
+      "id": "setup-health-gate",
+      "command": "python3 -m pytest tests/test_setup_semantics.py tests/test_install_scripts.py -q",
+      "evidence": "from-scratch setup aborts on failed Hub health instead of reporting a false successful installation"
+    },
+    {
+      "id": "activation-telemetry",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestActivationTelemetry(RecordsConnectionAndFirstToolWithoutPayload|IsOptInAggregatedAndPersistent)' -count=1",
+      "evidence": "opt-in local event counters, payload exclusion and restart persistence"
+    },
+    {
+      "id": "backup-restore-drill",
+      "command": "python3 -m pytest tests/test_backup_restore.py -q",
+      "evidence": "manifest/digest round trip, restrictive modes and traversal-safe atomic restore"
+    },
+    {
+      "id": "safe-demo-readonly",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestSafeDemoToolIsAvailableToReadonlyMCPWithoutEchoingArguments' -count=1",
+      "evidence": "readonly MCP connection check returns build/connection facts without shell, credentials or argument echo"
+    },
+    {
+      "id": "slo-alert-runbook",
+      "command": "python3 -m pytest tests/test_slo_docs.py -q",
+      "evidence": "operator SLO, error-budget and alert recovery contract is present and tied to machine-readable probes"
+    },
+    {
+      "id": "hub-metrics",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestHubMetricsEndpointIsBoundedAndSecretFree' -count=1",
+      "evidence": "Hub operational metrics expose bounded aggregate counts without credentials, arguments or file contents"
+    },
+    {
+      "id": "shellmcp-metrics",
+      "command": "cd go-shellmcp && go test ./internal/server -run 'TestMetricsEndpointIsAuthenticatedBoundedAndSecretFree' -count=1",
+      "evidence": "authenticated ShellMCP operational metrics expose bounded runtime state without credentials or host identity"
+    },
+    {
+      "id": "observability-documentation",
+      "command": "python3 -m pytest tests/test_docs_product_contract.py -q",
+      "evidence": "canonical observability page documents request correlation, bounded metrics, OTLP redaction and external evidence boundaries"
+    },
+    {
+      "id": "request-trace-correlation",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestRequestTraceID|TestTraceParent' -count=1",
+      "evidence": "bounded X-Request-ID and W3C traceparent correlation joins MCP policy, queued job and result audit without payloads"
+    },
+    {
+      "id": "otlp-structured-export",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestOTLPExporter' -count=1",
+      "evidence": "opt-in loopback OTLP/HTTP export correlates policy/tool/trace fields, rejects insecure external endpoints and excludes sensitive payloads"
+    },
+    {
+      "id": "shellmcp-trace-propagation",
+      "command": "cd go-shellmcp && go test ./internal/server -run 'TestQueueExecutesGenericMCPToolAndPostsResult' -count=1",
+      "evidence": "Hub queue trace_id and traceparent cross ShellMCP polling, TaskResult and ShellMCP audit without command payloads"
+    },
+    {
+      "id": "supply-chain-policy",
+      "command": "python3 -m pytest tests/test_supply_chain_policy.py tests/test_release_workflow_contract.py tests/test_release_provenance.py tests/test_update_semantics.py -q",
+      "evidence": "release manifest/SBOM verification, installer fail-closed metadata, CI attestation/vulnerability gates and operator response policy"
+    },
+    {
+      "id": "remote-secret-ingress",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(Secret(Store|Ingress)|MCPSecret|ShellExecResolvesSecret|ReadonlyMCP)' -count=1 && cd .. && python3 -m pytest tests/test_secret_ingress_contract.py -q",
+      "evidence": "encrypted one-time browser input, owner/TTL checks, MCP metadata-only status, server-side secret_env injection, readonly denial and response redaction"
+    },
+    {
+      "id": "mcp-capability-catalog",
+      "command": "python3 -m pytest tests/test_mcp_catalog.py -q",
+      "evidence": "curated MCP definitions expose provenance, scopes, network needs and risk before activation; catalog-bound installs require explicit acceptance"
+    },
+    {
+      "id": "mcp-extension-conformance",
+      "command": "python3 -m pytest tests/test_extension_sdk.py -q",
+      "evidence": "third-party-shaped manifest and stdio lifecycle validate, then discover -> schema -> execute crosses a live Hub and generic relay"
+    },
+    {
+      "id": "live-hub-acceptance-runner",
+      "command": "python3 -m pytest tests/test_live_acceptance.py -q",
+      "evidence": "secret-safe deployment runner covers health/version, connection and OAuth discovery, OpenAPI, authenticated safe MCP call and real-process admin password session persistence"
+    },
+    {
+      "id": "deployment-runtime-diagnosis",
+      "command": "python3 -m pytest tests/test_deployment_runtime.py -q",
+      "evidence": "secret-safe SSH runner detects canonical unit drift, stale Hub listeners, Tunnel router conflicts and ShellMCP queue auth failures without restart or credential output"
+    },
+    {
+      "id": "sustainable-offering-boundary",
+      "command": "python3 -m pytest tests/test_sustainable_offering.py -q",
+      "evidence": "open-core boundary preserves AGPL self-hosted operation, data portability, optional hosted convenience and no forced lock-in"
+    },
+    {
+      "id": "disposable-canary-rollback",
+      "command": "python3 -m pytest tests/test_canary_acceptance.py -q",
+      "evidence": "real Go Hub binaries swap on one endpoint, reconnect through live MCP smoke and roll back a bad candidate"
+    }
+  ],
+  "file_sharing": [
+    {
+      "id": "readonly-inspection",
+      "command": "cd go-shellmcp && go test ./internal/inspect -run 'TestReadFile|TestListDirectory' -count=1",
+      "evidence": "bounded reads, redaction and metadata-only listing"
+    },
+    {
+      "id": "safe-file-state",
+      "command": "cd go-shellmcp && go test ./internal/shell -run 'TestSnapshot|TestRestore' -count=1",
+      "evidence": "bounded snapshot and safe restore behavior"
+    },
+    {
+      "id": "managed-file-backup",
+      "command": "cd go-shellmcp && go test ./internal/server -run 'TestMCPFileBackupBackupListRestoreCleanup' -count=1",
+      "evidence": "MCP file_backup create/list/restore/cleanup contract"
+    },
+    {
+      "id": "managed-file-backup-process",
+      "command": "python3 -m pytest tests/test_shellmcp_contract.py -k file_backup_round_trip_through_process -q",
+      "evidence": "real ShellMCP process performs file_backup create/list/restore with bounded artifact state"
+    },
+    {
+      "id": "readonly-symlink-process",
+      "command": "python3 -m pytest tests/test_shellmcp_contract.py -k symlink_escape_through_process -q",
+      "evidence": "real ShellMCP MCP process rejects read-only inspection of a symbolic link at the managed-root boundary"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "admin-access-profile",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestManagedClientAccessProfile|TestAccessProfileCASInventoryAndAuthContext|TestAccessProfileSharedConfigRefreshAndWorkspacePersistence|TestAccessProfileNormalizesNamedInstructionSetReference|TestNamedInstructionSetCRUDAndProfileInitialize' -count=1",
+      "evidence": "profile persistence, named instruction-set CRUD, live MCP initialize refresh, bindings and effective tool filtering"
+    },
+    {
+      "id": "admin-access-profile-process",
+      "command": "python3 -m pytest tests/test_hub_contract.py -k profile_binding_enforces_mcp_tool_policy -q",
+      "evidence": "real Hub process creates a profile, binds a managed token and enforces allowed discover versus forbidden execute"
+    }
+  ],
+  "security_policies": [
+    {
+      "id": "capability-policy",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test.*Policy|Test.*AuthContext|Test.*Nonce' -count=1",
+      "evidence": "fail-closed capability decisions and replay-safe auth"
+    },
+    {
+      "id": "jwt-connection-hygiene",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestJWTRequest(RejectsWrongAudienceAndExpiredConnection|RequiresCompleteRecognizedScopedClaims)' -count=1",
+      "evidence": "wrong audience/resource, expiry, missing/unknown scope, subject, issued-at, key-id and admin-token-forwarding rejection"
+    },
+    {
+      "id": "operator-audit-decision",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(ToolAuditIncludesActorPolicyDigestAndResultReference|DeniedToolAuditIncludesPolicyReasonWithoutArguments|AuditIncidentDrillRecoversDecisionWithoutRawArguments|AuditTrailSurvivesHubRestartWithRestrictivePermissions|AuditEndpointFiltersSearchesAndPaginatesWithoutRawArguments)' -count=1",
+      "evidence": "actor, target, allow/deny policy decisions, durable/searchable audit, pagination, argument digest and result reference without raw arguments"
+    },
+    {
+      "id": "ask-before-write",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(AskBeforeWrite(RequiresAdminApprovalAndConsumesApproval|CoversPinnedServerAndLegacyAgentAliases)|BoundedAutonomousProfileStopsWriteBudgetAcrossRelay)' -count=1",
+      "evidence": "write-capable MCP calls and aliases enforce approval, one-time consume, and bounded-autonomous per-actor budgets"
+    },
+    {
+      "id": "legacy-policy-boundaries",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(MCPPromptCallCannotBypassProfilePolicy|WebhookActionCannotBypassApprovalPolicy|BulkExecUsesPolicyGate|AdminMCPResourceReadHonorsTargetPolicy)' -count=1",
+      "evidence": "legacy bridge, webhook, bulk and admin resource entrypoints cannot enqueue work outside the central policy boundary"
+    },
+    {
+      "id": "runtime-actions-openapi-proxy-contract",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestActionsOpenAPIIncludesNetworkProxyContract' -count=1",
+      "evidence": "runtime generated Actions OpenAPI advertises the same Network Tunnel control paths as the static contract"
+    },
+    {
+      "id": "readonly-security",
+      "command": "cd go-shellmcp && go test ./internal/inspect ./internal/redact ./internal/security -count=1",
+      "evidence": "path boundary, symlink/credential rejection and secret redaction"
+    },
+    {
+      "id": "repository-secret-boundary",
+      "command": "python3 -m pytest tests/test_no_secrets.py tests/test_public_mirror.py -q",
+      "evidence": "tracked-tree public/private and credential scan"
+    },
+    {
+      "id": "security-preset-mfa",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(SecurityPresetAndTOTPFailClosedUntilEnrollment|SensitiveSecurityMutationRequiresFreshAdminReauth)' -count=1",
+      "evidence": "preset persistence, locked-down fail-closed behavior, TOTP enrollment/verification, fresh security re-auth and MFA-required admin login"
+    },
+    {
+      "id": "webauthn-passkey-mfa",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(WebAuthnRegistrationBeginReturnsPublicKeyChallenge|LockedDownAcceptsEnrolledWebAuthnCredential|WebAuthnLoginBeginFailsClosedWithoutCredential|LockedDownAdminLoginRequiresWebAuthnProofCookie)' -count=1",
+      "evidence": "passkey registration/login ceremony boundaries, restrictive credential state and locked-down MFA acceptance"
+    },
+    {
+      "id": "webauthn-admin-browser-enrollment",
+      "command": "GPTADMIN_BROWSER_TESTS=1 python3 -m pytest tests/test_admin_passkey_browser.py -q",
+      "evidence": "real Chromium virtual-authenticator enrolls a passkey through the production admin SPA and Hub ceremony endpoints"
+    },
+    {
+      "id": "auth-failure-rate-limit",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestAuthFailuresAreRateLimitedPerClient' -count=1",
+      "evidence": "failed admin/control authentication is bounded per client with Retry-After while successful auth remains outside the failure budget"
+    },
+    {
+      "id": "loopback-bind-default",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestFromEnvDefaultsHubToLoopbackAndHonorsHubBind' -count=1",
+      "evidence": "unset Hub bind fails closed to loopback and explicit installer/HAOS bind overrides remain honored"
+    },
+    {
+      "id": "secure-public-origin-preset",
+      "command": "cd go-hub && go test ./internal/hub -run 'Test(SecurityPresetRejectsExternalHTTPOrigin|ValidatePublicOriginAllowsHTTPSAndLoopbackOnly)' -count=1",
+      "evidence": "security preset mutation rejects external HTTP identity while allowing HTTPS and loopback-only internal origins"
+    },
+    {
+      "id": "typed-heartbeat-endpoint",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestSecurityHeartbeatUsesTypedAdminEndpoint' -count=1",
+      "evidence": "heartbeat preference changes use a typed boolean endpoint and never accept an operator shell command"
+    }
+  ],
+  "release_provenance": [
+    {
+      "id": "release-manifest-tamper-check",
+      "command": "python3 -m pytest tests/test_release_provenance.py tests/test_sbom.py tests/test_update_semantics.py -q",
+      "evidence": "artifact provenance/SBOM, canonical manifest compatibility and installer digest rejection"
+    },
+    {
+      "id": "release-workflow-gates",
+      "command": "python3 -m pytest tests/test_release_workflow_contract.py -q",
+      "evidence": "release workflow verifies manifest/SBOM and shipped installer links before publication"
+    }
+  ],
+  "integration_certification": [
+    {
+      "id": "integration-support-inventory",
+      "command": "python3 -m pytest tests/test_integration_certification.py -q",
+      "evidence": "documented adapters have version policy, smoke command, evidence class and explicit write idempotency semantics"
+    },
+    {
+      "id": "integration-control-contract",
+      "command": "python3 -m pytest tests/test_docs_product_contract.py::test_integration_control_contract_matches_current_hub_scope -q",
+      "evidence": "current Hub discover -> schema -> execute mapping is documented without downgrading the implemented policy and retry contract"
+    }
+  ],
+  "golden_paths": [
+    {
+      "id": "platform-client-paths",
+      "command": "python3 -m pytest tests/test_golden_paths.py -q",
+      "evidence": "Linux/macOS/Windows/Android and Codex/Claude/ChatGPT install/auth/tool/rollback contract"
+    },
+    {
+      "id": "installed-mcp-client-handshake",
+      "command": "python3 -m pytest tests/test_real_mcp_clients.py -q",
+      "evidence": "isolated real Codex, Claude Code and OpenCode configs connect to a disposable canonical Hub and exercise safe demo MCP behavior"
+    }
+  ]
+}

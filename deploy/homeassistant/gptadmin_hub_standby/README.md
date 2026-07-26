@@ -1,6 +1,8 @@
 # GPTAdmin Hub Standby Home Assistant add-on
 
-Local HAOS add-on source for a standby GPTAdmin Go hub. It is intended to run on Home Assistant OS with `host_network: true` and listen on `:9001`.
+Local HAOS add-on source for a standby GPTAdmin Go hub and its independent
+failover runtime. It runs on Home Assistant OS with `host_network: true`, keeps
+the standby Hub on `:9001`, and keeps a reclaim-aware proxy on `:9101`.
 
 This directory is safe to commit: it contains no live tokens. The generated `config.yaml` used on HAOS is created by `scripts/deploy_haos_hub_standby.sh` from `/etc/gptadmin/gptadmin.env` on the primary server.
 
@@ -27,4 +29,8 @@ http://192.168.2.101:9001/version
 http://192.168.2.101:9001/healthz
 ```
 
-Public failover is separate: this add-on provides the LAN standby hub, but does not itself switch FRP/DNS from the primary hub.
+The add-on owns the fallback-side watchdog and starts one FRP client per
+configured endpoint only after the primary public health route fails its
+threshold. Existing FRP credentials are passed as a Supervisor password option;
+the state bundle remains secret-safe. When the primary returns, signed reclaim
+demotes the fallback FRP clients.

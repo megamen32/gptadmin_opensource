@@ -12,6 +12,13 @@ This document is the target contract for a deliberate breaking migration. It
 does **not** claim that the current multi-token implementation has already been
 removed.
 
+The legacy `CTL_TOKEN` compatibility window ends at
+`2026-07-27T00:00:00Z`. Until then the Hub marks accepted uses as deprecated
+and sends a `Sunset` response header. After that instant it rejects the legacy
+bearer in admin and MCP auth; operators must use AdminPassword sessions or
+scoped OAuth JWT connections. New installs and the CLI do not create, print or
+rotate this legacy credential.
+
 ## Security model
 
 `AdminPassword` authenticates a human. It must not be reused as a JWT signing
@@ -98,6 +105,17 @@ agent policy or JWT validation.
 - Organization deployments may delegate human login to an identity-aware OIDC
   proxy. GPTAdmin still verifies the proxy identity, maps it to local roles and
   records it in the audit trail.
+
+The current Hub runtime exposes the progressive preset API, WebAuthn
+registration/login ceremonies and the TOTP fallback at
+`/admin/api/security/preset`, `/admin/api/security/mfa/webauthn/*` and
+`/admin/api/security/mfa/totp/*`. WebAuthn credentials are stored in a
+restrictive atomic state file; registration and login ceremonies are
+single-use and the verified passkey is carried to the password login through
+an HttpOnly, short-lived proof cookie. Locked down cannot be selected until a
+passkey or verified TOTP method is enrolled. Recovery codes remain one-time
+hashed fallbacks. OIDC/external identity verification remains a deployment
+follow-up and must not be inferred from local MFA enrollment.
 
 ### Connect an MCP client
 

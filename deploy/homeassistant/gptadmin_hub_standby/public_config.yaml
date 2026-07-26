@@ -1,0 +1,49 @@
+name: GPTAdmin Hub Standby
+version: "1.0.5"
+slug: gptadmin_hub_standby
+description: "Independent GPTAdmin Hub standby with automatic Tunnel failover and reclaim"
+url: "https://github.com/megamen32/gptadmin-haos-addons"
+arch:
+  - aarch64
+image: ghcr.io/megamen32/gptadmin-haos-hub-standby
+startup: services
+boot: auto
+init: false
+host_network: true
+protected: true
+apparmor: false
+options:
+  hub_host: "0.0.0.0"
+  hub_port: 9001
+  public_origin:
+  admin_password:
+  failover_frp_token:
+  failover:
+    primary_health_url:
+    primary_public_url:
+    node_id: "standby"
+    rank: 1
+    fail_count_base: 3
+    local_hub_port: 9001
+    endpoints: []
+    subdomain:
+    domain:
+    public_confirm_timeout_sec: 3
+schema:
+  hub_host: str
+  hub_port: int
+  public_origin: url
+  admin_password: password
+  failover_frp_token: password
+  failover:
+    primary_health_url: url
+    primary_public_url: url
+    node_id: str
+    rank: int
+    fail_count_base: int
+    local_hub_port: int
+    endpoints:
+      - str
+    subdomain: str
+    domain: str
+    public_confirm_timeout_sec: int

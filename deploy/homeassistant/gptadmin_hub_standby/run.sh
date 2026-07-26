@@ -4,6 +4,11 @@ set -euo pipefail
 OPTS=/data/options.json
 jqr(){ jq -r "$1 // empty" "$OPTS"; }
 
+mkdir -p /data/config /data/outputs /opt/gptadmin/build /opt/gptadmin/public
+INTERNAL_SECRETS=/data/config/internal-secrets.json
+python3 /usr/local/bin/gptadmin_failover_config.py --ensure-internal-secrets "$INTERNAL_SECRETS"
+internal(){ jq -r --arg key "$1" '.[$key] // empty' "$INTERNAL_SECRETS"; }
+
 export GPTADMIN_ROOT=/opt/gptadmin
 export GPTADMIN_PUBLIC_DIR=/opt/gptadmin/public
 export GPTADMIN_ARTIFACT_DIR=/opt/gptadmin/build
@@ -15,12 +20,17 @@ export HUB_HOST="$GPTADMIN_HUB_HOST"
 export HUB_PORT="$GPTADMIN_HUB_PORT"
 export HUB_BIND="$GPTADMIN_HUB_HOST"
 export CTL_TOKEN="$(jqr '.ctl_token')"
+: "${CTL_TOKEN:=$(internal ctl_token)}"
 export MCP_RELAY_AGENT_TOKEN="$(jqr '.mcp_relay_agent_token')"
+: "${MCP_RELAY_AGENT_TOKEN:=$(internal mcp_relay_agent_token)}"
 export SHELLMCP_TOKEN="$(jqr '.shellmcp_token')"
+: "${SHELLMCP_TOKEN:=$(internal shellmcp_token)}"
 export SHELL_TOKEN="$SHELLMCP_TOKEN"
 export OAUTH_CLIENT_SECRET="$(jqr '.oauth_client_secret')"
+: "${OAUTH_CLIENT_SECRET:=$(internal oauth_client_secret)}"
 export ADMIN_PASSWORD="$(jqr '.admin_password')"
 export MCP_BRIDGE_KEY="$(jqr '.mcp_bridge_key')"
+: "${MCP_BRIDGE_KEY:=$(internal mcp_bridge_key)}"
 export PUBLIC_ORIGIN="$(jqr '.public_origin')"
 export MCP_RESOURCE="$(jqr '.mcp_resource')"
 export HUB_PUBLIC_URL="$(jqr '.hub_public_url')"
@@ -29,12 +39,45 @@ export OAUTH_PERMISSIVE_REDIRECTS="$(jqr '.oauth_permissive_redirects')"
 export OAUTH_PERMISSIVE_RESOURCES="$(jqr '.oauth_permissive_resources')"
 export MCP_RELAY_DEFAULT_TIMEOUT="$(jqr '.mcp_relay_default_timeout')"
 export MCP_RELAY_POLL_MAX_TIMEOUT="$(jqr '.mcp_relay_poll_max_timeout')"
+export FRP_TOKEN="$(jqr '.failover_frp_token')"
 export AUTH_LOG_SECRETS=0
 
 : "${GPTADMIN_HUB_HOST:=0.0.0.0}"
 : "${GPTADMIN_HUB_PORT:=9001}"
 : "${MCP_RELAY_DEFAULT_TIMEOUT:=30}"
 : "${MCP_RELAY_POLL_MAX_TIMEOUT:=55}"
+: "${FRP_TOKEN:=}"
+: "${MCP_RESOURCE:=$PUBLIC_ORIGIN}"
+: "${HUB_PUBLIC_URL:=$PUBLIC_ORIGIN}"
+: "${HUB_URL:=$PUBLIC_ORIGIN}"
 
-mkdir -p /data/config /data/outputs /opt/gptadmin/build /opt/gptadmin/public
-exec /usr/local/bin/gptadmin_hub
+if jq -e '.failover | type == "object"' "$OPTS" >/dev/null 2>&1; then
+  mkdir -p /opt/gptadmin/failover
+  python3 /usr/local/bin/gptadmin_failover_config.py \
+    --options "$OPTS" \
+    --config /opt/gptadmin/failover/failover_config.json \
+    --state /opt/gptadmin/failover/failover_state.json
+fi
+
+/usr/local/bin/gptadmin_hub &
+hub_pid=$!
+runtime_pid=""
+cleanup() {
+  if [[ -n "$runtime_pid" ]]; then
+    kill "$runtime_pid" 2>/dev/null || true
+    wait "$runtime_pid" 2>/dev/null || true
+  fi
+  kill "$hub_pid" 2>/dev/null || true
+  wait "$hub_pid" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+/usr/local/bin/gptadmin_failover_runtime.py &
+runtime_pid=$!
+while kill -0 "$hub_pid" 2>/dev/null && kill -0 "$runtime_pid" 2>/dev/null; do
+  sleep 2
+done
+if ! kill -0 "$hub_pid" 2>/dev/null; then
+  kill "$runtime_pid" 2>/dev/null || true
+fi
+wait "$runtime_pid"

@@ -14,8 +14,40 @@ const (
 
 type authClaimsContextKey struct{}
 
+const (
+	approvalModeReadOnly          = "read_only"
+	approvalModeAskBeforeWrite    = "ask_before_write"
+	approvalModeBoundedAutonomous = "bounded_autonomous"
+)
+
 func requestWithAuthClaims(r *http.Request, claims map[string]any) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), authClaimsContextKey{}, claims))
+}
+
+// requestWithAutomationProfile gives non-interactive ingress an auditable
+// policy identity instead of allowing it to execute with a nil request.
+func requestWithAutomationProfile(r *http.Request, actor, target, tool, approvalMode string) *http.Request {
+	if r == nil {
+		r, _ = http.NewRequest(http.MethodPost, "http://automation.invalid/", nil)
+	}
+	if approvalMode != approvalModeAskBeforeWrite && approvalMode != approvalModeBoundedAutonomous {
+		approvalMode = approvalModeAskBeforeWrite
+	}
+	claims := map[string]any{
+		"sub":         actor,
+		"client_id":   actor,
+		"scope":       "gptadmin.read gptadmin.exec",
+		"access_mode": accessModeFull,
+	}
+	r = requestWithAuthClaims(r, claims)
+	return requestWithAccessProfile(r, AccessProfile{
+		ID:             "automation:" + actor,
+		AccessMode:     accessModeFull,
+		ApprovalMode:   approvalMode,
+		AllowedTargets: []string{target},
+		AllowedTools:   []string{tool},
+		Version:        1,
+	})
 }
 
 func requestAccessMode(r *http.Request) string {
@@ -49,15 +81,37 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func profileAllowsTarget(r *http.Request, target string) bool {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound {
+		return true
+	}
+	return containsString(profile.AllowedTargets, target)
+}
+
+func profileAllowsTool(r *http.Request, toolName string) bool {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound {
+		return true
+	}
+	return containsString(profile.AllowedTools, toolName)
+}
+
 func authorizeToolCall(r *http.Request, target, toolName string) error {
+	if !profileAllowsTarget(r, target) || !profileAllowsTool(r, toolName) {
+		return errors.New("access profile denies this target or tool")
+	}
 	if requestAccessMode(r) != accessModeReadonly {
 		return nil
 	}
 	if target == "hub" {
 		switch toolName {
-		case "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status":
+		case "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo":
 			return nil
 		}
+	}
+	if toolName == "resources/list" || toolName == "resources/read" {
+		return nil
 	}
 	if strings.HasPrefix(target, "shell:") && toolName == "system_inspect" {
 		return nil
@@ -66,11 +120,31 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 }
 
 func authorizeFacadeCall(r *http.Request, name string, args map[string]any) error {
+	if !profileAllowsTool(r, name) {
+		return errors.New("access profile denies this facade")
+	}
 	if requestAccessMode(r) != accessModeReadonly {
-		return nil
+		switch name {
+		case "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem":
+			target := firstString(args, "target", "server_id", "agent_id")
+			if target != "" && !profileAllowsTarget(r, target) {
+				return errors.New("access profile denies this target")
+			}
+			return nil
+		case "execute", "call_mcp_tool", "callMcpTool":
+			return authorizeToolCall(r, firstString(args, "target", "server_id", "agent_id"), firstString(args, "tool", "tool_name", "name"))
+		default:
+			return nil
+		}
 	}
 	switch name {
-	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "discover", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem", "job", "get_mcp_job", "getMcpJob":
+	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob":
+		return nil
+	case "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem":
+		target := firstString(args, "target", "server_id", "agent_id")
+		if target != "" && !profileAllowsTarget(r, target) {
+			return errors.New("access profile denies this target")
+		}
 		return nil
 	case "execute", "call_mcp_tool", "callMcpTool":
 		return authorizeToolCall(r, firstString(args, "target", "server_id", "agent_id"), firstString(args, "tool", "tool_name", "name"))
@@ -81,12 +155,18 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 
 func appsSDKToolsForRequest(r *http.Request) []map[string]any {
 	tools := appsSDKTools()
-	if requestAccessMode(r) != accessModeReadonly {
+	_, bound := AccessProfileFromRequest(r)
+	if !bound && requestAccessMode(r) != accessModeReadonly {
 		return tools
 	}
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		if authorizeFacadeCall(r, firstString(tool, "name"), nil) == nil {
+		name := firstString(tool, "name")
+		allowed := profileAllowsTool(r, name)
+		if !bound {
+			allowed = authorizeFacadeCall(r, name, nil) == nil
+		}
+		if allowed {
 			filtered = append(filtered, tool)
 		}
 	}
@@ -94,7 +174,8 @@ func appsSDKToolsForRequest(r *http.Request) []map[string]any {
 }
 
 func toolsForRequest(r *http.Request, target string, tools []map[string]any) []map[string]any {
-	if requestAccessMode(r) != accessModeReadonly {
+	_, bound := AccessProfileFromRequest(r)
+	if !bound && requestAccessMode(r) != accessModeReadonly {
 		return tools
 	}
 	filtered := make([]map[string]any, 0, len(tools))

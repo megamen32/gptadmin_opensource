@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // UpdateLauncher describes how to launch the update script externally.
@@ -113,9 +112,7 @@ func (l *UpdateLauncher) launchSystemd() error {
 		args = []string{"--user", "start", l.ServiceUnit}
 	}
 	cmd := exec.Command("systemctl", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	setDetachedProcess(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl start %s: %w (output: %s)", l.ServiceUnit, err, string(out))
@@ -145,9 +142,7 @@ func (l *UpdateLauncher) launchKickstart() error {
 	cmd := exec.Command("launchctl", args...)
 	// Don't tie the hub's lifetime to launchctl — we only care about
 	// returning once launchctl has handed the request to launchd.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	setDetachedProcess(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("launchctl kickstart %s/%s: %w (output: %s)",

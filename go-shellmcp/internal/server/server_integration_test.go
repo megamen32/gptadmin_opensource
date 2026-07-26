@@ -240,18 +240,28 @@ func TestExecStreamMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestSupervisorLifecycleRoundTrip exercises the /capabilities/mcp/
-// start/stop/status path using a "sleep" command as a controllable
-// long-running process. Skipped if /bin/sleep is unavailable.
+// TestSupervisorLifecycleRoundTrip exercises the deprecated
+// /capabilities/mcp/ API against the real initialized MCP session owner.
 func TestSupervisorLifecycleRoundTrip(t *testing.T) {
-	if _, err := os.Stat("/bin/sleep"); err != nil {
-		t.Skipf("sleep not available: %v", err)
-	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "agents.json")
+	counter := filepath.Join(dir, "starts")
+	script := filepath.Join(dir, "child.sh")
+	body := `#!/bin/sh
+echo x >> "$COUNT_FILE"
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}' ;;
+  *'"method":"notifications/initialized"'*) ;;
+ esac
+done
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cfg := map[string]any{
 		"agents": []map[string]any{
-			{"ref": "sleepy", "name": "sleepy", "command": "/bin/sleep", "args": []string{"5"}},
+			{"ref": "local", "name": "local", "transport": "stdio", "command": script, "env": map[string]string{"COUNT_FILE": counter}, "enabled": true},
 		},
 	}
 	b, _ := json.Marshal(cfg)
@@ -262,7 +272,7 @@ func TestSupervisorLifecycleRoundTrip(t *testing.T) {
 	s := New(Config{Token: "t", MCPConfig: cfgPath})
 	defer s.Close()
 
-	startReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/sleepy",
+	startReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/local",
 		bytes.NewBufferString(`{"action":"start"}`))
 	startReq.Header.Set("Authorization", "Bearer t")
 	startRec := httptest.NewRecorder()
@@ -270,18 +280,8 @@ func TestSupervisorLifecycleRoundTrip(t *testing.T) {
 	if startRec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
 	}
-	// Schedule cleanup; do not fail the test on a stop error because
-	// supervisor's Stop can race with sleep termination on slow CI.
-	defer func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/sleepy",
-			bytes.NewBufferString(`{"action":"stop"}`))
-		stopReq.Header.Set("Authorization", "Bearer t")
-		stopRec := httptest.NewRecorder()
-		s.Handler().ServeHTTP(stopRec, stopReq)
-	}()
-
 	// status (running)
-	stReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/sleepy",
+	stReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/local",
 		bytes.NewBufferString(`{"action":"status"}`))
 	stReq.Header.Set("Authorization", "Bearer t")
 	stRec := httptest.NewRecorder()
@@ -295,6 +295,42 @@ func TestSupervisorLifecycleRoundTrip(t *testing.T) {
 	}
 	if r, _ := statusBody["running"].(bool); !r {
 		t.Fatalf("expected running=true, got body=%s", stRec.Body.String())
+	}
+	if pid, _ := statusBody["pid"].(float64); pid <= 0 {
+		t.Fatalf("expected active MCP pid, got body=%s", stRec.Body.String())
+	}
+
+	restartReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/local", bytes.NewBufferString(`{"action":"restart"}`))
+	restartReq.Header.Set("Authorization", "Bearer t")
+	restartRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(restartRec, restartReq)
+	if restartRec.Code != http.StatusOK {
+		t.Fatalf("restart status=%d body=%s", restartRec.Code, restartRec.Body.String())
+	}
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts := strings.Count(string(data), "x"); starts != 2 {
+		t.Fatalf("MCP session starts=%d want 2; data=%q", starts, data)
+	}
+
+	stopReq := httptest.NewRequest(http.MethodPost, "/capabilities/mcp/local", bytes.NewBufferString(`{"action":"stop"}`))
+	stopReq.Header.Set("Authorization", "Bearer t")
+	stopRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(stopRec, stopReq)
+	if stopRec.Code != http.StatusOK {
+		t.Fatalf("stop status=%d body=%s", stopRec.Code, stopRec.Body.String())
+	}
+	stReq = httptest.NewRequest(http.MethodPost, "/capabilities/mcp/local", bytes.NewBufferString(`{"action":"status"}`))
+	stReq.Header.Set("Authorization", "Bearer t")
+	stRec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(stRec, stReq)
+	if err := json.Unmarshal(stRec.Body.Bytes(), &statusBody); err != nil {
+		t.Fatal(err)
+	}
+	if running, _ := statusBody["running"].(bool); running {
+		t.Fatalf("expected running=false after stop, got body=%s", stRec.Body.String())
 	}
 }
 

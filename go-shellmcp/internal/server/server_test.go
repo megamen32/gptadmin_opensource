@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/output"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 )
@@ -23,6 +26,39 @@ func TestFromEnvDefaultLogLimit(t *testing.T) {
 	cfg := FromEnv()
 	if cfg.LogLimit != output.DefaultInlineTailBytes {
 		t.Fatalf("LogLimit=%d want %d", cfg.LogLimit, output.DefaultInlineTailBytes)
+	}
+}
+
+func TestFileEndpointRejectsSymlinkEvenWhenLinkIsInsideSpillRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("not-for-shell-client"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	s := New(Config{Token: "t", SpillDir: root})
+	request := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(link), nil)
+	request.Header.Set("Authorization", "Bearer t")
+	record := httptest.NewRecorder()
+	s.Handler().ServeHTTP(record, request)
+	if record.Code == http.StatusOK || strings.Contains(record.Body.String(), "not-for-shell-client") {
+		t.Fatalf("file endpoint followed symlink: status=%d body=%q", record.Code, record.Body.String())
+	}
+}
+
+func TestFromEnvUsesInstallerSpillDirectoryAliases(t *testing.T) {
+	spill := t.TempDir()
+	for _, key := range []string{"SHELL_SPOOL_DIR", "SHELLMCP_SPOOL_DIR", "SHELL_SPILL_DIR", "SHELLMCP_SPILL_DIR"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("SHELLMCP_SPILL_DIR", spill)
+
+	cfg := FromEnv()
+	if cfg.SpillDir != spill {
+		t.Fatalf("installer spill directory ignored: got %q want %q", cfg.SpillDir, spill)
 	}
 }
 
@@ -39,6 +75,18 @@ func TestFromEnvUsesWindowsInstallerPollingContract(t *testing.T) {
 	}
 }
 
+func TestFromEnvDefaultsToLongPollingWithoutInboundListener(t *testing.T) {
+	t.Setenv("SHELL_QUEUE", "")
+	t.Setenv("SHELLMCP_QUEUE", "")
+	t.Setenv("SHELL_MODE", "")
+	t.Setenv("SHELLMCP_MODE", "")
+
+	cfg := FromEnv()
+	if !cfg.QueueEnabled || cfg.Mode != "long_poll" {
+		t.Fatalf("default transport must be long_poll without a listener: %+v", cfg)
+	}
+}
+
 func TestQueueTransportNeverNeedsLocalListener(t *testing.T) {
 	for _, heartbeat := range []bool{false, true} {
 		s := New(Config{QueueEnabled: true, HeartbeatEnabled: heartbeat})
@@ -49,6 +97,32 @@ func TestQueueTransportNeverNeedsLocalListener(t *testing.T) {
 	if !New(Config{QueueEnabled: false}).needsLocalListener() {
 		t.Fatal("non-queue transport must retain its local listener")
 	}
+}
+
+func TestServerCloseTerminatesSupervisorChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the POSIX shell available on deployed Linux and macOS hosts")
+	}
+	s := New(Config{MCPConfig: filepath.Join(t.TempDir(), "mcp.json"), SpillDir: t.TempDir()})
+	defer s.supervisor.KillAll()
+	if err := s.supervisor.Upsert(supervisor.Agent{Ref: "slow", Command: "/bin/sh", Args: []string{"-c", "sleep 30"}, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.supervisor.Start("slow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := s.supervisor.Status("slow")
+		if err == nil && !status.Running {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("supervisor child remained alive after Server.Close")
 }
 
 func TestQueueShellExecPreservesExplicitRunAsUser(t *testing.T) {
@@ -149,6 +223,67 @@ func TestFileEndpoint(t *testing.T) {
 	s.Handler().ServeHTTP(rec2, r2)
 	if rec2.Code != 200 || rec2.Body.String() != "123456789" {
 		t.Fatalf("file code=%d body=%q", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestFileEndpointAllowsCanonicalizedSpillRootPrefix(t *testing.T) {
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "spill-root")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+	path := filepath.Join(alias, "stdout.txt")
+	if err := os.WriteFile(filepath.Join(physical, "stdout.txt"), []byte("canonical-root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{Token: "t", SpillDir: alias})
+	req := httptest.NewRequest(http.MethodGet, "/file?path="+path, nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "canonical-root" {
+		t.Fatalf("file code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileEndpointRejectsIntermediateSymlinkBelowCanonicalizedSpillRoot(t *testing.T) {
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "spill-root")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+	targetDir := filepath.Join(physical, "target")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "secret.txt"), []byte("not-for-shell-client"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	intermediateLink := filepath.Join(physical, "nested")
+	if err := os.Symlink(targetDir, intermediateLink); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+
+	s := New(Config{Token: "t", SpillDir: alias})
+	path := filepath.Join(alias, "nested", "secret.txt")
+	req := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(path), nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "not-for-shell-client") {
+		t.Fatalf("file endpoint followed intermediate symlink: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRejectSymlinksBelowRootFailsClosedOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectSymlinksBelowRoot(root, outside); err == nil {
+		t.Fatal("expected path outside root to be rejected")
 	}
 }
 
@@ -272,6 +407,89 @@ func TestMCPManagePersistsRemoteServerLifecycle(t *testing.T) {
 	}
 }
 
+func TestMCPManageOwnsOneOnDemandStdioSession(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "starts")
+	script := filepath.Join(dir, "child.sh")
+	body := `#!/bin/sh
+echo x >> "$COUNT_FILE"
+instance=$(wc -l < "$COUNT_FILE" | tr -d ' ')
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}' ;;
+  *'"method":"notifications/initialized"'*) ;;
+  *'"method":"tools/list"'*) printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo-$instance\",\"inputSchema\":{\"type\":\"object\"}}]}}" ;;
+ esac
+done
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{MCPConfig: filepath.Join(dir, "mcp.json"), SpillDir: t.TempDir()})
+	defer s.Close()
+	if _, err := s.mcpManage(map[string]any{"action": "upsert", "config": map[string]any{
+		"ref": "local", "transport": "stdio", "command": script,
+		"env": map[string]any{"COUNT_FILE": counter}, "enabled": false,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.mcpManage(map[string]any{"action": "enable", "ref": "local"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if data, err := os.ReadFile(counter); err == nil {
+		t.Fatalf("enable eagerly started an unconnected process: %q", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	tools, err := s.callMCPTool(context.Background(), "mcp_tools", map[string]any{"ref": "local"})
+	if err != nil || !strings.Contains(fmt.Sprint(tools["structuredContent"]), "echo-1") {
+		t.Fatalf("first tools=%#v err=%v", tools, err)
+	}
+	status, err := s.mcpManage(map[string]any{"action": "status", "ref": "local"})
+	if err != nil || !mcpRunning(t, status) {
+		t.Fatalf("active status=%#v err=%v", status, err)
+	}
+
+	if _, err := s.mcpManage(map[string]any{"action": "restart", "ref": "local"}); err != nil {
+		t.Fatal(err)
+	}
+	tools, err = s.callMCPTool(context.Background(), "mcp_tools", map[string]any{"ref": "local"})
+	if err != nil || !strings.Contains(fmt.Sprint(tools["structuredContent"]), "echo-2") {
+		t.Fatalf("restarted tools=%#v err=%v", tools, err)
+	}
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts := strings.Count(string(data), "x"); starts != 2 {
+		t.Fatalf("stdio process starts=%d want exactly two sessions; data=%q", starts, data)
+	}
+
+	if _, err := s.mcpManage(map[string]any{"action": "disable", "ref": "local"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = s.mcpManage(map[string]any{"action": "status", "ref": "local"})
+	if err != nil || mcpRunning(t, status) {
+		t.Fatalf("disabled status=%#v err=%v", status, err)
+	}
+}
+
+func mcpRunning(t *testing.T, response map[string]any) bool {
+	t.Helper()
+	structured, ok := response["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("structuredContent type=%T", response["structuredContent"])
+	}
+	status, ok := structured["status"].(mcpclient.RuntimeStatus)
+	if !ok {
+		t.Fatalf("runtime status type=%T", structured["status"])
+	}
+	return status.Running
+}
+
 func TestVersionUsesTransportFeatureNames(t *testing.T) {
 	s := New(Config{Token: "t", Name: "unit-host", LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir()})
 	req := httptest.NewRequest(http.MethodGet, "/version", nil)
@@ -281,6 +499,9 @@ func TestVersionUsesTransportFeatureNames(t *testing.T) {
 		t.Fatalf("version status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
+	if strings.Contains(body, `"status":"prototype"`) {
+		t.Fatalf("completed Go runtime still advertises itself as prototype: %s", body)
+	}
 	if strings.Contains(body, `"mcp_http"`) || strings.Contains(body, `"mcp_stdio"`) {
 		t.Fatalf("/version exposed ambiguous MCP feature names: %s", body)
 	}
@@ -289,17 +510,16 @@ func TestVersionUsesTransportFeatureNames(t *testing.T) {
 	}
 }
 
-func TestMCPHTTPPollingTransportDescriptor(t *testing.T) {
+func TestMCPHTTPGetDoesNotAdvertiseProprietaryPolling(t *testing.T) {
 	s := New(Config{Token: "t", Name: "unit-host", LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir(), QueueEnabled: true, Mode: "long_poll"})
 	req := httptest.NewRequest(http.MethodGet, "/mcp?sse=1", nil)
 	req.Header.Set("Authorization", "Bearer t")
-	req.Header.Set("Mcp-Session-Id", "session-test")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "streamable-http-poll") || !strings.Contains(rec.Body.String(), "session-test") {
-		t.Fatalf("bad poll descriptor code=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusMethodNotAllowed || strings.Contains(rec.Body.String(), "streamable-http-poll") {
+		t.Fatalf("GET code=%d body=%s want standards-safe 405", rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("MCP-Protocol-Version") == "" || rec.Header().Get("Mcp-Session-Id") != "session-test" {
+	if rec.Header().Get("MCP-Protocol-Version") == "" || rec.Header().Get("Mcp-Session-Id") != "" {
 		t.Fatalf("missing MCP transport headers: %#v", rec.Header())
 	}
 }

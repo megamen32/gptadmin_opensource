@@ -63,7 +63,8 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 3. You pick what to install: hub + agent, hub only, or agent only
 4. You pick a tunnel: auto-tunnel (FRP/Cloudflare) or your own domain
 5. Writes service units and starts them
-6. Prints your **Hub URL**, **CTL_TOKEN**, and **SHELLMCP_TOKEN**
+6. Prints your **Hub URL** and the `/connect` onboarding URL. Internal agent
+   credentials are stored server-side and are never printed for copy/paste.
 
 ## Uninstall
 

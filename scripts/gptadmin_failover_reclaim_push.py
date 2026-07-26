@@ -43,9 +43,14 @@ def sign(secret: str, text: str) -> str:
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: float) -> tuple[int, str]:
+def post_json(url: str, payload: dict[str, Any], timeout: float, authorization: str = "") -> tuple[int, str]:
+    """POST a signed reclaim payload with the Hub control credential."""
+
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": "gptadmin-primary-reclaim/1"}, method="POST")
+    headers = {"Content-Type": "application/json", "User-Agent": "gptadmin-primary-reclaim/1"}
+    if authorization:
+        headers["Authorization"] = "Bearer " + authorization
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - admin configured URL
             return int(getattr(r, "status", 0)), r.read().decode(errors="replace")[:1000]
@@ -103,7 +108,7 @@ def main() -> int:
                     "alg": "hmac-sha256",
                 }
                 payload["signature"] = sign(secret, sig_input("demote", node_id, nonce, issued_at, expires_at, primary_health_url))
-                status, body = post_json(url, payload, args.timeout)
+                status, body = post_json(url, payload, args.timeout, authorization=secret)
                 results.append({"attempt": attempt, "node_id": node_id, "status": status, "body": body})
                 if 200 <= status < 300 and '"accepted":true' in body.replace(" ", ""):
                     print(json.dumps({"ok": True, "accepted": True, "url": url, "node_id": node_id, "attempt": attempt, "results": results}, sort_keys=True))

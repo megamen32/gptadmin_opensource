@@ -13,6 +13,7 @@ RUN useradd -m -s /bin/bash app \
 
 WORKDIR /work
 COPY deploy/install.sh /work/deploy/install.sh
+COPY cli.py /work/cli.py
 COPY tests/e2e/docker/fakebin/ /e2e/fakebin/
 COPY tests/e2e/docker/scenarios/ /e2e/scenarios/
 COPY tunnels/ /work/tunnels/

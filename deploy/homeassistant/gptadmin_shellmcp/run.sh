@@ -25,7 +25,7 @@ SHELL_URL="$(opt shell_url 'http://192.168.2.101:25900')"
 SHELL_TOKEN="$(opt shell_token '')"
 SHELL_PORT="$(opt port '25900')"
 SHELL_QUEUE="$(opt queue 'true')"
-SHELL_HEARTBEAT="$(opt heartbeat 'true')"
+SHELL_HEARTBEAT="$(opt heartbeat 'false')"
 SHELL_DEFAULT_CWD="$(opt default_cwd '/config')"
 EXEC_TIMEOUT="$(opt exec_timeout '300')"
 LOG_LIMIT_B="$(opt log_limit_b '65536')"
@@ -92,6 +92,7 @@ export SHELL_DEFAULT_HOME="/root"
 export SHELL_DEFAULT_CWD
 export SHELLMCP_DEFAULT_USER="root"
 export SHELLMCP_DEFAULT_CWD="$SHELL_DEFAULT_CWD"
+export SHELLMCP_MCP_CONFIG="$(opt mcp_config '/data/shellmcp-mcp.json')"
 
 printf 'Starting GPTAdmin ShellMCP: name=%s url=%s hub=%s queue=%s heartbeat=%s\n' \
   "$SHELL_NAME" "$SHELL_URL" "$HUB_URL" "$SHELL_QUEUE" "$SHELL_HEARTBEAT"

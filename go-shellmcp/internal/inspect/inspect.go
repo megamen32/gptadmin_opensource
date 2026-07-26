@@ -141,6 +141,10 @@ func resolveAllowedPath(path string, roots []string) (string, error) {
 	if len(roots) == 0 {
 		return "", errors.New("read-only inspection has no allowed roots configured")
 	}
+	absoluteInput, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
@@ -159,6 +163,13 @@ func resolveAllowedPath(path string, roots []string) (string, error) {
 		if root == "" {
 			continue
 		}
+		absoluteRoot, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			continue
+		}
+		if err := rejectSymlinksBelowRoot(absoluteRoot, absoluteInput); err != nil {
+			return "", err
+		}
 		resolvedRoot, rootErr := filepath.EvalSymlinks(root)
 		if rootErr != nil {
 			continue
@@ -173,4 +184,28 @@ func resolveAllowedPath(path string, roots []string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("path %q is outside configured read-only inspection roots", path)
+}
+
+// rejectSymlinksBelowRoot rejects symlinks supplied below a configured root
+// while allowing a platform-owned symlink prefix used by the root itself.
+func rejectSymlinksBelowRoot(root, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
+		return nil
+	}
+	current := root
+	for _, part := range strings.Split(relative, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, infoErr := os.Lstat(current)
+		if infoErr != nil {
+			return infoErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("read-only inspection rejects symbolic links: %q", path)
+		}
+	}
+	return nil
 }

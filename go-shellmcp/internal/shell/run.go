@@ -24,6 +24,8 @@ const DefaultTimeout = 300 * time.Second
 
 type Request struct {
 	Cmd         string            `json:"cmd"`
+	TraceID     string            `json:"trace_id,omitempty"`
+	TraceParent string            `json:"traceparent,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	Cwd         string            `json:"cwd,omitempty"`
 	Timeout     int               `json:"timeout,omitempty"`

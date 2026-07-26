@@ -16,7 +16,7 @@ Run the hub + an agent locally:
 
 ```bash
 go run ./go-hub/cmd/gptadmin-hub   # terminal 1
-python client/shellmcp.py   # terminal 2
+SHELLMCP_TOKEN=agent-token HUB_URL=http://127.0.0.1:9001 go run ./go-shellmcp/cmd/shellmcp-go   # terminal 2
 python tests/test_hub.py    # terminal 3 — smoke test
 ```
 

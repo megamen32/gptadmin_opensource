@@ -229,6 +229,39 @@ func TestSnapshotRestoreIsSafeAfterFileDeleted(t *testing.T) {
 	}
 }
 
+func TestSnapshotRestoreDoesNotFollowSymlinkToExternalFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "external")
+	if err := os.WriteFile(target, []byte("external"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	snap, err := SnapshotDir(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Len() != 1 {
+		t.Fatalf("want symlink metadata in snapshot, got %d entries", snap.Len())
+	}
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if restored, failed := snap.Restore(); restored != 1 || failed != 0 {
+		t.Fatalf("restore = (%d, %d), want (1, 0)", restored, failed)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("external target mode changed through symlink: %o", got)
+	}
+}
+
 func TestSnapshotNilRestoreIsNoop(t *testing.T) {
 	var s *Snapshot
 	restored, failed := s.Restore()

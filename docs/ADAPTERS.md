@@ -17,7 +17,7 @@ The hub exposes **three ways** for an AI to connect. Same hub, same capabilities
 
 **Protocol:** MCP remote SSE (Streamable HTTP).
 
-**Endpoint:** `https://your-hub.bezrabotnyi.com/mcp`
+**Endpoint:** `https://your-hub.bezrabotnyi.com/mcp` (discover it from `/connect`)
 
 ### Setup
 
@@ -29,10 +29,7 @@ Add the hub as an MCP server in your client config. For Claude Desktop, edit
   "mcpServers": {
     "gptadmin": {
       "type": "http",
-      "url": "http://localhost:25900/mcp",
-      "headers": {
-        "Authorization": "Bearer  YOUR_CTL_TOKEN"
-      }
+      "url": "https://your-hub.example/mcp"
     }
   }
 }
@@ -45,11 +42,11 @@ systemd, etc.) available.
 
 ### Notes
 
-- `/mcp` does **not** accept `CTL_TOKEN` directly. It requires an OAuth bearer
-  token that the hub signs via `OAUTH_CLIENT_SECRET`. See
+- `/mcp` uses OAuth Authorization Code + PKCE. Start at `/connect` or the
+  `/.well-known/oauth-authorization-server` metadata; internal bearer values
+  are never copied into client configuration. See
   [Configuration → OAuth](./CONFIGURATION.md#oauth).
-- For local dev you can use `http://localhost:25900/mcp` without OAuth (the
-  hub relaxes auth on localhost).
+- For local development, use the same OAuth flow against the loopback Hub.
 
 ---
 
@@ -87,7 +84,8 @@ the script automatically:
 
 Press `Alt+K` (or the key icon, bottom-right) and enter:
 - **Bridge URL** — your hub URL (`https://your-hub.bezrabotnyi.com`)
-- **Bridge Key** — your `CTL_TOKEN`
+- Complete the one-time `/connect` pairing/OAuth flow; do not paste an internal
+  Hub or agent credential into the browser extension.
 
 ### Supported sites
 
@@ -107,7 +105,7 @@ Press `Alt+K` (or the key icon, bottom-right) and enter:
 
 **For:** ChatGPT Custom GPT, Open WebUI.
 
-**Protocol:** REST + OpenAPI schema, Bearer auth.
+**Protocol:** REST + OpenAPI schema, OAuth Authorization Code + PKCE.
 
 **Endpoint:** `https://your-hub.bezrabotnyi.com/admin/api/*`
 
@@ -117,7 +115,8 @@ Press `Alt+K` (or the key icon, bottom-right) and enter:
 2. Create or edit a GPT → Configure → Actions → Create new action
 3. Import OpenAPI by URL: `https://became.bezrabotnyi.com/api.json`
 4. In the `servers` block, replace the `url` with your Hub URL
-5. Authentication → API key → Bearer → paste your `CTL_TOKEN`
+5. Authentication → OAuth2 → Authorization Code + PKCE; use the Hub metadata
+   discovered from `/connect`
 6. Save. You can now ask ChatGPT to run server commands — no Codex limits.
 
 ### Setup (Open WebUI)
@@ -125,7 +124,7 @@ Press `Alt+K` (or the key icon, bottom-right) and enter:
 Add the hub as a tool/function endpoint in Open WebUI settings:
 - URL: `https://your-hub.bezrabotnyi.com/admin/api`
 - OpenAPI schema: import from `https://became.bezrabotnyi.com/api.json`
-- Auth: Bearer `CTL_TOKEN`
+- Auth: OAuth Authorization Code + PKCE from the Hub metadata
 
 ### Why "no Codex limits"
 

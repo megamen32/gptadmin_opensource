@@ -39,12 +39,13 @@ const (
 // *Logger is a valid no-op so callers can call Event unconditionally
 // without checking for nil. All exported methods are goroutine-safe.
 type Logger struct {
-	mu       sync.Mutex
-	enc      *json.Encoder
-	file     *os.File
-	path     string
-	maxBytes int64
-	closed   bool
+	mu         sync.Mutex
+	enc        *json.Encoder
+	file       *os.File
+	path       string
+	maxBytes   int64
+	closed     bool
+	afterWrite func()
 }
 
 // New opens path in append-only mode, creating parent directories as
@@ -82,6 +83,17 @@ func NewWithLimit(path string, maxBytes int64) (*Logger, error) {
 	return &Logger{enc: enc, file: f, path: path, maxBytes: maxBytes}, nil
 }
 
+// SetAfterWrite registers a bounded-storage hook. The callback runs after the
+// logger mutex is released so it may safely inspect or prune managed files.
+func (l *Logger) SetAfterWrite(callback func()) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.afterWrite = callback
+	l.mu.Unlock()
+}
+
 // Event writes a single audit record as one JSON line. Calling Event
 // on a nil receiver is a no-op, which lets callers wire the logger
 // unconditionally:
@@ -101,8 +113,8 @@ func (l *Logger) Event(typ string, fields map[string]any) {
 	fields["type"] = typ
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return
 	}
 	if l.maxBytes > 0 {
@@ -116,7 +128,13 @@ func (l *Logger) Event(typ string, fields map[string]any) {
 		// Best-effort: drop the record silently rather than crashing
 		// the calling request path. Callers needing delivery
 		// guarantees should layer their own retry around Event.
+		l.mu.Unlock()
 		return
+	}
+	callback := l.afterWrite
+	l.mu.Unlock()
+	if callback != nil {
+		callback()
 	}
 }
 

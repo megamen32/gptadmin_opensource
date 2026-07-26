@@ -48,17 +48,3 @@ func (s *Server) startUpdateLoop(ctx context.Context) {
 		}
 	}()
 }
-
-// startAutoStartAgents walks the configured supervisor agents and
-// best-effort starts each one. Errors are logged but never returned.
-func (s *Server) startAutoStartAgents() {
-	if s.supervisor == nil {
-		return
-	}
-	for _, a := range s.supervisor.Agents() {
-		ref := a.Ref
-		if err := s.supervisor.Start(ref); err != nil {
-			log.Printf("supervisor auto-start ref=%s err=%v", ref, err)
-		}
-	}
-}

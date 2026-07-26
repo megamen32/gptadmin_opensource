@@ -1,5 +1,5 @@
 name: GPTAdmin Hub Standby
-version: "1.0.0"
+version: "1.0.4"
 slug: gptadmin_hub_standby
 description: "Standby GPTAdmin hub on HAOS for roomhacker-server-100 failover"
 url: "https://gptadmin.bezrabotnyi.com"
@@ -35,6 +35,10 @@ options:
   oauth_permissive_resources: "__OAUTH_PERMISSIVE_RESOURCES__"
   mcp_relay_default_timeout: "__MCP_RELAY_DEFAULT_TIMEOUT__"
   mcp_relay_poll_max_timeout: "__MCP_RELAY_POLL_MAX_TIMEOUT__"
+  failover_frp_token: "__FAILOVER_FRP_TOKEN__"
+  failover_node_id: "shell:haos"
+  failover_proxy_listen: "0.0.0.0:9101"
+  failover_check_interval_sec: 15
 schema:
   hub_host: str
   hub_port: int
@@ -52,3 +56,7 @@ schema:
   oauth_permissive_resources: str
   mcp_relay_default_timeout: str
   mcp_relay_poll_max_timeout: str
+  failover_frp_token: password
+  failover_node_id: str
+  failover_proxy_listen: str
+  failover_check_interval_sec: int

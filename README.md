@@ -63,7 +63,9 @@ curl -s https://became.bezrabotnyi.com/install.sh | bash
 iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
-The installer prints your **Hub URL** and **CTL_TOKEN** — keep them.
+The installer prints your **Hub URL** and opens the connection flow. Do not
+copy a legacy bearer token; existing installations must migrate to
+AdminPassword/OAuth by `2026-07-27`.
 
 ```bash
 # 2. Connect your AI — pick one adapter:
@@ -118,7 +120,6 @@ gptadmin_security.py    # auth, OAuth, token validation
 cli.py                  # `gptadmin` CLI (setup, tunnel, status, logs)
 telegram_logs_bot.py    # optional Telegram alerts
 go-shellmcp/            # primary shell agent (Go) — runs on target machines
-client/                 # legacy Python shell agent (compat)
 public/                 # OpenAPI schema, install scripts, mcp-bridge.user.js
 deploy/                 # install scripts, systemd, nginx configs
 tests/                  # test_hub.py, test_rootd.py
@@ -135,10 +136,10 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install fastapi uvicorn requests
 
 # hub (terminal 1)
-CTL_TOKEN=your-token go run ./go-hub/cmd/gptadmin-hub
+python3 cli.py setup --hub --tunnel none --user
 
 # agent on a target machine (terminal 2)
-SHELLMCP_TOKEN=agent-token HUB_URL=http://127.0.0.1:25900 python client/shellmcp.py
+python3 cli.py setup --no-hub --shellmcp --hub-url http://127.0.0.1:9001 --user
 
 # smoke test (terminal 3)
 python tests/test_hub.py
@@ -191,4 +192,3 @@ GPTAdmin can be used as a secured gateway in front of any registered MCP server.
 - an OpenAPI Action schema for Custom GPTs: `https://your-hub/server/{slug}/actions/openapi.yaml`.
 
 Use this when a GPT should see only one tool/server, for example OpenMemory, instead of the full GPTAdmin relay surface. The OpenAPI schema is generated automatically from that server's MCP `tools/list` response. See [MCP Proxy Relay](./docs/MCP_PROXY_RELAY.md).
-

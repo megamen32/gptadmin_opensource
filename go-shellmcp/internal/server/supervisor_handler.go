@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/audit"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
@@ -19,8 +21,9 @@ type supervisorActionReq struct {
 	Ref    string `json:"ref"`
 }
 
-// supervisorHandler implements POST /capabilities/mcp/. The trailing slash
-// is intentional so the agent ref can be captured via r.URL.Path.
+// supervisorHandler implements the deprecated POST /capabilities/mcp/ API.
+// It intentionally delegates to childMCP so this compatibility path cannot
+// create a second detached process outside the MCP protocol session owner.
 func (s *Server) supervisorHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -64,19 +67,27 @@ func (s *Server) supervisorHandler(w http.ResponseWriter, r *http.Request) {
 		"ref":     req.Ref,
 	})
 
-	var (
-		status supervisor.AgentStatus
-		err    error
-	)
+	agent, err := mgr.Agent(req.Ref)
+	if err != nil {
+		if errors.Is(err, supervisor.ErrUnknownRef) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error(), "ref": req.Ref})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "ref": req.Ref, "action": req.Action})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	status := s.childMCP.Status(req.Ref)
 	switch req.Action {
 	case "start":
-		err = mgr.Start(req.Ref)
+		err = s.childMCP.Start(ctx, agent)
 	case "stop":
-		err = mgr.Stop(req.Ref)
+		err = s.childMCP.Close(req.Ref)
 	case "restart":
-		err = mgr.Restart(req.Ref)
+		err = s.childMCP.Restart(ctx, agent)
 	case "status":
-		status, err = mgr.Status(req.Ref)
+		status = s.childMCP.Status(req.Ref)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown action: " + req.Action})
 		return

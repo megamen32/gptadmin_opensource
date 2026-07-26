@@ -189,7 +189,9 @@ def _root_contract_command(command: str, tmp_path: Path) -> str:
 
     binary = tmp_path / "shellmcp-contract"
     subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/shellmcp-go"],
+        # The executable only exercises the daemon contract.  VCS metadata is
+        # irrelevant and unavailable in some isolated worktree test runners.
+        ["go", "build", "-buildvcs=false", "-o", str(binary), "./cmd/shellmcp-go"],
         cwd=str(ROOT / "go-shellmcp"),
         check=True,
         timeout=120,
@@ -292,6 +294,8 @@ def shellmcp_contract(request: pytest.FixtureRequest, tmp_path: Path) -> Iterato
             "SHELLMCP_IDENTITY_DIR": str(identity_dir),
             "SHELL_IDENTITY_DIR": str(identity_dir),
             "SHELLMCP_SPILL_DIR": str(spill_dir),
+            "SHELLMCP_INSPECT_ROOTS": str(tmp_path),
+            "SHELLMCP_FILE_BACKUP_ROOT": str(tmp_path / "file-backups"),
             "SHELL_SPILL_DIR": str(spill_dir),
             "SHELLMCP_DEFAULT_CWD": cwd,
             "SHELL_DEFAULT_CWD": cwd,
@@ -463,7 +467,7 @@ def test_shellmcp_contract_mcp_protocol_and_tools(shellmcp_contract: ShellmcpPro
     assert initialized.get("protocolVersion")
     assert initialized.get("serverInfo", {}).get("name")
     assert _header(headers, "MCP-Protocol-Version") == initialized["protocolVersion"]
-    assert _header(headers, "Mcp-Session-Id")
+    assert _header(headers, "Mcp-Session-Id") is None
 
     listed, _ = shellmcp_contract.mcp("tools/list", {}, 11)
     tools = listed.get("tools")
@@ -484,8 +488,8 @@ def test_shellmcp_contract_mcp_protocol_and_tools(shellmcp_contract: ShellmcpPro
     assert result.get("stdout") == "airshell_mcp_contract", executed
 
 
-def test_shellmcp_contract_mcp_resources_and_polling(shellmcp_contract: ShellmcpProcess) -> None:
-    """Expose resources and streamable-HTTP polling metadata through `/mcp`."""
+def test_shellmcp_contract_mcp_resources_and_stateless_get(shellmcp_contract: ShellmcpProcess) -> None:
+    """Expose resources and reject a GET stream when the stateless server offers none."""
     resources, _ = shellmcp_contract.mcp("resources/list", {}, 20)
     listed = resources.get("resources")
     assert isinstance(listed, list)
@@ -497,7 +501,67 @@ def test_shellmcp_contract_mcp_resources_and_polling(shellmcp_contract: Shellmcp
     assert contents[0].get("mimeType") == "application/json"
 
     status, descriptor, headers = shellmcp_contract.request("GET", "/mcp?session_id=contract-session")
-    assert status == 200
-    assert descriptor.get("transport", {}).get("post_path") == "/mcp"
+    assert status == 405
+    assert descriptor.get("error")
     assert _header(headers, "MCP-Protocol-Version")
-    assert _header(headers, "Mcp-Session-Id") == "contract-session"
+    assert _header(headers, "Mcp-Session-Id") is None
+
+
+def test_shellmcp_contract_file_backup_round_trip_through_process(shellmcp_contract: ShellmcpProcess, tmp_path: Path) -> None:
+    """Exercise file sharing through the real ShellMCP HTTP/MCP process."""
+
+    target = tmp_path / "shared-config.txt"
+    target.write_text("before", encoding="utf-8")
+    created, _ = shellmcp_contract.mcp(
+        "tools/call",
+        {"name": "file_backup", "arguments": {"action": "backup", "path": str(target), "ttl_days": 7, "label": "process"}},
+        30,
+    )
+    structured = created.get("structuredContent", {})
+    backup_id = structured.get("backup_id")
+    artifact = structured.get("artifact")
+    assert backup_id and artifact and Path(artifact).is_file()
+    assert Path(artifact).read_text(encoding="utf-8") == "before"
+
+    target.write_text("after", encoding="utf-8")
+    restored, _ = shellmcp_contract.mcp(
+        "tools/call",
+        {"name": "file_backup", "arguments": {"action": "restore", "backup_id": backup_id, "overwrite": True}},
+        31,
+    )
+    assert restored.get("structuredContent", {}).get("backup_id") == backup_id
+    assert target.read_text(encoding="utf-8") == "before"
+
+    listed, _ = shellmcp_contract.mcp(
+        "tools/call",
+        {"name": "file_backup", "arguments": {"action": "list", "limit": 5}},
+        32,
+    )
+    assert any(item.get("backup_id") == backup_id for item in listed.get("structuredContent", {}).get("backups", []))
+
+
+def test_shellmcp_contract_rejects_symlink_escape_through_process(shellmcp_contract: ShellmcpProcess, tmp_path: Path) -> None:
+    """Keep the read-only file boundary fail-closed at the public MCP process."""
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("not-for-model", encoding="utf-8")
+    link = tmp_path / "inspect-root" / "escape.txt"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this host")
+
+    status, body, _ = shellmcp_contract.request(
+        "POST",
+        "/mcp",
+        {
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {"name": "system_inspect", "arguments": {"action": "read_file", "path": str(link)}},
+        },
+    )
+    assert status == 200, body
+    assert body.get("error")
+    error_text = json.dumps(body["error"]).lower()
+    assert "symlink" in error_text or "symbolic link" in error_text or "outside" in error_text or "regular file" in error_text

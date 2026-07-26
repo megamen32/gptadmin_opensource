@@ -8,18 +8,19 @@ Full environment-variable reference, auth model, and OAuth setup.
 
 | Var | Required | Default | Purpose |
 |-----|----------|---------|---------|
-| `CTL_TOKEN` | **yes** | — | Bearer token for admin API + web panel. Generate with `openssl rand -hex 32`. |
-| `ADMIN_PASSWORD` | for OAuth | — | Password for the `/authorize` HTML form (OAuth flow). |
+| `ADMIN_PASSWORD` | **yes** | — | Password for the `/oauth/authorize` HTML form and admin session. |
+| `CTL_TOKEN` | legacy only until 2026-07-27 | — | Deprecated compatibility bearer; do not create or copy it. |
 | `OAUTH_CLIENT_SECRET` | for `/mcp` | — | Signs OAuth bearer tokens. Generate with `openssl rand -hex 32`. |
 | `PUBLIC_ORIGIN` | recommended | — | Public base URL (e.g. `https://your-hub.bezrabotnyi.com`). Used in OAuth + OpenAPI. |
 | `MCP_RESOURCE` | recommended | `$PUBLIC_ORIGIN` | The MCP resource identifier. |
+| `GPTADMIN_AUTH_RATE_LIMIT` | optional | `60` per client per minute | Maximum failed admin/control/MCP authentication attempts from one client before a temporary `429` response. Successful authentication does not consume the budget. |
 
 ### Network
 
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `HUB_PORT` | 25900 | Listen port |
-| `HUB_HOST` | 0.0.0.0 | Listen host |
+| `HUB_HOST` | `127.0.0.1` | Listen host; public deployments must set an explicit boundary host at the Tunnel/HAOS layer. `HUB_BIND` remains an installer compatibility alias. |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
 
 ### Behavior
@@ -30,6 +31,47 @@ Full environment-variable reference, auth model, and OAuth setup.
 | `LOG_LIMIT_B` | 65536 | Per-ShellMCP-agent inline stdout/stderr tail budget. Larger command output is spooled to disk; hub/client response budgets are configured separately. |
 | `HEARTBEAT_TIMEOUT` | 60 | Seconds before an agent is marked offline |
 | `BACKGROUND_TASK_TTL` | 3600 | How long completed background jobs are kept (seconds) |
+| `GPTADMIN_STARTUP_INSTRUCTIONS_FILE` | `$GPTADMIN_CONFIG_DIR/startup_instructions.md` | Optional local Markdown startup instructions for MCP clients. |
+| `GPTADMIN_STARTUP_INSTRUCTIONS` | — | Optional environment override for startup instructions; takes precedence over the file. |
+| `GPTADMIN_INSTRUCTION_SETS_STATE_FILE` | `$GPTADMIN_CONFIG_DIR/instruction_sets_state.json` | Restrictive state file for named profile instruction sets. |
+| `GPTADMIN_WEBHOOK_CONFIG_FILE` | `$GPTADMIN_CONFIG_DIR/webhooks.json` | Operator-owned universal webhook route definitions. |
+| `GPTADMIN_WEBHOOK_STATE_FILE` | `$GPTADMIN_CONFIG_DIR/webhook_state.json` | Durable webhook jobs and replay keys; written with mode `0600`. |
+
+### MCP startup instructions
+
+GPTAdmin supplies generic system-administration guidance in the MCP `initialize`
+result. To customize it persistently, create
+`$GPTADMIN_CONFIG_DIR/startup_instructions.md` (normally
+`$GPTADMIN_ROOT/config/startup_instructions.md`). The file must be a regular file
+of at most 16 KiB; unreadable, empty, or oversized files safely fall back to the
+built-in generic guidance. `GPTADMIN_STARTUP_INSTRUCTIONS` overrides the file
+when it is non-empty and at most 16 KiB.
+
+The same content is available to clients that ignore `initialize.instructions`
+via MCP `resources/read` at `gptadmin://startup-instructions`. Startup
+instructions are operational guidance, **not** a security boundary: configured
+permissions and approvals still control access and execution.
+
+Named profile instruction sets are managed through the authenticated Hub
+endpoints `GET /admin/api/instruction-sets` and
+`GET|PUT|DELETE /admin/api/instruction-sets/{id}`. `PUT` requires `If-Match`
+(`*` for create); a set cannot be deleted while an access profile references
+it. The selected profile set is returned on the next MCP `initialize` and
+startup-resource read without restarting Hub.
+
+Manage the file without exposing its contents accidentally:
+
+```bash
+gptadmin instructions path
+gptadmin instructions set-file /secure/path/sysadmin_startup.md
+gptadmin hub restart
+gptadmin instructions show  # explicitly prints the potentially sensitive content
+```
+
+`set-file` accepts UTF-8 files up to 16 KiB, installs atomically with mode `0600`,
+and prints only the destination path plus the restart hint. The CLI uses the
+selected installation scope: `~/.config/gptadmin` for `--user` installs and
+`/etc/gptadmin` for `--system` installs, unless `GPTADMIN_CONFIG_DIR` overrides it.
 
 ## ShellMCP env vars
 
@@ -39,10 +81,10 @@ See [ShellMCP → Environment variables](./SHELLMCP.md#environment-variables).
 
 GPT‑Админ has **three** auth mechanisms — they're different, don't mix them up.
 
-### 1. `CTL_TOKEN` (Bearer)
+### 1. Legacy `CTL_TOKEN` (temporary compatibility only)
 
 - Used for: `/admin`, `/admin/api/*`, `/servers`, `/tasks/*`, artifact endpoints
-- Header: `Authorization: Bearer <CTL_TOKEN>`
+- Header: `Authorization: Bearer <CTL_TOKEN>` (accepted only before the migration deadline)
 - This is the "admin" token. The web panel and Custom GPT actions use it.
 
 ### 2. OAuth bearer (for `/mcp`)
@@ -54,13 +96,32 @@ GPT‑Админ has **three** auth mechanisms — they're different, don't mix 
 
 ### 3. `ADMIN_PASSWORD` (form)
 
-- Used for: the HTML form at `/authorize` inside the OAuth flow
+- Used for: the HTML form at `/oauth/authorize` inside the OAuth flow
 - This is what a human types to authorize an OAuth client.
 
 ### 4. `SHELLMCP_TOKEN` (agent → hub)
 
 - Used for: `POST /heartbeat` (agent registration)
 - Each agent has its own `SHELLMCP_TOKEN` — the hub validates it on heartbeat.
+- It is also the credential for authenticated queue polling. A client that
+  cannot authenticate to the Hub must not be auto-approved: queued work can
+  contain sensitive command arguments and results, so an impersonating client
+  must be rejected before it receives tasks.
+- In-place updates preserve this credential and the service always uses the
+  canonical `gptadmin.env`. Explicit token rotation is a separate operation;
+  installing a new binary or restarting a service must not rotate it.
+- A new device identity is reported as `awaiting_approval`, not `offline`.
+  Review it with the Hub MCP `pending` tool and approve exactly one returned
+  `server_id` with `approve_pending_server`; approval is not repeated for each
+  poll or after a normal binary update.
+
+## Legacy bearer migration
+
+`CTL_TOKEN` is a deprecated compatibility credential, not a supported setup
+path. The migration deadline is `2026-07-27T00:00:00Z`; the Hub advertises
+this with `Deprecation`/`Sunset` headers and then rejects the bearer. Use the
+AdminPassword OAuth authorization flow or a scoped MCP JWT instead. ShellMCP
+agent credentials are separate and are not affected by this deadline.
 
 ## OAuth
 
@@ -90,10 +151,11 @@ In the web panel: `/admin` → **Security** → set `ADMIN_PASSWORD` and generat
 
 ```bash
 # Generate strong values:
-# CTL_TOKEN=$(openssl rand -hex 32)
+# Do not generate CTL_TOKEN on new installations; configure AdminPassword/OAuth instead.
 # OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)
 
-CTL_TOKEN=generate-a-strong-random-token
+ADMIN_PASSWORD=choose-a-password
+OAUTH_CLIENT_SECRET=internal-signing-secret
 ADMIN_PASSWORD=choose-a-strong-password
 OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)
 PUBLIC_ORIGIN=https://your-hub.example.com

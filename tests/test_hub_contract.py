@@ -15,15 +15,18 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import queue
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -74,17 +77,20 @@ def _request(
     *,
     token: str | None = None,
     payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
     timeout_s: float = 5.0,
 ) -> tuple[int, dict[str, Any], dict[str, str]]:
     """Send one direct HTTP request without inheriting workstation proxy settings."""
-    headers = {"Connection": "close"}
+    request_headers = {"Connection": "close"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        request_headers["Authorization"] = f"Bearer {token}"
+    if headers:
+        request_headers.update(headers)
     data = None
     if payload is not None:
-        headers["Content-Type"] = "application/json"
+        request_headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(request, timeout=timeout_s) as response:
@@ -127,9 +133,10 @@ class HubProcess:
         *,
         token: str | None = CONTRACT_TOKEN,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         """Call one hub endpoint."""
-        return _request(method, f"{self.base_url}{path}", token=token, payload=payload)
+        return _request(method, f"{self.base_url}{path}", token=token, payload=payload, headers=headers)
 
     def rpc(self, path: str, method: str, params: dict[str, Any], request_id: int) -> dict[str, Any]:
         """Call an MCP JSON-RPC method and return its successful envelope."""
@@ -164,10 +171,28 @@ def _command_id(command: str) -> str:
     return Path(shlex.split(command)[0]).name
 
 
+@pytest.fixture(scope="session")
+def default_hub_contract_command(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Build the default Go Hub once outside each process readiness window."""
+    binary = tmp_path_factory.mktemp("hub-contract") / "gptadmin-hub-contract"
+    subprocess.run(
+        ["go", "build", "-buildvcs=false", "-o", str(binary), "./cmd/gptadmin-hub"],
+        cwd=str(ROOT / "go-hub"),
+        check=True,
+        timeout=120,
+    )
+    return str(binary)
+
+
 @pytest.fixture(params=CONTRACT_COMMANDS, ids=_command_id)
-def hub_contract(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[HubProcess]:
+def hub_contract(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> Iterator[HubProcess]:
     """Start one implementation with isolated state and deterministic credentials."""
     command = str(request.param)
+    if command == DEFAULT_COMMANDS[0]:
+        command = str(request.getfixturevalue("default_hub_contract_command"))
     port = _free_port()
     state_dir = tmp_path / "state"
     log_path = tmp_path / "hub.log"
@@ -176,6 +201,7 @@ def hub_contract(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Hub
         {
             "CTL_TOKEN": CONTRACT_TOKEN,
             "GPTADMIN_CTL_TOKEN": CONTRACT_TOKEN,
+            "OAUTH_CLIENT_SECRET": "hub-contract-oauth-secret",
             "MCP_RELAY_AGENT_TOKEN": RELAY_TOKEN,
             "MCP_BRIDGE_KEY": CONTRACT_TOKEN,
             "GPTADMIN_HUB_HOST": "127.0.0.1",
@@ -208,7 +234,7 @@ def hub_contract(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Hub
         process = subprocess.Popen(
             command,
             shell=True,
-            cwd=str(ROOT / "go-hub") if command == DEFAULT_COMMANDS[0] else str(ROOT),
+            cwd=str(ROOT),
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -262,6 +288,25 @@ def test_hub_contract_health_and_auth(hub_contract: HubProcess) -> None:
     assert body
 
 
+def test_connection_manifest_drives_safe_first_mcp_action(hub_contract: HubProcess) -> None:
+    """A generic client can consume the manifest and call the safe demo tool."""
+    status, manifest, _ = hub_contract.request("GET", "/connect.json", token=None)
+    assert status == 200, manifest
+    config = manifest["client_configs"]["custom"]
+    first_action = config["first_action"]
+    assert config["url"] == f"{hub_contract.base_url}/mcp"
+    assert first_action == {"method": "tools/call", "tool": "demo", "arguments": {}}
+    result = hub_contract.rpc(
+        "/mcp",
+        first_action["method"],
+        {"name": first_action["tool"], "arguments": first_action["arguments"]},
+        request_id=17,
+    )
+    structured = _structured_content(result)
+    assert structured["status"] == "ok"
+    assert structured["access_mode"] == "full"
+
+
 def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     """Verify selected-target REST relay behavior and the published Action schema."""
     status, servers_body, _ = hub_contract.request("GET", "/mcp-relay/servers")
@@ -283,6 +328,38 @@ def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     assert tools_body.get("server_id") == "hub"
     tools = tools_body.get("response", {}).get("tools")
     assert isinstance(tools, list) and any(tool.get("name") == "discover" for tool in tools)
+    schema_version = tools_body["response"].get("schema_version")
+    schema_digest = tools_body["response"].get("schema_digest_sha256")
+    assert schema_version == "gptadmin.mcp-schema/v1"
+    assert isinstance(schema_digest, str) and len(schema_digest) == 64
+
+    status, executed, _ = hub_contract.request(
+        "POST",
+        "/mcp-relay/call",
+        payload={
+            "target": "hub",
+            "tool_name": "demo",
+            "arguments": {},
+            "schema_version": schema_version,
+            "schema_digest_sha256": schema_digest,
+        },
+    )
+    assert status == 200, executed
+    assert executed.get("status") == "completed", executed
+
+    status, stale, _ = hub_contract.request(
+        "POST",
+        "/mcp-relay/call",
+        payload={
+            "target": "hub",
+            "tool_name": "demo",
+            "arguments": {},
+            "schema_version": schema_version,
+            "schema_digest_sha256": "0" * 64,
+        },
+    )
+    assert status == 409, stale
+    assert stale.get("error", {}).get("code") == "schema_mismatch", stale
 
     for path, payload in (
         ("/mcp-relay/tools", {"target": "default"}),
@@ -298,6 +375,10 @@ def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     assert "required: [target]" in schema
     assert 'Never use target="default"' in schema
     assert "default: default" not in schema
+    assert "/webhooks/v1/{route}" in schema
+    assert "/webhook-jobs/{job_id}" in schema
+    assert "/webhook-routes/{route}" in schema
+    assert "schema_digest_sha256" in schema
 
 
 def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
@@ -359,3 +440,135 @@ def test_hub_contract_per_server_mcp_and_action_proxy(hub_contract: HubProcess) 
     assert status == 200
     assert action.get("server_id") == "hub"
     assert action.get("status") == "completed"
+
+
+def test_hub_contract_profile_binding_enforces_mcp_tool_policy(hub_contract: HubProcess) -> None:
+    """Exercise profile CRUD, managed-token binding and policy filtering in a real Hub process."""
+    profile = {
+        "id": "process-readonly",
+        "name": "Process readonly",
+        "access_mode": "full",
+        "approval_mode": "ask_before_write",
+        "allowed_targets": ["hub"],
+        "allowed_tools": ["discover"],
+    }
+    status, created, _ = hub_contract.request(
+        "PUT",
+        "/admin/api/access-profiles/process-readonly",
+        payload=profile,
+        headers={"If-Match": "*"},
+    )
+    assert status == 200, created
+    assert created.get("id") == "process-readonly"
+    assert created.get("approval_mode") == "ask_before_write"
+
+    status, issued, _ = hub_contract.request(
+        "POST",
+        "/admin/api/mcp/issue-token",
+        payload={"client_id": "process-profile-client", "ttl_days": 1},
+    )
+    assert status == 200, issued
+    token_id = issued.get("token_id")
+    access_token = issued.get("access_token")
+    assert token_id and access_token
+
+    status, binding, _ = hub_contract.request(
+        "PUT",
+        f"/admin/api/client-bindings/{token_id}",
+        payload={"profile_id": "process-readonly"},
+    )
+    assert status == 200, binding
+
+    status, listed, _ = hub_contract.request(
+        "POST",
+        "/mcp",
+        token=access_token,
+        payload={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert status == 200, listed
+    assert listed.get("error") is None, listed
+    names = {tool.get("name") for tool in listed.get("result", {}).get("tools", [])}
+    assert "discover" in names
+    assert "execute" not in names
+
+    status, allowed, _ = hub_contract.request(
+        "POST",
+        "/mcp",
+        token=access_token,
+        payload={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "discover", "arguments": {}}},
+    )
+    assert status == 200, allowed
+    assert allowed.get("error") is None, allowed
+    assert "servers" in json.dumps(allowed)
+
+    status, forbidden, _ = hub_contract.request(
+        "POST",
+        "/mcp",
+        token=access_token,
+        payload={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "execute", "arguments": {"target": "hub", "tool": "discover"}},
+        },
+    )
+    assert status == 200, forbidden
+    assert forbidden.get("error") is not None, forbidden
+
+
+def test_hub_contract_webhook_route_job_and_callback_through_process(hub_contract: HubProcess) -> None:
+    """Exercise webhook ingress, policy-dispatched MCP work and callback delivery."""
+
+    callback_bodies: queue.Queue[bytes] = queue.Queue()
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
+            length = int(self.headers.get("Content-Length", "0"))
+            callback_bodies.put(self.rfile.read(length))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    callback_server = ThreadingHTTPServer(("127.0.0.1", 0), CallbackHandler)
+    callback_thread = threading.Thread(target=callback_server.serve_forever, daemon=True)
+    callback_thread.start()
+    route = {
+        "id": "process-hook",
+        "token": "process-hook-token",
+        "action": {"kind": "mcp", "target": "hub", "tool": "demo", "arguments": {}},
+        "callback": {"url": f"http://127.0.0.1:{callback_server.server_port}", "token": "callback-token"},
+    }
+    try:
+        status, created, _ = hub_contract.request("POST", "/webhook-routes", payload=route)
+        assert status == 201, created
+        assert created == {"id": "process-hook", "kind": "mcp", "target": "hub", "tool": "demo", "auth_mode": "token", "callback_configured": True}
+
+        status, accepted, _ = hub_contract.request(
+            "POST",
+            "/webhooks/v1/process-hook",
+            token="process-hook-token",
+            payload={"event": "push", "value": "safe"},
+        )
+        assert status == 202, accepted
+        job_id = accepted["job_id"]
+
+        job = {}
+        for _ in range(50):
+            status, job, _ = hub_contract.request("GET", f"/webhook-jobs/{job_id}", token="process-hook-token")
+            assert status == 200, job
+            if job.get("status") == "failed" or (
+                job.get("status") == "completed" and job.get("callback_status") == "delivered"
+            ):
+                break
+            time.sleep(0.1)
+        assert job.get("status") == "completed", job
+        assert job.get("callback_status") == "delivered", job
+        callback_body = callback_bodies.get(timeout=2)
+        assert json.loads(callback_body)["job_id"] == job_id
+        assert "process-hook-token" not in callback_body.decode("utf-8")
+    finally:
+        callback_server.shutdown()
+        callback_thread.join(timeout=5)
+        callback_server.server_close()

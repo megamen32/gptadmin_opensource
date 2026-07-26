@@ -7,11 +7,28 @@ info:
 
     Shell hosts and MCP services are exposed as GPTAdmin servers with ids like shell:<server_name>.
     The hub itself is exposed as target "hub" for registry and approval tools.
+
+    Network Tunnel v1 exposes bounded control operations only. Raw proxy streams, offers and
+    SOCKS/HTTP data endpoints remain separate; see docs/NETWORK_PROXY.md and
+    docs/NETWORK_PROXY_THREAT_MODEL.md.
 servers:
   - url: https://u-f1102930.t.gptadmin.bezrabotnyi.com
 security:
   - bearerAuth: []
 paths:
+  /connect.json:
+    get:
+      operationId: connectionManifest
+      summary: Discover the canonical Hub connection contract
+      description: Public, secret-free manifest for deriving MCP and OAuth client setup from one Hub URL.
+      security: []
+      responses:
+        "200":
+          description: Canonical Hub URL and named client choices
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionManifest"
   /mcp-relay/servers:
     get:
       operationId: discover
@@ -70,6 +87,14 @@ paths:
                 $ref: "#/components/schemas/Result"
         "403":
           description: The JWT is read-only and the selected tool can modify state or execute commands.
+        "428":
+          description: A write-capable call is waiting for one administrator approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequired"
+        "429":
+          description: The bounded-autonomous profile has exhausted its write budget for the current window.
   /mcp-relay/job/{job_id}:
     get:
       operationId: job
@@ -96,12 +121,461 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Job"
+  /webhooks/v1/{route}:
+    post:
+      operationId: webhookIngress
+      summary: Accept one authenticated webhook event
+      description: The route configuration selects the MCP or Shell action; the event cannot select a target or callback URL.
+      security:
+        - webhookToken: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json: {}
+      responses:
+        "202":
+          description: Accepted webhook job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+  /webhook-jobs/{job_id}:
+    get:
+      operationId: webhookJob
+      summary: Read an authenticated webhook job
+      security:
+        - webhookToken: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookJob"
+  /webhook-routes:
+    get:
+      operationId: listWebhookRoutes
+      summary: List webhook route metadata
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Route metadata without secrets
+    post:
+      operationId: createWebhookRoute
+      summary: Create an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "201":
+          description: Created route metadata without secrets
+  /webhook-routes/{route}:
+    put:
+      operationId: replaceWebhookRoute
+      summary: Replace an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRoute"
+      responses:
+        "200":
+          description: Updated route metadata without secrets
+    delete:
+      operationId: deleteWebhookRoute
+      summary: Delete an operator-owned webhook route
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Route deleted
+  /proxy-control/v1/request:
+    post:
+      operationId: networkProxyRequest
+      summary: Request a bounded Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile_id, policy]
+              properties:
+                profile_id:
+                  type: string
+                policy:
+                  $ref: "#/components/schemas/NetworkProxyPolicy"
+      responses:
+        "201":
+          description: Pending capability
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capability]
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/approve:
+    post:
+      operationId: networkProxyApprove
+      summary: Approve a pending Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id:
+                  type: string
+      responses:
+        "200":
+          description: Active capability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/issue:
+    post:
+      operationId: networkProxyIssue
+      summary: Issue one client and one agent stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id, target]
+              properties:
+                capability_id:
+                  type: string
+                target:
+                  type: string
+                  description: IP address and port permitted by the capability
+      responses:
+        "200":
+          description: Short-lived role-bound grants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client_grant:
+                    $ref: "#/components/schemas/ProxyStreamGrant"
+                  agent_grant:
+                    $ref: "#/components/schemas/ProxyStreamGrant"
+  /proxy-control/v1/open:
+    post:
+      operationId: networkProxyOpen
+      summary: Consume a one-time stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, role]
+              properties:
+                token:
+                  type: string
+                role:
+                  type: string
+                  enum: [client, agent]
+      responses:
+        "200":
+          description: Consumed grant metadata without the bearer token
+  /proxy-control/v1/status:
+    get:
+      operationId: networkProxyStatus
+      summary: Read Network Tunnel capability state
+      parameters:
+        - name: capability_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Capability state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  capability:
+                    $ref: "#/components/schemas/NetworkProxyCapability"
+  /proxy-control/v1/revoke:
+    post:
+      operationId: networkProxyRevoke
+      summary: Revoke and drain a Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id:
+                  type: string
+      responses:
+        "200":
+          description: Draining capability
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+    webhookToken:
+      type: http
+      scheme: bearer
   schemas:
+    ConnectionManifest:
+      type: object
+      additionalProperties: false
+      required: [hub_url, mcp_endpoint, oauth_authorization_server, clients]
+      properties:
+        hub_url:
+          type: string
+          format: uri
+        mcp_endpoint:
+          type: string
+          format: uri
+        oauth_authorization_server:
+          type: string
+          format: uri
+        oauth_protected_resource:
+          type: string
+          format: uri
+        actions_openapi:
+          type: string
+          format: uri
+        clients:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionClient"
+    ConnectionClient:
+      type: object
+      additionalProperties: false
+      required: [id, label, method, endpoint]
+      properties:
+        id:
+          type: string
+          enum: [codex, claude, chatgpt, custom]
+        label:
+          type: string
+        method:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+    ApprovalRequired:
+      type: object
+      additionalProperties: false
+      required: [status, approval_id, expires_at, target, tool]
+      properties:
+        status:
+          type: string
+          enum: [approval_required]
+        approval_id:
+          type: string
+          description: Opaque one-time approval handle; never a copy of the request arguments.
+        expires_at:
+          type: string
+          format: date-time
+        target:
+          type: string
+        tool:
+          type: string
+        message:
+          type: string
+    BoundedAutonomousLimit:
+      type: object
+      additionalProperties: false
+      required: [status, retry_at, limit, window]
+      properties:
+        status:
+          type: string
+          enum: [bounded_autonomous_limit]
+        retry_at:
+          type: string
+          format: date-time
+        limit:
+          type: integer
+          minimum: 1
+        window:
+          type: string
+        message:
+          type: string
+    NetworkProxyPolicy:
+      type: object
+      additionalProperties: false
+      required: [scope, agent_id, mode, target_cidrs, target_ports, max_streams, max_bytes, lease]
+      properties:
+        scope:
+          type: string
+          enum: [lan, internet_egress]
+        agent_id:
+          type: string
+        mode:
+          type: string
+          enum: [webhook, pull, auto]
+        target_cidrs:
+          type: array
+          items:
+            type: string
+        target_ports:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+        max_streams:
+          type: integer
+          minimum: 1
+        max_bytes:
+          type: integer
+          minimum: 1
+        lease:
+          type: integer
+          minimum: 1
+          description: Lease duration in nanoseconds in the Go JSON contract
+    WebhookRoute:
+      type: object
+      additionalProperties: false
+      required: [id, action]
+      properties:
+        id:
+          type: string
+        token:
+          type: string
+        hmac_secret:
+          type: string
+        action:
+          type: object
+          additionalProperties: true
+    WebhookAccepted:
+      type: object
+      required: [route_id, job_id, status]
+      properties:
+        route_id:
+          type: string
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted]
+        duplicate:
+          type: boolean
+    WebhookJob:
+      type: object
+      required: [job_id, route_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+        route_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted, running, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        result:
+          type: object
+        error:
+          type: string
+    NetworkProxyCapability:
+      type: object
+      additionalProperties: false
+      required: [capability_id, profile_id, policy, state, requested_at, streams_issued]
+      properties:
+        capability_id:
+          type: string
+        profile_id:
+          type: string
+        policy:
+          $ref: "#/components/schemas/NetworkProxyPolicy"
+        state:
+          type: string
+          enum: [pending, active, expired, draining, revoked]
+        requested_at:
+          type: string
+          format: date-time
+        approved_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        streams_issued:
+          type: integer
+          minimum: 0
+    ProxyStreamGrant:
+      type: object
+      additionalProperties: false
+      required: [capability_id, stream_id, agent_id, target, role, token, expires_at]
+      properties:
+        capability_id:
+          type: string
+        stream_id:
+          type: string
+        agent_id:
+          type: string
+        target:
+          type: string
+        role:
+          type: string
+          enum: [client, agent]
+        token:
+          type: string
+          writeOnly: true
+        expires_at:
+          type: string
+          format: date-time
     DiscoverResponse:
       type: object
       additionalProperties: false
@@ -118,7 +592,7 @@ components:
       properties:
         server_id:
           type: string
-                  description: Target id to use in schema and execute.
+          description: Target id to use in schema and execute.
         name:
           type: string
         kind:

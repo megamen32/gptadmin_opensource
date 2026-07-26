@@ -56,13 +56,18 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$GO_BIN" build \
   -o "$OUT_DIR/shellmcp-go" ./cmd/shellmcp-go
 chmod 0755 "$OUT_DIR/shellmcp-go"
 
-python3 - "$SRC/config.yaml.template" "$OUT_DIR/config.yaml" "$ENV_FILE" "$HAOS_HOST" <<'PY'
+python3 - "$SRC/config.yaml.template" "$OUT_DIR/config.yaml" "$OUT_DIR/options.json" "$ENV_FILE" "$HAOS_HOST" <<'PY'
+import json
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-template, out, env_path, haos_host = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+template = Path(sys.argv[1])
+out = Path(sys.argv[2])
+options_out = Path(sys.argv[3])
+env_path = Path(sys.argv[4])
+haos_host = sys.argv[5]
 vals = {}
 if env_path.exists():
     try:
@@ -95,6 +100,21 @@ s = template.read_text()
 for k, v in repl.items():
     s = s.replace(k, v)
 out.write_text(s)
+options = {
+    'hub_url': hub,
+    'shell_name': 'haos',
+    'shell_url': shell_url,
+    'shell_token': repl['__SHELLMCP_TOKEN__'],
+    'port': 25900,
+    'queue': True,
+    'heartbeat': False,
+    'mcp_config': '/data/shellmcp-mcp.json',
+    'default_cwd': '/config',
+    'exec_timeout': 300,
+    'log_limit_b': 8192,
+}
+options_out.write_text(json.dumps({'options': options}) + '\n', encoding='utf-8')
+options_out.chmod(0o600)
 PY
 
 python3 - "$OUT_DIR/config.yaml" <<'PY'
@@ -149,10 +169,34 @@ except Exception:
 print(json.dumps(out, ensure_ascii=False))
 PY
 }
+api_file(){
+  local method=$1 path=$2 data_file=$3
+  local h=/tmp/gptadmin-ha-api.h b=/tmp/gptadmin-ha-api.b
+  rm -f "$h" "$b"
+  curl -sS -D "$h" -o "$b" --connect-timeout 5 --max-time 600 -X "$method" \
+    -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+    --data-binary "@$data_file" "http://supervisor$path" || true
+  python3 - "$b" "$method" "$path" "$(head -n 1 "$h" 2>/dev/null || true)" <<'PY'
+import json, sys
+b, method, path, status = sys.argv[1:]
+s = open(b, errors='replace').read() if b else ''
+out = {'method': method, 'path': path, 'status': status}
+try:
+    j = json.loads(s) if s else {}
+    out['result'] = j.get('result')
+    if 'message' in j:
+        out['message'] = j.get('message')
+except Exception:
+    out['body_head'] = s[:200]
+print(json.dumps(out, ensure_ascii=False))
+PY
+}
+REMOTE_OPTIONS=/addons/gptadmin_shellmcp/options.json
 api POST /addons/reload '{}'
 api GET /addons/local_gptadmin_shellmcp/info
 api POST /addons/local_gptadmin_shellmcp/install '{}'
 sleep 3
+api_file POST /addons/local_gptadmin_shellmcp/options "$REMOTE_OPTIONS"
 api POST /addons/local_gptadmin_shellmcp/rebuild '{}'
 sleep 5
 api POST /addons/local_gptadmin_shellmcp/start '{}'
@@ -163,10 +207,14 @@ chmod 0755 /tmp/haos-gptadmin-shellmcp-install.sh
 scp -q -i "$HAOS_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -P "$HAOS_SSH_PORT" /tmp/haos-gptadmin-shellmcp-install.sh "$HAOS_SSH_USER@$HAOS_HOST:$REMOTE"
 "${SSH[@]}" "bash '$REMOTE'"
 
-for i in $(seq 1 60); do
-  body=$(curl -sS --connect-timeout 2 --max-time 5 "http://$HAOS_HOST:25900/version" 2>/dev/null || true)
-  echo "attempt=$i body=$body"
-  grep -q 'shellmcp-go' <<<"$body" && break
-  sleep 2
-done
-curl -fsS "http://$HAOS_HOST:25900/version"; echo
+# Queue mode intentionally has no bound HTTP port. Give one poll enough time to
+# authenticate, then verify the container and its recent transport log instead.
+sleep 8
+status=$("${SSH[@]}" "docker inspect -f '{{.State.Status}}' addon_local_gptadmin_shellmcp 2>/dev/null || true")
+recent=$("${SSH[@]}" "docker logs --since 8s addon_local_gptadmin_shellmcp 2>&1 || true")
+echo "container_status=$status"
+if [[ "$status" != "running" ]] || grep -Eq 'HTTP 401|queue poll failed|fatal' <<<"$recent"; then
+  printf '%s\n' "$recent" >&2
+  exit 1
+fi
+echo "queue_transport=healthy"

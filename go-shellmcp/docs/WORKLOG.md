@@ -44,3 +44,16 @@
   on context cancellation and terminal deletion of Hub-404 stale outbox
   entries. Added standalone installation/configuration documentation for local
   stdio and remote Streamable HTTP/SSE child MCPs.
+- 2026-07-19: Completion re-audit active. Verifying the current implementation
+  against the full standalone, child-transport, optional-polling, bounded-disk
+  and Mac/Linux goal before closing it; only evidenced gaps will be changed.
+- 2026-07-19: Completion re-audit finished. TDD unified stdio lifecycle under
+  the protocol client, added cancellable generation-checked starts, implemented
+  persistent negotiated Streamable HTTP and real legacy SSE, made inbound
+  `/mcp` stateless/conformant, bounded child stderr, and enforced one aggregate
+  spill/outbox/audit/backup budget. Generic Hub queue dispatch and cancellation
+  have black-box coverage. Full Go/race/vet and five-target cross-builds pass;
+  Linux and deployed Darwin arm64 binaries pass the standalone managed-child
+  smoke, the Mac long-poll daemon is running without an inbound listener, and
+  the Linux arm64 binary passes the same isolated smoke on the live HAOS host
+  without restarting its existing add-on.

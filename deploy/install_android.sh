@@ -36,6 +36,12 @@ SHELLMCP_ANDROID_PRIVILEGE=${SHELLMCP_ANDROID_PRIVILEGE:-auto}
 SHELLMCP_SHIZUKU_RISH=${SHELLMCP_SHIZUKU_RISH:-${SHIZUKU_RISH:-$BIN_DIR/rish}}
 RISH_PRESERVE_ENV=${RISH_PRESERVE_ENV:-0}
 
+read_existing_env() {
+  local key=$1
+  [[ -r "$ENV_FILE" ]] || return 0
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE"
+}
+
 if [[ -z "${PREFIX:-}" || ! -d "${PREFIX:-/nope}" ]]; then
   echo "ERROR: this installer is meant to run inside Termux. PREFIX is missing." >&2
   exit 2
@@ -47,11 +53,17 @@ need tar
 need uname
 
 if [[ -z "$HUB_URL" ]]; then
+  HUB_URL=$(read_existing_env HUB_URL)
+fi
+if [[ -z "$HUB_URL" ]]; then
   read -r -p "GPTAdmin Hub URL [https://gptadmin.bezrabotnyi.com]: " HUB_URL || true
   HUB_URL=${HUB_URL:-https://gptadmin.bezrabotnyi.com}
 fi
 HUB_URL=${HUB_URL%/}
 
+if [[ -z "${SHELLMCP_TOKEN:-}" ]]; then
+  SHELLMCP_TOKEN=$(read_existing_env SHELLMCP_TOKEN)
+fi
 if [[ -z "${SHELLMCP_TOKEN:-}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
     SHELLMCP_TOKEN=$(openssl rand -hex 16)
@@ -60,6 +72,9 @@ if [[ -z "${SHELLMCP_TOKEN:-}" ]]; then
   fi
 fi
 
+if [[ -z "${SHELLMCP_NAME:-}" ]]; then
+  SHELLMCP_NAME=$(read_existing_env SHELLMCP_NAME)
+fi
 if [[ -z "${SHELLMCP_NAME:-}" ]]; then
   host=$(getprop ro.product.model 2>/dev/null | tr ' /' '--' | tr -cd '[:alnum:]._-' || true)
   serial=$(getprop ro.serialno 2>/dev/null | tr -cd '[:alnum:]' | tail -c 6 || true)

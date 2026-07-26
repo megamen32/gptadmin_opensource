@@ -62,8 +62,10 @@ $BinDir = Join-Path $InstallDir 'bin'
 $LogDir = Join-Path $InstallDir 'logs'
 $EnvFile = Join-Path $InstallDir 'shellmcp.env'
 $RunScript = Join-Path $InstallDir 'run_shellmcp.ps1'
+$BatchScript = Join-Path $InstallDir 'run_shellmcp.cmd'
 $HubPublicKeyFile = Join-Path $InstallDir 'hub_ed25519.pub'
 $CurrentExe = Join-Path $BinDir 'shellmcp.exe'
+$StartupScript = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\gptadmin-shellmcp.cmd'
 
 function Require-Admin {
     if (-not $IsAdmin) {
@@ -118,6 +120,12 @@ function Write-Config {
     ) | Set-Content -Path $EnvFile -Encoding ASCII
 
     @"
+@echo off
+for /f "usebackq tokens=1,* delims==" %%A in ("$EnvFile") do set "%%A=%%B"
+"$CurrentExe" >> "$LogDir\shellmcp.task.log" 2>&1
+"@ | Set-Content -Path $BatchScript -Encoding ASCII
+
+    @"
 `$ErrorActionPreference = 'Stop'
 `$env:SHELLMCP_TOKEN = '$ShellmcpToken'
 `$env:HUB_URL = '$HubUrl'
@@ -134,9 +142,16 @@ function Write-Config {
 `$env:SHELLMCP_UPDATE_INTERVAL_S = '3600'
 `$env:SHELLMCP_UPDATE_MANIFEST_URL = '$HubUrl/artifacts/shellmcp.json'
 `$env:SHELLMCP_UPDATE_TOKEN = '$ShellmcpToken'
-Set-Location '$InstallDir'
-& '$CurrentExe' *> '$LogDir\shellmcp.task.log'
+& '$BatchScript'
 "@ | Set-Content -Path $RunScript -Encoding UTF8
+}
+
+function Install-UserStartup {
+    New-Item -ItemType Directory -Force -Path (Split-Path $StartupScript) | Out-Null
+    @(
+        '@echo off',
+        "call `"$BatchScript`""
+    ) | Set-Content -Path $StartupScript -Encoding ASCII
 }
 
 function Install-Task {
@@ -149,21 +164,33 @@ function Install-Task {
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
     }
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
+        return 'task'
+    } catch {
+        if (-not $UserMode) { throw }
+        Write-Warning "Task Scheduler denied the user install; using the per-user Startup launcher instead."
+        Install-UserStartup
+        return 'startup'
+    }
 }
 
 if (-not $UserMode) { Require-Admin }
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item $StartupScript -Force -ErrorAction SilentlyContinue
     Write-Host "Removed scheduled task: $TaskName"
     exit 0
 }
 
 Download-And-InstallArtifact
 Write-Config
-Install-Task
-if (-not $NoStart) { Start-ScheduledTask -TaskName $TaskName }
+$LaunchBackend = Install-Task
+if (-not $NoStart -and $LaunchBackend -eq 'task') { Start-ScheduledTask -TaskName $TaskName }
+if (-not $NoStart -and $LaunchBackend -eq 'startup') {
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $RunScript)
+}
 Start-Sleep -Seconds 3
 
 Write-Host "Installed GPT Admin shellmcp"

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GPTAdmin</title>
-  <link rel="stylesheet" href="/admin/style.css">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="app">
@@ -133,22 +133,36 @@
 
       <!-- Security -->
       <section id="view-security" class="view"><div class="card">
-        <h2>Токены и Auth</h2>
-        <p class="muted small">Подробная инструкция по Bearer CTL, JWT, OAuth, `openapi.yaml` и подключению как ChatGPT app: <a href="https://became.bezrabotnyi.com/#/docs" target="_blank" rel="noreferrer">became.bezrabotnyi.com/#/docs</a>.</p>
-        <div class="row" style="margin:12px 0"><button class="btn-secondary" onclick="loadSecurityEnv()">↻ Обновить</button><button class="cancelBtn" onclick="rotateCtlToken()">↻ Ротировать CTL_TOKEN</button><button class="cancelBtn" onclick="rotateOAuth()">↻ Ротировать OAUTH_SECRET</button></div>
-        <div id="securityEnv" class="stackList"><p class="muted">Нажмите «Обновить»</p></div>
-        <div style="margin-top:16px"><h2 style="font-size:13px">Установить значение</h2>
-          <div class="row"><select id="secEnvKey"><option>CTL_TOKEN</option><option>ADMIN_PASSWORD</option><option>OAUTH_CLIENT_SECRET</option><option>MCP_BRIDGE_KEY</option><option>HUB_URL</option><option>PUBLIC_ORIGIN</option><option>MCP_RESOURCE</option><option>SHELLMCP_HEARTBEAT</option><option value="_custom">— своя —</option></select><input id="secEnvVal" placeholder="новое значение" style="min-width:280px"><button onclick="setEnvVar()">Установить</button></div>
-          <div class="row"><label class="small"><input type="checkbox" id="shellHeartbeatEnabled" onchange="setShellHeartbeatFromPanel(this.checked)"> ShellMCP heartbeat</label><span class="muted small">по умолчанию выключен</span></div>
-          <p class="muted small">Long-poll и webhook сами обновляют active. Включайте heartbeat только при отдельной диагностической необходимости.</p>
+        <h2>Подключения и безопасность</h2>
+        <p class="muted small">Управляйте профилями доступа и MFA через типизированные Hub endpoints. Публичный адрес подключения задаётся параметром <code>PUBLIC_ORIGIN</code>; значения паролей и внутренних ключей здесь не редактируются.</p>
+        <div class="row" style="margin:12px 0"><button class="btn-secondary" onclick="loadSecurityControls()">↻ Обновить</button><button class="cancelBtn" onclick="rotateOAuth()">↻ Обновить OAuth-сессию</button></div>
+        <pre id="securityPresetStatus" style="min-height:40px">—</pre>
+        <div style="margin-top:16px"><h2 style="font-size:13px">Профиль безопасности</h2>
+          <div class="row"><select id="securityPreset"><option value="working_default">Working default</option><option value="private_access">Private access</option><option value="locked_down">Locked down</option></select><button onclick="saveSecurityPreset()">Сохранить профиль</button></div>
+          <p class="muted small">Locked down включается только после подтверждённой MFA-регистрации.</p>
+        </div>
+        <div style="margin-top:16px"><h2 style="font-size:13px">MFA для администратора</h2>
+          <div class="row"><button onclick="enrollSecurityTotp()">Начать регистрацию MFA</button><input id="securityMfaCode" inputmode="numeric" placeholder="6-значный код" style="min-width:160px"><button onclick="verifySecurityTotp()">Подтвердить</button></div>
+          <pre id="securityMfaResult" style="min-height:60px">—</pre>
+          <div class="row"><button onclick="enrollSecurityPasskey()">Зарегистрировать passkey</button></div>
+          <pre id="securityPasskeyResult" style="min-height:40px">—</pre>
+          <p class="muted small">Ключ настройки и recovery codes показываются только в явном ответе регистрации; обычные списки их не возвращают.</p>
+        </div>
+        <div style="margin-top:16px"><h2 style="font-size:13px">Диагностический heartbeat</h2>
+          <div class="row"><label class="small"><input type="checkbox" id="shellHeartbeatEnabled" onchange="setShellHeartbeatFromPanel(this.checked)"> Разрешить дополнительный heartbeat</label><span class="muted small">по умолчанию выключен</span></div>
+          <pre id="securityHeartbeatResult" style="min-height:35px">—</pre>
+        </div>
+        <div style="margin-top:16px"><h2 style="font-size:13px">Локальная телеметрия активации</h2>
+          <div class="row"><label class="small"><input type="checkbox" id="securityTelemetryEnabled" onchange="setSecurityTelemetry(this.checked)"> Разрешить локальные счётчики</label><span class="muted small">данные не отправляются наружу</span></div>
+          <pre id="securityTelemetryResult" style="min-height:35px">—</pre>
+        </div>
+        <div style="margin-top:16px"><h2 style="font-size:13px">Ожидающие подтверждения</h2>
+          <div class="row"><button class="btn-secondary" onclick="loadApprovals()">↻ Обновить</button></div><div id="securityApprovals" class="stackList"><p class="muted">Нажмите «Обновить»</p></div>
         </div>
         <div style="margin-top:16px"><h2 style="font-size:13px">JWT для клиента без OAuth</h2>
           <div class="row"><input id="secMcpTokenName" placeholder="client_id" style="min-width:200px"><select id="secMcpAccessMode"><option value="readonly" selected>Только просмотр (рекомендуется для ChatGPT)</option><option value="full">Полный доступ</option></select><button onclick="issueMcpTokenFromPanel()">Выпустить</button></div>
           <p class="muted small">Большинство клиентов подключаются сами через OAuth. Для ChatGPT безопаснее начать с «Только просмотр»: команды и изменения недоступны, а найденные токены автоматически скрываются. Полный доступ используйте для Codex и других клиентов, которым действительно нужны изменения.</p>
           <pre id="secMcpTokenResult" style="min-height:60px">—</pre>
-        </div>
-        <div style="margin-top:16px"><h2 style="font-size:13px">Перезапуск</h2>
-          <div class="row"><button class="cancelBtn" onclick="restartHub()">⟳ Restart hub</button><span id="secRestartStatus" class="muted small"></span></div>
         </div>
       </div></section>
 
@@ -174,6 +188,6 @@
     </main>
   </div>
 </div>
-<script src="/admin/app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

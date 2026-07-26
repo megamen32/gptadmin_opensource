@@ -1,0 +1,50 @@
+{
+  "schema": "gptadmin.golden-paths/v1",
+  "clients": ["codex", "claude", "chatgpt"],
+  "paths": [
+    {
+      "id": "linux",
+      "platform": "linux",
+      "clients": ["codex", "claude", "chatgpt"],
+      "commands": {
+        "install": "python3 -m pytest tests/test_install_scripts.py tests/test_install_win.py -q",
+        "auth": "python3 -m pytest tests/test_hub_contract.py -q",
+        "first_tool": "python3 -m pytest tests/test_ai_mcp_clients.py tests/test_generic_stdio_mcp_relay.py -q",
+        "uninstall_rollback": "python3 -m pytest tests/test_update_semantics.py tests/test_failover_unit_contract.py -q"
+      }
+    },
+    {
+      "id": "macos",
+      "platform": "macos",
+      "clients": ["codex", "claude", "chatgpt"],
+      "commands": {
+        "install": "python3 -m pytest tests/test_plist_macos.py tests/test_mac_codex_update_mcp.py -q",
+        "auth": "python3 -m pytest tests/test_hub_contract.py -q",
+        "first_tool": "python3 -m pytest tests/test_ai_mcp_clients.py tests/test_generic_stdio_mcp_relay.py -q",
+        "uninstall_rollback": "python3 -m pytest tests/test_update_semantics.py tests/test_failover_unit_contract.py -q"
+      }
+    },
+    {
+      "id": "windows",
+      "platform": "windows",
+      "clients": ["codex", "claude", "chatgpt"],
+      "commands": {
+        "install": "python3 -m pytest tests/test_install_win.py tests/test_windows_hub_ci_contract.py -q",
+        "auth": "python3 -m pytest tests/test_hub_contract.py -q",
+        "first_tool": "python3 -m pytest tests/test_ai_mcp_clients.py tests/test_generic_stdio_mcp_relay.py -q",
+        "uninstall_rollback": "python3 -m pytest tests/test_update_semantics.py tests/test_failover_unit_contract.py -q"
+      }
+    },
+    {
+      "id": "android",
+      "platform": "android",
+      "clients": ["codex", "claude", "chatgpt"],
+      "commands": {
+        "install": "python3 -m pytest tests/test_install_scripts.py tests/test_android_4g_lan_proxy.py -q",
+        "auth": "python3 -m pytest tests/test_hub_contract.py -q",
+        "first_tool": "python3 -m pytest tests/test_ai_mcp_clients.py tests/test_generic_stdio_mcp_relay.py -q",
+        "uninstall_rollback": "python3 -m pytest tests/test_update_semantics.py tests/test_failover_unit_contract.py -q"
+      }
+    }
+  ]
+}

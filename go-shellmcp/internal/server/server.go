@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,7 @@ type Config struct {
 	HubPublicKeyFile         string
 	HubPublicKey             string
 	AuditLog                 string
+	StorageLimitBytes        int64
 	NonceTTL                 time.Duration
 	PreserveFileMetadata     bool
 	PreserveMetadataMaxFiles int
@@ -71,14 +73,19 @@ func FromEnv() Config {
 	host := env("SHELL_HOST", env("SHELLMCP_HOST", ""))
 	limit, _ := strconv.ParseInt(env("LOG_LIMIT_B", strconv.FormatInt(output.DefaultInlineTailBytes, 10)), 10, 64)
 	timeout, _ := strconv.Atoi(env("EXEC_TIMEOUT", "300"))
-	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))
+	spill := env("SHELL_SPOOL_DIR", env("SHELLMCP_SPOOL_DIR", env("SHELL_SPILL_DIR", env("SHELLMCP_SPILL_DIR", filepath.Join(os.TempDir(), "shellmcp-go-spool")))))
 	name := env("SHELL_NAME", env("SHELLMCP_NAME", ""))
 	baseURL := env("SHELL_URL", env("SHELLMCP_URL", "http://127.0.0.1:"+port))
 	hbInt, _ := strconv.Atoi(env("HB_INTERVAL_S", "3600"))
 	qTimeout, _ := strconv.Atoi(env("QUEUE_LONG_POLL_TIMEOUT_S", "55"))
 	mode := env("SHELL_MODE", env("SHELLMCP_MODE", ""))
+	queueDefault := "1"
+	if mode == "webhook" {
+		queueDefault = "0"
+	}
+	queueEnabled := truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", queueDefault)))
 	if mode == "" {
-		if truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))) {
+		if queueEnabled {
 			mode = "long_poll"
 		} else {
 			mode = "webhook"
@@ -108,7 +115,7 @@ func FromEnv() Config {
 	if sshKeyPath == "" {
 		sshKeyPath = os.Getenv("SSH_KEY")
 	}
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: truthy(env("SHELL_QUEUE", env("SHELLMCP_QUEUE", "0"))), QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, InspectRoots: inspectRoots, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: queueEnabled, QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, InspectRoots: inspectRoots, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath}
 }
 
 func splitPathList(value string) []string {
@@ -189,6 +196,19 @@ func firstToken(s string) string {
 	return s
 }
 
+func normalizeTraceID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return ""
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' && char != '.' {
+			return ""
+		}
+	}
+	return value
+}
+
 type Server struct {
 	cfg          Config
 	jobs         *job.Manager
@@ -201,6 +221,7 @@ type Server struct {
 	preserveMax  int
 	sshClient    *sshexec.Client
 	childMCP     *mcpclient.Client
+	storageLimit int64
 }
 
 func New(cfg Config) *Server {
@@ -224,7 +245,13 @@ func New(cfg Config) *Server {
 		hc = hub.New(cfg.HubURL, ident, cfg.Token)
 	}
 
-	auditLog, auditErr := audit.New(cfg.AuditLog)
+	var auditLog *audit.Logger
+	var auditErr error
+	if cfg.StorageLimitBytes > 0 {
+		auditLog, auditErr = audit.NewWithLimit(cfg.AuditLog, cfg.StorageLimitBytes)
+	} else {
+		auditLog, auditErr = audit.New(cfg.AuditLog)
+	}
 	if auditErr != nil {
 		log.Printf("audit logger disabled: %v", auditErr)
 	}
@@ -268,7 +295,13 @@ func New(cfg Config) *Server {
 		}
 	}
 
-	return &Server{
+	childMCP := mcpclient.New()
+	childMCP.SetAgentValidator(func(candidate supervisor.Agent) bool {
+		current, err := mgr.Agent(candidate.Ref)
+		return err == nil && current.Enabled && reflect.DeepEqual(current, candidate)
+	})
+
+	server := &Server{
 		cfg:          cfg,
 		jobs:         job.New(cfg.LogLimit),
 		identity:     ident,
@@ -279,26 +312,67 @@ func New(cfg Config) *Server {
 		preserveMeta: cfg.PreserveFileMetadata,
 		preserveMax:  maxFiles,
 		sshClient:    sshClient,
-		childMCP:     mcpclient.New(),
+		childMCP:     childMCP,
+		storageLimit: cfg.StorageLimitBytes,
 	}
+	if auditLog != nil {
+		auditLog.SetAfterWrite(func() {
+			protected := map[string]bool{}
+			if cfg.AuditLog != "" {
+				protected[cfg.AuditLog] = true
+			}
+			_ = server.enforceStorage(protected)
+		})
+	}
+	return server
 }
 
-// Close releases the audit logger and best-effort stops every supervisor
-// agent. Safe to call multiple times and idempotent w.r.t. nil resources.
+func (s *Server) storageRoots() []string {
+	roots := make([]string, 0, 4)
+	for _, root := range []string{s.cfg.SpillDir, s.cfg.OutboxDir, s.cfg.AuditLog} {
+		if strings.TrimSpace(root) != "" {
+			roots = append(roots, root)
+		}
+	}
+	if s.cfg.DefaultHome != "" || os.Getenv("SHELLMCP_FILE_BACKUP_ROOT") != "" || os.Getenv("GPTADMIN_FILE_BACKUP_ROOT") != "" {
+		roots = append(roots, s.fileBackupRoot())
+	}
+	return roots
+}
+
+func (s *Server) enforceStorage(protected map[string]bool) error {
+	if s.storageLimit > 0 {
+		_, err := storagebudget.EnforceRootsLimit(s.storageRoots(), s.storageLimit, protected)
+		return err
+	}
+	_, err := storagebudget.EnforceRoots(s.storageRoots(), protected)
+	return err
+}
+
+// Close releases server resources and active child MCP protocol sessions.
+// Safe to call multiple times and idempotent w.r.t. nil resources.
 func (s *Server) Close() error {
+	var closeErr error
 	if s.auditLog != nil {
-		_ = s.auditLog.Close()
+		closeErr = s.auditLog.Close()
 	}
 	if s.childMCP != nil {
 		s.childMCP.CloseAll()
 	}
+	// The supervisor owns MCP child processes independently of active client
+	// sessions. Stop them explicitly so a service restart cannot hang until
+	// systemd/launchd escalates the parent process timeout.
 	if s.supervisor != nil {
-		_ = s.supervisor.KillAll()
+		if err := s.supervisor.KillAll(); err != nil && closeErr == nil {
+			closeErr = err
+		}
 	}
 	if s.sshClient != nil {
-		_ = s.sshClient.Close()
+		if err := s.sshClient.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
 	}
-	return nil
+	return closeErr
 }
 
 func (s *Server) Handler() http.Handler {
@@ -306,6 +380,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/system/info", s.authed(s.systemInfo))
 	mux.HandleFunc("/system/health", s.authed(s.health))
+	mux.HandleFunc("/metrics", s.authed(s.metrics))
 	mux.HandleFunc("/capabilities", s.authed(s.capabilities))
 	mux.HandleFunc("/mcp", s.authed(s.mcpHTTP))
 	mux.HandleFunc("/exec", s.authed(s.exec))
@@ -329,7 +404,6 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 		go s.queueLoop(ctx)
 	}
 	s.startUpdateLoop(ctx)
-	s.startAutoStartAgents()
 	if s.cfg.QueueEnabled {
 		log.Printf("shellmcp-go polling mode name=%s heartbeat=%v queue=%v (no local listener)", s.cfg.Name, s.cfg.HeartbeatEnabled, s.cfg.QueueEnabled)
 		<-ctx.Done()
@@ -411,11 +485,23 @@ func (s *Server) authorized(r *http.Request, body []byte) bool {
 	return true
 }
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "prototype", "features": []string{"exec", "exec_live", "jobs", "file", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_transport_http", "mcp_transport_stdio"}})
+	writeJSON(w, 200, map[string]any{"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "git_commit": GitCommit, "status": "ready", "features": []string{"exec", "exec_live", "jobs", "file", "file_backup", "heartbeat", "queue", "real_mcp", "mcp_transport_http", "mcp_transport_stdio"}})
 }
 func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, system.Get()) }
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Unix(), "jobs": len(s.jobs.List()), "name": s.cfg.Name, "heartbeat": s.cfg.HeartbeatEnabled, "queue": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "default_user": s.cfg.DefaultUser, "default_home": s.cfg.DefaultHome, "default_cwd": s.cfg.DefaultCwd})
+}
+func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"component":       "shellmcp-go",
+		"build_version":   parseBuildVersion(BuildVersion),
+		"jobs":            len(s.jobs.List()),
+		"queue_enabled":   s.cfg.QueueEnabled,
+		"mode":            s.cfg.Mode,
+		"heartbeat":       s.cfg.HeartbeatEnabled,
+		"audit_enabled":   s.cfg.AuditLog != "",
+		"storage_limited": s.storageLimit > 0,
+	})
 }
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
@@ -426,7 +512,7 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 		"file_backup":    true,
 		"go_shellmcp":    true,
 		"real_mcp":       true,
-		"mcp_transports": []string{"stdio", "streamable-http-poll"},
+		"mcp_transports": []string{"stdio", "streamable-http"},
 		"build_version":  parseBuildVersion(BuildVersion),
 		"git_commit":     GitCommit,
 		"mcp_agents":     s.mcpAgentsForCapabilities(),
@@ -440,6 +526,7 @@ func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Reque
 		return req, false
 	}
 	s.applyDefaults(&req)
+	req.TraceID = normalizeTraceID(req.TraceID)
 	return req, true
 }
 func (s *Server) applyDefaults(req *shell.Request) {
@@ -463,6 +550,7 @@ func (s *Server) applyDefaults(req *shell.Request) {
 // existing local shell.Run path is used. Both branches produce the
 // same shell.Result so the JSON response shape is unchanged.
 func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
+	defer func() { _ = s.enforceStorage(nil) }()
 	if err := shell.ImplicitRootExecutionError(req); err != nil {
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
@@ -486,6 +574,7 @@ func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
 // shell.RunLive path emits (stdout/stderr "chunk" events + final
 // "exit") so the SSE / NDJSON response shape is unchanged.
 func (s *Server) runShellStream(ctx context.Context, req shell.Request, emit func(shell.Event)) shell.Result {
+	defer func() { _ = s.enforceStorage(nil) }()
 	if err := shell.ImplicitRootExecutionError(req); err != nil {
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
@@ -623,6 +712,7 @@ func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	req := body.Request
 	s.applyDefaults(&req)
+	req.TraceID = normalizeTraceID(req.TraceID)
 	jobID := body.JobID
 	if jobID == "" {
 		j := s.jobs.Start(req)
@@ -713,7 +803,65 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 403, map[string]any{"error": "path outside spool dir"})
 		return
 	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	if err := rejectSymlinksBelowRoot(root, abs); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil || (rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel))) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "symbolic links are not allowed"})
+		return
+	}
 	http.ServeFile(w, r, abs)
+}
+
+// rejectSymlinksBelowRoot permits a platform-owned symlink prefix in root but
+// rejects a caller-controlled symlink anywhere below it.
+func rejectSymlinksBelowRoot(root, path string) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return fmt.Errorf("resolve path relative to spill root: %w", err)
+	}
+	if rel == "." {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path outside spill root: %s", path)
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symbolic link below root: %s", path)
+		}
+	}
+	return nil
 }
 
 func (s *Server) heartbeatLoop(ctx context.Context) {
@@ -763,13 +911,22 @@ func (s *Server) queueLoop(ctx context.Context) {
 		s.flushOutbox(ctx)
 		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.cfg.QueueTimeout)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Printf("queue poll failed: %v", err)
-			time.Sleep(5 * time.Second)
+			retry := time.NewTimer(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				retry.Stop()
+				return
+			case <-retry.C:
+			}
 			continue
 		}
 		if ok {
 			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				go s.runCallbackTool(q.ID, q.ToolName, q.Arguments)
+				go s.runCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments)
 			} else {
 				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 				s.applyDefaults(&req)
@@ -784,15 +941,21 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	if runAsUser == "" {
 		runAsUser, _ = q.Arguments["user"].(string)
 	}
-	return shell.Request{Cmd: q.Cmd, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
+	return shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
 }
 
-func (s *Server) runCallbackTool(jobID, name string, args map[string]any) {
+func (s *Server) runCallbackTool(jobID, traceID, traceParent, name string, args map[string]any) {
+	traceID = normalizeTraceID(traceID)
 	result, err := s.callMCPTool(context.Background(), name, args)
-	payload := hub.TaskResult{ID: jobID, Result: result}
+	payload := hub.TaskResult{ID: jobID, TraceID: traceID, TraceParent: traceParent, Result: result}
 	if err != nil {
 		payload.Result = map[string]any{"error": err.Error()}
 	}
+	status := "completed"
+	if err != nil {
+		status = "failed"
+	}
+	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "tool": name, "trace_id": traceID, "traceparent": traceParent, "status": status})
 	if s.hub == nil {
 		return
 	}
@@ -803,11 +966,14 @@ func (s *Server) runCallbackTool(jobID, name string, args map[string]any) {
 }
 
 func (s *Server) runCallbackJob(jobID string, req shell.Request) {
+	req.TraceID = normalizeTraceID(req.TraceID)
+	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
 	res := s.runShell(context.Background(), req)
+	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})
 	if s.hub == nil {
 		return
 	}
-	payload := hub.TaskResult{ID: jobID, Result: res}
+	payload := hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res}
 	if err := s.hub.PostResult(context.Background(), s.cfg.Name, payload); err != nil {
 		log.Printf("callback result failed job=%s err=%v", jobID, err)
 		s.spoolOutbox(jobID, payload, err)
@@ -838,7 +1004,7 @@ func (s *Server) spoolOutbox(jobID string, payload hub.TaskResult, cause error) 
 	}
 	b, _ := json.Marshal(entry)
 	_ = os.WriteFile(path, b, 0o600)
-	_, _ = storagebudget.Enforce(s.cfg.SpillDir, map[string]bool{path: true})
+	_ = s.enforceStorage(nil)
 }
 
 // computeOutboxBackoff returns the wait time for the given attempt number

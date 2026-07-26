@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +30,13 @@ import (
 
 var BuildVersion = "go-dev"
 var GitCommit = "worktree"
+
+const defaultJWTKeyID = "gptadmin-hs256-v1"
+
+// legacyCtlTokenDeadline is the fixed end of the one-week migration window.
+// After this instant only AdminPassword sessions and scoped OAuth JWTs may
+// authenticate human/MCP requests.
+var legacyCtlTokenDeadline = time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)
 
 type Config struct {
 	Addr                       string
@@ -44,24 +53,52 @@ type Config struct {
 	MCPResource                string
 	AdminPassword              string
 	OAuthClientSecret          string
+	OAuthKeyID                 string
 	EnvFile                    string
 	OAuthPermissiveRedirects   bool
 	OAuthPermissiveResources   bool
 	AuthLogSecrets             bool
+	AuthRateLimit              int
 	BridgeKey                  string
+	LegacyCtlTokenDeadline     time.Time
+	Now                        func() time.Time
 	RegistryStateFile          string
 	FailoverConfigFile         string
 	FailoverStateFile          string
 	FailoverReclaimCommandFile string
+	StartupInstructionsFile    string
+	StartupInstructions        string
+	InstructionSetsStateFile   string
+	NetworkProxyStateFile      string
+	NetworkProxyRelayKeyFile   string
+	NetworkProxyRelayRevokeURL string
+	WebhookConfigFile          string
+	WebhookStateFile           string
+	AuditStateFile             string
+	SecurityStateFile          string
+	TelemetryStateFile         string
+	TelemetryOTLPEndpoint      string
+	SecretStoreDir             string
+	SecretStoreKeyFile         string
+	SecretIngressStateFile     string
+	SecretIngressTTL           time.Duration
+	WebhookRoutes              []WebhookRoute
 }
 
 func FromEnv() Config {
 	port := env("GPTADMIN_HUB_PORT", env("HUB_PORT", env("PORT", "9001")))
-	host := env("GPTADMIN_HUB_HOST", env("HUB_HOST", ""))
+	// Keep the installer/legacy HUB_BIND input while failing closed to the
+	// loopback interface when no explicit deployment host is configured. Public
+	// HAOS/failover deployments set HUB_HOST explicitly at their boundary.
+	host := env("GPTADMIN_HUB_HOST", env("HUB_HOST", env("HUB_BIND", "127.0.0.1")))
 	root := env("GPTADMIN_ROOT", ".")
 	cfgDir := env("GPTADMIN_CONFIG_DIR", filepath.Join(root, "config"))
 	defTimeout := secondsEnv("MCP_RELAY_DEFAULT_TIMEOUT", 30)
 	pollTimeout := secondsEnv("MCP_RELAY_POLL_MAX_TIMEOUT", 55)
+	secretTTL := secondsEnv("GPTADMIN_SECRET_INGRESS_TTL", 15*60)
+	if secretTTL < 60 || secretTTL > 3600 {
+		secretTTL = 15 * 60
+	}
 	return Config{
 		Addr:                       host + ":" + port,
 		ConfigDir:                  cfgDir,
@@ -77,15 +114,35 @@ func FromEnv() Config {
 		MCPResource:                strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
 		AdminPassword:              env("ADMIN_PASSWORD", ""),
 		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", ""),
+		OAuthKeyID:                 env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
 		EnvFile:                    env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
 		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
 		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
 		AuthLogSecrets:             truthyString(env("AUTH_LOG_SECRETS", "0")),
+		AuthRateLimit:              positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
 		BridgeKey:                  env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
+		LegacyCtlTokenDeadline:     legacyCtlTokenDeadline,
+		Now:                        time.Now,
 		RegistryStateFile:          env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
 		FailoverConfigFile:         env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
 		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
 		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
+		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
+		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
+		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
+		NetworkProxyStateFile:      env("GPTADMIN_NETWORK_PROXY_STATE_FILE", filepath.Join(cfgDir, "network_proxy_state.json")),
+		NetworkProxyRelayKeyFile:   env("GPTADMIN_NETWORK_PROXY_RELAY_KEY_FILE", ""),
+		NetworkProxyRelayRevokeURL: strings.TrimRight(env("GPTADMIN_NETWORK_PROXY_RELAY_REVOKE_URL", ""), "/"),
+		WebhookConfigFile:          env("GPTADMIN_WEBHOOK_CONFIG_FILE", filepath.Join(cfgDir, "webhooks.json")),
+		WebhookStateFile:           env("GPTADMIN_WEBHOOK_STATE_FILE", filepath.Join(cfgDir, "webhook_state.json")),
+		AuditStateFile:             env("GPTADMIN_AUDIT_STATE_FILE", filepath.Join(cfgDir, "audit.jsonl")),
+		SecurityStateFile:          env("GPTADMIN_SECURITY_STATE_FILE", filepath.Join(cfgDir, securityStateFilename)),
+		TelemetryStateFile:         env("GPTADMIN_TELEMETRY_STATE_FILE", filepath.Join(cfgDir, telemetryStateFilename)),
+		TelemetryOTLPEndpoint:      env("GPTADMIN_OTLP_ENDPOINT", ""),
+		SecretStoreDir:             env("GPTADMIN_SECRET_STORE_DIR", filepath.Join(cfgDir, "secrets")),
+		SecretStoreKeyFile:         env("GPTADMIN_SECRET_STORE_KEY_FILE", filepath.Join(cfgDir, "secret-store.key")),
+		SecretIngressStateFile:     env("GPTADMIN_SECRET_INGRESS_STATE_FILE", filepath.Join(cfgDir, "secrets", "requests.json")),
+		SecretIngressTTL:           time.Duration(secretTTL) * time.Second,
 	}
 }
 
@@ -104,9 +161,37 @@ func secondsEnv(k string, d int) int {
 	return v
 }
 
+func positiveIntEnv(k string, d int) int {
+	v, err := strconv.Atoi(env(k, ""))
+	if err != nil || v <= 0 {
+		return d
+	}
+	return v
+}
+
 func truthyString(v string) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func (s *Server) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Server) legacyCtlTokenAllowed() bool {
+	// Direct in-process constructors are used by compatibility tests and
+	// migration tooling; the production FromEnv path always sets a deadline.
+	return s.cfg.LegacyCtlTokenDeadline.IsZero() || s.now().Before(s.cfg.LegacyCtlTokenDeadline)
+}
+
+func (s *Server) markLegacyCtlToken(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	if !s.cfg.LegacyCtlTokenDeadline.IsZero() {
+		w.Header().Set("Sunset", s.cfg.LegacyCtlTokenDeadline.UTC().Format(http.TimeFormat))
+	}
 }
 
 type Agent struct {
@@ -128,33 +213,38 @@ type persistentRegistryState struct {
 }
 
 type relayJob struct {
-	ID        string         `json:"id"`
-	AgentID   string         `json:"agent_id,omitempty"`
-	Method    string         `json:"method"`
-	Params    map[string]any `json:"params,omitempty"`
-	CreatedAt float64        `json:"created_at"`
-	StartedAt float64        `json:"started_at,omitempty"`
-	DoneAt    float64        `json:"completed_at,omitempty"`
-	Status    string         `json:"status"`
-	Result    map[string]any `json:"result,omitempty"`
-	Error     any            `json:"error,omitempty"`
+	ID          string         `json:"id"`
+	AgentID     string         `json:"agent_id,omitempty"`
+	TraceID     string         `json:"trace_id,omitempty"`
+	TraceParent string         `json:"traceparent,omitempty"`
+	Method      string         `json:"method"`
+	Params      map[string]any `json:"params,omitempty"`
+	CreatedAt   float64        `json:"created_at"`
+	StartedAt   float64        `json:"started_at,omitempty"`
+	DoneAt      float64        `json:"completed_at,omitempty"`
+	Status      string         `json:"status"`
+	Result      map[string]any `json:"result,omitempty"`
+	Error       any            `json:"error,omitempty"`
 }
 
 type shellJob struct {
-	ID        string         `json:"id"`
-	Server    string         `json:"server,omitempty"`
-	ToolName  string         `json:"tool_name,omitempty"`
-	Arguments map[string]any `json:"arguments,omitempty"`
-	Cmd       string         `json:"cmd,omitempty"`
-	Cwd       string         `json:"cwd,omitempty"`
-	Timeout   int            `json:"timeout,omitempty"`
-	Env       map[string]any `json:"env,omitempty"`
-	CreatedAt float64        `json:"created_at"`
-	StartedAt float64        `json:"started_at,omitempty"`
-	DoneAt    float64        `json:"completed_at,omitempty"`
-	Status    string         `json:"status"`
-	Result    any            `json:"result,omitempty"`
-	Error     any            `json:"error,omitempty"`
+	ID           string         `json:"id"`
+	Server       string         `json:"server,omitempty"`
+	TraceID      string         `json:"trace_id,omitempty"`
+	TraceParent  string         `json:"traceparent,omitempty"`
+	ToolName     string         `json:"tool_name,omitempty"`
+	Arguments    map[string]any `json:"arguments,omitempty"`
+	Cmd          string         `json:"cmd,omitempty"`
+	Cwd          string         `json:"cwd,omitempty"`
+	Timeout      int            `json:"timeout,omitempty"`
+	Env          map[string]any `json:"env,omitempty"`
+	SecretValues []string       `json:"-"`
+	CreatedAt    float64        `json:"created_at"`
+	StartedAt    float64        `json:"started_at,omitempty"`
+	DoneAt       float64        `json:"completed_at,omitempty"`
+	Status       string         `json:"status"`
+	Result       any            `json:"result,omitempty"`
+	Error        any            `json:"error,omitempty"`
 }
 
 type auditEvent struct {
@@ -162,6 +252,28 @@ type auditEvent struct {
 	Name   string         `json:"name"`
 	Fields map[string]any `json:"fields,omitempty"`
 }
+
+type approvalRequest struct {
+	ID              string    `json:"approval_id"`
+	ProfileID       string    `json:"profile_id"`
+	Actor           string    `json:"actor"`
+	Target          string    `json:"target"`
+	Tool            string    `json:"tool"`
+	ArgumentsDigest string    `json:"arguments_digest"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	Status          string    `json:"status"`
+}
+
+type autonomousBudget struct {
+	WindowStart time.Time
+	Count       int
+}
+
+const (
+	autonomousCallLimit  = 32
+	autonomousWindowSize = 5 * time.Minute
+)
 
 type oauthCode struct {
 	Created     time.Time
@@ -177,18 +289,27 @@ type oauthCode struct {
 // persisted, so an operator can revoke or rotate a client without creating a
 // second secret database.
 type managedMCPToken struct {
-	ID         string `json:"id"`
-	ClientID   string `json:"client_id"`
-	TokenKind  string `json:"token_kind,omitempty"`
-	Scope      string `json:"scope"`
-	AccessMode string `json:"access_mode"`
-	IssuedAt   int64  `json:"issued_at"`
-	ExpiresAt  int64  `json:"expires_at"`
-	RevokedAt  int64  `json:"revoked_at,omitempty"`
+	ID           string   `json:"id"`
+	ClientID     string   `json:"client_id"`
+	TokenKind    string   `json:"token_kind,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	RedirectURIs []string `json:"redirect_uris,omitempty"`
+	Scope        string   `json:"scope"`
+	AccessMode   string   `json:"access_mode,omitempty"`
+	ProfileID    string   `json:"profile_id,omitempty"`
+	IssuedAt     int64    `json:"issued_at"`
+	CreatedAt    int64    `json:"created_at,omitempty"`
+	ExpiresAt    int64    `json:"expires_at"`
+	RevokedAt    int64    `json:"revoked_at,omitempty"`
 }
 
 type managedMCPTokenState struct {
 	Tokens map[string]managedMCPToken `json:"tokens"`
+}
+
+type authRateWindow struct {
+	Started time.Time
+	Count   int
 }
 
 type idempotencyEntry struct {
@@ -203,43 +324,197 @@ type idempotencyEntry struct {
 type Server struct {
 	cfg Config
 
-	mu          sync.Mutex
-	cond        *sync.Cond
-	agents      map[string]*Agent
-	relayQueues map[string][]string
-	relayJobs   map[string]*relayJob
-	shellQueues map[string][]string
-	shellJobs   map[string]*shellJob
-	idempotency map[string]*idempotencyEntry
-	oauthCodes  map[string]oauthCode
-	managedMCP  map[string]managedMCPToken
-	audit       []auditEvent
-	failover    FailoverConfig
+	mu                sync.Mutex
+	authRateMu        sync.Mutex
+	cond              *sync.Cond
+	agents            map[string]*Agent
+	relayQueues       map[string][]string
+	relayJobs         map[string]*relayJob
+	shellQueues       map[string][]string
+	shellJobs         map[string]*shellJob
+	idempotency       map[string]*idempotencyEntry
+	oauthCodes        map[string]oauthCode
+	managedMCP        map[string]managedMCPToken
+	oauthClients      map[string]oauthClientMetadata
+	accessProfiles    map[string]AccessProfile
+	approvals         map[string]*approvalRequest
+	autonomous        map[string]*autonomousBudget
+	security          securitySettings
+	securityPath      string
+	webauthnState     webAuthnState
+	webauthnPath      string
+	webauthnSessions  map[string]webAuthnSession
+	telemetry         telemetryState
+	telemetryPath     string
+	telemetryExporter *telemetryExporter
+	secretStore       *SecretStore
+	secretStoreErr    error
+	audit             []auditEvent
+	authRate          map[string]authRateWindow
+	failover          FailoverConfig
 
-	updateStatePath string
-	updateLockPath  string
-	updateLauncher  *UpdateLauncher
+	updateStatePath     string
+	updateLockPath      string
+	updateLauncher      *UpdateLauncher
+	networkProxy        *NetworkProxyController
+	webhookRoutes       map[string]WebhookRoute
+	webhookJobs         map[string]*webhookJob
+	webhookDeliveries   map[string]*webhookDelivery
+	webhookStateWriteMu sync.Mutex
+
+	instructionMu      sync.RWMutex
+	instructionWriteMu sync.Mutex
+	instructionSet     InstructionSet
+	instructionSetsMu  sync.RWMutex
+	instructionSets    map[string]InstructionSet
 }
 
 func New(cfg Config) *Server {
+	if cfg.AuthRateLimit <= 0 {
+		cfg.AuthRateLimit = 60
+	}
+	webhookRoutes := append([]WebhookRoute(nil), cfg.WebhookRoutes...)
+	if loadedRoutes, err := loadWebhookRoutes(cfg.WebhookConfigFile); err != nil {
+		log.Printf("webhook config load failed path=%s err=%v", cfg.WebhookConfigFile, err)
+	} else {
+		webhookRoutes = append(webhookRoutes, loadedRoutes...)
+	}
+	if err := validateWebhookRoutes(webhookRoutes); err != nil {
+		log.Printf("webhook config rejected path=%s err=%v", cfg.WebhookConfigFile, err)
+		webhookRoutes = nil
+	}
+	securityPath := cfg.SecurityStateFile
+	if securityPath == "" && cfg.ConfigDir != "" {
+		securityPath = filepath.Join(cfg.ConfigDir, securityStateFilename)
+	}
+	securityKey := firstNonEmpty(cfg.AdminPassword, cfg.OAuthClientSecret, cfg.CtlToken, "gptadmin-security-state")
+	security, err := loadSecuritySettings(securityPath, securityKey)
+	if err != nil {
+		log.Printf("security settings load failed path=%s err=%v", securityPath, err)
+		security = defaultSecuritySettings()
+	}
+	telemetryPath := cfg.TelemetryStateFile
+	if telemetryPath == "" && cfg.ConfigDir != "" {
+		telemetryPath = filepath.Join(cfg.ConfigDir, telemetryStateFilename)
+	}
+	telemetry, err := loadTelemetryState(telemetryPath)
+	if err != nil {
+		log.Printf("telemetry state load failed path=%s err=%v", telemetryPath, err)
+		telemetry = defaultTelemetryState()
+	}
+	telemetryExporter, err := newTelemetryExporter(cfg.TelemetryOTLPEndpoint)
+	if err != nil {
+		log.Printf("OTLP telemetry disabled: %v", err)
+	}
+	webauthnPath := ""
+	if cfg.ConfigDir != "" {
+		webauthnPath = filepath.Join(cfg.ConfigDir, webAuthnStateFilename)
+	}
+	webauthnState, err := loadWebAuthnState(webauthnPath)
+	if err != nil {
+		log.Printf("webauthn state load failed path=%s err=%v", webauthnPath, err)
+		webauthnState = defaultWebAuthnState()
+	}
 	s := &Server{
-		cfg:         cfg,
-		agents:      map[string]*Agent{},
-		relayQueues: map[string][]string{},
-		relayJobs:   map[string]*relayJob{},
-		shellQueues: map[string][]string{},
-		shellJobs:   map[string]*shellJob{},
-		idempotency: map[string]*idempotencyEntry{},
-		oauthCodes:  map[string]oauthCode{},
-		managedMCP:  map[string]managedMCPToken{},
-		audit:       []auditEvent{},
+		cfg:               cfg,
+		agents:            map[string]*Agent{},
+		relayQueues:       map[string][]string{},
+		relayJobs:         map[string]*relayJob{},
+		shellQueues:       map[string][]string{},
+		shellJobs:         map[string]*shellJob{},
+		idempotency:       map[string]*idempotencyEntry{},
+		oauthCodes:        map[string]oauthCode{},
+		managedMCP:        map[string]managedMCPToken{},
+		oauthClients:      map[string]oauthClientMetadata{},
+		accessProfiles:    map[string]AccessProfile{},
+		approvals:         map[string]*approvalRequest{},
+		autonomous:        map[string]*autonomousBudget{},
+		security:          security,
+		securityPath:      securityPath,
+		webauthnState:     webauthnState,
+		webauthnPath:      webauthnPath,
+		webauthnSessions:  map[string]webAuthnSession{},
+		telemetry:         telemetry,
+		telemetryPath:     telemetryPath,
+		telemetryExporter: telemetryExporter,
+		audit:             []auditEvent{},
+		authRate:          map[string]authRateWindow{},
+		webhookRoutes:     webhookRouteMap(webhookRoutes),
+		webhookJobs:       map[string]*webhookJob{},
+		webhookDeliveries: map[string]*webhookDelivery{},
+		instructionSets:   map[string]InstructionSet{},
+	}
+	if cfg.ConfigDir != "" || cfg.SecretStoreDir != "" || cfg.SecretStoreKeyFile != "" || cfg.SecretIngressStateFile != "" {
+		if cfg.SecretStoreDir == "" {
+			cfg.SecretStoreDir = filepath.Join(cfg.ConfigDir, "secrets")
+		}
+		if cfg.SecretStoreKeyFile == "" {
+			cfg.SecretStoreKeyFile = filepath.Join(cfg.ConfigDir, "secret-store.key")
+		}
+		if cfg.SecretIngressStateFile == "" {
+			cfg.SecretIngressStateFile = filepath.Join(cfg.SecretStoreDir, "requests.json")
+		}
+		if cfg.SecretIngressTTL <= 0 {
+			cfg.SecretIngressTTL = 15 * time.Minute
+		}
+		s.cfg = cfg
+		secretStore, secretStoreErr := NewSecretStoreWithStateFile(cfg.ConfigDir, cfg.SecretStoreDir, cfg.SecretStoreKeyFile, cfg.SecretIngressStateFile, cfg.Now)
+		s.secretStore = secretStore
+		s.secretStoreErr = secretStoreErr
+		if secretStoreErr != nil {
+			log.Printf("secret ingress store unavailable: %v", secretStoreErr)
+		}
 	}
 	s.cond = sync.NewCond(&s.mu)
+	networkProxyStatePath := cfg.NetworkProxyStateFile
+	if networkProxyStatePath == "" && cfg.ConfigDir != "" {
+		networkProxyStatePath = filepath.Join(cfg.ConfigDir, "network_proxy_state.json")
+	}
+	networkProxy, err := NewNetworkProxyController(networkProxyStatePath, cfg.Now, nil)
+	if err != nil {
+		log.Printf("network proxy state load failed path=%s err=%v", networkProxyStatePath, err)
+		networkProxy = newUnavailableNetworkProxyController(cfg.Now, err)
+	}
+	s.networkProxy = networkProxy
+	if cfg.NetworkProxyRelayKeyFile != "" {
+		key, keyErr := os.ReadFile(cfg.NetworkProxyRelayKeyFile)
+		key = []byte(strings.TrimRight(string(key), " \t\r\n"))
+		if keyErr != nil {
+			log.Printf("network proxy relay key load failed path=%s err=%v", cfg.NetworkProxyRelayKeyFile, keyErr)
+		} else if len(key) < 32 {
+			log.Printf("network proxy relay key rejected path=%s: key must contain at least 32 bytes", cfg.NetworkProxyRelayKeyFile)
+		} else {
+			networkProxy.SetRelayKey(key)
+			if cfg.NetworkProxyRelayRevokeURL != "" {
+				relayKey := append([]byte(nil), key...)
+				relayURL := cfg.NetworkProxyRelayRevokeURL
+				networkProxy.SetOnRevoke(func(capabilityID string) {
+					go s.sendNetworkProxyRelayRevoke(relayURL, relayKey, capabilityID)
+				})
+			}
+		}
+	}
+	s.instructionSet = newInstructionSet(cfg)
+	if err := s.loadInstructionSetsState(); err != nil {
+		log.Printf("instruction sets state load failed path=%s err=%v", s.instructionSetsStatePath(), err)
+	}
 	if err := s.loadRegistryState(); err != nil {
 		log.Printf("registry state load failed path=%s err=%v", s.registryStatePath(), err)
 	}
 	if err := s.loadManagedMCPState(); err != nil {
 		log.Printf("MCP token state load failed path=%s err=%v", s.managedMCPStatePath(), err)
+	}
+	if err := s.loadOAuthClientsState(); err != nil {
+		log.Printf("OAuth client state load failed path=%s err=%v", s.oauthClientsStatePath(), err)
+	}
+	if err := s.loadAccessProfilesState(); err != nil {
+		log.Printf("access profile state load failed path=%s err=%v", s.accessProfilesStatePath(), err)
+	}
+	if err := s.loadWebhookState(); err != nil {
+		log.Printf("webhook state load failed path=%s err=%v", s.webhookStatePath(), err)
+	}
+	if err := s.loadAuditState(); err != nil {
+		log.Printf("audit state load failed path=%s err=%v", s.auditStatePath(), err)
 	}
 	s.failover = s.loadFailoverConfig()
 	home := os.Getenv("GPTADMIN_HOME")
@@ -251,6 +526,33 @@ func New(cfg Config) *Server {
 	s.updateLockPath = home + "/update.lock"
 	s.updateLauncher = DefaultUpdateLauncher()
 	return s
+}
+
+func (s *Server) sendNetworkProxyRelayRevoke(relayURL string, key []byte, capabilityID string) {
+	ticket, err := signNetworkProxyRevocation(key, capabilityID, time.Now().UTC().Add(30*time.Second))
+	if err != nil {
+		log.Printf("network proxy relay revoke ticket failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	body, err := json.Marshal(map[string]string{"ticket": ticket})
+	if err != nil {
+		return
+	}
+	request, err := http.NewRequest(http.MethodPost, relayURL+"/v1/control/revoke", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("network proxy relay revoke request failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		log.Printf("network proxy relay revoke delivery failed capability=%s err=%v", capabilityID, err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		log.Printf("network proxy relay revoke rejected capability=%s status=%d", capabilityID, response.StatusCode)
+	}
 }
 
 func (s *Server) managedMCPStatePath() string {
@@ -390,6 +692,9 @@ func (s *Server) saveRegistryStateLocked() error {
 }
 
 func (s *Server) ListenAndServe() error {
+	if s.secretStoreErr != nil {
+		return fmt.Errorf("secret ingress store unavailable: %w", s.secretStoreErr)
+	}
 	if err := os.MkdirAll(s.cfg.OutputDir, 0o750); err != nil {
 		log.Printf("output dir unavailable: %v", err)
 	}
@@ -402,14 +707,15 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/metrics", s.hubMetrics)
 	mux.HandleFunc("/actions/openapi.yaml", s.actionsOpenAPI)
-	mux.HandleFunc("/artifacts/shellmcp.json", s.requireCtl(s.shellmcpArtifactManifest))
-	mux.HandleFunc("/artifacts/shellmcp.tar.gz", s.requireCtl(s.shellmcpArtifactDownload))
-	mux.HandleFunc("/artifacts/shellmcp-android-arm64.json", s.requireCtl(s.androidShellmcpArtifactManifest))
-	mux.HandleFunc("/artifacts/shellmcp-android-arm64.bin", s.requireCtl(s.androidShellmcpArtifactDownload))
+	mux.HandleFunc("/artifacts/shellmcp.json", s.requireArtifact(s.shellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/shellmcp.tar.gz", s.requireArtifact(s.shellmcpArtifactDownload))
+	mux.HandleFunc("/artifacts/shellmcp-android-arm64.json", s.requireArtifact(s.androidShellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/shellmcp-android-arm64.bin", s.requireArtifact(s.androidShellmcpArtifactDownload))
 	// Legacy rootd artifact aliases: old services still point ROOTD_UPDATE_MANIFEST_URL here.
-	mux.HandleFunc("/artifacts/rootd.json", s.requireCtl(s.shellmcpArtifactManifest))
-	mux.HandleFunc("/artifacts/rootd.tar.gz", s.requireCtl(s.shellmcpArtifactDownload))
+	mux.HandleFunc("/artifacts/rootd.json", s.requireArtifact(s.shellmcpArtifactManifest))
+	mux.HandleFunc("/artifacts/rootd.tar.gz", s.requireArtifact(s.shellmcpArtifactDownload))
 	mux.HandleFunc("/heartbeat", s.requireShell(s.heartbeat))
 	mux.HandleFunc("/servers", s.requireCtl(s.serversList))
 	mux.HandleFunc("/bulk/exec", s.requireCtl(s.bulkExec))
@@ -430,28 +736,67 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp-relay/shell_exec", s.requireCtl(s.mcpRelayShellExec))
 	mux.HandleFunc("/mcp-relay/get_mcp_job/", s.requireCtl(s.mcpRelayJob))
 	mux.HandleFunc("/mcp-relay/job/", s.requireCtl(s.mcpRelayJob))
+	mux.HandleFunc("/webhooks/v1/", s.webhookEndpoint)
+	mux.HandleFunc("/webhook-jobs/", s.webhookJobEndpoint)
+	mux.HandleFunc("/webhook-routes", s.requireCtl(s.webhookRoutesEndpoint))
+	mux.HandleFunc("/webhook-routes/", s.requireCtl(s.webhookRoutesEndpoint))
 	mux.HandleFunc("/.well-known/oauth-protected-resource", s.oauthProtectedResource)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
 	mux.HandleFunc("/register", s.oauthRegister)
 	mux.HandleFunc("/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/token", s.oauthToken)
+	// Canonical OAuth paths are namespaced; root aliases remain for clients
+	// pinned to the pre-contract endpoint names during the migration window.
+	mux.HandleFunc("/oauth/authorize", s.oauthAuthorize)
+	mux.HandleFunc("/oauth/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc("/connect", s.connectionPage)
+	mux.HandleFunc("/connect.json", s.connectionPage)
+	mux.HandleFunc("/connect/callback", s.browserOAuthCallback)
+	mux.HandleFunc("/secret-input/", s.secretIngress)
 	mux.HandleFunc("/_services/", s.httpServiceEndpoint)
 	mux.HandleFunc("/server/", s.serverMCPEndpoint)
 	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
 	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
 	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
+	mux.HandleFunc("/proxy-control/v1/request", s.requireCtl(s.networkProxyRequestHTTP))
+	mux.HandleFunc("/proxy-control/v1/approve", s.requireCtl(s.networkProxyApproveHTTP))
+	mux.HandleFunc("/proxy-control/v1/issue", s.requireCtl(s.networkProxyIssueHTTP))
+	mux.HandleFunc("/proxy-control/v1/open", s.requireCtl(s.networkProxyOpenHTTP))
+	mux.HandleFunc("/proxy-control/v1/status", s.requireCtl(s.networkProxyStatusHTTP))
+	mux.HandleFunc("/proxy-control/v1/revoke", s.requireCtl(s.networkProxyRevokeHTTP))
 	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.adminMCPManage))
 	mux.HandleFunc("/admin/api/mcp/issue-token", s.requireCtl(s.adminMCPIssueToken))
 	mux.HandleFunc("/admin/api/mcp/tokens/", s.requireCtl(s.adminMCPTokenAction))
+	mux.HandleFunc("/admin/api/access-profiles", s.requireCtl(s.adminAccessProfiles))
+	mux.HandleFunc("/admin/api/access-profiles/", s.requireCtl(s.adminAccessProfile))
+	mux.HandleFunc("/admin/api/client-bindings/", s.requireCtl(s.adminClientBinding))
 	mux.HandleFunc("/admin/api/mcp/resources/list", s.requireCtl(s.adminMCPResourcesList))
 	mux.HandleFunc("/admin/api/mcp/resources/read", s.requireCtl(s.adminMCPResourceRead))
 	mux.HandleFunc("/admin/api/auth/rotate-oauth", s.requireCtl(s.adminRotateOAuth))
 	mux.HandleFunc("/admin/api/security/env", s.requireCtl(s.adminSecurityEnv))
+	mux.HandleFunc("/admin/api/security/reauth", s.requireCtl(s.adminSecurityReauth))
+	mux.HandleFunc("/admin/api/security/heartbeat", s.requireCtl(s.adminSecurityHeartbeat))
+	mux.HandleFunc("/admin/api/security/preset", s.requireCtl(s.adminSecurityPreset))
+	mux.HandleFunc("/admin/api/security/mfa/totp/enroll", s.requireCtl(s.adminTOTPEnroll))
+	mux.HandleFunc("/admin/api/security/mfa/totp/verify", s.requireCtl(s.adminTOTPVerify))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/register/begin", s.requireCtl(s.adminWebAuthnRegisterBegin))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/register/finish", s.requireCtl(s.adminWebAuthnRegisterFinish))
+	// Login ceremonies are the one admin surface reachable before the admin
+	// session exists. The handler still requires an exact same-origin browser
+	// request (or an existing internal credential), so it cannot become a
+	// cross-site credential oracle.
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/login/begin", s.requireWebAuthnBrowser(s.adminWebAuthnLoginBegin))
+	mux.HandleFunc("/admin/api/security/mfa/webauthn/login/finish", s.requireWebAuthnBrowser(s.adminWebAuthnLoginFinish))
+	mux.HandleFunc("/admin/api/telemetry", s.requireCtl(s.adminTelemetry))
+	mux.HandleFunc("/admin/api/telemetry/event", s.requireCtl(s.adminTelemetry))
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.adminClientDelete))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/instruction-sets/default", s.requireCtl(s.adminDefaultInstructionSet))
+	mux.HandleFunc("/admin/api/instruction-sets", s.requireCtl(s.adminInstructionSets))
+	mux.HandleFunc("/admin/api/instruction-sets/", s.requireCtl(s.adminInstructionSet))
 	mux.HandleFunc("/admin/api/update", s.requireCtl(s.adminTriggerUpdate))
 	mux.HandleFunc("/admin/api/failover/state", s.requireCtl(s.adminFailoverState))
 	mux.HandleFunc("/admin/api/failover/reclaim/accept", s.requireCtl(s.adminFailoverReclaimAccept))
@@ -459,12 +804,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
+	mux.HandleFunc("/admin/api/approvals", s.requireCtl(s.adminApprovals))
+	mux.HandleFunc("/admin/api/approvals/", s.requireCtl(s.adminApproval))
 	mux.HandleFunc("/admin/api/clients", s.requireCtl(s.adminClients))
 	mux.HandleFunc("/admin/login", s.adminLogin)
 	mux.HandleFunc("/admin/logout", s.adminLogout)
+	mux.HandleFunc("/admin/legacy/", s.adminLegacyStatic)
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
-	return withCORS(mux)
+	return withRequestTrace(withCORS(mux))
 }
 
 func (s *Server) httpServiceEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -573,8 +921,8 @@ func requestScheme(r *http.Request) string {
 func withCORS(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "authorization,content-type,x-ctl-token,x-mcp-relay-token")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization,content-type,if-match,x-ctl-token,x-mcp-relay-token")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -593,7 +941,22 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/api/instruction-sets/default" && (r.Method == http.MethodGet || r.Method == http.MethodPut) {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if strings.HasPrefix(r.URL.Path, "/admin/api/instruction-sets/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if strings.HasPrefix(r.URL.Path, "/admin/api/access-profiles/") || strings.HasPrefix(r.URL.Path, "/admin/api/client-bindings/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			s.markLegacyCtlToken(w)
+			if !s.legacyCtlTokenAllowed() {
+				s.authAudit("ctl_auth_denied", r, map[string]any{"reason": "legacy ctl token migration deadline passed"})
+				s.writeCtlUnauthorized(w, r)
+				return
+			}
 			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
 			next(w, r)
 			return
@@ -608,6 +971,7 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 		if claims, err := s.verifyBearerJWTFromRequest(r); err == nil {
 			s.authAudit("ctl_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
 			*r = *requestWithAuthClaims(r, claims)
+			*r = *s.applyAccessProfileContext(r, claims)
 			if !mcpClientHTTPPathAllowed(r.URL.Path) {
 				detail := "MCP client credentials cannot access the admin API"
 				if requestAccessMode(r) == accessModeReadonly {
@@ -621,7 +985,36 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 		} else {
 			s.authAudit("ctl_auth_denied", r, map[string]any{"reason": err.Error()})
 		}
+		if s.authFailureRateLimited(w, r) {
+			return
+		}
 		s.writeCtlUnauthorized(w, r)
+	}
+}
+
+func (s *Server) requireWebAuthnBrowser(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			next(w, r)
+			return
+		}
+		if s.cfg.AdminPassword != "" && s.adminSessionValid(r) {
+			next(w, r)
+			return
+		}
+		expected := strings.TrimRight(s.origin(r), "/")
+		requestOrigin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+		if requestOrigin == "" {
+			if referer, err := url.Parse(r.Referer()); err == nil && referer.Scheme != "" && referer.Host != "" {
+				requestOrigin = strings.TrimRight(referer.Scheme+"://"+referer.Host, "/")
+			}
+		}
+		if requestOrigin != expected {
+			s.authAudit("webauthn_browser_denied", r, map[string]any{"reason": "same-origin required"})
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "same-origin browser request required"})
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -631,6 +1024,18 @@ func (s *Server) requireRelay(w http.ResponseWriter, r *http.Request) bool {
 	}
 	writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
 	return false
+}
+
+func (s *Server) requireArtifact(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// ShellMCP updates use the agent-bound credential, so they remain
+		// possible after the human CLI bearer migration deadline.
+		if s.cfg.ShellToken != "" && tokenMatches(r, s.cfg.ShellToken) && (s.cfg.ShellToken != s.cfg.CtlToken || s.legacyCtlTokenAllowed()) {
+			next(w, r)
+			return
+		}
+		s.requireCtl(next)(w, r)
+	}
 }
 
 func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
@@ -737,6 +1142,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Result"
+        "428":
+          description: A write-capable call is waiting for one administrator approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequired"
+        "429":
+          description: The bounded-autonomous profile has exhausted its write budget for the current window.
   /mcp-relay/job/{job_id}:
     get:
       operationId: job
@@ -763,12 +1176,184 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Job"
+  /webhooks/v1/{route}:
+    post:
+      operationId: webhookIngress
+      summary: Accept one authenticated webhook event
+      description: The configured route selects the target action; the event cannot select a target or callback URL.
+      security:
+        - webhookToken: []
+      parameters:
+        - name: route
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json: {}
+      responses:
+        "202":
+          description: Accepted webhook job
+  /webhook-jobs/{job_id}:
+    get:
+      operationId: webhookJob
+      summary: Read an authenticated webhook job
+      security:
+        - webhookToken: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+  /webhook-routes/{route}:
+    put:
+      operationId: replaceWebhookRoute
+      summary: Replace an operator-owned webhook route
+    delete:
+      operationId: deleteWebhookRoute
+      summary: Delete an operator-owned webhook route
+  /proxy-control/v1/request:
+    post:
+      operationId: networkProxyRequest
+      summary: Request a bounded Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile_id, policy]
+              properties:
+                profile_id: {type: string}
+                policy: {type: object, additionalProperties: true}
+      responses:
+        "201": {description: Pending capability}
+  /proxy-control/v1/approve:
+    post:
+      operationId: networkProxyApprove
+      summary: Approve a pending Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id: {type: string}
+      responses:
+        "200": {description: Active capability}
+  /proxy-control/v1/issue:
+    post:
+      operationId: networkProxyIssue
+      summary: Issue one client and one agent stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id, target]
+              properties:
+                capability_id: {type: string}
+                target: {type: string}
+      responses:
+        "200": {description: Short-lived role-bound grants}
+  /proxy-control/v1/open:
+    post:
+      operationId: networkProxyOpen
+      summary: Consume a one-time stream grant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, role]
+              properties:
+                token: {type: string}
+                role: {type: string, enum: [client, agent]}
+      responses:
+        "200": {description: Consumed grant metadata without the bearer token}
+  /proxy-control/v1/status:
+    get:
+      operationId: networkProxyStatus
+      summary: Read Network Tunnel capability state
+      parameters:
+        - name: capability_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Capability state}
+  /proxy-control/v1/revoke:
+    post:
+      operationId: networkProxyRevoke
+      summary: Revoke and drain a Network Tunnel capability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability_id]
+              properties:
+                capability_id: {type: string}
+      responses:
+        "200": {description: Draining capability}
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+    webhookToken:
+      type: http
+      scheme: bearer
   schemas:
+    ApprovalRequired:
+      type: object
+      additionalProperties: false
+      required: [status, approval_id, expires_at, target, tool]
+      properties:
+        status:
+          type: string
+          enum: [approval_required]
+        approval_id:
+          type: string
+          description: Opaque one-time approval handle; never a copy of the request arguments.
+        expires_at:
+          type: string
+          format: date-time
+        target:
+          type: string
+        tool:
+          type: string
+        message:
+          type: string
+    BoundedAutonomousLimit:
+      type: object
+      additionalProperties: false
+      required: [status, retry_at, limit, window]
+      properties:
+        status:
+          type: string
+          enum: [bounded_autonomous_limit]
+        retry_at:
+          type: string
+          format: date-time
+        limit:
+          type: integer
+          minimum: 1
+        window:
+          type: string
+        message:
+          type: string
     DiscoverResponse:
       type: object
       additionalProperties: false
@@ -868,6 +1453,15 @@ components:
           minLength: 1
           maxLength: 200
           description: Reuse only for the same operation.
+        schema_version:
+          type: string
+          description: Version returned by the selected target schema.
+        schema_digest_sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[a-f0-9]{64}$'
+          description: Digest returned by the selected target schema.
     Result:
       type: object
       additionalProperties: true
@@ -881,6 +1475,7 @@ components:
         response:
           type: object
           nullable: true
+          description: Schema responses include schema_version and schema_digest_sha256.
           additionalProperties: true
         background:
           type: boolean
@@ -1062,10 +1657,22 @@ func (s *Server) bulkExec(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 	results := map[string]any{}
+	responseStatus := http.StatusOK
+	approvalID := firstString(req, "approval_id")
 	for _, srv := range targets {
-		results[srv] = s.callShellTool("shell:"+strings.TrimPrefix(srv, "shell:"), "shell_exec", map[string]any{"cmd": cmd, "cwd": firstString(req, "cwd"), "timeout": req["timeout"]}, true, s.cfg.DefaultTimeout)
+		target := "shell:" + strings.TrimPrefix(srv, "shell:")
+		args := map[string]any{"cmd": cmd, "cwd": firstString(req, "cwd"), "timeout": req["timeout"]}
+		if approvalID != "" {
+			args["approval_id"] = approvalID
+		}
+		policyRequest := requestWithAutomationProfile(r, "bulk-exec", target, "shell_exec", approvalModeAskBeforeWrite)
+		result, status := s.executeMCPTool(policyRequest, target, "shell_exec", args, true, s.cfg.DefaultTimeout, "")
+		results[srv] = result
+		if status > responseStatus {
+			responseStatus = status
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
+	writeJSON(w, responseStatus, map[string]any{"ok": responseStatus < http.StatusBadRequest, "results": results})
 }
 
 func sha256File(path string) (string, error) {
@@ -1106,9 +1713,20 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if transport == "" {
 		transport = "webhook"
 	}
+	identity := shellIdentityFromMap(meta)
 	s.mu.Lock()
-	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: transport, Status: "online", LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
-	s.addAuditLocked("heartbeat", map[string]any{"agent_id": agentID, "transport": transport})
+	approved := s.shellIdentityApprovedLocked(agentID, identity)
+	meta["approved"] = approved
+	status := "online"
+	if !approved {
+		status = "awaiting_approval"
+	}
+	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: transport, Status: status, LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
+	auditName := "heartbeat"
+	if !approved {
+		auditName = "heartbeat_awaiting_approval"
+	}
+	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": transport})
 	if err := s.saveRegistryStateLocked(); err != nil {
 		log.Printf("registry state save failed: %v", err)
 	}
@@ -1116,7 +1734,11 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("failover state save failed: %v", err)
 	}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": "registered"})
+	responseStatus := "registered"
+	if !approved {
+		responseStatus = "awaiting_approval"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agent_id": agentID, "status": responseStatus})
 }
 
 func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
@@ -1143,9 +1765,15 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.touchShellPollLocked(name, r)
+	if !s.touchShellPollLocked(name, r) {
+		writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
+		return
+	}
 	for {
-		s.touchShellPollLocked(name, r)
+		if !s.touchShellPollLocked(name, r) {
+			writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
+			return
+		}
 		if q := s.shellQueues[name]; len(q) > 0 {
 			id := q[0]
 			s.shellQueues[name] = q[1:]
@@ -1167,9 +1795,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 	}
 }
 
-func (s *Server) touchShellPollLocked(name string, r *http.Request) {
+func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 	if name == "" {
-		return
+		return false
 	}
 	now := nowFloat()
 	agentID := "shell:" + name
@@ -1194,8 +1822,14 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) {
 			meta[key] = v
 		}
 	}
+	approved := s.shellIdentityApprovedLocked(agentID, shellIdentityFromMap(meta))
+	meta["approved"] = approved
 	if a := s.agents[agentID]; a != nil {
-		a.Status = "online"
+		if !approved {
+			a.Status = "awaiting_approval"
+		} else {
+			a.Status = "online"
+		}
 		a.LastSeen = now
 		a.Transport = mode
 		if a.Meta == nil {
@@ -1204,16 +1838,53 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) {
 		for k, v := range meta {
 			a.Meta[k] = v
 		}
-		return
+		return approved
 	}
-	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: mode, Status: "online", LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
-	s.addAuditLocked("queue_poll_register", map[string]any{"agent_id": agentID, "transport": mode})
+	status := "online"
+	auditName := "queue_poll_register"
+	if !approved {
+		status = "awaiting_approval"
+		auditName = "queue_poll_awaiting_approval"
+	}
+	s.agents[agentID] = &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: mode, Status: status, LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
+	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": mode})
 	if err := s.saveRegistryStateLocked(); err != nil {
 		log.Printf("registry state save failed: %v", err)
 	}
 	if err := s.saveFailoverStateBundleLocked(); err != nil {
 		log.Printf("failover state save failed: %v", err)
 	}
+	return approved
+}
+
+func shellIdentityFromMap(values map[string]any) map[string]string {
+	identity := map[string]string{}
+	for _, key := range []string{"server_id", "public_key", "fingerprint"} {
+		if value := strings.TrimSpace(fmt.Sprint(values[key])); value != "" && value != "<nil>" {
+			identity[key] = value
+		}
+	}
+	return identity
+}
+
+func (s *Server) shellIdentityApprovedLocked(agentID string, identity map[string]string) bool {
+	if len(identity) == 0 {
+		return true
+	}
+	agent := s.agents[agentID]
+	if agent == nil {
+		return false
+	}
+	for key, expected := range identity {
+		actual := strings.TrimSpace(fmt.Sprint(agent.Meta[key]))
+		if actual != "" && actual != "<nil>" && actual != expected {
+			return false
+		}
+	}
+	if approved, ok := agent.Meta["approved"].(bool); ok {
+		return approved
+	}
+	return true
 }
 
 func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name string) {
@@ -1241,7 +1912,14 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		job.Status = "failed"
 		job.Error = res.Error
 	}
-	s.addAuditLocked("shell_result", map[string]any{"server": name, "job_id": res.ID, "status": job.Status})
+	fields := map[string]any{"server": name, "job_id": res.ID, "status": job.Status}
+	if job.TraceID != "" {
+		fields["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		fields["traceparent"] = job.TraceParent
+	}
+	s.addAuditLocked("shell_result", fields)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -1327,7 +2005,14 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 			}
 			job.Status = "running"
 			job.StartedAt = nowFloat()
-			writeJSON(w, http.StatusOK, map[string]any{"id": job.ID, "method": job.Method, "params": job.Params})
+			payload := map[string]any{"id": job.ID, "method": job.Method, "params": job.Params}
+			if job.TraceID != "" {
+				payload["trace_id"] = job.TraceID
+			}
+			if job.TraceParent != "" {
+				payload["traceparent"] = job.TraceParent
+			}
+			writeJSON(w, http.StatusOK, payload)
 			return
 		}
 		remaining := time.Until(deadline)
@@ -1366,6 +2051,16 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
 		return
 	}
+	if job.AgentID != agentID {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "relay result does not belong to this agent"})
+		return
+	}
+	if job.Status == "completed" || job.Status == "failed" {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "relay job already has a terminal result"})
+		return
+	}
 	job.DoneAt = nowFloat()
 	job.Result = res.Result
 	if res.OK != nil && !*res.OK {
@@ -1379,7 +2074,14 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 			entry.Response = cloneMap(relayJobResponse(job))
 		}
 	}
-	s.addAuditLocked("mcp_result", map[string]any{"server_id": agentID, "job_id": res.ID, "status": job.Status})
+	fields := map[string]any{"server_id": agentID, "job_id": res.ID, "status": job.Status}
+	if job.TraceID != "" {
+		fields["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		fields["traceparent"] = job.TraceParent
+	}
+	s.addAuditLocked("mcp_result", fields)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -1446,8 +2148,60 @@ func agentAsServer(a Agent) map[string]any {
 		"status":       a.Status,
 		"last_seen":    a.LastSeen,
 		"capabilities": a.Capabilities,
-		"meta":         a.Meta,
+		"meta":         redactPublicMetadata(a.Meta),
 	}
+}
+
+// redactPublicMetadata removes credentials from agent metadata before it is
+// returned by discovery. Agent transport arguments are operator-supplied and
+// can contain authorization headers even when their enclosing key is benign.
+func redactPublicMetadata(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if isSensitiveMetadataKey(key) {
+				redacted[key] = "<redacted>"
+				continue
+			}
+			redacted[key] = redactPublicMetadata(nested)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(typed))
+		for index, nested := range typed {
+			redacted[index] = redactPublicMetadata(nested)
+		}
+		return redacted
+	case string:
+		if isSensitiveMetadataValue(typed) {
+			return "<redacted>"
+		}
+	}
+	return value
+}
+
+func isSensitiveMetadataKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, marker := range []string{"token", "secret", "password", "authorization", "credential", "api_key"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveMetadataValue(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "authorization:") || strings.Contains(lower, "bearer ") {
+		return true
+	}
+	for _, key := range []string{"token", "secret", "password", "api_key"} {
+		if strings.Contains(lower, key+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
@@ -1521,6 +2275,11 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 	}
 	var req map[string]any
 	_ = readJSON(r, &req)
+	if err := authorizeFacadeCall(r, "schema", req); err != nil {
+		s.auditToolDecision(r, firstString(req, "target", "server_id", "agent_id"), "schema", req, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
 	target := firstString(req, "target", "server_id", "agent_id")
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
@@ -1529,11 +2288,11 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 	}
 	target = selectedTarget
 	if target == "hub" {
-		writeJSON(w, http.StatusOK, withActionToolHints(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, hubTools())}}, target))
+		writeJSON(w, http.StatusOK, withActionToolHints(withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, hubTools())}}), target))
 		return
 	}
 	if strings.HasPrefix(target, "shell:") {
-		writeJSON(w, http.StatusOK, withActionToolHints(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, shellTools())}}, target))
+		writeJSON(w, http.StatusOK, withActionToolHints(withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, shellTools())}}), target))
 		return
 	}
 	if requestAccessMode(r) == accessModeReadonly {
@@ -1545,7 +2304,8 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
-	resp := withActionToolHints(s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)), target)
+	resp := withSchemaContractMetadata(s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
+	resp = withActionToolHints(resp, target)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1573,6 +2333,7 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := authorizeToolCall(r, target, toolName); err != nil {
+		s.auditToolDecision(r, target, toolName, args, "deny", err.Error(), nil, http.StatusForbidden)
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
@@ -1582,6 +2343,10 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target = selectedTarget
+	if response, blocked := s.validateSchemaContract(r, target, req); blocked {
+		writeJSON(w, http.StatusConflict, response)
+		return
+	}
 	resp, status := s.executeMCPTool(r, target, toolName, args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), firstString(req, "idempotency_key"))
 	writeJSON(w, status, resp)
 }
@@ -1593,23 +2358,52 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	callArgs, approvalID := approvalArguments(args)
+	if response, blocked := s.approvalGate(r, target, toolName, callArgs, approvalID); blocked {
+		s.auditToolDecision(r, target, toolName, callArgs, "deny", "approval required", response, http.StatusPreconditionRequired)
+		return response, http.StatusPreconditionRequired
+	}
+	if response, blocked := s.boundedAutonomousGate(r, target, toolName); blocked {
+		s.auditToolDecision(r, target, toolName, callArgs, "deny", "bounded autonomous budget exhausted", response, http.StatusTooManyRequests)
+		return response, http.StatusTooManyRequests
+	}
+	args = callArgs
+	secretValues := []string(nil)
+	if toolName == "shell_exec" {
+		resolvedArgs, resolvedSecrets, err := s.resolveSecretEnvForRequest(r, target, args)
+		if err != nil {
+			s.auditToolDecision(r, target, toolName, callArgs, "deny", err.Error(), nil, http.StatusForbidden)
+			return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+		}
+		args = resolvedArgs
+		secretValues = resolvedSecrets
+	}
 	operation := func() (map[string]any, int) {
 		if target == "hub" {
-			resp, status := s.callHubTool(toolName, args)
+			resp, status := s.callHubToolForRequest(r, toolName, args)
 			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
 		}
 		if strings.HasPrefix(target, "shell:") {
-			return s.callShellTool(target, toolName, args, background, timeout), http.StatusOK
+			return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues), http.StatusOK
 		}
-		jobID := s.enqueueRelay(target, "tools/call", map[string]any{"name": toolName, "arguments": args})
+		jobID := s.enqueueRelayWithTraceParent(target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r))
 		if background {
-			return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID}, http.StatusOK
+			response := map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID}
+			if traceID := requestTraceID(r); traceID != "" {
+				response["trace_id"] = traceID
+			}
+			if parent := requestTraceParent(r); parent != "" {
+				response["traceparent"] = parent
+			}
+			return response, http.StatusOK
 		}
 		return s.waitRelay(jobID, timeout), http.StatusOK
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return operation()
+		response, status := operation()
+		s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
+		return response, status
 	}
 	if len(key) > idempotencyKeyMax {
 		return map[string]any{"detail": fmt.Sprintf("idempotency_key must be at most %d characters", idempotencyKeyMax)}, http.StatusBadRequest
@@ -1675,6 +2469,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	s.mu.Unlock()
 
 	response, status := operation()
+	s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
 	s.mu.Lock()
 	entry.JobID = firstString(response, "job_id")
 	entry.Response = cloneMap(response)
@@ -1684,9 +2479,177 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	return response, status
 }
 
+func approvalArguments(args map[string]any) (map[string]any, string) {
+	callArgs := cloneMap(args)
+	approvalID := firstString(callArgs, "approval_id")
+	delete(callArgs, "approval_id")
+	return callArgs, approvalID
+}
+
+func (s *Server) approvalGate(r *http.Request, target, toolName string, args map[string]any, approvalID string) (map[string]any, bool) {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound || profile.ApprovalMode != approvalModeAskBeforeWrite || isReadOnlyTool(target, toolName) {
+		return nil, false
+	}
+	actor := s.actorForRequest(r)
+	digestBytes, err := json.Marshal(args)
+	if err != nil {
+		return map[string]any{"status": "failed", "error": "arguments cannot be serialized"}, true
+	}
+	digest := sha256Hex(digestBytes)
+	now := s.now()
+	if approvalID != "" {
+		s.mu.Lock()
+		approval := s.approvals[approvalID]
+		if approval != nil && approval.Status == "approved" && now.Before(approval.ExpiresAt) &&
+			approval.ProfileID == profile.ID && approval.Actor == actor && approval.Target == target &&
+			approval.Tool == toolName && approval.ArgumentsDigest == digest {
+			approval.Status = "consumed"
+			s.mu.Unlock()
+			return nil, false
+		}
+		s.mu.Unlock()
+	}
+	approval := &approvalRequest{
+		ID: newID(), ProfileID: profile.ID, Actor: actor, Target: target, Tool: toolName,
+		ArgumentsDigest: digest, CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute), Status: "pending",
+	}
+	s.mu.Lock()
+	if len(s.approvals) >= 256 {
+		s.mu.Unlock()
+		return map[string]any{"status": "failed", "error": "approval queue is full"}, true
+	}
+	s.approvals[approval.ID] = approval
+	s.mu.Unlock()
+	return map[string]any{
+		"status": "approval_required", "approval_id": approval.ID,
+		"expires_at": approval.ExpiresAt, "target": target, "tool": toolName,
+		"message": "An administrator must approve this write before execution.",
+	}, true
+}
+
+func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string) (map[string]any, bool) {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound || profile.ApprovalMode != approvalModeBoundedAutonomous || isReadOnlyTool(target, toolName) {
+		return nil, false
+	}
+	key := profile.ID + "\x00" + s.actorForRequest(r)
+	now := s.now()
+	s.mu.Lock()
+	budget := s.autonomous[key]
+	if budget == nil || !now.Before(budget.WindowStart.Add(autonomousWindowSize)) {
+		budget = &autonomousBudget{WindowStart: now}
+		s.autonomous[key] = budget
+	}
+	if budget.Count >= autonomousCallLimit {
+		retryAt := budget.WindowStart.Add(autonomousWindowSize)
+		s.mu.Unlock()
+		return map[string]any{
+			"status":   "bounded_autonomous_limit",
+			"retry_at": retryAt,
+			"limit":    autonomousCallLimit,
+			"window":   autonomousWindowSize.String(),
+			"message":  "The bounded autonomous write budget is exhausted; retry after the window.",
+		}, true
+	}
+	budget.Count++
+	s.mu.Unlock()
+	return nil, false
+}
+
+func isReadOnlyTool(target, toolName string) bool {
+	if toolName == "resources/list" || toolName == "resources/read" {
+		return true
+	}
+	if target == "hub" {
+		switch toolName {
+		case "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob":
+			return true
+		default:
+			return false
+		}
+	}
+	return strings.HasPrefix(target, "shell:") && toolName == "system_inspect"
+}
+
+func (s *Server) actorForRequest(r *http.Request) string {
+	if r == nil {
+		return "anonymous"
+	}
+	if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+		return "legacy_ctl"
+	}
+	if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+		if actor := firstString(claims, "client_id", "sub"); actor != "" {
+			return actor
+		}
+		return "scoped_connection"
+	}
+	if s.adminSessionValid(r) {
+		return "admin_session"
+	}
+	return "anonymous"
+}
+
 func sha256Hex(value []byte) string {
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
+}
+
+func (s *Server) auditToolDecision(r *http.Request, target, toolName string, args map[string]any, decision, reason string, response map[string]any, status int) {
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		encoded = []byte("<unserializable>")
+	}
+	resultReference := "none"
+	if response != nil {
+		resultReference = firstString(response, "job_id", "id")
+		if resultReference == "" {
+			resultReference = "inline"
+		}
+	}
+	actor := "anonymous"
+	identityFields := map[string]any{}
+	if r != nil {
+		if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			actor = "legacy_ctl"
+		} else if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+			actor = firstString(claims, "client_id", "sub")
+			identityFields["client_id"] = firstString(claims, "client_id")
+			identityFields["subject"] = firstString(claims, "sub")
+			identityFields["jti"] = firstString(claims, "jti")
+			if actor == "" {
+				actor = "scoped_connection"
+			}
+		} else if s.adminSessionValid(r) {
+			actor = "admin_session"
+		}
+	}
+	fields := map[string]any{
+		"actor":            actor,
+		"profile_id":       AccessProfileIDFromRequest(r),
+		"target":           target,
+		"tool":             toolName,
+		"policy_decision":  decision,
+		"arguments_digest": sha256Hex(encoded),
+		"result_reference": resultReference,
+		"status":           status,
+		"access_mode":      requestAccessMode(r),
+	}
+	if reason != "" {
+		fields["policy_reason"] = reason
+	}
+	if traceID := requestTraceID(r); traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	for key, value := range identityFields {
+		if value != "" {
+			fields[key] = value
+		}
+	}
+	s.mu.Lock()
+	s.addAuditLocked("tool_policy_decision", fields)
+	s.mu.Unlock()
 }
 
 func toolArgsFromTopLevel(req map[string]any) map[string]any {
@@ -1694,8 +2657,10 @@ func toolArgsFromTopLevel(req map[string]any) map[string]any {
 		"target": true, "server_id": true, "agent_id": true,
 		"tool": true, "tool_name": true, "name": true,
 		"arguments": true, "args": true,
-		"background":      true,
-		"idempotency_key": true,
+		"background":           true,
+		"idempotency_key":      true,
+		"schema_version":       true,
+		"schema_digest_sha256": true,
 	}
 	args := map[string]any{}
 	for k, v := range req {
@@ -1782,8 +2747,11 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 		"timeout":     req["timeout"],
 		"run_as_user": firstString(req, "run_as_user", "user"),
 	}
-	resp := s.callShellTool(target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout))
-	writeJSON(w, http.StatusOK, resp)
+	if raw, ok := req["secret_env"]; ok {
+		args["secret_env"] = raw
+	}
+	resp, responseStatus := s.executeMCPTool(r, target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, responseStatus, resp)
 }
 
 func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
@@ -1819,11 +2787,26 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enqueueRelay(agentID, method string, params map[string]any) string {
+	return s.enqueueRelayWithTrace(agentID, method, params, "")
+}
+
+func (s *Server) enqueueRelayWithTrace(agentID, method string, params map[string]any, traceID string) string {
+	return s.enqueueRelayWithTraceParent(agentID, method, params, traceID, "")
+}
+
+func (s *Server) enqueueRelayWithTraceParent(agentID, method string, params map[string]any, traceID, traceParent string) string {
 	id := newID()
 	s.mu.Lock()
-	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
+	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
 	s.relayQueues[agentID] = append(s.relayQueues[agentID], id)
-	s.addAuditLocked("mcp_enqueue", map[string]any{"server_id": agentID, "job_id": id, "method": method})
+	fields := map[string]any{"server_id": agentID, "job_id": id, "method": method}
+	if traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	if traceParent != "" {
+		fields["traceparent"] = traceParent
+	}
+	s.addAuditLocked("mcp_enqueue", fields)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	return id
@@ -1850,27 +2833,53 @@ func (s *Server) waitRelay(jobID string, timeout time.Duration) map[string]any {
 }
 
 func relayJobResponse(job *relayJob) map[string]any {
-	if job.Status == "failed" {
-		return map[string]any{"server_id": job.AgentID, "status": "failed", "job_id": job.ID, "error": job.Error}
+	response := map[string]any{"server_id": job.AgentID, "status": job.Status, "job_id": job.ID}
+	if job.TraceID != "" {
+		response["trace_id"] = job.TraceID
 	}
-	return map[string]any{"server_id": job.AgentID, "status": job.Status, "job_id": job.ID, "response": spillFriendly(job.Result)}
+	if job.TraceParent != "" {
+		response["traceparent"] = job.TraceParent
+	}
+	if job.Status == "failed" {
+		response["error"] = job.Error
+		return response
+	}
+	response["response"] = spillFriendly(job.Result)
+	return response
 }
 
 func shellJobResponse(job *shellJob) map[string]any {
 	out := map[string]any{"server_id": "shell:" + job.Server, "status": job.Status, "job_id": job.ID, "task_id": job.ID}
+	if job.TraceID != "" {
+		out["trace_id"] = job.TraceID
+	}
+	if job.TraceParent != "" {
+		out["traceparent"] = job.TraceParent
+	}
 	if job.Result != nil {
-		out["response"] = map[string]any{"content": []map[string]any{{"type": "text", "text": "shell_exec completed on " + job.Server}}, "structuredContent": map[string]any{"server": job.Server, "result": job.Result}}
+		out["response"] = map[string]any{"content": []map[string]any{{"type": "text", "text": "shell_exec completed on " + job.Server}}, "structuredContent": map[string]any{"server": job.Server, "result": redactSecretValues(job.Result, job.SecretValues)}}
 	}
 	if job.Error != nil {
-		out["error"] = job.Error
+		out["error"] = redactSecretValues(job.Error, job.SecretValues)
 	}
 	return out
 }
 
 func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, int) {
+	return s.callHubToolForRequest(nil, name, args)
+}
+
+func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[string]any) (map[string]any, int) {
+	if isNetworkProxyHubTool(name) {
+		return s.callNetworkProxyTool(AccessProfileIDFromRequest(r), name, args)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.addAuditLocked("hub_tool", map[string]any{"tool": name})
+	fields := map[string]any{"tool": name}
+	if traceID := requestTraceID(r); traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	s.addAuditLocked("hub_tool", fields)
 	switch name {
 	case "discover", "listMcpServers", "list_mcp_servers":
 		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
@@ -1879,9 +2888,53 @@ func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, 
 		agents := s.publicAgentsLocked(nil)
 		return map[string]any{"agents": agents}, http.StatusOK
 	case "pending", "list_pending_servers":
-		return map[string]any{"pending": []any{}, "count": 0}, http.StatusOK
+		pending := make([]map[string]any, 0)
+		for _, agent := range s.agents {
+			if agent != nil && agent.Status == "awaiting_approval" {
+				pending = append(pending, agentAsServer(*agent))
+			}
+		}
+		return map[string]any{"pending": pending, "count": len(pending)}, http.StatusOK
+	case "approve_pending_server":
+		target := firstString(args, "server_id", "agent_id", "name")
+		if target == "" {
+			return map[string]any{"error": "server_id or name is required"}, http.StatusBadRequest
+		}
+		if !strings.HasPrefix(target, "shell:") {
+			target = "shell:" + target
+		}
+		agent := s.agents[target]
+		if agent == nil || agent.Status != "awaiting_approval" {
+			return map[string]any{"error": "pending server not found", "server_id": target}, http.StatusNotFound
+		}
+		agent.Status = "online"
+		agent.LastSeen = nowFloat()
+		if agent.Meta == nil {
+			agent.Meta = map[string]any{}
+		}
+		agent.Meta["approved"] = true
+		s.addAuditLocked("approve_pending_server", map[string]any{"agent_id": target})
+		if err := s.saveRegistryStateLocked(); err != nil {
+			log.Printf("registry state save failed: %v", err)
+		}
+		return map[string]any{"ok": true, "status": "approved", "server_id": target}, http.StatusOK
 	case "hub_status", "status":
-		return map[string]any{"ok": true, "servers": len(s.agents), "relay_jobs": len(s.relayJobs), "shell_jobs": len(s.shellJobs)}, http.StatusOK
+		awaiting := 0
+		for _, agent := range s.agents {
+			if agent != nil && agent.Status == "awaiting_approval" {
+				awaiting++
+			}
+		}
+		return map[string]any{"ok": true, "servers": len(s.agents), "awaiting_approval": awaiting, "relay_jobs": len(s.relayJobs), "shell_jobs": len(s.shellJobs)}, http.StatusOK
+	case "demo":
+		return map[string]any{
+			"status":        "ok",
+			"connection":    map[string]any{"hub_url": s.origin(r), "mcp_endpoint": s.origin(r) + "/mcp"},
+			"build_version": BuildVersion,
+			"access_mode":   requestAccessMode(r),
+			"capabilities":  []string{"mcp", "read_only_demo"},
+			"message":       "GPTAdmin safe demo is ready; no command or credential access was used.",
+		}, http.StatusOK
 	default:
 		return map[string]any{"error": "unsupported hub tool", "tool": name, "arguments": args}, http.StatusBadRequest
 	}
@@ -1897,11 +2950,23 @@ func canonicalShellQueueName(name string) string {
 }
 
 func (s *Server) callShellTool(target, toolName string, args map[string]any, background bool, timeout time.Duration) map[string]any {
+	return s.callShellToolWithTrace(target, toolName, args, background, timeout, "")
+}
+
+func (s *Server) callShellToolWithTrace(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID string) map[string]any {
+	return s.callShellToolWithTraceParent(target, toolName, args, background, timeout, traceID, "")
+}
+
+func (s *Server) callShellToolWithTraceParent(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string) map[string]any {
+	return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, traceID, traceParent, nil)
+}
+
+func (s *Server) callShellToolWithTraceParentAndSecrets(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string) map[string]any {
 	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
 	}
-	job := &shellJob{ID: newID(), Server: server, ToolName: toolName, Arguments: cloneMap(args), CreatedAt: nowFloat(), Status: "queued"}
+	job := &shellJob{ID: newID(), Server: server, TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), CreatedAt: nowFloat(), Status: "queued"}
 	if toolName == "shell_exec" {
 		job.Cmd = firstString(args, "cmd", "command")
 		if job.Cmd == "" {
@@ -1914,11 +2979,25 @@ func (s *Server) callShellTool(target, toolName string, args map[string]any, bac
 	s.mu.Lock()
 	s.shellJobs[job.ID] = job
 	s.shellQueues[server] = append(s.shellQueues[server], job.ID)
-	s.addAuditLocked("shell_enqueue", map[string]any{"server": server, "job_id": job.ID})
+	fields := map[string]any{"server": server, "job_id": job.ID}
+	if traceID != "" {
+		fields["trace_id"] = traceID
+	}
+	if traceParent != "" {
+		fields["traceparent"] = traceParent
+	}
+	s.addAuditLocked("shell_enqueue", fields)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	if background {
-		return map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job queued"}
+		response := map[string]any{"server_id": target, "status": "running", "background": true, "job_id": job.ID, "task_id": job.ID, "message": "shell job queued"}
+		if traceID != "" {
+			response["trace_id"] = traceID
+		}
+		if traceParent != "" {
+			response["traceparent"] = traceParent
+		}
+		return response
 	}
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
@@ -1937,17 +3016,21 @@ func (s *Server) callShellTool(target, toolName string, args map[string]any, bac
 }
 
 func hubTools() []map[string]any {
-	return []map[string]any{
+	tools := []map[string]any{
 		{"name": "discover", "description": "List registered targets", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "pending", "description": "List pending approvals", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "approve_pending_server", "description": "Approve one ShellMCP device awaiting enrollment", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
 		{"name": "status", "description": "Return Hub status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 	}
+	tools = append(tools, networkProxyHubTools()...)
+	return append(tools, secretHubTools()...)
 }
 
 func shellTools() []map[string]any {
 	return []map[string]any{
 		{"name": "system_inspect", "description": "Read bounded redacted files/directories; no commands", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}}, "path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576}}, "required": []string{"action", "path"}, "additionalProperties": false}},
-		{"name": "shell_exec", "description": "Run one command as the default non-root user", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}}, "required": []string{"cmd"}}},
+		{"name": "shell_exec", "description": "Run one command as the default non-root user; secret_env references are resolved by the Hub and never returned", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
 		{"name": "mcp_manage", "description": "Manage child MCPs", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
 		{"name": "mcp_tools", "description": "List child MCP tools", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}}, "required": []string{"ref"}, "additionalProperties": false}},
 		{"name": "mcp_call", "description": "Call a child MCP tool", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
@@ -1967,7 +3050,7 @@ func (s *Server) tasksEndpoint(w http.ResponseWriter, r *http.Request) {
 		items := []map[string]any{}
 		for _, j := range s.shellJobs {
 			if j.Server == srv {
-				items = append(items, map[string]any{"task_id": j.ID, "job_id": j.ID, "server": j.Server, "cmd": j.Cmd, "status": j.Status, "result": j.Result, "error": j.Error, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+				items = append(items, map[string]any{"task_id": j.ID, "job_id": j.ID, "server": j.Server, "cmd": redactSecretValues(j.Cmd, j.SecretValues), "status": j.Status, "result": redactSecretValues(j.Result, j.SecretValues), "error": redactSecretValues(j.Error, j.SecretValues), "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
 			}
 		}
 		s.mu.Unlock()
@@ -2096,12 +3179,14 @@ func (s *Server) adminMCPResourcesList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target"})
 		return
 	}
-	jobID := s.enqueueRelay(target, "resources/list", map[string]any{})
-	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
+	if err := authorizeToolCall(r, target, "resources/list"); err != nil {
+		s.auditToolDecision(r, target, "resources/list", nil, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
+	args := map[string]any{}
+	result, status := s.executeMCPTool(r, target, "resources/list", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, status, result)
 }
 
 func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
@@ -2120,12 +3205,13 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target or uri"})
 		return
 	}
-	jobID := s.enqueueRelay(target, "resources/read", map[string]any{"uri": uri})
-	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
+	if err := authorizeToolCall(r, target, "resources/read"); err != nil {
+		s.auditToolDecision(r, target, "resources/read", map[string]any{"uri": uri}, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
+	result, status := s.executeMCPTool(r, target, "resources/read", map[string]any{"uri": uri}, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	writeJSON(w, status, result)
 }
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
@@ -2299,7 +3385,7 @@ func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "access_mode must be full or readonly"})
 		return
 	}
-	token, record, err := s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessMode)
+	token, record, err := s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessMode, "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
@@ -2319,19 +3405,19 @@ func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) issueManagedMCPToken(clientID string, ttlDays int, origin, resource string) (string, managedMCPToken, error) {
-	return s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessModeFull)
+	return s.issueManagedMCPTokenWithMode(clientID, ttlDays, origin, resource, accessModeFull, "")
 }
 
-func (s *Server) issueManagedMCPTokenWithMode(clientID string, ttlDays int, origin, resource, accessMode string) (string, managedMCPToken, error) {
+func (s *Server) issueManagedMCPTokenWithMode(clientID string, ttlDays int, origin, resource, accessMode, profileID string) (string, managedMCPToken, error) {
 	now := time.Now().Unix()
 	scope := "gptadmin.read gptadmin.exec"
 	if accessMode == accessModeReadonly {
 		scope = "gptadmin.read gptadmin.inspect"
 	}
-	record := managedMCPToken{ID: newID(), ClientID: clientID, Scope: scope, AccessMode: accessMode, IssuedAt: now, ExpiresAt: now + int64(ttlDays)*24*3600}
+	record := managedMCPToken{ID: newID(), ClientID: clientID, Scope: scope, AccessMode: accessMode, ProfileID: profileID, IssuedAt: now, ExpiresAt: now + int64(ttlDays)*24*3600}
 	token, err := s.signJWT(map[string]any{
 		"sub": "admin", "scope": record.Scope, "access_mode": record.AccessMode, "client_id": clientID, "jti": record.ID,
-		"iss": origin, "aud": resource, "resource": resource, "exp": record.ExpiresAt, "iat": now,
+		"iss": origin, "aud": resource, "resource": resource, "exp": record.ExpiresAt, "iat": now, "kid": s.jwtKeyID(),
 	})
 	if err != nil {
 		return "", managedMCPToken{}, err
@@ -2378,7 +3464,7 @@ func (s *Server) adminMCPTokenAction(w http.ResponseWriter, r *http.Request) {
 	if accessMode == "" {
 		accessMode = accessModeFull
 	}
-	token, replacement, err := s.issueManagedMCPTokenWithMode(record.ClientID, remainingDays, s.origin(r), s.resource(r), accessMode)
+	token, replacement, err := s.issueManagedMCPTokenWithMode(record.ClientID, remainingDays, s.origin(r), s.resource(r), accessMode, record.ProfileID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
@@ -2394,15 +3480,169 @@ func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	query := r.URL.Query()
+	limit := 100
+	offset := 0
+	var err error
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 500 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "limit must be between 1 and 500"})
+			return
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "offset must be non-negative"})
+			return
+		}
+	}
 	s.mu.Lock()
-	items := append([]auditEvent(nil), s.audit...)
+	all := append([]auditEvent(nil), s.audit...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"events": items, "audit_log": "go-in-memory"})
+	nameFilter := strings.TrimSpace(query.Get("name"))
+	actorFilter := strings.TrimSpace(query.Get("actor"))
+	targetFilter := strings.TrimSpace(query.Get("target"))
+	textFilter := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	filtered := make([]auditEvent, 0, len(all))
+	for _, event := range all {
+		if nameFilter != "" && event.Name != nameFilter {
+			continue
+		}
+		if actorFilter != "" && firstString(event.Fields, "actor", "client_id", "subject") != actorFilter {
+			continue
+		}
+		if targetFilter != "" && firstString(event.Fields, "target", "server_id", "agent_id") != targetFilter {
+			continue
+		}
+		if textFilter != "" {
+			encoded, _ := json.Marshal(event)
+			if !strings.Contains(strings.ToLower(string(encoded)), textFilter) {
+				continue
+			}
+		}
+		filtered = append(filtered, event)
+	}
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	items := filtered[offset:end]
+	response := map[string]any{"events": items, "count": len(items), "total": total, "offset": offset, "audit_log": "durable-jsonl"}
+	if end < total {
+		response["next_offset"] = end
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) adminApprovals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	items := s.approvalSnapshotLocked()
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": items})
+}
+
+func (s *Server) adminApproval(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/api/approvals/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid approval id"})
+		return
+	}
+	s.mu.Lock()
+	approval, ok := s.approvals[id]
+	if ok && approval.Status == "pending" && !s.now().Before(approval.ExpiresAt) {
+		approval.Status = "expired"
+	}
+	if !ok {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "approval not found"})
+		return
+	}
+	if r.Method == http.MethodGet {
+		result := *approval
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.mu.Unlock()
+		w.Header().Set("Allow", "GET, POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if approval.Status != "pending" {
+		status := approval.Status
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "approval is no longer pending", "status": status})
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Action)) {
+	case "approve":
+		approval.Status = "approved"
+	case "reject":
+		approval.Status = "rejected"
+	default:
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "action must be approve or reject"})
+		return
+	}
+	result := *approval
+	s.mu.Unlock()
+	s.addApprovalAudit(result)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) approvalSnapshotLocked() []approvalRequest {
+	items := make([]approvalRequest, 0, len(s.approvals))
+	now := s.now()
+	for _, approval := range s.approvals {
+		if approval.Status == "pending" && !now.Before(approval.ExpiresAt) {
+			approval.Status = "expired"
+		}
+		items = append(items, *approval)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	return items
+}
+
+func (s *Server) addApprovalAudit(approval approvalRequest) {
+	s.mu.Lock()
+	s.addAuditLocked("approval_"+approval.Status, map[string]any{
+		"approval_id": approval.ID, "profile_id": approval.ProfileID, "actor": approval.Actor,
+		"target": approval.Target, "tool": approval.Tool, "arguments_digest": approval.ArgumentsDigest,
+	})
+	s.mu.Unlock()
 }
 
 func (s *Server) adminRotateOAuth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if !s.requireSensitiveSecurityReauth(w, r) {
 		return
 	}
 	if strings.TrimSpace(s.cfg.EnvFile) == "" {
@@ -2467,6 +3707,38 @@ func (s *Server) adminSecurityEnv(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"variables": variables, "shellmcp_heartbeat": heartbeat})
 }
 
+func (s *Server) adminSecurityHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if !s.requireSensitiveSecurityReauth(w, r) {
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := readJSON(r, &req); err != nil || req.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "enabled boolean is required"})
+		return
+	}
+	if strings.TrimSpace(s.cfg.EnvFile) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "env file is not configured"})
+		return
+	}
+	value := "0"
+	if *req.Enabled {
+		value = "1"
+	}
+	if err := replaceEnvValue(s.cfg.EnvFile, "SHELLMCP_HEARTBEAT", value); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to persist heartbeat setting"})
+		return
+	}
+	s.addSecurityAudit("security_heartbeat_changed", map[string]any{"enabled": *req.Enabled, "restart_required": true})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled, "restart_required": true, "message": "Restart the ShellMCP service to apply the setting."})
+}
+
 func sensitiveEnvKey(key string) bool {
 	key = strings.ToUpper(key)
 	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "BEARER", "API_KEY", "PRIVATE_KEY"} {
@@ -2523,11 +3795,14 @@ func (s *Server) adminClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) managedMCPClientsLocked() []managedMCPToken {
-	clients := make([]managedMCPToken, 0, len(s.managedMCP)+1)
+	clients := make([]managedMCPToken, 0, len(s.managedMCP)+len(s.oauthClients)+1)
 	for _, record := range s.managedMCP {
 		clients = append(clients, record)
 	}
-	if s.cfg.CtlToken != "" {
+	for clientID, metadata := range s.oauthClients {
+		clients = append(clients, oauthClientInventory(metadata, clientID))
+	}
+	if s.cfg.CtlToken != "" && s.legacyCtlTokenAllowed() {
 		clients = append(clients, managedMCPToken{
 			ID:         "legacy-ctl",
 			ClientID:   "legacy-ctl",
@@ -2564,7 +3839,7 @@ func (s *Server) adminJobsDataLocked() map[string]any {
 }
 
 func serverStatusCounts(servers []map[string]any) map[string]int {
-	counts := map[string]int{"online": 0, "offline": 0, "stale": 0, "pending": 0}
+	counts := map[string]int{"online": 0, "offline": 0, "stale": 0, "awaiting_approval": 0}
 	for _, srv := range servers {
 		if st, _ := srv["status"].(string); st != "" {
 			counts[st]++
@@ -2602,6 +3877,24 @@ func (s *Server) adminStatic(w http.ResponseWriter, r *http.Request) {
 	fs.ServeHTTP(w, r)
 }
 
+// adminLegacyStatic keeps the operational console available while the React
+// policy console owns the primary /admin/ entrypoint. It deliberately shares
+// the admin session gate and API origin with the primary UI so legacy tools do
+// not require a second credential or a hidden bearer token.
+func (s *Server) adminLegacyStatic(w http.ResponseWriter, r *http.Request) {
+	if !s.adminSessionValid(r) {
+		if wantsHTML(r) || strings.HasPrefix(r.URL.Path, "/admin/legacy/") {
+			s.renderAdminLogin(w, r, "")
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	root := filepath.Join(s.cfg.PublicDir, "admin-legacy")
+	fs := http.StripPrefix("/admin/legacy/", http.FileServer(http.Dir(root)))
+	fs.ServeHTTP(w, r)
+}
+
 func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2618,7 +3911,18 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		password := r.FormValue("password")
 		if s.cfg.AdminPassword == "" || !hmac.Equal([]byte(password), []byte(s.cfg.AdminPassword)) {
 			s.authAudit("admin_login_denied", r, map[string]any{"reason": "bad_password"})
+			if s.authFailureRateLimited(w, r) {
+				return
+			}
 			s.renderAdminLogin(w, r, "неверный пароль")
+			return
+		}
+		if s.securityRequiresMFA() && !s.verifyAdminMFARequest(r, r.FormValue("mfa_code")) {
+			s.authAudit("admin_login_denied", r, map[string]any{"reason": "mfa_required_or_invalid"})
+			if s.authFailureRateLimited(w, r) {
+				return
+			}
+			s.renderAdminLogin(w, r, "нужен корректный MFA-код")
 			return
 		}
 		expires := time.Now().Add(adminSessionTTL)
@@ -2648,6 +3952,8 @@ func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
 	next := safeAdminNext(r.URL.Query().Get("next"))
 	if next == "/admin/login" || next == "/admin/logout" {
 		next = "/admin/"
@@ -2656,8 +3962,48 @@ func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg
 	if errMsg != "" {
 		errHTML = `<div class="err">` + html.EscapeString(errMsg) + `</div>`
 	}
+	mfaHTML := ""
+	if s.securityRequiresMFA() {
+		passkeyEnrolled := s.webAuthnEnrolled()
+		mfaRequired := " required"
+		if passkeyEnrolled {
+			mfaRequired = ""
+		}
+		mfaHTML = `<label for="mfa_code">MFA-код</label><input id="mfa_code" name="mfa_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}"` + mfaRequired + `>`
+		if passkeyEnrolled {
+			mfaHTML += `<button id="webauthn-login" type="button">Войти с passkey</button><div id="webauthn-status" class="foot" role="status" aria-live="polite"></div><script>
+(function () {
+  const form = document.getElementById('login-form');
+  const button = document.getElementById('webauthn-login');
+  const status = document.getElementById('webauthn-status');
+  const decode = (value) => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)), (char) => char.charCodeAt(0));
+  const encode = (value) => { let binary = ''; new Uint8Array(value).forEach((byte) => { binary += String.fromCharCode(byte); }); return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
+  const fail = (error) => { status.textContent = error instanceof Error ? error.message : 'Passkey не подтверждён'; button.disabled = false; };
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    status.textContent = 'Подтвердите passkey в браузере';
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) throw new Error('Этот браузер не поддерживает passkey');
+      const begin = await fetch('/admin/api/security/mfa/webauthn/login/begin', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!begin.ok) throw new Error('Не удалось начать проверку passkey');
+      const options = (await begin.json()).publicKey;
+      options.challenge = decode(options.challenge);
+      if (options.allowCredentials) options.allowCredentials = options.allowCredentials.map((item) => ({ ...item, id: decode(item.id) }));
+      const credential = await navigator.credentials.get({ publicKey: options });
+      if (!credential) throw new Error('Passkey не выбран');
+      const response = credential.response;
+      const finish = await fetch('/admin/api/security/mfa/webauthn/login/finish', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: credential.id, rawId: encode(credential.rawId), response: { clientDataJSON: encode(response.clientDataJSON), authenticatorData: encode(response.authenticatorData), signature: encode(response.signature), userHandle: response.userHandle ? encode(response.userHandle) : null }, type: credential.type }) });
+      if (!finish.ok) throw new Error('Сервер отклонил passkey');
+      document.getElementById('mfa_code').required = false;
+      form.submit();
+    } catch (error) { fail(error); }
+  });
+}());
+</script>`
+		}
+	}
 	page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.hint{margin:0 0 18px;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Введите admin-пароль. Без cookie-сессии админка и её API не отдаются.</p><div class="hint">Для браузерной админки нужен <strong>admin-пароль</strong>. Для Custom GPT / generated Action schema используйте <code>Authorization: Bearer &lt;CTL_TOKEN&gt;</code> или Bearer JWT, выпущенный через OAuth.</div>` + errHTML + `<form method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.hint{margin:0 0 18px;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Войдите с <strong>AdminPassword</strong>. Без cookie-сессии админка и её API не отдаются.</p><div class="hint">Для настройки MCP client используйте Connect.</div>` + errHTML + `<form id="login-form" method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required>` + mfaHTML + `<button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
 	_, _ = io.WriteString(w, page)
 }
 
@@ -2665,24 +4011,28 @@ func (s *Server) adminSessionValid(r *http.Request) bool {
 	if s.cfg.AdminPassword == "" {
 		return true
 	}
-	c, err := r.Cookie(adminSessionCookieName)
-	if err != nil || c.Value == "" {
-		return false
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != adminSessionCookieName || cookie.Value == "" {
+			continue
+		}
+		parts := strings.Split(cookie.Value, ".")
+		if len(parts) != 2 {
+			continue
+		}
+		exp, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil || exp < time.Now().Unix() {
+			continue
+		}
+		mac, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			continue
+		}
+		want := s.adminSessionMAC(parts[0])
+		if hmac.Equal(mac, want) {
+			return true
+		}
 	}
-	parts := strings.Split(c.Value, ".")
-	if len(parts) != 2 {
-		return false
-	}
-	exp, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || exp < time.Now().Unix() {
-		return false
-	}
-	mac, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-	want := s.adminSessionMAC(parts[0])
-	return hmac.Equal(mac, want)
+	return false
 }
 
 func (s *Server) signAdminSession(expires time.Time) string {
@@ -2717,10 +4067,74 @@ func safeAdminNext(v string) string {
 }
 
 func (s *Server) addAuditLocked(name string, fields map[string]any) {
-	s.audit = append(s.audit, auditEvent{Time: time.Now().Format(time.RFC3339), Name: name, Fields: fields})
+	event := auditEvent{Time: time.Now().Format(time.RFC3339), Name: name, Fields: fields}
+	s.audit = append(s.audit, event)
+	s.enqueueTelemetryAudit(event)
 	if len(s.audit) > 500 {
 		s.audit = s.audit[len(s.audit)-500:]
 	}
+	if path := s.auditStatePath(); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			log.Printf("audit state directory failed path=%s err=%v", path, err)
+			return
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			log.Printf("audit state append failed path=%s err=%v", path, err)
+			return
+		}
+		_ = file.Chmod(0o600)
+		if err := json.NewEncoder(file).Encode(event); err != nil {
+			log.Printf("audit state encode failed path=%s err=%v", path, err)
+		}
+		if err := file.Close(); err != nil {
+			log.Printf("audit state close failed path=%s err=%v", path, err)
+		}
+	}
+}
+
+func (s *Server) auditStatePath() string {
+	if s.cfg.AuditStateFile != "" {
+		return s.cfg.AuditStateFile
+	}
+	if s.cfg.ConfigDir == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.ConfigDir, "audit.jsonl")
+}
+
+func (s *Server) loadAuditState() error {
+	path := s.auditStatePath()
+	if path == "" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 2<<20)
+	for scanner.Scan() {
+		var event auditEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return fmt.Errorf("decode audit event: %w", err)
+		}
+		s.audit = append(s.audit, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if len(s.audit) > 500 {
+		s.audit = s.audit[len(s.audit)-500:]
+	}
+	return nil
 }
 
 func readJSON(r *http.Request, dst any) error {
@@ -2905,12 +4319,15 @@ func (s *Server) origin(r *http.Request) string {
 		return s.cfg.PublicOrigin
 	}
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r != nil && (r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https") {
 		scheme = "https"
 	}
-	host := r.Host
-	if xf := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xf != "" {
-		host = xf
+	host := ""
+	if r != nil {
+		host = r.Host
+		if xf := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xf != "" {
+			host = xf
+		}
 	}
 	if host == "" {
 		host = "127.0.0.1"
@@ -2938,8 +4355,8 @@ func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request
 	origin := s.origin(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                origin,
-		"authorization_endpoint":                origin + "/authorize",
-		"token_endpoint":                        origin + "/token",
+		"authorization_endpoint":                origin + "/oauth/authorize",
+		"token_endpoint":                        origin + "/oauth/token",
 		"registration_endpoint":                 origin + "/register",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
@@ -2955,15 +4372,37 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req map[string]any
-	_ = readJSON(r, &req)
+	if err := readOAuthRegistrationJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_client_metadata", "error_description": err.Error()})
+		return
+	}
+	redirectURIs, err := oauthRedirectURIsFromRequest(req["redirect_uris"])
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_client_metadata", "error_description": err.Error()})
+		return
+	}
 	clientID := "gptadmin-" + newID()
 	clientSecret := newID()
+	s.mu.Lock()
+	if len(s.oauthClients) >= oauthClientsMaxItems {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "temporarily_unavailable", "error_description": "OAuth client registry is full"})
+		return
+	}
+	s.oauthClients[clientID] = oauthClientMetadata{RedirectURIs: redirectURIs, CreatedAt: time.Now().Unix()}
+	if err := s.saveOAuthClientsStateLocked(); err != nil {
+		delete(s.oauthClients, clientID)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "server_error", "error_description": "failed to persist OAuth client metadata"})
+		return
+	}
+	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  clientID,
 		"client_secret":              clientSecret,
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
-		"redirect_uris":              req["redirect_uris"],
+		"redirect_uris":              redirectURIs,
 		"grant_types":                []string{"authorization_code"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
@@ -2995,6 +4434,14 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
 		return
 	}
+	if !s.oauthClientAllowsRedirect(q.Get("client_id"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
+		return
+	}
+	if strings.TrimSpace(q.Get("code_challenge")) == "" || q.Get("code_challenge_method") != "S256" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "PKCE S256 is required"})
+		return
+	}
 	hidden := ""
 	for _, k := range []string{"client_id", "redirect_uri", "state", "scope", "code_challenge", "code_challenge_method", "resource"} {
 		v := q.Get(k)
@@ -3007,7 +4454,7 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	if scope == "" {
 		scope = "gptadmin.read gptadmin.exec"
 	}
-	page := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize GPTAdmin MCP</title><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:28px;border:1px solid #1e293b;border-radius:24px;background:#0f1623}.hint{margin:16px 0;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:14px;margin-top:10px}input{background:#111827;color:#fff;border:1px solid #334155}button{border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;font-weight:800}.muted{color:#94a3b8;word-break:break-all}</style></head><body><main class="card"><h1>Authorize GPTAdmin MCP</h1><p class="muted">Client: ` + html.EscapeString(q.Get("client_id")) + `</p><p class="muted">Resource: ` + html.EscapeString(resource) + `</p><p>Scopes: ` + html.EscapeString(scope) + `</p><div class="hint">Эта страница выпускает Bearer JWT для MCP/Custom GPT. Если у вас уже есть <code>CTL_TOKEN</code> или готовый Bearer JWT, можете использовать его напрямую в generated Action schema без повторной авторизации.</div><form method="POST" action="/authorize">` + hidden + `<label>Admin password</label><input type="password" name="password" autofocus required autocomplete="current-password"><button type="submit">Authorize</button></form></main></body></html>`
+	page := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize GPTAdmin MCP</title><style>body{font-family:system-ui,sans-serif;background:#070a12;color:#e5eefc;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:28px;border:1px solid #1e293b;border-radius:24px;background:#0f1623}.hint{margin:16px 0;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:14px;margin-top:10px}input{background:#111827;color:#fff;border:1px solid #334155}button{border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;font-weight:800}.muted{color:#94a3b8;word-break:break-all}</style></head><body><main class="card"><h1>Authorize GPTAdmin MCP</h1><p class="muted">Client: ` + html.EscapeString(q.Get("client_id")) + `</p><p class="muted">Resource: ` + html.EscapeString(resource) + `</p><p>Scopes: ` + html.EscapeString(scope) + `</p><div class="hint">Эта страница выпускает Bearer JWT для MCP/Custom GPT. Используйте OAuth или готовый Bearer JWT, выпущенный через Hub; credential values никогда не показываются на этой странице.</div><form method="POST" action="/oauth/authorize">` + hidden + `<label>Admin password</label><input type="password" name="password" autofocus required autocomplete="current-password"><button type="submit">Authorize</button></form></main></body></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(page))
 }
@@ -3030,6 +4477,14 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	if !s.allowedRedirect(redirectURI) || !s.allowedResource(resource, r) {
 		s.authAudit("oauth_authorize_denied", r, map[string]any{"reason": "invalid redirect_uri or resource", "redirect_uri": redirectURI, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid redirect_uri or resource"})
+		return
+	}
+	if !s.oauthClientAllowsRedirect(r.Form.Get("client_id"), redirectURI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
+		return
+	}
+	if strings.TrimSpace(r.Form.Get("code_challenge")) == "" || r.Form.Get("code_challenge_method") != "S256" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "PKCE S256 is required"})
 		return
 	}
 	code := newID()
@@ -3074,12 +4529,21 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "code not found, expired, or resource mismatch"})
 		return
 	}
+	if r.Form.Get("client_id") != data.ClientID || r.Form.Get("redirect_uri") != data.RedirectURI {
+		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "client or redirect mismatch", "client_id": data.ClientID, "form": s.formForAudit(r)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "client or redirect mismatch"})
+		return
+	}
 	if data.Challenge != "" && !pkceOK(r.Form.Get("code_verifier"), data.Challenge) {
 		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "PKCE verification failed", "client_id": data.ClientID, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 		return
 	}
-	token, err := s.signJWT(map[string]any{"sub": "admin", "scope": data.Scope, "client_id": data.ClientID, "iss": s.origin(r), "aud": resource, "resource": resource, "exp": time.Now().Add(12 * time.Hour).Unix(), "iat": time.Now().Unix()})
+	claims := map[string]any{"sub": "admin", "scope": data.Scope, "client_id": data.ClientID, "iss": s.origin(r), "aud": resource, "resource": resource, "exp": time.Now().Add(12 * time.Hour).Unix(), "iat": time.Now().Unix(), "kid": s.jwtKeyID()}
+	if profileID := s.oauthClientProfileID(data.ClientID); profileID != "" {
+		claims["profile_id"] = profileID
+	}
+	token, err := s.signJWT(claims)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -3328,7 +4792,16 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": authErr.Error()})
 		return
 	}
-	result, rpcErr := s.agentToolCall(agent, toolName, args)
+	callArgs, approvalID := approvalArguments(args)
+	if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, toolName, callArgs, approvalID); blocked {
+		writeJSON(w, http.StatusPreconditionRequired, approvalResponse)
+		return
+	}
+	if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, toolName); blocked {
+		writeJSON(w, http.StatusTooManyRequests, budgetResponse)
+		return
+	}
+	result, rpcErr := s.agentToolCall(r, agent, toolName, callArgs)
 	if rpcErr != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "failed", "error": rpcErr})
 		return
@@ -3508,7 +4981,12 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 	params := mapValue(body["params"])
 	switch method {
 	case "initialize":
-		return map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + agentSlug(agent.AgentID), "version": BuildVersion}}, nil, false
+		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") {
+			return map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + agentSlug(agent.AgentID), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
+		}
+		jobID := s.enqueueRelay(agent.AgentID, method, params)
+		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+		return result, rpcErr, false
 	case "notifications/initialized", "notifications/cancelled":
 		return nil, nil, true
 	case "tools/list":
@@ -3529,7 +5007,14 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if authErr != nil {
 			return nil, map[string]any{"code": -32003, "message": authErr.Error()}, false
 		}
-		result, err := s.agentToolCall(agent, name, args)
+		callArgs, approvalID := approvalArguments(args)
+		if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, name, callArgs, approvalID); blocked {
+			return nil, map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}, false
+		}
+		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name); blocked {
+			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
+		}
+		result, err := s.agentToolCall(r, agent, name, callArgs)
 		return result, err, false
 	case "resources/list":
 		result, err := s.agentResourcesList(r, agent)
@@ -3576,22 +5061,28 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 	return map[string]any{"tools": []map[string]any{}}, nil
 }
 
-func (s *Server) agentToolCall(agent Agent, name string, args map[string]any) (any, any) {
+func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
 	if agent.AgentID == "hub" {
 		return mcpToolResult(s.appsSDKCall(name, args)), nil
 	}
 	if strings.HasPrefix(agent.AgentID, "shell:") {
-		return unwrapMCPUpstream(s.callShellTool(agent.AgentID, name, args, false, s.cfg.DefaultTimeout))
+		return unwrapMCPUpstream(s.callShellToolWithTraceParent(agent.AgentID, name, args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r)))
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args})
+	jobID := s.enqueueRelayWithTraceParent(agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
 func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 	if agent.AgentID == "hub" {
-		return appsSDKResourcesList(), nil
+		return s.appsSDKResourcesList(), nil
 	}
-	if strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "resources/list") {
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		return map[string]any{"resources": []map[string]any{
+			{"uri": startupInstructionsResourceURI, "name": "GPTAdmin startup instructions", "mimeType": "text/markdown"},
+			{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"},
+		}}, nil
+	}
+	if !hasCapability(agent, "resources/list") {
 		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
 	}
 	jobID := s.enqueueRelay(agent.AgentID, "resources/list", map[string]any{})
@@ -3602,7 +5093,14 @@ func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (an
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourceRead(r, uri), nil
 	}
-	if strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(uri, "gptadmin://server/") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
+	if strings.HasPrefix(agent.AgentID, "shell:") {
+		if uri == startupInstructionsResourceURI {
+			return s.startupInstructionsResourceRead(r, uri), nil
+		}
+		b, _ := json.Marshal(s.agentCard(r, agent))
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
+	}
+	if strings.HasPrefix(uri, "gptadmin://server/") || strings.HasPrefix(uri, "gptadmin://agent/") || !hasCapability(agent, "resources/read") {
 		b, _ := json.Marshal(s.agentCard(r, agent))
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
 	}
@@ -3680,7 +5178,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	var rpcErr any
 	switch method {
 	case "initialize":
-		result = map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}}
+		result = map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -3692,12 +5190,17 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			rpcErr = map[string]any{"code": -32602, "message": "tool name is required"}
 		} else if err := authorizeFacadeCall(r, name, args); err != nil {
+			s.recordActivationTelemetry("failure")
+			s.auditToolDecision(r, "hub", name, args, "deny", err.Error(), nil, http.StatusForbidden)
 			rpcErr = map[string]any{"code": -32003, "message": err.Error()}
 		} else {
-			result = mcpToolResult(s.appsSDKCallForRequest(r, name, args))
+			s.recordActivationTelemetry("first_tool")
+			structured := s.appsSDKCallForRequest(r, name, args)
+			result = mcpToolResult(structured)
+			s.auditToolDecision(r, "hub", name, args, "allow", "", map[string]any{}, http.StatusOK)
 		}
 	case "resources/list":
-		result = appsSDKResourcesList()
+		result = s.appsSDKResourcesList()
 	case "resources/read":
 		uri := firstString(params, "uri")
 		if uri == "" {
@@ -3717,13 +5220,22 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) bridgeKeyMatches(key string) bool {
+	if s.cfg.BridgeKey == "" || key != s.cfg.BridgeKey {
+		return false
+	}
+	// The default bridge key is the legacy CTL bearer. A separately configured
+	// bridge credential remains valid after the migration deadline.
+	return s.cfg.BridgeKey != s.cfg.CtlToken || s.legacyCtlTokenAllowed()
+}
+
 func (s *Server) mcpPrompt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if s.cfg.BridgeKey != "" && r.URL.Query().Get("key") != s.cfg.BridgeKey {
+	if !s.bridgeKeyMatches(r.URL.Query().Get("key")) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
@@ -3751,7 +5263,7 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if s.cfg.BridgeKey != "" && r.URL.Query().Get("key") != s.cfg.BridgeKey {
+	if !s.bridgeKeyMatches(r.URL.Query().Get("key")) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
@@ -3769,11 +5281,27 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tool is required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "result": s.appsSDKCall(tool, args)})
+	// The legacy bridge key is an ingress credential, not a scoped MCP client.
+	// Treat bridge calls as read-only until the caller migrates to an OAuth
+	// connection with an explicit access profile; otherwise this endpoint would
+	// invoke the executor with a nil request and bypass policy gates.
+	bridgeRequest := requestWithAuthClaims(r, map[string]any{
+		"sub":         "legacy-bridge",
+		"scope":       "gptadmin.read",
+		"access_mode": accessModeReadonly,
+	})
+	if err := authorizeFacadeCall(bridgeRequest, tool, args); err != nil {
+		s.auditToolDecision(bridgeRequest, "bridge", tool, args, "deny", err.Error(), nil, http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"status": "failed", "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "result": s.appsSDKCallForRequest(bridgeRequest, tool, args)})
 }
 
 func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	switch name {
+	case "secret_request", "secret_status":
+		return s.secretToolForRequest(nil, name, args)
 	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard":
 		s.mu.Lock()
 		servers := s.publicServersLocked(nil)
@@ -3790,6 +5318,12 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
 		s.mu.Unlock()
 		return map[string]any{"servers": servers}
+	case "pending", "list_pending_servers", "approve_pending_server":
+		result, _ := s.callHubToolForRequest(nil, name, args)
+		return result
+	case "demo":
+		result, _ := s.callHubTool(name, args)
+		return result
 	case "list_mcp_agents", "listMcpAgents":
 		s.mu.Lock()
 		agents := s.publicAgentsLocked(nil)
@@ -3803,13 +5337,13 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		}
 		target = selectedTarget
 		if target == "hub" {
-			return map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}
+			return withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
 		}
 		if strings.HasPrefix(target, "shell:") {
-			return map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
+			return withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
 		}
 		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
-		return s.waitRelay(jobID, s.cfg.DefaultTimeout)
+		return withSchemaContractMetadata(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 	case "inspect", "inspect_system", "inspectSystem":
 		target := firstString(args, "target", "server_id", "agent_id")
 		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
@@ -3843,6 +5377,41 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 }
 
 func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
+	if name == "secret_request" || name == "secret_status" {
+		return s.secretToolForRequest(r, name, args)
+	}
+	if name == "demo" {
+		result, _ := s.callHubToolForRequest(r, name, args)
+		return result
+	}
+	if name == "schema" || name == "list_mcp_tools" || name == "listMcpTools" {
+		if err := authorizeFacadeCall(r, name, args); err != nil {
+			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
+		}
+		requestedTarget := firstString(args, "target", "server_id", "agent_id")
+		if requestAccessMode(r) == accessModeReadonly && requestedTarget != "hub" && !strings.HasPrefix(requestedTarget, "shell:") {
+			return map[string]any{"server_id": requestedTarget, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}}
+		}
+		return s.appsSDKSchemaForRequest(r, args)
+	}
+	if name == "inspect" || name == "inspect_system" || name == "inspectSystem" {
+		if err := authorizeFacadeCall(r, name, args); err != nil {
+			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
+		}
+		target := firstString(args, "target", "server_id", "agent_id")
+		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+		if status != http.StatusOK {
+			return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+		}
+		if !strings.HasPrefix(selectedTarget, "shell:") {
+			return map[string]any{"server_id": selectedTarget, "status": "failed", "error": "system inspection requires a shell:* target"}
+		}
+		response, responseStatus := s.executeMCPTool(r, selectedTarget, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout, "")
+		if responseStatus >= http.StatusBadRequest {
+			return map[string]any{"server_id": selectedTarget, "status": "failed", "error": response}
+		}
+		return response
+	}
 	if requestAccessMode(r) == accessModeReadonly && (name == "schema" || name == "list_mcp_tools" || name == "listMcpTools") {
 		target := firstString(args, "target", "server_id", "agent_id")
 		if target != "hub" && !strings.HasPrefix(target, "shell:") {
@@ -3850,6 +5419,9 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 		}
 	}
 	if name == "call_mcp_tool" || name == "callMcpTool" {
+		return s.appsSDKCallMCP(r, name, args)
+	}
+	if name == "execute" {
 		return s.appsSDKCallMCP(r, name, args)
 	}
 	result := s.appsSDKCall(name, args)
@@ -3868,6 +5440,30 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 	return payload
 }
 
+func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) any {
+	target := firstString(args, "target", "server_id", "agent_id")
+	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
+	if status != http.StatusOK {
+		return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+	}
+	target = selectedTarget
+	var result map[string]any
+	if target == "hub" {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}}
+	} else if strings.HasPrefix(target, "shell:") {
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
+	} else {
+		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
+		result = s.waitRelay(jobID, s.cfg.DefaultTimeout)
+	}
+	if response, ok := result["response"].(map[string]any); ok {
+		if raw, ok := response["tools"].([]map[string]any); ok {
+			response["tools"] = toolsForRequest(r, target, raw)
+		}
+	}
+	return withSchemaContractMetadata(result)
+}
+
 func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]any) any {
 	target := firstString(args, "target", "server_id", "agent_id")
 	toolName := firstString(args, "tool", "tool_name", "name")
@@ -3884,6 +5480,9 @@ func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]an
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
 		return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
+	}
+	if response, blocked := s.validateSchemaContract(r, selectedTarget, args); blocked {
+		return response
 	}
 	response, status := s.executeMCPTool(r, selectedTarget, toolName, callArgs, truthy(args["background"]), s.cfg.DefaultTimeout, firstString(args, "idempotency_key"))
 	if status >= http.StatusBadRequest {
@@ -3915,7 +5514,7 @@ func appsSDKTools() []map[string]any {
 		"openai/toolInvocation/invoking": "Opening GPTAdmin…",
 		"openai/toolInvocation/invoked":  "GPTAdmin ready.",
 	}
-	return []map[string]any{
+	tools := []map[string]any{
 		{
 			"name":            "ui",
 			"title":           "Open UI",
@@ -3937,11 +5536,31 @@ func appsSDKTools() []map[string]any {
 			"_meta":           readMeta,
 		},
 		{
+			"name":            "demo",
+			"title":           "Safe connection check",
+			"description":     "Run a read-only connection check without shell execution, file access or credentials.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
+		},
+		{
+			"name":            "approve_pending_server",
+			"title":           "Approve ShellMCP device",
+			"description":     "Approve one ShellMCP device awaiting enrollment. Use the exact server_id returned by discover with detail=full or pending.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}}, "required": []string{"server_id"}, "additionalProperties": false},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
 			"name":            "schema",
 			"title":           "Schema",
 			"description":     "List tools for one target selected by discover. Never use target=default.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}, "additionalProperties": false},
-			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "additionalProperties": true}}, "additionalProperties": true},
+			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "description": "Includes schema_version and schema_digest_sha256 when listing tools.", "additionalProperties": true}}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
 			"_meta":           readMeta,
@@ -3965,7 +5584,7 @@ func appsSDKTools() []map[string]any {
 			"name":            "execute",
 			"title":           "Execute",
 			"description":     "Execute one tool on one target. Use schema first. Retry the same operation with the same idempotency_key.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"target", "tool"}, "additionalProperties": true},
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}, "schema_version": map[string]any{"type": "string"}, "schema_digest_sha256": map[string]any{"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$"}}, "required": []string{"target", "tool"}, "additionalProperties": true},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
 			"securitySchemes": execSecurity,
@@ -3982,10 +5601,14 @@ func appsSDKTools() []map[string]any {
 			"_meta":           readMeta,
 		},
 	}
+	return append(tools, secretAppsTools()...)
 }
 
-func appsSDKResourcesList() map[string]any {
+const startupInstructionsResourceURI = "gptadmin://startup-instructions"
+
+func (s *Server) appsSDKResourcesList() map[string]any {
 	return map[string]any{"resources": []map[string]any{
+		{"uri": startupInstructionsResourceURI, "name": "GPTAdmin startup instructions", "description": "Operational guidance for GPTAdmin system administration; permissions and approvals remain authoritative.", "mimeType": "text/markdown"},
 		{
 			"uri":         "ui://widget/admin-v3.html",
 			"name":        "GPTAdmin dashboard widget",
@@ -4015,6 +5638,9 @@ func appsSDKWidgetMeta() map[string]any {
 }
 
 func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
+	if uri == startupInstructionsResourceURI {
+		return s.startupInstructionsResourceRead(r, uri)
+	}
 	if uri == "gptadmin://servers" || uri == "gptadmin://agents" {
 		s.mu.Lock()
 		servers := s.publicServersLocked(nil)
@@ -4026,6 +5652,10 @@ func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "unknown GPTAdmin resource"}}}
 	}
 	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": appsSDKWidgetHTML(s.origin(r)), "_meta": appsSDKWidgetMeta()}}}
+}
+
+func (s *Server) startupInstructionsResourceRead(r *http.Request, uri string) map[string]any {
+	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/markdown", "text": s.startupInstructionsTextForRequest(r)}}}
 }
 
 func appsSDKWidgetHTML(origin string) string {
@@ -4089,7 +5719,65 @@ func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, er
 	if tok == "" {
 		return nil, errors.New("empty bearer token")
 	}
-	return s.verifyJWT(tok)
+	return s.verifyJWTForRequest(r, tok)
+}
+
+func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]any, error) {
+	claims, err := s.verifyJWT(token)
+	if err != nil {
+		return nil, err
+	}
+	expected := strings.TrimRight(s.resource(r), "/")
+	if expected == "" || !jwtAudienceMatches(claims["aud"], expected) {
+		return nil, errors.New("token audience does not match this Hub")
+	}
+	resource, ok := claims["resource"].(string)
+	if !ok || strings.TrimRight(resource, "/") != expected {
+		return nil, errors.New("token resource does not match this Hub")
+	}
+	if scope, ok := claims["scope"].(string); !ok || !validJWTScopes(scope) {
+		return nil, errors.New("token scope is invalid")
+	}
+	if sub, ok := claims["sub"].(string); !ok || strings.TrimSpace(sub) == "" {
+		return nil, errors.New("token subject is required")
+	}
+	if iat := intFromAny(claims["iat"]); iat <= 0 || int64(iat) > time.Now().Unix()+60 {
+		return nil, errors.New("token issued-at is invalid")
+	}
+	if kid, ok := claims["kid"].(string); !ok || strings.TrimSpace(kid) == "" || kid != s.jwtKeyID() {
+		return nil, errors.New("token key id is invalid")
+	}
+	return claims, nil
+}
+
+func (s *Server) jwtKeyID() string {
+	if strings.TrimSpace(s.cfg.OAuthKeyID) != "" {
+		return strings.TrimSpace(s.cfg.OAuthKeyID)
+	}
+	return defaultJWTKeyID
+}
+
+func validJWTScopes(value string) bool {
+	for _, scope := range strings.Fields(value) {
+		if scope != "gptadmin.read" && scope != "gptadmin.inspect" && scope != "gptadmin.exec" {
+			return false
+		}
+	}
+	return strings.TrimSpace(value) != ""
+}
+
+func jwtAudienceMatches(value any, expected string) bool {
+	switch audience := value.(type) {
+	case string:
+		return strings.TrimRight(audience, "/") == expected
+	case []any:
+		for _, item := range audience {
+			if candidate, ok := item.(string); ok && strings.TrimRight(candidate, "/") == expected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) authAudit(name string, r *http.Request, fields map[string]any) {
@@ -4206,12 +5894,20 @@ func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 		tok := strings.TrimSpace(auth[7:])
 		if s.cfg.CtlToken != "" && tok == s.cfg.CtlToken {
+			s.markLegacyCtlToken(w)
+			if !s.legacyCtlTokenAllowed() {
+				s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "legacy ctl token migration deadline passed"})
+				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "legacy token expired; use OAuth connection"})
+				return false
+			}
 			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "ctl_token"})
 			return true
 		}
-		if claims, err := s.verifyJWT(tok); err == nil {
+		if claims, err := s.verifyJWTForRequest(r, tok); err == nil {
 			s.authAudit("mcp_auth_ok", r, map[string]any{"auth_kind": "oauth_jwt", "jwt_claims": claims})
 			*r = *requestWithAuthClaims(r, claims)
+			*r = *s.applyAccessProfileContext(r, claims)
 			return true
 		} else {
 			s.authAudit("mcp_auth_denied", r, map[string]any{"reason": err.Error(), "jwt_claims_unverified": decodeJWTClaimsUnverified(tok)})
@@ -4220,6 +5916,9 @@ func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "missing authorization header"})
 	} else {
 		s.authAudit("mcp_auth_denied", r, map[string]any{"reason": "unsupported authorization scheme"})
+	}
+	if s.authFailureRateLimited(w, r) {
+		return false
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
 	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
@@ -4241,7 +5940,7 @@ func (s *Server) writeCtlUnauthorized(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminPasswordOK(v string) bool {
 	secret := s.cfg.AdminPassword
-	if secret == "" {
+	if secret == "" && s.legacyCtlTokenAllowed() {
 		secret = s.cfg.CtlToken
 	}
 	return secret != "" && hmac.Equal([]byte(v), []byte(secret))
@@ -4254,6 +5953,9 @@ func (s *Server) allowedRedirect(uri string) bool {
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
+	}
+	if s.sameOriginOAuthCallback(u) {
+		return true
 	}
 	host := strings.ToLower(u.Hostname())
 	if (host == "localhost" || host == "127.0.0.1") && (u.Scheme == "http" || u.Scheme == "https") {
@@ -4269,6 +5971,17 @@ func (s *Server) allowedRedirect(uri string) bool {
 		return true
 	}
 	return false
+}
+
+func (s *Server) sameOriginOAuthCallback(uri *url.URL) bool {
+	if uri == nil || uri.Path != "/connect/callback" || uri.RawQuery != "" || uri.Fragment != "" {
+		return false
+	}
+	origin, err := url.Parse(strings.TrimRight(s.cfg.PublicOrigin, "/"))
+	if err != nil || origin.Scheme == "" || origin.Host == "" {
+		return false
+	}
+	return uri.Scheme == origin.Scheme && strings.EqualFold(uri.Host, origin.Host)
 }
 
 func (s *Server) allowedResource(resource string, r *http.Request) bool {
@@ -4349,6 +6062,9 @@ func (s *Server) verifyJWT(token string) (map[string]any, error) {
 		s.mu.Unlock()
 		if known && record.RevokedAt != 0 {
 			return nil, errors.New("token revoked")
+		}
+		if known && record.ProfileID != "" {
+			claims["profile_id"] = record.ProfileID
 		}
 	}
 	return claims, nil

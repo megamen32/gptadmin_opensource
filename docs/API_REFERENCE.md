@@ -1,6 +1,40 @@
 # API Reference
 
+## Operational probes
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/healthz` | none | Liveness only; returns `ok`. |
+| `GET` | `/version` | none | Build version and commit identity. |
+| `GET` | `/metrics` | none | Bounded aggregate Hub counts; never includes credentials, arguments or file contents. |
+
 REST + MCP endpoints exposed by the hub.
+
+## Request correlation
+
+The Hub accepts an optional W3C `traceparent` request header. It returns a
+validated child `traceparent` and the bounded `X-Request-ID` response header;
+queued relay and ShellMCP jobs carry the same correlation fields through poll
+and result delivery. Invalid trace headers are discarded and replaced. Trace
+metadata never contains command arguments, credentials or file contents.
+
+An operator may opt in to OTLP/HTTP log export with
+`GPTADMIN_OTLP_ENDPOINT`. External collectors must use HTTPS; plain HTTP is
+accepted only for loopback development collectors. The exporter uses a
+bounded asynchronous queue and exports allowlisted event fields such as
+policy decision, tool, result reference and trace IDs. It never exports raw
+arguments, commands, credentials, URLs or file contents, and collector
+delivery failures do not fail the originating Hub request.
+
+## Remote secret ingress
+
+Full-access MCP clients can call `secret_request` and `secret_status`. The
+first returns only `request_id`, `input_url`, `secret_ref`, `env_name`, `file`
+and expiry metadata. The operator submits the value once to
+`POST /secret-input/{token}`; neither MCP nor the response body accepts or
+returns the plaintext. A later `shell_exec` may pass
+`secret_env: {"ENV_NAME": "secret_ref"}`. Hub job responses and logs redact
+the resolved value, and readonly profiles cannot access these operations.
 
 ## Auth quick reference
 
@@ -13,7 +47,7 @@ REST + MCP endpoints exposed by the hub.
 | `GET /servers` | Bearer `CTL_TOKEN` |
 | `GET /api.json` | none |
 | `GET /openapi.yaml` | none |
-| `POST /authorize` | `ADMIN_PASSWORD` form |
+| `POST /oauth/authorize` | `ADMIN_PASSWORD` form |
 | `POST /oauth/token` | client credentials |
 
 See [Configuration → Auth model](./CONFIGURATION.md#auth-model).

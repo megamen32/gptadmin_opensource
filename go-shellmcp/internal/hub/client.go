@@ -48,18 +48,22 @@ type Beat struct {
 }
 
 type QueueJob struct {
-	ID        string            `json:"id"`
-	ToolName  string            `json:"tool_name,omitempty"`
-	Arguments map[string]any    `json:"arguments,omitempty"`
-	Cmd       string            `json:"cmd,omitempty"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Timeout   int               `json:"timeout,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	ID          string            `json:"id"`
+	TraceID     string            `json:"trace_id,omitempty"`
+	TraceParent string            `json:"traceparent,omitempty"`
+	ToolName    string            `json:"tool_name,omitempty"`
+	Arguments   map[string]any    `json:"arguments,omitempty"`
+	Cmd         string            `json:"cmd,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	Timeout     int               `json:"timeout,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
 }
 
 type TaskResult struct {
-	ID     string `json:"id"`
-	Result any    `json:"result"`
+	ID          string `json:"id"`
+	TraceID     string `json:"trace_id,omitempty"`
+	TraceParent string `json:"traceparent,omitempty"`
+	Result      any    `json:"result"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, beat Beat) (*http.Response, []byte, error) {

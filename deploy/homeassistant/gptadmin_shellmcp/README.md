@@ -2,6 +2,10 @@
 
 Local HAOS add-on source for a GPTAdmin ShellMCP server/agent. It runs with `host_network: true`, listens on `:25900`, registers as `haos`, and exposes direct MCP endpoints.
 
+The child MCP registry persists at `/data/shellmcp-mcp.json`. Heartbeat is
+opt-in. Set `queue: false` to use the add-on as a standalone HTTP MCP host
+without Hub polling; keep `queue: true` for outbound-only Hub long-poll mode.
+
 This directory is safe to commit: it contains no live tokens. The generated `config.yaml` used on HAOS is created by `scripts/deploy_haos_shellmcp.sh` from `/etc/gptadmin/gptadmin.env` on the primary server.
 
 Typical deploy from `roomhacker-server-100`:

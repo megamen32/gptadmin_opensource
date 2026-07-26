@@ -90,12 +90,12 @@ sudo gptadmin urls --json  # machine-readable output
 
 **The agent doesn't show up in `/admin`**
 - Check `HUB_URL` is set and reachable from the agent
-- Check `SHELLMCP_TOKEN` matches what the hub expects
+- Re-run the agent connection step from the Hub connection page
 - Look at the agent logs: `journalctl --user -u shellmcp -n 50`
 
 **`/mcp` returns 401**
-- You're using `CTL_TOKEN` directly. `/mcp` needs an OAuth bearer. See
-  [Configuration → OAuth](./CONFIGURATION.md#oauth).
+- Complete the OAuth connection from the Hub URL; `/mcp` accepts scoped MCP
+  connections, not copied service credentials. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
 
 **Browser extension buttons don't appear**
 - Refresh the page
@@ -104,4 +104,5 @@ sudo gptadmin urls --json  # machine-readable output
 
 **Custom GPT action test fails**
 - Verify the Hub URL in `servers.url` matches your hub
-- Verify the Bearer token is your `CTL_TOKEN`, not `SHELLMCP_TOKEN`
+- Re-open the Hub connection page and complete the OAuth authorization for the
+  Custom GPT client

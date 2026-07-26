@@ -35,6 +35,7 @@ options:
   port: 25900
   queue: true
   heartbeat: false
+  mcp_config: "/data/shellmcp-mcp.json"
   default_cwd: "/config"
   exec_timeout: 300
   log_limit_b: 8192
@@ -46,6 +47,7 @@ schema:
   port: int
   queue: bool
   heartbeat: bool
+  mcp_config: str
   default_cwd: str
   exec_timeout: int
   log_limit_b: int

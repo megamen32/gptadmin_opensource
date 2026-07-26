@@ -12,6 +12,7 @@ package-lock.json.bak*
 
 # --- Build artifacts ---
 build/
+.build/
 *.spec
 .buildcache/
 
@@ -45,6 +46,9 @@ scripts/check_mac_tunnel_matrix.env
 # --- AI assistant settings (private) ---
 .claude/
 .serena/
+.juggler/
+.playwright-cli/
+graphify-out/
 
 # --- Private infrastructure prompts ---
 public/gptadmin_instructions_under_8000.md
@@ -60,3 +64,4 @@ public/gptadmin_infrastructure_mcp_instructions.md
 .gitpublic/scan
 *.db-shm
 *.db-wal
+private/Cloud/.juggler/

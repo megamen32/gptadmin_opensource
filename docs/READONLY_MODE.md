@@ -11,9 +11,12 @@ A read-only JWT has `access_mode=readonly` and the scopes `gptadmin.read` and
 run `shell_exec`, manage child MCP servers, create backups or change services.
 
 The global Hub MCP surface for this profile omits the generic
-`call_mcp_tool`. It exposes `inspect_system`, marked with MCP
-`readOnlyHint=true`, plus the bounded discovery tools. The tool list is stable
-for the lifetime of the connection.
+`call_mcp_tool`. It exposes a safe `demo` connection check and
+`inspect_system`, both marked with MCP `readOnlyHint=true`, plus the bounded
+discovery tools. The demo returns only Hub URL, MCP endpoint, build version and
+the effective access mode; it never echoes arguments, reads files, runs
+commands or returns credentials. The tool list is stable for the lifetime of
+the connection.
 
 Issue this connection in **Admin -> JWT for a client without OAuth -> Read
 only**, or use the advanced CLI fallback:

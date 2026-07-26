@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 const $=(id)=>document.getElementById(id);let state=null,currentView=localStorage.getItem('gptadmin_view')||'overview',updateStartedFromBuild=null;
-function token(){const input=$('token');return (input?.value||'').trim()||localStorage.getItem('gptadmin_ctl_token')||''}function saveToken(){const input=$('token');if(!input)return;localStorage.setItem('gptadmin_ctl_token',input.value.trim());refreshAll()}function hdr(){const h={'Content-Type':'application/json'};const t=token();if(t)h.Authorization='Bearer '+t;return h}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}function displayKind(kind){return kind==='virtual_hub'?'hub':kind}function toggleSidebar(){ $('sidebar').classList.toggle('open') }
+function hdr(){return {'Content-Type':'application/json'}}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function cls(s){return String(s||'').replace(/[^a-zA-Z0-9_-]/g,'_')}function displayKind(kind){return kind==='virtual_hub'?'hub':kind}function toggleSidebar(){ $('sidebar').classList.toggle('open') }
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...hdr(),...(opts.headers||{})}});const t=await r.text();let j;try{j=JSON.parse(t)}catch{j={text:t}}if(!r.ok)throw new Error((j&&j.detail)||j.error||t||r.status);return j}
 function asTable(rows,cols){if(!rows||!rows.length)return '<p class="muted">пусто</p>';return '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c[0])+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
 function compactTime(ts){if(!ts)return '—';const numeric=typeof ts==='number'?ts:Number(ts);const value=Number.isFinite(numeric)&&String(ts).trim()!==''?(numeric<1e12?numeric*1000:numeric):ts;const d=new Date(value);if(Number.isNaN(d.getTime()))return ts;return d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
@@ -400,73 +400,124 @@ async function addManagedMcp(){try{const p=mcpPayloadBase('add');p.name=$('mcpNa
 
 async function getJob(){try{const id=$('jobId').value.trim();const j=await api('/mcp-relay/job/'+encodeURIComponent(id)+'?verbose=true&include_raw=true');$('result').textContent=JSON.stringify(j,null,2);refreshAll()}catch(e){$('result').textContent='ERR '+e.message}}
 function formatArgs(){try{$('args').value=JSON.stringify(JSON.parse($('args').value||'{}'),null,2)}catch(e){$('result').textContent='Bad JSON: '+e.message}}
-const topTokenInput=$('token');if(topTokenInput)topTokenInput.value=localStorage.getItem('gptadmin_ctl_token')||'';initMaxActiveIpsInput();showView(currentView);loadFailover().catch(()=>{});refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
+initMaxActiveIpsInput();showView(currentView);loadFailover().catch(()=>{});refreshAll();setInterval(()=>{if($('autoRefresh').checked)refreshAll()},15000);
 
 // ===== Security management =====
-async function loadSecurityEnv(){
-  const el=$('securityEnv');
-  el.innerHTML='<p class="muted">Загрузка…</p>';
+async function loadSecurityControls(){
   try{
-    const j=await api('/admin/api/security/env');
-    const variables=Array.isArray(j.variables)?j.variables:[];
-    const heartbeatInput=$('shellHeartbeatEnabled');
-    if(heartbeatInput)heartbeatInput.checked=!!j.shellmcp_heartbeat;
-    el.innerHTML=variables.map(v=>{
-      const label=v.sensitive?'sensitive · value hidden':(v.present?'set':'empty');
-      return `<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">${esc(v.key)}</span><span class="muted small">${label}</span></div><div class="mono">${v.present?'length '+esc(String(v.length)):'not set'}</div></div>`;
-    }).join('');
-  }catch(e){
-    el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>';
-  }
+    const preset=await api('/admin/api/security/preset');
+    if($('securityPreset'))$('securityPreset').value=preset.preset||'working_default';
+    $('securityPresetStatus').textContent=JSON.stringify({preset:preset.preset,mfa_enrolled:!!preset.mfa_enrolled,updated_at:preset.updated_at||null},null,2);
+    const env=await api('/admin/api/security/env');
+    if($('shellHeartbeatEnabled'))$('shellHeartbeatEnabled').checked=!!env.shellmcp_heartbeat;
+    $('securityHeartbeatResult').textContent=env.shellmcp_heartbeat?'Включён':'Выключен';
+    const telemetry=await api('/admin/api/telemetry');
+    if($('securityTelemetryEnabled'))$('securityTelemetryEnabled').checked=!!telemetry.enabled;
+    $('securityTelemetryResult').textContent=JSON.stringify({enabled:!!telemetry.enabled,local_only:!!telemetry.local_only,counters:telemetry.counters||{}},null,2);
+    await loadApprovals();
+  }catch(e){$('securityPresetStatus').textContent='ERR '+e.message}
 }
 
-async function setEnvVar(){
-  const key=$('secEnvKey').value;
-  const val=$('secEnvVal').value.trim();
-  if(!val){alert('Введите значение');return}
-  const realKey=key==='_custom'?prompt('Имя переменной:'):key;
-  if(!realKey)return;
-  if(!confirm('Установить '+realKey+' в env? Это изменит конфигурацию хаба.'))return;
+async function saveSecurityPreset(){
+  if(!await ensureSecurityReauth())return;
   try{
-    const cmd=`grep -v '^${realKey}=' /etc/gptadmin/gptadmin.env 2>/dev/null > /tmp/_gptadmin.env.tmp && echo '${realKey}=${val.replace(/'/g,"'\''")}' >> /tmp/_gptadmin.env.tmp && mv /tmp/_gptadmin.env.tmp /etc/gptadmin/gptadmin.env && echo OK || echo FAIL`;
-    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:roomhacker-server-100',
-      tool_name:'shell_exec',
-      arguments:{cmd,sudo:true}
-    })});
-    const sc=j.response?.structuredContent||j.structuredContent||{};
-    const result=sc.result||{};
-    const out=result.stdout||'';
-    if(out.includes('OK')){
-      $('secEnvVal').value='';
-      loadSecurityEnv();
-      alert(realKey+' установлен. Перезапустите хаб.');
-    }else{
-      alert('Ошибка: '+out);
-    }
-  }catch(e){alert('ERR '+e.message)}
+    const j=await api('/admin/api/security/preset',{method:'PUT',body:JSON.stringify({preset:$('securityPreset').value})});
+    $('securityPresetStatus').textContent=JSON.stringify(j,null,2);
+  }catch(e){$('securityPresetStatus').textContent='ERR '+e.message}
 }
 
-function setShellHeartbeatFromPanel(enabled){
-  $('secEnvKey').value='SHELLMCP_HEARTBEAT';
-  $('secEnvVal').value=enabled?'1':'0';
-  setEnvVar();
+async function enrollSecurityTotp(){
+  try{
+    const j=await api('/admin/api/security/mfa/totp/enroll',{method:'POST',body:'{}'});
+    $('securityMfaResult').textContent=JSON.stringify(j,null,2);
+  }catch(e){$('securityMfaResult').textContent='ERR '+e.message}
 }
 
-async function rotateCtlToken(){
-  if(!confirm('Сгенерировать новый CTL_TOKEN? Старый перестанет работать!'))return;
-  const newToken=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
-  $('secEnvKey').value='CTL_TOKEN';
-  $('secEnvVal').value=newToken;
-  alert('Новый CTL_TOKEN сгенерирован. Нажмите «Установить» чтобы применить, затем перезапустите хаб.\n\nВНИМАНИЕ: после рестарта старый токен перестанет работать!');
+function webAuthnDecode(value){
+  const normalized=value.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-value.length%4)%4);
+  const raw=atob(normalized);const bytes=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+  return bytes;
+}
+function webAuthnEncode(value){
+  const bytes=new Uint8Array(value);let raw='';
+  for(const byte of bytes)raw+=String.fromCharCode(byte);
+  return btoa(raw).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+async function enrollSecurityPasskey(){
+  const output=$('securityPasskeyResult');
+  if(!window.PublicKeyCredential||!navigator.credentials?.create){output.textContent='ERR WebAuthn is not available in this browser';return}
+  try{
+    const begin=await api('/admin/api/security/mfa/webauthn/register/begin',{method:'POST',body:'{}'});
+    const publicKey=begin.publicKey;
+    publicKey.challenge=webAuthnDecode(publicKey.challenge);
+    if(publicKey.user?.id)publicKey.user={...publicKey.user,id:webAuthnDecode(publicKey.user.id)};
+    if(publicKey.excludeCredentials)publicKey.excludeCredentials=publicKey.excludeCredentials.map(item=>({...item,id:webAuthnDecode(item.id)}));
+    const credential=await navigator.credentials.create({publicKey});
+    if(!credential)throw new Error('passkey registration was cancelled');
+    const response=credential.response;
+    const result=await api('/admin/api/security/mfa/webauthn/register/finish',{method:'POST',body:JSON.stringify({id:credential.id,rawId:webAuthnEncode(credential.rawId),response:{clientDataJSON:webAuthnEncode(response.clientDataJSON),attestationObject:webAuthnEncode(response.attestationObject)},type:credential.type})});
+    output.textContent=JSON.stringify(result,null,2);
+    await loadSecurityControls();
+  }catch(e){output.textContent='ERR '+e.message}
+}
+
+async function verifySecurityTotp(){
+  const code=$('securityMfaCode').value.trim();
+  if(!code){alert('Введите MFA-код');return}
+  try{
+    const j=await api('/admin/api/security/mfa/totp/verify',{method:'POST',body:JSON.stringify({code})});
+    $('securityMfaResult').textContent=JSON.stringify(j,null,2);
+    await loadSecurityControls();
+  }catch(e){$('securityMfaResult').textContent='ERR '+e.message}
+}
+
+async function setShellHeartbeatFromPanel(enabled){
+  if(!await ensureSecurityReauth()){$('shellHeartbeatEnabled').checked=!enabled;return}
+  try{
+    const j=await api('/admin/api/security/heartbeat',{method:'POST',body:JSON.stringify({enabled})});
+    $('securityHeartbeatResult').textContent=JSON.stringify(j,null,2);
+  }catch(e){$('securityHeartbeatResult').textContent='ERR '+e.message}
+}
+
+async function setSecurityTelemetry(enabled){
+  try{
+    const j=await api('/admin/api/telemetry',{method:'PUT',body:JSON.stringify({enabled})});
+    $('securityTelemetryResult').textContent=JSON.stringify(j,null,2);
+  }catch(e){$('securityTelemetryResult').textContent='ERR '+e.message}
+}
+
+async function ensureSecurityReauth(){
+  const password=prompt('Введите admin-пароль для подтверждения изменения безопасности:');
+  if(password===null)return false;
+  const code=($('securityMfaCode')?.value||'').trim();
+  try{
+    await api('/admin/api/security/reauth',{method:'POST',body:JSON.stringify({password,code})});
+    return true;
+  }catch(e){alert('ERR '+e.message);return false}
+}
+
+async function loadApprovals(){
+  const el=$('securityApprovals');
+  if(!el)return;
+  try{
+    const j=await api('/admin/api/approvals');
+    const rows=Array.isArray(j.approvals)?j.approvals:[];
+    el.innerHTML=rows.length?rows.map(a=>'<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">'+esc(a.status||'unknown')+'</span><span class="muted small">'+esc(a.tool||'')+'</span></div><div class="mono">'+esc(a.target||'')+' · '+esc(a.actor||'')+'</div>'+(a.status==='pending'?'<div class="row"><button onclick="decideApproval(\''+esc(a.approval_id)+'\',\'approve\')">Разрешить</button><button class="cancelBtn" onclick="decideApproval(\''+esc(a.approval_id)+'\',\'reject\')">Отклонить</button></div>':'')+'</div>').join(''):'<p class="muted">Нет запросов</p>';
+  }catch(e){el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>'}
+}
+
+async function decideApproval(id,action){
+  try{await api('/admin/api/approvals/'+encodeURIComponent(id),{method:'POST',body:JSON.stringify({action})});await loadApprovals()}catch(e){alert('ERR '+e.message)}
 }
 
 async function rotateOAuth(){
-  if(!confirm('Сгенерировать новый OAUTH_CLIENT_SECRET? Все MCP-клиенты нужно будет переподключить!'))return;
+  if(!confirm('Обновить внутреннюю OAuth-конфигурацию? Подключения MCP потребуется проверить заново.'))return;
+  if(!await ensureSecurityReauth())return;
   try{
     const j=await api('/admin/api/auth/rotate-oauth',{method:'POST'});
-    alert(j.message||'OAuth secret rotated. Перезапустите хаб.');
-    loadSecurityEnv();
+    alert(j.message||'OAuth-конфигурация обновлена. Перезапустите хаб.');
+    await loadSecurityControls();
   }catch(e){alert('ERR '+e.message)}
 }
 
@@ -481,23 +532,6 @@ async function issueMcpTokenFromPanel(){
     el.textContent=JSON.stringify(j,null,2);
   }catch(e){el.textContent='ERR '+e.message}
 }
-
-async function restartHub(){
-  if(!confirm('Перезапустить gptadmin_hub? Кратковременный простой.'))return;
-  $('secRestartStatus').textContent='Перезапуск…';
-  try{
-    const j=await api('/mcp-relay/call',{method:'POST',body:JSON.stringify({
-      target:'shell:roomhacker-server-100',
-      tool_name:'shell_exec',
-      arguments:{cmd:'sudo systemctl restart gptadmin_hub 2>&1; echo exit=$?',sudo:true}
-    })});
-    const sc=j.response?.structuredContent||j.structuredContent||{};
-    const result=sc.result||{};
-    $('secRestartStatus').textContent='Готово: '+(result.stdout||'').trim();
-    setTimeout(()=>{$('secRestartStatus').textContent='';loadSecurityEnv()},3000);
-  }catch(e){$('secRestartStatus').textContent='ERR '+e.message}
-}
-
 
 async function revokeClient(key){
   if(!confirm('Отозвать клиента '+key+'? Он больше не сможет использовать MCP.'))return;

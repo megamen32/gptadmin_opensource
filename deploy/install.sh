@@ -156,7 +156,7 @@ cat <<EOF
 Использование (примеры):
   gptadmin update           # обновить существующую установку
   gptadmin status
-  gptadmin tokens           # покажет ТОЛЬКО CTL_TOKEN (хаб)
+  gptadmin tokens           # покажет статус AdminPassword/OAuth без секретов
   gptadmin logs hub         # логи хаба
   gptadmin port 4555        # смена порта хаба
   gptadmin config shellmcp    # настроить ShellMCP transport

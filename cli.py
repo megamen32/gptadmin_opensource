@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
+import stat
 import os
 import sys
 import tarfile
@@ -20,14 +23,24 @@ import time
 import urllib.request
 import urllib.error
 import pwd
-from pathlib import Path
+from functools import wraps
+from email.utils import parsedate_to_datetime
+from pathlib import Path, PurePosixPath
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 try:
     import tomllib
 except Exception:
     tomllib = None
 
+# Fixed one-week migration window for the legacy administrator bearer. New
+# installs no longer create it; existing installations are handled by the Hub
+# until this date and must migrate to AdminPassword/OAuth before then.
+LEGACY_CTL_TOKEN_DEADLINE = '2026-07-27'
+
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
 
 # ===== ANSI Colors =====
 _IS_TTY = sys.stderr.isatty() if hasattr(sys, 'stderr') else False
@@ -119,6 +132,47 @@ MCP_TOKEN_FILE = ETC_DIR / 'mcp-relay.token'
 MCP_RUNTIME_DIR = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay'
 MCP_MANAGER = MCP_RUNTIME_DIR / 'mcp_agent_manager.py'
 MCP_RELAY = MCP_RUNTIME_DIR / 'generic_stdio_mcp_relay.py'
+STARTUP_INSTRUCTIONS_FILE = ETC_DIR / 'startup_instructions.md'
+STARTUP_INSTRUCTIONS_MAX_BYTES = 16 * 1024
+
+MCP_CAPABILITY_CATALOG_VERSION = 'gptadmin-capabilities/v1'
+# The private signing key is intentionally not part of GPTAdmin. This detached
+# public key and signature authenticate the immutable catalog shipped in this
+# release; changing a definition requires a deliberate release-time re-sign.
+MCP_CAPABILITY_CATALOG_PUBLIC_KEY_B64 = 'em0_XbX6G5Tr8CSbH9EfQMFWUyHFHwyjYhs6JkCTl3s'
+MCP_CAPABILITY_CATALOG_SIGNATURE_B64 = 'fMIkvEZ7uOq3L19onPa9JyYK9oef-B5-Go9_CmaHYO9a2MKRMTHmogA9D4bK5mfhqF3K6dOBXfOWcjNRFOUmDQ'
+MCP_CAPABILITY_CATALOG = (
+    {
+        'id': 'gptadmin-safe-demo',
+        'version': '1.0.0',
+        'provenance': 'bundled:gptadmin-hub',
+        'scopes': ['gptadmin.read'],
+        'network_needs': [],
+        'risk_level': 'low',
+        'maintenance_owner': 'GPTAdmin',
+        'tools': ['demo'],
+    },
+    {
+        'id': 'gptadmin-readonly-inspection',
+        'version': '1.0.0',
+        'provenance': 'bundled:gptadmin-shellmcp',
+        'scopes': ['gptadmin.inspect'],
+        'network_needs': [],
+        'risk_level': 'medium',
+        'maintenance_owner': 'GPTAdmin',
+        'tools': ['system_inspect', 'inspect'],
+    },
+    {
+        'id': 'gptadmin-network-tunnel',
+        'version': '1.0.0',
+        'provenance': 'bundled:gptadmin-network-proxy',
+        'scopes': ['gptadmin.network'],
+        'network_needs': ['explicit finite LAN or internet-egress target policy'],
+        'risk_level': 'high',
+        'maintenance_owner': 'GPTAdmin',
+        'tools': ['network_proxy_request', 'network_proxy_issue'],
+    },
+)
 
 if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
@@ -148,7 +202,7 @@ else:
         str((USER_HOME / '.local' / 'state' / 'gptadmin' / 'logs') if IS_USER_INSTALL else Path('/var/log/gptadmin'))
     )).expanduser()
     SYSTEMD_HUB   = 'gptadmin-hub.service'
-    SYSTEMD_SHELLMCP = 'gptadmin-shellmcp.service'
+    SYSTEMD_SHELLMCP = 'shellmcp.service'
     SYSTEMD_FRPC  = 'gptadmin-tunnel-frpc.service'
     SYSTEMD_CLOUDFLARED = 'gptadmin-cloudflared.service'
     SYSTEMD_AUTO_UPDATE = 'gptadmin-auto-update.service'
@@ -303,6 +357,9 @@ def env_set_many(upd: dict):
 _PERSISTENT_AUTH_KEYS = frozenset({
     'CTL_TOKEN',
     'SHELLMCP_TOKEN',
+    'SHELL_TOKEN',
+    'ROOTD_TOKEN',
+    'ROOTD_UPDATE_TOKEN',
     'ADMIN_PASSWORD',
     'OAUTH_CLIENT_SECRET',
     'MCP_BRIDGE_KEY',
@@ -496,6 +553,29 @@ def _copy_pkg_runtime_payloads(tdp: Path):
         if client_dst.exists():
             shutil.rmtree(client_dst, ignore_errors=True)
         shutil.copytree(client_src, client_dst)
+    public_src = tdp / 'public'
+    admin_src = public_src / 'admin'
+    if admin_src.exists():
+        public_dst = INSTALL_DIR / 'public'
+        public_dst.mkdir(parents=True, exist_ok=True)
+        admin_dst = public_dst / 'admin'
+        staged_admin = public_dst / '.admin-react.new'
+        if staged_admin.exists():
+            shutil.rmtree(staged_admin, ignore_errors=True)
+        shutil.copytree(admin_src, staged_admin)
+        if admin_dst.exists():
+            shutil.rmtree(admin_dst, ignore_errors=True)
+        os.replace(staged_admin, admin_dst)
+        legacy_src = public_src / 'admin-legacy'
+        if legacy_src.exists():
+            legacy_dst = public_dst / 'admin-legacy'
+            staged_legacy = public_dst / '.admin-legacy.new'
+            if staged_legacy.exists():
+                shutil.rmtree(staged_legacy, ignore_errors=True)
+            shutil.copytree(legacy_src, staged_legacy)
+            if legacy_dst.exists():
+                shutil.rmtree(legacy_dst, ignore_errors=True)
+            os.replace(staged_legacy, legacy_dst)
 
 
 def _arch_tag() -> str:
@@ -624,6 +704,16 @@ def _cleanup_obsolete_runtime_files():
                 path.unlink()
         except FileNotFoundError:
             pass
+    if not IS_MACOS:
+        # Older Go-canary installs overrode both ExecStart and EnvironmentFile,
+        # leaving Hub and ShellMCP on different token sources after rotation.
+        # The canonical unit now reads only gptadmin.env; preserve unrelated
+        # drop-ins such as spool permissions and auto-update settings.
+        dropin_dir = SYSTEMD_DIR / f'{SYSTEMD_SHELLMCP}.d'
+        for obsolete_dropin in dropin_dir.glob('*go-primary*.conf'):
+            # Older installers used different numeric prefixes; any matching
+            # override can replace the canonical gptadmin.env credential.
+            obsolete_dropin.unlink(missing_ok=True)
     for directory in (BIN_DIR, CLI_PATH.parent):
         if not directory.exists():
             continue
@@ -654,34 +744,16 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
 # ===== Service management =====
 
 if IS_MACOS:
-    def _mac_python() -> str:
-        candidates = [
-            os.environ.get('GPTADMIN_PYTHON'),
-            '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3',
-            '/opt/homebrew/bin/python3',
-            '/usr/local/bin/python3',
-            sys.executable,
-            '/usr/bin/python3',
-        ]
-        for c in candidates:
-            if c and Path(c).exists():
-                return c
-        return 'python3'
-
     def _plist_path(label: str) -> Path:
         return SERVICES_DIR / f'{label}.plist'
 
     def _wrapper_script(name: str, bin_path: Path) -> Path:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = BIN_DIR / f'run_{name}.sh'
-        if name == 'shellmcp' and not _binary_looks_native(bin_path):
-            exec_line = f'PYTHONPATH={INSTALL_DIR}/client${{PYTHONPATH:+:$PYTHONPATH}} exec {_mac_python()} {bin_path}'
-        else:
-            exec_line = f'exec {bin_path}'
         script.write_text(
             f'#!/bin/sh\n'
             f'set -a; [ -f {ENV_FILE} ] && . {ENV_FILE}; set +a\n'
-            f'{exec_line}\n'
+            f'exec {bin_path}\n'
         )
         os.chmod(script, 0o755)
         return script
@@ -1036,6 +1108,7 @@ WantedBy={LINUX_WANTED_BY}
 
     FRPC_UNIT_TPL = """[Unit]
 Description=FRP client for GPTAdmin
+BindsTo=gptadmin-hub.service
 After=network-online.target gptadmin-hub.service
 Wants=network-online.target
 
@@ -1635,6 +1708,14 @@ def sync_oauth_origin_env(env: dict) -> None:
     the wrong authorization server/password.
     """
     public = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or '').rstrip('/')
+    if env.get('FRP_ENABLE', '').lower() == 'true':
+        subdomain = str(env.get('FRP_SUBDOMAIN') or '').strip().strip('.')
+        domain = str(env.get('FRP_DOMAIN') or '').strip().strip('.')
+        if subdomain and domain:
+            # Older FRP installs could retain a private HUB_PUBLIC_URL after
+            # an update. The tunnel's deterministic public name is canonical.
+            public = f'https://{subdomain}.{domain}'
+            env['HUB_PUBLIC_URL'] = public
     if not public:
         return
     env['PUBLIC_ORIGIN'] = public
@@ -1655,6 +1736,20 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
         time.sleep(2)
     print('WARNING: Local hub health check did not pass before starting dependent services' + (f': {last_err}' if last_err else ''), file=sys.stderr)
     return False
+
+
+def _require_local_hub_health(env: dict, timeout_s: int = 90) -> None:
+    """Abort setup when the newly started local Hub never becomes healthy.
+
+    Args:
+        env: Installer environment containing the Hub address and credentials.
+        timeout_s: Maximum number of seconds to wait for the health endpoint.
+
+    Raises:
+        RuntimeError: If the Hub health gate does not pass.
+    """
+    if not wait_local_hub_health(env, timeout_s=timeout_s):
+        raise RuntimeError('local Hub health check failed during setup')
 
 
 def _load_local_shellmcp_identity(env: dict, timeout_s: int = 30) -> dict:
@@ -1744,79 +1839,7 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
     if flag in {'0', 'false', 'no', 'off'}:
         print('Local ShellMCP auto-approve skipped: GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP=0')
         return
-    token = env.get('CTL_TOKEN') or ''
-    hub_port = env.get('HUB_PORT', '9001')
-    if not token:
-        print('WARNING: Local ShellMCP auto-approve skipped: CTL_TOKEN is empty', file=sys.stderr)
-        return
-    # launchd may report the service as loaded before the hub process actually
-    # accepts connections. Re-check here so auto-approve does not race first
-    # registration and leave the local ShellMCP pending with 401 queue polls.
-    health_env = dict(env)
-    health_env.setdefault('HUB_PORT', hub_port or '9001')
-    wait_local_hub_health(health_env, timeout_s=180)
-
-    base = f'http://127.0.0.1:{hub_port}'
-    headers = ['-H', f'Authorization: Bearer {token}', '-H', 'Content-Type: application/json']
-
-    def curl_json(path: str, payload: dict | None = None) -> dict:
-        cmd = ['curl', '-fsS', '--max-time', '10', *headers]
-        if payload is not None:
-            cmd += ['-d', json.dumps(payload, separators=(',', ':'))]
-        cmd.append(base + path)
-        res = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or res.stdout or f'curl rc={res.returncode}').strip())
-        return json.loads(res.stdout or '{}')
-
-    expected_identity = _load_local_shellmcp_identity(env, timeout_s=60)
-    if not expected_identity:
-        print('WARNING: Local ShellMCP auto-approve skipped: local shellmcp identity did not appear', file=sys.stderr)
-        return
-
-    last_err = ''
-    for attempt in range(1, 31):
-        try:
-            data = curl_json('/servers')
-            pending = data.get('pending') or []
-            servers = data.get('servers') or []
-            for x in servers:
-                if not isinstance(x, dict):
-                    continue
-                if _server_active_matches_local_shell_identity(x, expected_identity):
-                    print('Local ShellMCP auto-approve: already active')
-                    return
-            approved = []
-            mismatched = []
-            for item in pending:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get('name') or '')
-                if not name:
-                    continue
-                if not _server_matches_local_shell_identity(item, expected_identity):
-                    mismatched.append(name)
-                    continue
-                payload = {'target': 'hub', 'tool_name': 'approve_pending_server', 'arguments': {'name': name}, 'timeout': 30}
-                res = curl_json('/mcp-relay/call', payload)
-                if _approve_pending_response_ok(res):
-                    approved.append(name)
-            if approved:
-                for _ in range(10):
-                    data2 = curl_json('/servers')
-                    for x in data2.get('servers') or []:
-                        if _server_active_matches_local_shell_identity(x, expected_identity):
-                            print('Local ShellMCP auto-approved: ' + ', '.join(approved))
-                            return
-                    time.sleep(1)
-                print('Local ShellMCP auto-approved: ' + ', '.join(approved))
-                return
-            if mismatched:
-                last_err = 'pending server(s) did not match local shellmcp identity: ' + ', '.join(mismatched)
-        except Exception as e:
-            last_err = str(e)
-        time.sleep(2)
-    print('WARNING: Local ShellMCP auto-approve did not complete' + (f': {last_err}' if last_err else ''), file=sys.stderr)
+    print('Local ShellMCP awaits approval; use Hub MCP pending -> approve_pending_server.')
 
 def setup_interactive(args):
     need_root()
@@ -1850,7 +1873,6 @@ def setup_interactive(args):
 
     env = env_read()
 
-    env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
     env.setdefault('ADMIN_PASSWORD', gen_hex())
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
@@ -1864,7 +1886,7 @@ def setup_interactive(args):
         ensure_shellmcp_default_user(env)
         ensure_shellmcp_identity_env(env)
         env.setdefault('SHELLMCP_UPDATE_INTERVAL_S', '3600')
-        env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('CTL_TOKEN', ''))
+        env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('SHELLMCP_TOKEN', ''))
         env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
         env.setdefault('SHELLMCP_SERVICE_NAME', svc_shellmcp_name())
         env.setdefault('SHELLMCP_SERVICE_SCOPE', INSTALL_SCOPE)
@@ -1961,7 +1983,7 @@ def setup_interactive(args):
     if install_shellmcp:
         hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
-        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('SHELLMCP_TOKEN', '')
         env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
         env['SHELLMCP_SERVICE_SCOPE'] = INSTALL_SCOPE
 
@@ -2042,7 +2064,7 @@ def setup_interactive(args):
     svc_daemon_reload()
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
-        wait_local_hub_health(env)
+        _require_local_hub_health(env)
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_frpc_enable_start_all(env)
     if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
@@ -2064,7 +2086,7 @@ def setup_interactive(args):
             env['QUEUE_URL'] = local_hub.rstrip('/') + '/queue'
             env['SHELLMCP_URL'] = ''
             env['SHELLMCP_UPDATE_MANIFEST_URL'] = public_url.rstrip('/') + '/artifacts/shellmcp.json'
-            env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+            env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('SHELLMCP_TOKEN', '')
         else:
             env['HUB_URL'] = public_url
         sync_oauth_origin_env(env)
@@ -2080,7 +2102,7 @@ def setup_interactive(args):
     print('\n=== Готово ===')
     if install_hub:
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
-        print(f"API-Ключ (Bearer): {env['CTL_TOKEN']}")
+        print(f"Подключение: AdminPassword/OAuth (legacy bearer migration deadline {LEGACY_CTL_TOKEN_DEADLINE})")
     if install_shellmcp and not install_hub:
         print(f"HUB_URL для ShellMCP: {env.get('HUB_URL', '—')}")
     if install_shellmcp:
@@ -2107,9 +2129,9 @@ def setup_interactive(args):
 
 3) Выберите импорт по URL: https://became.bezrabotnyi.com/api.json
 
-4) Заменитие в "servers": "url": на свой Hub URL {env.get('HUB_PUBLIC_URL') or env.get('HUB_URL', '—')}
+4) Замените в "servers": "url": на свой Hub URL {env.get('HUB_PUBLIC_URL') or env.get('HUB_URL', '—')}
 
-5) В разделе «Аутентификация» выберите тип API ключ, Bearer и вставьте ключ {env['CTL_TOKEN']}
+5) Завершите OAuth-подключение через страницу Hub; bearer-копирование больше не используется.
 ---------------------''')
 
 # ===== Commands =====
@@ -2167,7 +2189,13 @@ def _mcp_go_supervisor_enabled() -> bool:
         or os.environ.get('GPTADMIN_MCP_AGENTS_DIR')
         or env.get('GPTADMIN_MCP_AGENTS_DIR')
     )
-    return bool(config and config.strip())
+    if config and config.strip():
+        return True
+    # Go-only upgrades may predate SHELLMCP_MCP_CONFIG in gptadmin.env. The
+    # installed native binary is authoritative; falling back to standalone
+    # Python relays here recreates duplicate services on every `mcp install`.
+    binary = BIN_DIR / 'shellmcp'
+    return binary.is_file() and _binary_looks_native(binary)
 
 
 def _mcp_slug(name: str) -> str:
@@ -2187,8 +2215,8 @@ def _mcp_ensure_token_file():
         return
     if not token:
         die(
-            'MCP relay token is not configured. Re-run setup with --mcp-relay-token TOKEN '
-            'or set MCP_RELAY_AGENT_TOKEN in gptadmin.env; this must be the token of the target Hub.'
+            'Managed Hub connection is not configured. Re-run setup for the '
+            'target Hub or complete pairing from its connection page.'
         )
     token = token.strip()
     if MCP_TOKEN_FILE.exists() and MCP_TOKEN_FILE.read_text(encoding='utf-8').strip() == token:
@@ -2236,23 +2264,52 @@ def _mcp_write_agent_config(name: str, cfg: dict) -> Path:
 
 
 def _mcp_sync_go_supervisor_config(cfg: dict) -> None:
-    """Make Go ShellMCP own MCP relay children in one aggregate registry."""
+    """Project real MCP children into the aggregate Go ShellMCP registry."""
     agents = []
-    relay = INSTALL_DIR / 'agents' / 'generic_stdio_mcp_relay' / 'generic_stdio_mcp_relay.py'
-    python = sys.executable or 'python3'
     for name, server in sorted((cfg.get('mcpServers') or {}).items()):
         if not server.get('enabled', True):
             continue
-        agent_path = MCP_AGENTS_DIR / f'{_mcp_slug(name)}.json'
-        agents.append({
+        agent = {
             'ref': _mcp_agent_id(name, server),
             'name': str(server.get('name') or name),
-            'command': python,
-            'args': [str(relay), '--agent-config', str(agent_path)],
+            'command': str(server.get('command') or ''),
+            'args': [str(value) for value in server.get('args', [])],
+            'env': {str(key): str(value) for key, value in (server.get('env') or {}).items()},
             'cwd': str(server.get('cwd') or '/'),
+            'user': str(server.get('run_as_user') or server.get('user') or ''),
             'enabled': True,
-        })
+        }
+        if server.get('url'):
+            agent['url'] = str(server['url'])
+        if server.get('headers'):
+            agent['headers'] = {str(key): str(value) for key, value in server['headers'].items()}
+        transport = str(server.get('transport') or '').strip().lower()
+        if transport in {'stdio', 'streamable-http', 'sse'}:
+            agent['transport'] = transport
+        agents.append(agent)
     _json_write(MCP_SUPERVISOR_CONFIG, agents)
+
+
+def _mcp_retire_legacy_relay_services(cfg: dict, names: list[str], backend: str | None = None) -> None:
+    """Stop and remove standalone Python relay services superseded by Go."""
+    if _mcp_manager_exists():
+        for name in names:
+            if name not in (cfg.get('mcpServers') or {}):
+                continue
+            agent_config = MCP_AGENTS_DIR / f'{_mcp_slug(name)}.json'
+            run(_mcp_manager_cmd('uninstall', agent_config, backend), check=False)
+    if IS_MACOS:
+        for unit_path in sorted(SERVICES_DIR.glob('com.gptadmin.mcp.*.plist')):
+            svc_disable_stop(unit_path.stem, unit_path)
+            unit_path.unlink(missing_ok=True)
+    elif os.name != 'nt':
+        removed = False
+        for unit_path in sorted(SYSTEMD_DIR.glob('gptadmin-mcp-*.service')):
+            svc_disable_stop(unit_path.name, unit_path)
+            unit_path.unlink(missing_ok=True)
+            removed = True
+        if removed:
+            svc_daemon_reload()
 
 
 def _mcp_refresh_generated_configs(cfg: dict) -> None:
@@ -2346,7 +2403,127 @@ def cmd_mcp_list(args):
         cmd = spec.get('command', '')
         argv = ' '.join(str(x) for x in spec.get('args', []))
         fmt = spec.get('stdio_format', spec.get('transport', 'auto'))
-        print(f"{name}\t{'enabled' if enabled else 'disabled'}\t{fmt}\t{cmd} {argv}")
+        catalog = spec.get('catalog_id', '')
+        catalog_text = f'\t{catalog}' if catalog else ''
+        print(f"{name}\t{'enabled' if enabled else 'disabled'}\t{fmt}{catalog_text}\t{cmd} {argv}")
+
+
+def _mcp_catalog_signed_material(payload: dict) -> dict:
+    """Return only the catalog fields covered by the detached signature."""
+
+    return {
+        'catalog_version': payload['catalog_version'],
+        'source': payload['source'],
+        'definitions': payload['definitions'],
+    }
+
+
+def _mcp_catalog_canonical_bytes(payload: dict) -> bytes:
+    """Serialize signed catalog material deterministically for verification."""
+
+    return json.dumps(_mcp_catalog_signed_material(payload), ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+
+def _verify_mcp_catalog_payload(payload: dict) -> None:
+    """Fail closed when the bundled capability catalog has been tampered with."""
+
+    try:
+        public_key = base64.urlsafe_b64decode(MCP_CAPABILITY_CATALOG_PUBLIC_KEY_B64 + '==')
+        signature = base64.urlsafe_b64decode(MCP_CAPABILITY_CATALOG_SIGNATURE_B64 + '==')
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, _mcp_catalog_canonical_bytes(payload))
+    except (KeyError, ValueError, TypeError, InvalidSignature) as exc:
+        raise ValueError('MCP capability catalog signature verification failed') from exc
+
+
+def _mcp_catalog_payload() -> dict:
+    """Return the immutable bundled capability catalog with verified provenance."""
+    payload = {
+        'catalog_version': MCP_CAPABILITY_CATALOG_VERSION,
+        'source': 'GPTAdmin bundled capability catalog',
+        'definitions': [dict(item) for item in MCP_CAPABILITY_CATALOG],
+    }
+    _verify_mcp_catalog_payload(payload)
+    payload['catalog_digest_sha256'] = hashlib.sha256(_mcp_catalog_canonical_bytes(payload)).hexdigest()
+    payload['signature'] = {
+        'algorithm': 'Ed25519',
+        'public_key': MCP_CAPABILITY_CATALOG_PUBLIC_KEY_B64,
+        'verified': True,
+    }
+    return payload
+
+
+def _mcp_catalog_definition(catalog_id: str) -> dict | None:
+    """Return one catalog definition by ID, or ``None`` for an uncurated server."""
+    if not catalog_id:
+        return None
+    for definition in _mcp_catalog_payload()['definitions']:
+        if definition['id'] == catalog_id:
+            return dict(definition)
+    die(f'unknown MCP capability catalog id: {catalog_id}')
+
+
+def cmd_mcp_catalog(args):
+    """Display curated capabilities before an operator activates one."""
+    payload = _mcp_catalog_payload()
+    if getattr(args, 'json', False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    print(f"Catalog: {payload['catalog_version']} ({payload['source']})")
+    for definition in payload['definitions']:
+        print(f"{definition['id']}\t{definition['version']}\t{definition['risk_level']}\t{definition['provenance']}")
+        print(f"  scopes={','.join(definition['scopes'])} tools={','.join(definition['tools'])}")
+        print(f"  network_needs={'; '.join(definition['network_needs']) or 'none'} owner={definition['maintenance_owner']}")
+    print(f"  signature={payload['signature']['algorithm']} verified digest={payload['catalog_digest_sha256']}")
+
+
+def _validate_mcp_extension_manifest(path: Path) -> dict:
+    """Validate a third-party MCP extension manifest without executing it."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f'cannot read extension manifest: {exc}') from exc
+    if len(raw) > 128 * 1024:
+        raise ValueError('extension manifest exceeds 128 KiB')
+    try:
+        manifest = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f'extension manifest is not valid UTF-8 JSON: {exc}') from exc
+    if not isinstance(manifest, dict):
+        raise ValueError('extension manifest must be a JSON object')
+    required = ('schema', 'id', 'version', 'kind', 'protocol', 'entrypoint', 'capabilities', 'scopes', 'network_needs', 'provenance', 'risk_level', 'maintenance_owner')
+    for key in required:
+        if key not in manifest:
+            raise ValueError(f'extension manifest requires {key}')
+    if manifest['schema'] != 'gptadmin.mcp-extension/v1':
+        raise ValueError('unsupported extension manifest schema')
+    for key in ('id', 'version', 'kind', 'protocol', 'maintenance_owner', 'provenance'):
+        if not isinstance(manifest[key], str) or not manifest[key].strip():
+            raise ValueError(f'extension manifest {key} must be a non-empty string')
+    if manifest['kind'] not in {'stdio', 'http'} or manifest['protocol'] != 'mcp-jsonrpc':
+        raise ValueError('extension manifest kind/protocol is unsupported')
+    if not isinstance(manifest['entrypoint'], list) or not manifest['entrypoint'] or not all(isinstance(item, str) and item for item in manifest['entrypoint']):
+        raise ValueError('extension manifest entrypoint must be a non-empty string list')
+    if not isinstance(manifest['capabilities'], list) or not manifest['capabilities']:
+        raise ValueError('extension manifest capabilities must be a non-empty list')
+    for capability in manifest['capabilities']:
+        if not isinstance(capability, dict) or not isinstance(capability.get('name'), str) or not capability['name'].strip():
+            raise ValueError('extension capability name is required')
+        if not isinstance(capability.get('description'), str) or not capability['description'].strip():
+            raise ValueError('extension capability description is required')
+        if not isinstance(capability.get('input_schema'), dict):
+            raise ValueError('extension capability input_schema is required')
+    for key in ('scopes', 'network_needs'):
+        if not isinstance(manifest[key], list) or not all(isinstance(item, str) for item in manifest[key]):
+            raise ValueError(f'extension manifest {key} must be a string list')
+    if manifest['risk_level'] not in {'low', 'medium', 'high'}:
+        raise ValueError('extension manifest risk_level must be low, medium or high')
+    return manifest
+
+
+def cmd_mcp_extension_validate(args):
+    """Validate and print an extension manifest without installing it."""
+    manifest = _validate_mcp_extension_manifest(Path(args.manifest).expanduser())
+    print(json.dumps({'valid': True, 'manifest': manifest}, ensure_ascii=False, indent=2))
 
 
 
@@ -2373,6 +2550,7 @@ def _mcp_extract_tail_options(args):
         '--agent-id': 'agent_id',
         '--run-as-user': 'run_as_user',
         '--hub-url': 'hub_url',
+        '--catalog-id': 'catalog_id',
     }
     while i < len(tail):
         item = tail[i]
@@ -2398,6 +2576,10 @@ def _mcp_extract_tail_options(args):
             args.install = True
             i += 1
             continue
+        if item == '--accept-capability':
+            args.accept_capability = True
+            i += 1
+            continue
         if item == '--status':
             args.status = True
             i += 1
@@ -2410,6 +2592,13 @@ def _mcp_extract_tail_options(args):
 def cmd_mcp_add(args):
     need_root()
     _mcp_extract_tail_options(args)
+    catalog_id = getattr(args, 'catalog_id', None) or ''
+    catalog_definition = _mcp_catalog_definition(catalog_id)
+    if catalog_definition:
+        print('Curated capability requested:')
+        print(json.dumps(catalog_definition, ensure_ascii=False, indent=2))
+        if getattr(args, 'install', False) and not getattr(args, 'accept_capability', False):
+            die('curated MCP activation requires --accept-capability after reviewing the catalog definition')
     cfg = _mcp_config()
     servers = cfg.setdefault('mcpServers', {})
     if args.name in servers and not args.force:
@@ -2450,6 +2639,10 @@ def cmd_mcp_add(args):
         servers[args.name]['run_as_user'] = args.run_as_user
     if args.hub_url:
         cfg.setdefault('gptadmin', {})['hub_url'] = args.hub_url.rstrip('/')
+    if catalog_definition:
+        servers[args.name]['catalog_id'] = catalog_definition['id']
+        servers[args.name]['catalog_version'] = catalog_definition['version']
+        servers[args.name]['catalog_provenance'] = catalog_definition['provenance']
     _mcp_save(cfg)
     agent_config = _mcp_write_agent_config(args.name, cfg)
     _mcp_sync_go_supervisor_config(cfg)
@@ -2516,8 +2709,18 @@ def cmd_mcp_install(args):
     if not names:
         die('no MCP servers configured')
     if _mcp_go_supervisor_enabled():
+        env_updates = {'SHELLMCP_MCP_CONFIG': str(MCP_SUPERVISOR_CONFIG)}
+        if IS_MACOS:
+            migrated_env = env_read()
+            ensure_shellmcp_default_user(migrated_env)
+            for key in ('SHELLMCP_DEFAULT_USER', 'SHELLMCP_DEFAULT_HOME', 'SHELLMCP_DEFAULT_CWD'):
+                if migrated_env.get(key):
+                    env_updates[key] = migrated_env[key]
+        env_set_many(env_updates)
         _mcp_refresh_generated_configs(cfg)
-        print('ShellMCP supervisor manages MCP relay services; standalone install skipped')
+        _mcp_retire_legacy_relay_services(cfg, names, args.backend)
+        svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
+        print('ShellMCP Go supervisor owns MCP servers; legacy relay services removed')
         return
     for name in names:
         if not (cfg.get('mcpServers') or {}).get(name, {}).get('enabled', True):
@@ -2952,58 +3155,441 @@ def cmd_version(_):
     home = str(INSTALL_DIR) if INSTALL_DIR else 'not set'
     print(f'  {c_dim("Home:")}      {home}')
 
-def cmd_doctor(_):
-    """Health check — services, ports, config, tokens."""
-    print_header('GPTAdmin Doctor')
+def _doctor_service_runtime(label: str) -> tuple[str, str]:
+    """Probe one installed service without exposing service-manager output."""
+    try:
+        if IS_MACOS:
+            result = run(['launchctl', 'list', label], check=False, capture=True, timeout=3)
+            if result.returncode == 0:
+                return 'ok', 'launchd job is loaded'
+            return 'error', 'launchd job is not loaded'
+        if IS_WINDOWS:
+            result = run(['schtasks', '/Query', '/TN', label, '/FO', 'LIST', '/NH'], check=False, capture=True, timeout=3)
+            output = (result.stdout or '').lower()
+            if result.returncode == 0 and ('running' in output or 'выполняется' in output):
+                return 'ok', 'Windows task is running'
+            if result.returncode == 0:
+                return 'warning', 'Windows task is registered but not reported running'
+            return 'error', 'Windows task is not available'
+        command = ['systemctl']
+        if IS_USER_INSTALL:
+            command.append('--user')
+        command.extend(['is-active', label])
+        result = run(command, check=False, capture=True, timeout=3)
+        state = (result.stdout or '').strip().lower()
+        if result.returncode == 0 and state == 'active':
+            return 'ok', 'systemd service is active'
+        if state in {'failed', 'inactive', 'deactivating', 'dead'}:
+            return 'error', f'systemd service is {state}'
+        return 'warning', 'systemd runtime state is unavailable'
+    except (OSError, subprocess.SubprocessError):
+        return 'warning', 'service manager is unavailable'
+
+
+def _doctor_shellmcp_unit_contract(path: Path) -> tuple[str, str] | None:
+    """Detect a legacy rootd binary hidden behind the canonical ShellMCP unit."""
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return 'warning', 'ShellMCP unit could not be inspected'
+    exec_lines = [line.strip() for line in lines if line.strip().startswith('ExecStart=')]
+    if any(re.search(r'/rootd-go(?:-canary)?(?:\s|$)', line) for line in exec_lines):
+        return 'error', 'legacy ShellMCP binary is configured; run gptadmin update'
+    return None
+
+
+def _doctor_local_hub_health(host: str, port: str) -> tuple[str, str]:
+    """Require an explicit local Hub bind to answer its health contract."""
+    probe_host = host.strip()
+    if probe_host in {'', '0.0.0.0', '::'}:
+        probe_host = '127.0.0.1'
+    url_host = f'[{probe_host}]' if ':' in probe_host and not probe_host.startswith('[') else probe_host
+    try:
+        request = urllib.request.Request(f'http://{url_host}:{int(port)}/healthz', headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode('utf-8', 'replace') or '{}')
+            if response.status != 200 or not isinstance(payload, dict) or payload.get('ok') is not True:
+                raise ValueError('invalid Hub health response')
+    except Exception:
+        return 'error', 'configured Hub port does not answer the local health contract'
+    return 'ok', 'local Hub health passed'
+
+
+def _doctor_report() -> dict:
+    """Collect service, configuration and local Hub readiness checks."""
+    checks = []
     issues = 0
-    # Check services
+
     units = installed_units()
     if not units:
-        print_err('No services installed. Run: gptadmin setup')
+        checks.append({'name': 'services', 'status': 'error', 'message': 'No services installed'})
         issues += 1
     else:
         for label, path in units:
-            exists = path.exists()
-            if exists:
-                print_ok(f'{label} — unit installed')
+            if path.exists():
+                checks.append({'name': f'service:{label}', 'status': 'ok', 'message': 'unit installed'})
+                runtime_status, runtime_message = _doctor_service_runtime(label)
+                checks.append({'name': f'service_runtime:{label}', 'status': runtime_status, 'message': runtime_message})
+                if runtime_status == 'error':
+                    issues += 1
+                if label == svc_shellmcp_name():
+                    unit_contract = _doctor_shellmcp_unit_contract(path)
+                    if unit_contract is not None:
+                        contract_status, contract_message = unit_contract
+                        checks.append({'name': 'shellmcp_unit', 'status': contract_status, 'message': contract_message})
+                        if contract_status == 'error':
+                            issues += 1
             else:
-                print_err(f'{label} — unit missing')
+                checks.append({'name': f'service:{label}', 'status': 'error', 'message': 'unit missing'})
                 issues += 1
-    # Check config
+
     env = env_read()
-    ctl = env.get('CTL_TOKEN', '')
-    if ctl:
-        print_ok(f'CTL_TOKEN is set ({len(ctl)} chars)')
+    if env.get('ADMIN_PASSWORD', ''):
+        checks.append({'name': 'admin_password', 'status': 'ok', 'message': 'configured'})
     else:
-        print_err('CTL_TOKEN is not set')
+        checks.append({'name': 'admin_password', 'status': 'error', 'message': 'not configured'})
         issues += 1
+    if env.get('CTL_TOKEN'):
+        checks.append({'name': 'legacy_bearer', 'status': 'warning', 'message': 'present; migrate to AdminPassword/OAuth'})
+
     hub_url = env.get('HUB_URL', env.get('PUBLIC_ORIGIN', ''))
     if hub_url:
-        print_ok(f'Hub URL: {hub_url}')
+        checks.append({'name': 'hub_url', 'status': 'ok', 'message': 'configured'})
     else:
-        print_warn('Hub URL is not set (needed for agents to connect)')
+        checks.append({'name': 'hub_url', 'status': 'error', 'message': 'not set'})
         issues += 1
-    # Check port
+
+    version_path = Path(__file__).parent / 'VERSION'
+    try:
+        local_version = version_path.read_text(encoding='utf-8').strip()
+    except OSError:
+        local_version = 'unknown'
+    checks.append({'name': 'version', 'status': 'ok' if local_version != 'unknown' else 'warning', 'message': f'local build {local_version}'})
+
+    remote_build = None
+    if hub_url:
+        try:
+            health_url = hub_url.rstrip('/') + '/healthz'
+            request = urllib.request.Request(health_url, headers={'Accept': 'application/json'})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = response.read().decode('utf-8', 'replace')
+                remote = json.loads(body) if body else {}
+                if response.status != 200 or not isinstance(remote, dict) or remote.get('ok') is not True:
+                    raise RuntimeError(f'HTTP {response.status}')
+                remote_build = remote.get('build_version')
+                checks.append({'name': 'remote_health', 'status': 'ok', 'message': f'Hub reachable at {hub_url}'})
+                remote_date = response.headers.get('Date', '')
+                if remote_date:
+                    remote_clock = parsedate_to_datetime(remote_date).timestamp()
+                    drift = abs(time.time() - remote_clock)
+                    clock_status = 'ok' if drift <= 120 else 'error'
+                    checks.append({'name': 'remote_clock', 'status': clock_status, 'message': f'clock drift {drift:.0f}s'})
+                    if clock_status == 'error':
+                        issues += 1
+                else:
+                    checks.append({'name': 'remote_clock', 'status': 'warning', 'message': 'Hub did not provide a Date header'})
+        except Exception as exc:
+            checks.append({'name': 'remote_health', 'status': 'error', 'message': f'Hub health check failed: {exc}'})
+            issues += 1
+            checks.append({'name': 'remote_clock', 'status': 'warning', 'message': 'unavailable because Hub health failed'})
+    else:
+        checks.append({'name': 'remote_health', 'status': 'warning', 'message': 'skipped because Hub URL is not configured'})
+        checks.append({'name': 'remote_clock', 'status': 'warning', 'message': 'skipped because Hub URL is not configured'})
+
+    auth_token = str(env.get('CTL_TOKEN', '')).strip()
+    if hub_url and auth_token:
+        try:
+            auth_url = hub_url.rstrip('/') + '/admin/api/overview'
+            auth_request = urllib.request.Request(
+                auth_url,
+                headers={'Accept': 'application/json', 'Authorization': f'Bearer {auth_token}'},
+            )
+            with urllib.request.urlopen(auth_request, timeout=3) as response:
+                if response.status != 200:
+                    raise RuntimeError(f'HTTP {response.status}')
+                payload = json.loads(response.read().decode('utf-8', 'replace') or '{}')
+                if not isinstance(payload, dict):
+                    raise RuntimeError('invalid JSON response')
+            checks.append({'name': 'remote_auth', 'status': 'ok', 'message': 'authenticated Hub probe passed'})
+        except Exception:
+            checks.append({'name': 'remote_auth', 'status': 'error', 'message': 'authenticated Hub probe failed'})
+            issues += 1
+    elif hub_url:
+        checks.append({'name': 'remote_auth', 'status': 'warning', 'message': 'not probed; no machine credential is configured'})
+
+    if ENV_FILE.exists():
+        mode = stat.S_IMODE(ENV_FILE.stat().st_mode)
+        if mode & 0o077:
+            checks.append({'name': 'env_permissions', 'status': 'error', 'message': f'{ENV_FILE.name} is too permissive'})
+            issues += 1
+        else:
+            checks.append({'name': 'env_permissions', 'status': 'ok', 'message': f'{ENV_FILE.name} is private'})
+    else:
+        checks.append({'name': 'env_permissions', 'status': 'warning', 'message': 'env file is not present'})
+
     hub_port = env.get('HUB_PORT', '9001')
     try:
-        import socket as _sock
-        sock = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         result = sock.connect_ex(('127.0.0.1', int(hub_port)))
         sock.close()
         if result == 0:
-            print_ok(f'Port {hub_port} is listening')
+            checks.append({'name': 'hub_port', 'status': 'ok', 'message': f'port {hub_port} is listening'})
         else:
-            print_warn(f'Port {hub_port} is not listening (hub not running?)')
+            checks.append({'name': 'hub_port', 'status': 'error', 'message': f'port {hub_port} is not listening'})
             issues += 1
-    except Exception:
+    except (OSError, TypeError, ValueError) as exc:
+        checks.append({'name': 'hub_port', 'status': 'error', 'message': f'invalid port configuration: {exc}'})
+        issues += 1
+
+    local_host = env.get('HUB_HOST', env.get('HUB_BIND', '')).strip()
+    if local_host:
+        local_health_status, local_health_message = _doctor_local_hub_health(local_host, hub_port)
+        checks.append({'name': 'hub_local_health', 'status': local_health_status, 'message': local_health_message})
+        if local_health_status == 'error':
+            issues += 1
+
+    return {'ok': issues == 0, 'issues': issues, 'hub_url': hub_url or None, 'remote_build': remote_build, 'checks': checks}
+
+
+BACKUP_FORMAT = 'gptadmin.backup/v1'
+BACKUP_MANIFEST_NAME = 'manifest.json'
+BACKUP_MAX_FILE_BYTES = 64 << 20
+
+
+def _backup_member_name(value: str) -> str:
+    """Validate and normalize one archive-relative POSIX member name."""
+    name = str(value)
+    path = PurePosixPath(name)
+    if not name or name.startswith('/') or '\\' in name or name != path.as_posix() or any(part in {'', '.', '..'} for part in path.parts):
+        raise ValueError(f'unsafe archive member: {name!r}')
+    return path.as_posix()
+
+
+def _backup_files(source: Path) -> list[tuple[str, Path, int]]:
+    """Return regular files below source with validated relative names."""
+    source = source.resolve()
+    if not source.is_dir():
+        raise ValueError(f'backup source is not a directory: {source}')
+    files: list[tuple[str, Path, int]] = []
+    for path in sorted(source.rglob('*')):
+        relative = path.relative_to(source).as_posix()
+        if path.is_symlink():
+            raise ValueError(f'backup source contains symlink: {relative}')
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f'backup source contains unsupported entry: {relative}')
+        size = path.stat().st_size
+        if size > BACKUP_MAX_FILE_BYTES:
+            raise ValueError(f'backup file is too large: {relative}')
+        files.append((_backup_member_name(relative), path, stat.S_IMODE(path.stat().st_mode)))
+    return files
+
+
+def _backup_manifest(source: Path) -> dict:
+    """Build a stable manifest of regular files under source."""
+    entries = []
+    for relative, path, mode in _backup_files(source):
+        digest = hashlib.sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        entries.append({'path': relative, 'size': path.stat().st_size, 'sha256': digest.hexdigest(), 'mode': mode})
+    entries.sort(key=lambda item: item['path'])
+    return {'format': BACKUP_FORMAT, 'files': entries}
+
+
+def _validate_backup_manifest(manifest: object) -> dict:
+    """Validate the untrusted manifest object and return its canonical shape."""
+    if not isinstance(manifest, dict) or manifest.get('format') != BACKUP_FORMAT or not isinstance(manifest.get('files'), list):
+        raise ValueError('invalid backup manifest format')
+    entries = []
+    seen: set[str] = set()
+    for item in manifest['files']:
+        if not isinstance(item, dict):
+            raise ValueError('invalid backup manifest entry')
+        relative = _backup_member_name(item.get('path', ''))
+        if relative in seen:
+            raise ValueError(f'duplicate backup member: {relative}')
+        seen.add(relative)
+        size = item.get('size')
+        mode = item.get('mode')
+        digest = item.get('sha256')
+        if not isinstance(size, int) or size < 0 or size > BACKUP_MAX_FILE_BYTES:
+            raise ValueError(f'invalid backup size: {relative}')
+        if not isinstance(mode, int) or mode < 0 or mode > 0o7777:
+            raise ValueError(f'invalid backup mode: {relative}')
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError(f'invalid backup digest: {relative}')
+        entries.append({'path': relative, 'size': size, 'sha256': digest, 'mode': mode})
+    entries.sort(key=lambda item: item['path'])
+    return {'format': BACKUP_FORMAT, 'files': entries}
+
+
+def _backup_tar_info(name: str, size: int, mode: int) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.size = size
+    info.mode = mode
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = ''
+    info.gname = ''
+    return info
+
+
+def create_backup_archive(source: Path, archive: Path) -> dict:
+    """Create an atomic, manifest-first configuration backup archive."""
+    source = Path(source).resolve()
+    archive = Path(archive).resolve()
+    try:
+        archive.relative_to(source)
+    except ValueError:
         pass
-    # Summary
+    else:
+        raise ValueError('backup archive must be outside its source directory')
+    manifest = _backup_manifest(source)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f'.{archive.name}.', suffix='.tmp', dir=archive.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        with temporary.open('wb') as raw:
+            with gzip.GzipFile(fileobj=raw, mode='wb', mtime=0) as compressed:
+                with tarfile.open(fileobj=compressed, mode='w') as handle:
+                    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                    manifest_info = _backup_tar_info(BACKUP_MANIFEST_NAME, len(manifest_bytes), 0o600)
+                    handle.addfile(manifest_info, io.BytesIO(manifest_bytes))
+                    for item in manifest['files']:
+                        path = source / item['path']
+                        info = _backup_tar_info(item['path'], item['size'], item['mode'])
+                        with path.open('rb') as file_handle:
+                            handle.addfile(info, file_handle)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return manifest
+
+
+def verify_backup_archive(archive: Path) -> dict:
+    """Verify archive safety, member set, sizes and SHA-256 digests."""
+    archive = Path(archive)
+    with tarfile.open(archive, 'r:gz') as handle:
+        members = handle.getmembers()
+        manifest_members = [member for member in members if member.name == BACKUP_MANIFEST_NAME]
+        if len(manifest_members) != 1 or not manifest_members[0].isreg():
+            raise ValueError('backup manifest is missing or invalid')
+        manifest_payload = handle.extractfile(manifest_members[0])
+        if manifest_payload is None:
+            raise ValueError('backup manifest cannot be read')
+        manifest = _validate_backup_manifest(json.loads(manifest_payload.read()))
+        expected = {item['path']: item for item in manifest['files']}
+        actual: dict[str, tarfile.TarInfo] = {}
+        for member in members:
+            if member.name == BACKUP_MANIFEST_NAME:
+                continue
+            name = _backup_member_name(member.name)
+            if not member.isreg():
+                raise ValueError(f'unsafe archive member: {member.name!r}')
+            if name in actual:
+                raise ValueError(f'duplicate archive member: {name}')
+            actual[name] = member
+        if set(actual) != set(expected):
+            raise ValueError('backup members do not match manifest')
+        for name, item in expected.items():
+            member = actual[name]
+            if member.size != item['size']:
+                raise ValueError(f'backup size mismatch: {name}')
+            digest = hashlib.sha256()
+            stream = handle.extractfile(member)
+            if stream is None:
+                raise ValueError(f'backup member cannot be read: {name}')
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+            if digest.hexdigest() != item['sha256']:
+                raise ValueError(f'backup digest mismatch: {name}')
+    return manifest
+
+
+def restore_backup_archive(archive: Path, target: Path) -> dict:
+    """Atomically restore a verified archive into a new target directory."""
+    manifest = verify_backup_archive(archive)
+    target = Path(target).resolve()
+    if target.exists():
+        raise ValueError('restore target must not already exist')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f'.{target.name}.', dir=target.parent))
+    try:
+        with tarfile.open(archive, 'r:gz') as handle:
+            for item in manifest['files']:
+                member = handle.getmember(item['path'])
+                destination = temporary / item['path']
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                stream = handle.extractfile(member)
+                if stream is None:
+                    raise ValueError(f'backup member cannot be read: {item["path"]}')
+                with destination.open('xb') as output:
+                    shutil.copyfileobj(stream, output)
+                os.chmod(destination, item['mode'])
+        if _backup_manifest(temporary) != manifest:
+            raise ValueError('restored files do not match backup manifest')
+        os.replace(temporary, target)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return manifest
+
+
+def cmd_backup(args):
+    try:
+        if args.backup_cmd == 'create':
+            manifest = create_backup_archive(Path(args.source), Path(args.archive))
+            print(json.dumps({'ok': True, 'archive': str(Path(args.archive)), 'file_count': len(manifest['files']), 'format': BACKUP_FORMAT}))
+        elif args.backup_cmd == 'verify':
+            manifest = verify_backup_archive(Path(args.archive))
+            print(json.dumps({'ok': True, 'archive': str(Path(args.archive)), 'file_count': len(manifest['files']), 'format': BACKUP_FORMAT}))
+        elif args.backup_cmd == 'restore':
+            manifest = restore_backup_archive(Path(args.archive), Path(args.target))
+            print(json.dumps({'ok': True, 'target': str(Path(args.target)), 'file_count': len(manifest['files']), 'format': BACKUP_FORMAT}))
+        else:
+            die('backup command is required: create, verify or restore')
+    except (OSError, ValueError, tarfile.TarError, json.JSONDecodeError) as exc:
+        die(f'backup failed: {exc}')
+
+
+def cmd_doctor(args):
+    """Health check — services, ports, config, tokens."""
+    report = _doctor_report()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
+
+    print_header('GPTAdmin Doctor')
+    for check in report['checks']:
+        message = check['message']
+        if check['name'] == 'hub_url' and check['status'] == 'ok':
+            message = f"Hub URL: {report['hub_url']}"
+        elif check['name'] == 'legacy_bearer':
+            message = f"Legacy Hub bearer is present; migrate to AdminPassword/OAuth by {LEGACY_CTL_TOKEN_DEADLINE}."
+        elif check['name'].startswith('service:'):
+            message = f"{check['name'].split(':', 1)[1]} — {message}"
+        elif check['name'] == 'admin_password':
+            message = f"AdminPassword is {message}"
+        elif check['name'] == 'hub_url' and check['status'] == 'error':
+            message = 'Hub URL is not set (needed for agents to connect)'
+        if check['status'] == 'ok':
+            print_ok(message)
+        elif check['status'] == 'warning':
+            print_warn(message)
+        else:
+            print_err(message)
     print()
-    if issues == 0:
+    if report['ok']:
         print_ok('All checks passed.')
     else:
-        print_warn(f'{issues} issue(s) found. Fix them before proceeding.')
+        print_warn(f"{report['issues']} issue(s) found. Fix them before proceeding.")
 
 def cmd_status(_):
     units = installed_units()
@@ -3021,6 +3607,82 @@ def cmd_status(_):
     if tunnel:
         print(f'  {c_dim("Tunnel:")}  {c_green(tunnel)}')
     print_autoupdate_status(env)
+
+def startup_instructions_path() -> Path:
+    """Return the startup-instructions path for the selected install scope."""
+    return STARTUP_INSTRUCTIONS_FILE
+
+
+def read_startup_instructions(path: Path | None = None) -> str:
+    path = path or startup_instructions_path()
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        die(f'startup instructions file does not exist: {path}')
+    if not path.is_file() or stat.st_size > STARTUP_INSTRUCTIONS_MAX_BYTES:
+        die(f'startup instructions must be a regular file of at most {STARTUP_INSTRUCTIONS_MAX_BYTES} bytes')
+    data = path.read_bytes()
+    if len(data) > STARTUP_INSTRUCTIONS_MAX_BYTES:
+        die(f'startup instructions exceed {STARTUP_INSTRUCTIONS_MAX_BYTES} bytes')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        die('startup instructions must be UTF-8 text')
+
+
+def set_startup_instructions_file(source: Path, destination: Path | None = None) -> Path:
+    destination = destination or startup_instructions_path()
+    try:
+        stat = source.stat()
+    except FileNotFoundError:
+        die(f'source file does not exist: {source}')
+    if not source.is_file() or stat.st_size > STARTUP_INSTRUCTIONS_MAX_BYTES:
+        die(f'source must be a regular file of at most {STARTUP_INSTRUCTIONS_MAX_BYTES} bytes')
+    data = source.read_bytes()
+    if not data or len(data) > STARTUP_INSTRUCTIONS_MAX_BYTES:
+        die(f'source must contain 1-{STARTUP_INSTRUCTIONS_MAX_BYTES} bytes')
+    try:
+        data.decode('utf-8')
+    except UnicodeDecodeError:
+        die('source must be UTF-8 text')
+
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.startup_instructions.', dir=destination.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
+            fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        os.chmod(destination, 0o600)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return destination
+
+
+def cmd_instructions(args):
+    path = startup_instructions_path()
+    if args.instructions_cmd == 'path':
+        print(path)
+        return
+    if args.instructions_cmd == 'show':
+        # This is the only instructions command that emits file contents.
+        sys.stdout.write(read_startup_instructions(path))
+        return
+    if args.instructions_cmd == 'set-file':
+        written = set_startup_instructions_file(Path(args.source).expanduser(), path)
+        print(f'Startup instructions installed: {written}')
+        print('Restart the hub to apply them: gptadmin hub restart')
+        return
+    die('choose one of: show, path, set-file')
+
 
 def cmd_start(_):
     need_root()
@@ -3091,49 +3753,42 @@ def cmd_logs(args):
 def cmd_tokens(args):
     env = env_read()
     show_shell = getattr(args, 'show_shellmcp', False) if hasattr(args, 'show_shellmcp') else False
-    print_header('GPTAdmin Tokens')
-    ctl = env.get('CTL_TOKEN', '')
-    print(f'  {c_dim("CTL_TOKEN")}     {c_green(ctl) if ctl else c_red("(not set)")}')
-    print(f'  {c_dim("HUB_URL")}       {env.get("HUB_URL", env.get("PUBLIC_ORIGIN", c_dim("(not set)")))}')
-    # MCP bearer tokens
+    print_header('GPTAdmin Connections')
+    print(f'  Hub URL              {env.get("HUB_URL", env.get("PUBLIC_ORIGIN", c_dim("(not set)")))}')
+    # Never print internal credential names or prefixes in normal status output.
     for k in sorted(env):
         if k.startswith('GPTADMIN_') and k.endswith('_MCP_BEARER'):
-            val = env[k]
             label = k.replace('GPTADMIN_', '').replace('_MCP_BEARER', '').lower()
-            print(f'  {c_dim("MCP_BEARER")}    {c_cyan(label)}: {c_green(val[:16] + "..." if len(val) > 20 else val) if val else c_red("(not set)")}')
-    # ShellMCP token
+            print(f'  MCP connection       {c_cyan(label)}: {c_green("configured") if env[k] else c_red("(not set)")}')
     shell_tok = env.get('SHELLMCP_TOKEN', '')
     if show_shell:
-        print(f'  {c_dim("SHELLMCP_TOKEN")} {c_yellow(shell_tok) if shell_tok else c_red("(not set)")}')
-        print_warn('SHELLMCP_TOKEN is sensitive — do not share it.')
+        print(f'  Agent connection      {c_green("configured") if shell_tok else c_red("(not set)")}')
+        print_warn('The agent credential is internal and is never displayed.')
     else:
-        print(f'  {c_dim("SHELLMCP_TOKEN")} {c_yellow("(hidden, use --show-shellmcp to reveal)")}')
-    # MCP_BRIDGE_KEY
+        print(f'  Agent connection      {c_yellow("configured (hidden)") if shell_tok else c_red("(not set)")}')
     bridge = env.get('MCP_BRIDGE_KEY', '')
-    if bridge and bridge != ctl:
-        print(f'  {c_dim("MCP_BRIDGE_KEY")} {c_green(bridge[:16] + "...")}')
+    if bridge and bridge != env.get('CTL_TOKEN', ''):
+        print(f'  Network bridge        {c_green("configured (hidden)")}')
     print()
+    if env.get('CTL_TOKEN'):
+        print_warn(f'Legacy Hub bearer is hidden and expires on {LEGACY_CTL_TOKEN_DEADLINE}; migrate to AdminPassword/OAuth.')
     print(c_dim('  Issue new MCP token:  gptadmin token issue <name>'))
-    print(c_dim('  Rotate tokens:        gptadmin token rotate [hub|shellmcp|mcp]'))
+    print(c_dim('  Rotate tokens:        gptadmin token rotate [shellmcp]'))
 
 def cmd_rotate(args):
     need_root()
     which = args.which
     if which in ('shellmcp', 'shell', 'shell-mcp'):
         which = 'shellmcp'
-    if which not in ('hub', 'shellmcp'):
-        die('unknown token target. Use: hub or shellmcp')
-    newtok = gen_hex()
     if which == 'hub':
-        env_set_many({'CTL_TOKEN': newtok})
-        if UNIT_PATH_HUB.exists():
-            svc_restart(svc_hub_name(), UNIT_PATH_HUB)
-        print(f'New hub CTL_TOKEN: {newtok}')
-    else:
-        env_set_many({'SHELLMCP_TOKEN': newtok})
-        if UNIT_PATH_SHELLMCP.exists():
-            svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
-        print('ShellMCP token rotated (значение не выводится).')
+        die(f'legacy Hub bearer rotation is removed; use AdminPassword/OAuth (deadline {LEGACY_CTL_TOKEN_DEADLINE})')
+    if which not in ('hub', 'shellmcp'):
+        die('unknown token target. Use: shellmcp')
+    newtok = gen_hex()
+    env_set_many({'SHELLMCP_TOKEN': newtok})
+    if UNIT_PATH_SHELLMCP.exists():
+        svc_restart(svc_shellmcp_name(), UNIT_PATH_SHELLMCP)
+    print('ShellMCP token rotated (значение не выводится).')
 
 def cmd_port(args):
     need_root()
@@ -3364,7 +4019,7 @@ def cmd_urls(args):
                 print(f'    action: {_join_url(public_hub, f"/server/{slug}/actions/openapi.yaml")}')
     else:
         print()
-        print_warn('server list is unavailable; set CTL_TOKEN in config or run with sudo/--system')
+        print_warn('server list is unavailable; open the Hub connection page or run with sudo/--system')
 
 def cmd_tunnel_logs(_):
     env = env_read()
@@ -3534,8 +4189,13 @@ def _artifact_name_from_url(url: str) -> str:
     return url.rstrip('/').rsplit('/', 1)[-1]
 
 
+def _release_manifest_bypass_enabled() -> bool:
+    """Return whether the operator explicitly disabled release verification."""
+    return os.environ.get('GPTADMIN_UPDATE_SKIP_MANIFEST', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def _remote_artifact_build_info(pkg_url: str) -> dict:
-    if os.environ.get('GPTADMIN_UPDATE_SKIP_MANIFEST', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
+    if _release_manifest_bypass_enabled():
         return {}
     base = pkg_url.rsplit('/', 1)[0]
     manifest_url = os.environ.get('GPTADMIN_MANIFEST_URL') or (base.rstrip('/') + '/manifest.json')
@@ -3546,8 +4206,44 @@ def _remote_artifact_build_info(pkg_url: str) -> dict:
     except Exception as exc:
         print(f'WARNING: update manifest unavailable, continuing with download: {exc}', file=sys.stderr)
         return {}
-    artifact = (manifest.get('artifacts') or {}).get(name) or {}
-    return {k: artifact.get(k) for k in ('build_version', 'build_ts', 'git_commit', 'sha256', 'size') if artifact.get(k) is not None}
+    artifacts = manifest.get('artifacts') or {}
+    if isinstance(artifacts, dict):
+        artifact = artifacts.get(name) or {}
+    elif isinstance(artifacts, list):
+        artifact = next(
+            (
+                item for item in artifacts
+                if isinstance(item, dict) and Path(str(item.get('path', ''))).name == name
+            ),
+            {},
+        )
+    else:
+        artifact = {}
+    return {
+        key: artifact.get(key, manifest.get(key))
+        for key in ('build_version', 'build_ts', 'git_commit', 'sha256', 'size')
+        if artifact.get(key, manifest.get(key)) is not None
+    }
+
+
+def _verify_downloaded_artifact(path: Path, metadata: dict, *, require_metadata: bool = False) -> None:
+    """Reject a downloaded package when a published digest/size disagrees."""
+    expected_sha = str(metadata.get('sha256') or '').strip().lower()
+    expected_size = metadata.get('size')
+    if require_metadata and (not expected_sha or expected_size is None) and not _release_manifest_bypass_enabled():
+        die(f'Проверка релиза не пройдена: manifest не содержит полный digest/size ({path.name})')
+    if not expected_sha and expected_size is None:
+        return
+    actual_size = path.stat().st_size
+    if expected_size is not None and int(expected_size) != actual_size:
+        die(f'Проверка релиза не пройдена: размер пакета не совпадает ({path.name})')
+    if expected_sha:
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha:
+            die(f'Проверка релиза не пройдена: SHA-256 пакета не совпадает ({path.name})')
 
 
 def _should_skip_update(installed: dict, remote: dict) -> bool:
@@ -3582,6 +4278,151 @@ def _service_pairs_for_update(install_hub: bool, install_shellmcp: bool, env: di
     return pairs
 
 
+class _UpdateRuntimeSnapshot:
+    """Private snapshot of files that an in-place update can replace."""
+
+    def __init__(self, paths: list[Path]):
+        self.root = Path(tempfile.mkdtemp(prefix='gptadmin-update-rollback-'))
+        self.entries: list[tuple[Path, Path, str, bool]] = []
+        self.runtime_stopped = False
+        try:
+            for index, source in enumerate(dict.fromkeys(Path(path) for path in paths)):
+                backup = self.root / str(index)
+                if source.is_symlink():
+                    raise ValueError(f'update rollback source cannot be a symlink: {source}')
+                if source.is_dir():
+                    shutil.copytree(source, backup, symlinks=True)
+                    kind, existed = 'directory', True
+                elif source.is_file():
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, backup)
+                    kind, existed = 'file', True
+                else:
+                    kind, existed = 'missing', False
+                self.entries.append((source, backup, kind, existed))
+        except BaseException:
+            self.cleanup()
+            raise
+
+    def restore(self) -> None:
+        """Restore the pre-update paths, removing files created by the failed update."""
+
+        for source, backup, kind, existed in reversed(self.entries):
+            if source.is_dir() and not source.is_symlink():
+                shutil.rmtree(source)
+            elif source.exists() or source.is_symlink():
+                source.unlink()
+            if not existed:
+                continue
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if kind == 'directory':
+                shutil.copytree(backup, source, symlinks=True)
+            else:
+                shutil.copy2(backup, source)
+
+    def cleanup(self) -> None:
+        """Remove the private snapshot directory after success or rollback."""
+
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def _run_update_transaction(paths: list[Path], operation, *, rollback_callback=None):
+    """Run an update operation with file restoration on any failure.
+
+    The callback is intentionally invoked only after the snapshot has been
+    restored, so service restart observes the previous binaries/configuration.
+    """
+
+    snapshot = _UpdateRuntimeSnapshot(paths)
+    try:
+        return operation()
+    except BaseException:
+        try:
+            snapshot.restore()
+        except BaseException as restore_error:
+            print('WARNING: update rollback could not restore the previous runtime', file=sys.stderr)
+            if rollback_callback is None:
+                raise restore_error
+        if rollback_callback is not None:
+            rollback_callback()
+        raise
+    finally:
+        snapshot.cleanup()
+
+
+_active_update_snapshot: _UpdateRuntimeSnapshot | None = None
+
+
+def _mark_update_runtime_started() -> None:
+    """Mark the point after which a failed update must restart old services."""
+
+    if _active_update_snapshot is not None:
+        _active_update_snapshot.runtime_stopped = True
+
+
+def _update_runtime_paths() -> list[Path]:
+    """Return the installed paths touched by package replacement or restart."""
+
+    return [
+        INSTALL_DIR / 'cli',
+        INSTALL_DIR / 'agents',
+        INSTALL_DIR / 'client',
+        INSTALL_DIR / 'public',
+        BIN_DIR,
+        CLI_PATH,
+        ENV_FILE,
+        INSTALLED_BUILD_FILE,
+        FRPC_CONF,
+        UNIT_PATH_HUB,
+        UNIT_PATH_SHELLMCP,
+        UNIT_PATH_FRPC,
+        UNIT_PATH_CLOUDFLARED,
+        UNIT_PATH_AUTO_UPDATE,
+        globals().get('UNIT_PATH_AUTO_UPDATE_TIMER', UNIT_PATH_AUTO_UPDATE),
+    ]
+
+
+def _restart_update_services_after_rollback() -> None:
+    """Best-effort restart of the restored service set after a failed update."""
+
+    try:
+        env = env_read()
+        svc_daemon_reload()
+        install_hub = env.get('INSTALL_HUB') == 'true' or UNIT_PATH_HUB.exists()
+        install_shellmcp = env.get('INSTALL_SHELLMCP') == 'true' or UNIT_PATH_SHELLMCP.exists()
+        for name, path in _service_pairs_for_update(install_hub, install_shellmcp, env):
+            svc_enable_start(name, path)
+    except BaseException:
+        print('WARNING: restored runtime could not be restarted automatically', file=sys.stderr)
+
+
+def _transactional_update(func):
+    """Decorate the update command with rollback-safe runtime restoration."""
+
+    @wraps(func)
+    def wrapped(args):
+        global _active_update_snapshot
+        need_root()
+        snapshot = _UpdateRuntimeSnapshot(_update_runtime_paths())
+        _active_update_snapshot = snapshot
+        try:
+            return func(args)
+        except BaseException:
+            try:
+                snapshot.restore()
+            except BaseException:
+                print('WARNING: update rollback could not restore the previous runtime', file=sys.stderr)
+            if snapshot.runtime_stopped:
+                _restart_update_services_after_rollback()
+            raise
+        finally:
+            _active_update_snapshot = None
+            snapshot.cleanup()
+
+    return wrapped
+
+
+@_transactional_update
 def cmd_update(args):
     """In-place upgrade for existing installs.
 
@@ -3607,7 +4448,6 @@ def cmd_update(args):
     if not install_hub and not install_shellmcp:
         die('No installed components detected. Use --hub and/or --shellmcp, or run: gptadmin setup')
 
-    env.setdefault('CTL_TOKEN', gen_hex())
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
     env.setdefault('ADMIN_PASSWORD', gen_hex())
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
@@ -3624,7 +4464,7 @@ def cmd_update(args):
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
         hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
-        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('CTL_TOKEN', '')
+        env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('SHELLMCP_TOKEN', '')
         env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
         env['SHELLMCP_SERVICE_SCOPE'] = INSTALL_SCOPE
     sync_oauth_origin_env(env)
@@ -3636,6 +4476,8 @@ def cmd_update(args):
 
     target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
     remote_info = _remote_artifact_build_info(target_pkg)
+    if not _release_manifest_bypass_enabled() and (not remote_info.get('sha256') or remote_info.get('size') is None):
+        die(f'Проверка релиза не пройдена: manifest недоступен или не содержит полный digest/size ({Path(target_pkg).name})')
     if not getattr(args, 'force', False):
         installed_info = _installed_build_info(env, install_hub)
         if _should_skip_update(installed_info, remote_info):
@@ -3649,41 +4491,54 @@ def cmd_update(args):
             print('Use `gptadmin update --force` to reinstall anyway.')
             return
 
-    print('Stopping installed GPTAdmin services for safe in-place update...')
-    svc_stop_multi(_service_pairs_for_update(install_hub, install_shellmcp, env))
-
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
+
+        def download_release(url: str, destination: Path) -> None:
+            """Download one package and enforce its published manifest digest."""
+            metadata = _remote_artifact_build_info(url)
+            download(url, destination)
+            _verify_downloaded_artifact(destination, metadata, require_metadata=True)
+
         if install_hub and install_shellmcp:
             print('[Update] downloading full package...')
             pkg = tdp / 'all.tgz'
             try:
-                download(pkg_all, pkg)
+                download_release(pkg_all, pkg)
             except subprocess.CalledProcessError:
                 if pkg_all == PKG_ALL_URL_DEFAULT:
                     raise
                 print('  Platform package unavailable, using full package...')
-                download(PKG_ALL_URL_DEFAULT, pkg)
-            install_component_from_pkg(pkg, 'hub')
-            install_component_from_pkg(pkg, 'shellmcp')
+                download_release(PKG_ALL_URL_DEFAULT, pkg)
+            components = ('hub', 'shellmcp')
         elif install_hub:
             print('[Update] downloading hub package...')
             pkg = tdp / 'hub.tgz'
             try:
-                download(pkg_hub, pkg)
+                download_release(pkg_hub, pkg)
             except subprocess.CalledProcessError:
                 print('  Component package unavailable, using full package...')
-                download(pkg_all, pkg)
-            install_component_from_pkg(pkg, 'hub')
+                download_release(pkg_all, pkg)
+            components = ('hub',)
         elif install_shellmcp:
             print('[Update] downloading shellmcp package...')
             pkg = tdp / 'shellmcp.tgz'
             try:
-                download(pkg_shellmcp, pkg)
+                download_release(pkg_shellmcp, pkg)
             except subprocess.CalledProcessError:
                 print('  Component package unavailable, using full package...')
-                download(pkg_all, pkg)
-            install_component_from_pkg(pkg, 'shellmcp')
+                download_release(pkg_all, pkg)
+            components = ('shellmcp',)
+
+        # Download and verify every selected release artifact before taking the
+        # live control plane down. The rollback path still protects package
+        # installation and health failures, but a network hiccup must not
+        # create user-visible downtime in the first place.
+        print('Stopping installed GPTAdmin services for safe in-place update...')
+        _mark_update_runtime_started()
+        svc_stop_multi(_service_pairs_for_update(install_hub, install_shellmcp, env))
+        for component in components:
+            install_component_from_pkg(pkg, component)
 
     # Package payloads must never be able to invalidate existing Hub JWTs or
     # client credentials. Restore the pre-update auth state before services
@@ -3708,7 +4563,8 @@ def cmd_update(args):
     svc_daemon_reload()
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
-        wait_local_hub_health(env, timeout_s=90)
+        if not wait_local_hub_health(env, timeout_s=90):
+            raise RuntimeError('local Hub health check failed after update')
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_frpc_enable_start_all(env)
     if env.get('TUNNEL_MODE') == 'cloudflare' or env.get('CLOUDFLARE_TUNNEL_ENABLE', 'false') == 'true':
@@ -3832,12 +4688,15 @@ def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[st
     sync_oauth_origin_env(env)
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
     env.setdefault('ADMIN_PASSWORD', gen_hex())
-    wanted = clients or {'claude-code', 'codex', 'opencode', 'vscode'}
+    wanted = clients or {'claude-code', 'codex', 'opencode', 'vscode', 'hermes', 'openclaw', 'zed'}
     tokens = {
         'GPTADMIN_CLAUDE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CLAUDE_MCP_BEARER')) or make_mcp_bearer_token(env, 'claude-code'),
         'GPTADMIN_CODEX_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CODEX_MCP_BEARER')) or make_mcp_bearer_token(env, 'codex'),
         'GPTADMIN_OPENCODE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_OPENCODE_MCP_BEARER')) or make_mcp_bearer_token(env, 'opencode'),
         'GPTADMIN_VSCODE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_VSCODE_MCP_BEARER')) or make_mcp_bearer_token(env, 'vscode'),
+        'GPTADMIN_HERMES_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_HERMES_MCP_BEARER')) or make_mcp_bearer_token(env, 'hermes-agent'),
+        'GPTADMIN_OPENCLAW_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_OPENCLAW_MCP_BEARER')) or make_mcp_bearer_token(env, 'openclaw-assistant'),
+        'GPTADMIN_ZED_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_ZED_MCP_BEARER')) or make_mcp_bearer_token(env, 'zed'),
         'GPTADMIN_CUSTOM_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CUSTOM_MCP_BEARER')) or make_mcp_bearer_token(env, 'custom-mcp-client'),
     }
     env.update(tokens)
@@ -3860,6 +4719,12 @@ def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[st
         results['opencode'] = _configure_opencode_mcp(url, tokens['GPTADMIN_OPENCODE_MCP_BEARER'])
     if 'vscode' in wanted:
         results['vscode'] = _configure_vscode_mcp(url, tokens['GPTADMIN_VSCODE_MCP_BEARER'])
+    if 'hermes' in wanted:
+        results['hermes'] = _configure_hermes_mcp(url, tokens['GPTADMIN_HERMES_MCP_BEARER'])
+    if 'openclaw' in wanted:
+        results['openclaw'] = _configure_openclaw_mcp(url, tokens['GPTADMIN_OPENCLAW_MCP_BEARER'])
+    if 'zed' in wanted:
+        results['zed'] = _configure_zed_mcp(url, tokens['GPTADMIN_ZED_MCP_BEARER'])
     results['_url'] = url
     if print_custom:
         results['_custom_token'] = tokens['GPTADMIN_CUSTOM_MCP_BEARER']
@@ -3963,6 +4828,96 @@ def _configure_vscode_mcp(url: str, token: str) -> str:
     res = _run_quiet(['code', '--add-mcp', json.dumps(config, separators=(',', ':'))])
     if res.returncode != 0:
         return 'error: ' + ((res.stderr or res.stdout).strip() or f'code rc={res.returncode}')
+    return 'ok'
+
+
+def _configure_hermes_mcp(url: str, token: str) -> str:
+    """Register GPTAdmin as a remote MCP server in Hermes (Nous/Nous-platform agent).
+
+    Mirrors what claude mcp add does for Claude Code: a non-interactive
+    `hermes mcp add <name> --url ... --auth header --env KEY=VAL` call.
+    The auth header is sourced from the bearer token via an environment
+    variable so the value never lands on the command line.
+    """
+    if not shutil.which('hermes'):
+        return 'skip: hermes CLI not found'
+    env_var = 'GPTADMIN_GPTADMIN_MCP_BEARER'
+    env = _merge_env_for_client({env_var: token})
+    _run_quiet(['hermes', 'mcp', 'remove', 'gptadmin'], env=env)
+    res = _run_quiet(
+        ['hermes', 'mcp', 'add', 'gptadmin',
+         '--url', url,
+         '--auth', 'header',
+         '--env', f'{env_var}={token}'],
+        env=env,
+    )
+    if res.returncode != 0:
+        err = ((res.stderr or res.stdout).strip() or f'hermes rc={res.returncode}')
+        # If `hermes mcp add` rejected `--env` for HTTP transport, fall back
+        # to writing the header-value directly (still better than nothing).
+        if 'env is only supported' in err or 'stdio' in err:
+            res = _run_quiet(
+                ['hermes', 'mcp', 'add', 'gptadmin',
+                 '--url', url,
+                 '--auth', 'header'],
+                env=env,
+            )
+            err = ((res.stderr or res.stdout).strip() or f'hermes rc={res.returncode}')
+            if res.returncode == 0:
+                _run_quiet(['hermes', 'config', 'set', f'mcp_servers.gptadmin.headers.Authorization', f'Bearer {token}'], env=env)
+                return 'ok'
+        return 'error: ' + err
+    return 'ok'
+
+
+def _configure_openclaw_mcp(url: str, token: str) -> str:
+    """Register GPTAdmin as a remote MCP server in OpenClaw (HA add-on assistant).
+
+    OpenClaw runs as a Home Assistant add-on. Its config is managed via the
+    HA Supervisor API (POST /core/api/services/<domain>/<service>). The
+    add-on slug on this host is `64fc532e_openclaw_assistant`. Update this
+    helper once the canonical registration endpoint is documented in
+    docs/INTEGRATIONS.md.
+    """
+    return (
+        'skip: openclaw is a Home Assistant add-on; configure via the '
+        'HA Supervisor UI or POST /core/api/services/persistent_notification/... '
+        '(see docs/INTEGRATIONS.md)'
+    )
+
+
+def _configure_zed_mcp(url: str, token: str) -> str:
+    """Register GPTAdmin as a remote MCP server in Zed (context_server).
+
+    Zed stores MCP servers under "context_servers" in ~/.config/zed/settings.json
+    using one entry per server, with an HTTP transport exposing URL + headers.
+    The token is written into the JSON file; that path is fine because the
+    settings file is mode 0600 on first write.
+    """
+    cfg_dir = USER_HOME / '.config' / 'zed'
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_dir / 'settings.json'
+    data: dict = {}
+    if cfg.exists():
+        try:
+            data = json.loads(cfg.read_text() or '{}')
+        except Exception as e:
+            return f'error: cannot parse {cfg}: {e}'
+    data.setdefault('context_servers', {})
+    data['context_servers']['gptadmin'] = {
+        'name': 'gptadmin',
+        'url': url,
+        'headers': {'Authorization': f'Bearer {token}'},
+        'enabled': True,
+    }
+    if cfg.exists():
+        backup = cfg.with_suffix(cfg.suffix + '.bak.gptadmin-mcp.' + time.strftime('%Y%m%d_%H%M%S'))
+        shutil.copy2(cfg, backup)
+    cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    try:
+        os.chmod(cfg, 0o600)
+    except Exception:
+        pass
     return 'ok'
 
 
@@ -4160,7 +5115,23 @@ def main():
     sub = ap.add_subparsers(dest='cmd')
 
     sub.add_parser('version', help='Показать версию и информацию о сборке').set_defaults(func=cmd_version)
-    sub.add_parser('doctor', help='Проверка здоровья: сервисы, порты, конфиг, токены').set_defaults(func=cmd_doctor)
+    ap_doctor = sub.add_parser('doctor', help='Проверка здоровья: Hub, MCP clients, Tunnel и конфиг')
+    ap_doctor.add_argument('--json', action='store_true', help='Вывести машиночитаемый JSON без секретов')
+    ap_doctor.set_defaults(func=cmd_doctor)
+
+    ap_backup = sub.add_parser('backup', help='Создать, проверить или восстановить конфигурационный backup')
+    backup_sub = ap_backup.add_subparsers(dest='backup_cmd')
+    ap_backup_create = backup_sub.add_parser('create', help='Создать backup с manifest и SHA-256')
+    ap_backup_create.add_argument('archive')
+    ap_backup_create.add_argument('--source', default=str(ETC_DIR), help='Каталог конфигурации; по умолчанию текущий Hub config')
+    ap_backup_create.set_defaults(func=cmd_backup)
+    ap_backup_verify = backup_sub.add_parser('verify', help='Проверить backup без распаковки')
+    ap_backup_verify.add_argument('archive')
+    ap_backup_verify.set_defaults(func=cmd_backup)
+    ap_backup_restore = backup_sub.add_parser('restore', help='Атомарно восстановить backup в новый каталог')
+    ap_backup_restore.add_argument('archive')
+    ap_backup_restore.add_argument('target')
+    ap_backup_restore.set_defaults(func=cmd_backup)
     ap_setup = sub.add_parser('setup', help='Установка и настройка')
     ap_setup.add_argument('--pkg-all')
     ap_setup.add_argument('--pkg-hub')
@@ -4172,7 +5143,7 @@ def main():
     ap_setup.add_argument('--no-shellmcp', '--no-shell', dest='no_shellmcp', action='store_true', help='Do not install ShellMCP/rootd component')
     ap_setup.add_argument('--tunnel', choices=['frp', 'manual', 'cloudflare', 'none'], help='Public hub tunnel mode; --silent defaults to frp')
     ap_setup.add_argument('--hub-url', help='Existing public hub URL for manual tunnel or shell-only install')
-    ap_setup.add_argument('--mcp-relay-token', help='MCP_RELAY_AGENT_TOKEN of an existing Hub for shell-only installs')
+    ap_setup.add_argument('--mcp-relay-token', help='Managed connection for an existing Hub in shell-only installs')
     ap_setup.add_argument('--hub-port', help='Local hub port; default 9001')
     ap_setup.add_argument('--shell-transport', choices=['polling', 'webhook', 'websocket'], default='polling', help='Internal hub↔ShellMCP transport; default polling')
     ap_setup.add_argument('--shell-heartbeat', action='store_true', help='Enable optional ShellMCP heartbeat (disabled by default)')
@@ -4221,6 +5192,14 @@ def main():
     sub.add_parser('stop', help='Остановить сервисы').set_defaults(func=cmd_stop)
     sub.add_parser('restart', help='Перезапустить сервисы').set_defaults(func=cmd_restart)
 
+    ap_instructions = sub.add_parser('instructions', help='Управление startup instructions хаба')
+    instructions_sub = ap_instructions.add_subparsers(dest='instructions_cmd')
+    instructions_sub.add_parser('show', help='Явно показать содержимое инструкций').set_defaults(func=cmd_instructions)
+    instructions_sub.add_parser('path', help='Показать путь без содержимого').set_defaults(func=cmd_instructions)
+    ap_instructions_set = instructions_sub.add_parser('set-file', help='Безопасно установить инструкции из UTF-8 файла')
+    ap_instructions_set.add_argument('source')
+    ap_instructions_set.set_defaults(func=cmd_instructions)
+
     hub = sub.add_parser('hub', help='Управление хабом')
     hub_sub = hub.add_subparsers(dest='hub_cmd')
     hub_sub.add_parser('status', help='Статус хаба').set_defaults(func=cmd_status)
@@ -4240,8 +5219,8 @@ def main():
     ap_logs.add_argument('service', nargs='?', default='all', metavar='service', help='hub | shell | frpc | all')
     ap_logs.set_defaults(func=cmd_logs)
 
-    ap_tok = sub.add_parser('tokens', help='Показать все токены GPTAdmin')
-    ap_tok.add_argument('--show-shellmcp', action='store_true', help='Показать SHELLMCP_TOKEN (опасно!)')
+    ap_tok = sub.add_parser('tokens', help='Показать состояние подключений GPTAdmin')
+    ap_tok.add_argument('--show-shellmcp', action='store_true', help='Показать состояние подключения агента; секрет не выводится')
     ap_tok.set_defaults(func=cmd_tokens)
 
     ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить JWT для MCP-клиента без OAuth')
@@ -4289,6 +5268,14 @@ def main():
     ap_mcp_connect.add_argument('--fresh', action='store_true')
     ap_mcp_connect.set_defaults(func=cmd_mcp_connect)
 
+    ap_mcp_catalog = mcp_sub.add_parser('catalog', help='Показать атрибутированный каталог MCP capability')
+    ap_mcp_catalog.add_argument('--json', action='store_true')
+    ap_mcp_catalog.set_defaults(func=cmd_mcp_catalog)
+
+    ap_mcp_extension = mcp_sub.add_parser('extension-validate', aliases=['validate-extension'], help='Проверить manifest стороннего MCP extension')
+    ap_mcp_extension.add_argument('manifest')
+    ap_mcp_extension.set_defaults(func=cmd_mcp_extension_validate)
+
     ap_mcp_add = mcp_sub.add_parser('add', help='Добавить MCP-сервер (стиль Claude/Codex)')
     ap_mcp_add.add_argument('name')
     ap_mcp_add.add_argument('command', nargs='?', help='Command, e.g. npx')
@@ -4300,6 +5287,8 @@ def main():
     ap_mcp_add.add_argument('--agent-id')
     ap_mcp_add.add_argument('--run-as-user')
     ap_mcp_add.add_argument('--hub-url')
+    ap_mcp_add.add_argument('--catalog-id', help='Bind this server to a curated capability definition')
+    ap_mcp_add.add_argument('--accept-capability', action='store_true', help='Acknowledge the displayed catalog scope/risk before install')
     ap_mcp_add.add_argument('--disabled', action='store_true')
     ap_mcp_add.add_argument('--force', action='store_true')
     ap_mcp_add.add_argument('--install', action='store_true', help='Сразу установить и запустить relay service')
@@ -4359,6 +5348,8 @@ def main():
         ap.print_help(); return
     if args.cmd == 'mcp' and not getattr(args, 'mcp_cmd', None):
         ap_mcp.print_help(); return
+    if args.cmd == 'instructions' and not getattr(args, 'instructions_cmd', None):
+        ap_instructions.print_help(); return
     # Best-effort update hint (silent on any error, auto-update off, new version available).
     try:
         maybe_update_hint(args)
