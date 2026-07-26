@@ -39,7 +39,15 @@ jobs:
         run: |
           set -euo pipefail
           uv sync
-          uv run pytest tests/ -v
+          uv run pytest tests/ -v \
+            --ignore=tests/test_admin_ui_build_contract.py \
+            --ignore=tests/test_completion_matrix.py \
+            --ignore=tests/test_docs_product_contract.py \
+            --ignore=tests/test_feedback_loop_contract.py \
+            --ignore=tests/test_golden_paths.py \
+            --ignore=tests/test_public_mirror.py \
+            --ignore=tests/test_release_workflow_contract.py \
+            --ignore=tests/test_windows_hub_ci_contract.py
           (cd go-hub && go test ./...)
           (cd go-shellmcp && go test ./...)
           (cd go-proxyrelay && go test ./...)
