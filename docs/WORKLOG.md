@@ -2795,3 +2795,14 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Verification: RED then GREEN; focused UI/admin contracts `17 passed`; full Python suite `247 passed, 3 skipped`; `go test ./...` passed; `git diff --check` passed.
 - Delivery: Atomically deployed only `admin-legacy/index.html` to server-100 at `20260725T020209Z`; rollback backup and hashes are recorded in `trash/logs/admin-legacy-css-deploy-20260725T020209Z.md`; no restart or binary change.
 - Next: Hard-refresh the supplied browser tab and confirm the styled console; leave the separate clean `v129` release integration for a dedicated release task.
+
+## 2026-07-27 - Codex OAuth refresh and widget resource recovery - completed
+
+- Milestone: `S0.1`, `S0.5`
+- Owner: Codex
+- Scope: Preserve existing Hub bearer connections, add durable OAuth refresh rotation, and prove authenticated Apps SDK widget resource delivery.
+- Baseline / red evidence: Live build `134` / `beed6963404ee2c1978ea2246cf5c46db5757ce9` advertised only `authorization_code`; its redacted existing-credential matrix returned `401` on admin, MCP and relay. The TDD regression failed because OAuth discovery omitted `refresh_token`.
+- Change: Added digest-only five-year OAuth refresh records with client/resource binding and rotation, advertised refresh support, retained existing deprecated bearer credentials until explicit rotation/removal, and aligned CLI connection-status copy.
+- Verification: Focused RED/GREEN Hub OAuth/widget and legacy-bearer tests passed; Hub suite and affected Python contract/live/canary/extension tests passed locally. Release run `30301756447` passed. After standard Hub-only update, build `136` / `6d3446228d5125efda31b27120b6e86b52bd952e` returned post-deploy `200` on the redacted admin/MCP/relay matrix; a real authorization-code -> refresh -> widget `resources/read` lifecycle passed, including old-refresh rejection.
+- Delivery: Public release `v136`; standard updater deployed the Hub without printing or rotating credentials.
+- Next: Reauthorize the existing GPTADMIN Codex connection once, then record a real `discover -> schema -> execute` client acceptance.
