@@ -291,7 +291,9 @@ type oauthCode struct {
 type managedMCPToken struct {
 	ID           string   `json:"id"`
 	ClientID     string   `json:"client_id"`
+	TokenDigest  string   `json:"token_digest,omitempty"`
 	TokenKind    string   `json:"token_kind,omitempty"`
+	Audience     string   `json:"audience,omitempty"`
 	Status       string   `json:"status,omitempty"`
 	RedirectURIs []string `json:"redirect_uris,omitempty"`
 	Scope        string   `json:"scope"`
@@ -4359,7 +4361,7 @@ func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request
 		"token_endpoint":                        origin + "/oauth/token",
 		"registration_endpoint":                 origin + "/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
 		"scopes_supported":                      []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec"},
@@ -4403,7 +4405,7 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
 		"redirect_uris":              redirectURIs,
-		"grant_types":                []string{"authorization_code"},
+		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
 		"code_challenge_methods":     []string{"S256"},
@@ -4515,6 +4517,15 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
 		return
 	}
+	grantType := strings.TrimSpace(r.Form.Get("grant_type"))
+	if grantType == "refresh_token" {
+		s.oauthRefreshToken(w, r)
+		return
+	}
+	if grantType != "" && grantType != "authorization_code" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported_grant_type"})
+		return
+	}
 	code := r.Form.Get("code")
 	s.mu.Lock()
 	data, ok := s.oauthCodes[code]
@@ -4539,11 +4550,12 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 		return
 	}
-	claims := map[string]any{"sub": "admin", "scope": data.Scope, "client_id": data.ClientID, "iss": s.origin(r), "aud": resource, "resource": resource, "exp": time.Now().Add(12 * time.Hour).Unix(), "iat": time.Now().Unix(), "kid": s.jwtKeyID()}
-	if profileID := s.oauthClientProfileID(data.ClientID); profileID != "" {
-		claims["profile_id"] = profileID
+	token, err := s.issueOAuthAccessToken(data.ClientID, resource, data.Scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
-	token, err := s.signJWT(claims)
+	refreshToken, refreshRecord, err := s.issueOAuthRefreshToken(data.ClientID, resource, data.Scope)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -4552,7 +4564,111 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	s.addAuditLocked("oauth_token_issued", map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource})
 	s.mu.Unlock()
 	s.authAudit("oauth_token_ok", r, map[string]any{"client_id": data.ClientID, "scope": data.Scope, "resource": resource, "access_token": s.secretForAudit(token), "jwt_claims": decodeJWTClaimsUnverified(token), "form": s.formForAudit(r)})
-	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200})
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200, "refresh_token": refreshToken, "refresh_token_expires_in": refreshRecord.ExpiresAt - s.now().Unix()})
+}
+
+// oauthRefreshToken rotates a durable, digest-only refresh credential and
+// issues a short-lived access JWT for the same client and resource.
+func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
+	resource := strings.TrimRight(r.Form.Get("resource"), "/")
+	clientID := strings.TrimSpace(r.Form.Get("client_id"))
+	refreshToken := strings.TrimSpace(r.Form.Get("refresh_token"))
+	record, ok := s.oauthRefreshTokenRecord(refreshToken, clientID, resource)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "refresh token is invalid, expired, or belongs to a different client"})
+		return
+	}
+	accessToken, err := s.issueOAuthAccessToken(record.ClientID, record.Audience, record.Scope)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	newRefreshToken, newRecord, err := newOAuthRefreshToken(record.ClientID, record.Audience, record.Scope, s.now())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !s.rotateOAuthRefreshToken(refreshToken, record, newRecord) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "refresh token is no longer valid"})
+		return
+	}
+	s.authAudit("oauth_refresh_ok", r, map[string]any{"client_id": record.ClientID, "resource": record.Audience, "scope": record.Scope, "refresh_token": s.secretForAudit(refreshToken)})
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 43200, "refresh_token": newRefreshToken, "refresh_token_expires_in": newRecord.ExpiresAt - s.now().Unix()})
+}
+
+func (s *Server) issueOAuthAccessToken(clientID, resource, scope string) (string, error) {
+	now := s.now()
+	claims := map[string]any{"sub": "admin", "scope": scope, "client_id": clientID, "iss": strings.TrimRight(s.cfg.PublicOrigin, "/"), "aud": resource, "resource": resource, "exp": now.Add(12 * time.Hour).Unix(), "iat": now.Unix(), "kid": s.jwtKeyID()}
+	if claims["iss"] == "" {
+		claims["iss"] = resource
+	}
+	if profileID := s.oauthClientProfileID(clientID); profileID != "" {
+		claims["profile_id"] = profileID
+	}
+	return s.signJWT(claims)
+}
+
+func (s *Server) issueOAuthRefreshToken(clientID, resource, scope string) (string, managedMCPToken, error) {
+	token, record, err := newOAuthRefreshToken(clientID, resource, scope, s.now())
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	s.mu.Lock()
+	s.managedMCP[record.ID] = record
+	err = s.saveManagedMCPStateLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return "", managedMCPToken{}, err
+	}
+	return token, record, nil
+}
+
+func newOAuthRefreshToken(clientID, resource, scope string, now time.Time) (string, managedMCPToken, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", managedMCPToken{}, err
+	}
+	record := managedMCPToken{ID: newID(), ClientID: clientID, TokenKind: "oauth_refresh", Audience: resource, Scope: scope, IssuedAt: now.Unix(), ExpiresAt: now.AddDate(5, 0, 0).Unix()}
+	token := "gptr_" + record.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	digest := sha256.Sum256([]byte(token))
+	record.TokenDigest = hex.EncodeToString(digest[:])
+	return token, record, nil
+}
+
+func (s *Server) oauthRefreshTokenRecord(token, clientID, resource string) (managedMCPToken, bool) {
+	parts := strings.SplitN(token, "_", 3)
+	if len(parts) != 3 || parts[0] != "gptr" || parts[1] == "" || parts[2] == "" || clientID == "" {
+		return managedMCPToken{}, false
+	}
+	digest := sha256.Sum256([]byte(token))
+	now := s.now().Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.managedMCP[parts[1]]
+	if !ok || record.TokenKind != "oauth_refresh" || record.RevokedAt != 0 || record.ExpiresAt <= now || record.ClientID != clientID || (resource != "" && strings.TrimRight(record.Audience, "/") != resource) || record.TokenDigest == "" || !hmac.Equal([]byte(record.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return managedMCPToken{}, false
+	}
+	return record, true
+}
+
+func (s *Server) rotateOAuthRefreshToken(token string, oldRecord, newRecord managedMCPToken) bool {
+	digest := sha256.Sum256([]byte(token))
+	now := s.now().Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, ok := s.managedMCP[oldRecord.ID]
+	if !ok || stored.TokenKind != "oauth_refresh" || stored.RevokedAt != 0 || stored.ExpiresAt <= now || stored.TokenDigest == "" || !hmac.Equal([]byte(stored.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return false
+	}
+	stored.RevokedAt = now
+	s.managedMCP[stored.ID] = stored
+	s.managedMCP[newRecord.ID] = newRecord
+	if err := s.saveManagedMCPStateLocked(); err != nil {
+		s.managedMCP[stored.ID] = oldRecord
+		delete(s.managedMCP, newRecord.ID)
+		return false
+	}
+	return true
 }
 
 func agentSlug(v string) string {
