@@ -12,6 +12,15 @@ Rules:
 - At the end of the current goal, resolve every actionable open entry before
   final handoff, unless a concrete external blocker is recorded.
 
+## 2026-07-27 - LEGACY-BEARER-DEADLINE-20260727 - Existing Hub connections expired by a fixed date - in progress
+
+- Component: `go-hub/internal/hub/server.go` legacy bearer acceptance and `cli.py` connection-status copy.
+- Evidence: immutable GitHub Actions run `30301216345` for release `v135` failed its real Hub process fixtures on 2026-07-27 with `401` and `legacy token expired; use OAuth connection` after the fixed migration deadline.
+- Confirmed facts: Existing bearer-backed process, canary and extension checks were rejected even though the release must preserve already issued connections. New installs do not create this deprecated credential.
+- Root cause: `FromEnv` applied a calendar cutoff while compatibility fixtures and retained deployments still used the existing bearer.
+- Fix / verification: The pending build keeps existing credentials valid until explicit rotation/removal, removes the deadline from normal CLI copy, and has RED/GREEN Hub plus CLI regressions; release publication remains required.
+- Next action: Publish a new immutable build, then run the redacted credential matrix and real Codex reauthorization/refresh/widget acceptance.
+
 ## 2026-07-24 - UPDATE-HEALTH-IGNORED-20260724 - Failed update health did not abort - fixed
 
 - Component: `cli.py:cmd_update` in-place update flow.

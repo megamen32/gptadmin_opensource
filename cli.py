@@ -33,10 +33,9 @@ try:
 except Exception:
     tomllib = None
 
-# Fixed one-week migration window for the legacy administrator bearer. New
-# installs no longer create it; existing installations are handled by the Hub
-# until this date and must migrate to AdminPassword/OAuth before then.
-LEGACY_CTL_TOKEN_DEADLINE = '2026-07-27'
+# CTL_TOKEN is a deprecated compatibility credential. New and updated
+# installations do not create it, but an existing credential remains valid
+# until its owner explicitly rotates or removes it.
 
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
@@ -2102,7 +2101,7 @@ def setup_interactive(args):
     print('\n=== Готово ===')
     if install_hub:
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
-        print(f"Подключение: AdminPassword/OAuth (legacy bearer migration deadline {LEGACY_CTL_TOKEN_DEADLINE})")
+        print('Подключение: AdminPassword/OAuth (existing legacy bearer remains valid until explicitly rotated or removed)')
     if install_shellmcp and not install_hub:
         print(f"HUB_URL для ShellMCP: {env.get('HUB_URL', '—')}")
     if install_shellmcp:
@@ -3572,7 +3571,7 @@ def cmd_doctor(args):
         if check['name'] == 'hub_url' and check['status'] == 'ok':
             message = f"Hub URL: {report['hub_url']}"
         elif check['name'] == 'legacy_bearer':
-            message = f"Legacy Hub bearer is present; migrate to AdminPassword/OAuth by {LEGACY_CTL_TOKEN_DEADLINE}."
+            message = 'Legacy Hub bearer is present; it remains valid until explicitly rotated or removed.'
         elif check['name'].startswith('service:'):
             message = f"{check['name'].split(':', 1)[1]} — {message}"
         elif check['name'] == 'admin_password':
@@ -3771,7 +3770,7 @@ def cmd_tokens(args):
         print(f'  Network bridge        {c_green("configured (hidden)")}')
     print()
     if env.get('CTL_TOKEN'):
-        print_warn(f'Legacy Hub bearer is hidden and expires on {LEGACY_CTL_TOKEN_DEADLINE}; migrate to AdminPassword/OAuth.')
+        print_warn('Legacy Hub bearer is hidden and remains valid until explicitly rotated or removed.')
     print(c_dim('  Issue new MCP token:  gptadmin token issue <name>'))
     print(c_dim('  Rotate tokens:        gptadmin token rotate [shellmcp]'))
 
@@ -3781,7 +3780,7 @@ def cmd_rotate(args):
     if which in ('shellmcp', 'shell', 'shell-mcp'):
         which = 'shellmcp'
     if which == 'hub':
-        die(f'legacy Hub bearer rotation is removed; use AdminPassword/OAuth (deadline {LEGACY_CTL_TOKEN_DEADLINE})')
+        die('legacy Hub bearer rotation is removed; use AdminPassword/OAuth. Rotation is a global invalidation event.')
     if which not in ('hub', 'shellmcp'):
         die('unknown token target. Use: shellmcp')
     newtok = gen_hex()

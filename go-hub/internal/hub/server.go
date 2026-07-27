@@ -100,28 +100,30 @@ func FromEnv() Config {
 		secretTTL = 15 * 60
 	}
 	return Config{
-		Addr:                       host + ":" + port,
-		ConfigDir:                  cfgDir,
-		PublicDir:                  env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
-		ArtifactDir:                env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
-		CtlToken:                   env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
-		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
-		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
-		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
-		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
-		OutputDir:                  env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
-		PublicOrigin:               strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
-		MCPResource:                strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
-		AdminPassword:              env("ADMIN_PASSWORD", ""),
-		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", ""),
-		OAuthKeyID:                 env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
-		EnvFile:                    env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
-		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
-		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
-		AuthLogSecrets:             truthyString(env("AUTH_LOG_SECRETS", "0")),
-		AuthRateLimit:              positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
-		BridgeKey:                  env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
-		LegacyCtlTokenDeadline:     legacyCtlTokenDeadline,
+		Addr:                     host + ":" + port,
+		ConfigDir:                cfgDir,
+		PublicDir:                env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
+		ArtifactDir:              env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
+		CtlToken:                 env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
+		RelayAgentToken:          env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
+		ShellToken:               env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
+		DefaultTimeout:           time.Duration(defTimeout) * time.Second,
+		PollMaxTimeout:           time.Duration(pollTimeout) * time.Second,
+		OutputDir:                env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
+		PublicOrigin:             strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
+		MCPResource:              strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
+		AdminPassword:            env("ADMIN_PASSWORD", ""),
+		OAuthClientSecret:        env("OAUTH_CLIENT_SECRET", ""),
+		OAuthKeyID:               env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
+		EnvFile:                  env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
+		OAuthPermissiveRedirects: truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
+		OAuthPermissiveResources: truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
+		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
+		AuthRateLimit:            positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
+		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
+		// Existing installations may still rely on this deprecated credential.
+		// New installs do not create it; explicit rotation/removal is the cutoff.
+		LegacyCtlTokenDeadline:     time.Time{},
 		Now:                        time.Now,
 		RegistryStateFile:          env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
 		FailoverConfigFile:         env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
@@ -181,11 +183,7 @@ func (s *Server) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (s *Server) legacyCtlTokenAllowed() bool {
-	// Direct in-process constructors are used by compatibility tests and
-	// migration tooling; the production FromEnv path always sets a deadline.
-	return s.cfg.LegacyCtlTokenDeadline.IsZero() || s.now().Before(s.cfg.LegacyCtlTokenDeadline)
-}
+func (s *Server) legacyCtlTokenAllowed() bool { return true }
 
 func (s *Server) markLegacyCtlToken(w http.ResponseWriter) {
 	w.Header().Set("Deprecation", "true")
