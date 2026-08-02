@@ -2564,7 +2564,7 @@ func isReadOnlyTool(target, toolName string) bool {
 	}
 	if target == "hub" {
 		switch toolName {
-		case "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob":
+		case "discover", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob":
 			return true
 		default:
 			return false
@@ -2874,6 +2874,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	if isNetworkProxyHubTool(name) {
 		return s.callNetworkProxyTool(AccessProfileIDFromRequest(r), name, args)
 	}
+	if name == "resource_receipt" {
+		return s.appsSDKResourceReceipt(r, firstString(args, "uri")), http.StatusOK
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fields := map[string]any{"tool": name}
@@ -3020,6 +3023,13 @@ func hubTools() []map[string]any {
 	tools := []map[string]any{
 		{"name": "discover", "description": "List registered targets", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{
+			"name":         "resource_receipt",
+			"description":  "Read one GPTAdmin MCP resource and return a metadata-only URI, MIME, byte-size, SHA-256, content-count receipt.",
+			"inputSchema":  resourceReceiptInputSchema(),
+			"outputSchema": resourceReceiptOutputSchema(),
+			"annotations":  map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+		},
 		{"name": "pending", "description": "List pending approvals", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "approve_pending_server", "description": "Approve one ShellMCP device awaiting enrollment", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
 		{"name": "status", "description": "Return Hub status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
@@ -5183,6 +5193,9 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 
 func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
 	if agent.AgentID == "hub" {
+		if name == "resource_receipt" {
+			return mcpToolResult(s.appsSDKResourceReceipt(r, firstString(args, "uri"))), nil
+		}
 		return mcpToolResult(s.appsSDKCall(name, args)), nil
 	}
 	if strings.HasPrefix(agent.AgentID, "shell:") {
@@ -5433,6 +5446,8 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 			"servers":      servers,
 			"hint":         "Interactive dashboard rendered. The widget can call discover, schema, execute, and job through the MCP Apps bridge.",
 		}
+	case "resource_receipt":
+		return s.appsSDKResourceReceipt(nil, firstString(args, "uri"))
 	case "discover", "list_mcp_servers", "listMcpServers":
 		s.mu.Lock()
 		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
@@ -5499,6 +5514,9 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
 	if name == "secret_request" || name == "secret_status" {
 		return s.secretToolForRequest(r, name, args)
+	}
+	if name == "resource_receipt" {
+		return s.appsSDKResourceReceipt(r, firstString(args, "uri"))
 	}
 	if name == "demo" {
 		result, _ := s.callHubToolForRequest(r, name, args)
@@ -5611,6 +5629,40 @@ func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]an
 	return response
 }
 
+func resourceReceiptInputSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"uri": map[string]any{"type": "string", "minLength": 1}},
+		"required":             []string{"uri"},
+		"additionalProperties": false,
+	}
+}
+
+func resourceReceiptOutputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"uri":           map[string]any{"type": "string"},
+			"mime_type":     map[string]any{"type": "string"},
+			"byte_size":     map[string]any{"type": "integer", "minimum": 0},
+			"sha256":        map[string]any{"type": "string"},
+			"content_count": map[string]any{"type": "integer", "minimum": 0},
+			"ok":            map[string]any{"type": "boolean"},
+			"error": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"code":    map[string]any{"type": "string"},
+					"message": map[string]any{"type": "string"},
+				},
+				"required":             []string{"code", "message"},
+				"additionalProperties": false,
+			},
+		},
+		"required":             []string{"uri", "mime_type", "byte_size", "sha256", "content_count", "ok"},
+		"additionalProperties": false,
+	}
+}
+
 func appsSDKTools() []map[string]any {
 	readScopes := []string{"gptadmin.read"}
 	execScopes := []string{"gptadmin.read", "gptadmin.exec"}
@@ -5644,6 +5696,16 @@ func appsSDKTools() []map[string]any {
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
 			"_meta":           renderMeta,
+		},
+		{
+			"name":            "resource_receipt",
+			"title":           "Resource read receipt",
+			"description":     "Read one GPTAdmin MCP resource and return only its URI, MIME type, byte size, SHA-256 digest, content count, and success status. Resource contents are never returned.",
+			"inputSchema":     resourceReceiptInputSchema(),
+			"outputSchema":    resourceReceiptOutputSchema(),
+			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			"securitySchemes": readSecurity,
+			"_meta":           readMeta,
 		},
 		{
 			"name":            "discover",
@@ -5772,6 +5834,47 @@ func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "unknown GPTAdmin resource"}}}
 	}
 	return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": appsSDKWidgetHTML(s.origin(r)), "_meta": appsSDKWidgetMeta()}}}
+}
+
+func (s *Server) appsSDKResourceReceipt(r *http.Request, uri string) map[string]any {
+	failure := func(code, message string, contentCount int) map[string]any {
+		return map[string]any{
+			"uri":           uri,
+			"mime_type":     "",
+			"byte_size":     0,
+			"sha256":        "",
+			"content_count": contentCount,
+			"ok":            false,
+			"error":         map[string]any{"code": code, "message": message},
+		}
+	}
+	if uri == "" {
+		return failure("invalid_uri", "resource uri is required", 0)
+	}
+	if uri != startupInstructionsResourceURI && uri != "gptadmin://servers" && uri != "gptadmin://agents" && uri != "ui://widget/admin-v3.html" {
+		return failure("resource_not_found", "unknown GPTAdmin resource", 0)
+	}
+	contents, ok := s.appsSDKResourceRead(r, uri)["contents"].([]map[string]any)
+	if !ok || len(contents) != 1 {
+		return failure("invalid_resource_result", "resource read did not return exactly one content item", len(contents))
+	}
+	content := contents[0]
+	if firstString(content, "uri") != uri {
+		return failure("resource_uri_mismatch", "resource read returned a different uri", 1)
+	}
+	payload := firstString(content, "text", "blob")
+	if payload == "" {
+		return failure("empty_resource", "resource read returned no text or blob payload", 1)
+	}
+	digest := sha256.Sum256([]byte(payload))
+	return map[string]any{
+		"uri":           uri,
+		"mime_type":     firstString(content, "mimeType", "mime_type"),
+		"byte_size":     len([]byte(payload)),
+		"sha256":        hex.EncodeToString(digest[:]),
+		"content_count": len(contents),
+		"ok":            true,
+	}
 }
 
 func (s *Server) startupInstructionsResourceRead(r *http.Request, uri string) map[string]any {

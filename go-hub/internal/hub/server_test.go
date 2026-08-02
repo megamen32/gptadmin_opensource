@@ -1766,11 +1766,12 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	result := body["result"].(map[string]any)
 	tools := result["tools"].([]any)
 	expectedToolNames := map[string]bool{
-		"ui": true, "discover": true, "demo": true, "approve_pending_server": true,
+		"ui": true, "resource_receipt": true, "discover": true, "demo": true, "approve_pending_server": true,
 		"schema": true, "inspect": true, "execute": true, "job": true,
 		"secret_request": true, "secret_status": true,
 	}
 	renderTools := 0
+	var appsReceiptTool map[string]any
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
 		name, ok := tool["name"].(string)
@@ -1807,13 +1808,42 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 			if _, ok := meta["openai/widgetAccessible"]; ok {
 				t.Fatalf("data tool %s must not be widget-accessible", tool["name"])
 			}
+			if tool["name"] == "resource_receipt" {
+				appsReceiptTool = tool
+				annotations := tool["annotations"].(map[string]any)
+				if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false || annotations["openWorldHint"] != false {
+					t.Fatalf("resource receipt annotations are unsafe: %#v", annotations)
+				}
+				input := tool["inputSchema"].(map[string]any)
+				if input["additionalProperties"] != false || fmt.Sprint(input["required"]) != "[uri]" {
+					t.Fatalf("resource receipt input schema is not exact: %#v", input)
+				}
+				output := tool["outputSchema"].(map[string]any)
+				if output["additionalProperties"] != false || fmt.Sprint(output["required"]) != "[uri mime_type byte_size sha256 content_count ok]" {
+					t.Fatalf("resource receipt output schema is not exact: %#v", output)
+				}
+			}
 		}
 	}
-	if len(tools) != 10 || len(expectedToolNames) != 0 {
+	if len(tools) != 11 || len(expectedToolNames) != 0 {
 		t.Fatalf("got Apps SDK tools=%d missing=%v, want exact capability set", len(tools), expectedToolNames)
 	}
 	if renderTools != 1 {
 		t.Fatalf("got %d render tools, want 1", renderTools)
+	}
+	var hubReceiptTool map[string]any
+	for _, tool := range hubTools() {
+		if tool["name"] == "resource_receipt" {
+			hubReceiptTool = tool
+			break
+		}
+	}
+	appsInputSchema, _ := json.Marshal(appsReceiptTool["inputSchema"])
+	hubInputSchema, _ := json.Marshal(hubReceiptTool["inputSchema"])
+	appsOutputSchema, _ := json.Marshal(appsReceiptTool["outputSchema"])
+	hubOutputSchema, _ := json.Marshal(hubReceiptTool["outputSchema"])
+	if appsReceiptTool == nil || hubReceiptTool == nil || !bytes.Equal(appsInputSchema, hubInputSchema) || !bytes.Equal(appsOutputSchema, hubOutputSchema) {
+		t.Fatalf("resource receipt schema drift: apps=%#v hub=%#v", appsReceiptTool, hubReceiptTool)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"ui://widget/admin-v3.html"}}`)))
@@ -1841,6 +1871,114 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	ui := meta["ui"].(map[string]any)
 	if ui["domain"] == "" || ui["csp"] == nil || meta["openai/widgetCSP"] == nil {
 		t.Fatalf("resource missing widget metadata: %#v", meta)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"resource_receipt","arguments":{"uri":"ui://widget/admin-v3.html"}}}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("resource_receipt status=%d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	receipt := body["result"].(map[string]any)["structuredContent"].(map[string]any)
+	wantDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(htmlText)))
+	if receipt["uri"] != "ui://widget/admin-v3.html" || receipt["mime_type"] != "text/html;profile=mcp-app" || receipt["sha256"] != wantDigest || receipt["ok"] != true {
+		t.Fatalf("bad resource receipt: %#v", receipt)
+	}
+	if receipt["byte_size"] != float64(len([]byte(htmlText))) || receipt["content_count"] != float64(1) {
+		t.Fatalf("bad resource receipt sizes: %#v", receipt)
+	}
+	for _, forbidden := range []string{"text", "html", "content", "contents"} {
+		if _, ok := receipt[forbidden]; ok {
+			t.Fatalf("resource receipt leaked %s: %#v", forbidden, receipt)
+		}
+	}
+
+	readToken, err := s.signJWT(map[string]any{"sub": "reader", "aud": "https://hub.example", "resource": "https://hub.example", "scope": "gptadmin.read", "client_id": "read-test", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"resource_receipt","arguments":{"uri":"ui://widget/admin-v3.html"}}}`)))
+	req.Header.Set("Authorization", "Bearer "+readToken)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), wantDigest) {
+		t.Fatalf("gptadmin.read token cannot call resource receipt: status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, forbidden := range []string{"<html", "GPTAdmin MCP</title>", "ui/notifications/tool-result"} {
+		if strings.Contains(w.Body.String(), forbidden) {
+			t.Fatalf("read-only receipt leaked widget content %q: %s", forbidden, w.Body.String())
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"resource_receipt","arguments":{"uri":"gptadmin://unknown"}}}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unknown resource_receipt status=%d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	failedReceipt := body["result"].(map[string]any)["structuredContent"].(map[string]any)
+	failedError := failedReceipt["error"].(map[string]any)
+	if failedReceipt["ok"] != false || failedReceipt["content_count"] != float64(0) || failedError["code"] != "resource_not_found" {
+		t.Fatalf("unknown resource did not return a typed failure: %#v", failedReceipt)
+	}
+	for _, forbidden := range []string{"text", "html", "content", "contents"} {
+		if _, ok := failedReceipt[forbidden]; ok {
+			t.Fatalf("failed resource receipt leaked %s: %#v", forbidden, failedReceipt)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"resource_receipt","args":{"uri":"ui://widget/admin-v3.html"}}}}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "unsupported hub tool") || !strings.Contains(w.Body.String(), wantDigest) {
+		t.Fatalf("existing plugin bridge cannot reach resource receipt: status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, forbidden := range []string{"<html", "GPTAdmin MCP</title>", "ui/notifications/tool-result"} {
+		if strings.Contains(w.Body.String(), forbidden) {
+			t.Fatalf("plugin bridge receipt leaked widget content %q: %s", forbidden, w.Body.String())
+		}
+	}
+}
+
+func TestResourceReceiptUsesAuthenticatedRequestOrigin(t *testing.T) {
+	s := New(Config{OAuthClientSecret: "oauth-secret", MCPResource: "https://receipt.example", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	token, err := s.signJWT(map[string]any{"sub": "reader", "aud": "https://receipt.example", "resource": "https://receipt.example", "scope": "gptadmin.read", "client_id": "origin-test", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(payload string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "https://receipt.example/mcp", bytes.NewBufferString(payload))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("MCP call status=%d body=%s", w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	read := call(`{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"ui://widget/admin-v3.html"}}`)
+	content := read["result"].(map[string]any)["contents"].([]any)[0].(map[string]any)
+	htmlText := content["text"].(string)
+	receiptCall := call(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"resource_receipt","arguments":{"uri":"ui://widget/admin-v3.html"}}}`)
+	receipt := receiptCall["result"].(map[string]any)["structuredContent"].(map[string]any)
+	wantDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(htmlText)))
+	if receipt["sha256"] != wantDigest || receipt["byte_size"] != float64(len([]byte(htmlText))) {
+		t.Fatalf("resource receipt ignored authenticated request origin: receipt=%#v", receipt)
 	}
 }
 

@@ -70,3 +70,8 @@ Tag указывает на текущий main, GitHub Release опублико
   skips that unsupported attestation solely on private source repositories,
   keeps every other blocking gate, and documents the boundary. 23 targeted
   workflow/policy/provenance/docs tests pass; v138 remains immutable.
+- 2026-08-02: Complete. v139 tagged Release build 139 and the full Build,
+  Sync, Release workflow completed successfully. Public gptadmin_opensource
+  release v139 is published (not draft/prerelease) with 12 verified assets,
+  including manifest.json and gptadmin-sbom.spdx.json. Private and public v139
+  annotated tags exist; no foreign worktree changes were staged.
