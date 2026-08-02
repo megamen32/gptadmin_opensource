@@ -27,12 +27,13 @@ const (
 // WebhookRoute is a named, authenticated ingress rule. Secrets are supplied
 // by operator-owned configuration and are never accepted from the request.
 type WebhookRoute struct {
-	ID             string           `json:"id"`
-	Token          string           `json:"token,omitempty"`
-	HMACSecret     string           `json:"hmac_secret,omitempty"`
-	MaxSkewSeconds int              `json:"max_skew_seconds,omitempty"`
-	Action         WebhookAction    `json:"action"`
-	Callback       *WebhookCallback `json:"callback,omitempty"`
+	ID               string           `json:"id"`
+	Token            string           `json:"token,omitempty"`
+	HMACSecret       string           `json:"hmac_secret,omitempty"`
+	SignatureVersion string           `json:"signature_version,omitempty"`
+	MaxSkewSeconds   int              `json:"max_skew_seconds,omitempty"`
+	Action           WebhookAction    `json:"action"`
+	Callback         *WebhookCallback `json:"callback,omitempty"`
 }
 
 // WebhookAction describes one explicitly configured target operation.
@@ -108,6 +109,12 @@ func validateWebhookRoutes(routes []WebhookRoute) error {
 		seen[route.ID] = true
 		if (route.Token == "") == (route.HMACSecret == "") {
 			return fmt.Errorf("webhook route %q must configure exactly one token or hmac_secret", route.ID)
+		}
+		if route.SignatureVersion != "" && route.SignatureVersion != "v1" && route.SignatureVersion != "v2" {
+			return fmt.Errorf("webhook route %q has unsupported signature_version", route.ID)
+		}
+		if route.SignatureVersion != "" && route.HMACSecret == "" {
+			return fmt.Errorf("webhook route %q signature_version requires hmac_secret", route.ID)
 		}
 		if err := validateWebhookAction(route.ID, route.Action); err != nil {
 			return err
@@ -326,6 +333,16 @@ func verifyWebhookRequest(r *http.Request, route WebhookRoute, body []byte, now 
 		return errors.New("webhook timestamp is outside the allowed replay window")
 	}
 	expected := webhookSignature(route.HMACSecret, timestampText, body)
+	if route.SignatureVersion == "v2" {
+		expected = webhookSignatureV2(
+			route.HMACSecret,
+			r.Method,
+			r.URL.EscapedPath(),
+			timestampText,
+			strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+			body,
+		)
+	}
 	if !hmac.Equal([]byte(expected), []byte(strings.TrimSpace(r.Header.Get("X-Webhook-Signature")))) {
 		return errors.New("invalid webhook signature")
 	}
@@ -336,6 +353,19 @@ func webhookSignature(secret, timestamp string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(timestamp + "."))
 	_, _ = mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func webhookSignatureV2(secret, method, path, timestamp, idempotencyKey string, body []byte) string {
+	canonical := strings.Join([]string{
+		strings.ToUpper(method),
+		path,
+		timestamp,
+		idempotencyKey,
+		sha256Hex(body),
+	}, "\n")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -416,6 +446,9 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 		if status >= http.StatusBadRequest {
 			return nil, fmt.Errorf("webhook shell action failed policy with status %d: %v", status, result)
 		}
+		if err := validateWebhookShellResult(result); err != nil {
+			return nil, err
+		}
 		return result, nil
 	case "mcp", "prompt":
 		args, err := renderWebhookValue(action.Arguments, event)
@@ -447,6 +480,27 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 	default:
 		return nil, fmt.Errorf("unsupported webhook action kind %q", action.Kind)
 	}
+}
+
+func validateWebhookShellResult(result map[string]any) error {
+	if firstString(result, "status") != "completed" {
+		return errors.New("webhook shell action did not complete")
+	}
+	response := mapValue(result["response"])
+	structured := mapValue(response["structuredContent"])
+	execution := mapValue(structured["result"])
+	rawReturnCode, ok := execution["returncode"]
+	if !ok {
+		return errors.New("webhook shell action did not return an exit code")
+	}
+	returnCode, err := strconv.Atoi(fmt.Sprint(rawReturnCode))
+	if err != nil {
+		return errors.New("webhook shell action returned an invalid exit code")
+	}
+	if returnCode != 0 {
+		return fmt.Errorf("webhook shell action exited with code %d", returnCode)
+	}
+	return nil
 }
 
 func renderWebhookValue(value any, event any) (any, error) {

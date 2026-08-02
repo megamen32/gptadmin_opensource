@@ -32,6 +32,9 @@ a paid API. GPT‑Админ is different:
   Plug in chrome-devtools, openmemory, or any other MCP too.
 - **Real execution** — not "here's the command, copy it". The agent reads
   state, runs commands, validates, and reports actual output.
+- **Webhook-to-agent automation** — route signed Notify or monitoring events
+  to a fixed ShellMCP/MCP target, create or resume a named Agent Herder session,
+  and manage the same routes from the web console, MCP, or Custom GPT Actions.
 
 ## How it works
 

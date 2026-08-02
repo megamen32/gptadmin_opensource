@@ -24,15 +24,21 @@ import {
 } from "./api";
 import "./styles.css";
 
-type View = "instructions" | "profiles" | "clients" | "auth";
+type View = "instructions" | "profiles" | "clients" | "webhooks" | "auth";
 type LoadState = "loading" | "ready" | "empty" | "error" | "stale";
 
 const navigation: Array<{ id: View; label: string; href: string }> = [
   { id: "instructions", label: "Инструкции", href: "#instructions" },
   { id: "profiles", label: "Профили", href: "#profiles" },
   { id: "clients", label: "Клиенты", href: "#clients" },
+  { id: "webhooks", label: "Вебхуки и агенты", href: "#webhooks" },
   { id: "auth", label: "Авторизация", href: "#auth" },
 ];
+
+function viewFromHash(): View {
+  const hash = window.location.hash;
+  return hash === "#profiles" || hash === "#clients" || hash === "#webhooks" || hash === "#auth" ? hash.slice(1) as View : "instructions";
+}
 
 const emptyWorkspace = (): ExternalWorkspaceRef => ({
   machine_id: "",
@@ -484,6 +490,342 @@ function ClientsScreen() {
   );
 }
 
+type WebhookRouteSummary = {
+  id: string;
+  kind: "mcp" | "prompt" | "shell";
+  target: string;
+  tool?: string;
+  auth_mode: "hmac" | "token";
+  callback_configured: boolean;
+};
+
+type WebhookRouteDraft = {
+  id: string;
+  authMode: "hmac" | "token";
+  secret: string;
+  signatureVersion: "v1" | "v2";
+  maxSkewSeconds: string;
+  kind: "mcp" | "prompt" | "shell";
+  target: string;
+  approvalMode: "" | "ask_before_write" | "bounded_autonomous";
+  tool: string;
+  argumentsJson: string;
+  prompt: string;
+  promptArg: string;
+  command: string;
+  cwd: string;
+  callbackUrl: string;
+  callbackAuthMode: "none" | "token" | "hmac";
+  callbackSecret: string;
+};
+
+type WebhookJob = {
+  job_id: string;
+  route_id: string;
+  status: string;
+  created_at?: string;
+  started_at?: string;
+  completed_at?: string;
+  error?: string;
+  callback_status?: string;
+  result?: Record<string, unknown>;
+};
+
+const emptyWebhookRoute = (): WebhookRouteDraft => ({
+  id: "",
+  authMode: "hmac",
+  secret: "",
+  signatureVersion: "v2",
+  maxSkewSeconds: "300",
+  kind: "mcp",
+  target: "hub",
+  approvalMode: "",
+  tool: "",
+  argumentsJson: "{}",
+  prompt: "",
+  promptArg: "",
+  command: "",
+  cwd: "",
+  callbackUrl: "",
+  callbackAuthMode: "none",
+  callbackSecret: "",
+});
+
+async function webhookRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: "same-origin",
+    headers: {
+      Accept: "application/json",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...init.headers,
+    },
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body = await response.json() as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // Keep the bounded status-only fallback; never persist an arbitrary body.
+    }
+    throw new ApiError(response.status, detail);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+function asRouteSummary(value: unknown): WebhookRouteSummary | null {
+  if (typeof value !== "object" || value === null) return null;
+  const route = value as Record<string, unknown>;
+  if (typeof route.id !== "string" || typeof route.kind !== "string" || typeof route.target !== "string") return null;
+  if (route.kind !== "mcp" && route.kind !== "prompt" && route.kind !== "shell") return null;
+  return {
+    id: route.id,
+    kind: route.kind,
+    target: route.target,
+    tool: typeof route.tool === "string" ? route.tool : undefined,
+    auth_mode: route.auth_mode === "token" ? "token" : "hmac",
+    callback_configured: route.callback_configured === true,
+  };
+}
+
+function scrubJobValue(value: unknown, depth = 0): unknown {
+  if (depth >= 8) return "[скрыто: превышена глубина]";
+  if (Array.isArray(value)) return value.map((item) => scrubJobValue(item, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !/(secret|token|password|authorization|credential)/i.test(key))
+      .map(([key, nested]) => [key, scrubJobValue(nested, depth + 1)]));
+  }
+  return value;
+}
+
+function visibleJobResult(result: Record<string, unknown>): Array<[string, string]> {
+  return Object.entries(result)
+    .filter(([key]) => !/(secret|token|password|authorization|credential)/i.test(key))
+    .map(([key, value]) => [
+      key,
+      typeof value === "object" && value !== null
+        ? JSON.stringify(scrubJobValue(value))
+        : String(value),
+    ]);
+}
+
+function WebhooksScreen() {
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [routes, setRoutes] = useState<WebhookRouteSummary[]>([]);
+  const [draft, setDraft] = useState<WebhookRouteDraft>(emptyWebhookRoute);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [mutating, setMutating] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [jobId, setJobId] = useState("");
+  const [job, setJob] = useState<WebhookJob | null>(null);
+  const [jobMessage, setJobMessage] = useState<string | null>(null);
+  const [checkingJob, setCheckingJob] = useState(false);
+
+  async function loadRoutes(): Promise<void> {
+    setLoadState("loading");
+    setMessage(null);
+    try {
+      const response = await webhookRequest<{ routes?: unknown[] }>("/webhook-routes");
+      const summaries = (response.routes ?? []).map(asRouteSummary).filter((route): route is WebhookRouteSummary => route !== null);
+      setRoutes(summaries);
+      setLoadState(summaries.length ? "ready" : "empty");
+    } catch (error) {
+      setLoadState("error");
+      setMessage(error instanceof Error ? error.message : "Не удалось загрузить маршруты.");
+    }
+  }
+
+  useEffect(() => { void loadRoutes(); }, []);
+
+  function startCreate(): void {
+    setEditingId(null);
+    setDraft(emptyWebhookRoute());
+    setConfirmDelete(false);
+    setMessage(null);
+  }
+
+  function startEdit(route: WebhookRouteSummary): void {
+    setEditingId(route.id);
+    setDraft({
+      ...emptyWebhookRoute(),
+      id: route.id,
+      authMode: route.auth_mode,
+      kind: route.kind,
+      target: route.target,
+      tool: route.tool ?? "",
+      callbackAuthMode: route.callback_configured ? "hmac" : "none",
+    });
+    setConfirmDelete(false);
+    setMessage("Для полной замены повторно введите секрет и поля действия. Сохранённые секреты Hub не возвращает.");
+  }
+
+  function buildRoute(): Record<string, unknown> {
+    const id = draft.id.trim();
+    const secret = draft.secret.trim();
+    if (!id || id.includes("/") || id.includes("\\")) throw new Error("Укажите ID одним сегментом пути.");
+    if (!secret) throw new Error("Введите секрет маршрута. Hub хранит его только на запись.");
+    if (!draft.target.trim()) throw new Error("Укажите цель действия.");
+
+    let argumentsValue: Record<string, unknown> | undefined;
+    if (draft.argumentsJson.trim()) {
+      const parsed = JSON.parse(draft.argumentsJson) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Аргументы должны быть JSON-объектом.");
+      argumentsValue = parsed as Record<string, unknown>;
+    }
+
+    const action: Record<string, unknown> = { kind: draft.kind, target: draft.target.trim() };
+    if (draft.approvalMode) action.approval_mode = draft.approvalMode;
+    if (draft.kind === "shell") {
+      if (!draft.command.trim()) throw new Error("Для Shell укажите фиксированную команду.");
+      action.command = draft.command;
+      if (draft.cwd.trim()) action.cwd = draft.cwd.trim();
+    } else {
+      if (!draft.tool.trim()) throw new Error("Для MCP или prompt укажите инструмент.");
+      action.tool = draft.tool.trim();
+      if (argumentsValue && Object.keys(argumentsValue).length) action.arguments = argumentsValue;
+      if (draft.kind === "prompt") {
+        if (!draft.prompt.trim()) throw new Error("Для prompt укажите шаблон сообщения.");
+        action.prompt = draft.prompt;
+        if (draft.promptArg.trim()) action.prompt_arg = draft.promptArg.trim();
+      }
+    }
+
+    const route: Record<string, unknown> = { id, action };
+    if (draft.authMode === "hmac") {
+      route.hmac_secret = secret;
+      route.signature_version = draft.signatureVersion;
+      const skew = Number(draft.maxSkewSeconds);
+      if (Number.isFinite(skew) && skew > 0) route.max_skew_seconds = Math.floor(skew);
+    } else {
+      route.token = secret;
+    }
+    if (draft.callbackUrl.trim()) {
+      const callback: Record<string, unknown> = { url: draft.callbackUrl.trim() };
+      if (draft.callbackAuthMode !== "none") {
+        if (!draft.callbackSecret.trim()) throw new Error("Введите секрет callback или выберите режим без авторизации.");
+        callback[draft.callbackAuthMode === "token" ? "token" : "hmac_secret"] = draft.callbackSecret.trim();
+      }
+      route.callback = callback;
+    }
+    return route;
+  }
+
+  async function saveRoute(): Promise<void> {
+    if (mutating) return;
+    setMutating(true);
+    setMessage(null);
+    try {
+      const route = buildRoute();
+      const replacing = editingId !== null;
+      const path = replacing ? `/webhook-routes/${encodeURIComponent(editingId)}` : "/webhook-routes";
+      const summary = asRouteSummary(await webhookRequest<unknown>(path, {
+        method: replacing ? "PUT" : "POST",
+        body: JSON.stringify(route),
+      }));
+      if (!summary) throw new Error("Hub вернул некорректное описание маршрута.");
+      setRoutes((current) => replacing ? current.map((item) => item.id === editingId ? summary : item) : [...current, summary]);
+      setLoadState("ready");
+      setEditingId(summary.id);
+      setDraft((current) => ({ ...current, id: summary.id, secret: "", callbackSecret: "" }));
+      setMessage(replacing ? "Маршрут заменён" : "Маршрут создан");
+    } catch (error) {
+      setMessage(error instanceof SyntaxError ? "Аргументы должны быть корректным JSON-объектом." : error instanceof Error ? error.message : "Не удалось сохранить маршрут.");
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function deleteRoute(): Promise<void> {
+    if (!editingId || mutating || !confirmDelete) return;
+    const deletedId = editingId;
+    setMutating(true);
+    setMessage(null);
+    try {
+      await webhookRequest<void>(`/webhook-routes/${encodeURIComponent(deletedId)}`, { method: "DELETE" });
+      const remaining = routes.filter((route) => route.id !== deletedId);
+      setRoutes(remaining);
+      setLoadState(remaining.length ? "ready" : "empty");
+      setDraft(emptyWebhookRoute());
+      setEditingId(null);
+      setConfirmDelete(false);
+      setMessage("Маршрут удалён");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Не удалось удалить маршрут.");
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function inspectJob(): Promise<void> {
+    const id = jobId.trim();
+    if (!id || checkingJob) return;
+    setCheckingJob(true);
+    setJob(null);
+    setJobMessage(null);
+    try {
+      setJob(await webhookRequest<WebhookJob>(`/admin/api/webhook-jobs/${encodeURIComponent(id)}`));
+    } catch (error) {
+      setJobMessage(error instanceof Error ? error.message : "Не удалось получить задание.");
+    } finally {
+      setCheckingJob(false);
+    }
+  }
+
+  const editingRoute = editingId ? routes.find((route) => route.id === editingId) : null;
+  const resultEntries = job?.result ? visibleJobResult(job.result) : [];
+
+  return (
+    <>
+      <header className="topbar"><div><span className="eyebrow">WEBHOOK AUTOMATION / 04</span><h1>Вебхуки и агенты</h1></div><button className="button primary topbar-action" type="button" onClick={startCreate}>Новый маршрут</button></header>
+      <div className="content-wrap">
+        <section className="intro"><div><p className="section-kicker">SIGNED ROUTES / AGENT JOBS</p><h2>Управление маршрутами Hub</h2><p className="lede">Маршрут фиксирует авторизацию и разрешённое действие. Секреты принимаются только при записи и никогда не показываются из ответа Hub.</p></div><div className={`data-badge state-${loadState}`} role="status"><span className="state-dot" aria-hidden="true" />{loadState === "loading" ? "Загрузка маршрутов" : stateLabel(loadState)}</div></section>
+
+        {loadState === "loading" && <div className="state-panel card standalone-state" role="status"><span className="loader" aria-hidden="true" />Загрузка маршрутов</div>}
+        {loadState === "error" && <div className="state-panel card standalone-state state-error" role="alert"><strong>Не удалось загрузить маршруты</strong><span>{message}</span><button className="button secondary" type="button" onClick={() => void loadRoutes()}>Повторить</button></div>}
+        {loadState !== "loading" && loadState !== "error" && <section className="webhook-layout">
+          <aside className="route-list card" aria-label="Список webhook-маршрутов">
+            <div className="list-heading"><div><p className="section-kicker">МАРШРУТЫ</p><h3>Разрешённые действия</h3></div><button className="text-button" type="button" onClick={startCreate}>+ Новый</button></div>
+            {routes.length === 0 && <div className="route-empty"><strong>Маршрутов пока нет</strong><span>Создайте первый подписанный маршрут.</span></div>}
+            {routes.map((route) => <article className={`route-row ${editingId === route.id ? "selected" : ""}`} key={route.id}><div><strong>{route.id}</strong><span>{route.target}</span><small>{route.kind.toUpperCase()} · {route.auth_mode === "hmac" ? "HMAC" : "Bearer"}{route.callback_configured ? " · callback" : ""}</small></div><button className="text-button" type="button" onClick={() => startEdit(route)}>Изменить {route.id}</button></article>)}
+          </aside>
+
+          <section className="card route-editor" aria-labelledby="route-editor-title">
+            <div className="card-heading"><div><p className="section-kicker">{editingId ? "REPLACE ROUTE" : "CREATE ROUTE"}</p><h3 id="route-editor-title">{editingId ? `Заменить ${editingId}` : "Новый маршрут"}</h3></div><span className="chip">Секрет: только запись</span></div>
+            {message && <div className={message.includes("создан") || message.includes("заменён") || message.includes("удалён") ? "form-message success-text" : "form-message warning-text"} role="status">{message}</div>}
+            <form className="route-form" onSubmit={(event) => { event.preventDefault(); void saveRoute(); }}>
+              <div className="form-grid">
+                <label>Идентификатор маршрута<input value={draft.id} disabled={editingId !== null} onChange={(event) => setDraft({ ...draft, id: event.target.value })} /></label>
+                <label>Режим авторизации<select value={draft.authMode} onChange={(event) => setDraft({ ...draft, authMode: event.target.value as WebhookRouteDraft["authMode"] })}><option value="hmac">HMAC</option><option value="token">Bearer token</option></select></label>
+                <label>Секрет маршрута<input aria-label="Секрет маршрута" type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => setDraft({ ...draft, secret: event.target.value })} /><small>Не загружается из Hub и очищается после записи.</small></label>
+                {draft.authMode === "hmac" && <label>Версия подписи<select value={draft.signatureVersion} onChange={(event) => setDraft({ ...draft, signatureVersion: event.target.value as WebhookRouteDraft["signatureVersion"] })}><option value="v2">v2</option><option value="v1">v1</option></select></label>}
+                {draft.authMode === "hmac" && <label>Допустимое отклонение, секунд<input type="number" min="1" value={draft.maxSkewSeconds} onChange={(event) => setDraft({ ...draft, maxSkewSeconds: event.target.value })} /></label>}
+                <label>Тип действия<select value={draft.kind} onChange={(event) => { const kind = event.target.value as WebhookRouteDraft["kind"]; setDraft({ ...draft, kind, target: kind !== draft.kind ? "" : draft.target }); }}><option value="mcp">MCP</option><option value="prompt">Prompt</option><option value="shell">Shell</option></select></label>
+                <label>Цель<input value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })} placeholder="hub или shell:machine" /></label>
+                <label>Режим подтверждения<select value={draft.approvalMode} onChange={(event) => setDraft({ ...draft, approvalMode: event.target.value as WebhookRouteDraft["approvalMode"] })}><option value="">По умолчанию</option><option value="ask_before_write">Запрос перед записью</option><option value="bounded_autonomous">Ограниченно автономный</option></select></label>
+              </div>
+              {draft.kind === "shell" ? <div className="form-grid"><label>Команда<input value={draft.command} onChange={(event) => setDraft({ ...draft, command: event.target.value })} /></label><label>Рабочий каталог<input value={draft.cwd} onChange={(event) => setDraft({ ...draft, cwd: event.target.value })} /></label></div> : <><div className="form-grid"><label>Инструмент<input value={draft.tool} onChange={(event) => setDraft({ ...draft, tool: event.target.value })} /></label>{draft.kind === "prompt" && <label>Аргумент prompt<input value={draft.promptArg} onChange={(event) => setDraft({ ...draft, promptArg: event.target.value })} placeholder="message" /></label>}</div><label>Аргументы JSON<textarea className="short-textarea" value={draft.argumentsJson} onChange={(event) => setDraft({ ...draft, argumentsJson: event.target.value })} spellCheck="false" /></label>{draft.kind === "prompt" && <label>Шаблон сообщения<textarea className="short-textarea" value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} /></label>}</>}
+              <fieldset className="callback-fieldset"><legend>Callback (необязательно)</legend><div className="form-grid"><label>URL callback<input type="url" value={draft.callbackUrl} onChange={(event) => setDraft({ ...draft, callbackUrl: event.target.value })} /></label><label>Авторизация callback<select value={draft.callbackAuthMode} onChange={(event) => setDraft({ ...draft, callbackAuthMode: event.target.value as WebhookRouteDraft["callbackAuthMode"] })}><option value="none">Без авторизации</option><option value="hmac">HMAC</option><option value="token">Bearer token</option></select></label>{draft.callbackAuthMode !== "none" && <label>Секрет callback<input type="password" autoComplete="new-password" value={draft.callbackSecret} onChange={(event) => setDraft({ ...draft, callbackSecret: event.target.value })} /></label>}</div>{editingRoute?.callback_configured && <p className="field-help">Текущий callback скрыт. Чтобы сохранить его при замене, повторно заполните URL и авторизацию.</p>}</fieldset>
+              <div className="route-actions"><button className="button primary" type="submit" disabled={mutating}>{mutating ? "Сохраняем…" : editingId ? "Заменить маршрут" : "Создать маршрут"}</button>{editingId && <button className="button danger" type="button" onClick={() => setConfirmDelete(true)} disabled={mutating}>Удалить маршрут</button>}</div>
+            </form>
+            {confirmDelete && editingId && <div className="delete-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="delete-route-title" onKeyDown={(event) => { if (event.key === "Escape") setConfirmDelete(false); }}><strong id="delete-route-title">Удалить маршрут {editingId}?</strong><p>Маршрут перестанет принимать новые события. Это действие требует явного подтверждения.</p><div className="button-row"><button className="button secondary" type="button" onClick={() => setConfirmDelete(false)}>Отмена</button><button className="button danger" type="button" autoFocus onClick={() => void deleteRoute()} disabled={mutating}>Подтвердить удаление</button></div></div>}
+          </section>
+
+          <section className="card job-inspector" aria-labelledby="job-inspector-title">
+            <div><p className="section-kicker">DURABLE JOB STATUS</p><h3 id="job-inspector-title">Проверить webhook-задание</h3><p className="muted">Укажите один ID задания. Интерфейс показывает статус и безопасные поля результата.</p></div>
+            <form className="job-search" onSubmit={(event) => { event.preventDefault(); void inspectJob(); }}><label>ID задания<input value={jobId} onChange={(event) => setJobId(event.target.value)} /></label><button className="button secondary" type="submit" disabled={!jobId.trim() || checkingJob}>{checkingJob ? "Проверяем…" : "Проверить задание"}</button></form>
+            {jobMessage && <div className="state-panel state-error compact" role="alert"><strong>Не удалось получить задание</strong><span>{jobMessage}</span><button className="button secondary" type="button" onClick={() => void inspectJob()}>Повторить</button></div>}
+            {job && <div className="job-result" role="status"><dl><div><dt>ID</dt><dd>{job.job_id}</dd></div><div><dt>Маршрут</dt><dd>{job.route_id}</dd></div><div><dt>Статус</dt><dd>{job.status}</dd></div>{job.created_at && <div><dt>Создано</dt><dd>{formatUpdated(job.created_at)}</dd></div>}{job.started_at && <div><dt>Запущено</dt><dd>{formatUpdated(job.started_at)}</dd></div>}{job.completed_at && <div><dt>Завершено</dt><dd>{formatUpdated(job.completed_at)}</dd></div>}{job.callback_status && <div><dt>Callback</dt><dd>{job.callback_status}</dd></div>}{job.error && <div><dt>Ошибка</dt><dd>{job.error}</dd></div>}</dl>{resultEntries.length > 0 && <div className="safe-result"><strong>Результат</strong><dl>{resultEntries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></div>}</div>}
+          </section>
+        </section>}
+      </div>
+    </>
+  );
+}
+
 function AuthScreen() {
   const [rotating, setRotating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -505,12 +847,11 @@ function AuthScreen() {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("instructions");
+  const [view, setView] = useState<View>(viewFromHash);
 
   useEffect(() => {
     const onHashChange = () => {
-      const hash = window.location.hash;
-      setView(hash === "#profiles" || hash === "#clients" || hash === "#auth" ? hash.slice(1) as View : "instructions");
+      setView(viewFromHash());
     };
     onHashChange();
     window.addEventListener("hashchange", onHashChange);
@@ -520,7 +861,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar"><div className="brand"><span className="brand-mark" aria-hidden="true">G</span><span>GPTAdmin</span></div><div className="workspace-label">ОПЕРАЦИОННАЯ КОНСОЛЬ</div><nav aria-label="Основная навигация">{navigation.map((item) => <a className={`nav-item ${view === item.id ? "active" : ""}`} href={item.href} aria-current={view === item.id ? "page" : undefined} key={item.id} onClick={(event) => { event.preventDefault(); setView(item.id); window.history.replaceState(null, "", item.href); }}>{<><span className="nav-dot" aria-hidden="true" /><span>{item.label}</span></>}</a>)}<a className="nav-item" href="/admin/legacy/"><span className="nav-dot" aria-hidden="true" /><span>Операции и MCP</span></a></nav><div className="sidebar-footer"><span className="profile-state">{view === "profiles" ? "Профильный доступ" : "Рабочий контекст"}</span><a className="logout-link" href="/admin/logout">Выйти</a></div></aside>
-      <main className="main-content">{view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen /> : <AuthScreen />}</main>
+      <main className="main-content">{view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen /> : view === "webhooks" ? <WebhooksScreen /> : <AuthScreen />}</main>
     </div>
   );
 }

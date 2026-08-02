@@ -27,33 +27,39 @@ func (s *Server) webhookRoutesEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown webhook route"})
 		return
 	}
+	toolName := ""
+	switch {
+	case routeID == "" && r.Method == http.MethodGet:
+		toolName = webhookRoutesListTool
+	case routeID == "" && r.Method == http.MethodPost:
+		toolName = webhookRouteCreateTool
+	case routeID != "" && r.Method == http.MethodPut:
+		toolName = webhookRouteReplaceTool
+	case routeID != "" && r.Method == http.MethodDelete:
+		toolName = webhookRouteDeleteTool
+	}
+	if toolName != "" {
+		if err := authorizeFacadeCall(r, toolName, nil); err != nil {
+			s.auditToolDecision(r, "hub", toolName, nil, "deny", err.Error(), nil, http.StatusForbidden)
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
 
 	switch {
 	case routeID == "" && r.Method == http.MethodGet:
-		s.mu.Lock()
-		routes := make([]webhookRouteSummary, 0, len(s.webhookRoutes))
-		for _, route := range s.webhookRoutes {
-			routes = append(routes, summarizeWebhookRoute(route))
-		}
-		s.mu.Unlock()
-		sort.Slice(routes, func(i, j int) bool { return routes[i].ID < routes[j].ID })
-		writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
+		writeJSON(w, http.StatusOK, map[string]any{"routes": s.listWebhookRouteSummaries()})
 	case routeID == "" && r.Method == http.MethodPost:
-		s.writeWebhookRoute(w, r, "", http.StatusCreated)
+		s.writeWebhookRoute(w, r, "", http.StatusCreated, webhookRouteCreateTool)
 	case routeID != "" && r.Method == http.MethodPut:
-		s.writeWebhookRoute(w, r, routeID, http.StatusOK)
+		s.writeWebhookRoute(w, r, routeID, http.StatusOK, webhookRouteReplaceTool)
 	case routeID != "" && r.Method == http.MethodDelete:
-		s.mu.Lock()
-		if _, ok := s.webhookRoutes[routeID]; !ok {
-			s.mu.Unlock()
-			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown webhook route"})
+		args := map[string]any{"id": routeID, "confirm": true}
+		if !s.webhookHTTPPolicyGate(w, r, webhookRouteDeleteTool, args) {
 			return
 		}
-		delete(s.webhookRoutes, routeID)
-		err := s.saveWebhookRoutesLocked()
-		s.mu.Unlock()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		if operationErr := s.deleteWebhookRoute(routeID); operationErr != nil {
+			writeJSON(w, operationErr.Status, map[string]any{"detail": operationErr.Detail})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -62,7 +68,7 @@ func (s *Server) webhookRoutesEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) writeWebhookRoute(w http.ResponseWriter, r *http.Request, routeID string, status int) {
+func (s *Server) writeWebhookRoute(w http.ResponseWriter, r *http.Request, routeID string, status int, toolName string) {
 	body, err := readWebhookBody(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
@@ -74,38 +80,40 @@ func (s *Server) writeWebhookRoute(w http.ResponseWriter, r *http.Request, route
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": fmt.Sprintf("invalid webhook route: %v", err)})
 		return
 	}
+	args := map[string]any{"route": route}
 	if routeID != "" {
-		if route.ID != "" && route.ID != routeID {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "route id does not match path"})
-			return
-		}
-		route.ID = routeID
+		args["id"] = routeID
 	}
-	if err := validateWebhookRoutes([]WebhookRoute{route}); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+	if !s.webhookHTTPPolicyGate(w, r, toolName, args) {
 		return
 	}
+	var summary webhookRouteSummary
+	var operationErr *webhookOperationError
+	if routeID == "" {
+		summary, operationErr = s.createWebhookRoute(route)
+	} else {
+		summary, operationErr = s.replaceWebhookRoute(routeID, route)
+	}
+	if operationErr != nil {
+		writeJSON(w, operationErr.Status, map[string]any{"detail": operationErr.Detail})
+		return
+	}
+	writeJSON(w, status, summary)
+}
 
-	s.mu.Lock()
-	_, exists := s.webhookRoutes[route.ID]
-	if routeID == "" && exists {
-		s.mu.Unlock()
-		writeJSON(w, http.StatusConflict, map[string]any{"detail": "webhook route already exists"})
-		return
+func (s *Server) webhookHTTPPolicyGate(w http.ResponseWriter, r *http.Request, toolName string, args map[string]any) bool {
+	approvalID := strings.TrimSpace(r.Header.Get("X-GPTAdmin-Approval-ID"))
+	if response, blocked := s.approvalGate(r, "hub", toolName, args, approvalID); blocked {
+		s.auditToolDecision(r, "hub", toolName, args, "deny", "approval required", response, http.StatusPreconditionRequired)
+		writeJSON(w, http.StatusPreconditionRequired, response)
+		return false
 	}
-	if routeID != "" && !exists {
-		s.mu.Unlock()
-		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown webhook route"})
-		return
+	if response, blocked := s.boundedAutonomousGate(r, "hub", toolName); blocked {
+		s.auditToolDecision(r, "hub", toolName, args, "deny", "bounded autonomous budget exhausted", response, http.StatusTooManyRequests)
+		writeJSON(w, http.StatusTooManyRequests, response)
+		return false
 	}
-	s.webhookRoutes[route.ID] = route
-	err = s.saveWebhookRoutesLocked()
-	s.mu.Unlock()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
-		return
-	}
-	writeJSON(w, status, summarizeWebhookRoute(route))
+	return true
 }
 
 func summarizeWebhookRoute(route WebhookRoute) webhookRouteSummary {

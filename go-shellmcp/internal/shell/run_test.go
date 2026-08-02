@@ -87,6 +87,29 @@ func TestDefaultUserSelection(t *testing.T) {
 	}
 }
 
+func TestDownshiftPreservesOnlyEnvironmentNamesInArgv(t *testing.T) {
+	secretValue := `{"title":"disk","body":"private telemetry"}`
+	command, _ := buildCommand(context.Background(), Request{
+		Cmd:       `printf '%s' "$GPTADMIN_WEBHOOK_VALUE_0"`,
+		RunAsUser: "roomhacker",
+		Env:       map[string]string{"GPTADMIN_WEBHOOK_VALUE_0": secretValue},
+	})
+	arguments := strings.Join(command.Args, " ")
+	if !strings.Contains(arguments, "--preserve-env=GPTADMIN_WEBHOOK_VALUE_0") {
+		t.Fatalf("sudo command does not preserve the allowed environment name: %q", arguments)
+	}
+	if strings.Contains(arguments, secretValue) {
+		t.Fatalf("environment value leaked into argv: %q", arguments)
+	}
+}
+
+func TestInvalidEnvironmentNameFailsClosed(t *testing.T) {
+	res := Run(context.Background(), Request{Cmd: "true", Env: map[string]string{"BAD;touch /tmp/no": "x"}, SpillDir: t.TempDir()}, 8192)
+	if res.ReturnCode == 0 || !strings.Contains(res.Error, "invalid environment variable name") {
+		t.Fatalf("invalid environment name was not rejected: %+v", res)
+	}
+}
+
 func TestRootProcessWithoutDefaultUserIsRejected(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires a root test process")

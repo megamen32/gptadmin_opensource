@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,9 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	}
 	if req.Cmd == "" {
 		return Result{ReturnCode: -1, Error: "empty cmd", DurationMS: time.Since(started).Milliseconds()}, errors.New("empty cmd")
+	}
+	if err := validateEnvironment(req.Env); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	timeout := DefaultTimeout
 	if req.Timeout > 0 {
@@ -301,9 +305,37 @@ func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
 		return exec.CommandContext(ctx, shizukuRishPath(req), "-c", stripLeadingSudo(req.Cmd)), "shizuku"
 	}
 	if runtime.GOOS != "windows" && user != "" && user != "root" && (explicit || os.Geteuid() == 0) {
-		return exec.CommandContext(ctx, "sudo", "-H", "-u", user, "--", shellName(), shellArg(), req.Cmd), user
+		arguments := []string{"-H"}
+		environmentNames := make([]string, 0, len(req.Env))
+		for name := range req.Env {
+			environmentNames = append(environmentNames, name)
+		}
+		sort.Strings(environmentNames)
+		if len(environmentNames) > 0 {
+			arguments = append(arguments, "--preserve-env="+strings.Join(environmentNames, ","))
+		}
+		arguments = append(arguments, "-u", user, "--", shellName(), shellArg(), req.Cmd)
+		return exec.CommandContext(ctx, "sudo", arguments...), user
 	}
 	return exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd), ""
+}
+
+func validateEnvironment(environment map[string]string) error {
+	for name, value := range environment {
+		if name == "" || !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_') {
+			return fmt.Errorf("invalid environment variable name %q", name)
+		}
+		for index := 1; index < len(name); index++ {
+			character := name[index]
+			if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+				return fmt.Errorf("invalid environment variable name %q", name)
+			}
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("environment variable %q contains a null byte", name)
+		}
+	}
+	return nil
 }
 
 func envFromReq(req Request, key string) string {

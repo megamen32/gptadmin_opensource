@@ -106,7 +106,7 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 	}
 	if target == "hub" {
 		switch toolName {
-		case "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt":
+		case "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", webhookRoutesListTool, webhookJobGetTool:
 			return nil
 		}
 	}
@@ -138,7 +138,7 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 		}
 	}
 	switch name {
-	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob":
+	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob", webhookRoutesListTool, webhookJobGetTool:
 		return nil
 	case "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem":
 		target := firstString(args, "target", "server_id", "agent_id")
@@ -188,5 +188,7 @@ func toolsForRequest(r *http.Request, target string, tools []map[string]any) []m
 }
 
 func mcpClientHTTPPathAllowed(path string) bool {
-	return strings.HasPrefix(path, "/mcp-relay/")
+	return strings.HasPrefix(path, "/mcp-relay/") ||
+		path == "/webhook-routes" || strings.HasPrefix(path, "/webhook-routes/") ||
+		strings.HasPrefix(path, "/admin/api/webhook-jobs/")
 }

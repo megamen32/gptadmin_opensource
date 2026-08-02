@@ -10,6 +10,7 @@ handled exactly like any other registered MCP server.
 ```text
 POST /webhooks/v1/{route}
 GET  /webhook-jobs/{job_id}
+GET  /admin/api/webhook-jobs/{job_id}
 ```
 
 The POST body may be any single JSON value up to 1 MiB. The endpoint returns
@@ -23,9 +24,11 @@ Each route must configure exactly one of:
 
 - `token`: send `Authorization: Bearer <token>` or `X-Webhook-Token`.
 - `hmac_secret`: send `X-Webhook-Timestamp` and
-  `X-Webhook-Signature: sha256=<hex>`. The signed bytes are
-  `<timestamp>.<raw request body>` and the default replay window is five
-  minutes.
+  `X-Webhook-Signature: sha256=<hex>`. Legacy `v1` signs
+  `<timestamp>.<raw request body>`. New routes should set
+  `signature_version: "v2"`; v2 signs the newline-separated method, escaped
+  path, timestamp, `Idempotency-Key`, and SHA-256 of the raw body. The default
+  replay window is five minutes.
 
 Do not put route credentials in URLs or event JSON.
 
@@ -43,6 +46,27 @@ contain route metadata only; token and HMAC secret values are never returned.
 Route updates are persisted atomically to `GPTADMIN_WEBHOOK_CONFIG_FILE` with
 mode `0600`. Completed jobs and replay keys are stored in
 `GPTADMIN_WEBHOOK_STATE_FILE` so restart does not lose delivery identity.
+
+The admin console page **Вебхуки и агенты** uses the same operator endpoints.
+It can list, create, replace, and delete routes and inspect a durable job by
+ID. Route credentials are write-only: the UI and every read API return only
+secret-free metadata.
+
+The same five operations are available to AI clients through MCP:
+
+- `webhook_routes_list`
+- `webhook_route_create`
+- `webhook_route_replace`
+- `webhook_route_delete` (`confirm=true` is mandatory)
+- `webhook_job_get`
+
+They are also described by `/actions/openapi.yaml` and `public/openapi.yaml`
+for Custom GPT Actions. Read operations require `gptadmin.read`; route writes
+require `gptadmin.exec` and remain subject to the selected access profile and
+approval policy. When an `ask_before_write` profile returns an approval ID,
+approve it in GPTAdmin and repeat the write with the
+`X-GPTAdmin-Approval-ID` header; an approval is bound to the exact operation
+and payload and is consumed once.
 
 ```json
 {

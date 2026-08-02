@@ -1768,6 +1768,8 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	expectedToolNames := map[string]bool{
 		"ui": true, "resource_receipt": true, "discover": true, "demo": true, "approve_pending_server": true,
 		"schema": true, "inspect": true, "execute": true, "job": true,
+		"webhook_routes_list": true, "webhook_route_create": true, "webhook_route_replace": true,
+		"webhook_route_delete": true, "webhook_job_get": true,
 		"secret_request": true, "secret_status": true,
 	}
 	renderTools := 0
@@ -1825,7 +1827,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 			}
 		}
 	}
-	if len(tools) != 11 || len(expectedToolNames) != 0 {
+	if len(tools) != 16 || len(expectedToolNames) != 0 {
 		t.Fatalf("got Apps SDK tools=%d missing=%v, want exact capability set", len(tools), expectedToolNames)
 	}
 	if renderTools != 1 {

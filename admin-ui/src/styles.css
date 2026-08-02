@@ -292,3 +292,56 @@ dd { display: flex; align-items: center; gap: 7px; margin: 0; color: #344441; fo
   .button-row { justify-content: stretch; }
   .button-row .button { flex: 1; }
 }
+
+.webhook-layout { display: grid; grid-template-columns: minmax(230px, .75fr) minmax(0, 1.6fr); gap: 18px; align-items: start; }
+.route-list { overflow: hidden; }
+.route-empty { display: grid; gap: 7px; padding: 24px 20px; color: #687572; font-size: 12px; }
+.route-empty strong { color: #344441; font: 600 17px/1.2 Georgia, serif; }
+.route-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; border-bottom: 1px solid #eee8dc; padding: 16px 20px; }
+.route-row.selected { border-left: 4px solid #9b4f2f; padding-left: 16px; background: #f9ead0; }
+.route-row strong, .route-row span, .route-row small { display: block; overflow-wrap: anywhere; }
+.route-row strong { color: #30413e; font-size: 13px; }
+.route-row span { margin-top: 5px; color: #687572; font-size: 11px; }
+.route-row small { margin-top: 7px; color: #8f552e; font-size: 9px; font-weight: 800; letter-spacing: .05em; }
+.route-editor { padding: 25px; }
+.route-form { display: grid; gap: 20px; padding-top: 22px; }
+.route-form > label, .route-form .form-grid label, .callback-fieldset label, .job-search label { display: grid; gap: 7px; color: #475653; font-size: 12px; font-weight: 800; }
+.route-form input, .route-form select, .route-form textarea, .job-search input { width: 100%; border: 1px solid #bbbcb2; border-radius: 7px; padding: 11px 12px; color: #2d3c42; background: #fbfaf5; font-size: 13px; font-weight: 400; }
+.route-form input:disabled { color: #77817c; background: #eeeae0; cursor: not-allowed; }
+.route-form input:focus-visible, .route-form select:focus-visible, .route-form textarea:focus-visible, .job-search input:focus-visible { outline: 3px solid #e6b95e; outline-offset: 2px; }
+.route-form .short-textarea { min-height: 88px; }
+.form-message { margin-top: 18px; border-radius: 8px; padding: 12px 14px; background: #f8ebd3; font-size: 12px; line-height: 1.55; }
+.form-message.success-text { background: #e8f1e9; }
+.callback-fieldset { min-width: 0; margin: 0; border: 1px solid #ddd7ca; border-radius: 9px; padding: 16px; }
+.callback-fieldset legend { padding: 0 7px; color: #8f552e; font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+.callback-fieldset .field-help { margin-top: 13px; }
+.route-actions { display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e4ded2; padding-top: 19px; }
+.delete-confirmation { display: grid; gap: 11px; margin-top: 20px; border: 2px solid #a44229; border-radius: 9px; padding: 17px; color: #685233; background: #fff4eb; font-size: 12px; line-height: 1.55; }
+.delete-confirmation strong { color: #8f3925; font: 600 18px/1.2 Georgia, serif; }
+.delete-confirmation .button-row { justify-content: flex-end; }
+.delete-confirmation .button.secondary { margin-top: 0; }
+.job-inspector { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(260px, 1fr); gap: 22px; padding: 24px; }
+.job-search { display: flex; align-items: end; gap: 10px; }
+.job-search label { flex: 1; }
+.job-search .button.secondary { flex: 0 0 auto; margin-top: 0; }
+.job-result { grid-column: 1 / -1; border-top: 1px solid #e4ded2; padding-top: 20px; }
+.job-result dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.job-result dd { overflow-wrap: anywhere; }
+.safe-result { margin-top: 22px; }
+.safe-result > strong { color: #344441; font: 600 17px/1.2 Georgia, serif; }
+.safe-result dl { margin-top: 12px; }
+
+@media (max-width: 900px) {
+  .webhook-layout { grid-template-columns: 1fr; }
+  .job-inspector { grid-column: auto; }
+}
+
+@media (max-width: 620px) {
+  .route-row, .job-inspector { grid-template-columns: 1fr; }
+  .route-row .text-button { justify-self: start; }
+  .route-editor { padding: 18px; }
+  .route-actions, .job-search { align-items: stretch; flex-direction: column; }
+  .route-actions .button, .job-search .button { width: 100%; }
+  .job-result { grid-column: auto; }
+  .job-result dl { grid-template-columns: 1fr; }
+}

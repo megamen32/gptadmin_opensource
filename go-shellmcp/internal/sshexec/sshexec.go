@@ -452,11 +452,14 @@ func ComposeCmdForUser(cmd, cwd string, env map[string]string, runAsUser, transp
 	}
 	first := true
 	for k, v := range env {
+		if !validEnvironmentName(k) {
+			return "false"
+		}
 		if !first {
 			b.WriteByte(' ')
 		}
 		first = false
-		quoteShellArg(&b, k)
+		b.WriteString(k)
 		b.WriteByte('=')
 		quoteShellArg(&b, v)
 	}
@@ -475,6 +478,19 @@ func ComposeCmdForUser(cmd, cwd string, env map[string]string, runAsUser, transp
 	b.WriteString(" -- bash -lc ")
 	quoteShellArg(&b, composed)
 	return b.String()
+}
+
+func validEnvironmentName(name string) bool {
+	if name == "" || !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_') {
+		return false
+	}
+	for index := 1; index < len(name); index++ {
+		character := name[index]
+		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // quoteShellArg writes s to b wrapped in single quotes, escaping any

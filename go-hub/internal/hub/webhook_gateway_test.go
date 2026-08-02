@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -111,35 +112,17 @@ func TestWebhookGatewayRendersJSONAndDispatchesConfiguredShell(t *testing.T) {
 }
 
 func TestWebhookShellTemplateValuesCannotBecomeShellSource(t *testing.T) {
-	s := New(Config{WebhookRoutes: []WebhookRoute{{
-		ID:    "unsafe",
-		Token: "webhook-token",
-		Action: WebhookAction{
-			Kind:         "shell",
-			Target:       "shell:runner",
-			ApprovalMode: approvalModeBoundedAutonomous,
-			Command:      `printf '%s' '{{event.value}}'`,
-		},
-	}}})
-	s.mu.Lock()
-	s.agents["shell:runner"] = &Agent{AgentID: "shell:runner", Status: "online"}
-	s.mu.Unlock()
 	payload := `'; touch /tmp/webhook-should-not-execute; echo '`
-	if _, err := s.dispatchWebhookAction(s.webhookRoutes["unsafe"].Action, map[string]any{"value": payload}); err != nil {
+	command, environment, err := renderWebhookShellCommand(`printf '%s' '{{event.value}}'`, map[string]any{"value": payload})
+	if err != nil {
 		t.Fatalf("safe webhook rendering rejected event: %v", err)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, job := range s.shellJobs {
-		if strings.Contains(job.Cmd, payload) {
-			t.Fatalf("webhook event value was interpolated into shell source: %q", job.Cmd)
-		}
-		if len(job.Env) == 0 || job.Env["GPTADMIN_WEBHOOK_VALUE_0"] != payload {
-			t.Fatalf("webhook event value was not isolated as data: cmd=%q env=%#v", job.Cmd, job.Env)
-		}
-		return
+	if strings.Contains(command, payload) {
+		t.Fatalf("webhook event value was interpolated into shell source: %q", command)
 	}
-	t.Fatal("webhook shell action did not create a job")
+	if len(environment) == 0 || environment["GPTADMIN_WEBHOOK_VALUE_0"] != payload {
+		t.Fatalf("webhook event value was not isolated as data: cmd=%q env=%#v", command, environment)
+	}
 }
 
 func TestWebhookGatewayIdempotencyReturnsOriginalJob(t *testing.T) {
@@ -218,6 +201,92 @@ func TestWebhookSignatureFormatUsesRawBody(t *testing.T) {
 	body := []byte(`{"a":1}`)
 	if strings.Contains(webhookTestSignature("secret", "1", body), " ") {
 		t.Fatal("signature contains whitespace")
+	}
+}
+
+func TestWebhookV2SignatureBindsMethodPathAndIdempotencyKey(t *testing.T) {
+	secret := "webhook-v2-secret"
+	route := WebhookRoute{
+		ID: "notify-repair-100", HMACSecret: secret, SignatureVersion: "v2",
+		Action: WebhookAction{Kind: "mcp", Target: "hub", Tool: "status"},
+	}
+	s := New(Config{WebhookRoutes: []WebhookRoute{route}})
+	body := []byte(`{"schema":"notify.agent-job.v1"}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	path := "/webhooks/v1/notify-repair-100"
+	key := "notify-delivery-1"
+	signature := webhookSignatureV2(secret, http.MethodPost, path, timestamp, key, body)
+
+	valid := webhookRequest(http.MethodPost, path, body)
+	valid.Header.Set("X-Webhook-Timestamp", timestamp)
+	valid.Header.Set("X-Webhook-Signature", signature)
+	valid.Header.Set("Idempotency-Key", key)
+	validRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(validRecord, valid)
+	if validRecord.Code != http.StatusAccepted {
+		t.Fatalf("valid v2 signature status=%d body=%s", validRecord.Code, validRecord.Body.String())
+	}
+
+	changedKey := webhookRequest(http.MethodPost, path, body)
+	changedKey.Header.Set("X-Webhook-Timestamp", timestamp)
+	changedKey.Header.Set("X-Webhook-Signature", signature)
+	changedKey.Header.Set("Idempotency-Key", "notify-delivery-2")
+	changedRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(changedRecord, changedKey)
+	if changedRecord.Code != http.StatusUnauthorized {
+		t.Fatalf("changed idempotency key status=%d, want 401", changedRecord.Code)
+	}
+
+	var accepted map[string]any
+	if err := json.Unmarshal(validRecord.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	jobPath := "/webhook-jobs/" + fmt.Sprint(accepted["job_id"])
+	getSignature := webhookSignatureV2(secret, http.MethodGet, jobPath, timestamp, "", nil)
+	get := webhookRequest(http.MethodGet, jobPath, nil)
+	get.Header.Set("X-Webhook-Timestamp", timestamp)
+	get.Header.Set("X-Webhook-Signature", getSignature)
+	getRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(getRecord, get)
+	if getRecord.Code != http.StatusOK {
+		t.Fatalf("valid signed GET status=%d body=%s", getRecord.Code, getRecord.Body.String())
+	}
+
+	wrongMethod := webhookRequest(http.MethodGet, jobPath, nil)
+	wrongMethod.Header.Set("X-Webhook-Timestamp", timestamp)
+	wrongMethod.Header.Set("X-Webhook-Signature", signature)
+	wrongRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(wrongRecord, wrongMethod)
+	if wrongRecord.Code != http.StatusUnauthorized {
+		t.Fatalf("POST signature reused for GET status=%d, want 401", wrongRecord.Code)
+	}
+}
+
+func TestWebhookShellResultRequiresSuccessfulExit(t *testing.T) {
+	completed := func(returnCode any) map[string]any {
+		return map[string]any{
+			"status": "completed",
+			"response": map[string]any{
+				"structuredContent": map[string]any{
+					"result": map[string]any{"returncode": returnCode, "stderr": "must not enter the error"},
+				},
+			},
+		}
+	}
+	if err := validateWebhookShellResult(completed(float64(0))); err != nil {
+		t.Fatalf("zero exit rejected: %v", err)
+	}
+	if err := validateWebhookShellResult(completed(float64(1))); err == nil || strings.Contains(err.Error(), "must not enter") {
+		t.Fatalf("nonzero exit was not safely rejected: %v", err)
+	}
+	if err := validateWebhookShellResult(map[string]any{"status": "completed"}); err == nil {
+		t.Fatal("missing returncode was accepted")
+	}
+	if err := validateWebhookShellResult(completed("invalid")); err == nil {
+		t.Fatal("invalid returncode was accepted")
+	}
+	if err := validateWebhookShellResult(map[string]any{"status": "running"}); err == nil {
+		t.Fatal("non-terminal shell result was accepted")
 	}
 }
 

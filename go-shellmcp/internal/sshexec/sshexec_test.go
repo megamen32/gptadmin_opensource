@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -270,10 +271,10 @@ func TestComposeCmd(t *testing.T) {
 	})
 	t.Run("with env", func(t *testing.T) {
 		got := ComposeCmd("env", "", map[string]string{"FOO": "bar", "BAZ": "qux"})
-		if !strings.Contains(got, "'FOO'='bar' ") {
+		if !strings.Contains(got, "FOO='bar' ") {
 			t.Fatalf("missing FOO env: %q", got)
 		}
-		if !strings.Contains(got, "'BAZ'='qux' ") {
+		if !strings.Contains(got, "BAZ='qux' ") {
 			t.Fatalf("missing BAZ env: %q", got)
 		}
 		if !strings.HasSuffix(got, "bash -lc 'env'") {
@@ -285,11 +286,27 @@ func TestComposeCmd(t *testing.T) {
 		if !strings.Contains(got, "cd '/tmp'") {
 			t.Fatalf("missing cd: %q", got)
 		}
-		if !strings.Contains(got, "'K'='V' ") {
+		if !strings.Contains(got, "K='V' ") {
 			t.Fatalf("missing env: %q", got)
 		}
 		if !strings.HasSuffix(got, "bash -lc 'env'") {
 			t.Fatalf("bad trailing: %q", got)
+		}
+	})
+	t.Run("env reaches nested shell without entering argv", func(t *testing.T) {
+		value := `{"title":"disk","body":"it's bounded"}`
+		got := ComposeCmd(`printf '%s' "$GPTADMIN_WEBHOOK_VALUE_0"`, "", map[string]string{"GPTADMIN_WEBHOOK_VALUE_0": value})
+		output, err := exec.Command("bash", "-lc", got).CombinedOutput()
+		if err != nil {
+			t.Fatalf("composed command failed: %v output=%s cmd=%q", err, output, got)
+		}
+		if string(output) != value {
+			t.Fatalf("environment value did not survive: got=%q want=%q cmd=%q", output, value, got)
+		}
+	})
+	t.Run("invalid env name fails closed", func(t *testing.T) {
+		if got := ComposeCmd("true", "", map[string]string{"BAD;touch /tmp/no": "x"}); got != "false" {
+			t.Fatalf("invalid environment name was rendered: %q", got)
 		}
 	})
 	t.Run("escapes embedded single quote", func(t *testing.T) {

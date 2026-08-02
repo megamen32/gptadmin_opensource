@@ -169,6 +169,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WebhookJob"
+  /admin/api/webhook-jobs/{job_id}:
+    get:
+      operationId: getAdminWebhookJob
+      summary: Read one webhook job with operator authentication
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Durable webhook job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookJob"
   /webhook-routes:
     get:
       operationId: listWebhookRoutes
@@ -183,6 +202,12 @@ paths:
       summary: Create an operator-owned webhook route
       security:
         - bearerAuth: []
+      parameters:
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -204,6 +229,11 @@ paths:
           required: true
           schema:
             type: string
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -222,6 +252,11 @@ paths:
         - name: route
           in: path
           required: true
+          schema:
+            type: string
+        - name: X-GPTAdmin-Approval-ID
+          in: header
+          required: false
           schema:
             type: string
       responses:
@@ -492,11 +527,55 @@ components:
           type: string
         token:
           type: string
+          writeOnly: true
         hmac_secret:
           type: string
+          writeOnly: true
+        signature_version:
+          type: string
+          enum: [v1, v2]
+        max_skew_seconds:
+          type: integer
+          minimum: 1
         action:
           type: object
-          additionalProperties: true
+          additionalProperties: false
+          required: [kind, target]
+          properties:
+            kind:
+              type: string
+              enum: [mcp, prompt, shell]
+            target:
+              type: string
+            approval_mode:
+              type: string
+              enum: [ask_before_write, bounded_autonomous]
+            tool:
+              type: string
+            arguments:
+              type: object
+              additionalProperties: true
+            prompt:
+              type: string
+            prompt_arg:
+              type: string
+            command:
+              type: string
+            cwd:
+              type: string
+        callback:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:
+              type: string
+            token:
+              type: string
+              writeOnly: true
+            hmac_secret:
+              type: string
+              writeOnly: true
     WebhookAccepted:
       type: object
       required: [route_id, job_id, status]

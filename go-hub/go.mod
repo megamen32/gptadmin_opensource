@@ -2,7 +2,10 @@ module github.com/megamen32/gptadmin/go-hub
 
 go 1.24.0
 
-require github.com/go-webauthn/webauthn v0.15.0
+require (
+	github.com/go-webauthn/webauthn v0.15.0
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
