@@ -37,6 +37,15 @@ def test_readonly_cli_token_has_inspection_scope_without_exec() -> None:
     assert "gptadmin.exec" not in payload["scope"]
 
 
+def test_default_cli_mcp_token_has_five_year_lifetime() -> None:
+    """Default MCP client credentials must remain valid for the five-year policy."""
+    token = cli.make_mcp_bearer_token(_client_env(), "custom-endpoint-client")
+    payload_segment = token.split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
+
+    assert payload["exp"] - payload["iat"] == 5 * 365 * 24 * 3600
+
+
 def test_configure_all_supported_clients_registers_vscode(monkeypatch: pytest.MonkeyPatch) -> None:
     """One registration pass configures every supported local MCP client."""
     registered: dict[str, tuple[str, str]] = {}

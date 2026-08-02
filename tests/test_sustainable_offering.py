@@ -29,3 +29,4 @@ def test_documentation_map_exposes_open_core_boundary() -> None:
     document = (ROOT / "docs" / "DOCUMENTATION_MAP.md").read_text(encoding="utf-8").lower()
     assert "open-core" in document
     assert "open_core_plan.md" in document
+

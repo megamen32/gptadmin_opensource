@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,8 +24,75 @@ type Client struct {
 	Token    string
 }
 
-func New(base string, id *security.Identity, token string) *Client {
-	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: &http.Client{Timeout: 90 * time.Second}}
+func New(base string, id *security.Identity, token, dnsServer, resolveTo string) *Client {
+	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: newHTTPClient(dnsServer, resolveTo)}
+}
+
+func newHTTPClient(dnsServer, resolveTo string) *http.Client {
+	client := &http.Client{Timeout: 90 * time.Second}
+	dnsServer = strings.TrimSpace(dnsServer)
+	resolveTo = strings.TrimSpace(resolveTo)
+	if resolveTo != "" && net.ParseIP(resolveTo) == nil {
+		resolveTo = ""
+	}
+	if dnsServer == "" && resolveTo == "" {
+		return client
+	}
+
+	resolver := net.DefaultResolver
+	if dnsServer != "" {
+		host, _, err := net.SplitHostPort(dnsServer)
+		if err != nil {
+			host = dnsServer
+			dnsServer = net.JoinHostPort(dnsServer, "53")
+		}
+		if net.ParseIP(host) == nil {
+			return client
+		}
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "udp", dnsServer)
+			},
+		}
+	}
+
+	dialer := &net.Dialer{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		if resolveTo != "" {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolveTo, port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		resolved, err := resolver.LookupHost(ctx, host)
+		if err != nil {
+			if lastErr == nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("preferred Hub route %s failed: %v; DNS lookup for %q: %w", resolveTo, lastErr, host, err)
+		}
+		for _, ip := range resolved {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("configured DNS server returned no addresses for %q", host)
+	}
+	client.Transport = transport
+	return client
 }
 
 type Beat struct {

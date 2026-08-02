@@ -204,7 +204,6 @@ Write-Host "Port: $ShellmcpPort"
 Write-Host "ShellmcpUrl: $ShellmcpUrl"
 Write-Host "Transport: $ShellmcpTransport"
 Write-Host "HubPublicKeyFile: $HubPublicKeyFile"
-Write-Host "Token: $ShellmcpToken"
 if ($ShellmcpTransport -eq 'polling') {
     Write-Host 'Polling mode: local HTTP listener is intentionally disabled.'
 } else {

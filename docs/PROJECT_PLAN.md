@@ -40,6 +40,14 @@ minimum practical MCP context loaded only when the current task needs it.
 | Product activation | Canonical local first-tool path, installed-client handshake and opt-in activation counters; external outcome data remains absent | In progress |
 | Policy, observability and ecosystem | Bounded policy, telemetry, capability-catalog and extension contracts; external operator evidence remains pending | In progress |
 
+## Current execution board
+
+- **NOW — GPTADMIN connector authorization durability:** deploy only exact source candidate `25658c0` after all configured existing bearer credentials are migrated without replacement and pass the post-deploy custom endpoint, MCP Remote and relay/VRP matrix; then a newly authorized GPTADMIN Codex app connection must survive its connector/process restart and token-refresh paths and complete a real harmless `discover -> schema -> execute` interaction. **Exit gate:** focused RED/GREEN OAuth and configured-bearer regressions, redacted pre-deploy failure evidence for the known stale-resource incident, fresh green post-deploy matrix for every existing supported credential, and fresh live-client evidence; no authorization-related deployment before the candidate, rollback material and explicit post-deploy gates are ready.
+- **NEXT 1:** finish the existing S4.2 capability-catalog slice without overlapping its files or deployment state.
+- **NEXT 2:** resolve the recorded public-origin MCP audience mismatch with one explicit, tested policy.
+- **NEXT 3:** recover the public browser user path only with its separate read-only baseline and live acceptance evidence.
+- **NOT NOW:** unrelated feature work, release/tagging, or repeated full matrices. Do not treat Hub health, a mocked token response, or a one-time successful reconnect as evidence that connector authorization is durable.
+
 ## Stage 0 - Product contract and engineering baseline
 
 **Objective:** make the supported promise, compatibility boundaries and release

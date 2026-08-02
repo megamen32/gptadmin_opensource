@@ -2,8 +2,11 @@
 
 GPTAdmin release artifacts are published only after the build has produced a
 versioned release manifest, an SPDX SBOM, installer-link verification and
-dependency vulnerability checks. Tagged builds also receive GitHub build
-provenance attestations before any public mirror or release upload.
+dependency vulnerability checks. Tagged builds receive GitHub build provenance
+attestations when the repository supports that GitHub feature. GitHub does not
+offer attestations for user-owned private repositories; in that case the
+manifest, SBOM, installer verification and vulnerability gates remain required
+before any public mirror or release upload.
 
 ## Verification contract
 
@@ -26,9 +29,11 @@ updates.
 ## CI gates
 
 The release job runs `govulncheck` for the Go modules and `npm audit` for the
-admin UI lockfile before publication. Tagged builds use
+admin UI lockfile before publication. Tagged public-repository builds use
 `actions/attest-build-provenance` for the verified archives, manifest and SBOM.
-A failed gate blocks the public sync and release upload.
+For a user-owned private source repository, GitHub's unavailable attestation
+endpoint is skipped; every other gate remains blocking for public sync and
+release upload.
 
 ## Vulnerability response
 

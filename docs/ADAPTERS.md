@@ -48,6 +48,22 @@ systemd, etc.) available.
   [Configuration → OAuth](./CONFIGURATION.md#oauth).
 - For local development, use the same OAuth flow against the loopback Hub.
 
+### Authorization durability
+
+An MCP client that has completed authorization must retain enough client-managed
+session state to refresh or restore that authorization without asking the
+operator to repeat setup. In particular, a connector restart, client restart,
+or normal token-refresh path must not leave an otherwise configured GPTADMIN
+connection unable to call `discover`.
+
+If Codex reports `reauthentication_required` or a missing refresh state, use
+the client’s reconnect control once to recover access; do not paste internal
+Hub credentials into the client. Treat the message as a connector-lifecycle
+defect until the owning layer is identified. Before deploying a related fix,
+verify a fresh authorization, the defined restart/refresh scenario, and a real
+harmless `discover -> schema -> execute` interaction. The required evidence is
+specified in [Integration Control Contract](./INTEGRATION_CONTROL_CONTRACT.md#authorization-durability).
+
 ---
 
 ## 2. Browser extension

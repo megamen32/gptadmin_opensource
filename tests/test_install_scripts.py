@@ -51,6 +51,15 @@ def test_android_installer_reuses_existing_shellmcp_credentials():
     assert 'HUB_URL=$(read_existing_env HUB_URL)' in content
 
 
+def test_android_installer_persists_explicit_hub_dns_server():
+    """Android must preserve the resolver used by the Hub transport."""
+    content = (DEPLOY / "install_android.sh").read_text()
+    assert 'SHELLMCP_HUB_DNS_SERVER=${SHELLMCP_HUB_DNS_SERVER:-1.1.1.1:53}' in content
+    assert 'SHELLMCP_HUB_DNS_SERVER=$SHELLMCP_HUB_DNS_SERVER' in content
+    assert 'SHELLMCP_HUB_RESOLVE_TO=${SHELLMCP_HUB_RESOLVE_TO:-}' in content
+    assert 'SHELLMCP_HUB_RESOLVE_TO=$SHELLMCP_HUB_RESOLVE_TO' in content
+
+
 def test_standalone_shellmcp_installer_persists_credentials_without_printing_them():
     """Standalone installer must reuse a state-file credential on upgrades."""
     content = (DEPLOY / "install_shellmcp.sh").read_text()

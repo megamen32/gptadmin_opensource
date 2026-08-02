@@ -184,7 +184,10 @@ api(){
   rm -f "$h" "$b"
   local args=(-sS -D "$h" -o "$b" --connect-timeout 5 --max-time 600 -X "$method" -H "Authorization: Bearer $TOK")
   [[ -n "$data" ]] && args+=(-H "Content-Type: application/json" --data "$data")
-  curl "${args[@]}" "http://supervisor$path" || true
+  if ! curl "${args[@]}" "http://supervisor$path"; then
+    echo "Supervisor API transport failed: $method $path" >&2
+    return 1
+  fi
   python3 - "$b" "$method" "$path" "$(head -n 1 "$h" 2>/dev/null || true)" <<'PY'
 import json, sys
 b, method, path, status = sys.argv[1:]
@@ -204,11 +207,32 @@ except Exception:
     out['body_head'] = s[:200]
 print(json.dumps(out, ensure_ascii=False))
 PY
+  local status
+  status=$(head -n 1 "$h" 2>/dev/null || true)
+  if [[ ! "$status" =~ ^HTTP/[^[:space:]]+[[:space:]]2[0-9]{2} ]]; then
+    echo "Supervisor API rejected $method $path: $status" >&2
+    return 1
+  fi
+}
+addon_installed(){
+  python3 - /tmp/gptadmin-ha-api.b <<'PY'
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1]))
+    # Supervisor's app-info response has no stable `installed` boolean.
+    # A concrete installed version is the portable indicator; an unavailable
+    # local app only reports version_latest.
+    raise SystemExit(0 if payload.get('data', {}).get('version') else 1)
+except Exception:
+    raise SystemExit(1)
+PY
 }
 api POST /addons/reload '{}'
 api GET /addons/local_gptadmin_hub_standby/info
-api POST /addons/local_gptadmin_hub_standby/install '{}'
-sleep 3
+if ! addon_installed; then
+  api POST /addons/local_gptadmin_hub_standby/install '{}'
+  sleep 3
+fi
 api POST /addons/local_gptadmin_hub_standby/stop '{}'
 sleep 3
 api POST /addons/local_gptadmin_hub_standby/update '{}'
@@ -221,10 +245,15 @@ chmod 0755 /tmp/haos-gptadmin-hub-standby-install.sh
 scp -q -i "$HAOS_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -P "$HAOS_SSH_PORT" /tmp/haos-gptadmin-hub-standby-install.sh "$HAOS_SSH_USER@$HAOS_HOST:$REMOTE"
 "${SSH[@]}" "bash '$REMOTE'"
 
+observed=0
 for i in $(seq 1 60); do
   body=$(curl -sS --connect-timeout 2 --max-time 5 "http://$HAOS_HOST:9001/version" 2>/dev/null || true)
   echo "attempt=$i body=$body"
-  grep -q "$BUILD_VERSION" <<<"$body" && break
+  if grep -q "$BUILD_VERSION" <<<"$body"; then
+    observed=1
+    break
+  fi
   sleep 2
 done
+[[ "$observed" == "1" ]] || { echo "HAOS listener did not report build $BUILD_VERSION" >&2; exit 1; }
 curl -fsS "http://$HAOS_HOST:9001/healthz"; echo

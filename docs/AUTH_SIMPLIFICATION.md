@@ -12,12 +12,11 @@ This document is the target contract for a deliberate breaking migration. It
 does **not** claim that the current multi-token implementation has already been
 removed.
 
-The legacy `CTL_TOKEN` compatibility window ends at
-`2026-07-27T00:00:00Z`. Until then the Hub marks accepted uses as deprecated
-and sends a `Sunset` response header. After that instant it rejects the legacy
-bearer in admin and MCP auth; operators must use AdminPassword sessions or
-scoped OAuth JWT connections. New installs and the CLI do not create, print or
-rotate this legacy credential.
+The legacy `CTL_TOKEN` compatibility path has no time-based forced expiry.
+New installs and the CLI do not create, print or rotate this legacy credential.
+An already-issued compatibility credential remains valid until its owner
+explicitly rotates or removes it; operators should use AdminPassword sessions
+or scoped OAuth JWT connections for new work.
 
 ## Security model
 

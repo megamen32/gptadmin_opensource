@@ -75,6 +75,24 @@ func TestFromEnvUsesWindowsInstallerPollingContract(t *testing.T) {
 	}
 }
 
+func TestFromEnvReadsHubDNSServer(t *testing.T) {
+	t.Setenv("SHELLMCP_HUB_DNS_SERVER", "1.1.1.1:53")
+
+	cfg := FromEnv()
+	if cfg.HubDNSServer != "1.1.1.1:53" {
+		t.Fatalf("HubDNSServer=%q want explicit installer DNS server", cfg.HubDNSServer)
+	}
+}
+
+func TestFromEnvReadsHubResolveTo(t *testing.T) {
+	t.Setenv("SHELLMCP_HUB_RESOLVE_TO", "192.168.2.100")
+
+	cfg := FromEnv()
+	if cfg.HubResolveTo != "192.168.2.100" {
+		t.Fatalf("HubResolveTo=%q want explicit Hub route", cfg.HubResolveTo)
+	}
+}
+
 func TestFromEnvDefaultsToLongPollingWithoutInboundListener(t *testing.T) {
 	t.Setenv("SHELL_QUEUE", "")
 	t.Setenv("SHELLMCP_QUEUE", "")

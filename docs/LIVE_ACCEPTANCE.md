@@ -18,6 +18,22 @@ The runner verifies, in order:
 4. generated `/actions/openapi.yaml`;
 5. authenticated `tools/list` and the harmless `demo` MCP call.
 
+For a deployment that changes OAuth, connector registration, or client-session
+handling, this runner is necessary but not sufficient. The release evidence
+must additionally include a freshly authorized real MCP client after its
+defined restart/refresh boundary, completing a harmless `discover -> schema ->
+execute` interaction without manual reconnect. Record a redacted immutable
+client artifact and the ownership-specific automated regression named in
+[Integration Control Contract](./INTEGRATION_CONTROL_CONTRACT.md#authorization-durability).
+
+Before every deployment that changes authorization, key issuance, endpoints, or
+relay behavior, run a redacted credential matrix against **every existing
+supported credential**. Each credential must complete its harmless probe on the
+custom endpoint, MCP remote endpoint, and relay/VRP path that it is entitled to
+use. Do not substitute a newly issued token, a health check, or a single green
+endpoint for that matrix. Record external-owner credentials that cannot be
+probed as explicit deployment blockers.
+
 Use `--required-tool NAME` for a profile-specific tool allowlist. This runner
 does not claim successful webhook delivery, Network Tunnel data-plane
 connectivity, file restore, profile mutation or external MCP-client

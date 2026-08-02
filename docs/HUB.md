@@ -76,6 +76,16 @@ By default it listens on `0.0.0.0:25900`. Change with `--port` or `HUB_PORT`.
 See [API Reference](./API_REFERENCE.md) for full details.
 See [Webhooks](./WEBHOOKS.md) for route configuration and delivery semantics.
 
+## OAuth credential lifetime
+
+OAuth authorization-code and refresh exchanges use short-lived access JWTs and
+an opaque, rotating refresh credential. The Hub persists only the digest of the
+refresh credential; it survives a Hub restart for five calendar years unless
+explicitly revoked. Clients must persist the replacement value returned by each
+refresh. Managed MCP bearer keys issued without an explicit `ttl_days` also
+default to five years. Existing JWT strings retain their signed lifetime and
+are never silently replaced by an update.
+
 ## Web panel (`/admin`)
 
 Open the Hub URL printed by setup and choose **Admin**. Sign in with your

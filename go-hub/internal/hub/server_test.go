@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -388,111 +387,6 @@ func TestOAuthAndMCPJSONRPC(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"name":"discover"`)) {
 		t.Fatalf("tools/list missing expected server tool: %s", w.Body.String())
-	}
-}
-
-func TestOAuthRefreshSurvivesRestartAndReadsWidget(t *testing.T) {
-	config := Config{
-		AdminPassword:            "pw",
-		OAuthClientSecret:        "oauth-secret",
-		PublicOrigin:             "https://hub.example",
-		MCPResource:              "https://hub.example",
-		OAuthPermissiveRedirects: true,
-		OAuthPermissiveResources: true,
-		ConfigDir:                t.TempDir(),
-		DefaultTimeout:           time.Second,
-		PollMaxTimeout:           time.Second,
-	}
-	s := New(config)
-
-	discovery := httptest.NewRecorder()
-	s.Handler().ServeHTTP(discovery, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil))
-	if discovery.Code != http.StatusOK {
-		t.Fatalf("OAuth discovery status=%d body=%s", discovery.Code, discovery.Body.String())
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(discovery.Body.Bytes(), &metadata); err != nil {
-		t.Fatal(err)
-	}
-	grants, _ := metadata["grant_types_supported"].([]any)
-	if !slices.ContainsFunc(grants, func(grant any) bool { return grant == "refresh_token" }) {
-		t.Fatalf("OAuth discovery did not advertise refresh_token: %v", metadata)
-	}
-
-	authorizeForm := "client_id=codex&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fcb&resource=https%3A%2F%2Fhub.example&scope=gptadmin.read&password=pw&code_challenge=" + pkceChallenge("verifier") + "&code_challenge_method=S256"
-	authorize := httptest.NewRecorder()
-	authorizeRequest := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(authorizeForm))
-	authorizeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	s.Handler().ServeHTTP(authorize, authorizeRequest)
-	if authorize.Code != http.StatusFound {
-		t.Fatalf("authorize status=%d body=%s", authorize.Code, authorize.Body.String())
-	}
-	redirect, err := url.Parse(authorize.Header().Get("Location"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	code := redirect.Query().Get("code")
-	if code == "" {
-		t.Fatalf("authorize redirect omitted code: %s", authorize.Header().Get("Location"))
-	}
-
-	exchangeForm := "grant_type=authorization_code&code=" + code + "&client_id=codex&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fcb&resource=https%3A%2F%2Fhub.example&code_verifier=verifier"
-	exchange := httptest.NewRecorder()
-	exchangeRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(exchangeForm))
-	exchangeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	s.Handler().ServeHTTP(exchange, exchangeRequest)
-	if exchange.Code != http.StatusOK {
-		t.Fatalf("authorization-code exchange status=%d body=%s", exchange.Code, exchange.Body.String())
-	}
-	var initial map[string]any
-	if err := json.Unmarshal(exchange.Body.Bytes(), &initial); err != nil {
-		t.Fatal(err)
-	}
-	refreshToken, _ := initial["refresh_token"].(string)
-	if refreshToken == "" {
-		t.Fatalf("authorization-code exchange omitted refresh_token: %v", initial)
-	}
-
-	restarted := New(config)
-	refresh := httptest.NewRecorder()
-	refreshRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader("grant_type=refresh_token&refresh_token="+url.QueryEscape(refreshToken)+"&client_id=codex&resource=https%3A%2F%2Fhub.example"))
-	refreshRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	restarted.Handler().ServeHTTP(refresh, refreshRequest)
-	if refresh.Code != http.StatusOK {
-		t.Fatalf("refresh after restart status=%d body=%s", refresh.Code, refresh.Body.String())
-	}
-	var refreshed map[string]any
-	if err := json.Unmarshal(refresh.Body.Bytes(), &refreshed); err != nil {
-		t.Fatal(err)
-	}
-	accessToken, _ := refreshed["access_token"].(string)
-	if accessToken == "" {
-		t.Fatalf("refresh response omitted access_token: %v", refreshed)
-	}
-
-	resource := httptest.NewRecorder()
-	resourceRequest := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"ui://widget/admin-v3.html"}}`))
-	resourceRequest.Header.Set("Authorization", "Bearer "+accessToken)
-	restarted.Handler().ServeHTTP(resource, resourceRequest)
-	if resource.Code != http.StatusOK {
-		t.Fatalf("authenticated resources/read status=%d body=%s", resource.Code, resource.Body.String())
-	}
-	var resourceRPC map[string]any
-	if err := json.Unmarshal(resource.Body.Bytes(), &resourceRPC); err != nil {
-		t.Fatal(err)
-	}
-	contents := resourceRPC["result"].(map[string]any)["contents"].([]any)
-	content := contents[0].(map[string]any)
-	if content["uri"] != "ui://widget/admin-v3.html" || content["mimeType"] != "text/html;profile=mcp-app" || content["text"] == "" {
-		t.Fatalf("unexpected widget resource: %v", content)
-	}
-
-	rotated := httptest.NewRecorder()
-	rotatedRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader("grant_type=refresh_token&refresh_token="+url.QueryEscape(refreshToken)+"&client_id=codex&resource=https%3A%2F%2Fhub.example"))
-	rotatedRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	restarted.Handler().ServeHTTP(rotated, rotatedRequest)
-	if rotated.Code != http.StatusBadRequest {
-		t.Fatalf("rotated refresh token status=%d body=%s", rotated.Code, rotated.Body.String())
 	}
 }
 

@@ -9,7 +9,7 @@ Full environment-variable reference, auth model, and OAuth setup.
 | Var | Required | Default | Purpose |
 |-----|----------|---------|---------|
 | `ADMIN_PASSWORD` | **yes** | — | Password for the `/oauth/authorize` HTML form and admin session. |
-| `CTL_TOKEN` | legacy only until 2026-07-27 | — | Deprecated compatibility bearer; do not create or copy it. |
+| `CTL_TOKEN` | existing installations only | — | Deprecated compatibility bearer; do not create or copy it. It remains valid until its owner explicitly rotates or removes it. |
 | `OAUTH_CLIENT_SECRET` | for `/mcp` | — | Signs OAuth bearer tokens. Generate with `openssl rand -hex 32`. |
 | `PUBLIC_ORIGIN` | recommended | — | Public base URL (e.g. `https://your-hub.bezrabotnyi.com`). Used in OAuth + OpenAPI. |
 | `MCP_RESOURCE` | recommended | `$PUBLIC_ORIGIN` | The MCP resource identifier. |
@@ -84,14 +84,16 @@ GPT‑Админ has **three** auth mechanisms — they're different, don't mix 
 ### 1. Legacy `CTL_TOKEN` (temporary compatibility only)
 
 - Used for: `/admin`, `/admin/api/*`, `/servers`, `/tasks/*`, artifact endpoints
-- Header: `Authorization: Bearer <CTL_TOKEN>` (accepted only before the migration deadline)
+- Header: `Authorization: Bearer <CTL_TOKEN>` (accepted only for an existing
+  compatibility credential until its owner explicitly rotates or removes it)
 - This is the "admin" token. The web panel and Custom GPT actions use it.
 
 ### 2. OAuth bearer (for `/mcp`)
 
 - Used for: `/mcp` (MCP remote SSE)
-- `/mcp` does **not** accept `CTL_TOKEN` directly. It requires an OAuth bearer
-  token that the hub signs via `OAUTH_CLIENT_SECRET`.
+- `/mcp` normally uses an OAuth bearer token that the hub signs via
+  `OAUTH_CLIENT_SECRET`. The deprecated existing compatibility bearer remains
+  accepted only until its owner explicitly rotates or removes it.
 - MCP clients (Claude Desktop, Codex) obtain this token via the OAuth flow.
 
 ### 3. `ADMIN_PASSWORD` (form)
@@ -118,10 +120,10 @@ GPT‑Админ has **three** auth mechanisms — they're different, don't mix 
 ## Legacy bearer migration
 
 `CTL_TOKEN` is a deprecated compatibility credential, not a supported setup
-path. The migration deadline is `2026-07-27T00:00:00Z`; the Hub advertises
-this with `Deprecation`/`Sunset` headers and then rejects the bearer. Use the
-AdminPassword OAuth authorization flow or a scoped MCP JWT instead. ShellMCP
-agent credentials are separate and are not affected by this deadline.
+path. New setup and updates never create or print it. An existing credential
+remains valid until its owner explicitly rotates or removes it; normal clients
+should use the AdminPassword OAuth authorization flow or a scoped MCP JWT.
+ShellMCP agent credentials are separate and are not affected by this rule.
 
 ## OAuth
 
@@ -141,6 +143,20 @@ The hub implements OAuth endpoints compatible with the OpenAI SDK OAuth flow.
 2. Set `ADMIN_PASSWORD` (this is what users type at the authorize form)
 3. Set `PUBLIC_ORIGIN` to your public hub URL
 4. MCP clients will discover the OAuth endpoints via `/.well-known/...`
+
+### Connection lifecycle
+
+The Hub issues the OAuth protocol responses, while a given MCP client or its
+connector may own persisted browser/session and refresh state. An authorized
+client must remain able to refresh or restore its session across its supported
+restart boundary. Do not work around a client-side refresh failure by exposing
+or copying internal credentials. Changes to this boundary require the
+authorization-durability regression and live-client acceptance defined in
+[Integration Control Contract](./INTEGRATION_CONTROL_CONTRACT.md#authorization-durability).
+OAuth access JWTs remain short lived; the Hub-issued opaque refresh credential
+has a five-calendar-year lifetime and rotates on use. New managed MCP bearers
+without an explicit `ttl_days` default to five years. Existing signed JWTs
+retain their original expiry and are not silently replaced by setup or update.
 
 ### Where to set the password
 

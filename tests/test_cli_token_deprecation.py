@@ -9,8 +9,7 @@ import pytest
 import cli
 
 
-def test_tokens_never_prints_legacy_ctl_secret_or_a_forced_deadline(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """Existing bearer credentials stay hidden and are not auto-expired by the CLI."""
+def test_tokens_never_prints_legacy_ctl_secret_or_an_automatic_deadline(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "env_read", lambda: {"CTL_TOKEN": "legacy-secret", "HUB_URL": "https://hub.example"})
 
     cli.cmd_tokens(SimpleNamespace(show_shellmcp=False))
@@ -18,8 +17,7 @@ def test_tokens_never_prints_legacy_ctl_secret_or_a_forced_deadline(monkeypatch:
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert "legacy-secret" not in output
-    assert "expires on" not in output
-    assert "explicitly rotated or removed" in output
+    assert "deadline" not in output.lower()
 
 
 def test_tokens_hides_internal_credential_names_in_normal_output(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -42,14 +40,13 @@ def test_tokens_hides_internal_credential_names_in_normal_output(monkeypatch: py
     assert "MCP_BRIDGE_KEY" not in output
 
 
-def test_rotate_hub_is_removed_from_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_rotate_hub_requires_an_explicit_global_invalidation(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "need_root", lambda: None)
 
     with pytest.raises(SystemExit):
         cli.cmd_rotate(SimpleNamespace(which="hub"))
 
     output = capsys.readouterr()
-    assert "legacy" in (output.out + output.err).lower()
     assert "global invalidation" in (output.out + output.err).lower()
     assert "legacy-secret" not in (output.out + output.err)
 

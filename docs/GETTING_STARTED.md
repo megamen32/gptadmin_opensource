@@ -96,6 +96,9 @@ sudo gptadmin urls --json  # machine-readable output
 **`/mcp` returns 401**
 - Complete the OAuth connection from the Hub URL; `/mcp` accepts scoped MCP
   connections, not copied service credentials. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
+- If this connection predates Hub refresh support, reconnect once to obtain an
+  `offline_access` refresh credential. Existing sessions cannot receive one
+  retroactively.
 
 **Browser extension buttons don't appear**
 - Refresh the page

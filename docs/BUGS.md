@@ -1,5 +1,56 @@
 # Bug tracker
 
+## 2026-07-27 - GO-HUB-SERVER-TEST-TRUNCATED-20260727 - Hub package tests cannot compile - open
+
+- Component: `go-hub/internal/hub` test package.
+- Evidence: focused command `cd go-hub && go test ./internal/hub -run 'Test.*(Apps|Resource)' -count=1` on 2026-07-27 failed before executing tests: `server_test.go:1:1: expected 'package', found 'EOF'`.
+- Confirmed facts: the tracked test file `go-hub/internal/hub/server_test.go` is presently zero bytes; its working-tree diff removes 2,935 lines from the last tracked revision `c7c06ead67d6fe78e93017cdf16356f17372f6e8`.
+- Root-cause hypothesis: an unrelated in-progress edit or truncation removed the test package source. It is not evidence of a Hub runtime or Apps SDK regression.
+- Next action: identify the owner of the uncommitted truncation; restore or complete it only with that owner’s coordination, then rerun the focused Apps SDK resource test before changing the authorization lifecycle.
+
+## 2026-07-27 - GPTADMIN-CONNECTOR-REAUTH-20260727 - Codex app loses its authorization state - open
+
+- Component: GPTADMIN Codex app connector authorization lifecycle.
+- Evidence: immutable Codex connector responses on 2026-07-27: `gptadmin_discover` and `gptadmin_ui` both failed with `UNAUTHORIZED`, `reauthentication_required`, and `oauth_refresh_token_missing`; no tool or interactive Allow surface could be reached. Reconnect then showed a generic setup failure; the screenshot remains in the private incident archive and is deliberately not a source-tree dependency.
+- Confirmed facts: GPTADMIN was discovered by Codex, but its connector could not use an existing session or obtain a refreshed session. The downstream ADB target remained `unauthorized` because the interactive approval path was unavailable. The Apps SDK widget Hub origin responded `200` for health, version and OAuth metadata; it reports deployed version `1.0.5`, commit `9d8a427`. The public `gptadmin.bezrabotnyi.com` origin redirects to the website and returns `404` for those Hub paths.
+- Confirmed source cause: the Hub advertised only `authorization_code`, and `/oauth/token` returned a 12-hour access JWT without a `refresh_token`; a connector that requires refresh state necessarily reaches `oauth_refresh_token_missing` after access expiry/restart. The public-root origin mismatch remains a separate live-routing check.
+- Required regression: an ownership-specific lifecycle test must fail before the fix and then prove initial authorization, persisted refresh/session state, process or connector restart continuity, refresh continuity, and one real `discover -> schema -> execute` call. A mocked Hub `200` or a source-only token test is insufficient.
+- Deployment gate: do not deploy an authorization-related change until a fresh interactive authorization and the same post-restart/refresh client path pass against the deployment target; record only redacted immutable evidence.
+- Repair source: exact isolated candidate `25658c0` (including `8b32a36`, `eccb345`, `24e1032`, and `071d69c`) adds the OAuth refresh grant with five-calendar-year digest-only rotating refresh credentials, preserves the legacy bearer without the expired migration deadline, sets new managed MCP bearers to five years, and migrates every configured existing MCP bearer by digest without replacing its value. The fresh pre-deploy matrix found nine signed bearer values with stale `resource` claims and `401` on all three paths; this is the recorded red baseline, not a reason to mint replacements. Next action: operator reconnects GPTADMIN, then deploy only that SHA with rollback material and require a green post-deploy matrix for all existing credentials through custom endpoint, MCP Remote and relay/VRP.
+
+## 2026-07-26 - RELEASE-UV-PYTEST-INVOKES-SYSTEM-PYTHON-20260726 - CI cannot run docs contract after uv setup - open
+
+- Component: `build-and-sync.yml` release job docs product contract.
+- Evidence: immutable v131 run `30184856368`, failed step `Docs product contract`: `/usr/bin/python3: No module named pytest`.
+- Confirmed facts: the job installs uv, then invokes `python3 -m pytest`; GitHub system Python has no project test environment.
+- Root cause: release workflow bypasses the declared uv-managed dependency environment.
+- Next action: invoke tests through uv, add workflow-contract regression, push a repair commit to `main`, and re-dispatch the immutable v131 tag only after focused/local gates pass.
+
+## 2026-07-26 - SHELLMCP-FILE-TOCTOU-20260726 - validated file path can be reopened outside root - open
+
+- Component: Go ShellMCP `/file` and inspection-root file access.
+- Evidence: whole-branch security review of `go-shellmcp/internal/server/server.go:790-842` and `internal/inspect/inspect.go:74,105` at candidate `0eee91e`; canonical containment is checked before a separate pathname open/`http.ServeFile`.
+- Confirmed facts: configured root symlinks are permitted; replacing a root or intermediate link between validation and final open can redirect the final read. Current tests do not exercise the final-open race.
+- Root-cause hypothesis: validate-then-reopen pathname flow lacks a descriptor-pinned, no-follow final open.
+- Next action: add a rooted descriptor abstraction using a patched Go `os.Root` toolchain, serve the already-open file, migrate equivalent inspection paths or keep their bug open, and prove no outside bytes under bounded rename/symlink adversarial tests.
+
+## 2026-07-26 - MCP-PUBLIC-ORIGIN-AUDIENCE-MISMATCH-20260726 - managed bearer fails across public origins - open
+
+- Component: Hub managed MCP token issuance and dual public-origin contract.
+- Evidence: live `zaideiscord` acceptance at 2026-07-26. The Hub canonical public origin differs from the alternate origin; a bearer bound to one returns signature/audience failure on the other.
+- Confirmed facts: persisted client record is `full` with `gptadmin.exec`; a replacement issued for the canonical origin passed authenticated `/mcp` `200` before delivery.
+- Root-cause hypothesis: managed bearer issuer/resource claims bind the token to one hostname while product deployment exposes multiple public origins expected to work.
+- Next action: complete canonical-origin shell smoke, then decide/implement one explicit multi-origin MCP audience policy with a regression; do not represent the alternate origin as interchangeable until proven.
+
+## 2026-07-25 - MCP-QUEUED-JOBS-NOT-EXECUTING-20260725 - queued MCP jobs do not complete - awaiting client smoke
+
+- Component: Hub queue delivery and server-100 ShellMCP worker.
+- Evidence: production service journal and Hub metrics at 2026-07-25 22:57 MSK.
+- Confirmed facts: 18 shell jobs were queued; ShellMCP started with `queue=false`; an explicit `long_poll`/queue configuration restart logged `queue=true` and reduced `shell_queue_jobs` to 0 within five seconds.
+- Root cause: ShellMCP queue polling was disabled by deployed configuration drift; a restart without explicit queue mode could not recover jobs.
+- Verification: client policies for `Zaimanaged-client` and `zaideiscord` are equivalent; the Hub's 30-second synchronous wait returns a job reference only when the queued work does not complete in time.
+- Resolution: configuration corrected with private backup `/var/backups/gptadmin/gptadmin.env.before-shellmcp-queue-20260725T195706Z`, then service restarted once. Queue zero proves dequeue, not completed result; keep entry open until existing-client smoke returns expected stdout and exit code.
+
 This is the project’s append-only working register for bugs found during
 development, diagnostics, deployment, or live verification.
 
@@ -12,14 +63,43 @@ Rules:
 - At the end of the current goal, resolve every actionable open entry before
   final handoff, unless a concrete external blocker is recorded.
 
-## 2026-07-27 - LEGACY-BEARER-DEADLINE-20260727 - Existing Hub connections expired by a fixed date - fixed
+## 2026-07-25 - PUBLIC-ADMIN-502-20260725 - Public admin browser gate regressed - open
 
-- Component: `go-hub/internal/hub/server.go` legacy bearer acceptance and `cli.py` connection-status copy.
-- Evidence: immutable GitHub Actions run `30301216345` for release `v135` failed its real Hub process fixtures on 2026-07-27 with `401` and `legacy token expired; use OAuth connection` after the fixed migration deadline.
-- Confirmed facts: Existing bearer-backed process, canary and extension checks were rejected even though the release must preserve already issued connections. New installs do not create this deprecated credential.
-- Root cause: `FromEnv` applied a calendar cutoff while compatibility fixtures and retained deployments still used the existing bearer.
-- Fix / verification: Build `136` / commit `6d3446228d5125efda31b27120b6e86b52bd952e` keeps existing credentials valid until explicit rotation/removal and removes the deadline from normal CLI copy. Release run `30301756447` passed; the redacted post-deploy matrix returned `200` for admin, MCP and relay, and live OAuth refresh plus widget resource acceptance passed.
-- Next action: Reauthorize the existing GPTADMIN Codex connection once, because its pre-fix session has no refresh token to rotate.
+- Component: public admin origin, canonical Tunnel, and Hub upstream chain.
+- First observed: sanitized incident evidence from a real headless Chromium probe at `2026-07-25T15:05:38+03:00`; the disposable host-local log is intentionally not a source-tree dependency.
+- Confirmed fact: `https://gptadminmcp.bezrabotnyi.com/admin/` returned HTTP `502` with browser title `502 Bad Gateway`; the password, refresh, overview and authenticated MCP user path is unavailable.
+- Root cause: `gptadmin-hub.service` was inactive after a clean stop at `2026-07-25T08:57:09+03:00`; its loopback health endpoint was unavailable. The primary Tunnel was already failed. Starting the Hub once restored local and public health without configuration changes.
+- Current evidence: the earlier cookie failure was an incorrect smoke input (`/admin/` supplied where Hub origin was required), producing a doubled login path. At `2026-07-25T20:40Z`, real Chrome plus the corrected secure remote runner passed form, login, session cookie, reload, overview, and profiles on both public origins; login is a `302` with one secure host-only session cookie. The alternate-origin timeout is not currently reproducible.
+- Status: awaiting authenticated MCP acceptance.
+- Next action: identify why all configured acceptance-client candidates receive `/mcp` `401`, then complete one harmless existing-client MCP call and bounded stability observation; do not rotate credentials merely to hide stale test configuration.
+
+## 2026-07-25 - ADMIN-LOGIN-LEGACY-CREDENTIAL-COPY-20260725 - Login UI exposes an internal credential label - open
+
+- Component: public `/admin/` unauthenticated login copy.
+- First observed: real browser snapshot `output/playwright/gptadmin-production/.playwright-cli/page-2026-07-25T15-20-36-469Z.yml` after recovery.
+- Confirmed fact: the login page instructs Custom GPT/generated Action users to use an internal legacy credential label, violating the one-password/OAuth product vocabulary rule for normal UI.
+- Root-cause hypothesis: the legacy login template was not migrated when normal onboarding moved to the Hub connection/OAuth flow.
+- Status: open.
+- Next action: after the active availability gate is complete, add a failing UI regression and replace the copy with the approved Hub/MCP-client connection wording; do not expose or rotate any secret.
+
+## 2026-07-25 - RELEASE-TAG-ARTIFACT-VERSION-DRIFT-20260725 - Tagged release can double-bump its artifact version - open
+
+- Component: `tools/build.sh` and the tag-triggered build workflow.
+- First observed: read-only v129 release review at source commit `b00795b14c64703d7b44abb04cf2677e4ae31790` with tracked `VERSION=128`.
+- Confirmed fact: the release flow tags a `Release build N` commit and then invokes `tools/build.sh`, whose default behavior increments `VERSION`; this can produce artifacts/manifests labeled `N+1` under tag `vN`.
+- Root-cause hypothesis: developer builds and tag/reproducible builds share an unconditional version-bump path, and tests do not bind tag, tracked version, manifest, SBOM and binary identity together.
+- Confirmed review findings at commit `1b7c7b7`: a same-named branch can satisfy bare tag resolution when no tag exists; public release upload permits asset replacement; stale prior archives can survive and enter a current tagged manifest. Each bypass can publish a tag/version identity lie.
+- Status: open.
+- Next action: add a failing tagged-build identity regression, implement a non-bumping tag mode, and require exact version/commit provenance before v129 publication.
+
+## 2026-07-25 - V129-MACOS-SHELLMCP-CI-20260725 - v129 macOS ShellMCP gate fails - open
+
+- Component: `macos-build` GitHub Actions job, `Test Go shellmcp on darwin` step.
+- First observed: immutable tag workflow run `30166500079` for tag `v129` / commit `554172f6184c26583aa9fe0482e28d8a142220f2`.
+- Confirmed fact: the tag release workflow failed at the macOS ShellMCP Go-test gate; Hub, Windows, admin UI and failover completed successfully before the failure. The exact failure is `resolveAllowedPath` treating macOS's platform-owned `/var` to `/private/var` canonicalization as a prohibited user symlink.
+- Root cause: the lexical input path was compared directly against the canonical result, rather than rejecting symlinks only below the configured allowed root.
+- Status: open.
+- Next action: include the focused RED/GREEN root-prefix regression and full ShellMCP inspection/server verification in a new immutable v130 release; do not retag v129.
 
 ## 2026-07-24 - UPDATE-HEALTH-IGNORED-20260724 - Failed update health did not abort - fixed
 
@@ -700,3 +780,32 @@ Rules:
 - Fix / verification: Deployed only the corrected `index.html` atomically to server-100; the target hash matches the tested source, the previous file is backed up, Hub stayed active with the same PID, and the unauthenticated CSS request still returns the login gate.
 - Status: fixed in the live primary static payload; authenticated visual verification remains pending.
 - Next action: Hard-refresh the supplied browser tab and confirm the styled console; if stale, clear only this origin's cached site data.
+
+## 2026-07-26 - ANDROID-USB-ADB-BRIDGE-20260726 - USB device shadowed by stale Wi-Fi ADB serial - fixed
+
+- Component: `android-4g-lan-proxy.service` on roomhacker-server-100.
+- First observed: 2026-07-26; `adb devices -l` showed the Samsung device on USB while the bridge repeatedly reported that the configured ADB device was unavailable.
+- Confirmed facts: `/etc/gptadmin/gptadmin.env` named an obsolete Wi-Fi ADB address; after ADB restart the Samsung serial `R5CR702SRFP` appeared as `device usb:1-3`; the hard-coded internal forward port `3127` collided with an Xray listener.
+- Root cause: The bridge trusted a configured Wi-Fi serial ahead of a connected USB device and had no fallback when its fixed ADB-forward port was occupied.
+- Fix / verification: The deployment script now prefers a connected `usb:` ADB transport and chooses a free ADB-forward port. Focused regression tests passed (`3 passed`); the live bridge selected forward `3126`, LAN proxy `3125`, and an HTTP CONNECT probe through the Android proxy returned HTTP 200 while Android reported validated LTE on `rmnet4`.
+- Status: fixed.
+- Next action: Keep the scheduled Android test target disabled until its intended monitoring policy is explicitly resumed; USB is the authoritative device path.
+
+## 2026-07-26 - ANDROID-LTE-ROUTE-PROOF-20260726 - Bridge could silently use Wi-Fi - fixed
+
+- Component: `android4gproxy` and `android-4g-lan-proxy.service` on the USB-connected Samsung benchmark device.
+- First observed: 2026-07-26; the bridge returned public IP `95.165.165.65`, matching the home ingress instead of a cellular egress.
+- Confirmed facts: The native proxy uses the Android default route; when Wi-Fi was connected, `ip route get 1.1.1.1` selected `wlan0`. The Wi-Fi ADB reconnect timer and the Android persistent `wifi_on=1` setting could restore Wi-Fi after a transient `svc wifi disable`.
+- Root cause: LTE validation existed, but it did not bind proxy traffic to cellular or make the Wi-Fi-off requirement persistent, so a running bridge could falsely be labelled 4G.
+- Fix / verification: Disabled the Wi-Fi ADB reconnect timer for USB mode. The bridge now persists `wifi_on=0`, disables Wi-Fi, waits for an `rmnet` route, and fails closed otherwise. Focused regressions passed (`5 passed`). Two probes 15 seconds apart returned HTTP 200 through `192.168.2.100:3122` with egress `178.176.76.175`; Wi-Fi remained `0` and the route remained `rmnet4`.
+- Status: fixed.
+- Next action: Do not re-enable Wi-Fi ADB while this device is used as the LTE witness. Use USB ADB for recovery and monitoring.
+
+## 2026-07-26 - MCP-KEY-PERSISTENCE-20260726 - Managed client keys can lose access without an explicit user revoke - open
+
+- Component: managed MCP client-token lifecycle, OAuth JWT signing identity, `cli.py` client connection workflow, and Hub update/install persistence.
+- First observed: 2026-07-26, operator incident report: previously configured client keys were no longer accepted and the operator requires every key to remain valid until they explicitly revoke or rotate it.
+- Confirmed facts: `/home/roomhacker/gptadmin/go-hub/internal/hub/server.go` signs every managed MCP JWT with a mandatory `exp`; `/admin/api/mcp/issue-token` defaults to 365 days. The same file invalidates a known token when `RevokedAt` is set, and all signatures depend on the configured OAuth signing secret. `cli.py` advertises a legacy bearer migration deadline of `2026-07-27`.
+- Root-cause hypothesis: expiration and legacy migration are automatic invalidation paths; an OAuth signing-secret replacement during setup/update would invalidate every previously issued JWT at once. The exact production trigger is not yet proven because the authenticated Hub and its audit/state data are unavailable to this session.
+- Status: urgent open.
+- Next action: Add an explicit non-expiring managed-key mode backed by a persistent signing-key ring, preserve old verification keys across controlled rotation, and prove that only an explicit client revoke/delete action invalidates an existing key.

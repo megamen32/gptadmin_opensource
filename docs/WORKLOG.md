@@ -48,6 +48,16 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 ## Entries
 
+## 2026-07-27 - GPTADMIN connector authorization durability - active
+
+- Milestone: `S0.1` / `S0.5` / GPTADMIN interactive-client acceptance
+- Owner: `Codex`
+- Scope: Document and then implement a regression-protected authorization-retention contract for the GPTADMIN Codex app connection; do not deploy until a freshly authorized interactive client remains usable across the defined restart/refresh scenarios.
+- Baseline / red evidence: Codex app calls `gptadmin_discover` and `gptadmin_ui` returned immutable connector error `UNAUTHORIZED`, reason `oauth_refresh_token_missing`, on 2026-07-27; no interactive `Allow` action could be reached, while the target ADB remained unauthorized. Reconnect then failed with the client’s generic connection-setup error (redacted screenshot cited in `BUGS.md`). The widget Hub origin is live at deployed `1.0.5` / `9d8a427`, while the public root domain redirects Hub/OAuth paths to the website and yields `404`.
+- Intended verification: First add a failing automated authorization-lifecycle regression for the owning layer; then prove initial authorization, persisted refresh/session state, restart or refresh continuity, and an interactive `discover -> schema -> execute` call. A deployment requires current live evidence, not only source tests.
+- Delivery: isolated source candidate `25658c0` on `codex/oauth-refresh-five-years`; it adds the OAuth `refresh_token` grant, five-calendar-year digest-only rotating refresh credentials, five-year default for new managed MCP bearers, removes the now-expired legacy bearer migration deadline, and registers configured existing bearer values as digest-only five-year migration records. The red pre-deploy matrix exposed nine JWTs signed for a stale resource identity; all nine returned `401` on custom, MCP Remote and relay/VRP without revealing values. `cd go-hub && go test ./...` passed; the focused Python suite covering the matrix, live acceptance, product docs, CLI retention and client TTL passed `29`. No push, deployment or runtime restart was performed.
+- Next: After the operator completes reconnect, deploy only `25658c0` with rollback material, then require and record a green post-deploy matrix for every existing supported credential through custom endpoint, MCP Remote and relay/VRP. Do not substitute a new credential for an existing one.
+
 ## 2026-07-24 - Final linear acceptance after failover delivery - completed
 
 - Milestone: `S0.1` / `S3.4` / repository acceptance gate
@@ -2796,13 +2806,46 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Delivery: Atomically deployed only `admin-legacy/index.html` to server-100 at `20260725T020209Z`; rollback backup and hashes are recorded in `trash/logs/admin-legacy-css-deploy-20260725T020209Z.md`; no restart or binary change.
 - Next: Hard-refresh the supplied browser tab and confirm the styled console; leave the separate clean `v129` release integration for a dedicated release task.
 
-## 2026-07-27 - Codex OAuth refresh and widget resource recovery - completed
+## 2026-07-25 - Production user-path recovery - active
 
-- Milestone: `S0.1`, `S0.5`
+- Milestone: `S1.1`, `S1.3`, `S3.4`, `S3.5`
+- Objective: restore and prove the real public browser path: styled admin UI, one password login, refresh, authenticated overview and harmless MCP call through the Tunnel.
+- Baseline / red evidence: a sanitized incident log recorded HTTP `502` for the public `/admin/` browser navigation at `2026-07-25T15:05:38+03:00`; the disposable host-local log is intentionally not a source-tree dependency.
+- Exit gate: root cause is identified; the failed production component is recovered with rollback material; browser login/refresh, overview, harmless MCP and one bounded Hub/Tunnel stability window pass with sanitized immutable evidence.
+- Now: trace the public edge, canonical Tunnel and Hub read-only. Next: repair the failed component only after a backup/rollback preflight. Not now: server-88 repair, v129 integration, new features, or repeated heavy matrices.
+
+### Active evidence update
+
+- Root cause and rollback material: `gptadmin-hub.service` was cleanly stopped at `2026-07-25T08:57:09+03:00`; the protected remote snapshot is `/var/backups/gptadmin/primary-recovery-20260725T151500Z` (mode `0700`, nine files plus manifest).
+- Recovery: started only the Hub once. Local and public health are HTTP `200`, Hub commit is `fdca78d`, and `NRestarts=0`. The canonical primary Tunnel unit remains failed and is not restarted while HAOS route ownership is unresolved.
+- Browser evidence: `output/playwright/gptadmin-production/.playwright-cli/page-2026-07-25T15-20-39-775Z.png` shows `GPTAdmin Login` and zero console errors.
+- Remaining exit gates: manual secret-safe AdminPassword login, refresh and overview; authenticated harmless MCP call; a bounded stability observation matched to the delayed-stop window; then server-88 repair. The visible internal-credential login copy is separately tracked as `ADMIN-LOGIN-LEGACY-CREDENTIAL-COPY-20260725`.
+
+### Active blocker / decision
+
+- New production evidence: local and public `/connect.json` are both `404`, while health/version/admin are `200`. The running `fdca78d` binary lacks the connection-manifest markers present in current source; this is Hub deployment drift, not an edge-route fault.
+- Adviser recommendation: do not deploy the broad current HEAD (55 files and approximately `+14,320/-240` Hub delta from `fdca78d`). The minimal repair is a separately reviewed Hub-only backport from exact `fdca78d`, with its own focused RED/GREEN, full Hub gates, clean artifact identity, atomic binary rollback and live browser/MCP proof.
+- Decision needed: authorize that out-of-sequence bounded emergency hotfix, or retain the fixed sequence and leave authenticated MCP blocked until the clean v129 release. No further production mutation is permitted until this is selected.
+
+## 2026-07-25 - Production user-path recovery handoff - handed-off
+
+- Milestone: `S1.1`, `S1.3`, `S3.4`, `S3.5`
+- Objective: Close one user-visible production gate before any new feature work: a real browser can open the styled admin console, authenticate once, survive refresh, load `/admin/api/overview`, and complete one harmless authenticated MCP call through the Tunnel.
+- Starting point: Branch `codex/haos-addon-public`, commit `b00795b14c64703d7b44abb04cf2677e4ae31790`. Preserve the existing user-owned `.vscode/settings.json` change and untracked `docs/superpowers/plans/2026-07-24-remote-secret-ingress.md`. The instruction changes in `AGENTS.md` and `CLAUDE.md` are intentionally uncommitted at this checkpoint.
+- NOW: Hard-refresh and verify the real browser flow above. If it fails, stop all roadmap work and repair only the failing production path. After it passes, run one bounded stability observation long enough to cover the previously observed delayed-stop window; use cheap health/auth probes and do not rerun unchanged full suites.
+- NOW exit gate: Browser login and refresh pass; Hub and Tunnel remain healthy for the observation window; authenticated overview and harmless MCP acceptance pass; immutable sanitized evidence is recorded.
+- NEXT 1: Repair server-88 from legacy `rootd-go`/queue-auth drift to the supported Go ShellMCP using existing credentials. Verify `doctor --json`, deployment/runtime probe, queue authentication, one harmless tool call, file sharing, profile selection, and read-only/security-policy enforcement.
+- NEXT 2: Reconcile `LIVE-RUNTIME-INACTIVE-20260724` in `docs/BUGS.md` against immutable post-repair evidence. Close only the portions actually verified; keep server-88 open until its runtime gate is green.
+- NEXT 3: Integrate a single clean `v129` release from the linear branch. Run the full verification ladder once at this release boundary, canary it, verify rollback material, then repeat the real browser and authenticated MCP smoke.
+- NOT NOW: The unrelated HAOS recovery HAProxy job, new ecosystem/catalog work, metrics/docs polish, and repeated clean-clone/cross-platform matrices before the release boundary unless a shared contract changes.
+- Verification budget: Focused regression tests while repairing a concrete failure; one subsystem suite after a coherent repair batch; full suites, matrix and packaging exactly once before `v129` delivery.
+- Single next action: Open the deployed `/admin/` in the real browser, perform the hard-refresh/login/refresh flow, and save the sanitized result as the acceptance evidence for the NOW gate.
+
+## 2026-07-26 - Managed MCP key permanence - active
+
+- Milestone: `S1.3`, `S2.1`
 - Owner: Codex
-- Scope: Preserve existing Hub bearer connections, add durable OAuth refresh rotation, and prove authenticated Apps SDK widget resource delivery.
-- Baseline / red evidence: Live build `134` / `beed6963404ee2c1978ea2246cf5c46db5757ce9` advertised only `authorization_code`; its redacted existing-credential matrix returned `401` on admin, MCP and relay. The TDD regression failed because OAuth discovery omitted `refresh_token`.
-- Change: Added digest-only five-year OAuth refresh records with client/resource binding and rotation, advertised refresh support, retained existing deprecated bearer credentials until explicit rotation/removal, and aligned CLI connection-status copy.
-- Verification: Focused RED/GREEN Hub OAuth/widget and legacy-bearer tests passed; Hub suite and affected Python contract/live/canary/extension tests passed locally. Release run `30301756447` passed. After standard Hub-only update, build `136` / `6d3446228d5125efda31b27120b6e86b52bd952e` returned post-deploy `200` on the redacted admin/MCP/relay matrix; a real authorization-code -> refresh -> widget `resources/read` lifecycle passed, including old-refresh rejection.
-- Delivery: Public release `v136`; standard updater deployed the Hub without printing or rotating credentials.
-- Next: Reauthorize the existing GPTADMIN Codex connection once, then record a real `discover -> schema -> execute` client acceptance.
+- Objective: preserve every existing MCP client key until the operator explicitly revokes or rotates that exact key; ordinary setup, update, deadline passage and OAuth-session rotation must not invalidate it.
+- Baseline: `docs/BUGS.md` entry `MCP-KEY-PERSISTENCE-20260726`; current Hub requires JWT `exp`, the issue endpoint defaults to 365 days, and `cli.py` advertises a legacy bearer deadline of `2026-07-27`.
+- Exit gate: offline regression proves a managed key survives a synthetic multi-year time jump, Hub restart and OAuth rotation; it fails only after explicit revoke/rotate. Existing environment-stored keys are imported by digest without logging their values.
+- Now: add the smallest failing Hub regression and implement durable opaque managed-key records. Next: migrate CLI issuance and preserve existing environment-stored client keys. Not now: NanoKVM public-repository publication, host installs, unrelated Android work, or production deployment.

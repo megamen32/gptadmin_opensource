@@ -33,6 +33,8 @@ var GitCommit = "worktree"
 
 const defaultJWTKeyID = "gptadmin-hs256-v1"
 
+const defaultManagedMCPTokenTTLDays = 5 * 365
+
 // legacyCtlTokenDeadline is the fixed end of the one-week migration window.
 // After this instant only AdminPassword sessions and scoped OAuth JWTs may
 // authenticate human/MCP requests.
@@ -100,29 +102,27 @@ func FromEnv() Config {
 		secretTTL = 15 * 60
 	}
 	return Config{
-		Addr:                     host + ":" + port,
-		ConfigDir:                cfgDir,
-		PublicDir:                env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
-		ArtifactDir:              env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
-		CtlToken:                 env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
-		RelayAgentToken:          env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
-		ShellToken:               env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
-		DefaultTimeout:           time.Duration(defTimeout) * time.Second,
-		PollMaxTimeout:           time.Duration(pollTimeout) * time.Second,
-		OutputDir:                env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
-		PublicOrigin:             strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
-		MCPResource:              strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
-		AdminPassword:            env("ADMIN_PASSWORD", ""),
-		OAuthClientSecret:        env("OAUTH_CLIENT_SECRET", ""),
-		OAuthKeyID:               env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
-		EnvFile:                  env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
-		OAuthPermissiveRedirects: truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
-		OAuthPermissiveResources: truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
-		AuthLogSecrets:           truthyString(env("AUTH_LOG_SECRETS", "0")),
-		AuthRateLimit:            positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
-		BridgeKey:                env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
-		// Existing installations may still rely on this deprecated credential.
-		// New installs do not create it; explicit rotation/removal is the cutoff.
+		Addr:                       host + ":" + port,
+		ConfigDir:                  cfgDir,
+		PublicDir:                  env("GPTADMIN_PUBLIC_DIR", filepath.Join(root, "public")),
+		ArtifactDir:                env("GPTADMIN_ARTIFACT_DIR", filepath.Join(root, "build")),
+		CtlToken:                   env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
+		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
+		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
+		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
+		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
+		OutputDir:                  env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
+		PublicOrigin:               strings.TrimRight(env("PUBLIC_ORIGIN", ""), "/"),
+		MCPResource:                strings.TrimRight(env("MCP_RESOURCE", env("PUBLIC_ORIGIN", "")), "/"),
+		AdminPassword:              env("ADMIN_PASSWORD", ""),
+		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", ""),
+		OAuthKeyID:                 env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
+		EnvFile:                    env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
+		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
+		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
+		AuthLogSecrets:             truthyString(env("AUTH_LOG_SECRETS", "0")),
+		AuthRateLimit:              positiveIntEnv("GPTADMIN_AUTH_RATE_LIMIT", 60),
+		BridgeKey:                  env("MCP_BRIDGE_KEY", env("CTL_TOKEN", "")),
 		LegacyCtlTokenDeadline:     time.Time{},
 		Now:                        time.Now,
 		RegistryStateFile:          env("GPTADMIN_REGISTRY_STATE_FILE", filepath.Join(cfgDir, "registry_state.json")),
@@ -291,6 +291,7 @@ type managedMCPToken struct {
 	ClientID     string   `json:"client_id"`
 	TokenDigest  string   `json:"token_digest,omitempty"`
 	TokenKind    string   `json:"token_kind,omitempty"`
+	Issuer       string   `json:"issuer,omitempty"`
 	Audience     string   `json:"audience,omitempty"`
 	Status       string   `json:"status,omitempty"`
 	RedirectURIs []string `json:"redirect_uris,omitempty"`
@@ -3372,8 +3373,9 @@ func (s *Server) adminMCPIssueToken(w http.ResponseWriter, r *http.Request) {
 		clientID = "custom-mcp-client"
 	}
 	ttlDays := req.TTLDays
-	if ttlDays <= 0 {
-		ttlDays = 365
+	if ttlDays < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ttl_days must be zero or positive"})
+		return
 	}
 	origin := s.origin(r)
 	resource := s.resource(r)
@@ -3409,22 +3411,25 @@ func (s *Server) issueManagedMCPToken(clientID string, ttlDays int, origin, reso
 }
 
 func (s *Server) issueManagedMCPTokenWithMode(clientID string, ttlDays int, origin, resource, accessMode, profileID string) (string, managedMCPToken, error) {
-	now := time.Now().Unix()
+	now := s.now().Unix()
 	scope := "gptadmin.read gptadmin.exec"
 	if accessMode == accessModeReadonly {
 		scope = "gptadmin.read gptadmin.inspect"
 	}
-	record := managedMCPToken{ID: newID(), ClientID: clientID, Scope: scope, AccessMode: accessMode, ProfileID: profileID, IssuedAt: now, ExpiresAt: now + int64(ttlDays)*24*3600}
-	token, err := s.signJWT(map[string]any{
-		"sub": "admin", "scope": record.Scope, "access_mode": record.AccessMode, "client_id": clientID, "jti": record.ID,
-		"iss": origin, "aud": resource, "resource": resource, "exp": record.ExpiresAt, "iat": now, "kid": s.jwtKeyID(),
-	})
-	if err != nil {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
 		return "", managedMCPToken{}, err
 	}
+	record := managedMCPToken{ID: newID(), ClientID: clientID, TokenKind: "durable", Issuer: origin, Audience: resource, Scope: scope, AccessMode: accessMode, ProfileID: profileID, IssuedAt: now}
+	if ttlDays > 0 {
+		record.ExpiresAt = now + int64(ttlDays)*24*3600
+	}
+	token := "gptk_" + record.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	digest := sha256.Sum256([]byte(token))
+	record.TokenDigest = hex.EncodeToString(digest[:])
 	s.mu.Lock()
 	s.managedMCP[record.ID] = record
-	err = s.saveManagedMCPStateLocked()
+	err := s.saveManagedMCPStateLocked()
 	s.mu.Unlock()
 	return token, record, err
 }
@@ -4346,7 +4351,7 @@ func (s *Server) oauthProtectedResource(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":               s.resource(r),
 		"authorization_servers":  []string{s.origin(r)},
-		"scopes_supported":       []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec"},
+		"scopes_supported":       []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec", "offline_access"},
 		"resource_documentation": s.origin(r) + "/",
 	})
 }
@@ -4362,7 +4367,7 @@ func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
-		"scopes_supported":                      []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec"},
+		"scopes_supported":                      []string{"gptadmin.read", "gptadmin.inspect", "gptadmin.exec", "offline_access"},
 	})
 }
 
@@ -4407,7 +4412,7 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
 		"code_challenge_methods":     []string{"S256"},
-		"scope":                      "gptadmin.read gptadmin.exec",
+		"scope":                      "gptadmin.read gptadmin.exec offline_access",
 	})
 }
 
@@ -4565,8 +4570,9 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 43200, "refresh_token": refreshToken, "refresh_token_expires_in": refreshRecord.ExpiresAt - s.now().Unix()})
 }
 
-// oauthRefreshToken rotates a durable, digest-only refresh credential and
-// issues a short-lived access JWT for the same client and resource.
+// oauthRefreshToken rotates a durable OAuth refresh credential and returns a
+// short-lived access JWT. Refresh credentials are server-stored digests so a
+// Hub restart and OAuth signing-key change do not erase client authorization.
 func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	resource := strings.TrimRight(r.Form.Get("resource"), "/")
 	clientID := strings.TrimSpace(r.Form.Get("client_id"))
@@ -5837,6 +5843,13 @@ func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, er
 }
 
 func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]any, error) {
+	if claims, ok := s.verifyManagedMCPToken(token); ok {
+		expected := strings.TrimRight(s.resource(r), "/")
+		claims["iss"] = s.origin(r)
+		claims["aud"] = expected
+		claims["resource"] = expected
+		return claims, nil
+	}
 	claims, err := s.verifyJWT(token)
 	if err != nil {
 		return nil, err
@@ -5862,6 +5875,29 @@ func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]
 		return nil, errors.New("token key id is invalid")
 	}
 	return claims, nil
+}
+
+func (s *Server) verifyManagedMCPToken(token string) (map[string]any, bool) {
+	parts := strings.SplitN(token, "_", 3)
+	if len(parts) != 3 || parts[0] != "gptk" || parts[1] == "" || parts[2] == "" {
+		return nil, false
+	}
+	digest := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	record, known := s.managedMCP[parts[1]]
+	s.mu.Unlock()
+	if !known || record.TokenKind != "durable" || record.RevokedAt != 0 || record.TokenDigest == "" || !hmac.Equal([]byte(record.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
+		return nil, false
+	}
+	if record.ExpiresAt > 0 && !s.now().Before(time.Unix(record.ExpiresAt, 0)) {
+		return nil, false
+	}
+	return map[string]any{
+		"sub": "admin", "scope": record.Scope, "access_mode": record.AccessMode,
+		"client_id": record.ClientID, "jti": record.ID, "iat": record.IssuedAt, "kid": s.jwtKeyID(),
+		"iss": record.Issuer, "aud": record.Audience, "resource": record.Audience,
+		"profile_id": record.ProfileID,
+	}, true
 }
 
 func (s *Server) jwtKeyID() string {
@@ -6135,6 +6171,9 @@ func (s *Server) signJWT(claims map[string]any) (string, error) {
 }
 
 func (s *Server) verifyJWT(token string) (map[string]any, error) {
+	if claims, ok := s.verifyManagedMCPToken(token); ok {
+		return claims, nil
+	}
 	if s.cfg.OAuthClientSecret == "" {
 		return nil, errors.New("OAuth client secret is not configured")
 	}
@@ -6167,7 +6206,7 @@ func (s *Server) verifyJWT(token string) (map[string]any, error) {
 	if exp <= 0 {
 		return nil, errors.New("token expiry is required")
 	}
-	if time.Now().Unix() > int64(exp) {
+	if s.now().Unix() > int64(exp) {
 		return nil, errors.New("token expired")
 	}
 	if jti, _ := claims["jti"].(string); jti != "" {

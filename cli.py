@@ -33,9 +33,10 @@ try:
 except Exception:
     tomllib = None
 
-# CTL_TOKEN is a deprecated compatibility credential. New and updated
-# installations do not create it, but an existing credential remains valid
-# until its owner explicitly rotates or removes it.
+# Fixed one-week migration window for the legacy administrator bearer. New
+# installs no longer create it; existing installations are handled by the Hub
+# until this date and must migrate to AdminPassword/OAuth before then.
+LEGACY_CTL_TOKEN_DEADLINE = '2026-07-27'
 
 # ===== Platform =====
 IS_MACOS = sys.platform == 'darwin'
@@ -2101,7 +2102,7 @@ def setup_interactive(args):
     print('\n=== Готово ===')
     if install_hub:
         print(f"Hub URL: {env.get('HUB_PUBLIC_URL', '—')}")
-        print('Подключение: AdminPassword/OAuth (existing legacy bearer remains valid until explicitly rotated or removed)')
+        print(f"Подключение: AdminPassword/OAuth (legacy bearer migration deadline {LEGACY_CTL_TOKEN_DEADLINE})")
     if install_shellmcp and not install_hub:
         print(f"HUB_URL для ShellMCP: {env.get('HUB_URL', '—')}")
     if install_shellmcp:
@@ -3571,7 +3572,7 @@ def cmd_doctor(args):
         if check['name'] == 'hub_url' and check['status'] == 'ok':
             message = f"Hub URL: {report['hub_url']}"
         elif check['name'] == 'legacy_bearer':
-            message = 'Legacy Hub bearer is present; it remains valid until explicitly rotated or removed.'
+            message = "Legacy Hub bearer is present and remains valid until explicitly rotated or removed."
         elif check['name'].startswith('service:'):
             message = f"{check['name'].split(':', 1)[1]} — {message}"
         elif check['name'] == 'admin_password':
@@ -3770,7 +3771,7 @@ def cmd_tokens(args):
         print(f'  Network bridge        {c_green("configured (hidden)")}')
     print()
     if env.get('CTL_TOKEN'):
-        print_warn('Legacy Hub bearer is hidden and remains valid until explicitly rotated or removed.')
+        print_warn('Legacy Hub bearer is configured and remains valid until explicitly rotated or removed.')
     print(c_dim('  Issue new MCP token:  gptadmin token issue <name>'))
     print(c_dim('  Rotate tokens:        gptadmin token rotate [shellmcp]'))
 
@@ -3780,7 +3781,7 @@ def cmd_rotate(args):
     if which in ('shellmcp', 'shell', 'shell-mcp'):
         which = 'shellmcp'
     if which == 'hub':
-        die('legacy Hub bearer rotation is removed; use AdminPassword/OAuth. Rotation is a global invalidation event.')
+        die('Hub credential rotation is an explicit global invalidation operation; use the security UI only when every affected client is ready to reconnect.')
     if which not in ('hub', 'shellmcp'):
         die('unknown token target. Use: shellmcp')
     newtok = gen_hex()
@@ -4585,6 +4586,9 @@ def cmd_update(args):
 
 # ===== AI client MCP auto-configuration =====
 
+DEFAULT_MCP_TOKEN_TTL_DAYS = 5 * 365
+
+
 def _b64url_bytes(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
 
@@ -4593,7 +4597,7 @@ def _b64url_json(obj: dict) -> str:
     return _b64url_bytes(json.dumps(obj, separators=(',', ':')).encode())
 
 
-def make_mcp_bearer_token(env: dict, client_id: str, ttl_days: int = 365, access_mode: str = 'full') -> str:
+def make_mcp_bearer_token(env: dict, client_id: str, ttl_days: int = DEFAULT_MCP_TOKEN_TTL_DAYS, access_mode: str = 'full') -> str:
     secret = env.get('OAUTH_CLIENT_SECRET') or ''
     if not secret:
         raise RuntimeError('OAUTH_CLIENT_SECRET is missing')
@@ -4602,7 +4606,7 @@ def make_mcp_bearer_token(env: dict, client_id: str, ttl_days: int = 365, access
     if not origin or not resource:
         raise RuntimeError('PUBLIC_ORIGIN/MCP_RESOURCE is missing')
     now = int(time.time())
-    ttl_days = max(1, int(ttl_days or 365))
+    ttl_days = max(1, int(ttl_days or DEFAULT_MCP_TOKEN_TTL_DAYS))
     access_mode = str(access_mode or 'full').strip().lower()
     if access_mode not in {'full', 'readonly'}:
         raise ValueError('access_mode must be full or readonly')
@@ -4616,8 +4620,8 @@ def make_mcp_bearer_token(env: dict, client_id: str, ttl_days: int = 365, access
         'iss': origin,
         'aud': resource,
         'iat': now,
-        'exp': now + ttl_days * 24 * 3600,
     }
+    body['exp'] = now + ttl_days * 24 * 3600
     signing_input = f'{_b64url_json(header)}.{_b64url_json(body)}'.encode()
     sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
     return signing_input.decode() + '.' + _b64url_bytes(sig)
@@ -4637,7 +4641,7 @@ def _client_token_env_key(client_id: str) -> str:
     return f'GPTADMIN_{safe}_MCP_BEARER'
 
 
-def issue_mcp_bearer(env: dict, client_id: str, ttl_days: int = 365, access_mode: str = 'full') -> tuple[str, str, str]:
+def issue_mcp_bearer(env: dict, client_id: str, ttl_days: int = DEFAULT_MCP_TOKEN_TTL_DAYS, access_mode: str = 'full') -> tuple[str, str, str]:
     env = dict(env)
     if not (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or env.get('PUBLIC_ORIGIN')):
         env['HUB_URL'] = f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
@@ -4657,7 +4661,7 @@ def cmd_mcp_token(args):
     client_id = str(getattr(args, 'name', '') or '').strip()
     if not client_id:
         client_id = ask('MCP token name / client_id', 'custom-mcp-client').strip() or 'custom-mcp-client'
-    ttl_days = int(getattr(args, 'ttl_days', 365) or 365)
+    ttl_days = int(getattr(args, 'ttl_days', DEFAULT_MCP_TOKEN_TTL_DAYS) or DEFAULT_MCP_TOKEN_TTL_DAYS)
     access_mode = 'readonly' if bool(getattr(args, 'readonly', False)) else 'full'
     token, url, default_key = issue_mcp_bearer(env, client_id, ttl_days=ttl_days, access_mode=access_mode)
     env_key = str(getattr(args, 'env_key', '') or default_key).strip()
@@ -5224,7 +5228,7 @@ def main():
 
     ap_mcp_token_top = sub.add_parser('issue-token', aliases=['token'], help='Выпустить JWT для MCP-клиента без OAuth')
     ap_mcp_token_top.add_argument('name', nargs='?', help='client_id / имя токена, например codex-work')
-    ap_mcp_token_top.add_argument('--ttl-days', type=int, default=365)
+    ap_mcp_token_top.add_argument('--ttl-days', type=int, default=DEFAULT_MCP_TOKEN_TTL_DAYS)
     ap_mcp_token_top.add_argument('--env-key', help='Имя переменной для сохранения в gptadmin.env')
     ap_mcp_token_top.add_argument('--no-save', action='store_true', help='Только напечатать token, не сохранять в gptadmin.env')
     ap_mcp_token_top.add_argument('--readonly', action='store_true', help='Только просмотр без shell-команд; найденные секреты скрываются')
@@ -5256,7 +5260,7 @@ def main():
 
     ap_mcp_token = mcp_sub.add_parser('token', help='Выпустить JWT для MCP-клиента без OAuth')
     ap_mcp_token.add_argument('name', nargs='?', help='client_id / имя токена')
-    ap_mcp_token.add_argument('--ttl-days', type=int, default=365)
+    ap_mcp_token.add_argument('--ttl-days', type=int, default=DEFAULT_MCP_TOKEN_TTL_DAYS)
     ap_mcp_token.add_argument('--env-key')
     ap_mcp_token.add_argument('--no-save', action='store_true')
     ap_mcp_token.add_argument('--readonly', action='store_true', help='Только просмотр без shell-команд; найденные секреты скрываются')

@@ -30,7 +30,7 @@ public ChatGPT/browser certification remains an external evidence class.
 
 ## Evidence classes
 
-`local` means a reproducible repository test can prove the contract.
+`local` means a reproducible repository test can prove the contract.  
 `external_required` means the repository can validate configuration and
 protocol shape, but completion also requires the named client, public HTTPS
 origin, or deployment runner.

@@ -64,8 +64,15 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
 The installer prints your **Hub URL** and opens the connection flow. Do not
-copy a legacy bearer token; existing installations must migrate to
-AdminPassword/OAuth by `2026-07-27`.
+copy a legacy bearer token; new connections use AdminPassword/OAuth. An
+existing compatibility credential remains valid until its owner explicitly
+rotates or removes it.
+
+OAuth connections request `offline_access` and receive a rotating refresh
+credential, so the client can reconnect after an access-token expiry or Hub
+restart. If a connection was created before refresh support was deployed,
+complete the OAuth connection flow once more; that old session cannot be
+retrofitted with a refresh credential.
 
 ```bash
 # 2. Connect your AI — pick one adapter:

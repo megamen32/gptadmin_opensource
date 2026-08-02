@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDynamicOAuthClientInventorySurvivesRestartAndBindsIssuedToken(t *testing.T) {
@@ -198,6 +200,144 @@ func TestCanonicalOAuthEndpointsRequirePKCEAndBindClient(t *testing.T) {
 	token := oauthInventoryRequestBody(t, s, http.MethodPost, "/oauth/token", "", wrongClient.Encode(), "application/x-www-form-urlencoded")
 	if token.Code != http.StatusBadRequest || !strings.Contains(token.Body.String(), "client or redirect") {
 		t.Fatalf("authorization code was not bound to client and redirect: status=%d body=%s", token.Code, token.Body.String())
+	}
+}
+
+func TestOAuthRefreshTokenSurvivesRestartForFiveYearsAndAuthenticatesMCPPaths(t *testing.T) {
+	cfg := Config{
+		AdminPassword:            "admin-password",
+		OAuthClientSecret:        "oauth-signing-secret",
+		ConfigDir:                t.TempDir(),
+		PublicOrigin:             "https://hub.example",
+		MCPResource:              "https://hub.example",
+		OAuthPermissiveRedirects: true,
+		OAuthPermissiveResources: true,
+	}
+	first := New(cfg)
+
+	registered := oauthInventoryRequest(t, first, http.MethodPost, "/register", "", map[string]any{
+		"redirect_uris": []string{"https://client.example/callback"},
+	})
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var registration struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(registered.Body.Bytes(), &registration); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := "five-year-refresh-verifier"
+	authorize := url.Values{
+		"client_id":             {registration.ClientID},
+		"redirect_uri":          {"https://client.example/callback"},
+		"resource":              {cfg.MCPResource},
+		"scope":                 {"gptadmin.read gptadmin.exec"},
+		"password":              {cfg.AdminPassword},
+		"code_challenge":        {oauthInventoryPKCE(verifier)},
+		"code_challenge_method": {"S256"},
+	}
+	authorized := oauthInventoryRequestBody(t, first, http.MethodPost, "/oauth/authorize", "", authorize.Encode(), "application/x-www-form-urlencoded")
+	if authorized.Code != http.StatusFound {
+		t.Fatalf("authorize status=%d body=%s", authorized.Code, authorized.Body.String())
+	}
+
+	code := oauthInventoryRedirectCode(t, authorized.Header().Get("Location"))
+	initialForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {registration.ClientID},
+		"redirect_uri":  {"https://client.example/callback"},
+		"resource":      {cfg.MCPResource},
+		"code_verifier": {verifier},
+	}
+	initial := oauthInventoryRequestBody(t, first, http.MethodPost, "/oauth/token", "", initialForm.Encode(), "application/x-www-form-urlencoded")
+	if initial.Code != http.StatusOK {
+		t.Fatalf("initial token status=%d body=%s", initial.Code, initial.Body.String())
+	}
+	var initialBody struct {
+		RefreshToken          string `json:"refresh_token"`
+		RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"`
+	}
+	if err := json.Unmarshal(initial.Body.Bytes(), &initialBody); err != nil {
+		t.Fatal(err)
+	}
+	if initialBody.RefreshToken == "" {
+		t.Fatal("authorization-code response omitted refresh_token")
+	}
+	parts := strings.SplitN(initialBody.RefreshToken, "_", 3)
+	if len(parts) != 3 {
+		t.Fatalf("refresh token format=%q", initialBody.RefreshToken)
+	}
+	first.mu.Lock()
+	record := first.managedMCP[parts[1]]
+	first.mu.Unlock()
+	if want := time.Unix(record.IssuedAt, 0).AddDate(5, 0, 0).Unix(); record.ExpiresAt != want {
+		t.Fatalf("refresh expiry=%d, want %d", record.ExpiresAt, want)
+	}
+	if initialBody.RefreshTokenExpiresIn <= 0 {
+		t.Fatalf("refresh_token_expires_in=%d, want positive", initialBody.RefreshTokenExpiresIn)
+	}
+
+	restarted := New(cfg)
+	refreshForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {initialBody.RefreshToken},
+		"client_id":     {registration.ClientID},
+		"resource":      {cfg.MCPResource},
+	}
+	refreshed := oauthInventoryRequestBody(t, restarted, http.MethodPost, "/oauth/token", "", refreshForm.Encode(), "application/x-www-form-urlencoded")
+	if refreshed.Code != http.StatusOK {
+		t.Fatalf("refresh status=%d body=%s", refreshed.Code, refreshed.Body.String())
+	}
+	var refreshedBody struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(refreshed.Body.Bytes(), &refreshedBody); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedBody.AccessToken == "" || refreshedBody.RefreshToken == "" || refreshedBody.RefreshToken == initialBody.RefreshToken {
+		t.Fatalf("refresh response did not rotate credentials: %s", refreshed.Body.String())
+	}
+	reused := oauthInventoryRequestBody(t, restarted, http.MethodPost, "/oauth/token", "", refreshForm.Encode(), "application/x-www-form-urlencoded")
+	if reused.Code != http.StatusBadRequest || !strings.Contains(reused.Body.String(), "invalid_grant") {
+		t.Fatalf("rotated refresh token remained usable: status=%d body=%s", reused.Code, reused.Body.String())
+	}
+
+	for _, path := range []string{"/mcp", "/server/hub/mcp", "/mcp-relay/servers"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+		if path == "/mcp-relay/servers" {
+			req = httptest.NewRequest(http.MethodGet, path, nil)
+		}
+		req.Header.Set("Authorization", "Bearer "+refreshedBody.AccessToken)
+		response := httptest.NewRecorder()
+		restarted.Handler().ServeHTTP(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestOAuthMetadataAdvertisesRefreshAndOfflineAccess(t *testing.T) {
+	s := New(Config{PublicOrigin: "https://hub.example", MCPResource: "https://hub.example"})
+	rec := oauthInventoryRequest(t, s, http.MethodGet, "/.well-known/oauth-authorization-server", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metadata status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var metadata struct {
+		GrantTypesSupported []string `json:"grant_types_supported"`
+		ScopesSupported     []string `json:"scopes_supported"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(metadata.GrantTypesSupported, "refresh_token") {
+		t.Fatalf("refresh_token grant missing: %v", metadata.GrantTypesSupported)
+	}
+	if !slices.Contains(metadata.ScopesSupported, "offline_access") {
+		t.Fatalf("offline_access scope missing: %v", metadata.ScopesSupported)
 	}
 }
 

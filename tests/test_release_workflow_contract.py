@@ -160,6 +160,7 @@ def test_release_job_attests_artifacts_and_scans_dependencies_before_publication
         assert f"./{module}/..." not in vulnerability_step["run"]
     assert "npm audit" in vulnerability_step["run"]
     assert re.fullmatch(r"actions/attest-build-provenance@[0-9a-f]{40}", attestation_step["uses"])
+    assert attestation_step["if"] == "startsWith(github.ref, 'refs/tags/v') && github.event.repository.private == false"
     assert "build/manifest.json" in attestation_step["with"]["subject-path"]
     assert "build/gptadmin-sbom.spdx.json" in attestation_step["with"]["subject-path"]
 

@@ -84,3 +84,4 @@
 - [ ] On Android, repair the live ADB bridge target, start the installed Go arm64 binary, and require online Hub registration with no Python process.
 - [ ] On each reachable Windows machine, deploy or repair the Go Windows task and require online Hub registration; if a host is unreachable, report that external blocker separately from installer/CI proof.
 - [ ] Run Go suites, Python non-e2e, Windows/Android installer tests, cross-build and secret scan; replace the active worklog entry with factual delivery evidence.
+

@@ -78,6 +78,26 @@ GPTAdmin adopts the interaction shape, not Codex-specific names or behavior.
 
 ## Verification
 
+### Authorization durability
+
+An integration that uses OAuth or a client-managed authorization session must
+define its state owner and prove the full lifecycle, not only the initial
+redirect or a mocked access token. The owner must provide a regression that
+proves all of the following:
+
+1. an explicit initial authorization establishes usable state;
+2. refresh/session state required by that integration is persisted or restored
+   across its supported restart boundary;
+3. a normal refresh path preserves access without an operator action;
+4. after that restart or refresh, the integration completes a real harmless
+   `discover -> schema -> execute` interaction.
+
+When an external client owns the state, the Hub suite cannot substitute for
+that client-level test. Record a redacted immutable client-run artifact along
+with the owner’s automated regression. `UNAUTHORIZED` with a missing refresh
+state is a failing lifecycle result, not an invitation to copy an internal
+credential or to silently downgrade authentication.
+
 The current Hub implementation and policy path are covered by:
 
 ```bash

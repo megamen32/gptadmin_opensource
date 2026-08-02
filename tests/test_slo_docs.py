@@ -37,3 +37,4 @@ def test_slo_runbook_defines_machine_checks_targets_and_recovery() -> None:
     assert "Symptom" in text
     assert "Diagnosis" in text
     assert "Recovery" in text
+

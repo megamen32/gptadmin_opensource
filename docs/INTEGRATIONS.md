@@ -120,16 +120,23 @@ curl -sS https://<your-hub>/.well-known/oauth-authorization-server
   "authorization_endpoint": "https://<your-hub>/oauth/authorize",
   "token_endpoint": "https://<your-hub>/oauth/token",
   "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
   "token_endpoint_auth_methods_supported": ["none"],
   "client_id_metadata_document_supported": true,
   "registration_endpoint": "https://<your-hub>/register",
-  "scopes_supported": ["gptadmin.read", "gptadmin.exec"]
+  "scopes_supported": ["gptadmin.read", "gptadmin.exec", "offline_access"]
 }
 ```
 
 Clients that support [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) / [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) fetch this, register at `/register`, run PKCE `authorize → callback → token`, and present the hub's own consent page.
+
+ChatGPT requires `offline_access` and the `refresh_token` grant to maintain an
+OAuth connection after the original access token expires. GPTAdmin rotates a
+digest-only refresh credential on each use; the client receives the replacement
+while the Hub persists only its digest, so authorization survives a Hub restart.
+Connections created before this capability was deployed must be authorized once
+again: a server cannot add a refresh credential to an already-issued session.
 
 ### Troubleshooting
 
