@@ -93,7 +93,7 @@ func TestAdminMCPResourceReadHonorsTargetPolicy(t *testing.T) {
 	}
 }
 
-func TestActionsOpenAPIIncludesNetworkProxyContract(t *testing.T) {
+func TestActionsOpenAPIKeepsNetworkProxyOutOfDefaultCustomGPTContract(t *testing.T) {
 	s := New(Config{PublicOrigin: "https://hub.example"})
 	req := httptest.NewRequest(http.MethodGet, "/actions/openapi.yaml", nil)
 	rec := httptest.NewRecorder()
@@ -102,8 +102,8 @@ func TestActionsOpenAPIIncludesNetworkProxyContract(t *testing.T) {
 		t.Fatalf("actions OpenAPI status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	for _, path := range []string{"/proxy-control/v1/request", "/proxy-control/v1/approve", "/proxy-control/v1/issue", "/proxy-control/v1/open", "/proxy-control/v1/status", "/proxy-control/v1/revoke"} {
-		if !strings.Contains(rec.Body.String(), path) {
-			t.Fatalf("actions OpenAPI missing %s", path)
+		if strings.Contains(rec.Body.String(), path) {
+			t.Fatalf("default actions OpenAPI leaked %s", path)
 		}
 	}
 }

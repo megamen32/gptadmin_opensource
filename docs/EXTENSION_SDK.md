@@ -53,7 +53,7 @@ an MCP target or retry an ambiguous write without a caller-supplied bounded
 ## Conformance and evidence
 
 The local manifest, executable stdio lifecycle, and live relay boundary are checked by
-`tests/test_extension_sdk.py` using the third-party-shaped
+the native Go ShellMCP supervisor conformance suite using the third-party-shaped
 `tests/fixtures/mcp_extension_reference.py` adapter. The fixture proves the
 adapter-side `initialize -> tools/list -> tools/call` contract without editing
 Hub internals, and the live test proves `discover -> schema -> execute` through

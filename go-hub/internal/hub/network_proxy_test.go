@@ -628,7 +628,7 @@ func TestNetworkProxyControlDoesNotTouchCommandQueuesOrHeartbeat(t *testing.T) {
 	}
 }
 
-func TestNetworkProxyHubToolSchemasAreRegistered(t *testing.T) {
+func TestNetworkProxyVirtualMCPToolSchemasAreRegistered(t *testing.T) {
 	want := map[string]bool{
 		"network_proxy_request": false,
 		"network_proxy_approve": false,
@@ -636,7 +636,7 @@ func TestNetworkProxyHubToolSchemasAreRegistered(t *testing.T) {
 		"network_proxy_status":  false,
 		"network_proxy_revoke":  false,
 	}
-	for _, tool := range hubTools() {
+	for _, tool := range virtualMCPTools(virtualMCPDefinitions["network-proxy"]) {
 		name, _ := tool["name"].(string)
 		if _, ok := want[name]; ok {
 			want[name] = true
@@ -644,7 +644,7 @@ func TestNetworkProxyHubToolSchemasAreRegistered(t *testing.T) {
 	}
 	for name, found := range want {
 		if !found {
-			t.Errorf("Hub tool %q is not registered", name)
+			t.Errorf("network-proxy virtual MCP tool %q is not registered", name)
 		}
 	}
 }
@@ -697,7 +697,7 @@ func TestNetworkAccessAliasesAreRegisteredWithSafeSchemas(t *testing.T) {
 		"network_access_status":  false,
 		"network_access_disable": false,
 	}
-	for _, tool := range hubTools() {
+	for _, tool := range virtualMCPTools(virtualMCPDefinitions["network-proxy"]) {
 		name, _ := tool["name"].(string)
 		if _, ok := want[name]; !ok {
 			continue
@@ -740,7 +740,7 @@ func TestNetworkAccessAliasesAreRegisteredWithSafeSchemas(t *testing.T) {
 	}
 	for name, found := range want {
 		if !found {
-			t.Errorf("Hub tool %q is not registered", name)
+			t.Errorf("network-proxy virtual MCP tool %q is not registered", name)
 		}
 	}
 }

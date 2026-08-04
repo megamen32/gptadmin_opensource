@@ -6,6 +6,7 @@ import {
   getClients,
   getAccessProfile,
   getDefaultInstructionSet,
+	getVirtualMCPs,
   INSTRUCTION_LIMIT,
   issueMcpToken,
   putClientBinding,
@@ -13,6 +14,7 @@ import {
   putDefaultInstructionSet,
   revokeMcpToken,
   rotateOAuth,
+	setVirtualMCP,
   rotateMcpToken,
   deleteClientBinding,
   type ClientInventoryItem,
@@ -21,10 +23,11 @@ import {
   type AccessProfile,
   type ExternalWorkspaceRef,
   type InstructionSet,
+	type VirtualMCP,
 } from "./api";
 import "./styles.css";
 
-type View = "instructions" | "profiles" | "clients" | "webhooks" | "auth";
+type View = "instructions" | "profiles" | "clients" | "webhooks" | "capabilities" | "auth";
 type LoadState = "loading" | "ready" | "empty" | "error" | "stale";
 
 const navigation: Array<{ id: View; label: string; href: string }> = [
@@ -32,12 +35,13 @@ const navigation: Array<{ id: View; label: string; href: string }> = [
   { id: "profiles", label: "Профили", href: "#profiles" },
   { id: "clients", label: "Клиенты", href: "#clients" },
   { id: "webhooks", label: "Вебхуки и агенты", href: "#webhooks" },
+	{ id: "capabilities", label: "Виртуальные MCP", href: "#capabilities" },
   { id: "auth", label: "Авторизация", href: "#auth" },
 ];
 
 function viewFromHash(): View {
   const hash = window.location.hash;
-  return hash === "#profiles" || hash === "#clients" || hash === "#webhooks" || hash === "#auth" ? hash.slice(1) as View : "instructions";
+  return hash === "#profiles" || hash === "#clients" || hash === "#webhooks" || hash === "#capabilities" || hash === "#auth" ? hash.slice(1) as View : "instructions";
 }
 
 const emptyWorkspace = (): ExternalWorkspaceRef => ({
@@ -846,6 +850,43 @@ function AuthScreen() {
   return <><header className="topbar"><div><span className="eyebrow">AUTHENTICATION / 04</span><h1>Авторизация</h1></div></header><div className="content-wrap"><section className="intro"><div><p className="section-kicker">OAUTH CLIENT SECRET</p><h2>Управление доступом Hub</h2><p className="lede">Секрет OAuth никогда не показывается в UI. Ротация инвалидирует прежний секрет и может потребовать перезапуска Hub.</p></div></section><section className="card auth-card"><h3>OAuth secret</h3><p className="muted">Используйте ротацию только при плановом обновлении или подозрении на компрометацию.</p><button className="button primary" type="button" onClick={() => void rotate()} disabled={rotating}>{rotating ? "Обновляем…" : "Ротировать OAuth secret"}</button>{message && <p className="success-text" role="status">{message}</p>}</section></div></>;
 }
 
+function CapabilitiesScreen() {
+  const [items, setItems] = useState<VirtualMCP[]>([]);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [message, setMessage] = useState<string | null>(null);
+  const [changing, setChanging] = useState<string | null>(null);
+
+  async function load(): Promise<void> {
+    setLoadState("loading");
+    setMessage(null);
+    try {
+      setItems(await getVirtualMCPs());
+      setLoadState("ready");
+    } catch (error) {
+      setLoadState("error");
+      setMessage(error instanceof Error ? error.message : "Не удалось загрузить виртуальные MCP.");
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function toggle(item: VirtualMCP): Promise<void> {
+    if (changing) return;
+    setChanging(item.id);
+    setMessage(null);
+    try {
+      await setVirtualMCP(item.id, !item.enabled);
+      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, enabled: !entry.enabled } : entry));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Не удалось изменить виртуальный MCP.");
+    } finally {
+      setChanging(null);
+    }
+  }
+
+  return <><header className="topbar"><div><span className="eyebrow">OPTIONAL CAPABILITIES / 05</span><h1>Виртуальные MCP</h1></div><button className="button secondary topbar-action" type="button" onClick={() => void load()}>Обновить</button></header><div className="content-wrap"><section className="intro"><div><p className="section-kicker">DEFAULT-OFF</p><h2>Изолированные capability servers</h2><p className="lede">Включённый capability появляется в discover как отдельный MCP и получает собственные /server/&lt;slug&gt;/mcp и Action schema. Default Custom GPT schema их не импортирует.</p></div><div className={`data-badge state-${loadState}`} role="status"><span className="state-dot" aria-hidden="true" />{stateLabel(loadState)}</div></section>{message && <div className="state-panel state-error card standalone-state" role="alert">{message}</div>}{loadState === "loading" ? <div className="state-panel card standalone-state" role="status"><span className="loader" aria-hidden="true" />Загрузка capabilities</div> : <section className="clients-grid"><div className="card client-inventory"><div className="card-heading"><div><p className="section-kicker">HUB REGISTRY</p><h3>Доступные MCP</h3></div></div><div className="client-list">{items.map((item) => <article className="client-row" key={item.id}><div><strong>{item.name}</strong><span>{item.enabled ? "Включён и виден клиентам" : "Выключен по умолчанию"}</span></div><dl><div><dt>MCP</dt><dd><code>{item.mcp_path}</code></dd></div><div><dt>Actions</dt><dd><code>{item.actions_path}</code></dd></div></dl><button className={item.enabled ? "button danger" : "button primary"} type="button" onClick={() => void toggle(item)} disabled={changing !== null}>{changing === item.id ? "Сохраняем…" : item.enabled ? "Выключить" : "Включить"}</button></article>)}</div></div><aside className="card client-controls"><p className="section-kicker">ACCESS POLICY</p><h3>Перед выдачей клиенту</h3><p className="muted">Создайте access profile с нужным target и точным набором tools. Отключение MCP убирает его из discovery, но не удаляет его state.</p></aside></section>}</div></>;
+}
+
 export default function App() {
   const [view, setView] = useState<View>(viewFromHash);
 
@@ -861,7 +902,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar"><div className="brand"><span className="brand-mark" aria-hidden="true">G</span><span>GPTAdmin</span></div><div className="workspace-label">ОПЕРАЦИОННАЯ КОНСОЛЬ</div><nav aria-label="Основная навигация">{navigation.map((item) => <a className={`nav-item ${view === item.id ? "active" : ""}`} href={item.href} aria-current={view === item.id ? "page" : undefined} key={item.id} onClick={(event) => { event.preventDefault(); setView(item.id); window.history.replaceState(null, "", item.href); }}>{<><span className="nav-dot" aria-hidden="true" /><span>{item.label}</span></>}</a>)}<a className="nav-item" href="/admin/legacy/"><span className="nav-dot" aria-hidden="true" /><span>Операции и MCP</span></a></nav><div className="sidebar-footer"><span className="profile-state">{view === "profiles" ? "Профильный доступ" : "Рабочий контекст"}</span><a className="logout-link" href="/admin/logout">Выйти</a></div></aside>
-      <main className="main-content">{view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen /> : view === "webhooks" ? <WebhooksScreen /> : <AuthScreen />}</main>
+      <main className="main-content">{view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen /> : view === "webhooks" ? <WebhooksScreen /> : view === "capabilities" ? <CapabilitiesScreen /> : <AuthScreen />}</main>
     </div>
   );
 }

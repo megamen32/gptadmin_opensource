@@ -147,6 +147,21 @@ def test_sync_oauth_origin_repairs_stale_internal_fallback_when_frp_is_enabled()
     assert env["MCP_RESOURCE"] == expected
 
 
+def test_sync_oauth_origin_preserves_explicit_public_origin_over_loopback_hub():
+    """Token issuance must not silently replace the Hub's published identity."""
+    env = {
+        "HUB_URL": "http://127.0.0.1:9001",
+        "PUBLIC_ORIGIN": "https://u-example.t.gptadmin.bezrabotnyi.com/",
+        "MCP_RESOURCE": "https://u-example.t.gptadmin.bezrabotnyi.com/",
+    }
+
+    cli.sync_oauth_origin_env(env)
+
+    expected = "https://u-example.t.gptadmin.bezrabotnyi.com"
+    assert env["PUBLIC_ORIGIN"] == expected
+    assert env["MCP_RESOURCE"] == expected
+
+
 def test_cleanup_removes_obsolete_shellmcp_primary_override(monkeypatch, tmp_path):
     """Updates must stop an old drop-in from splitting Hub and Shell credentials."""
     systemd_dir = tmp_path / "systemd"

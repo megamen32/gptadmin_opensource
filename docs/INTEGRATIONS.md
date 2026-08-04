@@ -26,8 +26,42 @@ All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md)
 1. Open `https://chatgpt.com/gpts/editor` → **Create** or edit a GPT.
 2. **Configure → Actions → Create new action.**
 3. **Import OpenAPI by URL** → `https://<your-hub>/actions/openapi.yaml`.
-4. **Authentication** → choose OAuth and complete the authorization from the Hub connection page.
-5. **Save.** The Custom GPT now exposes every operation as a tool.
+4. **Authentication** → choose OAuth and complete the authorization from the Hub connection page. OAuth Authorization Code + PKCE is the recommended path.
+5. **Save.** The Custom GPT now exposes the relay workflow as actions.
+
+### Bearer fallback and token diagnostics
+
+For a named, non-interactive Custom GPT connection, the Admin Hub can issue a
+managed `gptk_…` Bearer token. Configure the Action with that token and use the
+public HTTPS schema URL; never use `localhost` in ChatGPT. The CLI fallback
+`gptadmin issue-token` is also compatible with the Hub: it binds both JWT
+`aud` and `resource` to the public MCP resource.
+
+`PUBLIC_ORIGIN` is the issuer/public origin and `MCP_RESOURCE` is the exact
+expected OAuth audience and protected resource. Both must equal the public
+HTTPS origin with no trailing slash. The installer keeps signing material inside
+the Hub configuration; clients never copy or configure an internal signing key.
+
+The default `/actions/openapi.yaml` intentionally contains one Bearer security
+scheme and only `discover → schema → execute → job`. This avoids Custom GPT
+import warnings from webhook ingress and approval-only headers.
+
+### Optional virtual MCP capabilities
+
+`network-proxy` and `webhooks` are disabled by default. An administrator can
+list or set them through the authenticated Hub API:
+
+```bash
+curl -H "Authorization: Bearer <admin-credential>" https://<your-hub>/admin/api/virtual-mcps
+curl -X PUT -H "Authorization: Bearer <admin-credential>" -H 'Content-Type: application/json' \
+  https://<your-hub>/admin/api/virtual-mcps/webhooks -d '{"enabled":true}'
+```
+
+Once enabled, they appear in `discover` and have ordinary isolated surfaces:
+`/server/network-proxy/mcp`, `/server/network-proxy/actions/openapi.yaml`,
+`/server/webhooks/mcp`, and `/server/webhooks/actions/openapi.yaml`. Bind an
+access profile to the virtual server and its individual tools before giving it
+to a client.
 
 ### Example
 

@@ -83,3 +83,16 @@ def test_admin_security_ui_offers_passkey_enrollment_without_raw_credentials():
     assert "/admin/api/security/mfa/webauthn/register/finish" in security
     assert "navigator.credentials.create" in security
     assert "CTL_TOKEN" not in security
+
+
+def test_both_admin_surfaces_manage_optional_virtual_mcps_through_one_typed_endpoint():
+    legacy_html = (ROOT / "public" / "admin" / "index.html").read_text(encoding="utf-8")
+    legacy_script = (ROOT / "public" / "admin" / "app.js").read_text(encoding="utf-8")
+    react_api = (ROOT / "admin-ui" / "src" / "api.ts").read_text(encoding="utf-8")
+    react_app = (ROOT / "admin-ui" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    assert "Виртуальные MCP" in legacy_html
+    assert "loadVirtualMcps" in legacy_script
+    assert "/admin/api/virtual-mcps" in legacy_script
+    assert "getVirtualMCPs" in react_api and "setVirtualMCP" in react_api
+    assert "Виртуальные MCP" in react_app

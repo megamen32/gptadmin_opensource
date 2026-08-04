@@ -12,8 +12,7 @@ and a controlled ingress. It verifies independent failure modes:
 - tunnel failure while the primary hub is healthy;
 - primary hub failure while the tunnel remains live;
 - primary hub and tunnel failure together, followed by tunnel recovery.
-- a live generic stdio MCP relay re-registering and serving a tool call after
-  Hub failover;
+- native ShellMCP's separate integration suite covers child-MCP lifecycle;
 - signed reclaim after primary recovery, which demotes the fallback route;
 - rank 1 promotion fencing a rank 2 fallback;
 - rank 2 promotion when the rank 1 node is unavailable.

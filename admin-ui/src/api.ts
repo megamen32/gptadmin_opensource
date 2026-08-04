@@ -68,6 +68,14 @@ export type OAuthRotationResponse = {
   message: string;
 };
 
+export type VirtualMCP = {
+  id: "network-proxy" | "webhooks";
+  name: string;
+  enabled: boolean;
+  mcp_path: string;
+  actions_path: string;
+};
+
 export type IssueTokenRequest = {
   client_id: string;
   ttl_days: number;
@@ -243,6 +251,18 @@ function parseClientEnvelope(body: unknown): ClientInventoryItem[] {
   return value.clients.map(parseClient);
 }
 
+function parseVirtualMCPs(body: unknown): VirtualMCP[] {
+  const value = asRecord(body, "Сервер вернул некорректный список виртуальных MCP.");
+  if (!Array.isArray(value.virtual_mcps)) throw new ApiError(502, "Сервер вернул неполный список виртуальных MCP.");
+  return value.virtual_mcps.map((item) => {
+    const mcp = asRecord(item, "Сервер вернул некорректный виртуальный MCP.");
+    if ((mcp.id !== "network-proxy" && mcp.id !== "webhooks") || typeof mcp.name !== "string" || typeof mcp.enabled !== "boolean" || typeof mcp.mcp_path !== "string" || typeof mcp.actions_path !== "string") {
+      throw new ApiError(502, "Сервер вернул неполный виртуальный MCP.");
+    }
+    return { id: mcp.id, name: mcp.name, enabled: mcp.enabled, mcp_path: mcp.mcp_path, actions_path: mcp.actions_path };
+  });
+}
+
 function parseBinding(body: unknown): BindingResponse {
   const value = asRecord(body, "Сервер вернул некорректную привязку клиента.");
   if (typeof value.profile_id !== "string" || (value.client_id !== undefined && typeof value.client_id !== "string") || (value.token_id !== undefined && typeof value.token_id !== "string")) {
@@ -408,6 +428,21 @@ export async function rotateMcpToken(id: string): Promise<TokenResponse> {
 export async function rotateOAuth(): Promise<OAuthRotationResponse> {
   const response = await request("/admin/api/auth/rotate-oauth", { method: "POST" });
   return parseOAuthRotation(await responseJSON(response));
+}
+
+export async function getVirtualMCPs(): Promise<VirtualMCP[]> {
+  const response = await request("/admin/api/virtual-mcps");
+  return parseVirtualMCPs(await responseJSON(response));
+}
+
+export async function setVirtualMCP(id: VirtualMCP["id"], enabled: boolean): Promise<VirtualMCP> {
+  const response = await request(`/admin/api/virtual-mcps/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+  const value = asRecord(await responseJSON(response), "Сервер вернул некорректный ответ виртуального MCP.");
+  if (value.id !== id || value.enabled !== enabled) throw new ApiError(502, "Сервер не подтвердил изменение виртуального MCP.");
+  return { id, name: id, enabled, mcp_path: `/server/${id}/mcp`, actions_path: `/server/${id}/actions/openapi.yaml` };
 }
 
 export function byteLength(value: string): number {

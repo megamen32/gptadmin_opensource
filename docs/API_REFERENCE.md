@@ -207,6 +207,20 @@ GPTAdmin exposes each registered MCP server through authenticated per-server rou
 
 The Action schema is generated from the selected MCP server's `tools/list`. Each operation request body is the MCP tool `inputSchema`. The Action call response wraps the upstream MCP result:
 
+## Optional virtual MCP management
+
+The Hub keeps `network-proxy` and `webhooks` disabled unless an operator
+enables them. They are first-class per-server MCPs, not operations in the
+default Custom GPT schema.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/admin/api/virtual-mcps` | List both virtual MCPs and their enabled state. |
+| `PUT` | `/admin/api/virtual-mcps/{id}` | Persist `{"enabled": true|false}` for `network-proxy` or `webhooks`. |
+
+An enabled virtual MCP is listed by `GET /mcp-relay/servers` and uses the
+standard `/server/{slug}/mcp` and `/server/{slug}/actions/openapi.yaml` routes.
+
 ```json
 {
   "server_id": "OpenMemory",

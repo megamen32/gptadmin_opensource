@@ -32,6 +32,8 @@ from typing import Any, Iterator
 
 import pytest
 
+import cli
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_COMMANDS = ["go run ./cmd/gptadmin-hub"]
 CONTRACT_TOKEN = "hub-contract-token"
@@ -288,6 +290,21 @@ def test_hub_contract_health_and_auth(hub_contract: HubProcess) -> None:
     assert body
 
 
+def test_cli_issued_bearer_is_accepted_by_a_real_hub_process(hub_contract: HubProcess) -> None:
+    """Keep CLI signing claims aligned with the Hub's audience/resource checks."""
+    token = cli.make_mcp_bearer_token(
+        {
+            "HUB_PUBLIC_URL": hub_contract.base_url,
+            "OAUTH_CLIENT_SECRET": "hub-contract-oauth-secret",
+        },
+        "custom-gpt-contract",
+        access_mode="readonly",
+    )
+    status, body, _ = hub_contract.request("GET", "/mcp-relay/servers", token=token)
+    assert status == 200, body
+    assert isinstance(body.get("servers"), list)
+
+
 def test_connection_manifest_drives_safe_first_mcp_action(hub_contract: HubProcess) -> None:
     """A generic client can consume the manifest and call the safe demo tool."""
     status, manifest, _ = hub_contract.request("GET", "/connect.json", token=None)
@@ -375,9 +392,9 @@ def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     assert "required: [target]" in schema
     assert 'Never use target="default"' in schema
     assert "default: default" not in schema
-    assert "/webhooks/v1/{route}" in schema
-    assert "/webhook-jobs/{job_id}" in schema
-    assert "/webhook-routes/{route}" in schema
+    assert "/webhooks/v1/{route}" not in schema
+    assert "/webhook-jobs/{job_id}" not in schema
+    assert "/webhook-routes/{route}" not in schema
     assert "schema_digest_sha256" in schema
 
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -48,6 +49,28 @@ func withRequestTrace(next http.Handler) http.Handler {
 		w.Header().Set(traceParentHeader, parent)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// withIngressAudit emits one secret-safe routing record for every request.
+// It deliberately records no header values or query/body content: callers can
+// correlate Custom GPT, FRP and Hub activity with X-Request-ID without turning
+// runtime logs into a credential store.
+func withIngressAudit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracked := &ingressResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(tracked, r)
+		log.Printf("ingress request_id=%s method=%s path=%s status=%d authorization_present=%t", requestTraceID(r), r.Method, r.URL.Path, tracked.status, strings.TrimSpace(r.Header.Get("Authorization")) != "")
+	})
+}
+
+type ingressResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *ingressResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func requestTraceID(r *http.Request) string {

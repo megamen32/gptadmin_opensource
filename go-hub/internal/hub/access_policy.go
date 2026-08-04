@@ -110,6 +110,9 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 			return nil
 		}
 	}
+	if target == "webhooks" && (toolName == webhookRoutesListTool || toolName == webhookJobGetTool) {
+		return nil
+	}
 	if toolName == "resources/list" || toolName == "resources/read" {
 		return nil
 	}

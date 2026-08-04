@@ -34,7 +34,27 @@ def test_readonly_cli_token_has_inspection_scope_without_exec() -> None:
 
     assert payload["access_mode"] == "readonly"
     assert payload["scope"] == "gptadmin.read gptadmin.inspect"
+    assert payload["resource"] == "https://hub.example.test"
+    assert payload["kid"] == "gptadmin-hs256-v1"
     assert "gptadmin.exec" not in payload["scope"]
+
+
+def test_cli_token_normalizes_the_public_origin_contract() -> None:
+    """Whitespace, hostname case and trailing slashes cannot desynchronise CLI and Hub."""
+    token = cli.make_mcp_bearer_token(
+        {
+            "PUBLIC_ORIGIN": " HTTPS://Hub.Example.Test/// ",
+            "MCP_RESOURCE": " HTTPS://Hub.Example.Test/// ",
+            "OAUTH_CLIENT_SECRET": "test-signing-secret",
+        },
+        "chatgpt",
+    )
+    payload_segment = token.split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
+
+    assert payload["iss"] == "https://hub.example.test"
+    assert payload["aud"] == "https://hub.example.test"
+    assert payload["resource"] == "https://hub.example.test"
 
 
 def test_default_cli_mcp_token_has_five_year_lifetime() -> None:
@@ -44,6 +64,35 @@ def test_default_cli_mcp_token_has_five_year_lifetime() -> None:
     payload = json.loads(base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
 
     assert payload["exp"] - payload["iat"] == 5 * 365 * 24 * 3600
+
+
+def test_auth_diagnose_reports_contract_without_printing_token_or_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator diagnostics must distinguish a bad issuer without leaking credentials."""
+    env_file = tmp_path / "gptadmin.env"
+    secret = "test-signing-secret"
+    env_file.write_text(
+        "\n".join(
+            [
+                "PUBLIC_ORIGIN=https://hub.example.test/",
+                "MCP_RESOURCE=https://hub.example.test/",
+                f"OAUTH_CLIENT_SECRET={secret}",
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(cli, "ENV_FILE", env_file)
+    token = cli.make_mcp_bearer_token(
+        {"PUBLIC_ORIGIN": "https://other.example.test", "OAUTH_CLIENT_SECRET": secret}, "diagnose"
+    )
+
+    cli.cmd_auth_diagnose(SimpleNamespace(token=token, offline=True))
+
+    output = capsys.readouterr().out
+    assert "Token verdict: issuer mismatch" in output
+    assert token not in output
+    assert secret not in output
 
 
 def test_configure_all_supported_clients_registers_vscode(monkeypatch: pytest.MonkeyPatch) -> None:

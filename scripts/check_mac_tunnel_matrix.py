@@ -37,8 +37,8 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 DEFAULT_REPORT_ROOT = REPO_ROOT / "logs" / "mac_tunnel_matrix"
 
 SNAPSHOT_FILES = (
-    "go-hub/cmd/gptadmin-hub",
-    "go-shellmcp/cmd/shellmcp-go",
+    "go-hub",
+    "go-shellmcp",
     "gptadmin_security.py",
     "gptadmin_build_info.py",
     "public/admin_dashboard.html",
@@ -354,6 +354,7 @@ class MacTunnelMatrixHarness:
         self.top_report_path = self.report_dir / "report.json"
         self.results: list[CellResult] = []
         self.remote_home = ""
+        self.remote_go_bin = ""
         self.sudo_password = os.environ.get("MAC_TUNNEL_SUDO_PASSWORD", "")
 
     def run(self) -> int:
@@ -515,6 +516,7 @@ class MacTunnelMatrixHarness:
             "frp_token": FRP_TOKEN_DEFAULT,
             "frp_domain": FRP_DOMAIN_DEFAULT,
             "frp_subdomain": f"gptadmin-{self.run_id}-{cell.scope[:1]}{cell.backend[:2]}-{random.randint(100, 999)}",
+            "go_bin": self.remote_go_bin,
         }
         self._remote_mkdirs([cell_root, logs_dir, run_dir, src_dir, bin_dir], ssh_log)
         if cell.scope == "system":
@@ -946,6 +948,13 @@ PY
             python3 --version
             curl --version >/dev/null
             tar --version >/dev/null
+            for candidate in /usr/local/go/bin/go /opt/homebrew/bin/go "$(command -v go 2>/dev/null || true)"; do
+              if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                printf 'GPTADMIN_MATRIX_GO=%s\n' "$candidate"
+                break
+              fi
+            done
+            test -n "${{candidate:-}}" && test -x "$candidate"
             if [ {shlex.quote('1' if 'system' in self.scopes else '0')} = 1 ]; then
               sudo -n true
             fi
@@ -956,9 +965,14 @@ PY
             """,
         )
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if not lines:
+        go_lines = [line for line in lines if line.startswith("GPTADMIN_MATRIX_GO=")]
+        if not go_lines:
+            raise HarnessError("remote Mac does not provide a Go executable for LaunchAgent wrappers")
+        self.remote_go_bin = go_lines[-1].split("=", 1)[1]
+        home_lines = [line for line in lines if not line.startswith("GPTADMIN_MATRIX_GO=")]
+        if not home_lines:
             raise HarnessError("failed to resolve remote home directory")
-        self.remote_home = lines[-1]
+        self.remote_home = home_lines[-1]
 
     def _prepare_remote_root(self) -> None:
         """Create the top-level remote workspace."""
@@ -1047,8 +1061,8 @@ PY
             set -a
             . {shlex.quote(str(runtime["env_path"]))}
             set +a
-            cd {shlex.quote(str(runtime["src_dir"]))}
-            exec go run ./go-hub/cmd/gptadmin-hub
+            cd {shlex.quote(str(runtime["src_dir"]))}/go-hub
+            exec {shlex.quote(str(runtime["go_bin"]))} run ./cmd/gptadmin-hub
             """
         )
         shell_wrapper = textwrap.dedent(
@@ -1057,8 +1071,8 @@ PY
             set -a
             . {shlex.quote(str(runtime["env_path"]))}
             set +a
-            cd {shlex.quote(str(runtime["src_dir"]))}
-            exec go run ./go-shellmcp/cmd/shellmcp-go
+            cd {shlex.quote(str(runtime["src_dir"]))}/go-shellmcp
+            exec {shlex.quote(str(runtime["go_bin"]))} run ./cmd/shellmcp-go
             """
         )
         tunnel_wrapper = self._render_tunnel_wrapper(runtime)

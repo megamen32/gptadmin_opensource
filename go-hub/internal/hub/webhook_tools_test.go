@@ -134,6 +134,7 @@ func TestWebhookMCPWritesHonorApprovalAndBoundedAutonomousGates(t *testing.T) {
 			WebhookConfigFile: filepath.Join(t.TempDir(), profile.ID+".json"),
 		})
 		s.mu.Lock()
+		s.virtualMCP["webhooks"] = true
 		s.accessProfiles[profile.ID] = profile
 		s.mu.Unlock()
 		token, err := s.signJWT(map[string]any{
@@ -155,7 +156,7 @@ func TestWebhookMCPWritesHonorApprovalAndBoundedAutonomousGates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/server/webhooks/mcp", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, req)
@@ -167,7 +168,7 @@ func TestWebhookMCPWritesHonorApprovalAndBoundedAutonomousGates(t *testing.T) {
 
 	askProfile := AccessProfile{
 		ID: "webhook-ask", AccessMode: accessModeFull, ApprovalMode: approvalModeAskBeforeWrite,
-		AllowedTargets: []string{"hub"}, AllowedTools: []string{webhookRouteCreateTool}, Version: 1,
+		AllowedTargets: []string{"webhooks"}, AllowedTools: []string{webhookRouteCreateTool}, Version: 1,
 	}
 	askServer, askToken := newServer(askProfile)
 	pending := call(askServer, askToken, map[string]any{"route": route("ask-route")})
@@ -199,7 +200,7 @@ func TestWebhookMCPWritesHonorApprovalAndBoundedAutonomousGates(t *testing.T) {
 
 	boundedProfile := AccessProfile{
 		ID: "webhook-bounded", AccessMode: accessModeFull, ApprovalMode: approvalModeBoundedAutonomous,
-		AllowedTargets: []string{"hub"}, AllowedTools: []string{webhookRouteCreateTool}, Version: 1,
+		AllowedTargets: []string{"webhooks"}, AllowedTools: []string{webhookRouteCreateTool}, Version: 1,
 	}
 	boundedServer, boundedToken := newServer(boundedProfile)
 	for i := 0; i < autonomousCallLimit; i++ {
@@ -219,12 +220,13 @@ func TestWebhookMCPWritesHonorApprovalAndBoundedAutonomousGates(t *testing.T) {
 	}
 }
 
-func TestWebhookParityToolsAreAdvertisedAndReadPolicyIsNarrow(t *testing.T) {
-	for _, tools := range [][]map[string]any{hubTools(), appsSDKTools()} {
-		for _, name := range []string{"webhook_routes_list", "webhook_route_create", "webhook_route_replace", "webhook_route_delete", "webhook_job_get"} {
-			if !toolListContains(tools, name) {
-				t.Fatalf("tool list does not advertise %q", name)
-			}
+func TestWebhookParityToolsAreVirtualAndReadPolicyIsNarrow(t *testing.T) {
+	for _, name := range []string{"webhook_routes_list", "webhook_route_create", "webhook_route_replace", "webhook_route_delete", "webhook_job_get"} {
+		if !toolListContains(virtualMCPTools(virtualMCPDefinitions["webhooks"]), name) {
+			t.Fatalf("webhooks virtual MCP does not advertise %q", name)
+		}
+		if toolListContains(hubTools(), name) || toolListContains(appsSDKTools(), name) {
+			t.Fatalf("default hub surface leaked optional webhook tool %q", name)
 		}
 	}
 	encodedSchema, _ := json.Marshal(webhookRouteInputSchema())
@@ -263,7 +265,7 @@ func TestAdminWebhookJobEndpointUsesOperatorAuthentication(t *testing.T) {
 	}
 }
 
-func TestActionsOpenAPIAdvertisesWebhookManagementParity(t *testing.T) {
+func TestActionsOpenAPIDefaultExcludesWebhookManagement(t *testing.T) {
 	s := New(Config{PublicOrigin: "https://hub.example"})
 	request := httptest.NewRequest(http.MethodGet, "/actions/openapi.yaml", nil)
 	record := httptest.NewRecorder()
@@ -272,15 +274,15 @@ func TestActionsOpenAPIAdvertisesWebhookManagementParity(t *testing.T) {
 		t.Fatalf("openapi status=%d body=%s", record.Code, record.Body.String())
 	}
 	for _, operationID := range []string{"listWebhookRoutes", "createWebhookRoute", "replaceWebhookRoute", "deleteWebhookRoute", "getAdminWebhookJob"} {
-		if !containsSecret(record.Body.String(), "operationId: "+operationID) {
-			t.Fatalf("OpenAPI does not advertise %s", operationID)
+		if containsSecret(record.Body.String(), "operationId: "+operationID) {
+			t.Fatalf("default OpenAPI leaked %s", operationID)
 		}
 	}
-	if strings.Count(record.Body.String(), "name: X-GPTAdmin-Approval-ID") != 3 {
-		t.Fatalf("OpenAPI does not expose approval replay on every route write")
+	if strings.Contains(record.Body.String(), "X-GPTAdmin-Approval-ID") || strings.Contains(record.Body.String(), "webhookToken:") {
+		t.Fatalf("default OpenAPI contains Custom GPT-incompatible webhook security or approval header")
 	}
-	if !containsSecret(record.Body.String(), "        server_id:\n          type: string\n          description: Target id to use in schema and execute.") {
-		t.Fatalf("OpenAPI contains an invalid McpServer.server_id YAML block")
+	if strings.Count(record.Body.String(), "scheme: bearer") != 1 {
+		t.Fatalf("default OpenAPI must contain exactly one bearer security scheme")
 	}
 	var document any
 	if err := yaml.Unmarshal(record.Body.Bytes(), &document); err != nil {
@@ -290,7 +292,10 @@ func TestActionsOpenAPIAdvertisesWebhookManagementParity(t *testing.T) {
 
 func TestWebhookRouteLifecycleIsCallableThroughMCP(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", WebhookConfigFile: filepath.Join(t.TempDir(), "webhooks.json")})
-	created := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"webhook_route_create","arguments":{"route":{"id":"mcp-route","token":"mcp-write-only","action":{"kind":"mcp","target":"hub","tool":"status"}}}}}`)
+	s.mu.Lock()
+	s.virtualMCP["webhooks"] = true
+	s.mu.Unlock()
+	created := postMCPRPCPath(t, s, "/server/webhooks/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"webhook_route_create","arguments":{"route":{"id":"mcp-route","token":"mcp-write-only","action":{"kind":"mcp","target":"hub","tool":"status"}}}}}`)
 	if containsSecret(string(mustJSON(t, created)), "mcp-write-only") {
 		t.Fatalf("MCP create response exposed a route secret: %v", created)
 	}
@@ -300,7 +305,7 @@ func TestWebhookRouteLifecycleIsCallableThroughMCP(t *testing.T) {
 	if !exists {
 		t.Fatal("MCP create did not persist the route")
 	}
-	listed := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"webhook_routes_list","arguments":{}}}`)
+	listed := postMCPRPCPath(t, s, "/server/webhooks/mcp", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"webhook_routes_list","arguments":{}}}`)
 	if !containsSecret(string(mustJSON(t, listed)), "mcp-route") || containsSecret(string(mustJSON(t, listed)), "mcp-write-only") {
 		t.Fatalf("MCP list is incomplete or exposed a secret: %v", listed)
 	}

@@ -164,6 +164,12 @@
           <p class="muted small">Большинство клиентов подключаются сами через OAuth. Для ChatGPT безопаснее начать с «Только просмотр»: команды и изменения недоступны, а найденные токены автоматически скрываются. Полный доступ используйте для Codex и других клиентов, которым действительно нужны изменения.</p>
           <pre id="secMcpTokenResult" style="min-height:60px">—</pre>
         </div>
+        <div style="margin-top:16px"><h2 style="font-size:13px">Виртуальные MCP</h2>
+          <p class="muted small">Proxy и webhooks выключены по умолчанию. Включённый capability становится отдельным MCP и отдельной Action schema.</p>
+          <div class="row"><button class="btn-secondary" onclick="loadVirtualMcps()">↻ Обновить</button></div>
+          <div id="securityVirtualMcps" class="stackList"><p class="muted">Нажмите «Обновить»</p></div>
+          <pre id="securityVirtualMcpResult" style="min-height:35px">—</pre>
+        </div>
       </div></section>
 
 

@@ -9,15 +9,28 @@ import pytest
 import cli
 
 
-def test_mcp_token_file_uses_target_hub_relay_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """A shell-only host must not authenticate its relays with its local CTL key."""
+def test_mcp_token_file_uses_one_time_hub_admin_password(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A shell-only host starts pairing from the Hub password, never a shared relay secret."""
     token_file = tmp_path / "mcp-relay.token"
     monkeypatch.setattr(cli, "MCP_TOKEN_FILE", token_file)
-    monkeypatch.setattr(cli, "env_read", lambda: {"CTL_TOKEN": "local-admin-key", "MCP_RELAY_AGENT_TOKEN": "hub-relay-key"})
+    monkeypatch.setattr(cli, "env_read", lambda: {"CTL_TOKEN": "local-admin-key", "MCP_RELAY_ENROLLMENT_PASSWORD": "hub-admin-password"})
 
     cli._mcp_ensure_token_file()
 
-    assert token_file.read_text(encoding="utf-8") == "hub-relay-key\n"
+    assert token_file.read_text(encoding="utf-8") == "hub-admin-password\n"
+    assert token_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_mcp_token_file_preserves_issued_agent_credential(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A catalog refresh must not replace an enrolled credential with the bootstrap password."""
+    token_file = tmp_path / "mcp-relay.token"
+    token_file.write_text("agent-bound-credential\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "MCP_TOKEN_FILE", token_file)
+    monkeypatch.setattr(cli, "env_read", lambda: {"MCP_RELAY_ENROLLMENT_PASSWORD": "hub-admin-password"})
+
+    cli._mcp_ensure_token_file()
+
+    assert token_file.read_text(encoding="utf-8") == "agent-bound-credential\n"
 
 
 def test_mcp_add_rejects_an_option_as_the_executable(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -48,8 +61,8 @@ def test_mcp_add_rejects_an_option_as_the_executable(monkeypatch: pytest.MonkeyP
     assert not (tmp_path / "mcp.json").exists()
 
 
-def test_mcp_add_install_starts_and_checks_the_relay(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """`mcp add --install --status` must create a live relay, not just JSON."""
+def test_mcp_add_install_requires_native_shellmcp(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A missing native supervisor must never fall back to a Python relay."""
     config_file = tmp_path / "mcp.json"
     agents_dir = tmp_path / "mcp-agents.d"
     token_file = tmp_path / "mcp-relay.token"
@@ -60,7 +73,6 @@ def test_mcp_add_install_starts_and_checks_the_relay(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(cli, "MCP_SUPERVISOR_CONFIG", tmp_path / "mcp-supervisor.json")
     monkeypatch.setattr(cli, "MCP_TOKEN_FILE", token_file)
     monkeypatch.setattr(cli, "env_read", lambda: {"MCP_RELAY_AGENT_TOKEN": "hub-relay-key"})
-    monkeypatch.setattr(cli, "_mcp_manager_cmd", lambda action, _path: ["manager", action])
     monkeypatch.setattr(cli, "run", lambda command, check=True: commands.append((command[-1], check)))
     args = argparse.Namespace(
         name="chrome-mac",
@@ -79,13 +91,14 @@ def test_mcp_add_install_starts_and_checks_the_relay(monkeypatch: pytest.MonkeyP
         hub_url=None,
     )
 
-    cli.cmd_mcp_add(args)
+    with pytest.raises(SystemExit):
+        cli.cmd_mcp_add(args)
 
     saved = cli._json_read(config_file, {})["mcpServers"]["chrome-mac"]
     assert saved["command"] == "npx"
     assert saved["args"] == ["-y", "chrome-devtools-mcp@latest", "--autoConnect"]
-    assert token_file.read_text(encoding="utf-8") == "hub-relay-key\n"
-    assert commands == [("install", True), ("status", False)]
+    assert not token_file.exists()
+    assert commands == []
 
 
 def test_mcp_add_does_not_install_a_duplicate_standalone_relay_when_supervised(
@@ -223,15 +236,13 @@ def test_supervised_install_retires_legacy_relays_and_restarts_shellmcp(monkeypa
     monkeypatch.setattr(cli, "SYSTEMD_DIR", tmp_path / "systemd")
     monkeypatch.setattr(cli, "env_read", lambda: {"MCP_RELAY_AGENT_TOKEN": "token", "SHELLMCP_MCP_CONFIG": str(tmp_path / "mcp-supervisor.json")})
     monkeypatch.setattr(cli, "_mcp_config", lambda: config)
-    monkeypatch.setattr(cli, "_mcp_manager_exists", lambda: True)
-    monkeypatch.setattr(cli, "_mcp_manager_cmd", lambda action, path, backend=None: ["manager", action, str(path)])
     monkeypatch.setattr(cli, "run", lambda command, check=True: commands.append((command, check)))
     monkeypatch.setattr(cli, "svc_restart", lambda name, path: restarts.append((name, path)))
     monkeypatch.setattr(cli, "env_set_many", lambda values: env_updates.append(values))
 
     cli.cmd_mcp_install(argparse.Namespace(name=None, backend=None))
 
-    assert commands == [(["manager", "uninstall", str(tmp_path / "mcp-agents.d/direct.json")], False)]
+    assert commands == []
     assert env_updates == [{"SHELLMCP_MCP_CONFIG": str(tmp_path / "mcp-supervisor.json")}]
     assert restarts == [(cli.svc_shellmcp_name(), cli.UNIT_PATH_SHELLMCP)]
 
@@ -275,7 +286,6 @@ def test_go_migration_removes_orphaned_python_relay_units(monkeypatch: pytest.Mo
     stopped: list[str] = []
     monkeypatch.setattr(cli, "IS_MACOS", False)
     monkeypatch.setattr(cli, "SYSTEMD_DIR", systemd_dir)
-    monkeypatch.setattr(cli, "_mcp_manager_exists", lambda: False)
     monkeypatch.setattr(cli, "svc_disable_stop", lambda name, path: stopped.append(name) or True)
     monkeypatch.setattr(cli, "svc_daemon_reload", lambda: None)
 
@@ -294,7 +304,6 @@ def test_go_migration_removes_orphaned_macos_python_relay_plists(monkeypatch: py
     stopped: list[tuple[str, str]] = []
     monkeypatch.setattr(cli, "IS_MACOS", True)
     monkeypatch.setattr(cli, "SERVICES_DIR", services_dir, raising=False)
-    monkeypatch.setattr(cli, "_mcp_manager_exists", lambda: False)
     monkeypatch.setattr(cli, "svc_disable_stop", lambda name, path: stopped.append((name, path.name)) or True)
 
     cli._mcp_retire_legacy_relay_services({"mcpServers": {}}, [])

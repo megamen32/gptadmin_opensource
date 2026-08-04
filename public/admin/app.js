@@ -521,6 +521,27 @@ async function rotateOAuth(){
   }catch(e){alert('ERR '+e.message)}
 }
 
+async function loadVirtualMcps(){
+  const el=$('securityVirtualMcps');
+  const out=$('securityVirtualMcpResult');
+  if(!el)return;
+  try{
+    const j=await api('/admin/api/virtual-mcps');
+    const items=Array.isArray(j.virtual_mcps)?j.virtual_mcps:[];
+    el.innerHTML=items.length?items.map(item=>'<div class="recentMiniItem"><div class="recentMiniTop"><b>'+esc(item.name||item.id||'virtual MCP')+'</b><span class="pill '+(item.enabled?'ok':'warn')+'">'+(item.enabled?'on':'off')+'</span></div><div class="muted small mono">'+esc(item.mcp_path||'')+'</div><div class="row"><button onclick="setVirtualMcp(\''+esc(item.id)+'\','+(!item.enabled)+')">'+(item.enabled?'Выключить':'Включить')+'</button></div></div>').join(''):'<p class="muted">Нет capabilities</p>';
+    if(out)out.textContent='—';
+  }catch(e){el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>'}
+}
+async function setVirtualMcp(id,enabled){
+  const out=$('securityVirtualMcpResult');
+  try{
+    const j=await api('/admin/api/virtual-mcps/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify({enabled:!!enabled})});
+    if(out)out.textContent=JSON.stringify(j,null,2);
+    await loadVirtualMcps();
+    refreshAll();
+  }catch(e){if(out)out.textContent='ERR '+e.message}
+}
+
 async function issueMcpTokenFromPanel(){
   const name=$('secMcpTokenName').value.trim();
   if(!name){alert('Введите client_id');return}

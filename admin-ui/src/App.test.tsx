@@ -139,6 +139,8 @@ describe("Profiles / Instructions", () => {
     await userEvent.tab();
     expect(screen.getByRole("link", { name: "Вебхуки и агенты" })).toHaveFocus();
     await userEvent.tab();
+    expect(screen.getByRole("link", { name: "Виртуальные MCP" })).toHaveFocus();
+    await userEvent.tab();
     expect(screen.getByRole("link", { name: "Авторизация" })).toHaveFocus();
     await userEvent.tab();
     expect(screen.getByRole("link", { name: "Операции и MCP" })).toHaveFocus();
@@ -215,7 +217,7 @@ describe("Profiles", () => {
     await screen.findByRole("textbox", { name: "Текст инструкций" });
 
     await userEvent.click(screen.getByRole("link", { name: "Профили" }));
-    expect(await screen.findByText("Операционный профиль")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Операционный профиль/ })).toBeInTheDocument();
     expect(screen.getByLabelText("Режим доступа")).toHaveValue("readonly");
     expect(screen.getByLabelText("Рабочее пространство 1: путь")).toHaveValue("/srv/ops");
 

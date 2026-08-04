@@ -5,6 +5,8 @@ the expected download URLs — without actually executing them.
 """
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,6 +108,21 @@ def test_install_completion_uses_product_auth_vocabulary():
     content = (DEPLOY / "install.sh").read_text(encoding="utf-8")
     assert "CTL_TOKEN" not in content
     assert "AdminPassword/OAuth" in content
+
+
+def test_cli_bootstrap_runs_without_optional_cryptography_dependency():
+    """A curl-installed CLI must reach setup even on stock Python.
+
+    ``-S`` skips site-packages, matching the Ubuntu user-install failure mode
+    where no project dependencies have been installed yet.
+    """
+    result = subprocess.run(
+        [sys.executable, "-S", str(ROOT / "cli.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_openapi_schema_exists():

@@ -1,55 +1,86 @@
-# Instructions: on any edit this file then commit it.
+# Task
 
-# Task Layer
+Status: todo | in progress | blocked | complete
+Initial role (informational):
+Original user request:
+Objective:
+Business canary:
+Confirmed scope:
+Explicit exclusions:
+Acceptance:
+Initial estimate (optimistic / likely / pessimistic active minutes):
+Estimate revisions (append-only; trigger and evidence):
+Cycle: direct | short | full | emergency
+Workflow:
+Current delivery slice:
+Stop when:
+Abandon when:
+Forbidden without explicit user request:
+Consequential authorization questions (append-only):
 
-## Before Start
+## Overseer audit receipts (append-only)
 
-Fill this layer before work begins. Workflow is the ordered chain for this task,
-not a list of every possible role. Add, remove, or name custom stages now.
+Add an entry only for an eligible audit. Never replace or delete an earlier
+entry. `CONTINUE` is not repeated to the user.
 
-Description:
-Severity: P0_URGENT | CORE | BEST_EFFORT | OPT_IN
-workflow: [e.g. explore(Explorer) -> work(Worker) -> review(Reviewer) -> commit(Lead); any custom stage(actor)]
-estimated min-max complete time: (min: , max: )
-Acceptance: [proof]
+- Timestamp:
+  Stage:
+  Evidence:
+  Business delta:
+  Avoidable spend:
+  Next minimal action:
+  Direct user question:
+  Decision: CONTINUE | ASK_USER | STOP_DRIFT
 
-## On Start
+## Critic decision history (append-only)
 
-Fill this layer when the first workflow stage starts.
-DO `git mv todo-<id>.md work-<id>.md`.
-On every handoff, replace the current executor identity and Next action, then
-commit this file.
+Add one entry for every decision. Never replace or delete an earlier entry.
 
-started (UTC+3): [ISO-8601]
-Executor: [agent name or ID]
-PID: [process ID]
-Harness: [opencode | claude | codex | zcode | vscode | other]
-session identifier: [session ID]
-Next action: [current workflow stage and its concrete next action]
+- Timestamp:
+  Stage:
+  Evidence:
+  Current user P0:
+  Business delta:
+  P0 distance: CLOSER | SAME | FARTHER
+  Questions for L:
+  Decision: PASS | RETHINK | STOP | STOP_SCOPE_DRIFT | STOP_MISSING_CONTEXT
 
-# Message layer
+## Decision
 
-## Notes
+Research:
+Plans:
+Human selection:
+Selected-plan WSFF:
 
-[append decisions, stage results, handoffs, and information learned during work]
+## Work
 
-## Blocker
+Current:
+Next:
+Blocked by:
+Evidence:
 
-[none, `.agents/bugs/<id>.md`, or exact user decision]
+## Child assignment
 
-# When complete
+The explicit role in `<Role> <task-file-path>` is authoritative for this pass.
+Reuse this same file for sequential passes such as Worker then Reviewer; append
+each pass and its detailed result below.
+Goal and known facts:
+Allowed and excluded paths:
+Acceptance and stop conditions:
+Model and budget:
+Detailed report appended here:
+L-facing return: TL;DR only
 
-Fill this layer only after the workflow and Acceptance are complete.
+## Role passes (append-only)
+
+- Role:
+  Started:
+  Detailed result:
 
 ## Result
 
-[full durable result of the task; this file must remain sufficient if every
-agent message or chat response is lost]
-
-## Completion checklist
-
-- [ ] Every selected workflow stage is complete or its omission is explained.
-- [ ] Acceptance is proven with exact commands, immutable artifacts, or paths.
-- [ ] Blockers are resolved or explicitly retained.
-- [ ] Result contains the full handoff and does not depend on a delivered agent message.
-- [ ] DO `git mv work-<id>.md done-<id>.md` and commit this file.
+Summary:
+Tests:
+Review:
+Commit:
+Unresolved:

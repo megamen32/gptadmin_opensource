@@ -65,3 +65,45 @@ func TestBrowserExtensionOAuthUsesSameOriginCallbackWithoutCredentialCopy(t *tes
 		t.Fatalf("browser callback rendered a credential: %s", callbackRecord.Body.String())
 	}
 }
+
+func TestCustomGPTActionsOAuthAuthorizeAllowsNoPKCE(t *testing.T) {
+	s := New(Config{
+		CtlToken:          "ctl",
+		AdminPassword:     "pw",
+		OAuthClientSecret: "oauth-secret",
+		PublicOrigin:      "https://hub.example",
+		MCPResource:       "https://hub.example",
+		DefaultTimeout:    time.Second,
+		PollMaxTimeout:    time.Second,
+	})
+	q := url.Values{
+		"response_type": {"code"},
+		"client_id":     {"chatgpt-actions"},
+		"redirect_uri":  {"https://chat.openai.com/aip/g-123/oauth/callback"},
+		"resource":      {"https://hub.example"},
+		"scope":         {"gptadmin.read"},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Custom GPT authorize without PKCE status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNoPKCEIsRestrictedToCustomGPTActionsCallback(t *testing.T) {
+	for _, redirectURI := range []string{
+		"http://localhost:3000/callback",
+		"https://chatgpt.com/connector/oauth/callback",
+		"https://example.invalid/oauth/callback",
+		"https://chat.openai.com/aip/g-/oauth/callback",
+		"https://chat.openai.com/aip/g-123/not-oauth",
+	} {
+		if validPKCEParameters("", "", redirectURI) {
+			t.Fatalf("no-PKCE must be rejected for non-Custom-GPT redirect %q", redirectURI)
+		}
+	}
+	if !validPKCEParameters("challenge", "S256", "http://localhost:3000/callback") {
+		t.Fatal("S256 PKCE must remain valid for non-Custom-GPT clients")
+	}
+}

@@ -164,9 +164,9 @@
       "evidence": "curated MCP definitions expose provenance, scopes, network needs and risk before activation; catalog-bound installs require explicit acceptance"
     },
     {
-      "id": "mcp-extension-conformance",
-      "command": "python3 -m pytest tests/test_extension_sdk.py -q",
-      "evidence": "third-party-shaped manifest and stdio lifecycle validate, then discover -> schema -> execute crosses a live Hub and generic relay"
+      "id": "native-mcp-supervisor-conformance",
+      "command": "cd go-shellmcp && go test ./internal/server ./internal/mcpclient ./internal/supervisor",
+      "evidence": "native ShellMCP persists stdio and remote MCP definitions, validates transports, and executes tools through its Go MCP client"
     },
     {
       "id": "live-hub-acceptance-runner",
@@ -255,9 +255,9 @@
       "evidence": "legacy bridge, webhook, bulk and admin resource entrypoints cannot enqueue work outside the central policy boundary"
     },
     {
-      "id": "runtime-actions-openapi-proxy-contract",
-      "command": "cd go-hub && go test ./internal/hub -run 'TestActionsOpenAPIIncludesNetworkProxyContract' -count=1",
-      "evidence": "runtime generated Actions OpenAPI advertises the same Network Tunnel control paths as the static contract"
+      "id": "runtime-actions-openapi-virtual-mcp-contract",
+      "command": "cd go-hub && go test ./internal/hub -run 'TestVirtualMCPsAreDefaultOffPersistedAndExposeDedicatedActions|TestActionsOpenAPIKeepsNetworkProxyOutOfDefaultCustomGPTContract|TestActionsOpenAPIDefaultExcludesWebhookManagement' -count=1",
+      "evidence": "default Custom GPT schema has one Bearer contract while default-off optional virtual MCPs persist and expose isolated server schemas only after enablement"
     },
     {
       "id": "readonly-security",

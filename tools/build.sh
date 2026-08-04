@@ -156,7 +156,10 @@ prepare_tagged_release_archive_scope() {
   local -a stale_build_archives=() generated_public_archives=()
   while IFS= read -r -d '' archive; do
     stale_build_archives+=("$archive")
-  done < <(find "$ART_DIR" -type f \( -name 'gptadmin*.tar.gz' -o -name 'gptadmin*.zip' \) -print0)
+  # Only the top-level build directory belongs to this release pipeline.
+  # Nested build trees can be owned by separate add-ons and must not be
+  # removed (or make this release fail) during tagged-release preflight.
+  done < <(find "$ART_DIR" -maxdepth 1 -type f \( -name 'gptadmin*.tar.gz' -o -name 'gptadmin*.zip' \) -print0)
   if [[ -d "$REPO_DIR/public" ]]; then
     while IFS= read -r -d '' archive; do
       generated_public_archives+=("$archive")
@@ -323,6 +326,12 @@ copy_hub_platform_binary() {
   [[ -n "$src" && -x "$src" ]] || return 0
   mkdir -p "$ART_DIR/gptadmin_hub/$tag"
   local dst="$ART_DIR/gptadmin_hub/$tag/$exe_name"
+  # A cross-build for this target is authoritative. Fallback binaries may be
+  # older prebuilt artifacts and must never overwrite the current source build.
+  if [[ -x "$dst" ]]; then
+    echo "hub platform binary: $tag/$exe_name (destination already built)"
+    return 0
+  fi
   # Cross-build already places the binary in its destination; copying a file
   # onto itself makes `cp` fail ("один и тот же файл") under errexit. Skip.
   if [[ "$src" -ef "$dst" ]]; then

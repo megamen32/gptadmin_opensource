@@ -114,3 +114,12 @@ def test_launchctl_kickstart_cmd_system_domain_skips_uid():
     cmd = _launchctl_kickstart_cmd(LABEL, is_user=False)
 
     assert cmd == ["launchctl", "kickstart", "-k", f"system/{LABEL}"], cmd
+
+
+def test_user_launchd_service_code_falls_back_to_ssh_user_domain():
+    """Headless user installs must not require a GUI login session."""
+    source = (Path(__file__).parents[1] / "cli.py").read_text(encoding="utf-8")
+
+    assert "def _launchd_domains()" in source
+    assert "fallback = f'user/{_launchd_uid()}'" in source
+    assert "for domain in domains:" in source

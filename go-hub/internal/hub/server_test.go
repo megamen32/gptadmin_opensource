@@ -39,6 +39,16 @@ func TestListServersUsesHubKind(t *testing.T) {
 	}
 }
 
+func TestAllowedRedirectAcceptsCustomGPTActionsCallback(t *testing.T) {
+	s := &Server{}
+	if !s.allowedRedirect("https://chat.openai.com/aip/g-776f9cc89b61906bdbcc3067b9b90b32ffb92a6f/oauth/callback") {
+		t.Fatal("Custom GPT Actions callback must be accepted")
+	}
+	if s.allowedRedirect("https://chat.openai.com/aip/not-a-gpt/oauth/callback") {
+		t.Fatal("non-GPT OpenAI callback must be rejected")
+	}
+}
+
 func TestDetailedDiscoveryRedactsSensitiveAgentMetadata(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
 	s.mu.Lock()
@@ -310,7 +320,12 @@ func postHubJSON(t *testing.T, s *Server, path, token, payload string) map[strin
 
 func postMCPRPC(t *testing.T, s *Server, payload string) map[string]any {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(payload))
+	return postMCPRPCPath(t, s, "/mcp", payload)
+}
+
+func postMCPRPCPath(t *testing.T, s *Server, path, payload string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
@@ -462,9 +477,7 @@ func TestLegacyCTLRemainsValidAfterMigrationDeadline(t *testing.T) {
 
 func TestShellTokenCanDownloadArtifactAfterLegacyDeadline(t *testing.T) {
 	artifactDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(artifactDir, "gptadmin-shellmcp.tar.gz"), []byte("artifact"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeShellMCPArtifactFixture(t, artifactDir, []byte("artifact"), 141, "artifact-commit")
 	s := New(Config{
 		CtlToken:               "legacy-ctl",
 		ShellToken:             "shell-agent",
@@ -479,6 +492,69 @@ func TestShellTokenCanDownloadArtifactAfterLegacyDeadline(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestShellMCPArtifactManifestUsesNumericArtifactMetadata(t *testing.T) {
+	artifactDir := t.TempDir()
+	wantSHA := writeShellMCPArtifactFixture(t, artifactDir, []byte("artifact-bound-to-metadata"), 141, "artifact-commit")
+	s := New(Config{CtlToken: "ctl", ArtifactDir: artifactDir})
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/shellmcp.json", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest struct {
+		BuildVersion int    `json:"build_version"`
+		GitCommit    string `json:"git_commit"`
+		SHA256       string `json:"sha256"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("decode numeric manifest: %v; body=%s", err, rec.Body.String())
+	}
+	if manifest.BuildVersion != 141 || manifest.GitCommit != "artifact-commit" || manifest.SHA256 != wantSHA {
+		t.Fatalf("manifest is not bound to artifact metadata: %+v", manifest)
+	}
+}
+
+func TestShellMCPArtifactManifestRejectsMismatchedMetadataDigest(t *testing.T) {
+	artifactDir := t.TempDir()
+	writeShellMCPArtifactFixture(t, artifactDir, []byte("artifact-bound-to-metadata"), 141, "artifact-commit")
+	metadata := []byte(`{"component":"shellmcp","build_version":141,"git_commit":"artifact-commit","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}`)
+	if err := os.WriteFile(filepath.Join(artifactDir, "gptadmin-shellmcp.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{CtlToken: "ctl", ArtifactDir: artifactDir})
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/shellmcp.json", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "does not match archive") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func writeShellMCPArtifactFixture(t *testing.T, artifactDir string, payload []byte, buildVersion int, gitCommit string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(artifactDir, "gptadmin-shellmcp.tar.gz"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	digest := fmt.Sprintf("%x", sum[:])
+	metadata, err := json.Marshal(map[string]any{
+		"component":     "shellmcp",
+		"build_version": buildVersion,
+		"git_commit":    gitCommit,
+		"sha256":        digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "gptadmin-shellmcp.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }
 
 func TestOAuthRotationPersistsWithoutReturningSecret(t *testing.T) {
@@ -1368,10 +1444,7 @@ func TestCompatibilityEndpoints(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	artifactPath := filepath.Join(artifactDir, "gptadmin-shellmcp.tar.gz")
-	if err := os.WriteFile(artifactPath, []byte("dummy artifact"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeShellMCPArtifactFixture(t, artifactDir, []byte("dummy artifact"), 141, "artifact-commit")
 	androidBinary := filepath.Join(artifactDir, "android-arm64", "bin", "shellmcp")
 	if err := os.MkdirAll(filepath.Dir(androidBinary), 0o755); err != nil {
 		t.Fatal(err)
@@ -1768,8 +1841,6 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	expectedToolNames := map[string]bool{
 		"ui": true, "resource_receipt": true, "discover": true, "demo": true, "approve_pending_server": true,
 		"schema": true, "inspect": true, "execute": true, "job": true,
-		"webhook_routes_list": true, "webhook_route_create": true, "webhook_route_replace": true,
-		"webhook_route_delete": true, "webhook_job_get": true,
 		"secret_request": true, "secret_status": true,
 	}
 	renderTools := 0
@@ -1827,7 +1898,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 			}
 		}
 	}
-	if len(tools) != 16 || len(expectedToolNames) != 0 {
+	if len(tools) != 11 || len(expectedToolNames) != 0 {
 		t.Fatalf("got Apps SDK tools=%d missing=%v, want exact capability set", len(tools), expectedToolNames)
 	}
 	if renderTools != 1 {
@@ -2041,6 +2112,37 @@ func TestJWTRequestContextRejectsWrongAudienceAndExpiredConnection(t *testing.T)
 	s.Handler().ServeHTTP(adminResponse, adminRequest)
 	if adminResponse.Code != http.StatusForbidden {
 		t.Fatalf("MCP JWT was forwarded to admin API: status=%d body=%s", adminResponse.Code, adminResponse.Body.String())
+	}
+}
+
+func TestJWTRequestRejectsWrongIssuerAndNormalizesConfiguredOrigin(t *testing.T) {
+	s := New(Config{OAuthClientSecret: "oauth-secret", PublicOrigin: " HTTPS://Hub.Example/// ", MCPResource: " HTTPS://Hub.Example/// "})
+	if got := s.origin(nil); got != "https://hub.example" {
+		t.Fatalf("normalized origin=%q", got)
+	}
+	if got := s.resource(nil); got != "https://hub.example" {
+		t.Fatalf("normalized resource=%q", got)
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9001/mcp-relay/servers", nil)
+	wrongIssuer, err := s.signJWT(map[string]any{
+		"sub": "test", "iss": "https://other.example", "aud": "https://hub.example", "resource": "https://hub.example",
+		"scope": "gptadmin.read", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyJWTForRequest(req, wrongIssuer); err == nil || !strings.Contains(err.Error(), "issuer") {
+		t.Fatalf("wrong issuer was accepted: %v", err)
+	}
+	normalizedClaims, err := s.signJWT(map[string]any{
+		"sub": "test", "iss": "HTTPS://HUB.EXAMPLE///", "aud": "HTTPS://HUB.EXAMPLE///", "resource": "HTTPS://HUB.EXAMPLE///",
+		"scope": "gptadmin.read", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyJWTForRequest(req, normalizedClaims); err != nil {
+		t.Fatalf("equivalent normalized origin rejected: %v", err)
 	}
 }
 

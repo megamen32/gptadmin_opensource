@@ -40,6 +40,45 @@ connectivity, file restore, profile mutation or external MCP-client
 certification; those remain separate gates and must be recorded with their own
 immutable evidence.
 
+## Custom GPT browser contract
+
+`tests/test_custom_gpt_browser_contract.py` is the release gate for the
+Actions-specific contract. It creates a disposable Hub and checks the same
+three connection paths a Custom GPT requires:
+
+1. the imported `/actions/openapi.yaml` has one Bearer scheme and contains no
+   optional proxy/webhook operations or unsupported approval headers;
+2. a readonly Bearer issued by the Hub completes `GET /mcp-relay/servers`;
+3. a real Chromium page submits the OAuth authorization form, returns through
+   an Authorization Code callback, exchanges the code, and completes that same
+   harmless discovery request. The test covers both PKCE-capable clients and
+   the no-PKCE Custom GPT compatibility path, which is restricted to the exact
+   ChatGPT Actions callback profile.
+
+Run it locally with an isolated browser:
+
+```bash
+GPTADMIN_BROWSER_TESTS=1 \
+  pytest -q tests/test_custom_gpt_browser_contract.py
+```
+
+To use a BrowserOS-managed Mac without using a personal editor session, expose
+the Mac's Chrome CDP port through an authenticated SSH tunnel and make the
+one-shot Hub reachable from that Mac. The Hub address is a disposable test
+listener, never the production Hub URL or administrator credential:
+
+```bash
+GPTADMIN_BROWSER_TESTS=1 \
+GPTADMIN_BROWSER_CDP_URL=http://127.0.0.1:19102 \
+GPTADMIN_BROWSER_HUB_HOST=192.168.2.100 \
+  pytest -q tests/test_custom_gpt_browser_contract.py
+```
+
+The test does not create or mutate a real Custom GPT draft. A final release
+that claims ChatGPT importer certification must additionally retain a redacted
+artifact from a dedicated test draft importing a disposable public test-Hub
+URL. Do not reuse the owner’s GPT or a production public Hub for that check.
+
 ## Deployment runtime diagnosis
 
 Before changing a deployed host, use the read-only runtime probe to emit a
