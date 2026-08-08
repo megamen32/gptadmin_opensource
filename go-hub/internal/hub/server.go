@@ -959,6 +959,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
+	mux.HandleFunc("/admin/api/connection-debug", s.requireCtl(s.connectionDebug))
 	mux.HandleFunc("/admin/api/approvals", s.requireCtl(s.adminApprovals))
 	mux.HandleFunc("/admin/api/approvals/", s.requireCtl(s.adminApproval))
 	mux.HandleFunc("/admin/api/clients", s.requireCtl(s.adminClients))
@@ -2751,7 +2752,7 @@ func redactPublicMetadata(value any) any {
 
 func isSensitiveMetadataKey(key string) bool {
 	lower := strings.ToLower(key)
-	for _, marker := range []string{"token", "secret", "password", "authorization", "credential", "api_key"} {
+	for _, marker := range []string{"token", "secret", "password", "authorization", "credential", "bearer", "api_key"} {
 		if strings.Contains(lower, marker) {
 			return true
 		}

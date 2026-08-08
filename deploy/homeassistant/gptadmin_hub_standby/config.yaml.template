@@ -42,6 +42,7 @@ options:
   availability_monitor_mcp_bearer: "__GPTADMIN_AVAILABILITY_MONITOR_MCP_BEARER__"
   oauth_permissive_redirects: "__OAUTH_PERMISSIVE_REDIRECTS__"
   oauth_permissive_resources: "__OAUTH_PERMISSIVE_RESOURCES__"
+  relax_auth_checks: "__GPTADMIN_RELAX_AUTH_CHECKS__"
   mcp_relay_default_timeout: "__MCP_RELAY_DEFAULT_TIMEOUT__"
   mcp_relay_poll_max_timeout: "__MCP_RELAY_POLL_MAX_TIMEOUT__"
   failover_frp_token: "__FAILOVER_FRP_TOKEN__"
@@ -72,6 +73,7 @@ schema:
   availability_monitor_mcp_bearer: password
   oauth_permissive_redirects: str
   oauth_permissive_resources: str
+  relax_auth_checks: str
   mcp_relay_default_timeout: str
   mcp_relay_poll_max_timeout: str
   failover_frp_token: password

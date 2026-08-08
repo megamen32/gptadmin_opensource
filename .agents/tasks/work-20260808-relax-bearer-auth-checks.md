@@ -42,4 +42,14 @@
 
 ## Rollout status
 
-Production rollout requested by user on 2026-08-08: commit only the scoped auth-flag source/tests/docs/task files, build and test, enable `GPTADMIN_RELAX_AUTH_CHECKS=1` on the production Hub, restart, then run plugin and direct bearer canaries. Preserve unrelated dirty work.
+Production rollout completed on 2026-08-08: commits `1b58f74` (runtime flag/tests) and `df30ea5` (docs mirror/release metadata) pushed to `origin/main`; GitHub Build/Sync/Release `31254337241` passed all required jobs. Server-100 is on build 146 / `1b58f74` with `GPTADMIN_RELAX_AUTH_CHECKS=1`. HAOS standby image was backed up as `local/aarch64-addon-gptadmin_hub_standby:backup-c970-20260808`, updated to build 146 / `1b58f74`, configured with the same custom MCP bearer and `relax_auth_checks=1`, and restarted.
+
+## Production canary
+
+- Canonical `u-f1102930.t.gptadmin.bezrabotnyi.com/version`: HTTP 200, build 146 / `1b58f74`.
+- Canonical OAuth authorize with the admin password and PKCE request: HTTP 302 with authorization code redirect.
+- Canonical Bearer `/mcp-relay/servers` and `/mcp`: HTTP 200.
+- GPTADMIN plugin `discover`: passed; Hub online and BrowserClaw online.
+- GPTADMIN plugin `shell_exec(uptime)` on `shell:roomhacker-server-100`: completed, returncode 0.
+- GPTADMIN plugin BrowserClaw `tabs(new example.com)` returned Example Domain snapshot; `tabs(close)` completed successfully.
+- The Bearer used for the canary was supplied in chat and must be rotated after handoff.
