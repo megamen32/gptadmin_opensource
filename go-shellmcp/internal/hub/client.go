@@ -96,23 +96,24 @@ func newHTTPClient(dnsServer, resolveTo string) *http.Client {
 }
 
 type Beat struct {
-	Name          string `json:"name"`
-	ServerID      string `json:"server_id"`
-	PublicKey     string `json:"public_key"`
-	Fingerprint   string `json:"fingerprint"`
-	BaseURL       string `json:"base_url"`
-	Cores         int    `json:"cores"`
-	MemMB         int64  `json:"mem_mb"`
-	Time          int64  `json:"time"`
-	Mode          string `json:"mode"`
-	TransportRole string `json:"transport_role"`
-	Backend       string `json:"backend"`
-	OS            string `json:"os"`
-	BuildVersion  int    `json:"build_version"`
-	GitCommit     string `json:"git_commit"`
-	DefaultUser   string `json:"default_user,omitempty"`
-	DefaultHome   string `json:"default_home,omitempty"`
-	DefaultCwd    string `json:"default_cwd,omitempty"`
+	Name          string           `json:"name"`
+	ServerID      string           `json:"server_id"`
+	PublicKey     string           `json:"public_key"`
+	Fingerprint   string           `json:"fingerprint"`
+	BaseURL       string           `json:"base_url"`
+	Cores         int              `json:"cores"`
+	MemMB         int64            `json:"mem_mb"`
+	Time          int64            `json:"time"`
+	Mode          string           `json:"mode"`
+	TransportRole string           `json:"transport_role"`
+	Backend       string           `json:"backend"`
+	OS            string           `json:"os"`
+	BuildVersion  int              `json:"build_version"`
+	GitCommit     string           `json:"git_commit"`
+	DefaultUser   string           `json:"default_user,omitempty"`
+	DefaultHome   string           `json:"default_home,omitempty"`
+	DefaultCwd    string           `json:"default_cwd,omitempty"`
+	MCPAgents     []map[string]any `json:"mcp_agents,omitempty"`
 }
 
 type QueueJob struct {

@@ -40,6 +40,14 @@ func newTestManager(t *testing.T, refs ...string) *Manager {
 	return New(agents)
 }
 
+func TestMergeChildEnvAddsMacOSPackagePaths(t *testing.T) {
+	env := mergeChildEnv([]string{"PATH=/usr/bin:/bin", "LANG=ru_RU.UTF-8"}, nil, "darwin")
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin") {
+		t.Fatalf("child PATH does not include common macOS package paths: %q", env)
+	}
+}
+
 func TestLoadAgents_ArraySchema(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agents.json")

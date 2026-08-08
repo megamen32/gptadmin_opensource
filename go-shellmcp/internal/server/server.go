@@ -14,6 +14,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/audit"
@@ -224,6 +226,12 @@ type Server struct {
 	sshClient    *sshexec.Client
 	childMCP     *mcpclient.Client
 	storageLimit int64
+	mcpHealth    atomic.Value // map[string]map[string]any
+	healthBusy   atomic.Bool
+	healthMu     sync.Mutex
+	healthCancel context.CancelFunc
+	healthWG     sync.WaitGroup
+	healthClosed bool
 }
 
 func New(cfg Config) *Server {
@@ -317,6 +325,7 @@ func New(cfg Config) *Server {
 		childMCP:     childMCP,
 		storageLimit: cfg.StorageLimitBytes,
 	}
+	server.mcpHealth.Store(map[string]map[string]any{})
 	if auditLog != nil {
 		auditLog.SetAfterWrite(func() {
 			protected := map[string]bool{}
@@ -355,6 +364,13 @@ func (s *Server) enforceStorage(protected map[string]bool) error {
 // Safe to call multiple times and idempotent w.r.t. nil resources.
 func (s *Server) Close() error {
 	var closeErr error
+	s.healthMu.Lock()
+	s.healthClosed = true
+	if s.healthCancel != nil {
+		s.healthCancel()
+	}
+	s.healthMu.Unlock()
+	s.healthWG.Wait()
 	if s.auditLog != nil {
 		closeErr = s.auditLog.Close()
 	}
@@ -871,11 +887,139 @@ func (s *Server) heartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		s.sendHeartbeat(ctx)
+		s.startLazyMCPHealthRefresh(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+func (s *Server) startLazyMCPHealthRefresh(ctx context.Context) {
+	if !s.healthBusy.CompareAndSwap(false, true) {
+		return
+	}
+	refreshCtx, cancel := context.WithCancel(ctx)
+	s.healthMu.Lock()
+	if s.healthClosed {
+		s.healthMu.Unlock()
+		cancel()
+		s.healthBusy.Store(false)
+		return
+	}
+	s.healthCancel = cancel
+	s.healthWG.Add(1)
+	s.healthMu.Unlock()
+	go func() {
+		defer func() {
+			cancel()
+			s.healthMu.Lock()
+			s.healthCancel = nil
+			s.healthMu.Unlock()
+			s.healthWG.Done()
+			s.healthBusy.Store(false)
+		}()
+		s.refreshMCPHealth(refreshCtx)
+	}()
+}
+
+func (s *Server) refreshMCPHealth(ctx context.Context) {
+	if s.supervisor == nil || s.childMCP == nil {
+		return
+	}
+	updated := map[string]map[string]any{}
+	for _, agent := range s.supervisor.Agents() {
+		if !agent.Enabled {
+			updated[agent.Ref] = map[string]any{
+				"process":  map[string]any{"state": "disabled", "pid": nil, "started_at": nil, "exited_at": nil, "exit_code": nil},
+				"protocol": map[string]any{"state": "disabled", "last_checked_at": nil, "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
+			}
+			continue
+		}
+		before := s.childMCP.Status(agent.Ref)
+		if agent.Transport == "stdio" && !before.Running {
+			processState := "stopped"
+			if !before.ExitedAt.IsZero() {
+				processState = "exited"
+			}
+			updated[agent.Ref] = map[string]any{
+				"process": map[string]any{
+					"state":      processState,
+					"pid":        nil,
+					"started_at": nullableTime(before.StartedAt),
+					"exited_at":  nullableTime(before.ExitedAt),
+					"exit_code":  exitCode(before),
+				},
+				"protocol": map[string]any{"state": "unknown", "last_checked_at": time.Now().UTC().Format(time.RFC3339Nano), "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
+			}
+			continue
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		tools, err := s.childMCP.ListTools(checkCtx, agent)
+		cancel()
+		status := s.childMCP.Status(agent.Ref)
+		processState := "stopped"
+		if agent.Transport != "stdio" {
+			processState = "remote"
+		} else if status.Running {
+			processState = "running"
+		} else if !status.ExitedAt.IsZero() {
+			processState = "exited"
+		}
+		protocol := map[string]any{
+			"state":             "ready",
+			"last_checked_at":   time.Now().UTC().Format(time.RFC3339Nano),
+			"last_handshake_at": time.Now().UTC().Format(time.RFC3339Nano),
+			"tools_count":       nil,
+			"last_error":        nil,
+		}
+		if err != nil {
+			protocol["state"] = "failed"
+			protocol["last_handshake_at"] = nil
+			protocol["last_error"] = "health check failed"
+		} else {
+			protocol["tools_count"] = len(tools)
+		}
+		updated[agent.Ref] = map[string]any{
+			"process": map[string]any{
+				"state":      processState,
+				"pid":        nullableInt(status.PID),
+				"started_at": nullableTime(status.StartedAt),
+				"exited_at":  nullableTime(status.ExitedAt),
+				"exit_code":  exitCode(status),
+			},
+			"protocol": protocol,
+		}
+	}
+	s.mcpHealth.Store(updated)
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func nullableInt(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func exitCode(status mcpclient.RuntimeStatus) any {
+	if status.ExitedAt.IsZero() {
+		return nil
+	}
+	return status.ExitCode
+}
+
+func unknownMCPHealth() map[string]any {
+	return map[string]any{
+		"process":  map[string]any{"state": "unknown", "pid": nil, "started_at": nil, "exited_at": nil, "exit_code": nil},
+		"protocol": map[string]any{"state": "unknown", "last_checked_at": nil, "last_handshake_at": nil, "tools_count": nil, "last_error": nil},
 	}
 }
 func (s *Server) sendHeartbeat(ctx context.Context) {
@@ -902,6 +1046,7 @@ func (s *Server) newBeat() hub.Beat {
 	beat.DefaultUser = s.cfg.DefaultUser
 	beat.DefaultHome = s.cfg.DefaultHome
 	beat.DefaultCwd = s.cfg.DefaultCwd
+	beat.MCPAgents = s.mcpAgentsForCapabilities()
 	return beat
 }
 

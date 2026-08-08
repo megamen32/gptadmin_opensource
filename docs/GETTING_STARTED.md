@@ -1,6 +1,6 @@
 # Getting Started
 
-Install GPT‑Админ, connect your AI, run your first command — in 5 minutes.
+Install GPT‑Админ, connect your AI, run your first command — in a few minutes.
 
 ## 1. Install the hub
 
@@ -17,7 +17,7 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
 The installer creates the Hub, starts a Tunnel when needed, and prints one
-**Hub URL**. Keep that URL: it is the normal connection point for GPTAdmin.
+**Hub URL**. Keep that URL: it is the place you will connect from.
 
 > No domain needed: choose the auto-tunnel option (FRP or Cloudflare) and you
 > get a public URL. See [Tunnels](./TUNNELS_DOCS.md).
@@ -34,19 +34,13 @@ Pick "agent only" when prompted. The agent registers with your hub automatically
 
 ## 3. Connect your AI
 
-The installer and every `gptadmin update` automatically register the Hub as an
-MCP server in locally installed **Codex**, **Claude Code**, **OpenCode**, and
-**VS Code**. No URL, transport mode, or bearer token needs to be copied into
-those clients. The registration uses the Hub's public URL, even when the local
-agent uses a loopback service URL.
-
-To register a client installed after setup, run:
+If the client already speaks MCP, register the Hub once:
 
 ```bash
 gptadmin connect-mcp
 ```
 
-For other clients, pick an adapter (you can use all of them with the same Hub):
+For other clients, pick an adapter:
 
 - **Claude Desktop / other MCP clients** → [MCP client setup](./ADAPTERS.md#1-mcp-client)
 - **DeepSeek / Qwen / Alice / GigaChat** (free web chats) → [Browser extension](./ADAPTERS.md#2-browser-extension)
@@ -63,6 +57,10 @@ Ask your AI in plain language:
 
 The AI calls the hub, the hub routes to the agent, the agent runs the command
 and returns real output. The AI reads it and reports back.
+
+If you are wiring a Custom GPT, import the generated schema URL from the
+Actions section in [Adapters](./ADAPTERS.md#3-openai-action), then choose
+Bearer or OAuth there. Never paste internal service secrets into the GPT.
 
 ## Show connection URLs
 
@@ -85,6 +83,11 @@ sudo gptadmin urls --json  # machine-readable output
 - [Configuration](./CONFIGURATION.md) — tune env vars, auth, OAuth
 - [Security](./SECURITY_DOCS.md) — production hardening
 - [Web panel](./HUB.md#web-panel-admin) — manage from the browser
+
+Optional extras:
+
+- [MCP Proxy Relay](./MCP_PROXY_RELAY.md)
+- [Webhooks](./WEBHOOKS.md)
 
 ## Troubleshooting
 

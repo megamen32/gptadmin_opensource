@@ -32,9 +32,10 @@ a paid API. GPT‑Админ is different:
   Plug in chrome-devtools, openmemory, or any other MCP too.
 - **Real execution** — not "here's the command, copy it". The agent reads
   state, runs commands, validates, and reports actual output.
-- **Webhook-to-agent automation** — route signed Notify or monitoring events
-  to a fixed ShellMCP/MCP target, create or resume a named Agent Herder session,
-  and manage the same routes from the web console, MCP, or Custom GPT Actions.
+- **Optional relay and webhook capabilities** — when you need them, GPTAdmin
+  can expose a single MCP server or route webhook events through dedicated
+  documented surfaces. Start from the quick path below; see the linked docs
+  only if you need those extra capabilities.
 
 ## How it works
 
@@ -66,16 +67,27 @@ curl -s https://became.bezrabotnyi.com/install.sh | bash
 iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
-The installer prints your **Hub URL** and opens the connection flow. Do not
-copy a legacy bearer token; new connections use AdminPassword/OAuth. An
-existing compatibility credential remains valid until its owner explicitly
-rotates or removes it.
+The installer prints one **Hub URL**. Open that URL, then pick the shortest
+path for the client you want:
 
-OAuth connections request `offline_access` and receive a rotating refresh
-credential, so the client can reconnect after an access-token expiry or Hub
-restart. If a connection was created before refresh support was deployed,
-complete the OAuth connection flow once more; that old session cannot be
-retrofitted with a refresh credential.
+```text
+ChatGPT Custom GPT → import https://your-hub.example/actions/openapi.yaml
+```
+
+That Actions file is generated from the Hub's current MCP tool list. It is the
+schema the GPT should import; you do not hand-write it.
+
+For authentication, choose one of these two paths:
+
+```text
+Bearer → paste only a scoped token value issued by the Hub
+OAuth → use the Hub authorize/token flow from the Hub URL
+```
+
+An existing legacy compatibility token remains valid until its owner explicitly rotates or removes it.
+
+Never paste an internal service secret into a GPT or client. If you need a
+different adapter, use the dedicated docs below.
 
 ```bash
 # 2. Connect your AI — pick one adapter:
@@ -104,7 +116,7 @@ Full per-adapter instructions: **https://gptadmin.bezrabotnyi.com/#/docs**
 
 | Adapter | For | How |
 |---------|-----|-----|
-| **OpenAI Action** | ChatGPT, Open WebUI | Create a Custom GPT / add OpenAPI endpoint, Bearer token. No Codex limits. |
+| **OpenAI Action** | ChatGPT, Open WebUI | Import the generated OpenAPI schema, then choose Bearer or OAuth. No Codex limits. |
 | **MCP remote SSE** | Claude Desktop, Codex, OpenCode | Hub is an MCP server (Streamable HTTP). Add to `claude_desktop_config.json`. |
 | **Browser extension** | DeepSeek, Qwen, Alice, GigaChat, ChatGPT (free) | Userscript (Tampermonkey/Firefox) adds MCP buttons to web chat UIs. No paid API. |
 
@@ -194,11 +206,9 @@ sudo gptadmin urls --json
 
 The default output focuses on the hub and ShellMCP endpoints. `--all` also includes every registered MCP server such as OpenMemory, FileShare and Chrome DevTools.
 
-## Secure MCP proxy/relay
+## Optional capabilities
 
-GPTAdmin can be used as a secured gateway in front of any registered MCP server. Each server gets two authenticated public faces:
+If you later need a single-server relay or webhook ingress, use the dedicated docs:
 
-- an MCP-compatible endpoint: `https://your-hub/server/{slug}/mcp`;
-- an OpenAPI Action schema for Custom GPTs: `https://your-hub/server/{slug}/actions/openapi.yaml`.
-
-Use this when a GPT should see only one tool/server, for example OpenMemory, instead of the full GPTAdmin relay surface. The OpenAPI schema is generated automatically from that server's MCP `tools/list` response. See [MCP Proxy Relay](./docs/MCP_PROXY_RELAY.md).
+- [MCP Proxy Relay](./docs/MCP_PROXY_RELAY.md)
+- [Webhooks](./docs/WEBHOOKS.md)

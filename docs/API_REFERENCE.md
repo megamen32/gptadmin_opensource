@@ -45,10 +45,15 @@ the resolved value, and readonly profiles cannot access these operations.
 | `POST /mcp` | OAuth bearer |
 | `POST /heartbeat` | Bearer `SHELLMCP_TOKEN` |
 | `GET /servers` | Bearer `CTL_TOKEN` |
-| `GET /api.json` | none |
-| `GET /openapi.yaml` | none |
+| `GET /actions/openapi.yaml` | none |
+| `GET /server/{slug}/actions/openapi.yaml` | none |
+| `GET /api.json` | none (legacy alias; not the Custom GPT path) |
+| `GET /openapi.yaml` | none (legacy alias; not the Custom GPT path) |
 | `POST /oauth/authorize` | `ADMIN_PASSWORD` form |
 | `POST /oauth/token` | client credentials |
+
+Custom GPT imports use `/actions/openapi.yaml` or `/server/{slug}/actions/openapi.yaml`;
+relay calls go through `/mcp-relay/*`. `CTL_TOKEN` is legacy/admin only.
 
 See [Configuration → Auth model](./CONFIGURATION.md#auth-model).
 
@@ -56,7 +61,7 @@ See [Configuration → Auth model](./CONFIGURATION.md#auth-model).
 
 ## Admin API (`/admin/api/*`)
 
-Bearer auth with `CTL_TOKEN`. Used by the web panel and Custom GPT actions.
+Bearer auth with `CTL_TOKEN`. Legacy admin/web-panel migration detail only.
 
 ### `GET /servers`
 
@@ -104,7 +109,10 @@ Create a managed backup of a file before editing.
 
 CPU, RAM, disk, uptime for a target agent.
 
-Full schema: import `https://became.bezrabotnyi.com/api.json` into your client.
+Legacy import schema: `https://became.bezrabotnyi.com/api.json` or
+`https://became.bezrabotnyi.com/openapi.yaml`. Custom GPT import uses
+`/actions/openapi.yaml` or `/server/{slug}/actions/openapi.yaml`, not these
+legacy aliases.
 
 ---
 
@@ -158,10 +166,12 @@ See [Configuration → OAuth](./CONFIGURATION.md#oauth).
 
 ## OpenAPI schema
 
-- `GET /api.json` — JSON schema (for Custom GPT / Open WebUI import)
-- `GET /openapi.yaml` — YAML schema
+- Canonical Custom GPT import: `GET /actions/openapi.yaml`
+- Per-server import: `GET /server/{slug}/actions/openapi.yaml`
+- Legacy aliases: `GET /api.json` and `GET /openapi.yaml`
 
-These are public (no auth) so Custom GPT can import by URL.
+The canonical import URLs are public (no auth). The legacy aliases stay public
+for migration, but they are not the Custom GPT path.
 
 ## Background tasks
 
@@ -209,17 +219,20 @@ The Action schema is generated from the selected MCP server's `tools/list`. Each
 
 ## Optional virtual MCP management
 
-The Hub keeps `network-proxy` and `webhooks` disabled unless an operator
-enables them. They are first-class per-server MCPs, not operations in the
-default Custom GPT schema.
+`network-proxy` and `webhooks` are off by default. The default `/actions/openapi.yaml` stays relay-only and excludes both.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/admin/api/virtual-mcps` | List both virtual MCPs and their enabled state. |
+| `GET` | `/admin/api/virtual-mcps` | Check both states in one call. |
 | `PUT` | `/admin/api/virtual-mcps/{id}` | Persist `{"enabled": true|false}` for `network-proxy` or `webhooks`. |
 
-An enabled virtual MCP is listed by `GET /mcp-relay/servers` and uses the
-standard `/server/{slug}/mcp` and `/server/{slug}/actions/openapi.yaml` routes.
+`network-proxy` gives bounded Network Tunnel tools: `network_proxy_request`, `network_proxy_approve`, `network_proxy_issue`, `network_proxy_open`, `network_proxy_status`, `network_proxy_revoke`.
+
+`webhooks` gives secret-free webhook route CRUD and job lookup: `webhook_routes_list`, `webhook_route_create`, `webhook_route_replace`, `webhook_route_delete`, `webhook_job_get`.
+
+Enablement check: `GET /mcp-relay/servers` shows only enabled virtual MCPs.
+
+Use after enablement: `/server/{slug}/mcp` and `/server/{slug}/actions/openapi.yaml`.
 
 ```json
 {

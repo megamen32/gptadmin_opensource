@@ -39,6 +39,154 @@ func TestListServersUsesHubKind(t *testing.T) {
 	}
 }
 
+func TestDiscoveryPublishesShellMCPChildAsDirectServer(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", PublicOrigin: "https://hub.example", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	s.mu.Lock()
+	s.agents["shell:mac-mini-2012.lan"] = &Agent{
+		AgentID: "shell:mac-mini-2012.lan",
+		Name:    "Shell: mac-mini-2012.lan",
+		Kind:    "virtual_shell",
+		Status:  "online",
+		Meta: map[string]any{
+			"mcp_agents": []any{
+				map[string]any{"ref": "BrowserClaw", "name": "BrowserClaw local on Mac mini", "transport": "stdio", "enabled": true},
+				map[string]any{"ref": "DisabledMCP", "name": "Disabled MCP", "transport": "stdio", "enabled": false},
+			},
+		},
+	}
+	s.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp-relay/servers?detail=full", nil)
+	req.Header.Set("Authorization", "Bearer ctl")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "browserclaw") || !strings.Contains(w.Body.String(), "/server/browserclaw/mcp") {
+		t.Fatalf("BrowserClaw direct endpoint missing from discovery: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"server_id":"mcp:shell:mac-mini-2012.lan:DisabledMCP"`) || strings.Contains(w.Body.String(), `"public_mcp_slug":"disabled-mcp"`) {
+		t.Fatalf("disabled child MCP was published: %s", w.Body.String())
+	}
+	cardReq := httptest.NewRequest(http.MethodGet, "/server/browserclaw/mcp", nil)
+	cardReq.Header.Set("Authorization", "Bearer ctl")
+	cardW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(cardW, cardReq)
+	if cardW.Code != http.StatusOK || !strings.Contains(cardW.Body.String(), `"slug":"browserclaw"`) {
+		t.Fatalf("BrowserClaw direct card mismatch: status=%d body=%s", cardW.Code, cardW.Body.String())
+	}
+}
+
+func TestDirectChildMCPToolsListRoutesThroughParentShell(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ShellToken: "shell", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	s.mu.Lock()
+	s.agents["shell:mac-mini-2012.lan"] = &Agent{
+		AgentID: "shell:mac-mini-2012.lan",
+		Name:    "Shell: mac-mini-2012.lan",
+		Kind:    "virtual_shell",
+		Status:  "online",
+		Meta: map[string]any{"mcp_agents": []any{map[string]any{
+			"ref": "BrowserClaw", "name": "BrowserClaw", "transport": "stdio", "enabled": true,
+		}}},
+	}
+	s.mu.Unlock()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/server/browserclaw/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+		req.Header.Set("Authorization", "Bearer ctl")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		done <- w
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	poll := httptest.NewRequest(http.MethodGet, "/queue/mac-mini-2012.lan?timeout=1", nil)
+	poll.Header.Set("Authorization", "Bearer shell")
+	pollW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(pollW, poll)
+	if pollW.Code != http.StatusOK {
+		t.Fatalf("poll status=%d body=%s", pollW.Code, pollW.Body.String())
+	}
+	var job map[string]any
+	if err := json.Unmarshal(pollW.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := job["id"].(string)
+	if jobID == "" || job["tool_name"] != "mcp_tools" {
+		t.Fatalf("unexpected parent job=%v", job)
+	}
+	result := `{"content":[{"type":"text","text":"Child MCP tools"}],"structuredContent":{"result":{"structuredContent":{"ref":"BrowserClaw","tools":[{"name":"tabs"}]}}}}`
+	resultReq := httptest.NewRequest(http.MethodPost, "/queue/mac-mini-2012.lan/result", strings.NewReader(`{"id":"`+jobID+`","result":`+result+`}`))
+	resultReq.Header.Set("Authorization", "Bearer shell")
+	resultW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(resultW, resultReq)
+	if resultW.Code != http.StatusOK {
+		t.Fatalf("result status=%d body=%s", resultW.Code, resultW.Body.String())
+	}
+
+	select {
+	case response := <-done:
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"tabs"`) {
+			t.Fatalf("direct child response status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct child endpoint did not complete")
+	}
+}
+
+func TestDirectChildMCPToolCallRoutesThroughParentShell(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ShellToken: "shell", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	s.mu.Lock()
+	s.agents["shell:mac-mini-2012.lan"] = &Agent{
+		AgentID: "shell:mac-mini-2012.lan", Name: "Shell: mac-mini-2012.lan", Kind: "virtual_shell", Status: "online",
+		Meta: map[string]any{"mcp_agents": []any{map[string]any{"ref": "BrowserClaw", "name": "BrowserClaw", "transport": "stdio", "enabled": true}}},
+	}
+	s.mu.Unlock()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/server/browserclaw/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tabs","arguments":{"action":"list"}}}`))
+		req.Header.Set("Authorization", "Bearer ctl")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		done <- w
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	poll := httptest.NewRequest(http.MethodGet, "/queue/mac-mini-2012.lan?timeout=1", nil)
+	poll.Header.Set("Authorization", "Bearer shell")
+	pollW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(pollW, poll)
+	var job map[string]any
+	if pollW.Code != http.StatusOK || json.Unmarshal(pollW.Body.Bytes(), &job) != nil {
+		t.Fatalf("poll status=%d body=%s", pollW.Code, pollW.Body.String())
+	}
+	jobID, _ := job["id"].(string)
+	args := mapValue(job["arguments"])
+	if jobID == "" || job["tool_name"] != "mcp_call" || args["ref"] != "BrowserClaw" || args["name"] != "tabs" {
+		t.Fatalf("unexpected parent mcp_call job=%v", job)
+	}
+	result := `{"content":[{"type":"text","text":"Child MCP tool completed"}],"structuredContent":{"result":{"structuredContent":{"ref":"BrowserClaw","name":"tabs","result":{"content":[{"type":"text","text":"tabs ok"}],"isError":false}}}}}`
+	resultReq := httptest.NewRequest(http.MethodPost, "/queue/mac-mini-2012.lan/result", strings.NewReader(`{"id":"`+jobID+`","result":`+result+`}`))
+	resultReq.Header.Set("Authorization", "Bearer shell")
+	resultW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(resultW, resultReq)
+	if resultW.Code != http.StatusOK {
+		t.Fatalf("result status=%d body=%s", resultW.Code, resultW.Body.String())
+	}
+
+	select {
+	case response := <-done:
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "tabs ok") {
+			t.Fatalf("direct child call status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct child call did not complete")
+	}
+}
+
 func TestAllowedRedirectAcceptsCustomGPTActionsCallback(t *testing.T) {
 	s := &Server{}
 	if !s.allowedRedirect("https://chat.openai.com/aip/g-776f9cc89b61906bdbcc3067b9b90b32ffb92a6f/oauth/callback") {
@@ -672,6 +820,41 @@ func TestAdminIssueMCPTokenUsesPublicOriginAndWorksForRelay(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"servers"`) {
 		t.Fatalf("relay body missing servers: %s", w.Body.String())
+	}
+}
+
+func TestAdminIssueMCPTokenDefaultsToFiveYears(t *testing.T) {
+	s := New(Config{
+		CtlToken:                 "ctl",
+		OAuthClientSecret:        "oauth-secret",
+		PublicOrigin:             "https://hub.example",
+		MCPResource:              "https://hub.example",
+		OAuthPermissiveResources: true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/mcp/issue-token", bytes.NewBufferString(`{"client_id":"five-year-client"}`))
+	req.Header.Set("Authorization", "Bearer ctl")
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("issue status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(5 * 365 * 24 * 60 * 60); body.ExpiresIn != want {
+		t.Fatalf("expires_in=%d, want %d", body.ExpiresIn, want)
+	}
+	claims, err := s.verifyJWT(body.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := int64(intFromAny(claims["exp"])) - int64(intFromAny(claims["iat"])); got != body.ExpiresIn {
+		t.Fatalf("JWT lifetime=%d, want response lifetime=%d", got, body.ExpiresIn)
 	}
 }
 
@@ -2112,6 +2295,44 @@ func TestJWTRequestContextRejectsWrongAudienceAndExpiredConnection(t *testing.T)
 	s.Handler().ServeHTTP(adminResponse, adminRequest)
 	if adminResponse.Code != http.StatusForbidden {
 		t.Fatalf("MCP JWT was forwarded to admin API: status=%d body=%s", adminResponse.Code, adminResponse.Body.String())
+	}
+}
+
+func TestRelaxAuthChecksAcceptsSignedJWTWithLegacyClaims(t *testing.T) {
+	s := New(Config{
+		OAuthClientSecret: "oauth-secret",
+		AdminPassword:     "admin-password",
+		PublicOrigin:      "https://hub.example",
+		MCPResource:       "https://hub.example",
+		RelaxAuthChecks:   true,
+	})
+	req := httptest.NewRequest(http.MethodGet, "https://hub.example/mcp", nil)
+	token, err := s.signJWT(map[string]any{
+		"exp":      time.Now().Add(-time.Hour).Unix(),
+		"iat":      time.Now().Add(-2 * time.Hour).Unix(),
+		"iss":      "https://legacy.example",
+		"aud":      "https://legacy.example",
+		"resource": "https://legacy.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyJWTForRequest(req, token); err != nil {
+		t.Fatalf("relaxed auth rejected a signed legacy JWT: %v", err)
+	}
+	if _, err := s.verifyJWTForRequest(req, "not-a-token"); err == nil {
+		t.Fatal("relaxed auth accepted an unknown key")
+	}
+}
+
+func TestFromEnvReadsRelaxAuthChecksFlag(t *testing.T) {
+	t.Setenv("GPTADMIN_RELAX_AUTH_CHECKS", "1")
+	if cfg := FromEnv(); !cfg.RelaxAuthChecks {
+		t.Fatal("GPTADMIN_RELAX_AUTH_CHECKS=1 was not enabled")
+	}
+	t.Setenv("GPTADMIN_RELAX_AUTH_CHECKS", "0")
+	if cfg := FromEnv(); cfg.RelaxAuthChecks {
+		t.Fatal("GPTADMIN_RELAX_AUTH_CHECKS=0 remained enabled")
 	}
 }
 

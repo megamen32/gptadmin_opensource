@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
 import cli
+
+
+def test_mcp_add_helper_is_non_destructive_and_installs_native_supervisor() -> None:
+    """The helper must not force-overwrite and must use the aggregate supervisor."""
+    helper = (Path(__file__).resolve().parents[1] / "mcp-add").read_text(encoding="utf-8")
+
+    assert 'cli.py mcp add "$name" --install "$@"' in helper
+    assert 'cli.py mcp add "$name" --force' not in helper
+    assert 'cli.py mcp install "$name"' in helper
+
+
+def test_mcp_server_docs_describe_native_supervisor() -> None:
+    """Operator docs must match the current ShellMCP-owned lifecycle."""
+    docs = (Path(__file__).resolve().parents[1] / "MCP_SERVERS.md").read_text(encoding="utf-8")
+
+    assert "aggregate Go ShellMCP supervisor" in docs
+    assert "/etc/gptadmin/mcp-supervisor.json" in docs
+    assert "gptadmin-mcp-*.service" not in docs
 
 
 def test_mcp_token_file_uses_one_time_hub_admin_password(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

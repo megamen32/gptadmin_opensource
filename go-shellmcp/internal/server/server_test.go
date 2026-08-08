@@ -495,6 +495,133 @@ done
 	}
 }
 
+func TestLazyMCPHealthRefreshPublishesReadyProtocolState(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "child.sh")
+	body := `#!/bin/sh
+n=0
+while IFS= read -r line; do
+ case "$line" in *notifications/initialized*) continue ;; esac
+ n=$((n+1))
+ if [ "$n" -eq 1 ]; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}'
+ else
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping"}]}}'
+ fi
+done
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{MCPConfig: filepath.Join(dir, "mcp.json"), SpillDir: t.TempDir()})
+	defer s.Close()
+	if _, err := s.mcpManage(map[string]any{"action": "upsert", "config": map[string]any{"ref": "local", "transport": "stdio", "command": script, "enabled": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.callMCPTool(context.Background(), "mcp_tools", map[string]any{"ref": "local"}); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshMCPHealth(context.Background())
+	agents := s.mcpAgentsForCapabilities()
+	if len(agents) != 1 {
+		t.Fatalf("agents=%#v", agents)
+	}
+	health, _ := agents[0]["health"].(map[string]any)
+	process, _ := health["process"].(map[string]any)
+	if process["state"] != "running" {
+		t.Fatalf("process health=%#v", health)
+	}
+	protocol, _ := health["protocol"].(map[string]any)
+	if protocol["state"] != "ready" || protocol["tools_count"] != 1 || protocol["last_handshake_at"] == nil {
+		t.Fatalf("protocol health=%#v", protocol)
+	}
+}
+
+func TestLazyMCPHealthRefreshLeavesStoppedBrokenChildUnknown(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "broken.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'not-json\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{MCPConfig: filepath.Join(dir, "mcp.json"), SpillDir: t.TempDir()})
+	defer s.Close()
+	if _, err := s.mcpManage(map[string]any{"action": "upsert", "config": map[string]any{"ref": "broken", "transport": "stdio", "command": script, "enabled": true}}); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshMCPHealth(context.Background())
+	health, _ := s.mcpAgentsForCapabilities()[0]["health"].(map[string]any)
+	protocol, _ := health["protocol"].(map[string]any)
+	if protocol["state"] != "unknown" || protocol["last_error"] != nil {
+		t.Fatalf("failure health=%#v", health)
+	}
+}
+
+func TestLazyMCPHealthRefreshDoesNotStartStoppedStdioChild(t *testing.T) {
+	s := New(Config{MCPConfig: filepath.Join(t.TempDir(), "mcp.json"), SpillDir: t.TempDir()})
+	defer s.Close()
+	if _, err := s.mcpManage(map[string]any{"action": "upsert", "config": map[string]any{"ref": "on-demand", "transport": "stdio", "command": "/bin/sh", "args": []any{"-c", "sleep 30"}, "enabled": true}}); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshMCPHealth(context.Background())
+	health, _ := s.mcpAgentsForCapabilities()[0]["health"].(map[string]any)
+	process, _ := health["process"].(map[string]any)
+	protocol, _ := health["protocol"].(map[string]any)
+	if process["state"] != "stopped" || process["pid"] != nil || process["started_at"] != nil || process["exited_at"] != nil || process["exit_code"] != nil {
+		t.Fatalf("stopped process health=%#v", process)
+	}
+	if protocol["state"] != "unknown" || protocol["last_handshake_at"] != nil || protocol["tools_count"] != nil {
+		t.Fatalf("stopped protocol health=%#v", protocol)
+	}
+}
+
+func TestServerCloseCancelsLazyMCPHealthRefresh(t *testing.T) {
+	started := make(chan struct{})
+	child := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return
+		}
+		switch request["method"] {
+		case "initialize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request["id"], "result": map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{}}})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			close(started)
+			<-r.Context().Done()
+		}
+	}))
+	defer child.Close()
+
+	s := New(Config{MCPConfig: filepath.Join(t.TempDir(), "mcp.json"), SpillDir: t.TempDir()})
+	if _, err := s.mcpManage(map[string]any{"action": "upsert", "config": map[string]any{"ref": "slow-remote", "transport": "streamable-http", "url": child.URL, "enabled": true}}); err != nil {
+		t.Fatal(err)
+	}
+	s.startLazyMCPHealthRefresh(context.Background())
+	// A second trigger while the first refresh is blocked must be ignored and
+	// must not replace the cancellation handle owned by the first refresh.
+	s.startLazyMCPHealthRefresh(context.Background())
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("lazy health refresh did not reach remote tools/list")
+	}
+	closed := make(chan struct{})
+	go func() {
+		_ = s.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Server.Close did not cancel lazy health refresh")
+	}
+}
+
 func mcpRunning(t *testing.T, response map[string]any) bool {
 	t.Helper()
 	structured, ok := response["structuredContent"].(map[string]any)

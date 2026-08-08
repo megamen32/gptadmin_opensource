@@ -37,15 +37,28 @@ real architecture decision.
 
 Before creating a child, L writes its role, goal, known facts, allowed and
 excluded paths, acceptance check, selected model and budget, stop conditions,
-and report contract into its assigned `todo-*.md`. The child receives only that
-task-file path, reads no parent conversation, appends its detailed result to
-the same file, and returns only TL;DR to L. Select the lowest sufficient model
-class; bounded Worker packages normally use `5.4-mini`. Do not inherit L's
+and report contract into its assigned `todo-*.md`. The child receives exactly
+`<Role> <absolute-task-file-path>`, reads no parent conversation, appends its
+detailed result to the same file, and returns only TL;DR to L. The same task
+may later be `work-*` for an explicit continuation. Select the lowest
+sufficient model class; bounded Worker packages normally use `5.4-mini`. Do not inherit L's
 model by default. Escalate only after `NEEDS_REDECOMPOSITION` or concrete
 acceptance evidence shows a capability gap. Load the selected harness adapter's
 `subagent_instructions_template` before creating the child. Use a no-history
 child only when the harness demonstrably supports it; otherwise record the
 limitation and do not claim model-routing or fresh-context proof.
+
+While that child is active, use `send_message` for every live question,
+clarification, correction, or status request when the harness exposes it. Do
+not replace a reachable child with another child or append conversational turns
+to the task file. The file remains the durable bootstrap/report/recovery record;
+live messaging does not authorize polling or an immediate-verdict request.
+
+For adjacent confirmed scope, continue the nearest suitable active Explorer,
+Worker, or Adviser by `send_message` with its new bounded objective, paths,
+acceptance proof, and stop condition. Do not create a replacement merely to
+give it nearby work. Reviewer and Tester are exceptions: always create them
+fresh and context-free for independent review and real-use testing.
 
 A child returns `NEEDS_REDECOMPOSITION` before wandering when scope must change,
 the second independent hypothesis fails, another unknown dependency appears,
@@ -53,12 +66,21 @@ the pessimistic budget is exceeded, or an answer from Lead would change the
 architecture. L treats that result as a planning signal, re-researches, and
 splits or escalates the package.
 
-When a child result is the next join point, L records one wake no sooner than
-10 minutes and ends its turn. The result itself may wake L earlier. Waiting by
-polling, prompting for an immediate result, changing a timeout, or opening a
-new result-seeking branch has zero canary delta and is forbidden.
+When a child result is the next join point, L ends its turn and waits only for
+the harness's native child-completion notification. Do not arm Agent Resume, a
+timer, or a parent-PID watcher for that child. Agent Resume is reserved for an
+external background PID/job, timer, or pending human wait. Polling, prompting
+for an immediate result, changing a timeout, or opening a new result-seeking
+branch has zero canary delta and is forbidden.
 
 If an Explorer's accepted result yields a bounded implementation in the same
 owned scope, L reassigns that exact child `Worker <same-task-file-path>`. The
 same file records both role passes; a second Worker for the same evidence is
 forbidden. Use a separate Reviewer only for independent review.
+
+For Full work only, reserve one fresh Tester package after all implementation,
+focused checks, Reviewer, and Critic. Its acceptance is real user-surface
+evidence, not source or unit-test evidence. Tester is a final sequential gate,
+never an exploratory or parallel implementation lane. Its mandatory scope is
+`only-new`; `all` product scope needs a direct user request or L proposal with
+explicit user approval.

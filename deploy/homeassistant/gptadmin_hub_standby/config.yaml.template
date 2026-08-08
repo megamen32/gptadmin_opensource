@@ -31,6 +31,15 @@ options:
   oauth_client_secret: "__OAUTH_CLIENT_SECRET__"
   admin_password: "__ADMIN_PASSWORD__"
   mcp_bridge_key: "__MCP_BRIDGE_KEY__"
+  codex_mcp_bearer: "__GPTADMIN_CODEX_MCP_BEARER__"
+  claude_mcp_bearer: "__GPTADMIN_CLAUDE_MCP_BEARER__"
+  custom_mcp_bearer: "__GPTADMIN_CUSTOM_MCP_BEARER__"
+  opencode_mcp_bearer: "__GPTADMIN_OPENCODE_MCP_BEARER__"
+  hermes_mcp_bearer: "__GPTADMIN_HERMES_MCP_BEARER__"
+  openclaw_mcp_bearer: "__GPTADMIN_OPENCLAW_MCP_BEARER__"
+  vscode_mcp_bearer: "__GPTADMIN_VSCODE_MCP_BEARER__"
+  zed_mcp_bearer: "__GPTADMIN_ZED_MCP_BEARER__"
+  availability_monitor_mcp_bearer: "__GPTADMIN_AVAILABILITY_MONITOR_MCP_BEARER__"
   oauth_permissive_redirects: "__OAUTH_PERMISSIVE_REDIRECTS__"
   oauth_permissive_resources: "__OAUTH_PERMISSIVE_RESOURCES__"
   mcp_relay_default_timeout: "__MCP_RELAY_DEFAULT_TIMEOUT__"
@@ -52,6 +61,15 @@ schema:
   oauth_client_secret: password
   admin_password: password
   mcp_bridge_key: password
+  codex_mcp_bearer: password
+  claude_mcp_bearer: password
+  custom_mcp_bearer: password
+  opencode_mcp_bearer: password
+  hermes_mcp_bearer: password
+  openclaw_mcp_bearer: password
+  vscode_mcp_bearer: password
+  zed_mcp_bearer: password
+  availability_monitor_mcp_bearer: password
   oauth_permissive_redirects: str
   oauth_permissive_resources: str
   mcp_relay_default_timeout: str

@@ -6,13 +6,15 @@ if [[ $# -lt 2 ]]; then
 Usage:
   ./mcp-add NAME --url https://server.example/mcp [--stdio-format framed]
   ./mcp-add NAME -- npx -y some-mcp-server --arg value
-  ./mcp-add NAME npx -y some-mcp-server --arg value
+  ./mcp-add NAME [--force] npx -y some-mcp-server --arg value
 
-This writes /etc/gptadmin/mcp.json, renders /etc/gptadmin/mcp-agents.d/NAME.json,
-installs/enables/starts the systemd relay, and prints status.
+This writes /etc/gptadmin/mcp.json and refreshes the native ShellMCP supervisor.
+Use --force explicitly to replace an existing entry.
 EOF
   exit 2
 fi
 name="$1"; shift
 if [[ "${1:-}" == "--" ]]; then shift; fi
-exec sudo python3 /home/roomhacker/gptadmin/cli.py mcp add "$name" --force --install --status "$@"
+sudo python3 /home/roomhacker/gptadmin/cli.py mcp add "$name" --install "$@"
+sudo python3 /home/roomhacker/gptadmin/cli.py mcp install "$name"
+sudo python3 /home/roomhacker/gptadmin/cli.py mcp status "$name"

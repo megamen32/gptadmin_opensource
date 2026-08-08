@@ -1,0 +1,16 @@
+schema_version: 1
+core:
+  roles: src/common/agents
+  profiles: src/common/profiles
+  protocols: src/common/protocols
+  marker_router:
+    - AGENTS.md
+    - CLAUDE.md
+adapters:
+  - adapters/codex/adapter.yaml
+  - adapters/opencode/adapter.yaml
+  - adapters/claude-code/adapter.yaml
+  - adapters/hermes/adapter.yaml
+capability_contracts:
+  - src/common/capabilities/human.ask_user.v1.yaml
+  - src/common/capabilities/human.ask_secret.v1.yaml

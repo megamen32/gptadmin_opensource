@@ -50,3 +50,18 @@ def test_cli_help_uses_product_connection_language() -> None:
         output = result.stdout + result.stderr
         for internal_name in FORBIDDEN_PRODUCT_NAMES:
             assert internal_name not in output, f"{command} exposes {internal_name}"
+
+
+def test_current_auth_docs_do_not_advertise_the_removed_legacy_deadline() -> None:
+    """Operator docs must match the no-automatic-invalidation compatibility rule."""
+
+    current_auth_docs = (
+        ROOT / "README.md",
+        ROOT / "docs" / "CONFIGURATION.md",
+        ROOT / "docs" / "AUTH_SIMPLIFICATION.md",
+    )
+    for path in current_auth_docs:
+        text = path.read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        assert "2026-07-27" not in text, f"{path.relative_to(ROOT)} advertises a removed deadline"
+        assert "explicitly rotates or removes" in normalized, f"{path.relative_to(ROOT)} omits the preservation rule"

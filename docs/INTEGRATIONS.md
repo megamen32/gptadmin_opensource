@@ -17,9 +17,9 @@ All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md)
 
 **When to use.** ChatGPT-family clients only: `chat.openai.com`, ChatGPT Desktop, Plus/Team. Any tool that imports an OpenAPI 3.x schema. Right pick when you want a Custom GPT that calls your hub without Codex-style per-hour tool-call quotas.
 
-**Protocol.** REST + OpenAPI 3.1, Bearer auth. The compact control flow is `discover → schema → execute`; `job` polls background work. Legacy long names remain accepted but are not advertised.
+**Protocol.** REST + OpenAPI 3.1, Bearer auth. The relay flow is `/mcp-relay/servers → /mcp-relay/tools → /mcp-relay/call`; `job` polls background work. Legacy long names remain accepted but are not advertised.
 
-**Schema URL.** `https://<your-hub>/actions/openapi.yaml` — the canonical, live-served spec. The repo also ships `public/openapi.json` (synonym of the same spec) so you can `curl` it locally.
+**Schema URL.** `https://<your-hub>/actions/openapi.yaml` — the canonical, live-served spec for Custom GPTs. Per-server imports use `https://<your-hub>/server/{slug}/actions/openapi.yaml`; the repo also ships `public/openapi.json` (synonym of the same spec) so you can `curl` it locally.
 
 ### How to connect
 
@@ -43,8 +43,9 @@ HTTPS origin with no trailing slash. The installer keeps signing material inside
 the Hub configuration; clients never copy or configure an internal signing key.
 
 The default `/actions/openapi.yaml` intentionally contains one Bearer security
-scheme and only `discover → schema → execute → job`. This avoids Custom GPT
-import warnings from webhook ingress and approval-only headers.
+scheme and only `discover → schema → execute → job`. That relay flow is the
+canonical Custom GPT import; webhook ingress and approval-only headers stay
+out of the default schema.
 
 ### Optional virtual MCP capabilities
 

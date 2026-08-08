@@ -54,3 +54,4 @@ def test_rotate_hub_requires_an_explicit_global_invalidation(monkeypatch: pytest
 def test_setup_does_not_generate_ctl_token(monkeypatch: pytest.MonkeyPatch) -> None:
     source = open(cli.__file__, encoding="utf-8").read()
     assert "env.setdefault('CTL_TOKEN', gen_hex())" not in source
+    assert "LEGACY_CTL_TOKEN_DEADLINE" not in source

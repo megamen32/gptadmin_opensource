@@ -5,6 +5,10 @@ does not choose a target from the request body. The route selects one explicit
 MCP target, prompt action, or Shell target, so Agent Herder is optional and is
 handled exactly like any other registered MCP server.
 
+This is the `webhooks` virtual MCP. It is disabled by default and gets its own
+`/server/webhooks/mcp` and `/server/webhooks/actions/openapi.yaml` surfaces
+after enablement.
+
 ## Endpoint
 
 ```text
@@ -60,8 +64,9 @@ The same five operations are available to AI clients through MCP:
 - `webhook_route_delete` (`confirm=true` is mandatory)
 - `webhook_job_get`
 
-They are also described by `/actions/openapi.yaml` and `public/openapi.yaml`
-for Custom GPT Actions. Read operations require `gptadmin.read`; route writes
+They are described by `/server/webhooks/actions/openapi.yaml` for Custom GPT
+Actions once the virtual MCP is enabled. The default `/actions/openapi.yaml`
+stays relay-only. Read operations require `gptadmin.read`; route writes
 require `gptadmin.exec` and remain subject to the selected access profile and
 approval policy. When an `ask_before_write` profile returns an approval ID,
 approve it in GPTAdmin and repeat the write with the

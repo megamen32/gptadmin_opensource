@@ -13,6 +13,7 @@ Full environment-variable reference, auth model, and OAuth setup.
 | `OAUTH_CLIENT_SECRET` | for `/mcp` | — | Signs OAuth bearer tokens. Generate with `openssl rand -hex 32`. |
 | `PUBLIC_ORIGIN` | recommended | — | Public base URL (e.g. `https://your-hub.bezrabotnyi.com`). Used in OAuth + OpenAPI. |
 | `MCP_RESOURCE` | recommended | `$PUBLIC_ORIGIN` | The MCP resource identifier. |
+| `GPTADMIN_RELAX_AUTH_CHECKS` | emergency only | `0` | Set to `1` only during a bounded ingress/auth-state recovery. Keeps signature/key matching but temporarily skips token claim/expiry and OAuth PKCE checks; return to `0` after recovery. |
 | `GPTADMIN_AUTH_RATE_LIMIT` | optional | `60` per client per minute | Maximum failed admin/control/MCP authentication attempts from one client before a temporary `429` response. Successful authentication does not consume the budget. |
 
 ### Network
@@ -34,6 +35,7 @@ Full environment-variable reference, auth model, and OAuth setup.
 | `GPTADMIN_STARTUP_INSTRUCTIONS_FILE` | `$GPTADMIN_CONFIG_DIR/startup_instructions.md` | Optional local Markdown startup instructions for MCP clients. |
 | `GPTADMIN_STARTUP_INSTRUCTIONS` | — | Optional environment override for startup instructions; takes precedence over the file. |
 | `GPTADMIN_INSTRUCTION_SETS_STATE_FILE` | `$GPTADMIN_CONFIG_DIR/instruction_sets_state.json` | Restrictive state file for named profile instruction sets. |
+| `GPTADMIN_VIRTUAL_MCP_STATE_FILE` | `$GPTADMIN_CONFIG_DIR/virtual_mcps_state.json` | Persisted on/off state for `network-proxy` and `webhooks`; if the file is absent, both stay off. |
 | `GPTADMIN_WEBHOOK_CONFIG_FILE` | `$GPTADMIN_CONFIG_DIR/webhooks.json` | Operator-owned universal webhook route definitions. |
 | `GPTADMIN_WEBHOOK_STATE_FILE` | `$GPTADMIN_CONFIG_DIR/webhook_state.json` | Durable webhook jobs and replay keys; written with mode `0600`. |
 

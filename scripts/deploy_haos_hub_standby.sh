@@ -140,6 +140,15 @@ repl = {
     '__OAUTH_CLIENT_SECRET__': get('OAUTH_CLIENT_SECRET') or get('ADMIN_PASSWORD') or get('CTL_TOKEN'),
     '__ADMIN_PASSWORD__': get('ADMIN_PASSWORD'),
     '__MCP_BRIDGE_KEY__': get('MCP_BRIDGE_KEY') or get('CTL_TOKEN'),
+    '__GPTADMIN_CODEX_MCP_BEARER__': get('GPTADMIN_CODEX_MCP_BEARER'),
+    '__GPTADMIN_CLAUDE_MCP_BEARER__': get('GPTADMIN_CLAUDE_MCP_BEARER'),
+    '__GPTADMIN_CUSTOM_MCP_BEARER__': get('GPTADMIN_CUSTOM_MCP_BEARER'),
+    '__GPTADMIN_OPENCODE_MCP_BEARER__': get('GPTADMIN_OPENCODE_MCP_BEARER'),
+    '__GPTADMIN_HERMES_MCP_BEARER__': get('GPTADMIN_HERMES_MCP_BEARER'),
+    '__GPTADMIN_OPENCLAW_MCP_BEARER__': get('GPTADMIN_OPENCLAW_MCP_BEARER'),
+    '__GPTADMIN_VSCODE_MCP_BEARER__': get('GPTADMIN_VSCODE_MCP_BEARER'),
+    '__GPTADMIN_ZED_MCP_BEARER__': get('GPTADMIN_ZED_MCP_BEARER'),
+    '__GPTADMIN_AVAILABILITY_MONITOR_MCP_BEARER__': get('GPTADMIN_AVAILABILITY_MONITOR_MCP_BEARER'),
     '__OAUTH_PERMISSIVE_REDIRECTS__': get('OAUTH_PERMISSIVE_REDIRECTS', '1'),
     '__OAUTH_PERMISSIVE_RESOURCES__': get('OAUTH_PERMISSIVE_RESOURCES', '1'),
     '__MCP_RELAY_DEFAULT_TIMEOUT__': get('MCP_RELAY_DEFAULT_TIMEOUT', '30'),
@@ -155,7 +164,7 @@ PY
 python3 - "$OUT_DIR/config.yaml" <<'PY'
 import re, sys
 s = open(sys.argv[1], encoding='utf-8').read()
-s = re.sub(r'((token|secret|password|key): ")[^"]+', r'\1***redacted***', s, flags=re.I)
+s = re.sub(r'((token|secret|password|key|bearer|access[_-]?token|refresh[_-]?token|api[_-]?key): ")[^"]+', r'\1***redacted***', s, flags=re.I)
 print(s)
 PY
 sha256sum "$OUT_DIR/gptadmin_hub"

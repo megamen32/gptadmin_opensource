@@ -1,0 +1,15 @@
+schema_version: 1
+harness: hermes
+kind: external-plugin
+role_source: ../../src/common/agents
+optional_instructions: instructions.md
+subagent_instructions_template: templates/subagent.md
+plugin: plugin
+verification: VERIFICATION.md
+delivery: tool-request-middleware
+self_improve: hermes-native
+capabilities:
+  native_role_profile: unsupported
+  fresh_child_context: proven
+  model_override: existing-hermes-delegation
+  resume_transport: adapter-dependent

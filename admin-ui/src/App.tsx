@@ -27,7 +27,7 @@ import {
 } from "./api";
 import "./styles.css";
 
-type View = "instructions" | "profiles" | "clients" | "webhooks" | "capabilities" | "auth";
+type View = "instructions" | "profiles" | "clients" | "webhooks" | "auth" | "capabilities";
 type LoadState = "loading" | "ready" | "empty" | "error" | "stale";
 
 const navigation: Array<{ id: View; label: string; href: string }> = [
@@ -35,13 +35,13 @@ const navigation: Array<{ id: View; label: string; href: string }> = [
   { id: "profiles", label: "Профили", href: "#profiles" },
   { id: "clients", label: "Клиенты", href: "#clients" },
   { id: "webhooks", label: "Вебхуки и агенты", href: "#webhooks" },
-	{ id: "capabilities", label: "Виртуальные MCP", href: "#capabilities" },
   { id: "auth", label: "Авторизация", href: "#auth" },
+  { id: "capabilities", label: "Виртуальные MCP", href: "#capabilities" },
 ];
 
 function viewFromHash(): View {
   const hash = window.location.hash;
-  return hash === "#profiles" || hash === "#clients" || hash === "#webhooks" || hash === "#capabilities" || hash === "#auth" ? hash.slice(1) as View : "instructions";
+  return hash === "#profiles" || hash === "#clients" || hash === "#webhooks" || hash === "#auth" || hash === "#capabilities" ? hash.slice(1) as View : "instructions";
 }
 
 const emptyWorkspace = (): ExternalWorkspaceRef => ({

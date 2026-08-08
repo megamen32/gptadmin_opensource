@@ -375,13 +375,7 @@ func (m *Manager) Start(ref string) error {
 	if a.Cwd != "" {
 		cmd.Dir = a.Cwd
 	}
-	if len(a.Env) > 0 {
-		env := make([]string, 0, len(a.Env))
-		for k, v := range a.Env {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = mergeChildEnv(os.Environ(), a.Env, runtime.GOOS)
 	// We deliberately don't set SysProcAttr here: stdlib-only with no platform
 	// fork, and an in-process supervisor is fine to kill just the child PID.
 	// If we ever need proper detachment we can add a small per-OS file with a
@@ -414,6 +408,48 @@ func (m *Manager) Start(ref string) error {
 	// clears m.process[ref] so a future Start() succeeds.
 	go m.reap(ref, tr)
 	return nil
+}
+
+// mergeChildEnv gives MCP children the package-manager paths that are absent
+// from launchd's minimal macOS environment. This matters for script shims such
+// as npx: /usr/local/bin/npx uses /usr/bin/env node, so inheriting only
+// /usr/bin:/bin makes the child exit before it emits a JSON-RPC frame.
+func mergeChildEnv(base []string, overrides map[string]string, goos string) []string {
+	values := make(map[string]string, len(base)+len(overrides))
+	order := make([]string, 0, len(base)+len(overrides))
+	set := func(key, value string) {
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	for _, entry := range base {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			set(key, value)
+		}
+	}
+	for key, value := range overrides {
+		set(key, value)
+	}
+	if goos == "darwin" {
+		path := values["PATH"]
+		for _, prefix := range []string{"/usr/local/bin", "/opt/homebrew/bin"} {
+			if !strings.Contains(":"+path+":", ":"+prefix+":") {
+				if path == "" {
+					path = prefix
+				} else {
+					path += ":" + prefix
+				}
+			}
+		}
+		set("PATH", path)
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+	return out
 }
 
 // reaper per agent. Acquires the mutex briefly when updating tracked state;

@@ -107,3 +107,52 @@ func TestNoPKCEIsRestrictedToCustomGPTActionsCallback(t *testing.T) {
 		t.Fatal("S256 PKCE must remain valid for non-Custom-GPT clients")
 	}
 }
+
+func TestRelaxAuthChecksAllowsOAuthWithoutPKCEVerifier(t *testing.T) {
+	s := New(Config{
+		CtlToken:                 "ctl",
+		AdminPassword:            "pw",
+		OAuthClientSecret:        "oauth-secret",
+		PublicOrigin:             "https://hub.example",
+		MCPResource:              "https://hub.example",
+		OAuthPermissiveRedirects: true,
+		OAuthPermissiveResources: true,
+		RelaxAuthChecks:          true,
+	})
+	form := url.Values{
+		"client_id":    {"chatgpt"},
+		"redirect_uri": {"https://chatgpt.com/connector/oauth/cb"},
+		"resource":     {"https://hub.example"},
+		"scope":        {"gptadmin.read"},
+		"password":     {"pw"},
+	}
+	authorize := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(form.Encode()))
+	authorize.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	authorizeRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(authorizeRecord, authorize)
+	if authorizeRecord.Code != http.StatusFound {
+		t.Fatalf("relaxed authorize status=%d body=%s", authorizeRecord.Code, authorizeRecord.Body.String())
+	}
+	code := authorizeRecord.Header().Get("Location")
+	if !strings.Contains(code, "code=") {
+		t.Fatalf("relaxed authorize did not return a code: %q", code)
+	}
+	parsed, err := url.Parse(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenForm := url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {parsed.Query().Get("code")},
+		"client_id":    {"chatgpt"},
+		"redirect_uri": {"https://chatgpt.com/connector/oauth/cb"},
+		"resource":     {"https://hub.example"},
+	}
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRecord := httptest.NewRecorder()
+	s.Handler().ServeHTTP(tokenRecord, tokenReq)
+	if tokenRecord.Code != http.StatusOK {
+		t.Fatalf("relaxed token status=%d body=%s", tokenRecord.Code, tokenRecord.Body.String())
+	}
+}

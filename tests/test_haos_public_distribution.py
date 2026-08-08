@@ -90,6 +90,16 @@ def test_public_app_source_is_not_the_instance_template() -> None:
     assert "gptadmin_failover_config.py" in (source / "run.sh").read_text()
 
 
+def test_standby_template_preserves_existing_client_bearer_inputs() -> None:
+    source = Path(__file__).parents[1] / "deploy/homeassistant/gptadmin_hub_standby"
+    template = (source / "config.yaml.template").read_text(encoding="utf-8")
+    run_script = (source / "run.sh").read_text(encoding="utf-8")
+
+    for client in ("CODEX", "CLAUDE", "CUSTOM", "OPENCODE", "HERMES", "OPENCLAW", "VSCODE", "ZED", "AVAILABILITY_MONITOR"):
+        assert f"__GPTADMIN_{client}_MCP_BEARER__" in template
+        assert f"GPTADMIN_{client}_MCP_BEARER" in run_script
+
+
 def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
     output = tmp_path / "gptadmin-haos-addons"

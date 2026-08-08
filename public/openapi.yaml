@@ -408,6 +408,9 @@ components:
       type: http
       scheme: bearer
   schemas:
+    EmptyObject:
+      type: object
+      properties: {}
     ConnectionManifest:
       type: object
       additionalProperties: false

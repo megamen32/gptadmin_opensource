@@ -15,8 +15,8 @@ shellmcp agents, handles auth, and serves the web panel.
    can read more on demand).
 5. **Serves the panel** — web UI at `/admin` (queue, agent health, logs).
 6. **Exposes MCP** — MCP remote SSE at `/mcp` for MCP clients.
-7. **Exposes OpenAPI** — `/api.json` and `/openapi.yaml` for Custom GPT import.
-8. **Accepts webhooks** — authenticated `/webhooks/v1/{route}` ingress can dispatch a configured MCP, prompt, or Shell action.
+7. **Exposes relay OpenAPI** — canonical Custom GPT import at `/actions/openapi.yaml`; per-server imports use `/server/{slug}/actions/openapi.yaml`.
+8. **Accepts webhooks** — authenticated `/webhooks/v1/{route}` ingress feeds the separate default-off `webhooks` virtual MCP and can dispatch a configured MCP, prompt, or Shell action.
 
 ## Remote secret ingress
 
@@ -63,8 +63,9 @@ By default it listens on `0.0.0.0:25900`. Change with `--port` or `HUB_PORT`.
 | `POST /mcp` | OAuth bearer | MCP remote SSE (for MCP clients) |
 | `POST /heartbeat` | Managed device connection | Agent registration |
 | `GET /servers` | Admin session | List registered agents |
-| `GET /api.json` | none | OpenAPI schema (for Custom GPT import) |
-| `GET /openapi.yaml` | none | OpenAPI YAML |
+| `GET /actions/openapi.yaml` | none | Canonical OpenAPI schema for Custom GPT import |
+| `GET /api.json` | none | Legacy JSON alias for the relay schema |
+| `GET /openapi.yaml` | none | Legacy YAML alias for the relay schema |
 | `POST /oauth/authorize` | `ADMIN_PASSWORD` form | Canonical OAuth authorize endpoint |
 | `POST /webhooks/v1/{route}` | Route token or HMAC signature | Universal event ingress |
 | `GET /webhook-jobs/{job_id}` | Same route credential | Read webhook job status/result |

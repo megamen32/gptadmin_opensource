@@ -199,7 +199,7 @@ func (s *Server) mcpTools() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "mcp_manage",
-			"description": "Persist and manage local stdio or remote Streamable HTTP/SSE MCP servers. upsert creates or replaces a definition; enable/disable persist desired state.",
+			"description": "Manage child MCP definitions on this selected ShellMCP host. Use list/status/config to inspect; upsert/remove/enable/disable/restart to change or run them. GPTAdmin Hub only routes the call and does not start the child elsewhere. To manage another machine, select that machine's ShellMCP target. A remote URL is reached from this host; no SSH tunnel is implied.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -213,7 +213,7 @@ func (s *Server) mcpTools() []map[string]any {
 		},
 		{
 			"name":        "mcp_tools",
-			"description": "List tools exposed by one enabled child MCP server.",
+			"description": "Run MCP tools/list for one configured child MCP on this host. This checks the child's protocol/tools, not just whether its process exists. Use the ref returned by mcp_manage list or status.",
 			"inputSchema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"ref": map[string]any{"type": "string"}},
@@ -222,7 +222,7 @@ func (s *Server) mcpTools() []map[string]any {
 		},
 		{
 			"name":        "mcp_call",
-			"description": "Call a tool on one enabled child MCP server.",
+			"description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child. A remote endpoint is reached from this host and no SSH tunnel is implied.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

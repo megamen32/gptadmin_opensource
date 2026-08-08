@@ -66,3 +66,19 @@ def test_homeassistant_deploy_refreshes_existing_addon_options() -> None:
     assert options_call in deploy_script
     assert deploy_script.index(options_call) < deploy_script.index("api POST /addons/local_gptadmin_shellmcp/rebuild")
     assert 'curl -fsS "http://$HAOS_HOST:25900/version"' not in deploy_script
+
+
+def test_rollout_previews_redact_bearer_and_access_token_fields() -> None:
+    """Deployment config previews must not echo bearer-shaped credentials."""
+    root = cli.Path(__file__).resolve().parents[1]
+    scripts = (
+        root / "scripts/deploy_haos_shellmcp.sh",
+        root / "scripts/deploy_haos_hub_standby.sh",
+    )
+
+    for path in scripts:
+        source = path.read_text(encoding="utf-8")
+        assert "bearer" in source
+        assert "access[_-]?token" in source
+        assert "refresh[_-]?token" in source
+        assert "api[_-]?key" in source

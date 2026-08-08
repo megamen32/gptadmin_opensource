@@ -51,6 +51,8 @@ def test_release_workflow_runs_docs_contract() -> None:
     workflow = (ROOT / ".github" / "workflows" / "build-and-sync.yml").read_text(encoding="utf-8")
     assert "name: Docs product contract" in workflow
     assert "uv run pytest tests/test_docs_product_contract.py tests/test_feedback_loop_contract.py -q" in workflow
+    assert "name: Docs-as-code contract" in workflow
+    assert "uv run pytest tests/test_site_docs.py tests/test_openapi_artifact.py tests/test_docs_product_contract.py tests/test_public_mirror.py tests/test_install_scripts.py -q" in workflow
 
 
 def test_integration_control_contract_matches_current_hub_scope() -> None:
@@ -78,3 +80,48 @@ def test_canonical_docs_include_executable_verification_snippets() -> None:
         document = (ROOT / "docs" / filename).read_text(encoding="utf-8")
         assert "```" in document, f"{filename} has no executable snippet fence"
         assert snippet in document, f"{filename} is missing verification command {snippet!r}"
+
+
+def test_openai_action_quickstart_stays_simple_and_oauth_first() -> None:
+    """The Custom GPT quickstart must stay compact and avoid proxy/webhook drift."""
+
+    document = (ROOT / "docs" / "INTEGRATIONS.md").read_text(encoding="utf-8")
+    quickstart = document.split("### Optional virtual MCP capabilities", 1)[0]
+    compact = " ".join(quickstart.split())
+
+    for required in (
+        "## 1. OpenAI Action (Custom GPT)",
+        "Import OpenAPI by URL",
+        "Authentication",
+        "OAuth Authorization Code + PKCE is the recommended path.",
+        "The default `/actions/openapi.yaml` intentionally contains one Bearer security scheme and only `discover → schema → execute → job`.",
+    ):
+        assert required in compact, f"Custom GPT quickstart is missing {required!r}"
+
+    for forbidden in (
+        "/server/network-proxy/mcp",
+        "/server/webhooks/mcp",
+    ):
+        assert forbidden not in compact, f"Custom GPT quickstart drifted into {forbidden!r}"
+
+
+def test_proxy_and_webhook_surfaces_remain_disabled_by_default_and_separate() -> None:
+    """Proxy/webhook support must remain opt-in with separate isolated surfaces."""
+
+    integrations = (ROOT / "docs" / "INTEGRATIONS.md").read_text(encoding="utf-8")
+    webhooks = (ROOT / "docs" / "WEBHOOKS.md").read_text(encoding="utf-8")
+
+    optional_section = " ".join(integrations.split("### Optional virtual MCP capabilities", 1)[1].split())
+    for required in (
+        "`network-proxy` and `webhooks` are disabled by default.",
+        "/server/network-proxy/mcp",
+        "/server/network-proxy/actions/openapi.yaml",
+        "/server/webhooks/mcp",
+        "/server/webhooks/actions/openapi.yaml",
+    ):
+        assert required in optional_section, f"Optional capability section is missing {required!r}"
+
+    compact_webhooks = " ".join(webhooks.split())
+    assert "default `approval_mode` is `ask_before_write`" in compact_webhooks
+    assert "rejected with an approval-required result and no job is queued until an explicit workflow is added." in compact_webhooks
+    assert 'approval_mode: "bounded_autonomous"' in compact_webhooks

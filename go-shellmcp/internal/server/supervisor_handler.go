@@ -124,9 +124,13 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 		return []map[string]any{}
 	}
 	agents := s.supervisor.Agents()
+	health := map[string]map[string]any{}
+	if value := s.mcpHealth.Load(); value != nil {
+		health, _ = value.(map[string]map[string]any)
+	}
 	out := make([]map[string]any, 0, len(agents))
 	for _, a := range agents {
-		out = append(out, map[string]any{
+		descriptor := map[string]any{
 			"ref":       a.Ref,
 			"name":      a.Name,
 			"transport": a.Transport,
@@ -134,7 +138,13 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 			"args":      a.Args,
 			"url":       a.URL,
 			"enabled":   a.Enabled,
-		})
+		}
+		if current, ok := health[a.Ref]; ok {
+			descriptor["health"] = current
+		} else {
+			descriptor["health"] = unknownMCPHealth()
+		}
+		out = append(out, descriptor)
 	}
 	return out
 }

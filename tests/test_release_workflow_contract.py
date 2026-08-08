@@ -84,6 +84,16 @@ def test_public_release_reruns_fail_closed_on_identity_mismatch() -> None:
     assert script.count("exit 1") >= 2
 
 
+def test_public_release_includes_windows_zip_in_immutable_asset_set() -> None:
+    """Every archive recorded by the provenance manifest must be published."""
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["build-and-release"]["steps"]
+    publish_step = next(step for step in steps if step.get("name") == "Mirror source + tag + GitHub Release to public repo")
+
+    assert '"$SRC"/build/*.zip' in publish_step["run"]
+
+
 def test_public_release_preflights_immutable_identity_before_mutating_remote_main() -> None:
     """An identity mismatch must fail before any public branch mutation."""
 
@@ -106,7 +116,7 @@ def test_publication_waits_for_every_platform_and_ui_gate() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = workflow["jobs"]["build-and-release"]
 
-    assert job["needs"] == ["admin-ui-build", "failover-e2e", "macos-build", "windows-shellmcp"]
+    assert job["needs"] == ["admin-ui-build", "failover-e2e", "docs-as-code-contract", "macos-build", "windows-shellmcp"]
     assert "always()" not in str(job.get("if", ""))
 
 

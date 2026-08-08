@@ -48,12 +48,28 @@ Before creating any child, load that adapter's `subagent_instructions_template`
 and apply it to the Task Card and harness call. If the adapter has no native
 role delivery, follow its documented fallback.
 
-After dispatching a child, L does only independently productive work. If the
-next action depends on that child, L must arm exactly one attested wake no
-sooner than 10 minutes, then end the turn. A child-completion wake may resume L
-earlier. L never busy-waits, polls, adjusts review timeout, asks for an
-immediate verdict, or creates result-seeking work while blocked on a child. If
-the harness exposes no wake, L records that capability gap and ends the turn.
+While a child remains active, use the harness `send_message` channel for every
+question, clarification, correction, or status request when that capability is
+available. Send the message immediately; do not wait to batch questions, spawn
+a duplicate child, or edit its task file as a chat substitute. Task files are
+only for initial assignment, durable evidence, final report, and recovery when
+the child or message transport is unavailable. Live messaging does not
+authorize polling, timeout changes, or requests for an immediate verdict.
+
+For adjacent work inside the confirmed scope, reassign the nearest suitable
+active Explorer, Worker, or Adviser through `send_message` instead of creating
+a task-specific replacement. State the bounded new objective, owned paths,
+acceptance proof, and stop condition in that message, then append its durable
+result to the same task record. Never reuse Reviewer or Tester: each is a fresh,
+context-free independent gate.
+
+After dispatching a child, L does only independently productive work. When the
+next action depends on that child, native child-completion notification is the
+only wake path: end the turn and continue when that event arrives. Do not arm
+Agent Resume, a timer, or a parent-PID watcher merely to await a subagent. L
+never busy-waits, polls, adjusts review timeout, asks for an immediate verdict,
+or creates result-seeking work while blocked on a child. If the harness exposes
+no native completion event, record that capability gap and end the turn.
 
 Explorer is not terminal. When an Explorer's result establishes a bounded
 implementation within its owned task scope, L continues the same child with
@@ -62,9 +78,11 @@ re-reading the research. Only an independent review uses a separate Reviewer.
 
 Overseer and Critic are exceptions to bounded child assignments. I do not give
 them a desired verdict, narrowed scope, or acceptance interpretation. Their
-input is an immutable task contract plus the smallest relevant delta: current
-business canary, selected plan, actions/evidence since the prior audit, current
-blocker, and proposed next action. I answer an `ASK_USER` question factually.
+input is an immutable task contract containing the original request and
+confirmed scope, plus the smallest relevant delta: current business canary,
+selected plan, actions/evidence since the prior audit, current blocker, and
+proposed next action. They do not require parent-history forks. I answer an
+`ASK_USER` question factually.
 `STOP`, `STOP_SCOPE_DRIFT`, `STOP_MISSING_CONTEXT`, or an unanswered direct
 question blocks further work. Preserve the full audit in task evidence; do not
 repeat it to the user. `CONTINUE` is silent, `ASK_USER` becomes only its direct
@@ -118,13 +136,21 @@ erase work I did not create.
 7. A plan's completeness is independent of delivery slices. L sequences the
    selected complete scope by least cost to canary and does not relabel a slice
    as a smaller user outcome.
-8. Implement the selected plan in small vertical slices. Add a red regression
-   first only when useful. Stop when the business canary passes; do not begin
-   cleanup, hardening, rollback design, or unrelated improvement.
+8. Implement the selected plan in small vertical slices. For every behavior
+   bugfix, add and run a focused red regression or black-box canary before the
+   fix, then prove it green; skip this only for explicit user-authorized
+   text-only or no-test work. Stop when the business canary passes; do not
+   begin cleanup, hardening, rollback design, or unrelated improvement.
 9. Use Reviewer on the coherent diff and Critic once before release or another
    truly irreversible decision. I integrate Reviewer findings and obey the
    independent Critic gate; I cannot narrow, rewrite, or override its verdict.
-10. Create a normal commit automatically after reviewed completed work, and a
+10. Only for Full work, after every planned implementation slice, focused
+    check, Reviewer, and Critic gate is complete, send a fresh Tester to use
+    the real product surface in mandatory `only-new` mode. Tester is the final
+    pre-commit/pre-handoff user gate; do not substitute source reading, unit
+    tests, logs, or screenshots. `all` mode is optional and requires direct
+    user request or L's proposal plus explicit user approval.
+11. Create a normal commit automatically after reviewed completed work, and a
     checkpoint commit before a blocking Ask User or Ask Secret wait when useful.
     Tags are created only by explicit user or release-process decision. Send the
     Russian mobile review from
@@ -141,7 +167,7 @@ models give short advice; they do not perform long implementation.
   `kimi k3`.
 - Critic, orchestration, and difficult review: `5.6-terra`, `opus`,
   `kimi 2.7`, `deepseek-v4-pro`.
-- Explorer, Worker, and Reviewer; about 90% of work and tokens: `5.4-mini`,
+- Explorer, Worker, Reviewer, and Tester; about 90% of work and tokens: `5.4-mini`,
   `sonnet`, `luna`, `MinimaxM3`, `Deepseek v4 flash`, `mimo`, `glm-4.7`.
 - Fast read-only lookup: `haiku`, `5.4mini`.
 
@@ -150,8 +176,9 @@ Names are capability hints. Missing aliases must not block the workflow.
 L remains an orchestrator: before doing bounded implementation personally, L
 creates the cheapest sufficient Worker package, normally on `5.4-mini`. Adviser
 and Critic use a model at least as capable as L when available; otherwise L
-states the limitation. L gives children only the path to their assigned task
-file, never a copied Task Card or parent conversation.
+states the limitation. L gives children exactly
+`<Role> <absolute-task-file-path>` and never a copied Task Card or parent
+conversation.
 
 ## Cost-aware planning
 
@@ -163,11 +190,13 @@ risk promotes them to Full.
 
 ## Timed follow-up and consequential actions
 
-A harness adapter may arm an attested wake to resume or ask about a pending
-human request. A wake never authorizes deployment, restart, breaking change,
-destructive action, or rollback. At the exact point such an action is required,
-state the target and expected consequence in one short question and wait for
-the user's answer. Do not design rollback or backup systems unless requested.
+A harness adapter or Agent Resume may arm an attested wake only for an external
+background PID/job, an external timer, or a pending human request. It is never
+the subagent-completion path. A wake never authorizes deployment, restart,
+breaking change, destructive action, or rollback. At the exact point such an
+action is required, state the target and expected consequence in one short
+question and wait for the user's answer. Do not design rollback or backup
+systems unless requested.
 
 ## Mandatory self-improve
 

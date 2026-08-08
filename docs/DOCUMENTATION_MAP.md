@@ -10,12 +10,12 @@ must update the relevant section here and the [Changelog](../CHANGELOG.md).
 | First install and Hub URL | [Getting Started](./GETTING_STARTED.md) | Install, Tunnel, first connection and harmless action |
 | MCP clients | [Integrations](./INTEGRATIONS.md) | Codex, Claude-compatible clients and MCP connection flow |
 | Browser extension | [Extension SDK](./EXTENSION_SDK.md) and [Integrations](./INTEGRATIONS.md) | OAuth browser handoff and extension-facing MCP contract |
-| ChatGPT Custom GPT | [Integrations](./INTEGRATIONS.md) | OpenAI Action/OpenAPI path and external certification boundary |
+| ChatGPT Custom GPT | [Integrations](./INTEGRATIONS.md) | Canonical `/actions/openapi.yaml`, `/mcp-relay/*`, OAuth/Bearer and external certification boundary |
 | Integration control contract | [Integration control](./INTEGRATION_CONTROL_CONTRACT.md) | Current discover/schema/execute mapping, policy and retry semantics |
 | Admin profiles | [Admin profiles](./ADMIN_PROFILES.md) | Instructions, targets, tools, client bindings and private references |
 | Network proxy and Tunnel | [Network proxy](./NETWORK_PROXY.md) | Grants, tickets, revoke and data-plane threat model |
 | Observability | [Observability](./OBSERVABILITY.md) | Request correlation, bounded metrics, OTLP export and evidence boundary |
-| Security policies | [Security](./SECURITY_DOCS.md) and [Auth simplification](./AUTH_SIMPLIFICATION.md) | AdminPassword, OAuth, MFA, policy and audit boundaries |
+| Security policies | [Security](./SECURITY_DOCS.md) and [Auth simplification](./AUTH_SIMPLIFICATION.md) | AdminPassword, OAuth bearer, legacy CTL migration, MFA, policy and audit boundaries |
 | File sharing and recovery | [File backups](./FILE_BACKUPS.md) and [Backup/restore](./BACKUP_RESTORE.md) | Managed roots, backup metadata, restore and cleanup |
 | Reference deployments | [Deployment blueprints](./DEPLOYMENT_BLUEPRINTS.md) | Small-team, home-lab and production trade-offs/runbooks |
 | Feedback and roadmap evidence | [Feedback loop](./FEEDBACK_LOOP.md) | Design-partner intake, support/incident signals and quarterly review |

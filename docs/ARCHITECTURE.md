@@ -24,9 +24,10 @@ AIs connect OUT of it.
 The central process. It:
 - Accepts heartbeats from shellmcp agents (registers them, tracks liveness)
 - Exposes MCP remote SSE at `/mcp` for MCP clients (Claude, Codex, OpenCode)
-- Exposes a REST admin API at `/admin/api/*` (used by the web panel + Custom GPTs)
+- Exposes a REST admin API at `/admin/api/*` (used by the web panel)
+- Exposes the relay API at `/mcp-relay/*` and the canonical Custom GPT schema at `/actions/openapi.yaml`
 - Proxies commands from AIs to the right shellmcp agent
-- Handles OAuth (for OpenAI SDK OAuth flow) and Bearer auth (CTL_TOKEN)
+- Handles OAuth (for OpenAI SDK OAuth flow) and Bearer auth for scoped client connections; `CTL_TOKEN` is legacy migration only
 - Serves the web panel at `/admin`
 
 ### 2. ShellMCP (`go-shellmcp/`, `client/`)
@@ -50,7 +51,7 @@ pick what fits your AI.
 |---------|----------|-----|----------|
 | **MCP client** | MCP remote SSE | Claude Desktop, Codex, OpenCode | `/mcp` |
 | **Browser extension** | userscript (Tampermonkey/Firefox) | DeepSeek, Qwen, Alice, GigaChat, ChatGPT (free) | injects into web UI |
-| **OpenAI Action** | REST + OpenAPI | ChatGPT Custom GPT, Open WebUI | `/admin/api/*` |
+| **OpenAI Action** | REST + OpenAPI | ChatGPT Custom GPT, Open WebUI | `/actions/openapi.yaml` or `/server/{slug}/actions/openapi.yaml` |
 
 See [Adapters](./ADAPTERS.md) for per-adapter setup.
 
@@ -59,7 +60,7 @@ See [Adapters](./ADAPTERS.md) for per-adapter setup.
 When you ask the AI "restart nginx on server-01":
 
 1. **AI** decides to call a tool (MCP tool / OpenAI Action / injected mcp block)
-2. **Adapter** routes the call to the hub (`POST /mcp` or `/admin/api/exec`)
+2. **Adapter** routes the call to the hub (`POST /mcp` or `/mcp-relay/call`)
 3. **Hub** looks up `server-01`, finds its shellmcp agent, forwards the command
 4. **shellmcp** on `server-01` runs `systemctl restart nginx`, captures output
 5. **shellmcp** returns stdout/stderr to the hub
@@ -73,6 +74,7 @@ When you ask the AI "restart nginx on server-01":
 - **MCP-native**: the hub speaks MCP, so any MCP client works. And the hub can
   itself consume other MCPs (chrome-devtools, openmemory) — they become tools
   available to every connected AI.
+- **Relay-first for Custom GPTs**: the import schema is `/actions/openapi.yaml` (or per-server), while relay calls go through `/mcp-relay/*`.
 - **Self-hosted**: your servers, your tokens, your data. Nothing leaves your
   infra.
 - **Any AI, even free ones**: the browser extension means you don't need a paid

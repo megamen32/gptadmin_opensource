@@ -25,7 +25,14 @@ Local stdio MCP package:
 ./mcp-add my-server -- npx -y some-mcp-package --flag value
 ```
 
-The helper writes `/etc/gptadmin/mcp.json`, renders `/etc/gptadmin/mcp-agents.d/NAME.json`, installs/enables/starts the generated systemd service, and prints status.
+The helper writes `/etc/gptadmin/mcp.json`, projects enabled entries into the
+aggregate Go ShellMCP supervisor, restarts `shellmcp.service`, and prints the
+supervisor status. It does not create one systemd unit per MCP server.
+
+Use `--force` explicitly when replacing an existing entry. Do not pass secret
+values through `--env`: they are persisted in the JSON registry. For a secret-
+backed MCP, use a root-only environment file and a launcher under `/opt` that
+reads it before executing the MCP server.
 
 ## Chrome DevTools example
 
@@ -54,5 +61,5 @@ python3 cli.py mcp cat NAME
 Files:
 
 - main config: `/etc/gptadmin/mcp.json`
-- rendered agent configs: `/etc/gptadmin/mcp-agents.d/*.json`
-- generated units: `/etc/systemd/system/gptadmin-mcp-*.service`
+- aggregate supervisor config: `/etc/gptadmin/mcp-supervisor.json`
+- supervisor unit: `shellmcp.service`

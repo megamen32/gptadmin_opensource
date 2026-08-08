@@ -7,8 +7,8 @@ GPT‑Админ gives AI agents access to your servers. Security is the top pri
 GPT‑Админ has three auth mechanisms — see [Configuration → Auth model](./CONFIGURATION.md#auth-model)
 for details:
 
-1. **`CTL_TOKEN`** (Bearer) — admin API + web panel
-2. **OAuth bearer** — `/mcp` endpoint (for MCP clients)
+1. **`CTL_TOKEN`** (Bearer, legacy migration only) — existing admin API + web panel installs; do not use it for new Custom GPT setup.
+2. **OAuth bearer** — `/mcp` endpoint (for MCP clients) and the Custom GPT relay schema flow
 3. **`ADMIN_PASSWORD`** — the `/oauth/authorize` form inside OAuth flow
 
 Plus `SHELLMCP_TOKEN` for agent → hub registration.
@@ -83,14 +83,14 @@ human confirmation before executing. Enable per-agent in `/admin` → Security.
 ## Token rotation
 
 ```bash
-# Generate a new CTL_TOKEN
+# Legacy `CTL_TOKEN` rotation (migration installs only)
 openssl rand -hex 32
 
 # Update the hub env, restart
 sudo systemctl restart gptadmin_hub  # or: systemctl --user restart gptadmin_hub
 
 # Update each agent's HUB_URL/TOKEN if you changed SHELLMCP_TOKEN
-# Update Custom GPT / MCP client configs with the new CTL_TOKEN
+# Update Custom GPT / MCP client configs with the new OAuth bearer or scoped managed MCP token; do not onboard new clients with CTL_TOKEN
 ```
 
 Rotate immediately if a token leaks. The repo's history-scrubbing
@@ -111,7 +111,7 @@ This keeps the upstream MCP server private while GPTAdmin applies HTTPS, bearer/
 
 ## Production hardening checklist
 
-- [ ] `CTL_TOKEN` is a strong random value (`openssl rand -hex 32`)
+- [ ] New Custom GPT setup uses OAuth bearer or a scoped managed MCP token; no new `CTL_TOKEN` is created
 - [ ] `OAUTH_CLIENT_SECRET` is set (for `/mcp`)
 - [ ] `ADMIN_PASSWORD` is strong
 - [ ] Hub is behind HTTPS (via Cloudflare/FRP tunnel or nginx + Certbot)

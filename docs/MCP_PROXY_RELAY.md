@@ -7,6 +7,8 @@ GPTAdmin can expose each registered MCP server through two public, authenticated
 
 This lets you keep real MCP servers on private machines, behind NAT, behind stdio, or behind an internal tunnel, while giving external AI clients one HTTPS entry point with GPTAdmin authentication, audit logging, routing, queues, and output handling.
 
+`network-proxy` and `webhooks` are separate virtual MCP capabilities. They stay off by default and only appear after an operator enables them.
+
 ## Why use GPTAdmin as the front door
 
 - One public HTTPS endpoint instead of exposing many MCP servers.
@@ -15,6 +17,13 @@ This lets you keep real MCP servers on private machines, behind NAT, behind stdi
 - Works with stdio MCP, remote MCP, shell connectors, and internal GPTAdmin hub tools.
 - OpenAPI schemas are generated from the upstream MCP server `tools/list` response, so the Action schema follows the real tool set.
 - Calls are proxied only to the selected MCP server; a Custom GPT can see OpenMemory only, FileShare only, or any other single server without seeing the full GPTAdmin relay.
+
+## Optional virtual MCP capabilities
+
+| Capability | Default | Gives | Enable | Check | Use |
+|-----------|---------|-------|--------|-------|-----|
+| `network-proxy` | off | bounded Network Tunnel tools: `network_proxy_request`, `network_proxy_approve`, `network_proxy_issue`, `network_proxy_open`, `network_proxy_status`, `network_proxy_revoke` | `curl -X PUT -H "Authorization: Bearer <admin-credential>" -H 'Content-Type: application/json' https://<your-hub>/admin/api/virtual-mcps/network-proxy -d '{"enabled":true}'` | `curl -H "Authorization: Bearer <admin-credential>" https://<your-hub>/admin/api/virtual-mcps` | `https://<your-hub>/server/network-proxy/mcp` · `https://<your-hub>/server/network-proxy/actions/openapi.yaml` |
+| `webhooks` | off | secret-free webhook route CRUD and job lookup: `webhook_routes_list`, `webhook_route_create`, `webhook_route_replace`, `webhook_route_delete`, `webhook_job_get` | `curl -X PUT -H "Authorization: Bearer <admin-credential>" -H 'Content-Type: application/json' https://<your-hub>/admin/api/virtual-mcps/webhooks -d '{"enabled":true}'` | `curl -H "Authorization: Bearer <admin-credential>" https://<your-hub>/admin/api/virtual-mcps` | `https://<your-hub>/server/webhooks/mcp` · `https://<your-hub>/server/webhooks/actions/openapi.yaml` |
 
 ## URL layout
 
@@ -133,6 +142,7 @@ This means:
 - removing a tool removes it from the generated schema;
 - per-server Custom GPTs stay small and focused;
 - users do not need to hand-maintain large OpenAPI files.
+- enabled virtual MCPs get their own per-server schema; the default hub `/actions/openapi.yaml` stays relay-only and omits `network-proxy` and `webhooks`.
 
 ## Security notes
 
@@ -140,6 +150,7 @@ This means:
 - Use HTTPS for public hubs.
 - Use strong bearer/OAuth credentials and rotate them if shared with a Custom GPT or MCP client.
 - Prefer per-server OpenAPI schemas for Custom GPTs when the GPT only needs one capability.
+- The default hub `/actions/openapi.yaml` is for relay-only Custom GPT imports; it does not include the optional virtual MCPs.
 - Use `/server/hub/mcp` or the GPTAdmin Apps SDK only when the client genuinely needs the full relay/admin surface.
 
 ## See also

@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,6 +11,17 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func TestHeartbeatBeatCarriesExistingChildMCPCatalog(t *testing.T) {
+	beat := Beat{MCPAgents: []map[string]any{{"ref": "BrowserClaw", "transport": "stdio", "enabled": true}}}
+	b, err := json.Marshal(beat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) == "{}" || !bytes.Contains(b, []byte(`"mcp_agents"`)) || !bytes.Contains(b, []byte(`"BrowserClaw"`)) {
+		t.Fatalf("heartbeat omitted child MCP catalog: %s", b)
+	}
+}
 
 func TestNewUsesConfiguredDNSServer(t *testing.T) {
 	dnsConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
