@@ -3,12 +3,15 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -59,6 +62,9 @@ func newHTTPClient(dnsServer, resolveTo string) *http.Client {
 
 	dialer := &net.Dialer{}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if roots := configuredRootCAs(); roots != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
@@ -93,6 +99,26 @@ func newHTTPClient(dnsServer, resolveTo string) *http.Client {
 	}
 	client.Transport = transport
 	return client
+}
+
+// configuredRootCAs keeps user-installed CA bundles effective for the Go
+// client on macOS, where crypto/x509 may otherwise rely only on the system
+// keychain. This is needed for locally reissued Hub certificates and remains
+// additive to the platform roots.
+func configuredRootCAs() *x509.CertPool {
+	path := strings.TrimSpace(os.Getenv("SSL_CERT_FILE"))
+	if path == "" {
+		return nil
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil || !roots.AppendCertsFromPEM(pemBytes) {
+		return roots
+	}
+	return roots
 }
 
 type Beat struct {

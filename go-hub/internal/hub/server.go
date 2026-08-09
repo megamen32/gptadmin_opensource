@@ -709,10 +709,11 @@ func (s *Server) reconcileExistingMCPBearers() error {
 func (s *Server) existingMCPBearerClaims(token string) (map[string]any, bool) {
 	digest := configuredMCPBearerDigest(token)
 	now := s.now().Unix()
+	lifecycle := s.effectiveBearerSecurityProfile().EnforceTokenLifecycle
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range s.managedMCP {
-		if !s.cfg.RelaxAuthChecks && (record.TokenKind != configuredMCPBearerTokenKind || record.RevokedAt != 0 || record.ExpiresAt <= now) {
+		if lifecycle && (record.TokenKind != configuredMCPBearerTokenKind || record.RevokedAt != 0 || record.ExpiresAt <= now) {
 			continue
 		}
 		if hmac.Equal([]byte(record.TokenDigest), []byte(digest)) {
@@ -934,6 +935,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/security/reauth", s.requireCtl(s.adminSecurityReauth))
 	mux.HandleFunc("/admin/api/security/heartbeat", s.requireCtl(s.adminSecurityHeartbeat))
 	mux.HandleFunc("/admin/api/security/preset", s.requireCtl(s.adminSecurityPreset))
+	mux.HandleFunc("/admin/api/security/profile", s.requireCtl(s.adminSecurityProfile))
 	mux.HandleFunc("/admin/api/security/mfa/totp/enroll", s.requireCtl(s.adminTOTPEnroll))
 	mux.HandleFunc("/admin/api/security/mfa/totp/verify", s.requireCtl(s.adminTOTPVerify))
 	mux.HandleFunc("/admin/api/security/mfa/webauthn/register/begin", s.requireCtl(s.adminWebAuthnRegisterBegin))
@@ -5227,7 +5229,7 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
 		return
 	}
-	if !s.cfg.RelaxAuthChecks && !validPKCEParameters(q.Get("code_challenge"), q.Get("code_challenge_method"), redirectURI) {
+	if s.effectiveBearerSecurityProfile().RequirePKCE && !validPKCEParameters(q.Get("code_challenge"), q.Get("code_challenge_method"), redirectURI) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid PKCE parameters"})
 		return
 	}
@@ -5272,7 +5274,7 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "redirect_uri is not registered for client"})
 		return
 	}
-	if !s.cfg.RelaxAuthChecks && !validPKCEParameters(r.Form.Get("code_challenge"), r.Form.Get("code_challenge_method"), redirectURI) {
+	if s.effectiveBearerSecurityProfile().RequirePKCE && !validPKCEParameters(r.Form.Get("code_challenge"), r.Form.Get("code_challenge_method"), redirectURI) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "error_description": "invalid PKCE parameters"})
 		return
 	}
@@ -5332,7 +5334,7 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "client or redirect mismatch"})
 		return
 	}
-	if !s.cfg.RelaxAuthChecks && data.Challenge != "" && !pkceOK(r.Form.Get("code_verifier"), data.Challenge) {
+	if s.effectiveBearerSecurityProfile().RequirePKCE && data.Challenge != "" && !pkceOK(r.Form.Get("code_verifier"), data.Challenge) {
 		s.authAudit("oauth_token_denied", r, map[string]any{"reason": "PKCE verification failed", "client_id": data.ClientID, "resource": resource, "form": s.formForAudit(r)})
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 		return
@@ -6800,35 +6802,50 @@ func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]
 			return nil, err
 		}
 	}
-	if s.cfg.RelaxAuthChecks {
-		return claims, nil
-	}
+	profile := s.effectiveBearerSecurityProfile()
 	expectedIssuer := normalizePublicURL(s.origin(r))
 	expected := normalizePublicURL(s.resource(r))
 	// Existing pre-contract JWTs without an issuer remain readable until they
 	// expire, but every new CLI/OAuth/Admin token carries it and a mismatched
 	// issuer is a distinct rejection reason.
-	if issuer, present := claims["iss"].(string); present && strings.TrimSpace(issuer) != "" && normalizePublicURL(issuer) != expectedIssuer {
+	issuer := ""
+	if rawIssuer, present := claims["iss"]; present && rawIssuer != nil {
+		issuer = strings.TrimSpace(fmt.Sprint(rawIssuer))
+	}
+	if profile.RequireIssuer && (issuer == "" || normalizePublicURL(issuer) != expectedIssuer) {
 		return nil, errors.New("token issuer does not match this Hub")
 	}
-	if expected == "" || !jwtAudienceMatches(claims["aud"], expected) {
+	if !profile.RequireIssuer && profile.Mode == processSecurityNormal && issuer != "" && normalizePublicURL(issuer) != expectedIssuer {
+		return nil, errors.New("token issuer does not match this Hub")
+	}
+	if profile.RequireAudience && (expected == "" || !jwtAudienceMatches(claims["aud"], expected)) {
 		return nil, errors.New("token audience does not match this Hub")
 	}
 	resource, ok := claims["resource"].(string)
-	if !ok || normalizePublicURL(resource) != expected {
+	if profile.RequireResource && (!ok || normalizePublicURL(resource) != expected) {
 		return nil, errors.New("token resource does not match this Hub")
 	}
-	if scope, ok := claims["scope"].(string); !ok || !validJWTScopes(scope) {
-		return nil, errors.New("token scope is invalid")
+	if profile.RequireScope {
+		scope, ok := claims["scope"].(string)
+		if !ok || !validJWTScopes(scope) {
+			return nil, errors.New("token scope is invalid")
+		}
 	}
-	if sub, ok := claims["sub"].(string); !ok || strings.TrimSpace(sub) == "" {
-		return nil, errors.New("token subject is required")
+	if profile.RequireSubject {
+		sub, ok := claims["sub"].(string)
+		if !ok || strings.TrimSpace(sub) == "" {
+			return nil, errors.New("token subject is required")
+		}
 	}
-	if iat := intFromAny(claims["iat"]); iat <= 0 || int64(iat) > time.Now().Unix()+60 {
-		return nil, errors.New("token issued-at is invalid")
+	if profile.RequireIssuedAt {
+		if iat := intFromAny(claims["iat"]); iat <= 0 || int64(iat) > time.Now().Unix()+60 {
+			return nil, errors.New("token issued-at is invalid")
+		}
 	}
-	if kid, ok := claims["kid"].(string); !ok || strings.TrimSpace(kid) == "" || kid != s.jwtKeyID() {
-		return nil, errors.New("token key id is invalid")
+	if !s.cfg.RelaxAuthChecks {
+		if kid, ok := claims["kid"].(string); !ok || strings.TrimSpace(kid) == "" || kid != s.jwtKeyID() {
+			return nil, errors.New("token key id is invalid")
+		}
 	}
 	return claims, nil
 }
@@ -6845,10 +6862,10 @@ func (s *Server) verifyManagedMCPToken(token string) (map[string]any, bool) {
 	if !known || record.TokenDigest == "" || !hmac.Equal([]byte(record.TokenDigest), []byte(hex.EncodeToString(digest[:]))) {
 		return nil, false
 	}
-	if !s.cfg.RelaxAuthChecks && (record.TokenKind != "durable" || record.RevokedAt != 0) {
+	if s.effectiveBearerSecurityProfile().EnforceTokenLifecycle && (record.TokenKind != "durable" || record.RevokedAt != 0) {
 		return nil, false
 	}
-	if !s.cfg.RelaxAuthChecks && record.ExpiresAt > 0 && !s.now().Before(time.Unix(record.ExpiresAt, 0)) {
+	if s.effectiveBearerSecurityProfile().EnforceTokenLifecycle && record.ExpiresAt > 0 && !s.now().Before(time.Unix(record.ExpiresAt, 0)) {
 		return nil, false
 	}
 	return map[string]any{
@@ -7063,7 +7080,7 @@ func (s *Server) adminPasswordOK(v string) bool {
 }
 
 func (s *Server) allowedRedirect(uri string) bool {
-	if s.cfg.OAuthPermissiveRedirects {
+	if s.cfg.OAuthPermissiveRedirects && !s.effectiveBearerSecurityProfile().EnforceRedirectAllowlist {
 		return uri != ""
 	}
 	u, err := url.Parse(uri)
@@ -7107,7 +7124,7 @@ func (s *Server) sameOriginOAuthCallback(uri *url.URL) bool {
 }
 
 func (s *Server) allowedResource(resource string, r *http.Request) bool {
-	if s.cfg.OAuthPermissiveResources {
+	if s.cfg.OAuthPermissiveResources && !s.effectiveBearerSecurityProfile().EnforceResourceAllowlist {
 		return true
 	}
 	want := strings.TrimRight(s.resource(r), "/")
@@ -7203,10 +7220,11 @@ func (s *Server) verifyJWT(token string) (map[string]any, error) {
 		return nil, err
 	}
 	exp := intFromAny(claims["exp"])
-	if exp <= 0 && !s.cfg.RelaxAuthChecks {
+	profile := s.effectiveBearerSecurityProfile()
+	if exp <= 0 && profile.RequireExpiry {
 		return nil, errors.New("token expiry is required")
 	}
-	if !s.cfg.RelaxAuthChecks && s.now().Unix() > int64(exp) {
+	if profile.RequireExpiry && s.now().Unix() > int64(exp) {
 		return nil, errors.New("token expired")
 	}
 	if jti, _ := claims["jti"].(string); jti != "" {

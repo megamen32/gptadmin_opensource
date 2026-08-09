@@ -598,6 +598,51 @@ button{height:32px;padding:0 12px;font-size:13px;border-radius:var(--radius-sm);
   <div id="securityEnv" class="stackList" style="margin-top:12px">
     <p class="muted">Нажмите «Обновить состояние», чтобы загрузить текущий security preset.</p>
   </div>
+  <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+    <h3 style="font-size:13px;margin-bottom:8px">Режим процессов</h3>
+    <div class="row">
+      <label class="small muted" for="processSecurityMode">Профиль:</label>
+      <select id="processSecurityMode" onchange="toggleProcessSecurityFields()">
+        <option value="normal">normal — штатная работа</option>
+        <option value="maximum">maximum — максимальная защита</option>
+        <option value="custom">custom — ручные флаги</option>
+      </select>
+      <button onclick="saveProcessSecurityProfile()">Сохранить профиль</button>
+    </div>
+    <div id="processSecurityFields" class="row" style="margin-top:8px">
+      <label class="small"><input id="processNoNewPrivileges" type="checkbox"> NoNewPrivileges</label>
+      <label class="small"><input id="processPrivateTmp" type="checkbox"> PrivateTmp</label>
+      <label class="small"><input id="processProtectSystem" type="checkbox"> ProtectSystem</label>
+      <label class="small"><input id="processProtectHome" type="checkbox"> ProtectHome</label>
+      <label class="small"><input id="processAllowPrivileged" type="checkbox" checked> разрешить privileged execution</label>
+    </div>
+    <p class="muted small">Профиль сохраняется явно и применяется при следующем штатном обновлении/перегенерации units.</p>
+  </div>
+  <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+    <h3 style="font-size:13px;margin-bottom:8px">Проверки bearer/OAuth</h3>
+    <div class="row">
+      <label class="small muted" for="bearerSecurityMode">Профиль:</label>
+      <select id="bearerSecurityMode" onchange="toggleBearerSecurityFields()">
+        <option value="normal">normal — рабочий auth-контракт</option>
+        <option value="maximum">maximum — все проверки</option>
+        <option value="custom">custom — ручные проверки</option>
+      </select>
+    </div>
+    <div id="bearerSecurityFields" class="row" style="margin-top:8px">
+      <label class="small"><input id="bearerRequireIssuer" type="checkbox"> issuer</label>
+      <label class="small"><input id="bearerRequireAudience" type="checkbox"> audience</label>
+      <label class="small"><input id="bearerRequireResource" type="checkbox"> resource</label>
+      <label class="small"><input id="bearerRequireScope" type="checkbox"> scope</label>
+      <label class="small"><input id="bearerRequireSubject" type="checkbox"> subject</label>
+      <label class="small"><input id="bearerRequireIssuedAt" type="checkbox"> issued-at</label>
+      <label class="small"><input id="bearerRequireExpiry" type="checkbox"> expiry</label>
+      <label class="small"><input id="bearerRequirePKCE" type="checkbox"> PKCE</label>
+      <label class="small"><input id="bearerLifecycle" type="checkbox"> token lifecycle</label>
+      <label class="small"><input id="bearerRedirects" type="checkbox"> redirect allowlist</label>
+      <label class="small"><input id="bearerResources" type="checkbox"> resource allowlist</label>
+    </div>
+    <p class="muted small">Подпись bearer проверяется всегда. Настройки применяются после штатного перезапуска Hub.</p>
+  </div>
   <div style="margin-top:16px">
     <h3 style="font-size:13px;margin-bottom:8px">UI tolerances (client-side)</h3>
     <div class="row">
@@ -979,12 +1024,55 @@ async function loadSecurityEnv(){
   el.innerHTML='<p class="muted">Загрузка…</p>';
   try{
     const j=await api('/admin/api/security/preset');
+    const profile=await api('/admin/api/security/profile');
+    const p=profile.process_profile||{};
+    const b=profile.bearer_profile||{};
+    $('processSecurityMode').value=p.mode||'normal';
+    $('processNoNewPrivileges').checked=!!p.no_new_privileges;
+    $('processPrivateTmp').checked=!!p.private_tmp;
+    $('processProtectSystem').checked=!!p.protect_system;
+    $('processProtectHome').checked=!!p.protect_home;
+    $('processAllowPrivileged').checked=p.allow_privileged_execution!==false;
+    toggleProcessSecurityFields();
+    $('bearerSecurityMode').value=b.mode||'normal';
+    ['Issuer','Audience','Resource','Scope','Subject','IssuedAt','Expiry','PKCE'].forEach(k=>{ $('bearerRequire'+k).checked=!!b['require_'+k.replace(/[A-Z]/g,m=>'_'+m.toLowerCase()).replace(/^_/,'')]; });
+    $('bearerLifecycle').checked=!!b.enforce_token_lifecycle;
+    $('bearerRedirects').checked=!!b.enforce_redirect_allowlist;
+    $('bearerResources').checked=!!b.enforce_resource_allowlist;
+    toggleBearerSecurityFields();
     const preset=esc(j.preset||'unknown');
     const mfa=j.mfa_enrolled?'enrolled':'not enrolled';
     el.innerHTML=`<div class="recentMiniItem"><div class="recentMiniTop"><span class="mono">Security preset</span><span class="muted small">${esc(mfa)}</span></div><div class="mono">${preset}</div></div>`;
   }catch(e){
     el.innerHTML='<p class="bad">ERR '+esc(e.message)+'</p>';
   }
+}
+
+function toggleProcessSecurityFields(){
+  const mode=$('processSecurityMode')?.value||'normal';
+  const disabled=mode!=='custom';
+  ['processNoNewPrivileges','processPrivateTmp','processProtectSystem','processProtectHome','processAllowPrivileged'].forEach(id=>{if($(id))$(id).disabled=disabled});
+  if(mode==='normal'){
+    $('processNoNewPrivileges').checked=false;$('processPrivateTmp').checked=false;$('processProtectSystem').checked=false;$('processProtectHome').checked=false;$('processAllowPrivileged').checked=true;
+  }
+  if(mode==='maximum'){
+    $('processNoNewPrivileges').checked=true;$('processPrivateTmp').checked=true;$('processProtectSystem').checked=true;$('processProtectHome').checked=true;$('processAllowPrivileged').checked=false;
+  }
+}
+function toggleBearerSecurityFields(){
+  const mode=$('bearerSecurityMode')?.value||'normal';
+  const disabled=mode!=='custom';
+  ['Issuer','Audience','Resource','Scope','Subject','IssuedAt','Expiry','PKCE'].forEach(k=>{if($('bearerRequire'+k))$('bearerRequire'+k).disabled=disabled});
+  ['bearerLifecycle','bearerRedirects','bearerResources'].forEach(id=>{if($(id))$(id).disabled=disabled});
+  if(mode==='normal'||mode==='maximum'){
+    ['Issuer','Audience','Resource','Scope','Subject','IssuedAt','Expiry','PKCE'].forEach(k=>{$('bearerRequire'+k).checked=(mode==='maximum'||k!=='Issuer')});
+    $('bearerLifecycle').checked=true;$('bearerRedirects').checked=mode==='maximum';$('bearerResources').checked=mode==='maximum';
+  }
+}
+async function saveProcessSecurityProfile(){
+  const mode=$('processSecurityMode').value;
+  const body={mode,no_new_privileges:$('processNoNewPrivileges').checked,private_tmp:$('processPrivateTmp').checked,protect_system:$('processProtectSystem').checked,protect_home:$('processProtectHome').checked,allow_privileged_execution:$('processAllowPrivileged').checked,bearer_profile:{mode:$('bearerSecurityMode').value,require_issuer:$('bearerRequireIssuer').checked,require_audience:$('bearerRequireAudience').checked,require_resource:$('bearerRequireResource').checked,require_scope:$('bearerRequireScope').checked,require_subject:$('bearerRequireSubject').checked,require_issued_at:$('bearerRequireIssuedAt').checked,require_expiry:$('bearerRequireExpiry').checked,require_pkce:$('bearerRequirePKCE').checked,enforce_token_lifecycle:$('bearerLifecycle').checked,enforce_redirect_allowlist:$('bearerRedirects').checked,enforce_resource_allowlist:$('bearerResources').checked}};
+  try{const j=await api('/admin/api/security/profile',{method:'PUT',body:JSON.stringify(body)});$('securityEnv').insertAdjacentHTML('afterbegin','<p class="ok">Профиль сохранён; применение привязано к штатной перегенерации units.</p>');console.log(j)}catch(e){$('securityEnv').insertAdjacentHTML('afterbegin','<p class="bad">ERR '+esc(e.message)+'</p>')}
 }
 
 // Direct environment mutation was removed from this legacy view. Use typed Hub security APIs.

@@ -1102,7 +1102,82 @@ if IS_MACOS:
 else:
     # Linux systemd. In user mode this uses systemd --user and ~/.config/systemd/user.
     LINUX_WANTED_BY = 'default.target' if IS_USER_INSTALL else 'multi-user.target'
-    LINUX_HARDENING = '' if IS_USER_INSTALL else f'NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectHome=true\nReadWritePaths={ETC_DIR} {INSTALL_DIR} {Path.home() / ".gptadmin"}\n'
+
+    def linux_systemd_hardening(mode: str, custom: dict | None = None) -> str:
+        """Return systemd restrictions for an explicit security profile.
+
+        The normal profile is intentionally frictionless.  Stronger process
+        isolation is opt-in so it cannot silently invalidate ShellMCP's
+        explicit privileged execution contract.
+        """
+        if str(mode).strip().lower() == 'normal':
+            return ''
+        normalized = str(mode).strip().lower()
+        if normalized not in {'maximum', 'custom'}:
+            raise ValueError('security mode must be normal, maximum or custom')
+        flags = {
+            'no_new_privileges': normalized == 'maximum',
+            'private_tmp': normalized == 'maximum',
+            'protect_system': normalized == 'maximum',
+            'protect_home': normalized == 'maximum',
+        }
+        if normalized == 'custom':
+            for key in flags:
+                if custom and key in custom:
+                    flags[key] = bool(custom[key])
+            if custom and custom.get('allow_privileged_execution') is False and not flags['no_new_privileges']:
+                raise ValueError('custom profile denying privileged execution requires no_new_privileges')
+        lines = []
+        if flags['no_new_privileges']:
+            lines.append('NoNewPrivileges=true')
+        if flags['private_tmp']:
+            lines.append('PrivateTmp=true')
+        if flags['protect_system']:
+            lines.append('ProtectSystem=full')
+        if flags['protect_home']:
+            lines.append('ProtectHome=true')
+        if flags['protect_system'] or flags['protect_home']:
+            lines.append(f'ReadWritePaths={ETC_DIR} {INSTALL_DIR} {Path.home() / ".gptadmin"}')
+        return '\n'.join(lines) + ('\n' if lines else '')
+
+    def configured_process_security_profile() -> tuple[str, dict]:
+        """Read the operator profile persisted by the Hub security API."""
+        env_mode = os.environ.get('GPTADMIN_SECURITY_MODE', '').strip().lower()
+        mode = env_mode or 'normal'
+        custom = {}
+        profile_path = ETC_DIR / 'security_state.json'
+        try:
+            persisted = json.loads(profile_path.read_text(encoding='utf-8'))
+            profile = persisted.get('process_profile') or {}
+            if isinstance(profile, dict) and profile.get('mode'):
+                # An explicit non-normal environment mode is a CLI override;
+                # otherwise the admin-configured profile is authoritative.
+                if env_mode not in {'maximum', 'custom'}:
+                    mode = str(profile.get('mode')).strip().lower()
+                custom = profile
+        except (OSError, ValueError, TypeError):
+            pass
+        return mode, custom
+
+    LINUX_SECURITY_MODE, LINUX_SECURITY_CUSTOM = configured_process_security_profile()
+    LINUX_HARDENING = '' if IS_USER_INSTALL else linux_systemd_hardening(LINUX_SECURITY_MODE, LINUX_SECURITY_CUSTOM)
+
+    def process_hardening_for_env(env: dict | None = None) -> str:
+        """Render the selected profile at unit-write time, not import time."""
+        if IS_USER_INSTALL:
+            return ''
+        if env and str(env.get('GPTADMIN_SECURITY_MODE', '')).strip().lower() in {'maximum', 'custom'}:
+            mode = str(env['GPTADMIN_SECURITY_MODE']).strip().lower()
+            _, persisted = configured_process_security_profile()
+            return linux_systemd_hardening(mode, persisted)
+        mode, custom = configured_process_security_profile()
+        return linux_systemd_hardening(mode, custom)
+
+    def render_unit_with_hardening(unit: str, hardening: str) -> str:
+        """Replace the import-time profile without corrupting normal units."""
+        if LINUX_HARDENING:
+            unit = unit.replace(LINUX_HARDENING, '', 1)
+        return unit.replace('\n[Install]', f'\n{hardening}[Install]', 1)
 
     UNIT_HUB = f"""
 [Unit]
@@ -1259,12 +1334,12 @@ WantedBy=timers.target
     def write_hub_unit(install_hub: bool, _install_shellmcp: bool):
         if install_hub:
             UNIT_PATH_HUB.parent.mkdir(parents=True, exist_ok=True)
-            UNIT_PATH_HUB.write_text(UNIT_HUB)
+            UNIT_PATH_HUB.write_text(render_unit_with_hardening(UNIT_HUB, process_hardening_for_env(env_read())))
 
     def write_shellmcp_unit(_install_hub: bool, install_shellmcp: bool):
         if install_shellmcp:
             UNIT_PATH_SHELLMCP.parent.mkdir(parents=True, exist_ok=True)
-            UNIT_PATH_SHELLMCP.write_text(UNIT_SHELLMCP)
+            UNIT_PATH_SHELLMCP.write_text(render_unit_with_hardening(UNIT_SHELLMCP, process_hardening_for_env(env_read())))
 
     def write_frpc_unit(frpc_bin: str):
         UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
@@ -1273,7 +1348,7 @@ WantedBy=timers.target
         os.chmod(wrapper, 0o755)
         UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(
             frpc_bin=wrapper,
-            hardening=LINUX_HARDENING,
+            hardening=process_hardening_for_env(env_read()),
             wanted_by=LINUX_WANTED_BY,
         ))
 
@@ -1281,7 +1356,7 @@ WantedBy=timers.target
         UNIT_PATH_CLOUDFLARED.parent.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_CLOUDFLARED.write_text(CLOUDFLARED_UNIT_TPL.format(
             cloudflared_bin=cloudflared_bin, env_file=ENV_FILE, hub_port=env.get('HUB_PORT', '9001'),
-            hardening=LINUX_HARDENING, wanted_by=LINUX_WANTED_BY))
+            hardening=process_hardening_for_env(env), wanted_by=LINUX_WANTED_BY))
 
 
     def write_autoupdate_unit(env: dict):
@@ -1483,23 +1558,39 @@ set -Eeuo pipefail
 FRPC_BIN={frpc_bin!r}
 CONFS=({confs})
 pids=()
+next_retry=()
+retry_delay=5
+start_child() {{
+  local index="$1"
+  "$FRPC_BIN" -c "${{CONFS[$index]}}" &
+  pids[$index]="$!"
+  next_retry[$index]=0
+}}
 cleanup() {{
   trap - TERM INT EXIT
   for pid in "${{pids[@]}}"; do
-    kill "$pid" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+    fi
   done
   wait 2>/dev/null || true
 }}
 trap cleanup TERM INT EXIT
-for conf in "${{CONFS[@]}}"; do
-  "$FRPC_BIN" -c "$conf" &
-  pids+=("$!")
+for index in "${{!CONFS[@]}}"; do
+  start_child "$index"
 done
 while true; do
-  for pid in "${{pids[@]}}"; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" || exit $?
-      exit 1
+  now="$(date +%s)"
+  for index in "${{!CONFS[@]}}"; do
+    pid="${{pids[$index]:-}}"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    if [[ "$now" -ge "${{next_retry[$index]:-0}}" ]]; then
+      # Restart this edge independently; one failed edge must not stop healthy FRP edges.
+      wait "$pid" 2>/dev/null || true
+      start_child "$index"
+      next_retry[$index]="$((now + retry_delay))"
     fi
   done
   sleep 2
@@ -1914,6 +2005,14 @@ def setup_interactive(args):
 
     env = env_read()
 
+    # The normal profile is intentionally frictionless. Stronger process
+    # isolation is an explicit operator choice, never a hidden system-install
+    # side effect.
+    requested_security_mode = getattr(args, 'security_mode', None)
+    if requested_security_mode:
+        env['GPTADMIN_SECURITY_MODE'] = requested_security_mode
+    else:
+        env.setdefault('GPTADMIN_SECURITY_MODE', 'normal')
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
     env.setdefault('ADMIN_PASSWORD', gen_hex())
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
@@ -4439,6 +4538,101 @@ def _transactional_update(func):
     return wrapped
 
 
+def cmd_security_profile(args):
+    """Read or persist the process security profile used by unit generation."""
+    path = ETC_DIR / 'security_state.json'
+    try:
+        state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        die(f'cannot read security profile: {exc}')
+    if not isinstance(state, dict):
+        die('security state must be a JSON object')
+    current = state.get('process_profile')
+    if not isinstance(current, dict):
+        current = {'mode': 'normal', 'allow_privileged_execution': True}
+    if not getattr(args, 'mode', None):
+        print(json.dumps({'process_profile': current}, ensure_ascii=False, indent=2))
+        return
+
+    mode = args.mode
+    if mode == 'normal':
+        profile = {
+            'mode': mode, 'no_new_privileges': False, 'private_tmp': False,
+            'protect_system': False, 'protect_home': False,
+            'allow_privileged_execution': True,
+        }
+    elif mode == 'maximum':
+        profile = {
+            'mode': mode, 'no_new_privileges': True, 'private_tmp': True,
+            'protect_system': True, 'protect_home': True,
+            'allow_privileged_execution': False,
+        }
+    else:
+        profile = {'mode': mode}
+        for key, value in (
+            ('no_new_privileges', args.no_new_privileges),
+            ('private_tmp', args.private_tmp),
+            ('protect_system', args.protect_system),
+            ('protect_home', args.protect_home),
+            ('allow_privileged_execution', args.allow_privileged_execution),
+        ):
+            profile[key] = bool(current.get(key, False if key != 'allow_privileged_execution' else True)) if value is None else value
+        if not profile['allow_privileged_execution'] and not profile['no_new_privileges']:
+            die('custom profile denying privileged execution must enable --no-new-privileges')
+
+    state['process_profile'] = profile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(json.dumps({'process_profile': profile, 'restart_bound': True}, ensure_ascii=False, indent=2))
+
+
+def cmd_security_bearer(args):
+    """Read or persist the claim/protocol checks for signed bearers."""
+    path = ETC_DIR / 'security_state.json'
+    try:
+        state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        die(f'cannot read security profile: {exc}')
+    if not isinstance(state, dict):
+        die('security state must be a JSON object')
+    current = state.get('bearer_profile')
+    if not isinstance(current, dict):
+        current = {'mode': 'normal'}
+    mode = getattr(args, 'mode', None)
+    if not mode:
+        print(json.dumps({'bearer_profile': current}, ensure_ascii=False, indent=2))
+        return
+    keys = ('issuer', 'audience', 'resource', 'scope', 'subject', 'issued_at', 'expiry', 'pkce')
+    if mode == 'maximum':
+        profile = {'mode': mode, **{f'require_{key}': True for key in keys}, 'enforce_token_lifecycle': True, 'enforce_redirect_allowlist': True, 'enforce_resource_allowlist': True}
+    elif mode == 'normal':
+        profile = {'mode': mode, 'require_issuer': False, **{f'require_{key}': True for key in keys if key != 'issuer'}, 'enforce_token_lifecycle': True, 'enforce_redirect_allowlist': False, 'enforce_resource_allowlist': False}
+    else:
+        profile = {'mode': mode}
+        for key in keys:
+            value = getattr(args, f'require_{key}', None)
+            profile[f'require_{key}'] = bool(current.get(f'require_{key}', True)) if value is None else value
+        for key in ('token_lifecycle', 'redirect_allowlist', 'resource_allowlist'):
+            value = getattr(args, f'enforce_{key}', None)
+            profile[f'enforce_{key}'] = bool(current.get(f'enforce_{key}', True)) if value is None else value
+    state['bearer_profile'] = profile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(json.dumps({'bearer_profile': profile, 'restart_bound': True}, ensure_ascii=False, indent=2))
+
+
 @_transactional_update
 def cmd_update(args):
     """In-place upgrade for existing installs.
@@ -4468,6 +4662,7 @@ def cmd_update(args):
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
     env.setdefault('ADMIN_PASSWORD', gen_hex())
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    env.setdefault('GPTADMIN_SECURITY_MODE', 'normal')
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
     env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
@@ -5234,6 +5429,7 @@ def main():
     ap_setup.add_argument('--hub-port', help='Local hub port; default 9001')
     ap_setup.add_argument('--shell-transport', choices=['polling', 'webhook', 'websocket'], default='polling', help='Internal hub↔ShellMCP transport; default polling')
     ap_setup.add_argument('--shell-heartbeat', action='store_true', help='Enable optional ShellMCP heartbeat (disabled by default)')
+    ap_setup.add_argument('--security-mode', choices=['normal', 'maximum', 'custom'], default=None, help='Process security profile; normal is frictionless by default')
     ap_setup.add_argument('--pair', help='Reserved one-time pairing token for GPTAdmin Cloud installs')
     ap_setup.add_argument('--user', action='store_true', help='Use per-user install paths/services')
     ap_setup.add_argument('--system', action='store_true', help='Use system install paths/services')
@@ -5252,6 +5448,33 @@ def main():
     ap_update.add_argument('--system', action='store_true', help='Use system install paths/services')
     ap_update.add_argument('--auto', action='store_true', help='Run from the automatic updater; obey GPTADMIN_AUTO_UPDATE')
     ap_update.set_defaults(func=cmd_update)
+
+    ap_security = sub.add_parser('security', help='Настроить режимы безопасности процессов')
+    security_sub = ap_security.add_subparsers(dest='security_cmd')
+    ap_security_profile = security_sub.add_parser('profile', help='Показать или изменить профиль process hardening')
+    ap_security_profile.add_argument('--mode', choices=['normal', 'maximum', 'custom'], help='normal: штатная работа; maximum: строгая изоляция; custom: явные флаги')
+    for flag, dest in (
+        ('no-new-privileges', 'no_new_privileges'),
+        ('private-tmp', 'private_tmp'),
+        ('protect-system', 'protect_system'),
+        ('protect-home', 'protect_home'),
+    ):
+        ap_security_profile.add_argument(f'--{flag}', dest=dest, action='store_true', default=None)
+        ap_security_profile.add_argument(f'--allow-{flag}', dest=dest, action='store_false')
+    ap_security_profile.add_argument('--allow-privileged-execution', dest='allow_privileged_execution', action='store_true', default=None)
+    ap_security_profile.add_argument('--deny-privileged-execution', dest='allow_privileged_execution', action='store_false')
+    ap_security_profile.set_defaults(func=cmd_security_profile)
+    ap_security_bearer = security_sub.add_parser('bearer', help='Показать или изменить проверки подписанного bearer/OAuth')
+    ap_security_bearer.add_argument('--mode', choices=['normal', 'maximum', 'custom'], help='normal: рабочий auth-контракт; maximum: все проверки; custom: явные проверки')
+    for key in ('issuer', 'audience', 'resource', 'scope', 'subject', 'issued-at', 'expiry', 'pkce'):
+        dest = 'require_' + key.replace('-', '_')
+        ap_security_bearer.add_argument(f'--require-{key}', dest=dest, action='store_true', default=None)
+        ap_security_bearer.add_argument(f'--allow-{key}', dest=dest, action='store_false')
+    for key in ('token-lifecycle', 'redirect-allowlist', 'resource-allowlist'):
+        dest = 'enforce_' + key.replace('-', '_')
+        ap_security_bearer.add_argument(f'--enforce-{key}', dest=dest, action='store_true', default=None)
+        ap_security_bearer.add_argument(f'--allow-{key}', dest=dest, action='store_false')
+    ap_security_bearer.set_defaults(func=cmd_security_bearer)
 
     ap_autoupdate = sub.add_parser('auto-update', aliases=['autoupdate'], help='Управление автообновлением GPTAdmin')
     ap_autoupdate.add_argument('action', nargs='?', choices=['status', 'enable', 'disable', 'run'], default='status')

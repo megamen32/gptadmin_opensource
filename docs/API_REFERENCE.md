@@ -7,6 +7,7 @@
 | `GET` | `/healthz` | none | Liveness only; returns `ok`. |
 | `GET` | `/version` | none | Build version and commit identity. |
 | `GET` | `/metrics` | none | Bounded aggregate Hub counts; never includes credentials, arguments or file contents. |
+| `GET` | `/admin/api/connection-debug?limit=200&server_id=...` | ctl bearer | Secret-safe operator snapshot of Hub, published child MCP connections, heartbeat age, topology metadata, jobs and recent trace-linked audit events. |
 
 REST + MCP endpoints exposed by the hub.
 

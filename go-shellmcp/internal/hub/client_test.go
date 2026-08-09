@@ -3,11 +3,14 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 )
@@ -84,6 +87,35 @@ func TestNewUsesPreferredHubIPBeforeDNS(t *testing.T) {
 
 	port := hubServer.Listener.Addr().(*net.TCPAddr).Port
 	client := New(fmt.Sprintf("http://hub.invalid:%d", port), nil, "", "", "127.0.0.1")
+	resp, _, err := client.do(context.Background(), http.MethodGet, "/ready", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestNewUsesConfiguredSSLBundle(t *testing.T) {
+	hubServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hubServer.Close()
+
+	caFile := t.TempDir() + "/roots.pem"
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: hubServer.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", caFile)
+	// Confirm the fixture is a real certificate rather than relying on a
+	// malformed bundle accidentally making the test pass.
+	if _, err := x509.ParseCertificate(hubServer.Certificate().Raw); err != nil {
+		t.Fatal(err)
+	}
+
+	port := hubServer.Listener.Addr().(*net.TCPAddr).Port
+	client := New(fmt.Sprintf("https://example.com:%d", port), nil, "", "", "127.0.0.1")
 	resp, _, err := client.do(context.Background(), http.MethodGet, "/ready", nil)
 	if err != nil {
 		t.Fatal(err)
