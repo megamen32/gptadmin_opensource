@@ -730,6 +730,22 @@ def _cleanup_obsolete_runtime_files():
             # Older installers used different numeric prefixes; any matching
             # override can replace the canonical gptadmin.env credential.
             obsolete_dropin.unlink(missing_ok=True)
+        # An older server-100 drop-in hard-coded ProtectHome=read-only.  It
+        # predates configurable security profiles and must not override the
+        # normal profile. Preserve its explicit user/group choice.
+        legacy_user_mode = dropin_dir / '100-gptadmin-user-mode.conf'
+        try:
+            legacy_text = legacy_user_mode.read_text(encoding='utf-8')
+            if 'ProtectHome=read-only' in legacy_text:
+                cleaned = legacy_text.replace('ProtectHome=read-only\n', '')
+                tmp = legacy_user_mode.with_name(legacy_user_mode.name + '.new')
+                tmp.write_text(cleaned, encoding='utf-8')
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, legacy_user_mode)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print_warn(f'Could not remove legacy ShellMCP hardening drop-in: {exc}')
     for directory in (BIN_DIR, CLI_PATH.parent):
         if not directory.exists():
             continue
