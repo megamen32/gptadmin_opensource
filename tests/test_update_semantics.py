@@ -3,11 +3,25 @@ from types import SimpleNamespace
 import json
 import hashlib
 import pytest
+import subprocess
 
 import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "cli.py"
+
+
+def test_local_hub_health_accepts_current_go_hub_version_contract(monkeypatch):
+    """The updater must accept the live Go Hub name, not only the old underscore spelling."""
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout='{"ok":true,"name":"gptadmin-go-hub","build_version":"148"}', stderr=""
+        ),
+    )
+
+    assert cli.wait_local_hub_health({"HUB_PORT": "9001"}, timeout_s=1) is True
 
 
 def test_update_reads_canonical_release_manifest_artifact_list(monkeypatch):

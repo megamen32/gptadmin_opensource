@@ -1862,8 +1862,14 @@ def wait_local_hub_health(env: dict, timeout_s: int = 90) -> bool:
     last_err = ''
     while time.time() < deadline:
         res = subprocess.run(['curl', '-fsS', '--max-time', '5', url], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode == 0 and 'gptadmin_hub' in (res.stdout or ''):
-            return True
+        if res.returncode == 0:
+            try:
+                payload = json.loads(res.stdout or '{}')
+            except (TypeError, ValueError):
+                payload = {}
+            name = str(payload.get('name') or '')
+            if payload.get('ok') is True and name in {'gptadmin_hub', 'gptadmin-go-hub'}:
+                return True
         last_err = (res.stderr or res.stdout or f'curl rc={res.returncode}').strip()
         time.sleep(2)
     print('WARNING: Local hub health check did not pass before starting dependent services' + (f': {last_err}' if last_err else ''), file=sys.stderr)
