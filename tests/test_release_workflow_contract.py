@@ -131,7 +131,6 @@ def test_auto_tag_verifies_the_fetched_remote_tag_commit_before_no_op() -> None:
     assert 'git ls-remote --exit-code --tags origin "refs/tags/${tag}"' in script
     assert 'git fetch --no-tags origin "refs/tags/${tag}"' in script
     assert 'git rev-parse --verify "FETCH_HEAD^{commit}"' in script
-    assert 'if [[ "$remote_tag_commit" != "$current_commit" ]]' in script
     assert "already targets the current commit; nothing to do" in script
     assert 'git rev-parse -q --verify "refs/tags/${tag}"' not in script
 
@@ -143,6 +142,31 @@ def test_auto_tag_retries_dispatch_after_a_verified_existing_tag() -> None:
     release = workflow["jobs"]["release"]
 
     assert "if" not in release
+
+
+def test_auto_tag_runs_on_every_main_push_and_advances_published_version() -> None:
+    """A code push must not get stuck on an already-published VERSION."""
+
+    workflow = yaml.safe_load(AUTO_TAG_WORKFLOW.read_text(encoding="utf-8"))
+    trigger = workflow.get("on", workflow[True])  # PyYAML 1.1 treats on as a boolean.
+    assert trigger["push"]["branches"] == ["main"]
+    assert "paths" not in trigger["push"]
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    script = next(step for step in workflow["jobs"]["tag"]["steps"] if step.get("id") == "maybe_tag")["run"]
+    assert "VERSION ${v} is already published" in script
+    assert "next=$((v + 1))" in script
+    assert "git push origin HEAD:main" in script
+
+
+def test_auto_tag_retries_dispatch_until_new_tag_is_visible() -> None:
+    """A successful tag push must survive GitHub's short ref propagation lag."""
+
+    workflow = yaml.safe_load(AUTO_TAG_WORKFLOW.read_text(encoding="utf-8"))
+    script = workflow["jobs"]["release"]["steps"][0]["run"]
+    assert "for attempt in 1 2 3 4 5 6" in script
+    assert 'gh api "repos/${GH_REPO}/git/ref/tags/${tag}"' in script
+    assert "sleep 5" in script
+    assert "could not dispatch build-and-sync.yml" in script
 
 
 def test_release_job_attests_artifacts_and_scans_dependencies_before_publication() -> None:
