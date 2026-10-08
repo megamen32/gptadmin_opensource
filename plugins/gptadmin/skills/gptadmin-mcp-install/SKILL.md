@@ -1,58 +1,75 @@
 ---
 name: gptadmin-mcp-install
-description: Discover targets, install child MCP servers, and run commands through a selected GPTAdmin target with schema-first and profile-scoped execution.
+description: Discover machines, run commands, and install or call child MCP servers through the configured GPTAdmin Hub with schema-first, profile-scoped execution.
 ---
 
-# Manage targets and child MCPs through GPTAdmin
+# Work through the GPTAdmin Hub
 
-GPTAdmin is the front door for ShellMCP targets and child MCP servers. Use the
-Hub's profile and target policy. Do not connect directly to an unapproved child
-endpoint when the task is meant to go through GPTAdmin.
+Everything goes through the one Hub URL from `servers.mcp.json`. If that is
+still the placeholder, see `gptadmin-connect` first — this skill assumes a real
+Hub is configured and authorized.
 
-The packaged parent endpoint is `https://mcp.bezrabotnyi.com/mcp`. Keep the
-parent connection on that canonical OAuth origin.
+## Discovery
 
-## Canonical workflow
+Call the Hub's discovery tool and read the response. It lists every machine and
+child MCP with a status:
 
-1. Call `discover` and read the response. Choose an explicit `server_id`.
-   Never guess `target="default"` and never infer a target from a display
-   label alone.
-2. Prefer `status=online` targets. `stale` means the relay has not checked in
-   and the call may hang; `failed` means it will not work.
-3. Read the target schema with `schema {"target": "<server_id>"}` before
-   calling anything. For a ShellMCP target the tools are typically
-   `shell_exec`, `mcp_manage`, `mcp_tools`, `mcp_call`.
-4. Run work with `execute {"target","tool","args"}`. Pass `idempotency_key`
-   when retrying. Use `background=true` for long operations and poll the
-   returned `job_id` with the `job` tool.
-5. To install a child MCP, use `mcp_manage` with the documented `upsert` action
-   on the target. Use the Hub's approval flow for writes. Never pass secrets
-   through command arguments or environment values.
-6. Verify with `mcp_manage` `status`, read the real `tools/list` through
-   `mcp_tools`, and only then call a child tool through `mcp_call`.
+- `online` — usable
+- `stale` — has not checked in recently; calls may hang, prefer another target
+- `failed` — will not work as-is
 
-## Running a shell command
+Report the real numbers: how many targets, how many online. Do not summarise
+"connected".
 
-`execute` on a ShellMCP target:
+Always choose an explicit target id. Never guess `target: default` and never
+infer a target from a display label.
 
-```json
-{"target": "shell:roomhacker-server-100", "tool": "shell_exec",
- "args": {"cmd": "uptime"}}
+## Schema first, then act
+
+1. `schema` with the chosen target to list its tools.
+2. Then the operation.
+
+Never call a tool you have not read the schema for. On a ShellMCP host the tools
+are typically `shell_exec`, `mcp_manage`, `mcp_tools`, `mcp_call` — but read
+them, do not assume.
+
+## Running a command
+
+```
+execute
+  target: <shell target id>
+  tool:   shell_exec
+  args:   {"cmd": "<command>"}
 ```
 
-Show the user the exact command before running anything destructive, and get
-explicit confirmation. `run_as_user=root` is for intentional root work only.
+- Show the user the exact command before anything destructive or
+  configuration-changing, and wait for explicit approval.
+- Use root only when root is genuinely required.
+- Long jobs: pass `background: true`, keep the returned job id, poll it.
+- Retries: reuse the same `idempotency_key`.
 
-## Profiles and permissions
+## Child MCPs
 
-A profile can restrict targets, tools, access mode, approvals, write budgets,
-and virtual MCPs. If discovery or schema omits a target or tool, treat it as
-unavailable. Do not bypass the profile with a direct URL, a legacy bearer, an
-admin endpoint, or a guessed tool name.
+To add one: `mcp_manage` with the documented action on that target, going
+through the Hub's approval flow. Never pass secrets as command arguments or
+environment values.
 
-## Failure handling
+To use one: `mcp_manage` status → `mcp_tools` for a real `tools/list` → then
+`mcp_call`. Do not skip to calling a tool that was never listed.
 
-Separate these states: OAuth authenticated, target discovered, target online,
-tool schema read, and business operation accepted. A successful parent MCP
-connection proves none of the later states by itself. Report the actual result
-and the target it came from, not just an HTTP acceptance.
+## Policy
+
+The active profile may restrict targets, tools, access mode, approvals, write
+budgets, and virtual MCPs. If discovery or schema omits a target or tool, it is
+unavailable — say so. Do not work around policy with a direct URL, a raw
+credential, an admin endpoint, or a guessed tool name.
+
+## Report results honestly
+
+These are different states and must be reported separately:
+
+OAuth authenticated → target discovered → target online → schema read →
+operation accepted.
+
+A successful connection to the Hub proves only the first. Name the target and
+show the actual output, not just "done".

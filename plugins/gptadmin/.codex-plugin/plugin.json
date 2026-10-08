@@ -6,8 +6,8 @@
     "name": "GPTAdmin contributors",
     "url": "https://github.com/megamen32"
   },
-  "homepage": "https://github.com/megamen32/gptadmin",
-  "repository": "https://github.com/megamen32/gptadmin",
+  "homepage": "https://github.com/megamen32/gptadmin_opensource",
+  "repository": "https://github.com/megamen32/gptadmin_opensource",
   "license": "AGPL-3.0",
   "keywords": [
     "mcp",
@@ -37,5 +37,6 @@
       "Install or use a child MCP through GPTAdmin.",
       "Use the memory MCP named by the active GPTAdmin profile."
     ]
-  }
+  },
+  "longDescription": ""
 }

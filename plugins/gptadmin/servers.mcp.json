@@ -3,9 +3,9 @@
   "mcpServers": {
     "gptadmin-hub": {
       "type": "streamable-http",
-      "url": "https://mcp.bezrabotnyi.com/mcp",
+      "url": "https://gptadmin.example.com/mcp",
       "headers": {},
-      "description": "GPTAdmin hub: OAuth-protected MCP front door for ShellMCP targets and child MCPs.",
+      "description": "REPLACE the url above with your own GPTAdmin Hub HTTPS /mcp endpoint before connecting. This example.com URL is a placeholder, not a working host.",
       "timeout": 60000
     }
   }

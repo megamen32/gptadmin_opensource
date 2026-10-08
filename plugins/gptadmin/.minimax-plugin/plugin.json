@@ -3,16 +3,16 @@
   "name": "gptadmin",
   "displayName": "GPTAdmin",
   "version": "1.0.0",
-  "description": "Connects the agent to the OAuth-protected GPTAdmin MCP hub for server administration, child-MCP installation, and profile-scoped workflows.",
+  "description": "Connects the agent to your own OAuth-protected GPTAdmin Hub for server administration, child-MCP installation, and profile-scoped workflows. Ships a placeholder Hub URL that you replace with your own before first use.",
   "author": "GPTAdmin contributors",
   "icon": "icon.png",
   "darkIcon": "icon-dark.png",
   "category": "Code",
   "exampleQueries": [
-    "Show my GPTAdmin targets and which ones are online.",
-    "Run a command on server-100 through GPTAdmin.",
-    "Install a child MCP on a ShellMCP target through GPTAdmin.",
-    "Reconnect GPTAdmin through the browser OAuth flow."
+    "Set up GPTAdmin — I need to point the plugin at my own Hub.",
+    "Show my GPTAdmin machines and which ones are online.",
+    "Run uptime on one of my machines through GPTAdmin.",
+    "Add a new machine: install ShellMCP and get it approved."
   ],
   "apps": [],
   "mcpServers": [
