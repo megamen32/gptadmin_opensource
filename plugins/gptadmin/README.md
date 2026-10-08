@@ -117,6 +117,8 @@ cannot fix that.
 
 | Symptom | Likely cause |
 |---|---|
+| Skills load, but the Hub exposes no tools | MCP entry exists but was never authorized — see step 3 |
+| Agent reaches your machines anyway, without the Hub | The user has a leftover token or a second access path; the plugin's own channel is still broken |
 | Browser opens, password rejected | Hub admin password, not your OS/SSH password |
 | `401` right after authorizing | Token issued for a different issuer than the URL you connect to |
 | Worked yesterday, not today | Issuer is a temporary tunnel address; make it stable (step 2) |

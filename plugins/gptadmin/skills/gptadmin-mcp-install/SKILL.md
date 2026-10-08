@@ -5,9 +5,21 @@ description: Discover machines, run commands, and install or call child MCP serv
 
 # Work through the GPTAdmin Hub
 
-Everything goes through the one Hub URL from `servers.mcp.json`. If that is
-still the placeholder, see `gptadmin-connect` first — this skill assumes a real
-Hub is configured and authorized.
+## Precondition — check this before anything else
+
+Confirm the Hub MCP tools are actually available in this session.
+
+- **Present** — continue.
+- **Absent** — stop. Say "the GPTAdmin Hub is not connected", and send the user
+  to `gptadmin-connect`.
+
+Never fall back to a token in a local config file, a direct script, SSH, or a
+different MCP server. That bypasses Hub policy and makes an authorization
+problem invisible. Report the missing connection instead.
+
+Everything below goes through the one Hub URL from `servers.mcp.json`. If that
+is still the placeholder, see `gptadmin-connect` first — this skill assumes a
+real Hub is configured and authorized.
 
 ## Discovery
 
