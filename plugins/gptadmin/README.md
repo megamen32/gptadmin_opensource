@@ -1,30 +1,58 @@
-# GPTAdmin Codex plugin
+# GPTAdmin — MiniMax Code plugin
 
-Installing this plugin adds the remote GPTAdmin MCP server to Codex. It is an
-OAuth connection to the GPTAdmin Hub, not a local mock or a copied bearer token.
+Connects MiniMax Code to the OAuth-protected GPTAdmin MCP hub: one remote entry
+point for administering servers, running commands through ShellMCP targets, and
+installing child MCP servers.
 
-On first use, the MCP client follows the Hub's OAuth discovery and opens the
-browser consent page. Enter the GPTAdmin admin password in that page. Never put
-the password, authorization code, access token, refresh token, or internal
-signing secret into Codex chat, `.mcp.json`, a skill, or a task file.
+## What it contains
 
-The default endpoint is `https://became.bezrabotnyi.com/mcp`. For another
-GPTAdmin installation, change only the URL in `.mcp.json` to that Hub's public
-HTTPS `/mcp` endpoint before connecting. The Hub must advertise the standard
-OAuth discovery endpoints:
+- `servers.mcp.json` — the remote GPTAdmin hub over `streamable-http`
+- `skills/gptadmin-connect` — OAuth connection and reconnection
+- `skills/gptadmin-mcp-install` — target discovery, schema-first execution,
+  child-MCP installation
+- `skills/gptadmin-workflow` — profile routing, memory workflow, ShellMCP
+  enrollment on a new host
 
-- `/.well-known/oauth-protected-resource`
-- `/.well-known/oauth-authorization-server`
-- `/register`
-- `/oauth/authorize`
-- `/oauth/token`
+## Install
 
-The included skills define the safe workflow:
+Point your client at the public repository and install the `gptadmin` plugin
+directory, or copy this directory into `~/.minimax/plugins/gptadmin/`.
 
-1. complete OAuth in the browser and verify the authenticated MCP connection;
-2. inspect the active profile before choosing a target or tool;
-3. discover a child MCP, read its schema, and install/use it through GPTAdmin;
-4. use the memory MCP explicitly named by the active GPTAdmin profile.
+The hub URL lives in exactly one place, `servers.mcp.json`. To use a different
+Hub, change only that `url`.
 
-OAuth success is not the same as business acceptance: after authorization,
-verify `tools/list`, then run a read-only discovery before any write or command.
+## Authorization
+
+The hub is OAuth-protected. On first use the client follows OAuth discovery and
+opens the browser consent page; the admin password is entered there and nowhere
+else. Never put the password, an authorization code, an access or refresh
+token, or a signing secret into chat, `.mcp.json`, a skill, or a task file.
+
+Requested scopes: `gptadmin.read gptadmin.exec offline_access`.
+
+## Hub and ShellMCP are different things
+
+- **Hub** — the single OAuth front door, policy and approval point. You need
+  exactly one reachable over HTTPS.
+- **ShellMCP** — the per-host agent that exposes shell and child-MCP tools to
+  the Hub. You need one on every host you want to control.
+
+A host only becomes usable after its ShellMCP is enrolled in `discover` and
+approved through `approve_pending_server`.
+
+## Issuer stability
+
+If the hub advertises an OAuth issuer on a `t.gptadmin` FRP tunnel host, saved
+tokens break whenever that tunnel restarts or its URL changes. The stable
+public hostname is `https://mcp.bezrabotnyi.com`. The hub should advertise that
+hostname as its issuer via `HUB_PUBLIC_URL` / `PublicOrigin`; the tunnel is
+transport only.
+
+## Verify before trusting it
+
+After authorizing, call `tools/list`, then `discover`, then one read-only
+command on an `online` target. OAuth success is not business acceptance.
+
+## License
+
+AGPL-3.0

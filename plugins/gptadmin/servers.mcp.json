@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "mcpServers": {
+    "gptadmin-hub": {
+      "type": "streamable-http",
+      "url": "https://mcp.bezrabotnyi.com/mcp",
+      "headers": {},
+      "description": "GPTAdmin hub: OAuth-protected MCP front door for ShellMCP targets and child MCPs.",
+      "timeout": 60000
+    }
+  }
+}
