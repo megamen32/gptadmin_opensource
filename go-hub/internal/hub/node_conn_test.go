@@ -97,11 +97,14 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	// The production cross-node path: the original MCP bearer travels to the
 	// member's /mcp, which reauthorizes it against the replicated snapshot
 	// token store and executes through its local queue.
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:member-a","tool":"shell_exec","arguments":{"command":"echo node-conn-live-ok"}}}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"name":"execute","arguments":{"target":"shell:member-a","tool":"shell_exec","arguments":{"command":"echo node-conn-live-ok"}}}}`)
 	// Diagnostic: the same call direct to the member must succeed; a 401
 	// here is a fixture auth problem, not a transport problem.
 	direct := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	direct.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
+	direct.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
+	direct.Header.Set("Mcp-Method", "tools/call")
+	direct.Header.Set("Mcp-Name", "execute")
 	directW := httptest.NewRecorder()
 	member.Handler().ServeHTTP(directW, direct)
 	if directW.Code != http.StatusOK {
@@ -110,6 +113,9 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
+	r.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
+	r.Header.Set("Mcp-Method", "tools/call")
+	r.Header.Set("Mcp-Name", "execute")
 	w := httptest.NewRecorder()
 	writer.forwardNodePeerRequest(w, r, "shell:member-a", body, "/mcp")
 	if w.Code != http.StatusOK {
@@ -120,6 +126,43 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "job_id") && !strings.Contains(w.Body.String(), "node-conn-live-ok") {
 		t.Fatalf("receipt is neither an accepted job nor an executed result: %s", w.Body.String())
+	}
+}
+
+// Fast local transport regression (<1s, max5s); live fleet acceptance is
+// separate. Arbitrary frame headers must not cross the loopback boundary.
+func TestNodeConnLocalExecuteKeepsOnlyMCPRoutingHeaders(t *testing.T) {
+	observed := make(chan http.Header, 2)
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer listener.Close()
+	s := &Server{cfg: Config{Addr: listener.Listener.Addr().String()}}
+	for _, endpoint := range []string{"/mcp", "/admin/api/mcp/execute"} {
+		frame := nodeConnFrame{Endpoint: endpoint, Auth: "Bearer original", Body: []byte(`{}`), Headers: map[string]string{
+			"Accept": "application/json", "MCP-Protocol-Version": mcpProtocolVersion,
+			"Mcp-Method": "tools/call", "Mcp-Name": "execute", "Cookie": "foreign-cookie",
+			"Mcp-Session-Id": "foreign-session", "Authorization": "Bearer replacement", "X-User": "foreign-user",
+		}}
+		status, _, _ := s.nodeConnLocalExecute(frame)
+		if status != http.StatusOK {
+			t.Fatalf("loopback status %d", status)
+		}
+		headers := <-observed
+		if headers.Get("Authorization") != frame.Auth || headers.Get("Cookie") != "" || headers.Get("Mcp-Session-Id") != "" || headers.Get("X-User") != "" {
+			t.Fatal("caller or session isolation changed")
+		}
+		for _, name := range []string{"MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
+			want := ""
+			if endpoint == "/mcp" {
+				want = frame.Headers[name]
+			}
+			if headers.Get(name) != want {
+				t.Fatalf("endpoint %s lost routing header %s", endpoint, name)
+			}
+		}
 	}
 }
 

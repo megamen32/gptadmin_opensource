@@ -275,6 +275,14 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 	}
 	frame := nodeConnFrame{Op: "call", ID: hex.EncodeToString(seed),
 		Endpoint: endpoint, Auth: r.Header.Get("Authorization"), Body: body}
+	if endpoint == "/mcp" {
+		frame.Headers = map[string]string{}
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
+			if value := r.Header.Get(name); value != "" {
+				frame.Headers[name] = value
+			}
+		}
+	}
 	wait := make(chan nodeConnResult, 1)
 	conn.pendingMu.Lock()
 	conn.pending[frame.ID] = wait
@@ -506,6 +514,15 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 		request.Header.Set("Authorization", frame.Auth)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if frame.Endpoint == "/mcp" {
+		// Match the HTTP peer route. Never propagate a browser cookie, client
+		// session ID or arbitrary frame header into another node's session.
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
+			if value := frame.Headers[name]; value != "" {
+				request.Header.Set(name, value)
+			}
+		}
+	}
 	timeout := s.cfg.DefaultTimeout
 	if timeout < 20*time.Second {
 		timeout = 20 * time.Second
