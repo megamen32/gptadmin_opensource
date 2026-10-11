@@ -44,6 +44,7 @@ sed -e 's#/etc/gptadmin/failover_config.json#/data/config/failover_config.json#'
     "$ROOT/scripts/gptadmin_failover_watchdog.py" > "$OUTPUT/gptadmin_hub_standby/gptadmin_failover_watchdog.py"
 cp "$ROOT/scripts/gptadmin_failover_proxy.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_failover_runtime.py" "$OUTPUT/gptadmin_hub_standby/"
+cp "$ROOT/scripts/gptadmin_frpc_processes.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_failover_config.py" "$OUTPUT/gptadmin_hub_standby/"
 
 cat > "$OUTPUT/SOURCE.json" <<EOF

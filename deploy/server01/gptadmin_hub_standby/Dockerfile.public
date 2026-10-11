@@ -17,7 +17,7 @@ RUN apk add --no-cache bash ca-certificates jq python3 tzdata
 COPY gptadmin_hub /usr/local/bin/gptadmin_hub
 COPY frpc /usr/local/bin/frpc
 COPY public /opt/gptadmin/public
-COPY gptadmin_failover_watchdog.py gptadmin_failover_proxy.py \
+COPY gptadmin_failover_watchdog.py gptadmin_frpc_processes.py gptadmin_failover_proxy.py \
   gptadmin_failover_runtime.py gptadmin_failover_config.py /usr/local/bin/
 COPY run.sh /run.sh
 

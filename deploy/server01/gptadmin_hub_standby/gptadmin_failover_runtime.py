@@ -17,6 +17,10 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+try:
+    from gptadmin_frpc_processes import config_paths, read_records, stop_records
+except ModuleNotFoundError:
+    from scripts.gptadmin_frpc_processes import config_paths, read_records, stop_records
 
 
 OPTIONS_FILE = Path("/data/options.json")
@@ -87,31 +91,15 @@ def start_proxy(options: dict[str, Any]) -> subprocess.Popen[bytes]:
 def stop_frpc() -> None:
     """Stop a FRP process started by the system-free watchdog."""
 
-    try:
-        pid = int(FRPC_PID.read_text(encoding="utf-8").strip())
-    except (FileNotFoundError, ValueError):
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    FRPC_PID.unlink(missing_ok=True)
+    stop_records(FRPC_PID, '/usr/local/bin/frpc',
+                 [FRPC_CONFIG] + config_paths(FRPC_CONFIG, 16))
 
 
 def frpc_is_alive() -> bool:
     """Return whether at least one fallback FRP client still owns its PID."""
 
-    try:
-        pids = [int(line) for line in FRPC_PID.read_text(encoding="utf-8").splitlines() if line.strip()]
-    except (FileNotFoundError, ValueError):
-        return False
-    for pid in pids:
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            continue
-        return True
-    return False
+    return bool(read_records(FRPC_PID, '/usr/local/bin/frpc',
+                             [FRPC_CONFIG] + config_paths(FRPC_CONFIG, 16)))
 
 
 def reset_dead_frpc_cooldown() -> None:
@@ -161,12 +149,15 @@ def main() -> int:
             while not stop and time.monotonic() < deadline:
                 time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     finally:
-        stop_frpc()
-        proxy.terminate()
         try:
-            proxy.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proxy.kill()
+            stop_frpc()
+        finally:
+            proxy.terminate()
+            try:
+                proxy.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proxy.kill()
+                proxy.wait(timeout=5)
     return 0
 
 

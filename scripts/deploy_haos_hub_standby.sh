@@ -48,7 +48,7 @@ file "$FRPC_BIN" | grep -Eqi 'ARM aarch64|ARM64' || {
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/build" "$OUT_DIR/public"
 cp "$SRC/Dockerfile" "$SRC/run.sh" "$OUT_DIR/"
-cp "$ROOT/scripts/gptadmin_failover_watchdog.py" "$ROOT/scripts/gptadmin_failover_proxy.py" \
+cp "$ROOT/scripts/gptadmin_failover_watchdog.py" "$ROOT/scripts/gptadmin_frpc_processes.py" "$ROOT/scripts/gptadmin_failover_proxy.py" \
   "$SRC/gptadmin_failover_runtime.py" "$SRC/gptadmin_failover_config.py" "$OUT_DIR/"
 cp "$FRPC_BIN" "$OUT_DIR/frpc"
 chmod 0755 "$OUT_DIR/run.sh"
