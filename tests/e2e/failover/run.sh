@@ -45,7 +45,7 @@ if [[ -f "$script_dir/../../../go-hub/go.mod" ]]; then
   watchdog_script="$repo_dir/scripts/gptadmin_failover_watchdog.py"
   proxy_script="$repo_dir/scripts/gptadmin_failover_proxy.py"
   reclaim_script="$repo_dir/scripts/gptadmin_failover_reclaim_push.py"
-  fake_frpc="$repo_dir/tests/e2e/failover/fake-frpc"
+  fake_frpc="/tmp/gptadmin-failover-frpc-$$"
 else
   hub_bin=/usr/local/bin/gptadmin_hub
   watchdog_script=/usr/local/bin/gptadmin_failover_watchdog.py
@@ -64,10 +64,11 @@ cleanup() {
   for pid in "${pids[@]:-}"; do kill_group "$pid"; done
   for pid in "${pids[@]:-}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap 'cleanup; if [[ "$hub_bin" == /tmp/gptadmin-failover-hub-* ]]; then rm -f "$hub_bin"; fi' EXIT
+trap 'cleanup; if [[ "$hub_bin" == /tmp/gptadmin-failover-hub-* ]]; then rm -f "$hub_bin" "$fake_frpc"; fi' EXIT
 
 if [[ "$hub_bin" == /tmp/gptadmin-failover-hub-* ]]; then
   (cd "$repo_dir/go-hub" && go build -buildvcs=false -o "$hub_bin" ./cmd/gptadmin-hub)
+  cc -Wall -Wextra -Werror -O2 "$repo_dir/tests/e2e/failover/fake-frpc.c" -o "$fake_frpc"
 fi
 
 start() {
@@ -236,7 +237,7 @@ scenario_hub_only() {
   watchdog | grep -q '"decision": "promote"'
   test "$(cat "$route_file")" = fallback
   wait_http "${public_url}/healthz"
-  echo 'ok: hub failure promotes fallback through a live tunnel'
+  echo 'ok: controller fixture promotes fallback through simulated ingress'
 }
 
 scenario_hub_and_tunnel() {
@@ -300,4 +301,4 @@ scenario_hub_and_tunnel
 scenario_primary_reclaim
 scenario_rank_one_prevents_second_promotion
 scenario_rank_two_promotes_when_rank_one_unavailable
-echo 'ALL FAILOVER BLACK-BOX SCENARIOS PASSED'
+echo 'ALL CONTROLLER CONTRACT SCENARIOS PASSED (SIMULATED INGRESS; NOT FRP ACCEPTANCE)'

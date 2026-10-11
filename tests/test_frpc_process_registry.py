@@ -137,5 +137,31 @@ class FRPCRegistryTests(unittest.TestCase):
             with self.assertRaises(ValueError):runtime.main()
         proxy.terminate.assert_called_once();proxy.wait.assert_called_once_with(timeout=5)
 
+    def test_native_controller_fixture_keeps_exact_process_identity_and_reuses_owner(self):
+        # Local ownership integration only; the fixture is not a FRP tunnel.
+        import os,shutil,subprocess,time
+        if not shutil.which('cc'):self.skipTest('C compiler unavailable for local fixture')
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);binary=root/'frpc';base=root/'frpc.toml';registry=root/'owners';route=root/'route'
+            subprocess.run(['cc','-Wall','-Wextra','-Werror','-O2',str(Path(__file__).parent/'e2e/failover/fake-frpc.c'),'-o',str(binary)],check=True,timeout=10)
+            args=SimpleNamespace(frpc_config=str(base),frpc_pid_file=str(registry),frpc_bin=str(binary),node_id='unit',hub_service='none',frpc_service='none')
+            bundle={'tunnel':{'frp':{'token':'unit-only','subdomain':'unit','domain':'example.test','endpoints':['a.example:7000']}}}
+            pids=[]
+            try:
+                with patch.dict(os.environ,{'E2E_ROUTE_FILE':str(route),'E2E_RUNNER_PID':str(os.getpid())}):
+                    watchdog.promote(args,{},bundle,{'local_hub_port':9101},False)
+                    first=owned.read_records(registry,str(binary),[base]);pids=[r['pid'] for r in first]
+                    watchdog.promote(args,{},bundle,{'local_hub_port':9101},False)
+                    self.assertEqual(owned.read_records(registry,str(binary),[base]),first)
+                    deadline=time.monotonic()+2
+                    while not route.exists() and time.monotonic()<deadline:time.sleep(.01)
+                    self.assertTrue(route.exists())
+            finally:
+                if registry.exists():owned.stop_records(registry,str(binary),[base])
+                for pid in pids:
+                    try:os.waitpid(pid,0)
+                    except ChildProcessError:pass
+            self.assertFalse(route.exists());self.assertFalse(registry.exists())
+
 
 if __name__=='__main__':unittest.main()
