@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/megamen32/gptadmin/go-hub/internal/cloudos"
 )
 
@@ -57,8 +58,30 @@ type Config struct {
 	CtlToken        string
 	RelayAgentToken string
 	ShellToken      string
-	DefaultTimeout  time.Duration
-	PollMaxTimeout  time.Duration
+	// StandaloneAutoTrust marks a single-computer install (installer-set
+	// GPTADMIN_STANDALONE=1): the agent installed alongside this Hub shares
+	// the Hub's own shell credential, so it is trusted without a pending
+	// approval round-trip. Fleet Hubs never set this and keep the gate.
+	StandaloneAutoTrust bool
+	// NodePeersJSON maps explicit shell targets to independently reachable node origins.
+	NodePeersJSON string
+	// NodeIdentityFile pins this node's mesh identity; membership heartbeat
+	// and view replication activate only when it exists and parses.
+	NodeIdentityFile string
+	// NodeSeedURL is the bootstrap origin used before the identity records
+	// the writer URL returned by join/heartbeat.
+	NodeSeedURL string
+	// NodeWriterConnectTo pins the writer's physical address while keeping
+	// the writer URL hostname for verified TLS/SNI.
+	NodeWriterConnectTo string
+	// NodePublicURL is the routable origin this node advertises in membership.
+	NodePublicURL            string
+	AuthMode                 string
+	AuthSourceID             string
+	AuthSnapshotReserveBytes int64
+	AuthSnapshotBudget       int
+	DefaultTimeout           time.Duration
+	PollMaxTimeout           time.Duration
 	// ActionSyncWait bounds how long the HTTP Actions facade waits for a
 	// queued shell/child MCP operation before returning a durable job handle.
 	// Tool/command timeout remains an independent argument.
@@ -140,6 +163,16 @@ func FromEnv() Config {
 		CtlToken:                   env("CTL_TOKEN", env("GPTADMIN_CTL_TOKEN", "")),
 		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
 		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
+		NodePeersJSON:              env("GPTADMIN_NODE_PEERS", ""),
+		NodeIdentityFile:           env("GPTADMIN_NODE_IDENTITY", ""),
+		NodeSeedURL:                strings.TrimRight(env("GPTADMIN_NODE_SEED", ""), "/"),
+		NodeWriterConnectTo:        strings.TrimSpace(env("GPTADMIN_NODE_WRITER_CONNECT_TO", "")),
+		NodePublicURL:              normalizePublicURL(env("GPTADMIN_NODE_PUBLIC_URL", "")),
+		AuthMode:                   strings.ToLower(strings.TrimSpace(env("GPTADMIN_AUTH_MODE", "legacy"))),
+		StandaloneAutoTrust:        truthyString(env("GPTADMIN_STANDALONE", "0")),
+		AuthSourceID:               strings.TrimSpace(env("GPTADMIN_AUTH_SOURCE_ID", "")),
+		AuthSnapshotReserveBytes:   authSnapshotReserveFromEnv(),
+		AuthSnapshotBudget:         positiveIntEnv("GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES", authSnapshotDefaultBudget),
 		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
 		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
 		ActionSyncWait:             time.Duration(actionSyncWaitMS) * time.Millisecond,
@@ -355,17 +388,18 @@ func defaultHubSettings() hubSettings {
 }
 
 type persistentRegistryState struct {
-	SavedAt          float64                       `json:"saved_at"`
-	BuildVersion     string                        `json:"build_version,omitempty"`
-	GitCommit        string                        `json:"git_commit,omitempty"`
-	Agents           map[string]Agent              `json:"agents"`
-	RelayCredentials map[string]string             `json:"relay_credentials,omitempty"`
-	RelayEnrollments map[string]relayEnrollment    `json:"relay_enrollments,omitempty"`
-	Settings         hubSettings                   `json:"settings"`
-	SettingsRevision int64                         `json:"settings_revision,omitempty"`
-	SettingsHistory  []settingsRevision            `json:"settings_history,omitempty"`
-	AgentPolicies    map[string]agentCleanupPolicy `json:"agent_policies,omitempty"`
-	Tombstones       []agentTombstone              `json:"tombstones,omitempty"`
+	SavedAt             float64                       `json:"saved_at"`
+	BuildVersion        string                        `json:"build_version,omitempty"`
+	GitCommit           string                        `json:"git_commit,omitempty"`
+	Agents              map[string]Agent              `json:"agents"`
+	RelayCredentials    map[string]string             `json:"relay_credentials,omitempty"`
+	RelayEnrollments    map[string]relayEnrollment    `json:"relay_enrollments,omitempty"`
+	LocalExecutorTokens map[string]string             `json:"local_executor_tokens,omitempty"`
+	Settings            hubSettings                   `json:"settings"`
+	SettingsRevision    int64                         `json:"settings_revision,omitempty"`
+	SettingsHistory     []settingsRevision            `json:"settings_history,omitempty"`
+	AgentPolicies       map[string]agentCleanupPolicy `json:"agent_policies,omitempty"`
+	Tombstones          []agentTombstone              `json:"tombstones,omitempty"`
 }
 
 type relayEnrollment struct {
@@ -505,44 +539,70 @@ type idempotencyEntry struct {
 }
 
 type Server struct {
+	connectionMu          sync.Mutex
+	connectionSessions    map[string]connectionSession
+	connectionExpired     map[string]connectionSession
 	managedMCPPersisted   map[string]managedMCPToken
 	oauthClientsPersisted map[string]oauthClientMetadata
 	cfg                   Config
 
-	mu                sync.Mutex
-	authRateMu        sync.Mutex
-	cond              *sync.Cond
-	agents            map[string]*Agent
-	relayCredentials  map[string]string // SHA-256 digests keyed by agent_id; never retain raw credentials.
-	relayEnrollments  map[string]relayEnrollment
-	relayQueues       map[string][]string
-	relayJobs         map[string]*relayJob
-	shellQueues       map[string][]string
-	shellControls     map[string][]shellControl
-	shellJobs         map[string]*shellJob
-	taskOwner         *taskOwner
-	taskRuntimeClosed bool
-	taskRuntimeStop   chan struct{}
-	idempotency       map[string]*idempotencyEntry
-	oauthCodes        map[string]oauthCode
-	managedMCP        map[string]managedMCPToken
-	oauthClients      map[string]oauthClientMetadata
-	accessProfiles    map[string]AccessProfile
-	approvals         map[string]*approvalRequest
-	autonomous        map[string]*autonomousBudget
-	security          securitySettings
-	securityPath      string
-	webauthnState     webAuthnState
-	webauthnPath      string
-	webauthnSessions  map[string]webAuthnSession
-	telemetry         telemetryState
-	telemetryPath     string
-	telemetryExporter *telemetryExporter
-	secretStore       *SecretStore
-	secretStoreErr    error
-	audit             []auditEvent
-	authRate          map[string]authRateWindow
-	failover          FailoverConfig
+	mu                    sync.Mutex
+	authRateMu            sync.Mutex
+	cond                  *sync.Cond
+	agents                map[string]*Agent
+	relayCredentials      map[string]string // SHA-256 digests keyed by agent_id; never retain raw credentials.
+	relayEnrollments      map[string]relayEnrollment
+	relayQueues           map[string][]string
+	relayJobs             map[string]*relayJob
+	shellQueues           map[string][]string
+	localExecutors        map[string]map[string]string
+	localExecutorTokens   map[string]string
+	nodePeers             map[string]nodePeerRoute
+	nodePeersErr          error
+	nodePeerClient        *http.Client
+	nodePeerPinnedClients map[nodePeerRoute]*http.Client
+	nodeBearerAdmissionClient *http.Client
+	nodeBearerAdmissionSlots chan struct{}
+	nodeConns             *nodeConnRegistry
+	membershipMu          sync.Mutex
+	membershipStopOnce    sync.Once
+	membershipStop        chan struct{}
+	membershipDone        sync.WaitGroup
+	membershipLoadErr     error
+	nodeIdentity          *nodeIdentity
+	membership            *nodeMembershipState
+	membershipView        *nodeMembershipView
+	membershipRoutes      map[string]nodePeerRoute
+	authMu                sync.RWMutex
+	authState             authSnapshotState
+	authInitialized       bool
+	authLocalID           string
+	authRuntimeLock       *flock.Flock
+	shellControls         map[string][]shellControl
+	shellJobs             map[string]*shellJob
+	taskOwner             *taskOwner
+	taskRuntimeClosed     bool
+	taskRuntimeStop       chan struct{}
+	idempotency           map[string]*idempotencyEntry
+	oauthCodes            map[string]oauthCode
+	managedMCP            map[string]managedMCPToken
+	oauthClients          map[string]oauthClientMetadata
+	accessProfiles        map[string]AccessProfile
+	approvals             map[string]*approvalRequest
+	autonomous            map[string]*autonomousBudget
+	security              securitySettings
+	securityPath          string
+	webauthnState         webAuthnState
+	webauthnPath          string
+	webauthnSessions      map[string]webAuthnSession
+	telemetry             telemetryState
+	telemetryPath         string
+	telemetryExporter     *telemetryExporter
+	secretStore           *SecretStore
+	secretStoreErr        error
+	audit                 []auditEvent
+	authRate              map[string]authRateWindow
+	failover              FailoverConfig
 
 	updateStatePath     string
 	updateLockPath      string
@@ -567,9 +627,23 @@ type Server struct {
 	settingsHistory    []settingsRevision
 	agentPolicies      map[string]agentCleanupPolicy
 	tombstones         []agentTombstone
+
+	// Node drain state; drainMu guards admission and the in-flight counter.
+	drainMu              sync.Mutex
+	nodeDrainActive      bool
+	nodeDrainReason      string
+	nodeDrainSince       time.Time
+	nodeDrainSubmissions int
+	nodeRuntime          NodeRuntimeCounters
 }
 
 func New(cfg Config) *Server {
+	if cfg.AuthSnapshotReserveBytes == 0 {
+		cfg.AuthSnapshotReserveBytes = authSnapshotDefaultReserve
+	}
+	if cfg.AuthSnapshotBudget == 0 {
+		cfg.AuthSnapshotBudget = authSnapshotDefaultBudget
+	}
 	// Direct Config construction must use the same issuer/resource wire
 	// contract as FromEnv and the CLI token issuer.
 	cfg.PublicOrigin = normalizePublicURL(cfg.PublicOrigin)
@@ -629,6 +703,7 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{
 		taskRuntimeStop:   make(chan struct{}),
+		nodeConns:         newNodeConnRegistry(),
 		cfg:               cfg,
 		agents:            map[string]*Agent{},
 		relayCredentials:  map[string]string{},
@@ -666,6 +741,17 @@ func New(cfg Config) *Server {
 		settingsHistory:   []settingsRevision{},
 		agentPolicies:     map[string]agentCleanupPolicy{},
 		tombstones:        []agentTombstone{},
+	}
+	s.nodePeers, s.nodePeersErr = parseNodePeers(cfg.NodePeersJSON)
+	s.nodePeerClient = newNodePeerClient(cfg.DefaultTimeout + 10*time.Second)
+	s.nodeBearerAdmissionClient = newNodeBearerAdmissionClient(cfg.NodeWriterConnectTo)
+	s.nodeBearerAdmissionSlots = make(chan struct{}, 8)
+	s.nodePeerPinnedClients = map[nodePeerRoute]*http.Client{}
+	s.initNodeMembership()
+	for _, route := range s.nodePeers {
+		if route.ConnectTo != "" && s.nodePeerPinnedClients[route] == nil {
+			s.nodePeerPinnedClients[route] = newPinnedNodePeerClient(cfg.DefaultTimeout+10*time.Second, route)
+		}
 	}
 	s.cloudOSRegistry.Register(&cloudos.Computer{
 		ID:           "server-100",
@@ -749,8 +835,10 @@ func New(cfg Config) *Server {
 	if err := s.loadManagedMCPState(); err != nil {
 		log.Printf("MCP token state load failed path=%s err=%v", s.managedMCPStatePath(), err)
 	}
-	if err := s.reconcileExistingMCPBearers(); err != nil {
-		log.Printf("configured MCP bearer migration state failed path=%s err=%v", s.managedMCPStatePath(), err)
+	if !s.authContinuityEnabled() {
+		if err := s.reconcileExistingMCPBearers(); err != nil {
+			log.Printf("configured MCP bearer migration state failed path=%s err=%v", s.managedMCPStatePath(), err)
+		}
 	}
 	if err := s.loadOAuthClientsState(); err != nil {
 		log.Printf("OAuth client state load failed path=%s err=%v", s.oauthClientsStatePath(), err)
@@ -807,7 +895,7 @@ func (s *Server) managedMCPStatePath() string {
 	if s.cfg.ConfigDir == "" {
 		return ""
 	}
-	return filepath.Join(s.cfg.ConfigDir, "mcp_tokens_state.json")
+	return filepath.Join(s.authStoreDir(), "mcp_tokens_state.json")
 }
 
 func configuredMCPBearerID(name string) string {
@@ -986,6 +1074,18 @@ func (s *Server) loadRegistryState() error {
 		s.agents[id] = &cp
 		loaded++
 	}
+	for id, token := range state.LocalExecutorTokens {
+		if id == "" || token == "" {
+			continue
+		}
+		if _, ok := s.agents[id]; !ok {
+			continue
+		}
+		if s.localExecutorTokens == nil {
+			s.localExecutorTokens = map[string]string{}
+		}
+		s.localExecutorTokens[id] = token
+	}
 	if loaded > 0 {
 		log.Printf("registry state loaded path=%s agents=%d saved_at=%.0f", path, loaded, state.SavedAt)
 	}
@@ -998,17 +1098,18 @@ func (s *Server) saveRegistryStateLocked() error {
 		return nil
 	}
 	state := persistentRegistryState{
-		SavedAt:          nowFloat(),
-		BuildVersion:     BuildVersion,
-		GitCommit:        GitCommit,
-		Agents:           map[string]Agent{},
-		RelayCredentials: map[string]string{},
-		RelayEnrollments: map[string]relayEnrollment{},
-		Settings:         s.settings,
-		SettingsRevision: s.settingsRevision,
-		SettingsHistory:  append([]settingsRevision(nil), s.settingsHistory...),
-		AgentPolicies:    map[string]agentCleanupPolicy{},
-		Tombstones:       append([]agentTombstone(nil), s.tombstones...),
+		SavedAt:             nowFloat(),
+		BuildVersion:        BuildVersion,
+		GitCommit:           GitCommit,
+		Agents:              map[string]Agent{},
+		RelayCredentials:    map[string]string{},
+		RelayEnrollments:    map[string]relayEnrollment{},
+		LocalExecutorTokens: map[string]string{},
+		Settings:            s.settings,
+		SettingsRevision:    s.settingsRevision,
+		SettingsHistory:     append([]settingsRevision(nil), s.settingsHistory...),
+		AgentPolicies:       map[string]agentCleanupPolicy{},
+		Tombstones:          append([]agentTombstone(nil), s.tombstones...),
 	}
 	for id, agent := range s.agents {
 		if id == "" || agent == nil || id == "hub" {
@@ -1038,6 +1139,18 @@ func (s *Server) saveRegistryStateLocked() error {
 	for id, policy := range s.agentPolicies {
 		if id != "" {
 			state.AgentPolicies[id] = policy
+		}
+	}
+	// Self-enrolled agent credentials must survive a Hub restart: the agent
+	// never learns a shared secret, this binding is the only way its poll
+	// authenticates. Same-box local executors re-register on boot, so only
+	// the self_enrolled bindings are persisted.
+	for id, agent := range s.agents {
+		if agent == nil || !truthyAny(agent.Meta["self_enrolled"]) {
+			continue
+		}
+		if token := s.localExecutorTokens[id]; token != "" {
+			state.LocalExecutorTokens[id] = token
 		}
 	}
 	return withStateFileLock(path, func() error {
@@ -1201,6 +1314,8 @@ func (s *Server) deleteStaleAgentLocked(id, reason string) bool {
 	delete(s.relayEnrollments, id)
 	delete(s.relayQueues, id)
 	delete(s.agentPolicies, id)
+	delete(s.localExecutorTokens, id)
+	delete(s.localExecutors, id)
 	return true
 }
 
@@ -1406,7 +1521,24 @@ func (s *Server) registryCleanupLoop() {
 }
 
 func (s *Server) ListenAndServe() error {
+	listener, err := net.Listen("tcp", s.cfg.Addr)
+	if err != nil {
+		_ = s.Close()
+		return err
+	}
+	return s.ServeContext(context.Background(), listener)
+}
+
+// ServeContext lets the combined node own one listener and one shutdown signal.
+func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error {
 	defer s.Close()
+	defer listener.Close()
+	if err := s.InitializeAuthContinuity(); err != nil {
+		return err
+	}
+	if s.nodePeersErr != nil {
+		return s.nodePeersErr
+	}
 	if s.secretStoreErr != nil {
 		return fmt.Errorf("secret ingress store unavailable: %w", s.secretStoreErr)
 	}
@@ -1415,12 +1547,35 @@ func (s *Server) ListenAndServe() error {
 	}
 	log.Printf("gptadmin go hub listening addr=%s config_dir=%s public_dir=%s", s.cfg.Addr, s.cfg.ConfigDir, s.cfg.PublicDir)
 	go s.registryCleanupLoop()
+	s.startMembershipLoops()
+	defer s.stopMembershipLoops()
 	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	return srv.ListenAndServe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(listener) }()
+	select {
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+			return err
+		}
+		return nil
+	}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/api/auth-snapshot/", s.authSnapshotHTTP)
+	mux.HandleFunc("/admin/api/nodes", s.nodeMembershipHTTP)
+	mux.HandleFunc("/admin/api/nodes/", s.nodeMembershipHTTP)
+	mux.HandleFunc("/admin/api/node/drain", s.requireCtl(s.nodeDrainHTTP))
+	mux.HandleFunc("/admin/api/agents/connect-info", s.requireCtl(s.trackAccessOperation(s.adminAgentConnectInfo)))
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/metrics", s.hubMetrics)
@@ -1484,6 +1639,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/server/", s.serverMCPEndpoint)
 	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
+	mux.HandleFunc("/connection/", s.connectionMCPEndpoint)
 	mux.HandleFunc("/mcp-prompt/prompt", s.mcpPrompt)
 	mux.HandleFunc("/mcp-prompt/call", s.mcpPromptCall)
 	mux.HandleFunc("/proxy-control/v1/request", s.requireCtl(s.networkProxyRequestHTTP))
@@ -1551,37 +1707,48 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/logout", s.adminLogout)
 	mux.HandleFunc("/cloudos", s.cloudOSUI)
 	mux.HandleFunc("/cloudos/", s.cloudOSUI)
+	// The hub's own entry point is the lightweight, password-gated admin UI.
+	// CloudOS is an optional static payload at /cloudos/; the exact-root
+	// pattern keeps every other unmatched path on its normal 404 route.
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
+	})
 	mux.HandleFunc("/admin/legacy/", s.adminLegacyStatic)
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
-	return withRequestTrace(withIngressAudit(withCORS(mux)))
+	return withRequestTrace(withIngressAudit(withCORS(s.withCloudOSAuth(s.authSnapshotGate(mux)))))
 }
 
-// cloudOSUI exposes the locally installed CloudOS UI below the same Hub origin.
-// Personal FRP hostnames already route to this Hub, so this does not create a
-// second public hostname or authentication ceremony.
+// cloudOSUI serves the locally installed CloudOS UI (cloudos-ui build output
+// below PublicDir) on the same Hub origin. Personal FRP hostnames already
+// route to this Hub, so this does not create a second public hostname or
+// authentication ceremony, and no separate UI service is required.
+// The desktop is the gateway to the user's files, so its entry documents and
+// assets require the same admin password session as the /api/v1/cloud-os/
+// API; anonymous browsers are sent to the login and returned afterwards.
 func (s *Server) cloudOSUI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/cloudos" {
 		http.Redirect(w, r, "/cloudos/", http.StatusTemporaryRedirect)
 		return
 	}
-	target, _ := url.Parse("http://127.0.0.1:3030")
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = strings.TrimPrefix(r.URL.Path, "/cloudos")
-		if req.URL.Path == "" {
-			req.URL.Path = "/"
-		}
-		req.Header.Set("X-Forwarded-Prefix", "/cloudos")
-		req.Header.Set("X-Forwarded-Proto", requestScheme(r))
-		req.Header.Set("X-Forwarded-Host", r.Host)
+	if s.cfg.AdminPassword != "" && !s.adminSessionValid(r) {
+		http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+		return
 	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "CloudOS UI is unavailable"})
+	root := filepath.Join(s.cfg.PublicDir, "cloudos-ui")
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "CloudOS UI is not installed"})
+		return
 	}
-	proxy.ServeHTTP(w, r)
+	// The entry document must always revalidate: asset names are
+	// content-hashed, so a stale cached index.html referencing chunks that a
+	// rebuild removed leaves the desktop on a blank screen.
+	if name := strings.TrimPrefix(r.URL.Path, "/cloudos/"); name == "" || name == "index.html" {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+		return
+	}
+	http.StripPrefix("/cloudos/", http.FileServer(http.Dir(root))).ServeHTTP(w, r)
 }
 
 func (s *Server) httpServiceEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -1685,6 +1852,34 @@ func requestScheme(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+
+// withCloudOSAuth is the single chokepoint for the whole CloudOS desktop
+// API: shell execution, file read/write, process and network control are
+// never served unauthenticated. Bearer callers reuse the /mcp auth classes;
+// browsers reuse the admin password session.
+func (s *Server) withCloudOSAuth(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/cloud-os/") && !s.cloudOSAuthOk(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (s *Server) cloudOSAuthOk(w http.ResponseWriter, r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		return s.mcpAuth(w, r)
+	}
+	if s.cfg.AdminPassword != "" && s.adminSessionValid(r) {
+		s.authAudit("cloudos_auth_ok", r, map[string]any{"auth_kind": "admin_cookie"})
+		return true
+	}
+	s.authAudit("cloudos_auth_denied", r, map[string]any{"reason": "no bearer or admin session"})
+	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.origin(r)+`/.well-known/oauth-protected-resource", scope="gptadmin.read gptadmin.exec"`)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized",
+		"detail": "CloudOS requires login", "admin_login": s.origin(r) + "/admin/login"})
+	return false
 }
 
 func withCORS(next http.Handler) http.HandlerFunc {
@@ -1888,7 +2083,47 @@ func (s *Server) requireArtifact(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.ShellToken == "" || !tokenMatches(r, s.cfg.ShellToken) {
+		expected := s.cfg.ShellToken
+		r.Header.Del(selfEnrollTokenHeader)
+		r.Header.Del(globalShellAuthHeader)
+		s.mu.Lock()
+		if strings.HasPrefix(r.URL.Path, "/queue/") {
+			rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/queue/"), "/")
+			parts := strings.Split(rest, "/")
+			name, _ := url.PathUnescape(parts[0])
+			name = canonicalShellQueueName(name)
+			if local := s.localExecutorTokens["shell:"+name]; local != "" {
+				expected = local
+			} else if expected == "" || !tokenMatches(r, expected) {
+				// Self-enrollment: a bare queue poll for an agent the Hub has
+				// never seen may register its own fresh credential. The agent
+				// then sits in the pending list until an admin approves it;
+				// known agents keep strict shared-or-bound token auth.
+				if enroll := s.queueSelfEnrollToken(r, "shell:"+name, len(parts) == 1); enroll != "" {
+					expected = enroll
+					r.Header.Set(selfEnrollTokenHeader, enroll)
+				} else if s.pendingShellEnrollmentAllowedLocked(name, r) {
+					// Existing agent whose raw-credential binding is absent
+					// (e.g. enrolled under an older build that pinned only a
+					// credential hash): the poll still authenticates against
+					// the pinned hash.
+					expected = bearerToken(r)
+				}
+			} else if expected != "" && expected == s.cfg.ShellToken {
+				// Authenticated with the Hub's own shell credential. On a
+				// standalone install this marks the agent installed alongside
+				// this Hub as trusted (see StandaloneAutoTrust).
+				r.Header.Set(globalShellAuthHeader, "1")
+			}
+		}
+		allowed := expected != "" && tokenMatches(r, expected)
+		if r.URL.Path == "/heartbeat" {
+			for _, local := range s.localExecutorTokens {
+				allowed = allowed || tokenMatches(r, local)
+			}
+		}
+		s.mu.Unlock()
+		if !allowed {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
 			return
 		}
@@ -1916,6 +2151,96 @@ func tokenMatches(r *http.Request, expected string) bool {
 		}
 	}
 	return false
+}
+
+const selfEnrollTokenHeader = "X-GPTAdmin-Self-Enroll-Token"
+
+const globalShellAuthHeader = "X-GPTAdmin-Global-Shell-Auth"
+
+// maxSelfEnrollPendingAgents bounds registry growth from unapproved
+// self-enrollment attempts; admins clean the pending list by approving or
+// letting stale cleanup remove rejected candidates.
+const maxSelfEnrollPendingAgents = 100
+
+const shellTokenHashMetaKey = "shell_token_hash"
+
+func shellEnrollmentToken(r *http.Request) string {
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+		return ""
+	}
+	credential := strings.TrimSpace(authorization[len("Bearer "):])
+	if len(credential) < 32 || len(credential) > 4096 || strings.ContainsAny(credential, " \t\r\n<>") {
+		return ""
+	}
+	return credential
+}
+
+func shellTokenHash(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+// pendingShellEnrollmentAllowedLocked accepts an unknown ShellMCP credential
+// only for its own pending record: an existing agent matches the credential
+// hash pinned during its first self-enrolled poll. A raw credential is never
+// persisted or exposed through this path.
+func (s *Server) pendingShellEnrollmentAllowedLocked(name string, r *http.Request) bool {
+	if name == "" || canonicalShellQueueName(name) != name || strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	credential := shellEnrollmentToken(r)
+	if credential == "" {
+		return false
+	}
+	agent := s.agents["shell:"+name]
+	if agent == nil {
+		return false
+	}
+	pinned, _ := agent.Meta[shellTokenHashMetaKey].(string)
+	return pinned != "" && hmac.Equal([]byte(pinned), []byte(shellTokenHash(credential)))
+}
+
+func bearerToken(r *http.Request) string {
+	h := strings.TrimSpace(r.Header.Get("Authorization"))
+	if h == "" {
+		return strings.TrimSpace(r.URL.Query().Get("token"))
+	}
+	if strings.HasPrefix(strings.ToLower(h), "bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	return h
+}
+
+// queueSelfEnrollToken validates a bare GET /queue/<name> poll from an agent
+// the Hub has never seen as a self-enrollment attempt and returns the bearer
+// credential to bind to the new agent. It returns "" when the attempt must
+// keep the normal 401 path. The caller holds s.mu; the auth-failure window
+// uses its own mutex, so this stays lock-order safe.
+func (s *Server) queueSelfEnrollToken(r *http.Request, agentID string, barePoll bool) string {
+	if !barePoll || r.Method != http.MethodGet {
+		return ""
+	}
+	if s.agents[agentID] != nil || s.localExecutorTokens[agentID] != "" {
+		return ""
+	}
+	token := bearerToken(r)
+	if len(token) < 16 || len(token) > 4096 || strings.ContainsAny(token, " \t\r\n<>") {
+		return ""
+	}
+	pending := 0
+	for _, agent := range s.agents {
+		if agent != nil && agent.Status == "awaiting_approval" {
+			pending++
+		}
+	}
+	if pending >= maxSelfEnrollPendingAgents {
+		return ""
+	}
+	if !s.allowAuthFailure(r) {
+		return ""
+	}
+	return token
 }
 
 func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -2890,13 +3215,13 @@ func (s *Server) finishFleetIdempotency(entry *idempotencyEntry, response map[st
 	if entry == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.cfg.ConfigDir != "" {
 		if err := s.withTaskDatabase(func(t *taskTransaction) error { return t.finishRequest(entry.Key, response, status) }); err != nil {
 			return err
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	entry.JobID = firstString(response, "task_id", "job_id")
 	entry.Response = cloneMap(response)
 	entry.Status = status
@@ -3080,6 +3405,12 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	identity := shellIdentityFromMap(meta)
 	s.mu.Lock()
+	localToken := s.localExecutorTokens[agentID]
+	if !s.localExecutorMatchesLocked(agentID, identity) || (localToken != "" && !tokenMatches(r, localToken)) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "local executor identity mismatch"})
+		return
+	}
 	approved := s.shellIdentityApprovedLocked(agentID, identity)
 	meta["approved"] = approved
 	status := "online"
@@ -3165,6 +3496,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 		return
 	}
 	for {
+		if r.Context().Err() != nil {
+			return
+		}
 		if !s.touchShellPollLocked(name, r) {
 			writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
 			return
@@ -3250,9 +3584,32 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 			meta[key] = v
 		}
 	}
-	approved := s.shellIdentityApprovedLocked(agentID, shellIdentityFromMap(meta))
+	identity := shellIdentityFromMap(meta)
+	if !s.localExecutorMatchesLocked(agentID, identity) {
+		return false
+	}
+	approved := s.shellIdentityApprovedLocked(agentID, identity)
+	// An empty identity beat reads as pre-approved for legacy agents. A
+	// self-enrolled agent must stay unapproved until an admin explicitly
+	// approves it, regardless of what the poll discloses about itself.
+	if approved {
+		if a := s.agents[agentID]; a != nil {
+			if truthyAny(a.Meta["self_enrolled"]) && !truthyAny(a.Meta["approved"]) {
+				approved = false
+			}
+		}
+	}
+	if !approved && s.cfg.StandaloneAutoTrust && r != nil && r.Header.Get(globalShellAuthHeader) == "1" {
+		// Single-computer install: the agent presenting the Hub's own shell
+		// credential was installed alongside this Hub by the same person; no
+		// pending-approval round-trip is meaningful there. Fleet Hubs never
+		// set StandaloneAutoTrust and keep the approval gate.
+		approved = true
+		meta["local_install"] = true
+	}
 	meta["approved"] = approved
 	if a := s.agents[agentID]; a != nil {
+		previousStatus := a.Status
 		if !approved {
 			a.Status = "awaiting_approval"
 			a.LastSeen = now
@@ -3266,6 +3623,14 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 		for k, v := range meta {
 			a.Meta[k] = v
 		}
+		if a.Status != previousStatus {
+			// A transition (e.g. standalone auto-trust flipping an awaiting
+			// agent online) must reach disk; otherwise the restored registry
+			// state contradicts the live one until the next unrelated save.
+			if err := s.saveRegistryStateLocked(); err != nil {
+				log.Printf("registry state save failed: %v", err)
+			}
+		}
 		return approved
 	}
 	status := "online"
@@ -3274,10 +3639,37 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 		status = "awaiting_approval"
 		auditName = "queue_poll_awaiting_approval"
 	}
+	enrollToken := ""
+	if r != nil {
+		enrollToken = r.Header.Get(selfEnrollTokenHeader)
+	}
+	if enrollToken != "" && s.agents[agentID] == nil {
+		// A self-enrolled credential binds to this agent immediately: the
+		// same bearer authenticates every later poll and result post. The
+		// agent stays awaiting_approval — even with an empty identity beat,
+		// which would otherwise read as pre-approved — until an admin
+		// approves it.
+		approved = false
+		meta["approved"] = false
+		meta["self_enrolled"] = true
+		meta[shellTokenHashMetaKey] = shellTokenHash(enrollToken)
+		if s.localExecutorTokens == nil {
+			s.localExecutorTokens = map[string]string{}
+		}
+		if s.localExecutors == nil {
+			s.localExecutors = map[string]map[string]string{}
+		}
+		s.localExecutorTokens[agentID] = enrollToken
+		if s.localExecutors[agentID] == nil {
+			s.localExecutors[agentID] = map[string]string{}
+		}
+		status = "awaiting_approval"
+		auditName = "queue_poll_awaiting_approval"
+	}
 	newAgent := &Agent{AgentID: agentID, Name: "Shell: " + name, Kind: "virtual_shell", Transport: mode, Status: status, LastSeen: now, Capabilities: []string{"shell", "system", "tasks", "logs"}, Meta: meta}
 	s.prepareAgentLocked(newAgent)
 	s.agents[agentID] = newAgent
-	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": mode})
+	s.addAuditLocked(auditName, map[string]any{"agent_id": agentID, "transport": mode, "self_enrolled": enrollToken != ""})
 	if err := s.saveRegistryStateLocked(); err != nil {
 		log.Printf("registry state save failed: %v", err)
 	}
@@ -3328,7 +3720,6 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	s.mu.Lock()
-	s.touchShellPollLocked(name, r)
 	if err := s.refreshTaskRecordsLocked(res.ID); err != nil {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
@@ -3338,6 +3729,17 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 	if job == nil {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+		return
+	}
+	if job.Server != canonicalShellQueueName(name) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "job belongs to another executor"})
+		return
+	}
+	localToken := s.localExecutorTokens["shell:"+job.Server]
+	if (localToken != "" && !tokenMatches(r, localToken)) || (localToken == "" && !s.touchShellPollLocked(name, r)) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "executor credential does not own job"})
 		return
 	}
 	if job.Status == "cancelled" {
@@ -3808,6 +4210,15 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 	for _, a := range agents {
 		usedSlugs[exposedAgentSlug(a)] = true
 	}
+	childReferenceCounts := map[string]int{}
+	for _, parent := range parents {
+		if !strings.HasPrefix(parent.AgentID, "shell:") {
+			continue
+		}
+		for _, child := range childMCPAgents(parent) {
+			childReferenceCounts[agentSlug(firstString(child.Meta, "child_ref"))]++
+		}
+	}
 	for _, parent := range parents {
 		if !strings.HasPrefix(parent.AgentID, "shell:") {
 			continue
@@ -3818,7 +4229,7 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 			if slug == "" {
 				continue
 			}
-			if usedSlugs[slug] {
+			if childReferenceCounts[slug] > 1 || usedSlugs[slug] {
 				slug = agentSlug(parent.AgentID) + "-" + slug
 			}
 			if usedSlugs[slug] {
@@ -3847,9 +4258,14 @@ func childMCPAgents(parent Agent) []Agent {
 		}
 		status := parent.Status
 		childMeta := map[string]any{
-			"parent_server_id": parent.AgentID,
-			"child_ref":        ref,
-			"enabled":          true,
+			"parent_server_id":          parent.AgentID,
+			"child_ref":                 ref,
+			"enabled":                   true,
+			"connection_mode":           firstString(descriptor, "connection_mode"),
+			"connection_scopes_version": intFromAny(descriptor["connection_scopes_version"]),
+			"connection_instance":       firstString(descriptor, "connection_instance"),
+			"managed_stdio_owner":       truthy(descriptor["managed_stdio_owner"]),
+			"managed_stdio_platform":    truthy(descriptor["managed_stdio_platform"]),
 		}
 		if health := mapValue(descriptor["health"]); len(health) > 0 {
 			childMeta["health"] = health
@@ -4014,6 +4430,7 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
+	releaseAuthAdmission(r)
 	target := firstString(req, "target", "server_id", "agent_id")
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
@@ -4072,6 +4489,11 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
+	var originalBody bytes.Buffer
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.TeeReader(r.Body, &originalBody), r.Body}
 	var req map[string]any
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
@@ -4096,6 +4518,13 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(args) == 0 {
+		if rawQuery := firstString(req, "query"); rawQuery != "" && strings.HasPrefix(strings.TrimSpace(rawQuery), "{") {
+			if parsed, err := toolArgsFromJSON(rawQuery); err == nil {
+				args = parsed
+			}
+		}
+	}
+	if len(args) == 0 {
 		args = toolArgsFromTopLevel(req)
 	}
 	if toolName == "" {
@@ -4105,6 +4534,9 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 	if err := authorizeToolCall(r, target, toolName); err != nil {
 		s.auditToolDecision(r, target, toolName, args, "deny", err.Error(), nil, http.StatusForbidden)
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	if s.forwardNodePeerCall(w, r, target, originalBody.Bytes()) {
 		return
 	}
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
@@ -4133,6 +4565,13 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	// Drain admission boundary: new submissions are rejected before any
+	// idempotency reservation or job creation; receipt reads stay available.
+	releaseSubmission, admitted := s.beginNodeSubmission(target, toolName)
+	if !admitted {
+		return map[string]any{"detail": nodeDrainRetryDetail, "retryable": true, "owner_target": target}, http.StatusServiceUnavailable
+	}
+	defer releaseSubmission()
 	callArgs, approvalID := approvalArguments(args)
 	if response, blocked := s.approvalGate(r, target, toolName, callArgs, approvalID); blocked {
 		s.auditToolDecision(r, target, toolName, callArgs, "deny", "approval required", response, http.StatusPreconditionRequired)
@@ -4153,6 +4592,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		args = resolvedArgs
 		secretValues = resolvedSecrets
 	}
+	if target != "hub" {
+		releaseAuthAdmission(r)
+	}
 	durableRequestKey := ""
 	operation := func() (map[string]any, int) {
 		if target == "hub" {
@@ -4164,6 +4606,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
 		}
 		if strings.HasPrefix(target, "shell:") {
+			args = s.shellConnectionArguments(r, target, toolName, args)
 			return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
 		}
 		if strings.HasPrefix(target, "file:") {
@@ -4181,9 +4624,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		if isChild && isChildMCPAgent(child) {
 			parent := firstString(child.Meta, "parent_server_id")
 			ref := firstString(child.Meta, "child_ref")
-			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", map[string]any{
+			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", childConnectionArguments(r, child, map[string]any{
 				"ref": ref, "name": toolName, "arguments": args,
-			}, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+			}), background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
 		}
 		jobID := s.enqueueRelayWithTraceParent(target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
 		if failure := s.relayEnqueueFailure(jobID); failure != nil {
@@ -4397,6 +4840,9 @@ func (s *Server) actorForRequest(r *http.Request) string {
 	if r == nil {
 		return "anonymous"
 	}
+	if principal, ok := s.airlockUIIdentity(r); ok {
+		return "airlock:" + principal.UserID
+	}
 	if s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
 		return "legacy_ctl"
 	}
@@ -4601,6 +5047,10 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ack := r.URL.Query().Get("ack") == "true" || r.URL.Query().Get("ack") == "1"
+	if response, found := s.childSchemaJobForRequest(r, jobID); found {
+		writeJSON(w, http.StatusOK, s.formatToolOutput(s.withSchemaContractMetadata(response), "", outputDetail))
+		return
+	}
 	s.mu.Lock()
 	if err := s.refreshTaskRecordsLocked(jobID); err != nil {
 		s.mu.Unlock()
@@ -4768,7 +5218,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	switch name {
 	case "discover", "listMcpServers", "list_mcp_servers":
 		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
-		return map[string]any{"servers": servers}, http.StatusOK
+		return map[string]any{"servers": servers, "mesh": s.meshSummaryLocked()}, http.StatusOK
 	case "listMcpAgents", "list_mcp_agents":
 		agents := s.publicAgentsLocked(nil)
 		return map[string]any{"agents": agents}, http.StatusOK
@@ -5060,8 +5510,10 @@ func shellTools() []map[string]any {
 	return []map[string]any{
 		{"name": "shell_exec", "description": "Run one command as the configured default non-root user; use run_as_user=root only when privileged shell execution is intentional. File reads/edits/checkpoints live on the paired file:<host> target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
 		{"name": "mcp_manage", "description": "Manage child MCP definitions on this selected ShellMCP host. Use list/status/config to inspect; upsert/remove/enable/disable/restart to change or run them. GPTAdmin Hub only routes the call and does not start the child elsewhere. To manage another machine, select that machine's ShellMCP target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
-		{"name": "mcp_tools", "description": "Run MCP tools/list for one configured child MCP on this host. Use the ref returned by mcp_manage list or status.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}}, "required": []string{"ref"}, "additionalProperties": false}},
-		{"name": "mcp_call", "description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
+		{"name": "mcp_tools", "description": "Run MCP tools/list for one configured child MCP on this host. Use the ref returned by mcp_manage list or status.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}}}},
+		{"name": "mcp_call", "description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "name"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}}}},
+		{"name": "mcp_connection_close", "description": "Close one Hub-owned child MCP connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
+		{"name": "mcp_request", "description": "Forward a supported child resource or prompt request.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
 	}
 }
 
@@ -6218,6 +6670,10 @@ func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg
 }
 
 func (s *Server) adminSessionValid(r *http.Request) bool {
+	if r.Header.Get("X-GPTAdmin-Airlock-Identity") != "" {
+		_, ok := s.airlockUIIdentity(r)
+		return ok
+	}
 	if s.cfg.AdminPassword == "" {
 		return true
 	}
@@ -6270,7 +6726,8 @@ func safeAdminNext(v string) string {
 	if v == "" {
 		return "/admin/"
 	}
-	if !strings.HasPrefix(v, "/admin/") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/admin/api/") {
+	cloudOS := strings.HasPrefix(v, "/cloudos") && !strings.HasPrefix(v, "//")
+	if (!strings.HasPrefix(v, "/admin/") && !cloudOS) || strings.HasPrefix(v, "/admin/api/") {
 		return "/admin/"
 	}
 	return v
@@ -6730,6 +7187,9 @@ func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.authWriterHTTP(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
@@ -6823,6 +7283,9 @@ func (s *Server) oauthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	if !s.authWriterHTTP(w) {
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
 		return
@@ -6870,6 +7333,9 @@ func (s *Server) oauthAuthorizePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
+	if !s.authWriterHTTP(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
@@ -6971,7 +7437,11 @@ func oauthRedirectMatches(issued, requested string) bool {
 // Hub restart and OAuth signing-key change do not erase client authorization.
 func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	resource := strings.TrimRight(r.Form.Get("resource"), "/")
-	clientID := strings.TrimSpace(r.Form.Get("client_id"))
+	clientID, validClient := oauthTokenClientID(r)
+	if !validClient {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "client identification mismatch"})
+		return
+	}
 	refreshToken := strings.TrimSpace(r.Form.Get("refresh_token"))
 	record, ok := s.oauthRefreshTokenRecord(refreshToken, clientID, resource)
 	if !ok {
@@ -7117,6 +7587,10 @@ func (s *Server) resolveExposedAgent(slug string) (Agent, bool) {
 	defer s.mu.Unlock()
 	for _, a := range s.publicAgentsLocked(nil) {
 		aliases := []string{a.AgentID, a.Name, exposedAgentSlug(a), agentSlug(a.AgentID), agentSlug(a.Name), compactSlug(a.AgentID), compactSlug(a.Name)}
+		if isChildMCPAgent(a) {
+			qualifiedSlug := agentSlug(firstString(a.Meta, "parent_server_id")) + "-" + agentSlug(firstString(a.Meta, "child_ref"))
+			aliases = append(aliases, qualifiedSlug)
+		}
 		for _, alias := range aliases {
 			if strings.EqualFold(slug, alias) || want == agentSlug(alias) || wantCompact == compactSlug(alias) {
 				return a, true
@@ -7181,7 +7655,7 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tail == "" || tail == "mcp" {
-		w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
+		w.Header().Set("MCP-Protocol-Version", connectionProtocol(strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -7223,6 +7697,11 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, rpcErr, noContent := s.agentMCPJSONRPC(r, agent, body)
+	if firstString(body, "method") == "initialize" {
+		if protocol := firstString(mapValue(result), "protocolVersion"); protocol != "" {
+			w.Header().Set("MCP-Protocol-Version", protocol)
+		}
+	}
 	if noContent {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -7515,6 +7994,20 @@ func compactJSON(v any) string {
 
 func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]any) (any, any, bool) {
 	method := firstString(body, "method")
+	if _, managed := r.Context().Value(connectionContextKey{}).(connectionScope); managed {
+		switch method {
+		case "initialize", "notifications/initialized", "notifications/cancelled", "tools/list", "tools/call":
+		case "ping":
+			releaseAuthAdmission(r)
+			return map[string]any{}, nil, false
+		default:
+			releaseAuthAdmission(r)
+			return nil, map[string]any{"code": -32601, "message": "managed child connection supports tools only"}, false
+		}
+	}
+	if method == "initialize" || method == "server/discover" || method == "prompts/list" || method == "prompts/get" {
+		releaseAuthAdmission(r)
+	}
 	params := mapValue(body["params"])
 	switch method {
 	case "server/discover":
@@ -7527,7 +8020,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 	case "initialize":
 		// Legacy compatibility shim for pre-2026-07-28 MCP clients.
 		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
-			return map[string]any{"protocolVersion": mcpProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + exposedAgentSlug(agent), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
+			return map[string]any{"protocolVersion": connectionProtocol(firstString(params, "protocolVersion")), "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + exposedAgentSlug(agent), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
 		}
 		jobID := s.enqueueRelay(agent.AgentID, method, params)
 		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
@@ -7671,6 +8164,19 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 }
 
 func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, any) {
+	releaseAuthAdmission(r)
+	if isChildMCPAgent(agent) {
+		if !profileAllowsTarget(r, agent.AgentID) {
+			return nil, map[string]any{"code": -32003, "message": "access profile denies this target"}
+		}
+		parent := firstString(agent.Meta, "parent_server_id")
+		args := childConnectionArguments(r, agent, map[string]any{"ref": firstString(agent.Meta, "child_ref")})
+		raw := s.callShellToolWithTraceParent(parent, "mcp_tools", args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
+			return unwrapMCPUpstream(raw)
+		}
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, childMCPTools(raw))}, nil
+	}
 	if requestAccessMode(r) != accessModeReadonly {
 		return s.agentToolsList(agent)
 	}
@@ -7697,17 +8203,20 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 }
 
 func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
+	if agent.AgentID != "hub" {
+		releaseAuthAdmission(r)
+	}
 	if agent.AgentID == "hub" {
 		if name == "resource_receipt" {
 			return mcpToolResult(s.appsSDKResourceReceipt(r, firstString(args, "uri"))), nil
 		}
-		return mcpToolResult(s.appsSDKCall(name, args)), nil
+		return mcpToolResult(s.appsSDKCallForRequest(r, name, args)), nil
 	}
 	if isVirtualMCPAgent(agent) {
 		return s.callVirtualMCPTool(r, agent, name, args)
 	}
 	if strings.HasPrefix(agent.AgentID, "shell:") {
-		return unwrapMCPUpstream(s.callShellToolWithTraceParent(agent.AgentID, name, args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r)))
+		return unwrapMCPUpstream(s.callShellToolWithTraceParent(agent.AgentID, name, s.shellConnectionArguments(r, agent.AgentID, name, args), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r)))
 	}
 	if strings.HasPrefix(agent.AgentID, "file:") {
 		if !fileToolAllowed(name) {
@@ -7721,11 +8230,11 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 	if isChildMCPAgent(agent) {
 		parent := firstString(agent.Meta, "parent_server_id")
 		ref := firstString(agent.Meta, "child_ref")
-		raw := s.callShellToolWithTraceParent(parent, "mcp_call", map[string]any{
+		raw := s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
 			"ref":       ref,
 			"name":      name,
 			"arguments": args,
-		}, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
 			return unwrapMCPUpstream(raw)
 		}
@@ -7740,6 +8249,7 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 }
 
 func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
+	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourcesList(), nil
 	}
@@ -7760,6 +8270,7 @@ func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 }
 
 func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (any, any) {
+	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourceRead(r, uri), nil
 	}
@@ -7885,7 +8396,7 @@ func validateMCP20260728RoutingHeaders(r *http.Request, body map[string]any) map
 
 func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("MCP-Protocol-Version", mcpProtocolVersion)
+	w.Header().Set("MCP-Protocol-Version", connectionProtocol(strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))))
 	w.Header().Set("Access-Control-Allow-Headers", "authorization, content-type, MCP-Protocol-Version, Mcp-Method, Mcp-Name")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	if r.Method == http.MethodOptions {
@@ -7903,6 +8414,11 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
+	var originalBody bytes.Buffer
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.TeeReader(r.Body, &originalBody), r.Body}
 	var body map[string]any
 	if err := readJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": err.Error()}})
@@ -7922,7 +8438,9 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		result = mcpDiscoverResult("gptadmin-go-hub", BuildVersion)
 	case "initialize":
 		// Legacy compatibility shim; MCP 2026-07-28 itself is stateless.
-		result = map[string]any{"protocolVersion": mcpProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}
+		protocol := connectionProtocol(firstString(params, "protocolVersion"))
+		w.Header().Set("MCP-Protocol-Version", protocol)
+		result = map[string]any{"protocolVersion": protocol, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -7940,6 +8458,21 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			s.auditToolDecision(r, "hub", name, args, "deny", err.Error(), nil, http.StatusForbidden)
 			rpcErr = map[string]any{"code": -32003, "message": err.Error()}
 		} else {
+			if nodePeerJobTool(name) && s.routeNodePeerJob(w, r, args, originalBody.Bytes()) {
+				return
+			}
+			if (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") && firstString(args, "tool", "tool_name", "name") == "shell_exec" {
+				target := firstString(args, "target", "server_id", "agent_id")
+				if strings.HasPrefix(strings.TrimSpace(target), "shell:") && s.forwardNodePeerRequest(w, r, target, originalBody.Bytes(), "/mcp") {
+					return
+				}
+			}
+			// Local submissions on /mcp fail with the node peer failure
+			// envelope; receipt reads and read-only tools stay available.
+			if !nodePeerJobTool(name) && !isReadOnlyTool("hub", name) && s.nodeDrainBlocked() {
+				s.writeNodeDrainFailure(w, "/mcp", originalBody.Bytes(), "hub", "")
+				return
+			}
 			callArgs, approvalID := approvalArguments(args)
 			// In MCP Tasks mode the facade is a transparent router for approval:
 			// checkpoint the actual shell target/tool instead of creating a second
@@ -8629,8 +9162,9 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	case "discover", "list_mcp_servers", "listMcpServers":
 		s.mu.Lock()
 		servers := s.publicServersLockedWithDetail(nil, fullDetailRequested(args["detail"]))
+		mesh := s.meshSummaryLocked()
 		s.mu.Unlock()
-		return map[string]any{"servers": servers}
+		return map[string]any{"servers": servers, "mesh": mesh}
 	case "pending", "list_pending_servers", "approve_pending_server":
 		result, _ := s.callHubToolForRequest(nil, name, args)
 		return result
@@ -8643,23 +9177,7 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		s.mu.Unlock()
 		return map[string]any{"agents": agents}
 	case "schema", "list_mcp_tools", "listMcpTools":
-		target := firstString(args, "target", "server_id", "agent_id")
-		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
-		if status != http.StatusOK {
-			return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
-		}
-		target = selectedTarget
-		if target == "hub" {
-			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": hubTools()}})
-		}
-		if strings.HasPrefix(target, "shell:") {
-			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}})
-		}
-		if strings.HasPrefix(target, "file:") {
-			return s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": fileTools()}})
-		}
-		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
-		return s.withSchemaContractMetadata(s.waitRelay(jobID, s.cfg.DefaultTimeout))
+		return s.appsSDKSchemaForRequest(nil, args)
 	case "inspect", "inspect_system", "inspectSystem":
 		target := firstString(args, "target", "server_id", "agent_id")
 		selectedTarget, status, detail := s.selectMCPRelayTarget(target)
@@ -8714,6 +9232,11 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 	}
 	if name == "resource_receipt" {
 		return s.appsSDKResourceReceipt(r, firstString(args, "uri"))
+	}
+	if nodePeerJobTool(name) {
+		if response, found := s.childSchemaJobForRequest(r, firstString(args, "id", "job_id")); found {
+			return s.withSchemaContractMetadata(response)
+		}
 	}
 	if name == "demo" {
 		result, _ := s.callHubToolForRequest(r, name, args)
@@ -8780,6 +9303,7 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 }
 
 func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) any {
+	releaseAuthAdmission(r)
 	target := firstString(args, "target", "server_id", "agent_id")
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
@@ -8796,8 +9320,15 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 	} else if strings.HasPrefix(target, "file:") {
 		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": fileTools()}}
 	} else {
-		jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
-		result = s.waitRelay(jobID, s.cfg.DefaultTimeout)
+		s.mu.Lock()
+		child, exists := s.exposedAgentByIDLocked(target)
+		s.mu.Unlock()
+		if exists && isChildMCPAgent(child) {
+			result = s.childSchemaForRequest(r, child)
+		} else {
+			jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
+			result = s.waitRelay(jobID, s.cfg.DefaultTimeout)
+		}
 	}
 	if response, ok := result["response"].(map[string]any); ok {
 		if raw, ok := response["tools"].([]map[string]any); ok {
@@ -9022,8 +9553,8 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "job",
 			"title":           "Job",
-			"description":     "Read a job; detail=full adds diagnostics.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
+			"description":     "Peer: owner_target=execute.target",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "owner_target": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
@@ -9051,7 +9582,7 @@ func (s *Server) appsSDKResourcesList() map[string]any {
 }
 
 func appsSDKWidgetMeta() map[string]any {
-	connectDomains := []string{"https://became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
+	connectDomains := []string{"https://became.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
 	resourceDomains := []string{"https://your-subdomain.t.became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://persistent.oaistatic.com"}
 	return map[string]any{
 		"ui": map[string]any{
@@ -9198,6 +9729,14 @@ func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, er
 func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]any, error) {
 	claims, managed := s.verifyManagedMCPToken(token)
 	if !managed {
+		// A revoked/unknown managed credential is a local denial, not an
+		// OAuth bearer whose verification should be sent to another node.
+		if strings.HasPrefix(token, "gptk_") {
+			return nil, errors.New("invalid managed MCP bearer")
+		}
+		if s.cfg.AuthMode == "reader" {
+			return s.verifyNodeWriterBearer(r, token)
+		}
 		var err error
 		claims, err = s.verifyJWT(token)
 		if err != nil {
@@ -9293,7 +9832,7 @@ func (s *Server) jwtKeyID() string {
 }
 
 func validJWTScopes(value string) bool {
-	allowed := map[string]bool{"gptadmin.read": true, "gptadmin.inspect": true, "gptadmin.exec": true, "gptadmin.settings.read": true, "gptadmin.settings.write": true, "gptadmin.registry.read": true, "gptadmin.registry.manage": true, "gptadmin.update": true}
+	allowed := map[string]bool{"gptadmin.read": true, "gptadmin.inspect": true, "gptadmin.exec": true, "gptadmin.settings.read": true, "gptadmin.settings.write": true, "gptadmin.registry.read": true, "gptadmin.registry.manage": true, "gptadmin.update": true, "offline_access": true}
 	for _, scope := range strings.Fields(value) {
 		if !allowed[scope] {
 			return false
@@ -9356,6 +9895,11 @@ func (s *Server) requestForAudit(r *http.Request) map[string]any {
 		"referer":         r.Referer(),
 		"origin":          r.Header.Get("Origin"),
 		"content_type":    r.Header.Get("Content-Type"),
+	}
+	if principal, ok := s.airlockUIIdentity(r); ok {
+		fields["airlock_user_id"] = principal.UserID
+		fields["airlock_user_email"] = principal.Email
+		fields["auth_kind"] = "airlock_admin"
 	}
 	fields["authorization"] = redactSecret(r.Header.Get("Authorization"))
 	if r.Header.Get("Cookie") != "" {
@@ -9461,6 +10005,10 @@ func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 			*r = *s.applyAccessProfileContext(r, claims)
 			return true
 		} else {
+			if nodeBearerUnavailable(err) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrolled writer bearer admission unavailable"})
+				return false
+			}
 			s.authAudit("mcp_auth_denied", r, map[string]any{"reason": err.Error(), "jwt_claims_unverified": decodeJWTClaimsUnverified(tok)})
 		}
 	} else if auth == "" {

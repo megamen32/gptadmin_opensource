@@ -1,70 +1,48 @@
 ---
 name: gptadmin-connect
-description: Configure, connect and reauthenticate the GPTAdmin Hub over its OAuth browser flow without exposing the admin password, OAuth codes, or tokens in chat or config files.
+description: Connect and reauthenticate the OAuth-protected GPTAdmin remote MCP without exposing passwords or tokens in chat.
 ---
 
 # Connect GPTAdmin
 
-The plugin ships a **placeholder** Hub URL. Every user runs their own Hub at
-their own address, so this skill's first job is to establish which address is
-actually configured.
+GPTAdmin is a remote MCP server. Installing this plugin adds the configured
+`gptadmin` HTTP MCP entry; it does not install a local copy of the Hub.
 
-## Step 1 — establish the Hub URL
+## First connection
 
-Read `servers.mcp.json` from the plugin package.
-
-- If the URL is still the placeholder (`https://gptadmin.example.com/mcp`),
-  stop and ask the user for their own Hub URL. Do not guess it, do not search
-  the web for it, and do not fall back to any address found in old
-  configuration, chat history, or another machine.
-- Confirm the URL is HTTPS and ends in `/mcp`.
-
-Only after the user supplies their address may anything else in this skill run.
-
-## Step 2 — let the client do OAuth
-
-Do not perform the OAuth handshake yourself. The MCP client owns it: discovery
-of `/.well-known/oauth-protected-resource`, then the authorization server, then
-dynamic client registration, then Authorization Code + PKCE (S256).
-
-When the browser consent page opens, tell the user that GPTAdmin is being
-authorized and that the Hub admin password is entered **in that browser page**.
-Never ask for it in chat and never write it into a file.
-
-Scopes requested: `gptadmin.read`, `gptadmin.exec`, `offline_access`.
-
-## Step 3 — verify, in order
-
-1. `tools/list` returns. Proves handshake + OAuth.
-2. Discovery runs and lists real hosts. Read the actual counts; do not report
-   "connected" without them.
-3. One read-only command on one `online` host, e.g. `uptime`.
-
-A successful TLS handshake or a green connection badge proves nothing about
-whether the Hub is usable.
-
-## Issuer check — the failure that looks like a ghost
-
-If the Hub's OAuth metadata advertises an issuer that differs from the URL the
-client connected to, saved tokens break the moment either address changes.
-
-Typical bad shape: the client uses a stable domain, but the Hub answers with a
-`temporary tunnel address` as its `issuer` and `resource`. Everything works,
-then fails days later with no change on the user's side.
-
-When you see that, tell the user the Hub must advertise one stable address as
-its issuer, and that the plugin's `url` must match it. This is a Hub
-configuration issue; changing the plugin URL alone will not fix it.
+1. Confirm the MCP URL is the user's public HTTPS Hub URL ending in `/mcp`.
+   The packaged default is `https://mcp.bezrabotnyi.com/mcp`; this is the
+   canonical OAuth resource and issuer for the GPTAdmin installation. Use the
+   user's own Hub URL only when it is a separate installation.
+2. Let the MCP client perform OAuth discovery from the Hub. It should use the
+   protected-resource and authorization-server metadata, dynamic registration,
+   and Authorization Code + PKCE (S256).
+3. When the browser consent page appears, tell the user that GPTAdmin is being
+   authorized and that the admin password must be entered in that browser page.
+   Never ask the user to paste the password into chat or a config file.
+4. For the normal reconnect flow, request `gptadmin.read gptadmin.exec
+   offline_access`. The first two scopes cover profile/discovery and execution;
+   `offline_access` lets the client retain a refreshable connection.
+5. After the callback, call `tools/list` and perform a read-only discovery. Do
+   not claim the connection is useful until the authenticated MCP call works.
 
 ## Reauthentication
 
-On `401`, `oauth_token_invalid_grant`, `oauth_refresh_token_missing`, or
-`reauthentication_required`: stop before any write, and re-run the browser
-flow. Never rotate, copy, decode, or paste a token as a workaround.
+If the client reports `401`, `oauth_token_invalid_grant`,
+`oauth_refresh_token_missing`, or `reauthentication_required`, stop before any
+write. Re-run the client's OAuth reconnect flow in the browser. Do not rotate,
+copy, decode, or print a token as a workaround.
+
+If the saved entry for this managed installation still names a legacy
+`u-f….t.became.bezrabotnyi.com` address, replace the entry with
+`https://mcp.bezrabotnyi.com/mcp` before reconnecting. Here FRP `u-f…` names
+are fallback transport addresses only; they are not the managed OAuth issuer,
+resource, or identity. A separate Hub uses its own explicitly selected stable
+HTTPS origin.
 
 ## Safety boundary
 
-Hub consent and policy are authoritative. Keep passwords, authorization codes,
-access and refresh tokens, and signing keys out of messages, logs, task files,
-screenshots, and generated configuration — including when the user volunteers
-them.
+The Hub's OAuth consent and profile policy are authoritative. The plugin's
+skills are workflow guidance, not an authorization bypass. Keep passwords,
+authorization codes, access/refresh tokens, and signing keys out of messages,
+logs, task files, screenshots, and generated config.

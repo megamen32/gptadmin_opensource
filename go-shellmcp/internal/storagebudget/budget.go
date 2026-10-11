@@ -12,10 +12,12 @@ import (
 const maxBudgetBytes int64 = 500 << 20
 
 type Result struct {
-	LimitBytes     int64
-	RemovedFiles   int
-	RemovedBytes   int64
-	RemainingBytes int64
+	LimitBytes      int64
+	RemovedFiles    int
+	RemovedBytes    int64
+	RemainingBytes  int64
+	ProtectedBytes  int64
+	OverBudgetBytes int64
 }
 
 type fileEntry struct {
@@ -119,10 +121,15 @@ func EnforceRootsLimit(roots []string, limit int64, protected map[string]bool) (
 		}
 	}
 	for _, entry := range files {
+		if pathProtected(entry.path, normalizedProtected) {
+			result.ProtectedBytes += entry.size
+		}
+	}
+	for _, entry := range files {
 		if result.RemainingBytes <= limit {
 			break
 		}
-		if normalizedProtected[entry.path] {
+		if pathProtected(entry.path, normalizedProtected) {
 			continue
 		}
 		if err := os.Remove(entry.path); err != nil {
@@ -133,7 +140,10 @@ func EnforceRootsLimit(roots []string, limit int64, protected map[string]bool) (
 		result.RemainingBytes -= entry.size
 	}
 	for _, root := range normalizedRoots {
-		removeEmptyDirs(root)
+		removeEmptyDirs(root, normalizedProtected)
+	}
+	if result.RemainingBytes > limit {
+		result.OverBudgetBytes = result.RemainingBytes - limit
 	}
 	return result, nil
 }
@@ -175,10 +185,20 @@ func normalizeRoots(roots []string) []string {
 	return outer
 }
 
-func removeEmptyDirs(root string) {
+// Protection applies to entire subtrees, including files created during a sweep.
+func pathProtected(path string, protected map[string]bool) bool {
+	for root, yes := range protected {
+		if yes && (path == root || strings.HasPrefix(path, root+string(os.PathSeparator))) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeEmptyDirs(root string, protected map[string]bool) {
 	var dirs []string
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() && path != root {
+		if err == nil && d.IsDir() && path != root && !pathProtected(path, protected) {
 			dirs = append(dirs, path)
 		}
 		return nil

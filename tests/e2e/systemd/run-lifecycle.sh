@@ -107,14 +107,13 @@ docker exec "$name" python3 /work/tests/e2e/systemd/runtime_acceptance.py
 
 # Exercise the installed updater against the same candidate artifact. This is
 # deliberately after real execution: update must preserve a functioning install.
-docker exec "$name" env \
-  PKG_ALL_URL="file:///work/${package#$repo/}" \
-  PKG_HUB_URL="file:///work/${package#$repo/}" \
-  PKG_SHELLMCP_URL="file:///work/${package#$repo/}" \
-  /usr/local/bin/gptadmin --system update --force \
-    --pkg-all "file:///work/${package#$repo/}" \
-    --pkg-hub "file:///work/${package#$repo/}" \
-    --pkg-shellmcp "file:///work/${package#$repo/}"
+# The updater must accept ordinary local filesystem paths. It discovers the
+# sibling gptadmin-release-matrix.json itself and still enforces digest/size;
+# no file:// spelling or manifest bypass is allowed in this gate.
+docker exec "$name" /usr/local/bin/gptadmin --system update --force \
+    --pkg-all "/work/${package#$repo/}" \
+    --pkg-hub "/work/${package#$repo/}" \
+    --pkg-shellmcp "/work/${package#$repo/}"
 
 docker exec "$name" systemctl is-active --quiet gptadmin-hub.service
 docker exec "$name" systemctl is-active --quiet shellmcp.service

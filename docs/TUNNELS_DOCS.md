@@ -20,7 +20,10 @@ During `gptadmin setup`, choose option **1** (auto-tunnel via FRP). The installe
 
 - ✅ No domain needed, no DNS setup
 - ✅ Fast (direct TCP tunnel)
-- ⚠️ URL is on `frp.bezrabotnyi.com` (shared domain)
+- ⚠️ URL is on `frp.bezrabotnyi.com` (shared domain). It can be the selected
+  public origin for that installation, but must not overwrite a different
+  explicit `PUBLIC_ORIGIN`. The managed shared connector uses
+  `https://mcp.bezrabotnyi.com/mcp`.
 - ⚠️ Free FRP server has rate limits
 
 ## Cloudflare Tunnel

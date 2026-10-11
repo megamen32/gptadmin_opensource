@@ -37,8 +37,8 @@ The existing fleet-health configuration currently names these targets:
 
 | Target | Source ID to configure | Activation note |
 |---|---|---|
-| server-100 | `host:admin-server-100` | local target; use the local producer or central adapter, not both |
-| admin-server-88 | `host:admin-server-88` | Linux target; local producer or central SSH adapter |
+| server-100 | `host:server01` | local target; use the local producer or central adapter, not both |
+| server01 | `host:server01` | Linux target; local producer or central SSH adapter |
 | server01 | `host:server01` | Linux target; local producer or central SSH adapter |
 | router | `host:router` | OpenWrt has no Python; central SSH adapter uses bounded `logread` |
 | haos | `host:haos` | central SSH adapter uses bounded `logread` |
@@ -54,7 +54,7 @@ Fresh bounded read-only probe evidence (2026-08-09) is:
 | Target | CPU/load | Disk | RAM available | Failed units | Log backend |
 |---|---:|---:|---:|---:|---|
 | server-100 | load `37.37` / 104 CPUs | 82% | 55,577 MiB | 2 | local files/journal |
-| admin-server-88 | load `65.98` / 88 CPUs | 82% | 48,067 MiB | 1 (`certbot.service`) | journal/files |
+| server01 | load `65.98` / 88 CPUs | 82% | 48,067 MiB | 1 (`certbot.service`) | journal/files |
 | server01 | load `54.83` / 88 CPUs | 59% | 30,605 MiB | 1 (`gptadmin-tunnel-frpc.service`) | journal |
 | router | load `6.51` / 4 proc fallback | 25% | 11 MiB | n/a | `logread` |
 | haos | load `0.85` / 4 CPUs | 68% | 1,535 MiB | n/a | `logread` |

@@ -47,7 +47,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Deque, Dict, Iterable, Literal, Optional
 
-DEFAULT_HUB = "https://became.bezrabotnyi.com"
+DEFAULT_HUB = "https://mcp.bezrabotnyi.com"
 STOP = False
 
 StdioFormat = Literal["auto", "framed", "ndjson"]

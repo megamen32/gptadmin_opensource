@@ -1,0 +1,14 @@
+[Unit]
+Description=S21 Android Remote Control MCP network tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -L 127.0.0.1:18080:127.0.0.1:8080 -p 22220 127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

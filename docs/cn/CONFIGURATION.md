@@ -11,7 +11,7 @@
 | `ADMIN_PASSWORD` | **是** | — | `/oauth/authorize` HTML 表单和管理会话的密码。 |
 | `CTL_TOKEN` |仅限现有安装| — |已弃用的兼容性承载；不要创建或复制它。它一直有效，直到其所有者明确轮换或删除它为止。 |
 | `OAUTH_CLIENT_SECRET` |对于 `/mcp` | — |签署 OAuth 不记名令牌。使用 `openssl rand -hex 32` 生成。 |
-| `PUBLIC_ORIGIN` |推荐| — |公共基本 URL（例如 `https://your-hub.bezrabotnyi.com`）。用于 OAuth + OpenAPI。 |
+| `PUBLIC_ORIGIN` |推荐| — |公共基本 URL。官方部署使用 `https://mcp.bezrabotnyi.com`；用于 OAuth + OpenAPI。 |
 | `MCP_RESOURCE` |推荐| `$PUBLIC_ORIGIN` | MCP 资源标识符。 |
 | `GPTADMIN_AUTH_RATE_LIMIT` |可选 | `60` 每个客户端每分钟 |在临时 `429` 响应之前，来自一个客户端的最大失败管理/控制/MCP 身份验证尝试次数。成功的身份验证不会消耗预算。 |
 
@@ -143,6 +143,13 @@ ShellMCP 代理凭据是独立的，不受此规则的影响。
 3. 将 `PUBLIC_ORIGIN` 设置为您的公共中心 URL
 4. MCP 客户端将通过 `/.well-known/...` 发现 OAuth 端点
 
+官方公共部署的客户端 identity 是 `https://mcp.bezrabotnyi.com`，MCP endpoint
+是 `https://mcp.bezrabotnyi.com/mcp`。生成的 FRP `u-*` 主机名只是隧道传输地址，
+不要把它注册为官方 ChatGPT/Codex identity。
+
+普通的完整连接请求 scopes `gptadmin.read gptadmin.exec offline_access`。
+只有明确的只读连接才使用 `gptadmin.read offline_access`。
+
 ### 连接生命周期Hub 发出 OAuth 协议响应，而给定的 MCP 客户端或其
 连接器可以拥有持久的浏览器/会话和刷新状态。经授权的
 客户端必须能够在其支持的范围内刷新或恢复其会话
@@ -154,6 +161,10 @@ OAuth 访问 JWT 的寿命仍然短暂； Hub颁发的不透明刷新凭证
 使用寿命为五个日历年，并轮换使用。新管理的 MCP 承载者
 如果没有明确的 `ttl_days` 默认为五年。现有已签名的 JWT
 保留其原始有效期，并且不会被安装或更新悄悄替换。
+
+如果 OAuth 发现元数据发生变化，或 ChatGPT 固定了旧的应用配置，请重新创建
+ChatGPT 应用并再次授权。仅刷新 Actions/tools 不一定会替换已保存的 OAuth
+元数据。Codex 遇到旧元数据时，应断开并重新创建 MCP 连接。
 
 ### 在哪里设置密码
 

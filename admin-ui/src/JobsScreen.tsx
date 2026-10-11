@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { friendlyActionName, friendlyServerName, jobStatusLabel } from "./ui/format";
+import { formatTimestamp, friendlyActionName, friendlyServerName, jobStatusLabel, timestampTitle } from "./ui/format";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
 
 type Job = {
@@ -17,13 +17,6 @@ type Job = {
 };
 
 type Overview = { jobs?: { recent?: Job[]; queued?: Job[]; background?: Job[]; count?: number } };
-
-function compactTime(value: number | string | undefined): string {
-  if (value === undefined || value === "") return "—";
-  const numeric = typeof value === "number" ? value : Number(value);
-  const date = Number.isFinite(numeric) ? new Date(numeric < 1e12 ? numeric * 1000 : numeric) : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "medium" });
-}
 
 function jobInput(job: Job): string { return job.command || job.arguments_preview || "Входные данные не сохранены"; }
 function jobPreview(job: Job): string { return job.error_preview || job.result_preview || ""; }
@@ -96,10 +89,10 @@ export default function JobsScreen() {
     <section className={`job-native-layout ${selected ? "has-detail" : ""}`}>
       <article className="card job-native-list">
         <div className="list-toolbar"><input className="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Фильтр задач" /><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Все статусы</option><option value="running">Выполняются</option><option value="queued">В очереди</option><option value="completed">Готовы</option><option value="failed">С ошибкой</option></select></div>
-        <div className="compact-list">{filtered.map((job) => <button className={`job-native-row ${selected?.job_id === job.job_id ? "selected" : ""}`} type="button" key={job.job_id || `${job.created_at}-${job.tool_name}`} onClick={() => void open(job)}><span className={`job-state job-${job.status || "unknown"}`}>{jobStatusLabel(job.status)}</span><span className="job-native-main"><strong>{friendlyActionName(job.tool_name)}</strong><small>{friendlyServerName(job.server_id || job.server, job.server)} · {compactTime(job.created_at)}</small><code>{jobInput(job)}</code>{jobPreview(job) && <em>{jobPreview(job)}</em>}</span></button>)}</div>
+        <div className="compact-list">{filtered.map((job) => <button className={`job-native-row ${selected?.job_id === job.job_id ? "selected" : ""}`} type="button" key={job.job_id || `${job.created_at}-${job.tool_name}`} onClick={() => void open(job)}><span className={`job-state job-${job.status || "unknown"}`}>{jobStatusLabel(job.status)}</span><span className="job-native-main"><strong>{friendlyActionName(job.tool_name)}</strong><small>{friendlyServerName(job.server_id || job.server, job.server)} · <span title={timestampTitle(job.created_at)}>{formatTimestamp(job.created_at)}</span></small><code>{jobInput(job)}</code>{jobPreview(job) && <em>{jobPreview(job)}</em>}</span></button>)}</div>
         {jobs.length < total && <div className="load-more-row"><button className="button secondary" type="button" disabled={loading} onClick={() => void loadMore()}>Показать ещё</button></div>}
       </article>
-      {selected && <aside className="card job-detail-pane"><div className="card-heading"><div><p className="section-kicker">ПОДРОБНОСТИ ЗАДАЧИ</p><h2>{selected.job_id || "Задача"}</h2></div><button className="text-button" type="button" onClick={() => { setSelected(null); setDetail(null); }}>Закрыть</button></div><dl className="detail-facts"><div><dt>Состояние</dt><dd>{jobStatusLabel(selected.status)}</dd></div><div><dt>Действие</dt><dd>{friendlyActionName(selected.tool_name)}</dd></div><div><dt>Сервер</dt><dd>{friendlyServerName(selected.server_id || selected.server, selected.server)}</dd></div><div><dt>Создана</dt><dd>{compactTime(selected.created_at)}</dd></div></dl><div className="detail-section"><h3>Входные данные</h3><pre className="detail-code">{jobInput(selected)}</pre></div><div className="detail-section"><h3>Полный результат</h3><pre className="raw-native-box job-full-result">{detailLoading ? "Загрузка…" : detail === null ? "—" : JSON.stringify(detail, null, 2)}</pre></div></aside>}
+      {selected && <aside className="card job-detail-pane"><div className="card-heading"><div><p className="section-kicker">ПОДРОБНОСТИ ЗАДАЧИ</p><h2>{selected.job_id || "Задача"}</h2></div><button className="text-button" type="button" onClick={() => { setSelected(null); setDetail(null); }}>Закрыть</button></div><dl className="detail-facts"><div><dt>Состояние</dt><dd>{jobStatusLabel(selected.status)}</dd></div><div><dt>Действие</dt><dd>{friendlyActionName(selected.tool_name)}</dd></div><div><dt>Сервер</dt><dd>{friendlyServerName(selected.server_id || selected.server, selected.server)}</dd></div><div><dt>Создана</dt><dd title={timestampTitle(selected.created_at)}>{formatTimestamp(selected.created_at)}</dd></div></dl><div className="detail-section"><h3>Входные данные</h3><pre className="detail-code">{jobInput(selected)}</pre></div><div className="detail-section"><h3>Полный результат</h3><pre className="raw-native-box job-full-result">{detailLoading ? "Загрузка…" : detail === null ? "—" : JSON.stringify(detail, null, 2)}</pre></div></aside>}
     </section>
   </div>;
 }

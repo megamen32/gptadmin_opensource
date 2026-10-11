@@ -1,10 +1,13 @@
 package hub
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -68,9 +71,30 @@ type ingressResponseWriter struct {
 	status int
 }
 
+// Preserve native request/response deadlines through the audit wrapper.
+func (w *ingressResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *ingressResponseWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack forwards connection upgrades (node WebSocket connections) to the
+// underlying writer; without it every hijack-based handler in the hub is
+// unreachable behind the ingress audit wrapper.
+func (w *ingressResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("ingress audit writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+// Flush forwards streaming responses (SSE) through the audit wrapper.
+func (w *ingressResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func requestTraceID(r *http.Request) string {

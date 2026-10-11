@@ -8,7 +8,7 @@ without Hub polling; keep `queue: true` for outbound-only Hub long-poll mode.
 
 This directory is safe to commit: it contains no live tokens. The generated `config.yaml` used on HAOS is created by `scripts/deploy_haos_shellmcp.sh` from `/etc/gptadmin/gptadmin.env` on the primary server.
 
-Typical deploy from `admin-server-100`:
+Typical deploy from `server01`:
 
 ```bash
 ./scripts/deploy_haos_shellmcp.sh --deploy

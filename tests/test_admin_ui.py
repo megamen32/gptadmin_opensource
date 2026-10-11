@@ -14,13 +14,13 @@ def test_react_admin_explains_the_current_mcp_auth_choice():
     app = (ROOT / "admin-ui" / "src" / "App.tsx").read_text()
     assert "Авторизация" in app
     assert "Токены подключения и управление OAuth" in app
-    assert "Выдать managed token" in app
+    assert "Выпустить токен" in app
 
 
 def test_react_admin_uses_user_facing_auth_labels():
     app = (ROOT / "admin-ui" / "src" / "App.tsx").read_text()
     assert "OAuth secret" in app
-    assert "Выдать managed token" in app
+    assert "Выпустить токен" in app
     assert "Режим доступа" in app
 
 
@@ -28,7 +28,7 @@ def test_react_admin_offers_managed_token_issue_and_rotation_for_non_oauth_clien
     """Clients without OAuth keep an explicit managed-token fallback path."""
     app = (ROOT / "admin-ui" / "src" / "App.tsx").read_text()
     api = (ROOT / "admin-ui" / "src" / "api.ts").read_text()
-    assert "Выдать managed token" in app
+    assert "Выпустить токен" in app
     assert "Режим доступа" in app
     assert '<option value="readonly">Только чтение</option>' in app
     assert "issueMcpToken" in api

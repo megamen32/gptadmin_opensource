@@ -166,6 +166,7 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 		// exists, preserve its pending association rather than cache a transient
 		// response-read failure as a permanent result or enqueue another task.
 		var released bool
+		s.mu.Lock()
 		err = s.withTaskDatabase(func(t *taskTransaction) error {
 			result, err := t.tx.Exec(`DELETE FROM task_requests WHERE key=? AND job_id='' AND response IS NULL`, key)
 			if err != nil {
@@ -175,6 +176,7 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 			released = rows == 1
 			return err
 		})
+		s.mu.Unlock()
 		if err != nil {
 			return response, http.StatusServiceUnavailable
 		}
@@ -184,7 +186,11 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 		}
 		return response, http.StatusServiceUnavailable
 	}
+	// Callback transitions/reservations use the same mutex. Final response
+	// publication must not open a competing local SQLite writer after dispatch.
+	s.mu.Lock()
 	err = s.withTaskDatabase(func(t *taskTransaction) error { return t.finishRequest(key, response, status) })
+	s.mu.Unlock()
 	if err != nil {
 		failure := taskPersistenceFailure(err)
 		if id := firstString(response, "task_id", "job_id"); id != "" {

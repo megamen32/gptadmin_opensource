@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -364,6 +365,25 @@ func ScheduleWindowsReplace(currentExe, stagedPath string, args []string) error 
 func GitHubDesiredTag(build int) string { return "v" + strconv.Itoa(build) }
 func SelfRepairTimeout() time.Duration  { return 3 * time.Minute }
 
+// LatestBuildFromEnv returns a pinned build number from
+// SHELLMCP_LATEST_BUILD when set, otherwise 0 (meaning "use GitHub").
+// Operators can use this to bypass a broken release tag without
+// rebuilding the binary. Validates that the env value is a positive
+// integer; an unparseable value is treated as 0 and surfaces in the
+// caller logs.
+func LatestBuildFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("SHELLMCP_LATEST_BUILD"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Printf("self-repair: SHELLMCP_LATEST_BUILD=%q is not a positive integer; ignoring", raw)
+		return 0
+	}
+	return n
+}
+
 func LatestGitHubBuild(ctx context.Context, repo string, client *http.Client) (int, error) {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -391,12 +411,34 @@ func LatestGitHubBuild(ctx context.Context, repo string, client *http.Client) (i
 		return 0, fmt.Errorf("self-repair: latest release redirect missing tag")
 	}
 	tag := parts[len(parts)-1]
-	if !strings.HasPrefix(tag, "v") {
-		return 0, fmt.Errorf("self-repair: latest release tag %q", tag)
+	build, err := ParseTagBuild(tag)
+	if err != nil {
+		return 0, err
 	}
-	build, err := strconv.Atoi(strings.TrimPrefix(tag, "v"))
+	return build, nil
+}
+
+// ParseTagBuild parses a GitHub release tag into a build number. The
+// expected contract is exactly "v<digits>" (e.g. "v190"). Tags with
+// prerelease suffixes ("v999.20260906063550", "v190-rc1"), missing
+// "v" prefix, or non-positive builds are rejected so a misconfigured
+// release cannot silently downgrade or brick the self-repair path.
+func ParseTagBuild(tag string) (int, error) {
+	if !strings.HasPrefix(tag, "v") {
+		return 0, fmt.Errorf("self-repair: latest release tag %q does not start with v", tag)
+	}
+	suffix := strings.TrimPrefix(tag, "v")
+	if suffix == "" {
+		return 0, fmt.Errorf("self-repair: latest release tag %q is empty after v", tag)
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("self-repair: invalid latest release tag %q (non-numeric suffix %q)", tag, suffix)
+		}
+	}
+	build, err := strconv.Atoi(suffix)
 	if err != nil || build <= 0 {
-		return 0, fmt.Errorf("self-repair: invalid latest release tag %q", tag)
+		return 0, fmt.Errorf("self-repair: invalid latest release tag %q (build %d)", tag, build)
 	}
 	return build, nil
 }

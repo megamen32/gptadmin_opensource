@@ -1030,7 +1030,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: `tools/list` exposes long `list_mcp_*`, `call_mcp_tool` and `get_mcp_job` names plus repeated prose; current contract does not use the shorter discover/schema/execute/job vocabulary.
 - Change: Canonical MCP tools are now `discover`, `schema`, `execute`, `job`, `inspect`, and `ui`; old names remain accepted but are not advertised. OpenAPI operation IDs and component schemas use the same compact vocabulary. Canonical execute uses `target/tool/args`; old `tool_name/arguments` remain accepted. Downstream ShellMCP names were retained and their descriptions shortened because they are separate capability contracts.
 - Verification: Red canonical-surface test first; Hub tests and race detector; ShellMCP Go tests; Python `97 passed, 2 skipped`; `tools/list` payload is capped by a regression assertion at 12000 bytes.
-- Delivery: Commit `9adf894` pushed to `main`; Build, Sync, Release run `29419512851` passed across build/release, macOS, Windows and Docker failover; Hub rebuilt with this commit and `gptadmin-hub.service` restarted active on `admin-server-100`; live smoke passed `discover`, `schema(target=hub)`, and `execute(tool=status)`, advertising only compact names. Website docs commit `bc76d8c` and parent pointer `1290935` are pushed.
+- Delivery: Commit `9adf894` pushed to `main`; Build, Sync, Release run `29419512851` passed across build/release, macOS, Windows and Docker failover; Hub rebuilt with this commit and `gptadmin-hub.service` restarted active on `server01`; live smoke passed `discover`, `schema(target=hub)`, and `execute(tool=status)`, advertising only compact names. Website docs commit `bc76d8c` and parent pointer `1290935` are pushed.
 - Next: Keep legacy names through the documented migration window; remove aliases only in a planned breaking release after client telemetry confirms migration.
 
 ## 2026-07-15 - Relax repeated MCP discovery - completed
@@ -1041,7 +1041,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: Public instructions required `Always call listMcpAgents first` and prescribed discovery/schema before every infrastructure action.
 - Change: Discover once when target is unknown; reuse a healthy target and schema; repeat only after stale/disconnected state, unknown tool schema, or explicit refresh. Added a black-box prompt guard and clarified the philosophy.
 - Verification: `python3 -m pytest tests/test_hub_contract.py -q` (`5 passed`); Build, Sync, Release run `29420583122` passed.
-- Delivery: Commit `0ff518f` pushed to `main`; both prompt files synchronized to `/opt/gptadmin/public` on `admin-server-100`; no Hub restart required because only static instructions changed.
+- Delivery: Commit `0ff518f` pushed to `main`; both prompt files synchronized to `/opt/gptadmin/public` on `server01`; no Hub restart required because only static instructions changed.
 - Next: Observe client behavior; do not reintroduce mandatory per-call discovery without measured correctness evidence.
 
 ## 2026-07-15 - Idempotent MCP writes - completed
@@ -1052,7 +1052,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: A write can complete while its response is lost; a retry currently has no Hub-level duplicate key and may enqueue the same operation twice.
 - Change: Added one Hub-level deduplication layer shared by HTTP and MCP Apps calls. It scopes keys by caller authorization fingerprint, fingerprints target/tool/arguments, reuses the original result/job, rejects conflicting reuse with `409`, refreshes background records when downstream results arrive, and bounds memory with a 15-minute TTL and 1024-entry limit.
 - Verification: Red tests first; `go test ./...` in `go-hub` and `go-shellmcp`; `go test -race ./internal/hub`; `python3 -m pytest tests/ --ignore=tests/e2e` (`97 passed, 2 skipped`).
-- Delivery: Commit `0227a34` pushed to `main`; Build, Sync, Release run `29417782872` passed across build/release, macOS, Windows and Docker failover; `/opt/gptadmin/bin/gptadmin_hub` rebuilt from this commit and `gptadmin-hub.service` restarted active on `admin-server-100`; live duplicate smoke returned one job id for two identical `shell:server01` calls.
+- Delivery: Commit `0227a34` pushed to `main`; Build, Sync, Release run `29417782872` passed across build/release, macOS, Windows and Docker failover; `/opt/gptadmin/bin/gptadmin_hub` rebuilt from this commit and `gptadmin-hub.service` restarted active on `server01`; live duplicate smoke returned one job id for two identical `shell:server01` calls.
 - Next: Add durable idempotency recovery semantics only as a separate milestone; current retry safety is bounded to the running Hub process.
 
 ## 2026-07-15 - Align integration contract with existing Hub flow - completed
@@ -1085,7 +1085,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: The attached client probe read `structuredContent.response.servers`, but production returns the list at `structuredContent.servers`; direct production inspection reports 27 servers while that parser reports zero.
 - Change: Added a direct MCP JSON-RPC restart-contract test. Generic stdio relay now treats failed polling or registration as unregistered and retries registration with capped backoff before sending another poll. Docker failover now starts a real generic relay and fake stdio MCP, validates authenticated `list_mcp_servers`, then requires an `echo` tool call through the promoted fallback.
 - Verification: Red Python regression tests proved one-time registration and polling after a failed recovery registration; green `go test ./...` and `go vet ./...` in Hub/ShellMCP, Python `97 passed, 2 skipped`, and Docker failover suite with all tunnel, Hub, combined, agent, reclaim and ranked-fallback scenarios passing locally.
-- Delivery: Commit `7ab87c9` pushed to `main`; Build, Sync, Release run `29359978802` passed, including Docker failover, macOS, Windows and Android artifact jobs. Production generic relay runtime copies on `admin-server-100` were synchronized and its ten `gptadmin-mcp-*` services restarted as user-owned processes; authenticated Hub smoke reports all ten online.
+- Delivery: Commit `7ab87c9` pushed to `main`; Build, Sync, Release run `29359978802` passed, including Docker failover, macOS, Windows and Android artifact jobs. Production generic relay runtime copies on `server01` were synchronized and its ten `gptadmin-mcp-*` services restarted as user-owned processes; authenticated Hub smoke reports all ten online.
 - Next: None.
 
 ## 2026-07-14 - Redacted security environment metadata - completed
@@ -2213,7 +2213,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.2`
 - Owner: Codex
 - Scope: External Custom GPT relay, FRP origin migration, and ShellMCP agents on
-  `admin-server-100`, `admin-server-88`, and `server01`.
+  `server01`, `server01`, and `server01`.
 - Baseline / red evidence: Server-100 root ShellMCP rejected ordinary commands
   without `SHELLMCP_DEFAULT_USER`; server01 ran an older listener build with
   `queue=false` and then returned queue `401 unauthorized`; live FRP installs
@@ -2241,7 +2241,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.2`
 - Owner: Codex
 - Scope: Android S21 4G egress, ADB transport, and LAN proxy exposure from
-  `admin-server-100`.
+  `server01`.
 - Baseline / red evidence: Android shell traffic could ping over `rmnet4`, but
   the existing ShellMCP queue route to the private Hub address was unreachable;
   no proxy daemon existed and LAN port 3126 was free. The first proxy smoke
@@ -2849,3 +2849,16 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline: `docs/BUGS.md` entry `MCP-KEY-PERSISTENCE-20260726`; current Hub requires JWT `exp`, the issue endpoint defaults to 365 days, and `cli.py` advertises a legacy bearer deadline of `2026-07-27`.
 - Exit gate: offline regression proves a managed key survives a synthetic multi-year time jump, Hub restart and OAuth rotation; it fails only after explicit revoke/rotate. Existing environment-stored keys are imported by digest without logging their values.
 - Now: add the smallest failing Hub regression and implement durable opaque managed-key records. Next: migrate CLI issuance and preserve existing environment-stored client keys. Not now: NanoKVM public-repository publication, host installs, unrelated Android work, or production deployment.
+
+## 2026-09-10 - CloudOS desktop rebased onto macos-web fork - completed
+
+- Milestone: CloudOS
+- Owner: ZCode (LHC Lead)
+- Objective (user): "cloud os доделать: найти лучшую основу для fork — web ui like mac os with terminal finder browser etc. — форкнуть и использовать; все ноды по умолчанию часть cloud os."
+- Fork base: PuruVJ/macos-web (MIT, commit 1420480, vendored as `cloudos-ui/` with `FORK.md`). Puter rejected: mandatory second Node backend/DB/auth violates "CloudOS is only a client of the hub". DaedalOS rejected: Windows-style.
+- Change: new Svelte apps Terminal/Finder/Browser/Computers over the hub `/api/v1/cloud-os/*` APIs; hub now serves the built UI statically from `PublicDir/cloudos-ui` (reverse proxy to the 3030 Next.js service removed); cloudos shell exec/inspect/tabs got a foreground wait-timeout floor so a 0 DefaultTimeout no longer answers "still running" before execution.
+- Verification: `go vet` + full `go test ./...` green (new `cloudos_ui_static_test.go`: serves dist, blocks traversal, 503 when not installed); real browser canary on the deployed hub: Terminal ran `hostname && echo CLOUDOS-CANARY-OK` on `server01` and printed the real output; Finder listed the real `/home/admin` (464 entries, 245 folders); Computers showed 23 machines (7 online, nodes + direct agents) with no pairing; Browser listed real BrowserClaw/AgentBrowser connectors; personal tunnel `https://your-subdomain.t.became.bezrabotnyi.com/cloudos/` returns 200. Screenshot: `.tmp/cloudos-live-canary-20260910.png`.
+- Nodes by default: every unified-node shell executor is projected by `/api/v1/cloud-os/shell/computers` and rendered across all CloudOS apps — no opt-in.
+- Deploy: binaries rebuilt and installed atomically to `/opt/gptadmin/bin` (with `.pre-cloudos-*` backup), dist copied to `/opt/gptadmin/public/cloudos-ui`, `gptadmin-hub.service` restarted once.
+- Not now: xterm.js PTY sessions, file open/edit in Finder, porting the old opencode/grepmesh apps, auth on /cloudos/ (unchanged existing behavior).
+- Foreign WIP left uncommitted on purpose: `cli.py` + `tools/build.sh` + `tools/build_node.py` (portable node package, references missing `scripts/gptadmin_node_manage.py`), `browser-os/app/api/grepmesh/route.ts` (parallel agent work), `node_drain_test.go` quarantined to `.tmp/foreign-wip/` (references unimplemented `EnableNodeDrain`).

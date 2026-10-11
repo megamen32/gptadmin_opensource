@@ -32,7 +32,7 @@ requirements.txt.bak*
 services/main_package/client.bak.*/
 
 # --- Apps (separate projects) ---
-apps/
+/apps/
 
 # --- Private deploy configs ---
 deploy/nginx/became.bezrabotnyi.com.conf
@@ -81,6 +81,7 @@ deploy/systemd/*
 !deploy/systemd/gptadmin-frp-watchdog.service
 !deploy/systemd/gptadmin-frp-watchdog.timer
 !deploy/systemd/gptadmin-handover@.service
+!deploy/systemd/gptadmin-ingress-failover@.service
 !deploy/systemd/gptadmin-hub-standby.service
 !deploy/systemd/gptadmin-hub-primary-ha.conf
 !deploy/systemd/gptadmin-hub-standby-self-repair.conf
@@ -90,4 +91,10 @@ deploy/systemd/*
 !deploy/systemd/gptadmin-wanb-health.timer
 !deploy/systemd/gptadmin-auto-update-disabled.conf
 !deploy/systemd/gptadmin-hub.service
+!deploy/systemd/gptadmin-hub-server100-budget.conf
+!deploy/systemd/gptadmin-ci-autofix.service
+!deploy/systemd/gptadmin-ci-autofix.timer
 .playwright-mcp/
+
+# CloudOS UI fork build output (served from PublicDir)
+cloudos-ui/dist/

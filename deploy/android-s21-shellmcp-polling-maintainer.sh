@@ -55,7 +55,7 @@ start_shellmcp() {
     fi
 }
 
-log "starting S21 ShellMCP polling maintainer on admin-server-100"
+log "starting S21 ShellMCP polling maintainer on server01"
 adb_base start-server || { log "adb start-server failed"; exit 0; }
 if [[ "$SERIAL" == *:* ]]; then
     adb_base connect "$SERIAL" >/dev/null 2>&1 || true

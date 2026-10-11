@@ -9,7 +9,7 @@ PLUGIN = ROOT / "plugins" / "gptadmin"
 def test_gptadmin_plugin_manifest_declares_oauth_mcp_and_workflow_skills():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "gptadmin"
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.2.0"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert "OAuth" in manifest["interface"]["longDescription"]
@@ -26,7 +26,7 @@ def test_gptadmin_mcp_config_is_remote_https_without_credentials():
     assert server["url"].startswith("https://")
     assert server["url"].endswith("/mcp")
     assert not any("token" in key.lower() or "password" in key.lower() for key in server)
-    assert server["url"] == "https://became.bezrabotnyi.com/mcp"
+    assert server["url"] == "https://mcp.bezrabotnyi.com/mcp"
 
 
 def test_gptadmin_marketplace_entry_is_installable_and_points_at_plugin():

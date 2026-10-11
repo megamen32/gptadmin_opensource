@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Nodes in the `failed` state were invisible: the status filter offered no way to select
+  them, the Overview attention panel truncated its list to six rows, and the summary tile
+  counted only online and stale, so the numbers contradicted both each other and the node
+  total. Failed nodes are now filterable, listed first, counted, and labelled in Russian.
+- Child nodes inherited their parent host label, so a shell target, a file target and a
+  child MCP on the same machine rendered as identical rows. Rows now carry a kind
+  qualifier such as «MCP-компонент: BrowserOS» next to the friendly name.
+- For online nodes `last_seen` is the hub poll time, which tracked the current clock and
+  answered nothing. Recent values now render as «только что» / «N минут назад», with the
+  exact timestamp in the tooltip; stale and failed nodes keep absolute time.
+
+### Changed
+- An issued token now states its granted scopes, access mode and expected expiry, in the
+  result block and on the client card. The result block sits next to the issuing form
+  instead of at the top of the page, the form has an «Отмена» action, and the result
+  includes the Hub endpoint plus a copy-ready `mcp.json` server entry.
+
+### Fixed
+- Admin UI renders timestamps as readable local date and time instead of raw
+  Unix seconds on the Servers, Overview and Jobs screens, for ISO strings,
+  Unix seconds, Unix milliseconds and missing values.
+
+### Changed
+- The managed-token form on the Clients screen is now reachable from a primary
+  "Новый клиент" entry point, stays visible while the client list is loading or
+  failed to load, and shows the granted scopes plus a copy-ready
+  `Authorization: Bearer ...` header for `mcp.json`.
+
+
 ## [139] - 2026-08-02
 
 ### Fixed

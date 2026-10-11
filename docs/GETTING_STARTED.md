@@ -16,8 +16,11 @@ curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/dep
 iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
-The installer creates the Hub, starts a Tunnel when needed, and prints one
-**Hub URL**. Keep that URL: it is the place you will connect from.
+The installer creates the Hub, starts a tunnel when needed, and prints one
+**Hub URL**. Keep that URL: it is the place you will connect from. The managed
+GPTAdmin plugin uses the canonical identity `https://mcp.bezrabotnyi.com` and
+endpoint `https://mcp.bezrabotnyi.com/mcp`; a separate installation uses its
+own stable public Hub URL.
 
 > No domain needed: choose the auto-tunnel option (FRP or Cloudflare) and you
 > get a public URL. See [Tunnels](./TUNNELS_DOCS.md).
@@ -31,6 +34,11 @@ curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/dep
 ```
 
 Pick "agent only" when prompted. The agent registers with your hub automatically.
+
+No terminal on the hub? The dashboard prints the exact code: open
+**Серверы → Подключить новый shell MCP → Показать код подключения** and copy
+the install command plus the agent env block (`HUB_URL`, `SHELL_TOKEN`,
+`SHELL_NAME`).
 
 ## 3. Connect your AI
 
@@ -98,10 +106,18 @@ Optional extras:
 
 **`/mcp` returns 401**
 - Complete the OAuth connection from the Hub URL; `/mcp` accepts scoped MCP
-  connections, not copied service credentials. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
+  connections, not copied service credentials. For the managed deployment that
+  URL is `https://mcp.bezrabotnyi.com`. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
 - If this connection predates Hub refresh support, reconnect once to obtain an
   `offline_access` refresh credential. Existing sessions cannot receive one
   retroactively.
+
+**ChatGPT/Codex still uses old OAuth metadata after a Hub change**
+- Refreshing Actions or tools does not necessarily replace saved OAuth metadata
+  in the client app.
+- Remove/recreate the ChatGPT app (or disconnect and recreate the Codex MCP
+  connection), then authorize the canonical endpoint again with
+  `gptadmin.read gptadmin.exec offline_access`.
 
 **Browser extension buttons don't appear**
 - Refresh the page
@@ -111,4 +127,5 @@ Optional extras:
 **Custom GPT action test fails**
 - Verify the Hub URL in `servers.url` matches your hub
 - Re-open the Hub connection page and complete the OAuth authorization for the
-  Custom GPT client
+  Custom GPT client. If OAuth metadata changed, recreate the app/connection; an
+  Actions refresh alone may keep the old metadata.

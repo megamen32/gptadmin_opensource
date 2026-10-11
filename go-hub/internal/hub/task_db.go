@@ -23,6 +23,8 @@ const taskDatabaseFilename = "tasks_state.sqlite"
 // the caller acknowledges the operation. FULL must not be changed to NORMAL.
 var errTaskConflict = errors.New("task changed in another Hub; reload and retry")
 
+var errTaskSchemaNeedsInit = errors.New("task database needs initialization")
+
 type taskTransaction struct {
 	tx        *sql.Tx
 	revisions map[string]int64
@@ -78,6 +80,72 @@ func openTaskDatabase(path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	return db, nil
+}
+
+// Normal task polling owns a deferred, read-only WAL snapshot. It must not
+// compete with durable mutations for SQLite's single writer or rerun DDL.
+func openTaskReadDatabase(path string) (*sql.DB, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(10000)")
+	q.Add("_pragma", "query_only(1)")
+	uri.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
+func (s *Server) withTaskReadDatabase(fn func(*sql.Tx) error) error {
+	path := s.taskDatabasePath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return errTaskSchemaNeedsInit
+	} else if err != nil {
+		return err
+	}
+	db, err := openTaskReadDatabase(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='task_store_meta'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return errTaskSchemaNeedsInit
+	}
+	var version int
+	err = tx.QueryRow(`SELECT version FROM task_store_meta WHERE id=1`).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && version == 1) {
+		return errTaskSchemaNeedsInit
+	}
+	if err != nil {
+		return err
+	}
+	if version != 2 {
+		return fmt.Errorf("unsupported task database version %d", version)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
@@ -240,7 +308,7 @@ func (s *Server) readTaskState() (persistedTaskState, error) { return s.readTask
 
 func (s *Server) readTaskRecords(ids ...string) (persistedTaskState, error) {
 	state := persistedTaskState{Relay: map[string]persistedRelayTask{}, Shell: map[string]persistedShellTask{}, Idempotency: map[string]persistedIdempotencyEntry{}}
-	err := s.withTaskDatabase(func(t *taskTransaction) error {
+	read := func(tx *sql.Tx) error {
 		query := `SELECT kind,key,payload,revision FROM task_records`
 		args := []any{}
 		if len(ids) > 0 {
@@ -249,7 +317,7 @@ func (s *Server) readTaskRecords(ids ...string) (persistedTaskState, error) {
 				args = append(args, id)
 			}
 		}
-		rows, err := t.tx.Query(query, args...)
+		rows, err := tx.Query(query, args...)
 		if err != nil {
 			return err
 		}
@@ -287,6 +355,14 @@ func (s *Server) readTaskRecords(ids ...string) (persistedTaskState, error) {
 			}
 		}
 		return rows.Err()
-	})
+	}
+	err := s.withTaskReadDatabase(read)
+	if errors.Is(err, errTaskSchemaNeedsInit) {
+		// Only cold/legacy stores need the existing atomic migration writer.
+		// Close the read transaction before taking the writer lock.
+		if err = s.withTaskDatabase(func(*taskTransaction) error { return nil }); err == nil {
+			err = s.withTaskReadDatabase(read)
+		}
+	}
 	return state, err
 }

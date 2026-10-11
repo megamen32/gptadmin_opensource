@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,13 +105,20 @@ def test_admin_spa_can_enroll_passkey_with_virtual_authenticator(tmp_path: Path)
             page.locator("#password").fill("pw")
             page.locator('#login-form button[type="submit"]').click()
             page.wait_for_url(base_url + "/admin/", timeout=10000)
-            page.evaluate("() => { showView('security'); return loadSecurityControls(); }")
-            page.evaluate("() => enrollSecurityPasskey()")
-            page.wait_for_function(
-                "() => document.querySelector('#securityPasskeyResult')?.textContent.includes('mfa_enrolled')",
-                timeout=10000,
-            )
-            assert "mfa_enrolled" in page.locator("#securityPasskeyResult").inner_text()
+            try:
+                page.goto(base_url + "/admin/#security", wait_until="domcontentloaded")
+                enroll = page.get_by_role("button", name="Добавить ключ входа", exact=True)
+                expect(enroll).to_be_enabled(timeout=10000)
+                enroll.click()
+                expect(page.locator("pre.compact-result")).to_contain_text(
+                    '"mfa_enrolled": true', timeout=10000,
+                )
+                preset = context.request.get(base_url + "/admin/api/security/preset")
+                assert preset.ok
+                assert preset.json()["mfa_enrolled"] is True
+            except Exception:
+                page.screenshot(path=str(tmp_path / "passkey-failure.png"))
+                raise
             browser.close()
     finally:
         if process.poll() is None:

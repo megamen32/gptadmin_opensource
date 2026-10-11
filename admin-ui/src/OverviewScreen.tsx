@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
-import { friendlyActionName, friendlyServerName, jobStatusLabel, serverStatusLabel } from "./ui/format";
+import { formatServerLastSeen, formatTimestamp, friendlyActionName, friendlyServerName, jobStatusLabel, serverRowQualifier, serverStatusLabel } from "./ui/format";
 
 type Server = {
   server_id?: string;
   name?: string;
   status?: string;
   kind?: string;
-  last_seen?: string;
+  last_seen?: string | number;
+  meta?: Record<string, unknown>;
 };
 
 type Job = {
@@ -22,7 +23,7 @@ type Job = {
 };
 
 type Overview = {
-  server_counts?: { online?: number; offline?: number; stale?: number };
+  server_counts?: { online?: number; offline?: number; stale?: number; failed?: number };
   client_count?: number;
   servers?: Server[];
   jobs?: { recent?: Job[]; queued?: Job[]; background?: Job[]; count?: number };
@@ -33,13 +34,6 @@ type Overview = {
   hub_public_url?: string;
   public_origin?: string;
 };
-
-function compactTime(value: number | string | undefined): string {
-  if (value === undefined || value === "") return "—";
-  const numeric = typeof value === "number" ? value : Number(value);
-  const date = Number.isFinite(numeric) ? new Date(numeric < 1e12 ? numeric * 1000 : numeric) : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-}
 
 async function requestOverview(signal?: AbortSignal): Promise<Overview> {
   const response = await fetch("/admin/api/overview?limit=24", { credentials: "same-origin", signal, headers: { Accept: "application/json" } });
@@ -75,10 +69,13 @@ export default function OverviewScreen() {
 
   const servers = overview?.servers ?? [];
   const recentJobs = overview?.jobs?.recent ?? [];
-  const problems = useMemo(() => servers.filter((server) => server.status !== "online").slice(0, 6), [servers]);
+  // Считаем прямо по списку узлов, а не по server_counts: бэкенд отдаёт ключ failed,
+  // но сумма «работают + требуют внимания» обязана сходиться с числом строк.
+  const workingServers = useMemo(() => servers.filter((server) => server.status === "online").length, [servers]);
+  const problems = useMemo(() => [...servers.filter((server) => server.status !== "online")].sort((a, b) => problemRank(a.status) - problemRank(b.status)), [servers]);
+  const failedServers = useMemo(() => servers.filter((server) => server.status === "failed").length, [servers]);
   const failedJobs = useMemo(() => recentJobs.filter((job) => job.status === "failed" || job.status === "error").slice(0, 6), [recentJobs]);
   const activeJobs = useMemo(() => recentJobs.filter((job) => job.status === "running" || String(job.status || "").startsWith("queued")).slice(0, 4), [recentJobs]);
-  const counts = overview?.server_counts ?? {};
   const queuedCount = overview?.jobs?.queued?.length ?? 0;
   const backgroundCount = overview?.jobs?.background?.length ?? 0;
   const update = overview?.update;
@@ -91,7 +88,7 @@ export default function OverviewScreen() {
   const healthText = health === "error"
     ? "Связь с системой временно недоступна. Попробуйте обновить страницу."
     : health === "warning"
-      ? `${problems.length ? `${problems.length} сервер${problems.length === 1 ? " требует" : "а требуют"} внимания. ` : ""}${failedJobs.length ? `${failedJobs.length} последн${failedJobs.length === 1 ? "яя задача завершилась" : "их задач завершились"} с ошибкой.` : ""}`
+      ? `${problems.length ? `${problems.length} сервер${problems.length === 1 ? " требует" : "ов требуют"} внимания. ` : ""}${failedJobs.length ? `${failedJobs.length} последн${failedJobs.length === 1 ? "яя задача завершилась" : "их задач завершились"} с ошибкой.` : ""}`
       : "Серверы отвечают, критических ошибок в последних задачах нет.";
 
   const triggerUpdate = async () => {
@@ -126,7 +123,7 @@ export default function OverviewScreen() {
       </section>
 
       <section className="overview-summary-strip" aria-label="Краткое состояние">
-        <a href="#agents"><span>Серверы</span><strong>{counts.online ?? 0} работают</strong><small>{(counts.offline ?? 0) + (counts.stale ?? 0) > 0 ? `${(counts.offline ?? 0) + (counts.stale ?? 0)} требуют внимания` : "проблем нет"}</small></a>
+        <a href="#agents"><span>Серверы</span><strong>{workingServers} работают</strong><small>{problems.length > 0 ? `${problems.length} требуют внимания${failedServers > 0 ? `, ${failedServers} с ошибкой` : ""}` : "проблем нет"}</small></a>
         <a href="#jobs"><span>Задачи</span><strong>{backgroundCount} выполняются</strong><small>{queuedCount > 0 ? `${queuedCount} ожидают запуска` : "очередь свободна"}</small></a>
         <a href="#clients"><span>Доступ</span><strong>{overview?.client_count ?? 0} клиентов</strong><small>управление доступом</small></a>
       </section>
@@ -134,18 +131,21 @@ export default function OverviewScreen() {
       {(problems.length > 0 || failedJobs.length > 0) && <section className="attention-stack" aria-label="Требует внимания">
         {problems.length > 0 && <article className="card overview-panel attention-panel">
           <div className="card-heading"><div><p className="section-kicker">ТРЕБУЕТ ВНИМАНИЯ</p><h2>Серверы</h2></div><span className="count-pill">{problems.length}</span></div>
-          <div className="compact-list">{problems.map((server) => <a className="compact-row" href="#agents" key={server.server_id ?? server.name}><span className={`status-dot status-${server.status ?? "unknown"}`} /><span><strong>{friendlyServerName(server.server_id, server.name)}</strong><small>{serverStatusLabel(server.status)}{server.last_seen ? ` · последний ответ ${server.last_seen}` : ""}</small></span></a>)}</div>
+          <div className="compact-list">{problems.map((server) => {
+            const qualifier = serverRowQualifier(server.server_id, server.name, server.kind, server.meta);
+            return <a className="compact-row" href="#agents" key={server.server_id ?? server.name}><span className={`status-dot status-${server.status ?? "unknown"}`} /><span><strong>{friendlyServerName(server.server_id, server.name)}{qualifier ? <span className="small-pill"> · {qualifier}</span> : null}</strong><small>{serverStatusLabel(server.status)}{server.last_seen ? <span title={formatTimestamp(server.last_seen)}> · последний ответ {formatServerLastSeen(server.status, server.last_seen)}</span> : ""}</small></span></a>;
+          })}</div>
         </article>}
 
         {failedJobs.length > 0 && <article className="card overview-panel attention-panel">
           <div className="card-heading"><div><p className="section-kicker">ОШИБКИ</p><h2>Последние задачи</h2></div><a className="text-button" href="#jobs">Все задачи</a></div>
-          <div className="compact-list">{failedJobs.map((job) => <a className="compact-row" href="#jobs" key={job.job_id}><span className={`job-state job-${job.status ?? "unknown"}`}>{jobStatusLabel(job.status)}</span><span><strong>{friendlyActionName(job.tool_name)}</strong><small>{job.error_preview || job.command || job.arguments_preview || "Подробности доступны в задачах"} · {compactTime(job.created_at)}</small></span></a>)}</div>
+          <div className="compact-list">{failedJobs.map((job) => <a className="compact-row" href="#jobs" key={job.job_id}><span className={`job-state job-${job.status ?? "unknown"}`}>{jobStatusLabel(job.status)}</span><span><strong>{friendlyActionName(job.tool_name)}</strong><small>{job.error_preview || job.command || job.arguments_preview || "Подробности доступны в задачах"} · <span title={formatTimestamp(job.created_at)}>{formatTimestamp(job.created_at)}</span></small></span></a>)}</div>
         </article>}
       </section>}
 
       {activeJobs.length > 0 && <section className="card overview-panel current-work-panel">
         <div className="card-heading"><div><p className="section-kicker">СЕЙЧАС В РАБОТЕ</p><h2>Активные задачи</h2></div><a className="text-button" href="#jobs">Все задачи</a></div>
-        <div className="compact-list">{activeJobs.map((job) => <a className="compact-row" href="#jobs" key={job.job_id}><span className={`job-state job-${job.status ?? "unknown"}`}>{jobStatusLabel(job.status)}</span><span><strong>{friendlyActionName(job.tool_name)}</strong><small>{compactTime(job.created_at)}</small></span></a>)}</div>
+        <div className="compact-list">{activeJobs.map((job) => <a className="compact-row" href="#jobs" key={job.job_id}><span className={`job-state job-${job.status ?? "unknown"}`}>{jobStatusLabel(job.status)}</span><span><strong>{friendlyActionName(job.tool_name)}</strong><small title={formatTimestamp(job.created_at)}>{formatTimestamp(job.created_at)}</small></span></a>)}</div>
       </section>}
 
       <details className="card overview-system-card overview-tech-details"><summary>Техническая информация</summary>
@@ -159,4 +159,11 @@ export default function OverviewScreen() {
       </details>
     </div>
   );
+}
+
+/** Ошибки показываем раньше молчаливых stale-узлов: у них статус уже не про возраст. */
+function problemRank(status?: string): number {
+  if (status === "failed") return 0;
+  if (status === "offline") return 1;
+  return 2;
 }

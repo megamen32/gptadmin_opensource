@@ -21,7 +21,7 @@ while IFS= read -r line; do
  if [ "$n" -eq 1 ]; then
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}'
  else
-  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping"}]}}'
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"ping"}]}}\n' "$n"
  fi
 done
 `

@@ -25,7 +25,7 @@ env_val() {
 MAIN_ORIGIN="$(env_val MCP_ORIGIN)"
 TENANT_ORIGIN="$(env_val TENANT_ORIGIN)"
 BEARER="$(env_val GPTADMIN_CUSTOM_MCP_BEARER)"
-TARGET="${GPTADMIN_CANARY_TARGET:-shell:admin-server-100}"
+TARGET="${GPTADMIN_CANARY_TARGET:-shell:server01}"
 
 if [ -r "$NOTIFY_ENV_FILE" ]; then
 	set -a

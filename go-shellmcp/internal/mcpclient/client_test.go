@@ -369,7 +369,7 @@ while IFS= read -r line; do
   *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}' ;;
   *'"method":"notifications/initialized"'*) ;;
   *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}' ;;
-  *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"stdio-ok"}]}}' ;;
+  *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"stdio-ok"}]}}' ;;
  esac
 done
 `
@@ -378,6 +378,7 @@ done
 	}
 	agent := supervisor.Agent{Ref: "local", Transport: "stdio", Command: script, Enabled: true}
 	c := New()
+	defer c.CloseAll()
 	tools, err := c.ListTools(context.Background(), agent)
 	if err != nil || len(tools) != 1 || fmt.Sprint(tools[0]["name"]) != "echo" {
 		t.Fatalf("tools=%#v err=%v", tools, err)

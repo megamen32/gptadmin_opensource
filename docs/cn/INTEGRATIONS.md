@@ -1,5 +1,11 @@
 # 集成
 
+官方公共部署使用 `https://mcp.bezrabotnyi.com` 作为 OAuth/MCP identity，使用
+`https://mcp.bezrabotnyi.com/mcp` 作为 MCP endpoint。生成的 FRP `u-*` 主机名是
+传输地址，不是官方 ChatGPT 或 Codex 客户端的 identity。如果 OAuth 元数据发生变化，
+或 ChatGPT 固定了旧的应用配置，请重新创建应用；仅刷新 Actions 不一定会刷新已保存的
+元数据。重新连接时使用 `gptadmin.read gptadmin.exec offline_access`。
+
 将 AI 客户端连接到 GPTAdmin 中心的四种方法。
 
 | ＃|适配器|最适合 |授权 |
@@ -75,7 +81,7 @@ curl -sS -X GET https://<your-hub>/mcp-relay/servers \
 ```text
 POST /mcp-relay/call
 {
-  "target": "shell:admin-server-100",
+  "target": "shell:server01",
   "tool": "shell_exec",
   "args": { "cmd": "uptime" }
 }
@@ -87,7 +93,8 @@ POST /mcp-relay/call
 
 ### 故障排除- **“未找到操作”** — 无法从 ChatGPT 端访问架构 URL。中心必须位于公共 HTTPS（Cloudflare Tunnel、公共域或 `become.bezrabotnyi.com` 样式镜像）上； `http://localhost` 不起作用。
 - **每次调用都会出现 401** — 重新打开 Hub 连接页面并完成 OAuth
-  再次；必须更新过期或不匹配范围的连接。
+  再次；必须更新过期或不匹配范围的连接。若应用保存了旧元数据，请重新创建
+  ChatGPT 应用或 Codex MCP 连接，并请求 `gptadmin.read gptadmin.exec offline_access`。
 - **架构导入，工具不显示** - GPT 编辑器积极缓存架构。重新导入。
 - **详细参考** — 请参阅 `docs/CHATGPT_ACTION.md`（旧版）和 `public/openapi.json` 了解完整操作列表。
 
@@ -100,6 +107,9 @@ POST /mcp-relay/call
 **协议。** MCP over Streamable HTTP、JSON-RPC 2.0。
 
 **端点。** `POST https://<your-hub>/mcp`（也用于 `initialize` 发现的 `GET`）。
+
+托管插件使用 `https://mcp.bezrabotnyi.com/mcp`。FRP `u-*` 主机名只能作为
+legacy/fallback transport，不能作为 OAuth identity。
 
 **Auth.** 由 Hub 发出的短暂范围的 OAuth 连接，带有
 Hub 的公共来源和 MCP 资源绑定到授权流中。获取

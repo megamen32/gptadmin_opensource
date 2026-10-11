@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -21,6 +22,9 @@ import (
 // executes cfg.RestartCmd (when set) or returns ErrRestartNeeded so an
 // external supervisor can perform the swap.
 func (s *Server) startUpdateLoop(ctx context.Context) {
+	if s.cfg.DisableSelfUpdate {
+		return
+	}
 	// The legacy Hub-manifest updater is retained only as an explicit opt-in.
 	// Normal installs self-repair from public GitHub Releases; Hub runtime policy
 	// overrides the autonomous latest-release fallback when available.
@@ -70,12 +74,10 @@ func (s *Server) startGitHubLatestLoop(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			if !s.selfRepairPolicySeen.Load() {
-				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				latest, err := update.LatestGitHubBuild(cctx, update.DefaultGitHubReleaseRepo, nil)
-				cancel()
+				latest, err := resolveDesiredBuild(ctx, update.DefaultGitHubReleaseRepo)
 				if err != nil {
-					log.Printf("self-repair: GitHub latest check failed: %v", err)
-				} else {
+					log.Printf("self-repair: desired build check failed: %v", err)
+				} else if latest > 0 {
 					s.triggerGitHubSelfRepair(latest, update.DefaultGitHubReleaseRepo)
 				}
 			}
@@ -88,13 +90,30 @@ func (s *Server) startGitHubLatestLoop(ctx context.Context) {
 	}()
 }
 
+// resolveDesiredBuild prefers the SHELLMCP_LATEST_BUILD env pin when set
+// (operators can override GitHub without rebuilding), otherwise falls back
+// to a GitHub "latest release" lookup. Returns 0 (and a non-nil error)
+// only when both sources are unavailable.
+func resolveDesiredBuild(ctx context.Context, repo string) (int, error) {
+	if pinned := update.LatestBuildFromEnv(); pinned > 0 {
+		return pinned, nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	latest, err := update.LatestGitHubBuild(cctx, repo, nil)
+	if err != nil {
+		return 0, fmt.Errorf("GitHub: %w", err)
+	}
+	return latest, nil
+}
+
 func legacyManifestUpdateEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("SHELLMCP_LEGACY_MANIFEST_UPDATE")))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 func (s *Server) triggerGitHubSelfRepair(desired int, repo string) {
-	if desired <= 0 || selfRepairDisabled() {
+	if desired <= 0 || s.cfg.DisableSelfUpdate || selfRepairDisabled() {
 		return
 	}
 	current := parseBuildVersion(BuildVersion)

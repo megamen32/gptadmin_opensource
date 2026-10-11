@@ -2,7 +2,7 @@
   "mcpServers": {
     "gptadmin": {
       "type": "http",
-      "url": "https://gptadmin.example.com/mcp"
+      "url": "https://mcp.bezrabotnyi.com/mcp"
     }
   }
 }

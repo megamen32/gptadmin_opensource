@@ -8,6 +8,8 @@ import (
 	"os"
 	"sync"
 	"testing"
+
+	"github.com/gofrs/flock"
 )
 
 func sharedAccessPair(t *testing.T) (*Server, *Server) {
@@ -214,12 +216,16 @@ func TestSharedAccessRotationIsAtomicAndPreservesNonExpiringRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock := a.managedMCPStatePath() + ".lock"
-	if err = os.Remove(lock); err != nil {
+	// Hold the shared state lock so the save path hits "access state busy".
+	// A directory in place of the lock file only blocks gofrs on Linux:
+	// darwin opens directories O_RDONLY and flocks them without error.
+	stateLock := flock.New(a.managedMCPStatePath() + ".lock")
+	held, err := stateLock.TryLock()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.Mkdir(lock, 0700); err != nil {
-		t.Fatal(err)
+	if !held {
+		t.Fatal("shared state lock already held")
 	}
 	response := sharedAccessCall(t, b, "fixture-owner", "POST", "/admin/api/mcp/tokens/"+record.ID+"/rotate", nil)
 	if response.Code < 400 {
@@ -231,7 +237,7 @@ func TestSharedAccessRotationIsAtomicAndPreservesNonExpiringRole(t *testing.T) {
 	if len(a.managedMCP) != 1 {
 		t.Fatal("failed rotation published a second token")
 	}
-	if err = os.Remove(lock); err != nil {
+	if err = stateLock.Close(); err != nil {
 		t.Fatal(err)
 	}
 	response = sharedAccessCall(t, b, "fixture-owner", "POST", "/admin/api/mcp/tokens/"+record.ID+"/rotate", nil)

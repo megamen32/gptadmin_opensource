@@ -52,7 +52,12 @@ def test_release_workflow_runs_docs_contract() -> None:
     assert "name: Docs product contract" in workflow
     assert "uv run pytest tests/test_docs_product_contract.py tests/test_feedback_loop_contract.py -q" in workflow
     assert "name: Docs-as-code contract" in workflow
-    assert "uv run pytest tests/test_site_docs.py tests/test_openapi_artifact.py tests/test_docs_product_contract.py tests/test_public_mirror.py tests/test_install_scripts.py -q" in workflow
+    import shlex
+    required = {"tests/test_site_docs.py", "tests/test_openapi_artifact.py",
+                "tests/test_docs_product_contract.py", "tests/test_public_mirror.py",
+                "tests/test_install_scripts.py", "tests/test_installer_served_contract.py"}
+    commands = re.findall(r"^\s+uv run pytest ([^\n]+)", workflow, re.MULTILINE)
+    assert any(required.issubset(shlex.split(command)) for command in commands)
 
 
 def test_integration_control_contract_matches_current_hub_scope() -> None:

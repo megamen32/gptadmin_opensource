@@ -31,18 +31,20 @@ type streamableSession struct {
 	protocolVersion string
 	nextID          int64
 	initialized     bool
+	frozenHeaders   bool
 }
 
 type legacySSESession struct {
-	mu          sync.Mutex
-	httpClient  *http.Client
-	agent       supervisor.Agent
-	cancel      context.CancelFunc
-	body        io.ReadCloser
-	scanner     *bufio.Scanner
-	postURL     string
-	nextID      int64
-	initialized bool
+	mu            sync.Mutex
+	httpClient    *http.Client
+	agent         supervisor.Agent
+	cancel        context.CancelFunc
+	body          io.ReadCloser
+	scanner       *bufio.Scanner
+	postURL       string
+	nextID        int64
+	initialized   bool
+	frozenHeaders bool
 }
 
 type httpStatusError struct {
@@ -55,13 +57,17 @@ func (e *httpStatusError) Unwrap() error { return e.err }
 
 func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, method string, params any) (map[string]any, error) {
 	c.mu.Lock()
+	if c.remoteClosing[agent.Ref] {
+		c.mu.Unlock()
+		return nil, errors.New("mcp remote session is closing")
+	}
 	session := c.remote[agent.Ref]
 	if session == nil {
 		switch agent.Transport {
 		case "streamable-http":
-			session = &streamableSession{httpClient: c.HTTP, agent: agent, protocolVersion: protocolVersion}
+			session = &streamableSession{httpClient: c.HTTP, agent: agent, protocolVersion: protocolVersion, frozenHeaders: c.frozenHeaders}
 		case "sse":
-			session = &legacySSESession{httpClient: c.HTTP, agent: agent}
+			session = &legacySSESession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
 		default:
 			c.mu.Unlock()
 			return nil, fmt.Errorf("mcp child %q has unsupported remote transport %q", agent.Ref, agent.Transport)
@@ -73,10 +79,22 @@ func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, meth
 	if err != nil {
 		c.mu.Lock()
 		if c.remote[agent.Ref] == session {
-			delete(c.remote, agent.Ref)
+			if c.remoteClosing == nil {
+				c.remoteClosing = make(map[string]bool)
+			}
+			c.remoteClosing[agent.Ref] = true
 		}
 		c.mu.Unlock()
-		_ = session.close()
+		cleanupErr := session.close()
+		c.mu.Lock()
+		if c.remote[agent.Ref] == session {
+			if cleanupErr == nil {
+				delete(c.remote, agent.Ref)
+			}
+			delete(c.remoteClosing, agent.Ref)
+		}
+		c.mu.Unlock()
+		err = errors.Join(err, cleanupErr)
 	}
 	return result, err
 }
@@ -93,7 +111,7 @@ func (s *streamableSession) call(ctx context.Context, method string, params any)
 		s.nextID++
 		result, _, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", ID: s.nextID, Method: method, Params: params})
 		var statusErr *httpStatusError
-		if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound && s.sessionID != "" && attempt == 0 {
+		if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound && s.sessionID != "" && attempt == 0 && (!s.frozenHeaders || s.agent.ConnectionMode == "stateless") {
 			s.reset()
 			continue
 		}
@@ -128,7 +146,7 @@ func (s *streamableSession) rpc(ctx context.Context, payload rpcRequest) (map[st
 	if err != nil {
 		return nil, s.sessionID, err
 	}
-	setRemoteHeaders(req, s.agent, s.protocolVersion)
+	setRemoteHeadersResolved(req, s.agent, s.protocolVersion, s.frozenHeaders)
 	if s.sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", s.sessionID)
 	}
@@ -177,21 +195,22 @@ func (s *streamableSession) close() error {
 	if err != nil {
 		return err
 	}
-	setRemoteHeaders(req, s.agent, s.protocolVersion)
+	setRemoteHeadersResolved(req, s.agent, s.protocolVersion, s.frozenHeaders)
 	req.Header.Set("Mcp-Session-Id", s.sessionID)
 	resp, err := s.httpClient.Do(req)
-	s.reset()
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+	if resp.StatusCode == http.StatusNotFound || (resp.StatusCode == http.StatusMethodNotAllowed && !s.frozenHeaders) {
+		s.reset()
 		return nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("mcp child %q DELETE HTTP %d", s.agent.Ref, resp.StatusCode)
 	}
+	s.reset()
 	return nil
 }
 
@@ -219,22 +238,24 @@ func (s *legacySSESession) call(ctx context.Context, method string, params any) 
 
 func (s *legacySSESession) open(ctx context.Context) error {
 	streamCtx, cancel := context.WithCancel(context.Background())
-	stopCancellation := context.AfterFunc(ctx, cancel)
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, sseHandshakeTimeout(s.httpClient.Timeout))
+	defer cancelHandshake()
+	stopCancellation := context.AfterFunc(handshakeCtx, cancel)
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, s.agent.URL, nil)
 	if err != nil {
 		stopCancellation()
 		cancel()
 		return err
 	}
-	setRemoteHeaders(req, s.agent, protocolVersion)
+	setRemoteHeadersResolved(req, s.agent, protocolVersion, s.frozenHeaders)
 	streamClient := *s.httpClient
 	streamClient.Timeout = 0
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		stopCancellation()
 		cancel()
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if handshakeCtx.Err() != nil {
+			return handshakeCtx.Err()
 		}
 		return fmt.Errorf("mcp child %q SSE GET: %w", s.agent.Ref, err)
 	}
@@ -250,15 +271,15 @@ func (s *legacySSESession) open(ctx context.Context) error {
 		stopCancellation()
 		resp.Body.Close()
 		cancel()
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if handshakeCtx.Err() != nil {
+			return handshakeCtx.Err()
 		}
 		return fmt.Errorf("mcp child %q SSE endpoint: %w", s.agent.Ref, err)
 	}
-	if !stopCancellation() && ctx.Err() != nil {
+	if !stopCancellation() && handshakeCtx.Err() != nil {
 		resp.Body.Close()
 		cancel()
-		return ctx.Err()
+		return handshakeCtx.Err()
 	}
 	base, err := url.Parse(s.agent.URL)
 	if err != nil {
@@ -281,6 +302,14 @@ func (s *legacySSESession) open(ctx context.Context) error {
 }
 
 func (s *legacySSESession) rpc(ctx context.Context, payload rpcRequest) (map[string]any, error) {
+	// Interrupt scanner reads during initialize as well as ordinary calls.
+	streamCancel := s.cancel
+	stop := context.AfterFunc(ctx, func() {
+		if streamCancel != nil {
+			streamCancel()
+		}
+	})
+	defer stop()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -289,7 +318,7 @@ func (s *legacySSESession) rpc(ctx context.Context, payload rpcRequest) (map[str
 	if err != nil {
 		return nil, err
 	}
-	setRemoteHeaders(req, s.agent, protocolVersion)
+	setRemoteHeadersResolved(req, s.agent, protocolVersion, s.frozenHeaders)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mcp child %q SSE POST: %w", s.agent.Ref, err)
@@ -334,11 +363,18 @@ func initializeParams() map[string]any {
 }
 
 func setRemoteHeaders(req *http.Request, agent supervisor.Agent, version string) {
+	setRemoteHeadersResolved(req, agent, version, false)
+}
+
+func setRemoteHeadersResolved(req *http.Request, agent supervisor.Agent, version string, frozen bool) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", version)
 	for key, value := range agent.Headers {
-		req.Header.Set(key, os.ExpandEnv(value))
+		if !frozen {
+			value = os.ExpandEnv(value)
+		}
+		req.Header.Set(key, value)
 	}
 }
 
@@ -412,4 +448,11 @@ func responseResult(ref string, decoded rpcResponse) (map[string]any, error) {
 		return nil, fmt.Errorf("mcp child %q RPC %d: %s", ref, decoded.Error.Code, decoded.Error.Message)
 	}
 	return decoded.Result, nil
+}
+
+func sseHandshakeTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return 30 * time.Second
 }

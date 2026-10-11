@@ -17,7 +17,10 @@ The hub exposes **three ways** for an AI to connect. Same hub, same capabilities
 
 **Protocol:** MCP remote SSE (Streamable HTTP).
 
-**Endpoint:** `https://your-hub.bezrabotnyi.com/mcp` (discover it from `/connect`)
+**Endpoint:** `https://your-hub.example/mcp` (discover it from `/connect`). The
+managed GPTAdmin plugin in this repository defaults to
+`https://mcp.bezrabotnyi.com/mcp`. A separate installation must use its own
+explicitly selected, stable public origin.
 
 ### Setup
 
@@ -58,8 +61,12 @@ connection unable to call `discover`.
 
 If Codex reports `reauthentication_required` or a missing refresh state, use
 the client’s reconnect control once to recover access; do not paste internal
-Hub credentials into the client. Treat the message as a connector-lifecycle
-defect until the owning layer is identified. Before deploying a related fix,
+Hub credentials into the client. If OAuth metadata or the frozen ChatGPT app
+configuration changed, recreate the app/connection: refreshing Actions does
+not necessarily refresh saved OAuth metadata. Request
+`gptadmin.read gptadmin.exec offline_access` when reconnecting. Treat the
+message as a connector-lifecycle defect until the owning layer is identified.
+Before deploying a related fix,
 verify a fresh authorization, the defined restart/refresh scenario, and a real
 harmless `discover -> schema -> execute` interaction. The required evidence is
 specified in [Integration Control Contract](./INTEGRATION_CONTROL_CONTRACT.md#authorization-durability).
@@ -99,7 +106,8 @@ the script automatically:
 ### Configuration
 
 Press `Alt+K` (or the key icon, bottom-right) and enter:
-- **Bridge URL** — your hub URL (`https://your-hub.bezrabotnyi.com`)
+- **Bridge URL** — your configured Hub URL (`https://your-hub.example`); the
+  managed deployment uses `https://mcp.bezrabotnyi.com`
 - Complete the one-time `/connect` pairing/OAuth flow; do not paste an internal
   Hub or agent credential into the browser extension.
 
@@ -161,14 +169,17 @@ Action authentication dialog and configure the public Hub:
 - authorization URL: `https://your-hub.example/oauth/authorize`;
 - token URL: `https://your-hub.example/oauth/token`;
 - client ID: a stable label for this GPT (for example `chatgpt-custom-gpt`);
-- scopes: `gptadmin.read` (add `gptadmin.exec` only when required).
+- scopes: `gptadmin.read gptadmin.exec offline_access` (omit `gptadmin.exec`
+  only for a deliberately read-only connection).
 
 ChatGPT supplies its callback. Some Custom GPT editor versions do not send
 PKCE parameters, so the Hub accepts that interoperable Authorization Code
 variant only for the exact `https://chat.openai.com/aip/g-.../oauth/callback`
 callback profile. Every other OAuth client must use PKCE S256.
 On the Hub authorization page, sign in and complete the redirect, then run a
-harmless test action again. The Hub rejects a token whose issuer, audience,
+harmless test action again. If OAuth metadata or the frozen ChatGPT app
+changes, recreate the app and authorize it again; refreshing Actions alone may
+not update metadata. The Hub rejects a token whose issuer, audience,
 resource, signature or key id does not match its canonical public origin.
 
 ### Diagnose a 401 without exposing a credential

@@ -17,7 +17,9 @@
 
 **协议：** MCP 远程 SSE（流式 HTTP）。
 
-**端点：** `https://your-hub.bezrabotnyi.com/mcp`（从 `/connect` 发现它）
+**端点：** `https://your-hub.example/mcp`（从 `/connect` 发现它）。本仓库的
+GPTAdmin 托管插件默认使用 `https://mcp.bezrabotnyi.com/mcp`；其他安装必须
+使用自己明确选择且稳定的公共 origin。
 
 ### 设置
 
@@ -59,7 +61,10 @@ systemd 等）可用。
 如果 Codex 报告 `reauthentication_required` 或缺少刷新状态，请使用
 客户端的重新连接控制一次以恢复访问；不要粘贴内部
 将凭证集线器发送到客户端。将消息视为连接器生命周期
-缺陷直到识别出所属层。在部署相关修复之前，
+缺陷直到识别出所属层。如果 OAuth 元数据或冻结的 ChatGPT 应用配置发生
+变化，请重新创建应用/连接；仅刷新 Actions 不一定会刷新已保存的 OAuth
+元数据。重新连接时请求 `gptadmin.read gptadmin.exec offline_access`。
+在部署相关修复之前，
 验证新的授权、定义的重新启动/刷新场景以及真实的
 无害的 `discover -> schema -> execute` 交互。所需的证据是
 在 [集成控制合同](./INTEGRATION_CONTROL_CONTRACT.md#authorization-durability) 中指定。
@@ -99,7 +104,8 @@ systemd 等）可用。
 ### 配置
 
 按 `Alt+K` （或右下角的钥匙图标）并输入：
-- **桥 URL** — 您的中心 URL (`https://your-hub.bezrabotnyi.com`)
+- **桥 URL** — 您配置的中心 URL (`https://your-hub.example`)；托管部署使用
+  `https://mcp.bezrabotnyi.com`
 - 完成一次性 `/connect` 配对/OAuth 流程；不要粘贴内部
   浏览器扩展中的集线器或代理凭据。
 
@@ -159,14 +165,16 @@ systemd 等）可用。
 - 授权URL：`https://your-hub.example/oauth/authorize`；
 - 令牌 URL：`https://your-hub.example/oauth/token`；
 - 客户端 ID：此 GPT 的稳定标签（例如 `chatgpt-custom-gpt`）；
-- 范围：`gptadmin.read`（仅在需要时添加 `gptadmin.exec`）。
+- 范围：`gptadmin.read gptadmin.exec offline_access`（只有明确的只读连接才省略
+  `gptadmin.exec`）。
 
 ChatGPT 提供其回调。某些自定义 GPT 编辑器版本不发送
 PKCE 参数，因此集线器接受可互操作的授权代码
 仅适用于确切的 `https://chat.openai.com/aip/g-.../oauth/callback` 的变体
 回调配置文件。所有其他 OAuth 客户端都必须使用 PKCE S256。
 在 Hub 授权页面上，登录并完成重定向，然后运行
-再次进行无害的测试动作。 Hub 拒绝其发行者、受众、
+再次进行无害的测试动作。如果 OAuth 元数据或冻结的 ChatGPT 应用发生变化，
+请重新创建应用并再次授权；仅刷新 Actions 不一定会更新已保存的元数据。Hub 拒绝其发行者、受众、
 资源、签名或密钥 ID 与其规范公共来源不匹配。
 
 ### 在不暴露凭证的情况下诊断 401

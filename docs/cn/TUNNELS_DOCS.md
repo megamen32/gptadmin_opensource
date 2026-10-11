@@ -20,7 +20,9 @@
 
 - ✅ 无需域名，无需设置 DNS
 - ✅ 快速（直接 TCP 隧道）
-- ⚠️ URL 位于 `frp.bezrabotnyi.com`（共享域）
+- ⚠️ URL 位于 `frp.bezrabotnyi.com`（共享域）。它可以作为该独立安装选择的公共
+  origin，但不能覆盖其他明确配置的 `PUBLIC_ORIGIN`。托管共享 connector 使用
+  `https://mcp.bezrabotnyi.com/mcp`。
 - ⚠️ 免费的 FRP 服务器有速率限制
 
 ## Cloudflare 隧道

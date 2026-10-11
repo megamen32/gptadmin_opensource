@@ -7,6 +7,13 @@ set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# The portable Node package has no legacy UI/build-version mutation dependency.
+# Its build tree and all temporary artifacts stay under the project .tmp root.
+if [[ "${1:-}" == node ]]; then
+  shift
+  exec python3 tools/build_node.py "$@"
+fi
+
 export PS4='+ [${EPOCHREALTIME}] ${BASH_SOURCE##*/}:${LINENO}: '
 set -x
 export LC_ALL=C.UTF-8
@@ -36,6 +43,7 @@ Targets:
              component tarballs, Windows/Android shellmcp packages, and smoke-test Linux bins.
   cli        Package GPTAdmin CLI only: build/gptadmin-cli.tar.gz
   hub        Build/package GPTAdmin hub: build/gptadmin-hub.tar.gz
+  node       Build portable Linux Node packages in .tmp/node-packages (see --help)
   shellmcp   Build/package Linux ShellMCP: build/gptadmin-shellmcp.tar.gz
   platform   Package install convenience bundles: build/gptadmin-<os>-<arch>.tar.gz
   windows    Cross-build Windows hub + ShellMCP and public/gptadmin-win.zip
@@ -254,6 +262,8 @@ build_cli() {
   mkdir -p "$ART_DIR/cli"
   cp -f cli.py "$ART_DIR/cli/cli.py"
   cp -f cli.py "$ART_DIR/cli/gptadmin.py"
+  mkdir -p "$ART_DIR/cli/scripts"
+  cp -f scripts/gptadmin_node_manage.py scripts/gptadmin_node_probe.py "$ART_DIR/cli/scripts/"
   chmod 755 "$ART_DIR/cli/gptadmin.py"
   (cd "$ART_DIR" && tar -czf gptadmin-cli.tar.gz.tmp.$$ cli && mv -f gptadmin-cli.tar.gz.tmp.$$ gptadmin-cli.tar.gz)
   echo "built: $ART_DIR/gptadmin-cli.tar.gz"
@@ -374,6 +384,9 @@ copy_support_payloads() {
   rm -rf "$ART_DIR/hub_source" "$ART_DIR/client"
   mkdir -p "$ART_DIR/hub_source" "$ART_DIR/client"
   cp -a go-hub "$ART_DIR/hub_source/go-hub"
+  # The unified-node entrypoint imports the executor through a local Go module
+  # replacement. Keep source-only installations buildable from this payload.
+  cp -a go-shellmcp "$ART_DIR/hub_source/go-shellmcp"
   find "$ART_DIR/hub_source/go-hub" -name '*.bak.*' -delete
   cp -a client/. "$ART_DIR/client/"
   find "$ART_DIR/hub_source" "$ART_DIR/client" \( -name '__pycache__' -o -name '*.pyc' -o -name '*.bak*' \) -print0 | xargs -0 -r rm -rf
@@ -384,10 +397,14 @@ copy_admin_static_payloads() {
   rm -rf "$ART_DIR/public"
   mkdir -p "$ART_DIR/public"
   cp -a public/. "$ART_DIR/public/"
+
+  # CloudOS is an optional add-on.  Keep a locally installed/staged desktop
+  # out of every normal hub and platform package.
+  rm -rf "$ART_DIR/public/cloudos-ui"
   rm -rf "$ART_DIR/public/admin" "$ART_DIR/public/admin-legacy"
   cp -a public/admin "$ART_DIR/public/admin-legacy"
   cp -a admin-ui/dist "$ART_DIR/public/admin"
-  echo "packaged React admin at $ART_DIR/public/admin; compatibility redirect at $ART_DIR/public/admin-legacy"
+  echo "packaged lightweight admin at $ART_DIR/public/admin; CloudOS is a separate add-on"
 }
 
 archive_component_cli() { build_cli; }
@@ -528,7 +545,16 @@ build_windows_shellmcp() {
   file "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe" || true
   step "Archive: gptadmin-win.zip"
   rm -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
-  (cd "$ART_DIR/windows" && zip -q -9 "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe)
+  # A bare Windows install boots a LOCAL Hub: the archive must carry the
+  # admin UI and public payloads alongside the two binaries.
+  local win_payload="$ART_DIR/windows-payload"
+  rm -rf "$win_payload"
+  mkdir -p "$win_payload"
+  cp -a "$ART_DIR/windows/." "$win_payload/"
+  cp -a public/admin "$win_payload/admin"
+  cp -f public/openapi.yaml "$win_payload/openapi.yaml"
+  cp -f public/custom-gpt-instructions.md "$win_payload/custom-gpt-instructions.md"
+  (cd "$win_payload" && zip -q -9 -r "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md)
   cp -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
   cp -f deploy/install_win.ps1 public/install_win.ps1
   unzip -l public/gptadmin-win.zip
@@ -603,11 +629,23 @@ emit_release_bundle() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/bin"
   cp -f "$shell" "$tmp/bin/shellmcp$suffix"
+  # Native Ubuntu x64 releases carry the GrepMesh companion next to ShellMCP.
+  # The installer enables it by default unless --no-grepmesh is requested.
+  if [[ "$platform" == ubuntu && "$arch" == x64 ]]; then
+    local grepmesh="$ART_DIR/grepmesh/linux_amd64/grepmesh-mcp"
+    [[ -x "$grepmesh" ]] || { echo "ERROR: missing bundled GrepMesh for $platform/$arch" >&2; exit 1; }
+    cp -f "$grepmesh" "$tmp/bin/grepmesh-mcp"
+  fi
   if [[ "$edition" == full ]]; then
     cp -f "$hub" "$tmp/bin/gptadmin-hub$suffix"
     mkdir -p "$tmp/cli"
     cp -f cli.py "$tmp/cli/gptadmin.py"
+    mkdir -p "$tmp/cli/scripts"
+    cp -f scripts/gptadmin_node_manage.py scripts/gptadmin_node_probe.py "$tmp/cli/scripts/"
     chmod 0755 "$tmp/cli/gptadmin.py"
+    [[ -d "$ART_DIR/public" ]] || { echo "ERROR: missing public payload for $platform/$arch full release" >&2; exit 1; }
+    cp -a "$ART_DIR/public" "$tmp/public"
+    [[ -f "$tmp/public/openapi.yaml" ]] || { echo "ERROR: full release public payload has no openapi.yaml" >&2; exit 1; }
   fi
   printf 'GPTAdmin %s for %s/%s (%s)\n' "$BUILD_VERSION" "$platform" "$arch" "$edition" > "$tmp/README.txt"
   if [[ "$extension" == zip ]]; then

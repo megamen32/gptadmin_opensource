@@ -48,6 +48,16 @@ def _wait_for_openapi(url: str, timeout_seconds: float = 45.0) -> bytes:
     raise AssertionError(f"timed out waiting for {url}: {last_error}")
 
 
+def _build_fixture_hub(directory: str, env: dict[str, str], log_file) -> Path:
+    # Cold compilation has its own bounded deadline. HTTP readiness measures
+    # the server, and cleanup must own the actual executable rather than go-run.
+    binary = Path(directory) / "gptadmin-openapi-hub"
+    subprocess.run(["go", "build", "-o", str(binary), "./cmd/gptadmin-hub"],
+                   cwd=GO_HUB_ROOT, env=env, stdout=log_file,
+                   stderr=subprocess.STDOUT, check=True, timeout=300)
+    return binary
+
+
 def _terminate(process: subprocess.Popen[str]) -> None:
     if process.poll() is None:
         process.terminate()
@@ -401,7 +411,9 @@ def test_public_openapi_artifact_matches_go_hub_renderer():
     origin = _public_origin()
     port = _free_port()
 
-    with tempfile.TemporaryDirectory(prefix="gptadmin-openapi-") as tmpdir:
+    temporary_root = ROOT / ".tmp"
+    temporary_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gptadmin-openapi-", dir=temporary_root) as tmpdir:
         env = os.environ.copy()
         env.update(
             {
@@ -420,8 +432,9 @@ def test_public_openapi_artifact_matches_go_hub_renderer():
 
         log_path = Path(tmpdir) / "gohub.log"
         with log_path.open("w", encoding="utf-8") as log_file:
+            binary = _build_fixture_hub(tmpdir, env, log_file)
             process = subprocess.Popen(
-                ["go", "run", "./cmd/gptadmin-hub"],
+                [str(binary)],
                 cwd=GO_HUB_ROOT,
                 env=env,
                 stdout=log_file,
@@ -457,7 +470,9 @@ def test_generated_core_openapi_operations_have_structural_contract():
     origin = _public_origin()
     port = _free_port()
 
-    with tempfile.TemporaryDirectory(prefix="gptadmin-openapi-") as tmpdir:
+    temporary_root = ROOT / ".tmp"
+    temporary_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gptadmin-openapi-", dir=temporary_root) as tmpdir:
         env = os.environ.copy()
         env.update(
             {
@@ -476,8 +491,9 @@ def test_generated_core_openapi_operations_have_structural_contract():
 
         log_path = Path(tmpdir) / "gohub.log"
         with log_path.open("w", encoding="utf-8") as log_file:
+            binary = _build_fixture_hub(tmpdir, env, log_file)
             process = subprocess.Popen(
-                ["go", "run", "./cmd/gptadmin-hub"],
+                [str(binary)],
                 cwd=GO_HUB_ROOT,
                 env=env,
                 stdout=log_file,

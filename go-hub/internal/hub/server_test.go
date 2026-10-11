@@ -1738,11 +1738,11 @@ func TestActionsInstructionsServesPublicPrompt(t *testing.T) {
 func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:admin-server-100"] = &Agent{AgentID: "shell:admin-server-100", Name: "Shell: admin-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:server01"] = &Agent{AgentID: "shell:server01", Name: "Shell: server01", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-server-100","tool_name":"shell_exec","cmd":"pwd"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:server01","tool_name":"shell_exec","cmd":"pwd"}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -1756,7 +1756,7 @@ func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	jobID := firstString(response, "job_id")
 	s.mu.Lock()
 	queued := s.shellJobs[jobID]
-	valid := queued != nil && queued.Server == "admin-server-100" && queued.Cmd == "pwd"
+	valid := queued != nil && queued.Server == "server01" && queued.Cmd == "pwd"
 	s.mu.Unlock()
 	if !valid || response["status"] != "running" {
 		t.Fatalf("callMcpTool shell_exec did not queue the requested command: %s", w.Body.String())
@@ -1766,14 +1766,42 @@ func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	}
 }
 
-func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
+func TestCallMcpToolAcceptsQueryJSONObjectFallback(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:admin-server-100"] = &Agent{AgentID: "shell:admin-server-100", Name: "Shell: admin-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:server01"] = &Agent{AgentID: "shell:server01", Name: "Shell: server01", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-server-100","tool_name":"shell_exec","args_json":"{\"cmd\":\"printf args-json-ok\"}"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:server01","tool_name":"shell_exec","query":"{\"cmd\":\"printf query-json-ok\"}"}`))
+	req.Header.Set("Authorization", "Bearer ctl")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("query JSON status=%d body=%s", w.Code, w.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	jobID := firstString(response, "job_id")
+	s.mu.Lock()
+	queued := s.shellJobs[jobID]
+	valid := queued != nil && queued.Cmd == "printf query-json-ok"
+	s.mu.Unlock()
+	if !valid {
+		t.Fatalf("query JSON did not decode into child arguments: %s", w.Body.String())
+	}
+}
+
+func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	s.mu.Lock()
+	s.agents["shell:server01"] = &Agent{AgentID: "shell:server01", Name: "Shell: server01", Kind: "virtual_shell", Status: "online"}
+	s.mu.Unlock()
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:server01","tool_name":"shell_exec","args_json":"{\"cmd\":\"printf args-json-ok\"}"}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -1793,7 +1821,7 @@ func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
 		t.Fatalf("args_json did not decode into child arguments: %s", w.Body.String())
 	}
 
-	bad := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:admin-server-100","tool_name":"shell_exec","args_json":"not-json"}`))
+	bad := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:server01","tool_name":"shell_exec","args_json":"not-json"}`))
 	bad.Header.Set("Authorization", "Bearer ctl")
 	badW := httptest.NewRecorder()
 	h.ServeHTTP(badW, bad)
@@ -1805,11 +1833,11 @@ func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
 func TestRelayShellExecForwardsExplicitRunAsUser(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:admin-server-100"] = &Agent{AgentID: "shell:admin-server-100", Name: "Shell: admin-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:server01"] = &Agent{AgentID: "shell:server01", Name: "Shell: server01", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/shell_exec", bytes.NewReader([]byte(`{"target":"shell:admin-server-100","cmd":"id -un","run_as_user":"root","background":true}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/shell_exec", bytes.NewReader([]byte(`{"target":"shell:server01","cmd":"id -un","run_as_user":"root","background":true}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

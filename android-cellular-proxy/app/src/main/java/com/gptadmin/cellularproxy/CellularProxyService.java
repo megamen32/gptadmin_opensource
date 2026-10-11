@@ -187,7 +187,25 @@ public final class CellularProxyService extends Service {
     }
 
     private Socket cellularSocket(String host, int port) throws IOException {
+        // Preferred: the explicitly requested cellular network. Fallback: the
+        // system default network — after radio transitions (WiFi windows for
+        // SIP calls, airplane-mode IP rotation by the register loop) the
+        // requestNetwork handle often goes stale (network never re-validated),
+        // while the system already routes via cellular again. Without the
+        // fallback the proxy silently dies until an app restart (2026-09-28).
         Network network = cellular;
+        if (network == null) {
+            // Stale-handle fallback: use the system default network only when
+            // it is cellular (during SIP WiFi windows the default is WiFi —
+            // never route proxy traffic through the home ISP).
+            Network active = connectivity.getActiveNetwork();
+            if (active != null) {
+                android.net.NetworkCapabilities caps = connectivity.getNetworkCapabilities(active);
+                if (caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    network = active;
+                }
+            }
+        }
         if (network == null) throw new IOException("cellular network unavailable");
         InetAddress[] addresses = network.getAllByName(host);
         IOException failure = null;

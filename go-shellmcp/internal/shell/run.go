@@ -196,11 +196,8 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		files = append(files, stderr.Path())
 	}
 	res.Files = files
-	protected := make(map[string]bool, len(files))
-	for _, path := range files {
-		protected[path] = true
-	}
-	_, _ = storagebudget.Enforce(spillDir, protected)
+	// Other executions' spills and a nested outbox are mandatory too.
+	_, _ = storagebudget.Enforce(spillDir, map[string]bool{spillDir: true})
 	if ctx.Err() == context.DeadlineExceeded {
 		res.Error = "timeout"
 		res.TimedOut = true

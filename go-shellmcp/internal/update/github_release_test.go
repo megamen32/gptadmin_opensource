@@ -107,6 +107,71 @@ func TestApplyGitHubReleaseFromFixture(t *testing.T) {
 	}
 }
 
+func TestLatestBuildFromEnvHonorsPositiveIntegerAndIgnoresGarbage(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{name: "empty", env: "", want: 0},
+		{name: "spaces only", env: "   ", want: 0},
+		{name: "positive", env: "190", want: 190},
+		{name: "pinned build 200", env: "200", want: 200},
+		{name: "with whitespace", env: " 42 ", want: 42},
+		{name: "zero rejected", env: "0", want: 0},
+		{name: "negative rejected", env: "-1", want: 0},
+		{name: "alpha rejected", env: "v190", want: 0},
+		{name: "decimal rejected", env: "1.5", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SHELLMCP_LATEST_BUILD", tc.env)
+			got := LatestBuildFromEnv()
+			if got != tc.want {
+				t.Fatalf("env=%q got=%d want=%d", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTagBuildAcceptsNumericAndRejectsPrerelease(t *testing.T) {
+	cases := []struct {
+		name      string
+		tag       string
+		wantBuild int
+		wantErr   bool
+	}{
+		{name: "numeric tag ok", tag: "v190", wantBuild: 190},
+		{name: "single digit ok", tag: "v1", wantBuild: 1},
+		{name: "large numeric ok", tag: "v9999999", wantBuild: 9999999},
+		{name: "prerelease dotted rejected", tag: "v999.20260906063550", wantErr: true},
+		{name: "rc suffix rejected", tag: "v190-rc1", wantErr: true},
+		{name: "alpha suffix rejected", tag: "v190a", wantErr: true},
+		{name: "empty tag rejected", tag: "", wantErr: true},
+		{name: "no v prefix rejected", tag: "190", wantErr: true},
+		{name: "v only rejected", tag: "v", wantErr: true},
+		{name: "zero build rejected", tag: "v0", wantErr: true},
+		{name: "negative sign rejected", tag: "v-1", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			build, err := ParseTagBuild(tc.tag)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got build=%d", build)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if build != tc.wantBuild {
+				t.Fatalf("build=%d want=%d", build, tc.wantBuild)
+			}
+		})
+	}
+}
+
 func TestChecksumForAssetRejectsMissingOrMalformed(t *testing.T) {
 	if _, err := checksumForAsset("deadbeef  x.tar.gz\n", "x.tar.gz"); err == nil {
 		t.Fatal("expected malformed checksum error")

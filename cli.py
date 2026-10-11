@@ -527,20 +527,47 @@ def ensure_https(url: str):
 
 # download & extract
 
-def download(url: str, dest: Path):
-    """Download a file with curl's progress meter visible.
+def _local_source_path(source: str) -> Path | None:
+    """Resolve a package/matrix source to a local path when applicable.
 
-    curl's default meter shows total size, received bytes, average speed,
-    elapsed time, estimated time left and current speed when Content-Length is
-    available. Set GPTADMIN_DOWNLOAD_QUIET=1 to keep the old silent behavior.
+    Plain filesystem paths and file:// URLs are supported. HTTP(S) and other
+    schemes remain remote sources. Relative paths are resolved against cwd.
     """
-    quiet = os.environ.get('GPTADMIN_DOWNLOAD_QUIET', '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    if quiet:
-        cmd = ['curl', '-fsSL', url, '-o', str(dest)]
+    value = str(source or '').strip()
+    if not value:
+        return None
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme == 'file':
+        if parsed.netloc not in {'', 'localhost'}:
+            return None
+        return Path(urllib.request.url2pathname(parsed.path)).expanduser().resolve()
+    if parsed.scheme:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def download(url: str, dest: Path):
+    """Download or copy one release artifact into ``dest``.
+
+    Local filesystem paths and file:// URLs are copied directly; HTTP(S) uses
+    curl with its progress meter visible. Set GPTADMIN_DOWNLOAD_QUIET=1 to keep
+    the old silent network-download behavior.
+    """
+    local = _local_source_path(url)
+    if local is not None:
+        if not local.is_file():
+            raise subprocess.CalledProcessError(1, ['local-copy', str(local)])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local, dest)
+        print(f'  Локальный файл: {local}', flush=True)
     else:
-        print(f'  URL: {url}', flush=True)
-        cmd = ['curl', '-fL', url, '-o', str(dest)]
-    run(cmd)
+        quiet = os.environ.get('GPTADMIN_DOWNLOAD_QUIET', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        if quiet:
+            cmd = ['curl', '-fsSL', url, '-o', str(dest)]
+        else:
+            print(f'  URL: {url}', flush=True)
+            cmd = ['curl', '-fL', url, '-o', str(dest)]
+        run(cmd)
     try:
         size = dest.stat().st_size
     except OSError:
@@ -1575,11 +1602,15 @@ esac
     def svc_grepmesh_name(): return SYSTEMD_GREPMESH
 
     def write_frpc_unit(frpc_bin: str):
+        template = FRPC_UNIT_TPL
+        if _local_unified_node_enabled():
+            template = template.replace('BindsTo=gptadmin-hub.service\n', '').replace(
+                'After=network-online.target gptadmin-hub.service\n', 'After=network-online.target\n')
         UNIT_PATH_FRPC.parent.mkdir(parents=True, exist_ok=True)
         wrapper = BIN_DIR / 'run_frpc_all.sh'
         wrapper.write_text(frpc_wrapper_script(frpc_bin, env_read()))
         os.chmod(wrapper, 0o755)
-        UNIT_PATH_FRPC.write_text(FRPC_UNIT_TPL.format(
+        UNIT_PATH_FRPC.write_text(template.format(
             frpc_bin=wrapper,
             hardening=process_hardening_for_env(env_read()),
             wanted_by=LINUX_WANTED_BY,
@@ -2061,8 +2092,8 @@ def sync_oauth_origin_env(env: dict) -> None:
     """Point OAuth discovery to this hub's public URL.
 
     Remote MCP clients such as Codex discover OAuth from the MCP endpoint.
-    Leaving PUBLIC_ORIGIN/MCP_RESOURCE unset makes the Go hub use the
-    legacy global default became.bezrabotnyi.com, which redirects users to
+    Leaving PUBLIC_ORIGIN/MCP_RESOURCE unset makes the Go hub use a legacy
+    global default origin (retired 2026-09-10), which redirects users to
     the wrong authorization server/password.
     """
     # HUB_URL is normally the loopback listener for a Hub that is exposed by
@@ -2075,12 +2106,13 @@ def sync_oauth_origin_env(env: dict) -> None:
         or env.get('HUB_URL')
         or ''
     )
-    if env.get('FRP_ENABLE', '').lower() == 'true':
+    if env.get('FRP_ENABLE', '').lower() == 'true' and not public.lower().startswith('https://'):
         subdomain = str(env.get('FRP_SUBDOMAIN') or '').strip().strip('.')
         domain = str(env.get('FRP_DOMAIN') or '').strip().strip('.')
         if subdomain and domain:
             # Older FRP installs could retain a private HUB_PUBLIC_URL after
-            # an update. The tunnel's deterministic public name is canonical.
+            # an update. Use the deterministic tunnel name only as recovery;
+            # an explicit HTTPS origin may intentionally be a stable alias.
             public = f'https://{subdomain}.{domain}'
             env['HUB_PUBLIC_URL'] = public
     if not public:
@@ -4781,7 +4813,23 @@ def _installed_build_info(env: dict, install_hub: bool) -> dict:
 
 
 def _artifact_name_from_url(url: str) -> str:
-    return url.rstrip('/').rsplit('/', 1)[-1]
+    local = _local_source_path(url)
+    if local is not None:
+        return local.name
+    parsed = urllib.parse.urlparse(str(url))
+    return Path(urllib.parse.unquote(parsed.path)).name
+
+
+def _read_release_matrix_source(source: str) -> tuple[dict, str]:
+    """Read a release matrix from a local path/file URL or HTTP(S) URL."""
+    local = _local_source_path(source)
+    if local is not None:
+        matrix = json.loads(local.read_text(encoding='utf-8'))
+        return matrix, str(local)
+    with urllib.request.urlopen(source, timeout=8) as response:
+        matrix = json.loads(response.read().decode('utf-8', 'replace'))
+        final_url = getattr(response, 'url', source)
+    return matrix, str(final_url)
 
 
 def _release_manifest_bypass_enabled() -> bool:
@@ -4792,13 +4840,18 @@ def _release_manifest_bypass_enabled() -> bool:
 def _remote_artifact_build_info(pkg_url: str) -> dict:
     if _release_manifest_bypass_enabled():
         return {}
-    base = pkg_url.rsplit('/', 1)[0]
-    matrix_url = os.environ.get('GPTADMIN_RELEASE_MATRIX_URL') or (base.rstrip('/') + '/gptadmin-release-matrix.json')
+    local_pkg = _local_source_path(pkg_url)
+    explicit_matrix = os.environ.get('GPTADMIN_RELEASE_MATRIX_URL')
+    if explicit_matrix:
+        matrix_url = explicit_matrix
+    elif local_pkg is not None:
+        matrix_url = str(local_pkg.with_name('gptadmin-release-matrix.json'))
+    else:
+        base = pkg_url.rsplit('/', 1)[0]
+        matrix_url = base.rstrip('/') + '/gptadmin-release-matrix.json'
     name = _artifact_name_from_url(pkg_url)
     try:
-        with urllib.request.urlopen(matrix_url, timeout=8) as r:
-            matrix = json.loads(r.read().decode('utf-8', 'replace'))
-            final_url = getattr(r, 'url', matrix_url)
+        matrix, final_url = _read_release_matrix_source(matrix_url)
     except Exception as exc:
         print(f'WARNING: release matrix unavailable: {exc}', file=sys.stderr)
         return {}
@@ -5000,6 +5053,47 @@ def _restart_update_services_after_rollback() -> None:
         print('WARNING: restored runtime could not be restarted automatically', file=sys.stderr)
 
 
+def _local_unified_node_enabled():
+    """Detect the configured local primary, including effective systemd overrides."""
+    modes = [os.environ.get('GPTADMIN_AUTH_MODE', '')]
+    # primary.env is the existing unified-primary override, not an extra marker.
+    # Other node instances (e.g. nodes/canary.env) do not select this primary.
+    for path in (ENV_FILE, ENV_FILE.parent / 'nodes' / 'primary.env'):
+        try:
+            lines = path.read_text().splitlines()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            die(f'cannot check unified node configuration: {path}')
+        mode = ''
+        for line in lines:
+            key, separator, value = line.strip().partition('=')
+            if separator and key.strip() == 'GPTADMIN_AUTH_MODE':
+                mode = value.strip().strip('"\'').lower()
+        modes.append(mode)
+    if any(mode.strip().lower() in ('writer', 'reader') for mode in modes):
+        return True
+    if IS_MACOS or not UNIT_PATH_HUB.exists():
+        return False
+    # Include effective systemd drop-ins, including a Node running in legacy
+    # auth mode. This is a read-only query, never a service start/restart.
+    command = ['systemctl'] + (['--user'] if IS_USER_INSTALL else [])
+    command += ['show', SYSTEMD_HUB, '--property=ExecStart', '--value']
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        die('cannot inspect Hub ExecStart before legacy update; check systemd and retry')
+    if result.returncode != 0:
+        die('cannot inspect Hub ExecStart before legacy update; check systemd and retry')
+    return bool(re.search(r'(?:^|[/\s=])gptadmin-node(?:[\s;}]|$)', result.stdout or ''))
+
+
+def _reject_legacy_update_for_unified_node():
+    """Read-only fence before the legacy updater snapshots or changes anything."""
+    if _local_unified_node_enabled():
+        die('legacy update is disabled for a unified node; use the unified node deployment path')
+
+
 def _transactional_update(func):
     """Decorate the update command with rollback-safe runtime restoration."""
 
@@ -5007,6 +5101,7 @@ def _transactional_update(func):
     def wrapped(args):
         global _active_update_snapshot
         need_root()
+        _reject_legacy_update_for_unified_node()
         snapshot = _UpdateRuntimeSnapshot(_update_runtime_paths())
         _active_update_snapshot = snapshot
         try:
@@ -5557,7 +5652,7 @@ def cmd_update(args):
     target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
     remote_info = _remote_artifact_build_info(target_pkg)
     if not _release_manifest_bypass_enabled() and (not remote_info.get('sha256') or remote_info.get('size') is None):
-        die(f'Проверка релиза не пройдена: manifest недоступен или не содержит полный digest/size ({Path(target_pkg).name})')
+        die(f'Проверка релиза не пройдена: manifest недоступен или не содержит полный digest/size ({_artifact_name_from_url(target_pkg)})')
     if not getattr(args, 'force', False):
         installed_info = _installed_build_info(env, install_hub)
         if _should_skip_update(installed_info, remote_info):
@@ -6195,7 +6290,7 @@ def maybe_update_hint(args):
         return
 
     # Skip for certain commands.
-    cmd = getattr(args, 'command', None)
+    cmd = getattr(args, 'cmd', None) or getattr(args, 'command', None)
     if cmd in ('update', 'auto-update'):
         return
     if getattr(args, 'auto', False):
@@ -6279,6 +6374,17 @@ def maybe_update_hint(args):
 
 
 def main():
+    # The portable Node lifecycle owns its instance paths and service transaction.
+    # Dispatch before legacy parsing/update hints, including `node --help`.
+    if len(sys.argv) > 1 and sys.argv[1] == 'node':
+        root = Path(__file__).resolve().parent
+        manager = next((p for p in (root / 'scripts' / 'gptadmin_node_manage.py',
+                                   root / 'gptadmin_node_manage.py',
+                                   INSTALL_DIR / 'cli' / 'scripts' / 'gptadmin_node_manage.py')
+                        if p.is_file()), None)
+        if manager is None:
+            die('Node manager is missing; install the complete Node or CLI package.')
+        os.execv(sys.executable, [sys.executable, str(manager), *sys.argv[2:]])
     # Backward-compatible command aliases, hidden from help.
     if len(sys.argv) > 1 and sys.argv[1] in ('config-shell', 'config-shellmcp'):
         legacy = sys.argv[1]
@@ -6288,6 +6394,8 @@ def main():
     ap.add_argument('--user', action='store_true', help='Use per-user install paths/services (default when not root)')
     ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
     sub = ap.add_subparsers(dest='cmd')
+
+    sub.add_parser('node', help='Установить или обновить единый Node (Linux/systemd)')
 
     sub.add_parser('version', help='Показать версию и информацию о сборке').set_defaults(func=cmd_version)
     ap_doctor = sub.add_parser('doctor', help='Проверка здоровья: Hub, MCP clients, Tunnel и конфиг')

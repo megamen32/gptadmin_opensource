@@ -1,5 +1,13 @@
 # Integrations
 
+For the official public deployment, use `https://mcp.bezrabotnyi.com` as the
+OAuth/MCP identity and `https://mcp.bezrabotnyi.com/mcp` as the MCP endpoint.
+Generated FRP `u-*` hostnames are transport addresses, not identities for
+official ChatGPT or Codex clients. If OAuth metadata changes or ChatGPT freezes
+an old app configuration, recreate the app; refreshing Actions does not
+necessarily refresh saved metadata. Reconnect with
+`gptadmin.read gptadmin.exec offline_access`.
+
 Four ways to connect an AI client to your GPTAdmin hub.
 
 | # | Adapter | Best for | Auth |
@@ -75,7 +83,7 @@ curl -sS -X GET https://<your-hub>/mcp-relay/servers \
 ```text
 POST /mcp-relay/call
 {
-  "target": "shell:admin-server-100",
+  "target": "shell:server01",
   "tool": "shell_exec",
   "args": { "cmd": "uptime" }
 }

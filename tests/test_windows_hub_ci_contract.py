@@ -28,7 +28,7 @@ def test_release_windows_package_builds_and_archives_the_go_hub():
 
     assert 'GOOS=windows GOARCH=amd64 go build "${GO_HUB_LDFLAGS[@]}"' in script
     assert '"$ART_DIR/windows/gptadmin-hub.exe"' in script
-    assert 'zip -q -9 "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe' in script
+    assert 'zip -q -9 -r "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md' in script
     assert 'cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 public/install_win.ps1 "$ART_DIR/public/"' in script
 
 

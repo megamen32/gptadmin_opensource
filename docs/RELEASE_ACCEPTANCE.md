@@ -110,8 +110,11 @@ known-good N-1
 ```
 
 For local candidate development, the lifecycle runner may use the same candidate
-archive to exercise the update mechanism itself. That is useful plumbing
-coverage but does not replace the N-1 -> N release migration gate.
+archive to exercise the update mechanism itself. The update step intentionally
+passes an ordinary local filesystem path and requires the sibling release matrix,
+so local-package handling and digest/size enforcement are covered without a
+manifest bypass. That is useful plumbing coverage but does not replace the
+N-1 -> N release migration gate.
 
 ## Restart and reconnect contract
 

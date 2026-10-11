@@ -25,6 +25,9 @@ def _minimal_build_repo(tmp_path: Path, *, include_shellmcp: bool = False) -> Pa
     shutil.copy2(REPO_ROOT / "tools" / "generate_sbom.py", repo / "tools" / "generate_sbom.py")
     shutil.copy2(REPO_ROOT / "tools" / "verify_release_manifest.py", repo / "tools" / "verify_release_manifest.py")
     shutil.copy2(REPO_ROOT / "cli.py", repo / "cli.py")
+    (repo / "scripts").mkdir()
+    for helper in ("gptadmin_node_manage.py", "gptadmin_node_probe.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / helper, repo / "scripts" / helper)
     if include_shellmcp:
         shutil.copytree(REPO_ROOT / "go-hub", repo / "go-hub")
         shutil.copytree(REPO_ROOT / "go-shellmcp", repo / "go-shellmcp")
@@ -94,6 +97,10 @@ def test_tagged_build_keeps_version_and_generates_matching_metadata(tmp_path: Pa
     sbom = json.loads((repo / "build" / "gptadmin-sbom.spdx.json").read_text(encoding="utf-8"))
     assert sbom["gptadminBuild"]["build_version"] == 129
     assert sbom["gptadminBuild"]["git_commit"] == commit
+    with tarfile.open(repo / "build" / "gptadmin-cli.tar.gz", "r:gz") as archive:
+        paths = set(archive.getnames())
+    for helper in ("gptadmin_node_manage.py", "gptadmin_node_probe.py"):
+        assert f"cli/scripts/{helper}" in paths
 
 
 def test_tagged_build_rejects_tag_version_mismatch(tmp_path: Path) -> None:

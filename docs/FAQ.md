@@ -51,15 +51,23 @@ service configuration. Normal setup never asks you to copy an internal key.
 ## `/mcp` returns 401 — why?
 
 `/mcp` requires a scoped OAuth connection. Re-open the Hub connection page and
-complete the OAuth flow; MCP clients handle the connection automatically. For
-local development, the Hub may relax auth on localhost. See [Configuration →
-OAuth](./CONFIGURATION.md#oauth).
+complete the OAuth flow; MCP clients handle the connection automatically. The
+managed deployment uses `https://mcp.bezrabotnyi.com`; a separate installation
+uses its own stable public origin. For local development, the Hub may relax auth
+on localhost. See [Configuration → OAuth](./CONFIGURATION.md#oauth).
+
+If ChatGPT or Codex continues using old OAuth metadata after a Hub change,
+recreate the frozen ChatGPT app or disconnect/recreate the Codex MCP connection.
+Refreshing Actions does not necessarily update saved metadata. Reauthorize with
+`gptadmin.read gptadmin.exec offline_access`.
 
 ## Do I need my own domain?
 
-No. The installer offers an auto-tunnel via FRP — you get a public URL on
-`frp.bezrabotnyi.com` with no DNS setup. For your own domain, use Cloudflare
-Tunnel or nginx + Certbot. See [Tunnels](./TUNNELS_DOCS.md).
+No. The installer offers an auto-tunnel via FRP, which can be the stable public
+origin of that separate installation. The managed shared ChatGPT/Codex connector
+instead uses `https://mcp.bezrabotnyi.com`; do not let a fallback tunnel replace
+an explicitly configured origin. For your own domain, use Cloudflare Tunnel or
+nginx + Certbot. See [Tunnels](./TUNNELS_DOCS.md).
 
 ## Does it work on Windows?
 

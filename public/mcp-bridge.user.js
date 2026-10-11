@@ -27,7 +27,7 @@
   // ═══════════════════════════════════════════════════════════════
   //  CONFIG
   // ═══════════════════════════════════════════════════════════════
-  const DEFAULT_HUB = 'https://became.bezrabotnyi.com';
+  const DEFAULT_HUB = 'https://mcp.bezrabotnyi.com';
 
   function hubUrl()       { return GM_getValue('hub_url', DEFAULT_HUB); }
   function accessToken()  { return GM_getValue('oauth_access_token', ''); }

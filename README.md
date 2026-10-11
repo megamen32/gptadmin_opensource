@@ -84,6 +84,26 @@ Bearer → paste only a scoped token value issued by the Hub
 OAuth → use the Hub authorize/token flow from the Hub URL
 ```
 
+### Canonical MCP/OAuth connector identity
+
+For the shared ChatGPT/Codex/native-MCP connector, the canonical public origin
+is `https://mcp.bezrabotnyi.com` and the MCP endpoint is:
+
+```text
+https://mcp.bezrabotnyi.com/mcp
+```
+
+Use that same origin when following OAuth discovery and reconnecting a client.
+The per-tunnel `u-f<ID>.t.became.bezrabotnyi.com` hostname is a legacy FRP
+transport/recovery fallback, not the connector identity for new ChatGPT or
+Codex setup. Do not replace the canonical origin with a loopback Hub URL or a
+transient tunnel name.
+
+If an existing connector still points at an `u-f<ID>` URL, update it to the
+canonical endpoint above and complete OAuth again. Verify the live metadata at
+`https://mcp.bezrabotnyi.com/.well-known/oauth-authorization-server` before
+retrying the connector.
+
 An existing legacy compatibility token remains valid until its owner explicitly rotates or removes it.
 
 Never paste an internal service secret into a GPT or client. If you need a
@@ -100,6 +120,17 @@ different adapter, use the dedicated docs below.
 ```
 
 Full per-adapter instructions: **https://became.bezrabotnyi.com/#/docs**
+
+### Администрирование и CloudOS
+
+Основная веб-консоль — `https://your-hub.example/admin/`. Она защищена
+настроенным паролем администратора и включает настройки, серверы, доступ и
+операции Hub. Корневой адрес Hub направляет туда же.
+
+CloudOS не входит в обычный hub-пакет: это отдельный аддон примерно на 56 MiB.
+Если desktop-интерфейс нужен, соберите `tools/build_cloudos_ui.sh`, распакуйте
+`build/gptadmin-cloudos-addon.tar.gz` рядом с Hub и запустите `./install.sh`.
+После установки он доступен авторизованному администратору по `/cloudos/`.
 
 ## What you can do through the hub
 

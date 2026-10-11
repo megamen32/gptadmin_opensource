@@ -17,7 +17,9 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 ```
 
 安装程序创建集线器，在需要时启动隧道，并打印一个
-**中心网址**。保留该 URL：这是您连接的地方。
+**中心网址**。保留该 URL：这是您连接的地方。GPTAdmin 托管插件使用规范
+identity `https://mcp.bezrabotnyi.com` 和 endpoint
+`https://mcp.bezrabotnyi.com/mcp`；独立安装使用自己的稳定公共 Hub URL。
 
 > 无需域名：选择自动隧道选项（FRP 或 Cloudflare），然后您
 > 获取公共 URL。请参阅[隧道](./TUNNELS_DOCS.md)。
@@ -98,10 +100,16 @@ sudo gptadmin urls --json  # machine-readable output
 
 **`/mcp` 返回 401**
 - 从 Hub URL 完成 OAuth 连接； `/mcp` 接受作用域 MCP
-  连接，而不是复制的服务凭据。请参阅[配置 → OAuth](./CONFIGURATION.md#oauth)。
+  连接，而不是复制的服务凭据。托管部署的 URL 是
+  `https://mcp.bezrabotnyi.com`。请参阅[配置 → OAuth](./CONFIGURATION.md#oauth)。
 - 如果此连接早于集线器刷新支持，请重新连接一次以获得
   `offline_access` 刷新凭据。现有会话无法接收
   追溯性地。
+
+**ChatGPT/Codex 在 Hub 变更后仍使用旧 OAuth 元数据**
+- 刷新 Actions 或 tools 不一定会替换客户端应用中已保存的 OAuth 元数据。
+- 删除并重新创建 ChatGPT 应用（或断开并重新创建 Codex MCP 连接），然后对规范
+  endpoint 再次授权，使用 `gptadmin.read gptadmin.exec offline_access`。
 
 **浏览器扩展按钮不出现**
 - 刷新页面
@@ -111,4 +119,5 @@ sudo gptadmin urls --json  # machine-readable output
 **自定义 GPT 操作测试失败**
 - 验证 `servers.url` 中的中心 URL 与您的中心匹配
 - 重新打开Hub连接页面并完成OAuth授权
-  自定义 GPT 客户端
+  自定义 GPT 客户端。如果 OAuth 元数据发生变化，请重新创建应用/连接；仅刷新
+  Actions 可能仍保留旧元数据。

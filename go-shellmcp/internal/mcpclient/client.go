@@ -25,22 +25,31 @@ type rpcRequest struct {
 	Params  any    `json:"params,omitempty"`
 }
 type rpcResponse struct {
-	ID     json.RawMessage `json:"id"`
-	Result map[string]any  `json:"result"`
-	Error  *struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	ID      json.RawMessage `json:"id"`
+	Result  map[string]any  `json:"result"`
+	Error   *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
 type Client struct {
-	HTTP        *http.Client
-	mu          sync.Mutex
-	stdio       map[string]*stdioClient
-	starting    map[string]*startingSession
-	generations map[string]uint64
-	remote      map[string]remoteSession
-	validator   func(supervisor.Agent) bool
+	HTTP               *http.Client
+	mu                 sync.Mutex
+	stdio              map[string]*stdioClient
+	starting           map[string]*startingSession
+	generations        map[string]uint64
+	remote             map[string]remoteSession
+	remoteClosing      map[string]bool
+	validator          func(supervisor.Agent) bool
+	scoped             map[string]*scopedPartition
+	scopedEpoch        uint64
+	closedScopes       map[string]closedScopeRecord
+	scopedBlockedUntil time.Time
+	frozenEnv          []string
+	frozenHeaders      bool
 }
 
 type startingSession struct {
@@ -60,18 +69,21 @@ type RuntimeStatus struct {
 }
 
 type stdioClient struct {
-	mu        sync.Mutex
-	stateMu   sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	enc       *json.Encoder
-	dec       *json.Decoder
-	stderr    boundedBuffer
-	nextID    int64
-	startedAt time.Time
-	exitedAt  time.Time
-	exitCode  int
-	done      chan struct{}
+	grouped       bool
+	terminateOnce sync.Once
+	terminationMu sync.Mutex
+	mu            sync.Mutex
+	stateMu       sync.Mutex
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	enc           *json.Encoder
+	dec           *json.Decoder
+	stderr        boundedBuffer
+	nextID        int64
+	startedAt     time.Time
+	exitedAt      time.Time
+	exitCode      int
+	done          chan struct{}
 }
 
 func New() *Client {
@@ -91,6 +103,14 @@ func (c *Client) SetAgentValidator(validator func(supervisor.Agent) bool) {
 	c.mu.Lock()
 	c.validator = validator
 	c.mu.Unlock()
+}
+
+// Generation is the lifecycle epoch of the original configured child ref.
+// Scope-only closes do not advance it or invalidate other consumers.
+func (c *Client) Generation(ref string) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generations[ref]
 }
 
 // Start initializes the configured MCP server. Stdio processes and negotiated
@@ -132,13 +152,18 @@ func (c *Client) Status(ref string) RuntimeStatus {
 }
 
 func (c *Client) Close(ref string) error {
+	scopedErr := c.closePartitions(ref, "")
 	c.mu.Lock()
 	c.generations[ref]++
 	session := c.stdio[ref]
 	starting := c.starting[ref]
 	remote := c.remote[ref]
-	delete(c.stdio, ref)
-	delete(c.remote, ref)
+	if remote != nil {
+		if c.remoteClosing == nil {
+			c.remoteClosing = make(map[string]bool)
+		}
+		c.remoteClosing[ref] = true
+	}
 	c.mu.Unlock()
 	if starting != nil {
 		starting.cancel()
@@ -146,22 +171,34 @@ func (c *Client) Close(ref string) error {
 	}
 	if session != nil {
 		if err := session.close(); err != nil {
-			return err
+			return errors.Join(scopedErr, err)
 		}
+		c.mu.Lock()
+		if c.stdio[ref] == session {
+			delete(c.stdio, ref)
+		}
+		c.mu.Unlock()
 	}
 	if remote != nil {
-		return remote.close()
+		err := remote.close()
+		c.mu.Lock()
+		if c.remote[ref] == remote {
+			if err == nil {
+				delete(c.remote, ref)
+			}
+			delete(c.remoteClosing, ref)
+		}
+		c.mu.Unlock()
+		return errors.Join(scopedErr, err)
 	}
-	return nil
+	return scopedErr
 }
 
 func (s *stdioClient) close() error {
 	_ = s.stdin.Close()
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
+	s.terminate()
 	<-s.done
-	return nil
+	return confirmStdioProcessDisposition(s.cmd, s.grouped)
 }
 
 func (s *stdioClient) status(ref string) RuntimeStatus {
@@ -182,6 +219,7 @@ func (s *stdioClient) status(ref string) RuntimeStatus {
 }
 
 func (c *Client) CloseAll() {
+	c.closePartitions("", "")
 	c.mu.Lock()
 	sessions := make([]*stdioClient, 0, len(c.stdio))
 	for _, session := range c.stdio {
@@ -273,9 +311,7 @@ func (c *Client) stdioSession(ctx context.Context, agent supervisor.Agent, metho
 	go func() {
 		select {
 		case <-ctx.Done():
-			if session.cmd.Process != nil {
-				_ = session.cmd.Process.Kill()
-			}
+			session.terminate()
 		case <-requestDone:
 		}
 	}()
@@ -285,8 +321,8 @@ func (c *Client) stdioSession(ctx context.Context, agent supervisor.Agent, metho
 		c.closeIfCurrent(agent.Ref, session)
 		return nil, err
 	}
-	var res rpcResponse
-	if err := session.dec.Decode(&res); err != nil {
+	res, err := readMatchingStdioResponse(session.dec, id)
+	if err != nil {
 		close(requestDone)
 		session.mu.Unlock()
 		c.closeIfCurrent(agent.Ref, session)
@@ -304,12 +340,14 @@ func (c *Client) stdioSession(ctx context.Context, agent supervisor.Agent, metho
 }
 
 func (c *Client) closeIfCurrent(ref string, session *stdioClient) {
+	if err := session.close(); err != nil {
+		return
+	}
 	c.mu.Lock()
 	if c.stdio[ref] == session {
 		delete(c.stdio, ref)
 	}
 	c.mu.Unlock()
-	_ = session.close()
 }
 
 func (c *Client) getStdio(ctx context.Context, agent supervisor.Agent) (*stdioClient, error) {
@@ -318,6 +356,18 @@ func (c *Client) getStdio(ctx context.Context, agent supervisor.Agent) (*stdioCl
 		if existing.status(agent.Ref).Running {
 			c.mu.Unlock()
 			return existing, nil
+		}
+		if c.frozenHeaders && agent.ConnectionMode != "stateless" {
+			c.mu.Unlock()
+			return nil, errors.New("mcp stateful child exited; initialize a new connection")
+		}
+		if c.frozenHeaders {
+			// Even stateless protocol recovery cannot discard an unconfirmed owned
+			// process group. The exited session remains reserved for explicit cleanup.
+			if err := existing.close(); err != nil {
+				c.mu.Unlock()
+				return nil, err
+			}
 		}
 		delete(c.stdio, agent.Ref)
 	}
@@ -344,7 +394,7 @@ func (c *Client) getStdio(ctx context.Context, agent supervisor.Agent) (*stdioCl
 	c.starting[agent.Ref] = starting
 	c.mu.Unlock()
 
-	session, err := startStdio(startCtx, agent)
+	session, err := startStdioEnvironment(startCtx, agent, c.frozenEnv)
 	valid := err == nil
 	c.mu.Lock()
 	validator := c.validator
@@ -362,9 +412,15 @@ func (c *Client) getStdio(ctx context.Context, agent supervisor.Agent) (*stdioCl
 	}
 	c.mu.Unlock()
 	cancel()
-	if err != nil {
-		if session != nil {
-			_ = session.close()
+	if err != nil && session != nil {
+		if cleanupErr := session.close(); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			// Retain failed initialization trees for explicit disposition retry.
+			c.mu.Lock()
+			if c.stdio[agent.Ref] == nil {
+				c.stdio[agent.Ref] = session
+			}
+			c.mu.Unlock()
 		}
 	}
 	c.mu.Lock()
@@ -380,6 +436,10 @@ func (c *Client) getStdio(ctx context.Context, agent supervisor.Agent) (*stdioCl
 }
 
 func startStdio(ctx context.Context, agent supervisor.Agent) (*stdioClient, error) {
+	return startStdioEnvironment(ctx, agent, nil)
+}
+
+func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEnv []string) (*stdioClient, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -387,9 +447,19 @@ func startStdio(ctx context.Context, agent supervisor.Agent) (*stdioClient, erro
 	}
 	cmd := exec.Command(agent.Command, agent.Args...)
 	cmd.Dir = agent.Cwd
-	cmd.Env = os.Environ()
-	for k, v := range agent.Env {
-		cmd.Env = append(cmd.Env, k+"="+os.ExpandEnv(v))
+	grouped := frozenEnv != nil
+	if grouped {
+		cmd.WaitDelay = 2 * time.Second
+	}
+	if err := prepareStdioProcess(cmd, grouped); err != nil {
+		return nil, err
+	}
+	cmd.Env = frozenEnv
+	if frozenEnv == nil {
+		cmd.Env = os.Environ()
+		for k, v := range agent.Env {
+			cmd.Env = append(cmd.Env, k+"="+os.ExpandEnv(v))
+		}
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -399,7 +469,7 @@ func startStdio(ctx context.Context, agent supervisor.Agent) (*stdioClient, erro
 	if err != nil {
 		return nil, err
 	}
-	session := &stdioClient{cmd: cmd, stdin: stdin, enc: json.NewEncoder(stdin), dec: json.NewDecoder(stdout), nextID: 1, startedAt: time.Now(), done: make(chan struct{})}
+	session := &stdioClient{grouped: grouped, cmd: cmd, stdin: stdin, enc: json.NewEncoder(stdin), dec: json.NewDecoder(stdout), nextID: 1, startedAt: time.Now(), done: make(chan struct{})}
 	cmd.Stderr = &session.stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("mcp child %q start: %w", agent.Ref, err)
@@ -412,37 +482,86 @@ func startStdio(ctx context.Context, agent supervisor.Agent) (*stdioClient, erro
 			session.exitCode = cmd.ProcessState.ExitCode()
 		}
 		session.stateMu.Unlock()
+		session.terminationMu.Lock()
 		close(session.done)
+		session.terminationMu.Unlock()
 	}()
 	initDone := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
+			session.terminate()
 		case <-initDone:
 		}
 	}()
 	defer close(initDone)
 	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: 1, Method: "initialize", Params: map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "shellmcp-go", "version": "1"}}}); err != nil {
-		_ = cmd.Process.Kill()
+		session.terminate()
 		<-session.done
-		return nil, err
+		return session, err
 	}
-	var initRes rpcResponse
-	if err := session.dec.Decode(&initRes); err != nil {
-		_ = cmd.Process.Kill()
+	initRes, err := readMatchingStdioResponse(session.dec, 1)
+	if err != nil {
+		session.terminate()
 		<-session.done
-		return nil, err
+		return session, err
 	}
 	if initRes.Error != nil {
-		_ = cmd.Process.Kill()
+		session.terminate()
 		<-session.done
-		return nil, fmt.Errorf("mcp child %q initialize: %s", agent.Ref, initRes.Error.Message)
+		return session, fmt.Errorf("mcp child %q initialize: %s", agent.Ref, initRes.Error.Message)
 	}
 	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized", Params: map[string]any{}}); err != nil {
-		_ = cmd.Process.Kill()
+		session.terminate()
 		<-session.done
-		return nil, err
+		return session, err
 	}
 	return session, nil
+}
+
+// Notifications may precede a reply. Server requests cannot be answered by this
+// one-way child adapter, so fail explicitly rather than discarding them.
+func readMatchingStdioResponse(dec *json.Decoder, expectedID any) (rpcResponse, error) {
+	const maxFrames = 64
+	for i := 0; i < maxFrames; i++ {
+		var frame rpcResponse
+		if err := dec.Decode(&frame); err != nil {
+			return rpcResponse{}, err
+		}
+		if frame.JSONRPC != "2.0" {
+			return rpcResponse{}, errors.New("mcp child: invalid JSON-RPC version")
+		}
+		if frame.Method != "" {
+			if len(frame.ID) > 0 && string(frame.ID) != "null" {
+				return rpcResponse{}, errors.New("mcp child: upstream server requests are unsupported")
+			}
+			continue
+		}
+		if !responseIDMatches(frame.ID, expectedID) {
+			return rpcResponse{}, errors.New("mcp child: JSON-RPC response ID does not match request")
+		}
+		if frame.Result == nil && frame.Error == nil {
+			return rpcResponse{}, errors.New("mcp child: JSON-RPC response has no result or error")
+		}
+		return frame, nil
+	}
+	return rpcResponse{}, errors.New("mcp child: too many notifications before response")
+}
+
+// One owner may signal the process group once, only before Wait completion.
+// The completion lock prevents later duplicate cleanup from targeting a group
+// whose leader PID may already have been reused.
+func (s *stdioClient) terminate() {
+	if !s.grouped {
+		terminateStdioProcess(s.cmd, false)
+		return
+	}
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	s.terminateOnce.Do(func() { terminateStdioProcess(s.cmd, s.grouped) })
 }

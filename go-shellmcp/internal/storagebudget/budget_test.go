@@ -162,3 +162,36 @@ func TestEnforceRootsLimitCanOwnOneFileWithoutOwningItsDirectory(t *testing.T) {
 		t.Fatalf("unrelated sibling was removed: %v", err)
 	}
 }
+
+func TestProtectedTreeSurvivesOverflowIncludingEmptyDirectories(t *testing.T) {
+	root := t.TempDir()
+	mandatory := filepath.Join(root, "spool")
+	nested := filepath.Join(mandatory, "outbox")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	receipt := filepath.Join(mandatory, "receipt.stdout")
+	if err := os.WriteFile(receipt, make([]byte, 32), 0600); err != nil {
+		t.Fatal(err)
+	}
+	disposable := filepath.Join(root, "audit")
+	if err := os.WriteFile(disposable, make([]byte, 8), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := EnforceLimit(root, 4, map[string]bool{mandatory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(receipt); err != nil {
+		t.Fatalf("mandatory spill removed: %v", err)
+	}
+	if _, err := os.Stat(nested); err != nil {
+		t.Fatalf("mandatory empty directory removed: %v", err)
+	}
+	if result.RemainingBytes != 32 || result.ProtectedBytes != 32 || result.OverBudgetBytes != 28 {
+		t.Fatalf("mandatory bytes not counted: %+v", result)
+	}
+	if _, err := os.Stat(disposable); !os.IsNotExist(err) {
+		t.Fatalf("disposable remains: %v", err)
+	}
+}

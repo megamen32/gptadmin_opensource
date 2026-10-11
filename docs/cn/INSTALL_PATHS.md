@@ -64,7 +64,8 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 4. 您选择隧道：自动隧道 (FRP/Cloudflare) 或您自己的域
 5. 编写服务单元并启动它们
 6. 打印您的 **Hub URL** 和 `/connect` 加入 URL。内部代理
-   凭据存储在服务器端，并且永远不会打印以进行复制/粘贴。
+   凭据存储在服务器端，并且永远不会打印以进行复制/粘贴。托管共享 connector
+   使用 `https://mcp.bezrabotnyi.com/mcp`；独立安装注册自己的稳定公共 Hub URL。
 
 ## 卸载
 

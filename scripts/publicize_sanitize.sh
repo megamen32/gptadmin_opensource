@@ -21,7 +21,7 @@ while IFS= read -r file; do
 		-e 's/10\.[0-9]+\.[0-9]+\.[0-9]+/203.0.113.10/g' \
 		-e 's/192\.168\.[0-9]+\.[0-9A-Za-z]+/203.0.113.10/g' \
 		-e 's/172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+/203.0.113.10/g' \
-		-e 's/admin-server-100|admin-server-88|server01|server01|server01|server01|server01/server01/g' \
+		-e 's/server01|server01|server01|server01|server01|server01|server01/server01/g' \
 		-e 's/admin/admin/g' \
 		-e 's/uplink|uplink/uplink/g' \
 		-e 's/[0-9]{8,12}:[A-Za-z0-9_-]{30,}/<TELEGRAM_TOKEN>/g' \

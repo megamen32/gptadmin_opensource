@@ -10,11 +10,16 @@ is expected to be centrally available through GPTADMIN.
 
 ## Preconditions
 
+- For this managed installation, the parent GPTADMIN MCP connection should use
+  the canonical `https://mcp.bezrabotnyi.com/mcp` endpoint. If its client has a
+  legacy `u-f….t.became.bezrabotnyi.com` entry, repair it through browser
+  OAuth with `gptadmin.read gptadmin.exec offline_access`. A separate Hub uses
+  its own explicitly selected stable HTTPS origin.
 - The real GPTADMIN connector must expose `listMcpAgents`, `callMcpTool`, and
   the target `shell:*` execution surface. A local checkout or GitHub Actions
   result is not server proof.
 - Identify the target from live inventory; for this project the expected target
-  is `shell:admin-server-100`.
+  is `shell:server01`.
 - Treat Memos as an existing backend. Do not create a second database or copy
   credentials/data.
 

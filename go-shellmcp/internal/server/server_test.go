@@ -506,7 +506,7 @@ while IFS= read -r line; do
  if [ "$n" -eq 1 ]; then
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}'
  else
-  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping"}]}}'
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"ping"}]}}\n' "$n"
  fi
 done
 `
@@ -830,8 +830,8 @@ while IFS= read -r line; do
  case "$line" in
   *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}' ;;
   *'"method":"notifications/initialized"'*) ;;
-  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"allowed","inputSchema":{"type":"object"}},{"name":"hidden","inputSchema":{"type":"object"}}]}}' ;;
-  *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"ok"}]}}' ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"allowed","inputSchema":{"type":"object"}},{"name":"hidden","inputSchema":{"type":"object"}}]}}' ;;
+  *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}}' ;;
  esac
 done
 `
@@ -839,6 +839,7 @@ done
 		t.Fatal(err)
 	}
 	s := New(Config{MCPConfig: filepath.Join(t.TempDir(), "mcp.json"), SpillDir: t.TempDir()})
+	defer s.Close()
 	agent := supervisor.Agent{Ref: "child", Name: "child", Transport: "stdio", Command: script, Enabled: true, ToolAllowlist: []string{"allowed"}}
 	if err := s.supervisor.Upsert(agent); err != nil {
 		t.Fatal(err)
@@ -857,5 +858,8 @@ done
 	}
 	if _, err := s.mcpChildCall(context.Background(), map[string]any{"ref": "child", "name": "hidden", "arguments": map[string]any{}}); err == nil {
 		t.Fatal("hidden tool call was not blocked")
+	}
+	if _, err := s.mcpChildCall(context.Background(), map[string]any{"ref": "child", "name": "allowed", "arguments": map[string]any{}}); err != nil {
+		t.Fatalf("allowed tool call failed: %v", err)
 	}
 }

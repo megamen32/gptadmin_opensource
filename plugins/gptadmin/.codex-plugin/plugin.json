@@ -1,13 +1,13 @@
 {
   "name": "gptadmin",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Connect Codex to the OAuth-protected GPTAdmin MCP hub for profiles, server administration, child-MCP installation, and memory-directed workflows.",
   "author": {
     "name": "GPTAdmin contributors",
     "url": "https://github.com/megamen32"
   },
-  "homepage": "https://github.com/megamen32/gptadmin_opensource",
-  "repository": "https://github.com/megamen32/gptadmin_opensource",
+  "homepage": "https://github.com/megamen32/gptadmin",
+  "repository": "https://github.com/megamen32/gptadmin",
   "license": "AGPL-3.0",
   "keywords": [
     "mcp",
@@ -37,6 +37,5 @@
       "Install or use a child MCP through GPTAdmin.",
       "Use the memory MCP named by the active GPTAdmin profile."
     ]
-  },
-  "longDescription": ""
+  }
 }

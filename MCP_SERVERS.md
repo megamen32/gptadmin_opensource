@@ -1,6 +1,17 @@
 # Adding GPTAdmin MCP stdio servers
 
-Use this from `~/gptadmin` on `admin-server-100`.
+Use this from `~/gptadmin` on `server01`.
+
+## Connector identity
+
+The canonical public MCP/OAuth origin is `https://mcp.bezrabotnyi.com`; native
+MCP clients use `https://mcp.bezrabotnyi.com/mcp`. Keep this public origin as
+the OAuth issuer/resource identity when configuring ChatGPT or Codex.
+
+An `u-f<ID>.t.became.bezrabotnyi.com` hostname may still be present as a legacy
+FRP transport or recovery fallback. It is not the identity for a new
+ChatGPT/Codex connector. If a client has been bound to that fallback, switch
+it to the canonical endpoint and repeat the OAuth connection flow.
 
 For a Mac that has only ShellMCP installed, setup must receive the target
 Hub's `MCP_RELAY_AGENT_TOKEN`; a locally generated `CTL_TOKEN` is not a relay
@@ -38,7 +49,7 @@ reads it before executing the MCP server.
 
 ```bash
 ./mcp-add chrome-devtools-88 \
-  --agent-id ChromeDevTools-admin-server-88 \
+  --agent-id ChromeDevTools-server01 \
   --run-as-user admin \
   --cwd /home/admin \
   --stdio-format ndjson \

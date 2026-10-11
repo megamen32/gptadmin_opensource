@@ -2,6 +2,21 @@
 
 GPTAdmin hub can be exposed to the internet using various tunnel backends. This allows LLM clients (Qwen, ChatGPT, etc.) to connect to your local hub without requiring a public IP address or domain.
 
+## Public identity versus tunnel transport
+
+For the shared ChatGPT/Codex/native-MCP connector, the canonical public origin
+is `https://mcp.bezrabotnyi.com` and the endpoint is
+`https://mcp.bezrabotnyi.com/mcp`. OAuth issuer/resource discovery must use
+that origin.
+
+For this managed deployment, FRP `u-f<ID>.t.became.bezrabotnyi.com`
+hostnames and Cloudflare Quick Tunnel URLs are transport or recovery fallbacks,
+not the shared connector identity. A separate installation may deliberately use
+its own stable tunnel URL as `PUBLIC_ORIGIN`; setup must not overwrite an
+explicitly configured origin with a generated fallback. If a managed client
+still uses a legacy `u-f` URL, move it to the canonical endpoint and repeat
+OAuth discovery/authorization.
+
 ## Quick Start
 
 ### Cloudflare Quick Tunnel (Recommended for Testing)
@@ -15,8 +30,9 @@ TUNNEL_TYPE=cloudflare uv run python -m gptadmin.hub
 This will create a temporary tunnel and print the public URL:
 ```
 ======================================================================
-Hub public URL: https://random-words-123.trycloudflare.com/mcp
-Add this to your LLM client (Qwen, ChatGPT, etc.)
+Temporary Hub transport URL: https://random-words-123.trycloudflare.com/mcp
+Use only for short-lived transport tests unless that separate installation
+deliberately selects the URL as its public OAuth origin.
 ======================================================================
 ```
 
@@ -157,3 +173,31 @@ To add a new tunnel backend:
    ```
 3. Add to `__init__.py` exports
 4. Add to hub's `main()` function
+
+## bezhook — туннель любой локальной службы одной командой (2026-09)
+
+`bezhook` — standalone-клиент над нашим FRP-флотом (frp v0.64.0 как библиотека),
+для случаев «мне нужен публичный URL на мой локальный порт прямо сейчас», без
+полной установки хаба. Репозиторий: `bezhook/`, зеркало и установка:
+
+```sh
+curl -fsSL https://dl.t.became.bezrabotnyi.com/bezhook/install.sh | sh   # Linux/macOS
+iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex  # Windows
+```
+
+```sh
+bezhook 3000 --sub myapp     # -> https://myapp.t.became.bezrabotnyi.com (TTL 72h)
+```
+
+Fanout на все три frps (server-100 best-effort, server01/server01 always-on), один
+стабильный URL, субдомен освобождается при остановке клиента. Детали,
+ограничения и разработка: `bezhook/README.md`. Это НЕ замена hub-туннелю
+`gptadmin-tunnel-frpc` — тот остаётся основным для хаба.
+
+### bezhook v0.2: провайдеры cloudflared/ngrok под капотом
+
+`bezhook 3000 --also cloudflared` (или `--backend cloudflared|ngrok`) зовёт
+установленные бинарники cloudflared/ngrok как субпроцессы и печатает их URL
+рядом с frp-URL. Бесплатные quick-туннели Cloudflare из домашней сети сейчас
+стабильно отдают 530 (известная беда CF free tier); ngrok требует
+`NGROK_AUTHTOKEN`. Детали: `bezhook/README.md`.

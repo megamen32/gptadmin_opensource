@@ -1,8 +1,10 @@
-FROM golang:1.25-bookworm AS build
-WORKDIR /src
+FROM golang:1.26-bookworm AS build
+WORKDIR /src/go-hub
 COPY go-hub/go.mod go-hub/go.sum ./
+COPY go-shellmcp/go.mod go-shellmcp/go.sum ../go-shellmcp/
 RUN go mod download
 COPY go-hub/ ./
+COPY go-shellmcp/ ../go-shellmcp/
 RUN CGO_ENABLED=0 go build -o /out/gptadmin_hub ./cmd/gptadmin-hub
 
 FROM python:3.12-slim-bookworm

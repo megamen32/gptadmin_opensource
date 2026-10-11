@@ -165,6 +165,10 @@ func (s *Server) refreshManagedMCPStateLocked() error {
 	return nil
 }
 func (s *Server) saveManagedMCPStateLocked() error {
+	if err := s.authWriteErrorLocked(); err != nil {
+		s.managedMCP = cloneAccessRecords(s.managedMCPPersisted)
+		return err
+	}
 	path := s.managedMCPStatePath()
 	if path == "" {
 		return nil
@@ -217,6 +221,10 @@ func (s *Server) refreshOAuthClientsStateLocked() error {
 	return nil
 }
 func (s *Server) saveOAuthClientsStateLocked() error {
+	if err := s.authWriteErrorLocked(); err != nil {
+		s.oauthClients = cloneAccessRecords(s.oauthClientsPersisted)
+		return err
+	}
 	path := s.oauthClientsStatePath()
 	if path == "" {
 		return nil

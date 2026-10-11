@@ -8,8 +8,16 @@ import (
 )
 
 func TestCloudOSListsServer100(t *testing.T) {
-	server := New(Config{})
+	server := New(Config{CtlToken: "owner-control-token"})
+	// The desktop API is never public: unauthenticated calls are rejected.
+	anon := httptest.NewRequest(http.MethodGet, "/api/v1/cloud-os/computers", nil)
+	anonRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(anonRes, anon)
+	if anonRes.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d, want %d", anonRes.Code, http.StatusUnauthorized)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cloud-os/computers", nil)
+	req.Header.Set("Authorization", "Bearer owner-control-token")
 	res := httptest.NewRecorder()
 
 	server.Handler().ServeHTTP(res, req)

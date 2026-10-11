@@ -53,6 +53,8 @@ type Agent struct {
 	// Transport selects how the child MCP is reached. Local processes use
 	// "stdio"; remote servers use "streamable-http" or "sse".
 	Transport string `json:"transport,omitempty"`
+	// ConnectionMode permits audited stateless sharing; empty defaults to session isolation.
+	ConnectionMode string `json:"connection_mode,omitempty"`
 	// URL is required for remote transports and empty for stdio children.
 	URL string `json:"url,omitempty"`
 	// Headers are attached to remote MCP requests. Values may reference
@@ -277,6 +279,11 @@ func normalizeAgent(agent Agent) Agent {
 }
 
 func validateAgent(agent Agent) error {
+	switch agent.ConnectionMode {
+	case "", "session", "stateless":
+	default:
+		return errors.New("supervisor: connection_mode must be session or stateless")
+	}
 	if agent.Ref == "" {
 		return errors.New("supervisor: agent ref is required")
 	}
@@ -660,18 +667,19 @@ func tryDecodeObject(data []byte) ([]Agent, bool) {
 func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 	var obj struct {
 		MCPServers map[string]struct {
-			Ref       string            `json:"ref"`
-			AgentID   string            `json:"agent_id"`
-			Name      string            `json:"name"`
-			Command   string            `json:"command"`
-			Args      []string          `json:"args"`
-			Env       map[string]string `json:"env"`
-			Cwd       string            `json:"cwd"`
-			User      string            `json:"user"`
-			Transport string            `json:"transport"`
-			URL       string            `json:"url"`
-			Headers   map[string]string `json:"headers"`
-			Enabled   *bool             `json:"enabled"`
+			Ref            string            `json:"ref"`
+			AgentID        string            `json:"agent_id"`
+			Name           string            `json:"name"`
+			Command        string            `json:"command"`
+			Args           []string          `json:"args"`
+			Env            map[string]string `json:"env"`
+			Cwd            string            `json:"cwd"`
+			User           string            `json:"user"`
+			Transport      string            `json:"transport"`
+			ConnectionMode string            `json:"connection_mode"`
+			URL            string            `json:"url"`
+			Headers        map[string]string `json:"headers"`
+			Enabled        *bool             `json:"enabled"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
@@ -691,17 +699,18 @@ func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 		// best-effort; no sort possible means we still iterate in some order
 		for k, v := range obj.MCPServers {
 			out = append(out, Agent{
-				Ref:       firstNonEmpty(v.AgentID, v.Ref, k),
-				Name:      firstNonEmpty(v.Name, k),
-				Command:   v.Command,
-				Args:      v.Args,
-				Env:       v.Env,
-				Cwd:       v.Cwd,
-				User:      v.User,
-				Transport: firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
-				URL:       v.URL,
-				Headers:   v.Headers,
-				Enabled:   enabledOrDefault(v.Enabled),
+				Ref:            firstNonEmpty(v.AgentID, v.Ref, k),
+				Name:           firstNonEmpty(v.Name, k),
+				Command:        v.Command,
+				Args:           v.Args,
+				Env:            v.Env,
+				Cwd:            v.Cwd,
+				User:           v.User,
+				Transport:      firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
+				ConnectionMode: v.ConnectionMode,
+				URL:            v.URL,
+				Headers:        v.Headers,
+				Enabled:        enabledOrDefault(v.Enabled),
 			})
 		}
 		return out, true
@@ -709,17 +718,18 @@ func tryDecodeMCPServers(data []byte) ([]Agent, bool) {
 	for _, k := range keys {
 		v := obj.MCPServers[k]
 		out = append(out, Agent{
-			Ref:       firstNonEmpty(v.AgentID, v.Ref, k),
-			Name:      firstNonEmpty(v.Name, k),
-			Command:   v.Command,
-			Args:      v.Args,
-			Env:       v.Env,
-			Cwd:       v.Cwd,
-			User:      v.User,
-			Transport: firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
-			URL:       v.URL,
-			Headers:   v.Headers,
-			Enabled:   enabledOrDefault(v.Enabled),
+			Ref:            firstNonEmpty(v.AgentID, v.Ref, k),
+			Name:           firstNonEmpty(v.Name, k),
+			Command:        v.Command,
+			Args:           v.Args,
+			Env:            v.Env,
+			Cwd:            v.Cwd,
+			User:           v.User,
+			Transport:      firstNonEmpty(v.Transport, transportFor(v.Command, v.URL)),
+			ConnectionMode: v.ConnectionMode,
+			URL:            v.URL,
+			Headers:        v.Headers,
+			Enabled:        enabledOrDefault(v.Enabled),
 		})
 	}
 	return out, true

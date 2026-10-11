@@ -132,6 +132,7 @@ describe("Profiles / Instructions", () => {
     expect(screen.getByRole("link", { name: "Автоматизация" })).toHaveAttribute("href", "#webhooks");
     expect(screen.getByRole("link", { name: "Журнал" })).toHaveAttribute("href", "#audit");
     expect(screen.getByRole("button", { name: "Для администратора" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("link", { name: "CloudOS (дополнительно)" })).toHaveAttribute("href", "/cloudos/");
   });
 });
 
@@ -287,7 +288,7 @@ describe("Clients / Auth", () => {
     expect(screen.queryByText("client-secret")).not.toBeInTheDocument();
     expect(screen.queryByText("bearer-once")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Выдать managed token" }));
+    await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("bearer-once");
     expect(screen.getByRole("button", { name: "Скопировать bearer" })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/admin/api/mcp/issue-token", expect.objectContaining({ method: "POST" }));
@@ -340,7 +341,7 @@ describe("Clients / Auth", () => {
 const webhookRouteFixture = {
   id: "repair-100",
   kind: "shell",
-  target: "shell:admin-server-100",
+  target: "shell:server01",
   auth_mode: "hmac",
   callback_configured: false,
 };
@@ -372,7 +373,7 @@ describe("Вебхуки и агенты", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить маршруты");
     await userEvent.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByText("repair-100")).toBeInTheDocument();
-    expect(screen.getByText("shell:admin-server-100")).toBeInTheDocument();
+    expect(screen.getByText("shell:server01")).toBeInTheDocument();
     expect(screen.queryByText("must-never-render")).not.toBeInTheDocument();
     expect(screen.queryByText("must-never-render-either")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/webhook-routes", expect.objectContaining({ credentials: "same-origin" }));
@@ -397,7 +398,7 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Короткое имя"), "repair-100");
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "write-only-secret");
     await userEvent.selectOptions(screen.getByLabelText("Что сделать"), "shell");
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:admin-server-100");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:server01");
     await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
     await userEvent.type(screen.getByLabelText("Рабочий каталог"), "/opt/notify");
     await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
@@ -412,7 +413,7 @@ describe("Вебхуки и агенты", () => {
       signature_version: "v2",
       action: expect.objectContaining({
         kind: "shell",
-        target: "shell:admin-server-100",
+        target: "shell:server01",
         command: "fixed-helper repair_100",
         cwd: "/opt/notify",
       }),
@@ -438,12 +439,12 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Короткое имя"), "ordered-100");
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "ordered-secret");
     await userEvent.clear(screen.getByLabelText("Где выполнить"));
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "mcp:shell:admin-server-100:Notify");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "mcp:shell:server01:Notify");
     await userEvent.type(screen.getByLabelText("Инструмент"), "send_message");
     await userEvent.click(screen.getByRole("button", { name: "+ Добавить шаг" }));
     await userEvent.type(screen.getByLabelText("Пауза перед шагом, секунд"), "30");
     const targets = screen.getAllByLabelText("Где выполнить");
-    await userEvent.type(targets[1], "mcp:shell:admin-server-100:AgentHerder");
+    await userEvent.type(targets[1], "mcp:shell:server01:AgentHerder");
     const tools = screen.getAllByLabelText("Инструмент");
     await userEvent.type(tools[1], "new_or_resume");
     await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
@@ -452,8 +453,8 @@ describe("Вебхуки и агенты", () => {
     expect(createdBody).toEqual(expect.objectContaining({
       id: "ordered-100",
       actions: [
-        expect.objectContaining({ target: "mcp:shell:admin-server-100:Notify", tool: "send_message" }),
-        expect.objectContaining({ target: "mcp:shell:admin-server-100:AgentHerder", tool: "new_or_resume", delay_seconds: 30 }),
+        expect.objectContaining({ target: "mcp:shell:server01:Notify", tool: "send_message" }),
+        expect.objectContaining({ target: "mcp:shell:server01:AgentHerder", tool: "new_or_resume", delay_seconds: 30 }),
       ],
     }));
   });
@@ -463,7 +464,7 @@ describe("Вебхуки и агенты", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const path = String(input);
       if (path === "/webhook-routes" && !init?.method) return webhookResponse({ routes: [webhookRouteFixture] });
-      if (path === "/webhook-routes/repair-100" && init?.method === "PUT") return webhookResponse({ ...webhookRouteFixture, target: "shell:admin-server-100-v2" });
+      if (path === "/webhook-routes/repair-100" && init?.method === "PUT") return webhookResponse({ ...webhookRouteFixture, target: "shell:server01-v2" });
       if (path === "/webhook-routes/repair-100" && init?.method === "DELETE") return webhookResponse(null, 204);
       if (path === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
       throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
@@ -474,7 +475,7 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "replacement-secret");
     await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
     await userEvent.clear(screen.getByLabelText("Где выполнить"));
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:admin-server-100-v2");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:server01-v2");
     await userEvent.click(screen.getByRole("button", { name: "Заменить маршрут" }));
     expect(await screen.findByText("Маршрут заменён")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/webhook-routes/repair-100", expect.objectContaining({ method: "PUT" }));
@@ -528,7 +529,216 @@ it("allows issuing the first token when the client inventory is empty", async ()
   });
   render(<App />);
   expect(await screen.findByRole("heading", { name: "Клиентов пока нет" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Выдать managed token" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Выпустить токен" })).toBeEnabled();
+});
+
+it("offers the token issue action up front and explains how to use the result", async () => {
+  window.history.replaceState(null, "", "#clients");
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/mcp/issue-token" && init?.method === "POST") {
+      return new Response(JSON.stringify({ token_id: "jwt-new", client_id: "managed-client", access_token: "fake-bearer-value", token_type: "Bearer" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<App />);
+
+  // entry point is visible before the admin touches the inventory at all
+  expect(await screen.findByRole("button", { name: "Новый клиент" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Новый клиент: выпустить токен" })).toBeInTheDocument();
+
+  // the form explains the granted scopes and the paste target
+  expect(screen.getByText("gptadmin.read gptadmin.inspect")).toBeInTheDocument();
+  expect(screen.getByText("mcp.json")).toBeInTheDocument();
+
+  await userEvent.selectOptions(screen.getByDisplayValue("Только чтение"), "full");
+  expect(screen.getByText("gptadmin.read gptadmin.exec")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  // issued value is shown once, as a paste-ready Authorization header
+  expect(await screen.findByRole("alert")).toHaveTextContent("fake-bearer-value");
+  expect(screen.getByText("Authorization: Bearer fake-bearer-value")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Скопировать Authorization" })).toBeInTheDocument();
+  // never leaks into the inventory rows
+  expect(document.querySelector(".client-list")?.textContent ?? "").not.toContain("fake-bearer-value");
+});
+
+// Сутки и дата: точность до секунды здесь не нужна и делает тест нестабильным.
+function dayStamp(date: Date): string {
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function clientsAndProfilesFetch(
+  clients: unknown[],
+  token: Record<string, unknown> | null,
+): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/admin/api/mcp/issue-token" && init?.method === "POST" && token) {
+      return new Response(JSON.stringify(token), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+}
+
+// issue-token не возвращает scope и метку истечения, поэтому UI выводит их сам:
+// scopes из access_mode, срок — из запрошенного TTL с честной пометкой «ожидаемый».
+it("states what the issued token actually grants: scopes, access mode and expected expiry", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-granted",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    role: "client",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  // scopes выведены из access_mode, а не выдуманы: read-only не должен выглядеть полным
+  expect(callout).toHaveTextContent("gptadmin.read gptadmin.inspect");
+  expect(callout).not.toHaveTextContent("gptadmin.read gptadmin.exec");
+  expect(callout).toHaveTextContent("Режим доступа");
+  expect(callout).toHaveTextContent("Только чтение");
+  // срока в ответе нет, поэтому он помечен как ожидаемый, а не как подтверждённый
+  expect(callout).toHaveTextContent("Ожидаемое истечение");
+  expect(callout).toHaveTextContent(dayStamp(new Date(Date.now() + 7 * 86_400_000)));
+});
+
+it("follows the full access mode into the granted scopes", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-full",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "full",
+    token_type: "Bearer",
+    expires_in: 30 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.selectOptions(screen.getByDisplayValue("Только чтение"), "full");
+  fireEvent.change(screen.getByLabelText("Срок действия, дней"), { target: { value: "30" } });
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  expect(callout).toHaveTextContent("gptadmin.read gptadmin.exec");
+  expect(callout).toHaveTextContent("Полный доступ");
+  expect(callout).toHaveTextContent(dayStamp(new Date(Date.now() + 30 * 86_400_000)));
+});
+
+it("hands out a copy-ready mcp.json with the Hub url from the issue response", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-config",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  // адрес Hub показан на экране выпуска, а не спрятан в другой вкладке
+  expect(callout).toHaveTextContent("Адрес Hub");
+  expect(callout).toHaveTextContent("https://hub.example/mcp");
+  // цельный серверный блок, который можно вставить в mcp.json как есть
+  const config = JSON.parse(Array.from(callout.querySelectorAll("code")).pop()?.textContent ?? "{}");
+  expect(config).toEqual({
+    mcpServers: {
+      gptadmin: {
+        type: "http",
+        url: "https://hub.example/mcp",
+        headers: { Authorization: "Bearer fake-bearer-value" },
+      },
+    },
+  });
+  expect(screen.getByRole("button", { name: "Скопировать mcp.json" })).toBeInTheDocument();
+});
+
+it("falls back to the panel origin when the issue response omits mcp_url", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-no-url",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+  });
+  render(<App />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+
+  const callout = await screen.findByRole("alert");
+  const config = JSON.parse(Array.from(callout.querySelectorAll("code")).pop()?.textContent ?? "{}");
+  expect(config.mcpServers.gptadmin.url).toBe(`${window.location.origin}/mcp`);
+});
+
+it("carries access mode and expiry on the client card so a token is identifiable later", async () => {
+  window.history.replaceState(null, "", "#clients");
+  const expiresAt = Math.floor(Date.now() / 1000) + 9 * 86_400;
+  clientsAndProfilesFetch([
+    { id: "jwt-1", client_id: "codex", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: expiresAt, revoked_at: null },
+  ], null);
+  render(<App />);
+
+  const card = (await screen.findByText("codex")).closest(".client-row");
+  expect(card).toHaveTextContent("Режим доступа");
+  expect(card).toHaveTextContent("Только чтение");
+  expect(card).toHaveTextContent("Истекает");
+  expect(card).toHaveTextContent(new Date(expiresAt * 1000).toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }));
+});
+
+it("keeps the issued token next to the form and lets the form be dismissed", async () => {
+  window.history.replaceState(null, "", "#clients");
+  clientsAndProfilesFetch([], {
+    ok: true,
+    token_id: "jwt-near",
+    client_id: "managed-client",
+    access_token: "fake-bearer-value",
+    access_mode: "readonly",
+    token_type: "Bearer",
+    expires_in: 7 * 24 * 3600,
+    mcp_url: "https://hub.example/mcp",
+  });
+  render(<App />);
+
+  // форма закрывается без выпуска токена и возвращается по кнопке
+  await userEvent.click(await screen.findByRole("button", { name: "Отмена" }));
+  expect(screen.queryByRole("button", { name: "Выпустить токен" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Показать форму" }));
+  expect(screen.getByRole("button", { name: "Выпустить токен" })).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+  const callout = await screen.findByRole("alert");
+  // результат — сосед формы, а не блок в начале страницы над списком клиентов
+  const formSection = screen.getByRole("heading", { name: "Новый клиент: выпустить токен" }).closest("section");
+  expect(formSection).not.toBeNull();
+  const followsForm = formSection ? formSection.compareDocumentPosition(callout) & Node.DOCUMENT_POSITION_FOLLOWING : 0;
+  expect(followsForm).toBeTruthy();
+  expect(callout.parentElement).toBe(formSection?.parentElement);
 });
 
 it("does not erase a new profile draft when the initial list arrives late", async () => {

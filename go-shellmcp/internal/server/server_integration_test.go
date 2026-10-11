@@ -402,7 +402,7 @@ func TestOutboxBackoffMonotonicAndCapped(t *testing.T) {
 	}
 }
 
-func TestOutboxDropsHubNotFoundResult(t *testing.T) {
+func TestOutboxRetainsHubNotFoundResult(t *testing.T) {
 	requests := 0
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -430,11 +430,18 @@ func TestOutboxDropsHubNotFoundResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	malformed := filepath.Join(outboxDir, "malformed.json")
+	if err := os.WriteFile(malformed, []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	s.flushOutbox(context.Background())
+	if raw, err := os.ReadFile(malformed); err != nil || string(raw) != "{broken" {
+		t.Fatalf("malformed evidence changed: %q %v", raw, err)
+	}
 	if requests != 1 {
 		t.Fatalf("requests=%d", requests)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("stale outbox file remains: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unacknowledged outbox file removed: %v", err)
 	}
 }

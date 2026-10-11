@@ -120,7 +120,11 @@ def test_publication_waits_for_every_platform_and_ui_gate() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = workflow["jobs"]["build-and-release"]
 
-    assert job["needs"] == ["admin-ui-build", "failover-e2e", "docs-as-code-contract", "candidate-client-contract", "macos-build", "windows-shellmcp"]
+    assert set(job["needs"]) >= {
+        "go-unit-tests", "operator-checks", "admin-ui-build", "failover-e2e",
+        "installer-e2e-linux", "docs-as-code-contract", "candidate-client-contract",
+        "macos-build", "windows-shellmcp",
+    }
     assert "always()" not in str(job.get("if", ""))
 
 

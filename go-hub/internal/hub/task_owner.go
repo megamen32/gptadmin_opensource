@@ -73,12 +73,22 @@ func (s *Server) taskOwnerAlive(owner string) (bool, error) {
 // Close releases task ownership after HTTP serving and in-flight operations
 // have stopped. It is idempotent; a closed runtime cannot create new tasks.
 func (s *Server) Close() error {
+	s.stopMembershipLoops()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.taskRuntimeClosed {
 		return nil
 	}
 	s.taskRuntimeClosed = true
+	if s.authRuntimeLock != nil {
+		_ = s.authRuntimeLock.Close()
+	}
+	if s.nodePeerClient != nil {
+		s.nodePeerClient.CloseIdleConnections()
+	}
+	for _, client := range s.nodePeerPinnedClients {
+		client.CloseIdleConnections()
+	}
 	if s.taskRuntimeStop != nil {
 		close(s.taskRuntimeStop)
 	}

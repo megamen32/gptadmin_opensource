@@ -116,7 +116,7 @@ func (s *Server) accessProfilesStatePath() string {
 	if s.cfg.ConfigDir == "" {
 		return ""
 	}
-	return filepath.Join(s.cfg.ConfigDir, accessProfilesStateFilename)
+	return filepath.Join(s.authStoreDir(), accessProfilesStateFilename)
 }
 
 func readAccessProfilesState(statePath string) (map[string]AccessProfile, error) {
@@ -261,6 +261,12 @@ func (s *Server) accessProfilesSnapshot() (map[string]AccessProfile, error) {
 }
 
 func (s *Server) updateAccessProfiles(mutator func(map[string]AccessProfile) error) (map[string]AccessProfile, error) {
+	s.mu.Lock()
+	writeErr := s.authWriteErrorLocked()
+	s.mu.Unlock()
+	if writeErr != nil {
+		return nil, writeErr
+	}
 	accessProfilesProcessMu.Lock()
 	defer accessProfilesProcessMu.Unlock()
 	path := s.accessProfilesStatePath()
@@ -299,6 +305,14 @@ func (s *Server) updateAccessProfiles(mutator func(map[string]AccessProfile) err
 	}
 	s.mu.Lock()
 	s.accessProfiles = cloneAccessProfiles(profiles)
+	if s.authContinuityEnabled() {
+		s.authState.ProfilesPresent = true
+		if err := writeAccessStateJSON(s.authStatePath(), s.authState, 4096); err != nil {
+			s.authState.Pending = true
+			s.mu.Unlock()
+			return nil, err
+		}
+	}
 	s.mu.Unlock()
 	return profiles, nil
 }

@@ -64,7 +64,9 @@ iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
 4. You pick a tunnel: auto-tunnel (FRP/Cloudflare) or your own domain
 5. Writes service units and starts them
 6. Prints your **Hub URL** and the `/connect` onboarding URL. Internal agent
-   credentials are stored server-side and are never printed for copy/paste.
+   credentials are stored server-side and are never printed for copy/paste. The
+   managed shared connector uses `https://mcp.bezrabotnyi.com/mcp`; a separate
+   installation registers its own stable public Hub URL.
 
 ## Uninstall
 

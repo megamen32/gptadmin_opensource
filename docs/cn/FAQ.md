@@ -51,15 +51,20 @@ MCP 客户端的 OAuth 连接并管理代理设备凭据
 ## `/mcp` 返回 401 — 为什么？
 
 `/mcp` 需要限定范围的 OAuth 连接。重新打开Hub连接页面并
-完成 OAuth 流程； MCP 客户端自动处理连接。对于
-本地开发，Hub 可能会放宽本地主机上的身份验证。参见[配置→
-OAuth](./CONFIGURATION.md#oauth)。
+完成 OAuth 流程； MCP 客户端自动处理连接。托管部署使用
+`https://mcp.bezrabotnyi.com`，其他安装使用自己的稳定公共 origin。对于
+本地开发，Hub 可能会放宽本地主机上的身份验证。参见[配置→OAuth](./CONFIGURATION.md#oauth)。
+
+如果 ChatGPT 或 Codex 在 Hub 变更后仍使用旧 OAuth 元数据，请重新创建冻结的
+ChatGPT 应用，或断开并重新创建 Codex MCP 连接。仅刷新 Actions 不一定会更新
+已保存的元数据。重新授权时使用 `gptadmin.read gptadmin.exec offline_access`。
 
 ## 我需要自己的域名吗？
 
-不会。安装程序通过 FRP 提供自动隧道 — 您可以在
-`frp.bezrabotnyi.com` 没有 DNS 设置。对于您自己的域，请使用 Cloudflare
-隧道或 nginx + Certbot。请参阅[隧道](./TUNNELS_DOCS.md)。
+不会。安装程序通过 FRP 提供自动隧道；它可以作为该独立安装的稳定公共
+origin。托管的共享 ChatGPT/Codex connector 使用
+`https://mcp.bezrabotnyi.com`；不要让 fallback 隧道替换已明确配置的 origin。
+对于您自己的域，请使用 Cloudflare 隧道或 nginx + Certbot。请参阅[隧道](./TUNNELS_DOCS.md)。
 
 ## 它可以在 Windows 上运行吗？
 

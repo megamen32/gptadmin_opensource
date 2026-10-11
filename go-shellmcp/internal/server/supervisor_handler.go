@@ -2,14 +2,19 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os/user"
 	"strings"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/audit"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 )
 
@@ -129,15 +134,30 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 		health, _ = value.(map[string]map[string]any)
 	}
 	out := make([]map[string]any, 0, len(agents))
+	runnerUser := ""
+	if runner, err := user.Current(); err == nil {
+		runnerUser = runner.Username
+	}
 	for _, a := range agents {
+		configuredUser := ""
+		if a.User != "" {
+			if owner, err := user.Lookup(a.User); err == nil {
+				configuredUser = owner.Username
+			}
+		}
 		descriptor := map[string]any{
-			"ref":       a.Ref,
-			"name":      a.Name,
-			"transport": a.Transport,
-			"command":   a.Command,
-			"args":      a.Args,
-			"url":       a.URL,
-			"enabled":   a.Enabled,
+			"ref":                       a.Ref,
+			"name":                      a.Name,
+			"transport":                 a.Transport,
+			"command":                   a.Command,
+			"args":                      a.Args,
+			"url":                       a.URL,
+			"enabled":                   a.Enabled,
+			"connection_mode":           a.ConnectionMode,
+			"connection_scopes_version": 1,
+			"connection_instance":       s.mcpConnectionInstance(a.Ref),
+			"managed_stdio_owner":       configuredUser != "" && configuredUser == runnerUser,
+			"managed_stdio_platform":    mcpclient.ScopedProcessGroupsSupported(),
 		}
 		if current, ok := health[a.Ref]; ok {
 			descriptor["health"] = current
@@ -147,4 +167,20 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 		out = append(out, descriptor)
 	}
 	return out
+}
+
+func (s *Server) mcpConnectionInstance(ref string) string {
+	if s.connectionInstance == "" || s.childMCP == nil {
+		return ""
+	}
+	return s.mcpConnectionInstanceAt(ref, s.childMCP.Generation(ref))
+}
+
+func (s *Server) mcpConnectionInstanceAt(ref string, generation uint64) string {
+	if s.connectionInstance == "" {
+		return ""
+	}
+	value := fmt.Sprintf("%s\x00%s\x00%d", s.connectionInstance, ref, generation)
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
 }

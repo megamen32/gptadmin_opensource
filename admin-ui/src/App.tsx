@@ -1,4 +1,5 @@
 import { logicalConnections, shortId } from "./connections";
+import { formatTimestamp } from "./ui/format";
 import JobsScreen from "./JobsScreen";
 import AgentsScreen from "./AgentsScreen";
 import ResourcesScreen from "./ResourcesScreen";
@@ -492,6 +493,36 @@ function clientStatusLabel(status: string): string {
   return status;
 }
 
+function scopeForAccessMode(mode: AccessMode): string {
+  return mode === "readonly" ? "gptadmin.read gptadmin.inspect" : "gptadmin.read gptadmin.exec";
+}
+
+function accessModeLabel(mode: AccessMode | null): string {
+  if (mode === "readonly") return "Только чтение";
+  if (mode === "full") return "Полный доступ";
+  return "Режим не задан";
+}
+
+// Hub отдаёт mcp_url = origin + "/mcp" вместе с issue/rotate/value. Если поле
+// отсутствует, адрес выводится из origin, с которого отдана сама панель.
+function hubMcpUrl(token: TokenResponse | null): string {
+  const fromHub = token?.mcp_url?.trim();
+  return fromHub || `${window.location.origin}/mcp`;
+}
+
+// Каноничная запись сервера для клиента: /mcp + заголовок Authorization.
+function mcpServerConfig(url: string, accessToken: string): string {
+  return JSON.stringify({
+    mcpServers: {
+      gptadmin: {
+        type: "http",
+        url,
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    },
+  }, null, 2);
+}
+
 function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setToken: (value: TokenResponse | null) => void }) {
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [filter, setFilter] = useState("");
@@ -509,6 +540,14 @@ function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setTo
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [issuing, setIssuing] = useState(false);
+  const issueInputRef = useRef<HTMLInputElement | null>(null);
+  const [issueFormOpen, setIssueFormOpen] = useState(true);
+  const pendingIssueFocusRef = useRef(false);
+  const tokenCalloutRef = useRef<HTMLDivElement | null>(null);
+  const scrolledTokenRef = useRef<string | null>(null);
+  // issue-token не отдаёт scope и метку истечения, поэтому запоминаем, чем
+  // именно этот выпуск был заказан, и помечаем срок как ожидаемый.
+  const [issued, setIssued] = useState<{ tokenId: string; accessMode: AccessMode; ttlDays: number; issuedAtMs: number } | null>(null);
   const [mutating, setMutating] = useState(false);
 
   async function load(): Promise<void> {
@@ -537,9 +576,13 @@ function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setTo
     setIssuing(true);
     setMessage(null);
     try {
-      const result = await issueMcpToken({ client_id: clientId.trim(), ttl_days: Math.max(1, Number(ttlDays) || 7), access_mode: accessMode, profile_id: issueProfileId || undefined, role: issueRole });
+      const requestedTtlDays = Math.max(1, Number(ttlDays) || 7);
+      const issuedAtMs = Date.now();
+      const expiresAtSeconds = Math.floor((issuedAtMs + requestedTtlDays * 86_400_000) / 1000);
+      const result = await issueMcpToken({ client_id: clientId.trim(), ttl_days: requestedTtlDays, access_mode: accessMode, profile_id: issueProfileId || undefined, role: issueRole });
+      setIssued({ tokenId: result.token_id, accessMode: result.access_mode ?? accessMode, ttlDays: requestedTtlDays, issuedAtMs });
       setToken(result);
-      setClients((items) => [...items, { id: result.token_id, client_id: result.client_id || clientId, role: issueRole, token_kind: "durable", status: "active", access_mode: accessMode, profile_id: issueProfileId || null, scope: null, redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null }]);
+      setClients((items) => [...items, { id: result.token_id, client_id: result.client_id || clientId, role: issueRole, token_kind: "durable", status: "active", access_mode: accessMode, profile_id: issueProfileId || null, scope: scopeForAccessMode(accessMode), redirect_uris: [], issued_at: null, created_at: expiresAtSeconds, expires_at: expiresAtSeconds, revoked_at: null }]);
       setSelectedClientId(result.token_id);
       setSelectedRole(issueRole);
       setSelectedProfileId(issueProfileId);
@@ -557,6 +600,41 @@ function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setTo
     setMessage("Bearer скопирован. Храните его как пароль.");
   }
 
+  async function copyAuthorizationHeader(): Promise<void> {
+    if (!token) return;
+    await navigator.clipboard?.writeText(`Authorization: Bearer ${token.access_token}`);
+    setMessage("Заголовок Authorization скопирован — вставьте его в mcp.json.");
+  }
+
+  async function copyServerConfig(): Promise<void> {
+    if (!token) return;
+    await navigator.clipboard?.writeText(mcpConfig);
+    setMessage("Конфигурация mcp.json скопирована — вставьте её в файл клиента.");
+  }
+
+  function focusIssueForm(): void {
+    pendingIssueFocusRef.current = true;
+    setIssueFormOpen(true);
+    issueInputRef.current?.focus();
+    issueInputRef.current?.scrollIntoView?.({ block: "center" });
+  }
+
+  // Форма может быть закрыта: после повторного открытия поле нужно сфокусировать,
+  // а результат выпуска — показать рядом с формой, а не прокручивать список клиентов.
+  useEffect(() => {
+    if (issueFormOpen && pendingIssueFocusRef.current) {
+      pendingIssueFocusRef.current = false;
+      issueInputRef.current?.focus();
+      issueInputRef.current?.scrollIntoView?.({ block: "center" });
+    }
+  }, [issueFormOpen]);
+
+  useEffect(() => {
+    if (!token || scrolledTokenRef.current === token.token_id) return;
+    scrolledTokenRef.current = token.token_id;
+    tokenCalloutRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [token]);
+
   const profileName = (profileId: string | null): string => profiles.find((profile) => profile.id === profileId)?.name ?? profileId ?? "Не привязан";
   const connections = logicalConnections(clients);
   const visibleClients = connections.filter((client) => (showInactive || client.id === selectedClientId || !["revoked", "expired"].includes(client.status)) && `${client.label} ${client.client_id} ${client.id}`.toLowerCase().includes(filter.toLowerCase()));
@@ -569,6 +647,20 @@ function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setTo
     setSelectedProfileId(selected?.profile_id ?? "");
   }, [clients, selectedClientId]);
   const supportsManagedActions = canManage && ["managed_jwt", "durable"].includes(selectedClient?.token_kind ?? "");
+
+  const issuedForToken = issued && token && issued.tokenId === token.token_id ? issued : null;
+  const issuedClientRecord = token ? clients.find((client) => client.id === token.token_id) ?? null : null;
+  const shownAccessMode: AccessMode | null = token?.access_mode ?? issuedClientRecord?.access_mode ?? issuedForToken?.accessMode ?? null;
+  const shownScope = shownAccessMode ? scopeForAccessMode(shownAccessMode) : null;
+  // Токен, выпущенный в этой сессии, ещё не подтверждён сервером: срок посчитан
+  // из запрошенного TTL, поэтому и называется ожидаемым. Всё остальное — данные
+  // инвентаря, и там срок отдаёт сам Hub.
+  const expiryIsExpected = issuedForToken !== null;
+  const expirySeconds = expiryIsExpected
+    ? Math.floor((issuedForToken.issuedAtMs + issuedForToken.ttlDays * 86_400_000) / 1000)
+    : issuedClientRecord?.expires_at ?? null;
+  const hubUrl = hubMcpUrl(token);
+  const mcpConfig = token ? mcpServerConfig(hubUrl, token.access_token) : "";
 
   function selectClient(client: ClientInventoryItem): void {
     setSelectedClientId(client.id);
@@ -656,22 +748,22 @@ function ClientsScreen({ token, setToken }: { token: TokenResponse | null; setTo
 
   return (
     <>
-      <header className="topbar"><div><span className="eyebrow">CLIENT ACCESS / 03</span><h1>Клиенты</h1></div><button className="button secondary topbar-action" type="button" onClick={() => void load()}>Обновить</button></header>
+      <header className="topbar"><div><span className="eyebrow">CLIENT ACCESS / 03</span><h1>Клиенты</h1></div><button className="button primary topbar-action" type="button" onClick={focusIssueForm}>Новый клиент</button><button className="button secondary topbar-action" type="button" onClick={() => void load()}>Обновить</button></header>
       <div className="content-wrap">
         <section className="intro"><div><p className="section-kicker">MANAGED CONNECTIONS / INVENTORY</p><h2>Подключения MCP-клиентов</h2><p className="lede">Одна карточка — одно подключение. Роль и профиль OAuth назначаются подключению целиком; история обновления токенов находится внутри карточки.</p></div><div className={`data-badge state-${loadState}`} role="status"><span className="state-dot" aria-hidden="true" />{loadState === "loading" ? "Загрузка клиентов" : stateLabel(loadState)}</div></section>
-        {token && <div className="token-callout" role="alert"><strong>Токен подключения</strong><span>Доступен также в разделе «Токены и подключение». Сохранён на Hub; доступен владельцу и администраторам после перезапуска.</span><code>{token.access_token}</code><div className="button-row"><button className="button primary" type="button" onClick={() => void copyToken()}>Скопировать bearer</button><button className="text-button" type="button" onClick={() => setToken(null)}>Скрыть</button></div></div>}
         {message && <div className="state-panel state-error card standalone-state" role="alert"><span>{message}</span></div>}
         {loadState === "loading" && <div className="state-panel card standalone-state" role="status"><span className="loader" aria-hidden="true" />Загрузка клиентов</div>}
         {loadState === "error" && <div className="state-panel card standalone-state state-error" role="alert"><strong>Не удалось загрузить клиентов</strong><button className="button secondary" type="button" onClick={() => void load()}>Повторить</button></div>}
-        {loadState === "empty" && <div className="empty-card card"><span className="empty-mark" aria-hidden="true">+</span><h3>Клиентов пока нет</h3><p>Выдайте первый managed token для подключения MCP-клиента.</p></div>}
+        {loadState === "empty" && <div className="empty-card card"><span className="empty-mark" aria-hidden="true">+</span><h3>Клиентов пока нет</h3><p>Выпустите токен в блоке «Новый клиент» ниже — без OAuth и без браузера.</p></div>}
         {(loadState === "ready" || loadState === "empty") && <div className="clients-grid"><section className="card client-inventory" aria-labelledby="client-inventory-title"><div className="card-heading"><div><p className="section-kicker">INVENTORY</p><h3 id="client-inventory-title">Зарегистрированные клиенты</h3></div><span className="chip">{connections.length} подключений</span></div><div className="connection-filters"><label>Найти подключение<input type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Название или точный ID" /></label><label className="inline-check"><input type="checkbox" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />Показывать отозванные и истёкшие</label></div>
           {linkedConnection && <p className="connection-notice">Подключение выбрано по точному ID из ссылки. Роль назначается ему, а не отдельным записям истории.</p>}
           <div className="client-list">{visibleClients.map((client) => <article className={`client-row ${selectedClientId === client.id ? "selected" : ""}`} key={client.id} data-connection-id={client.id}>
             <div className="client-identity"><strong>{client.label}</strong><span>{clientKindLabel(client.token_kind)} · {clientStatusLabel(client.status)}</span><small className="connection-id" title={client.id}>ID: {shortId(client.id)}</small></div>
             <button className="text-button" type="button" onClick={() => selectClient(client)} aria-label={`Выбрать ${client.client_id}`}>{selectedClientId === client.id ? "Выбрано" : "Выбрать"}</button>
-            <dl><div><dt>Роль</dt><dd>{client.role === "owner" ? "Владелец" : client.role === "admin" ? "Администратор" : "Клиент"}</dd></div><div><dt>Профиль</dt><dd>{profileName(client.profile_id)}</dd></div></dl>
+            <dl><div><dt>Роль</dt><dd>{client.role === "owner" ? "Владелец" : client.role === "admin" ? "Администратор" : "Клиент"}</dd></div><div><dt>Профиль</dt><dd>{profileName(client.profile_id)}</dd></div><div><dt>Режим доступа</dt><dd>{accessModeLabel(client.access_mode)}</dd></div><div><dt>Истекает</dt><dd>{client.expires_at ? formatTimestamp(client.expires_at) : "не задано"}</dd></div></dl>
             {client.credentials.length > 0 && <details className="connection-history"><summary>История OAuth: {client.credentials.length} записей</summary><p>Это обновления токена одного подключения, не отдельные пользователи. История сохранена, права здесь не назначаются.</p>{client.credentials.map((credential) => <div className="credential-history-row" key={credential.id}><code title={credential.id}>{shortId(credential.id)}</code><span>{clientStatusLabel(credential.status)}</span><time>{credential.issued_at ? new Date(credential.issued_at * 1000).toLocaleString("ru-RU") : "Дата не сохранена"}</time></div>)}</details>}
-          </article>)}{!visibleClients.length && <p className="muted">Подключений с таким фильтром нет.</p>}</div></section><section className="card client-controls" aria-labelledby="client-controls-title"><p className="section-kicker">SELECTED CLIENT</p><h3 id="client-controls-title">Доступ и токен</h3>{selectedClient ? <><p className="selected-connection-name">{selectedClient.label} · {clientKindLabel(selectedClient.token_kind)}</p><code className="connection-full-id">{selectedClient.id}</code>{selectedClient.token_kind === "oauth" && <p className="field-help">Это регистрация подключения. Выбранная роль действует после следующего запроса, без перевыпуска его токенов.</p>}<label>Роль выбранного подключения<select aria-label="Роль выбранного подключения" value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}><option value="client">Клиент — выполнение по профилю</option><option value="admin">Администратор — управление и токены</option><option value="owner">Владелец — полное управление</option></select></label><div className="button-row"><button className="button secondary" type="button" onClick={() => void saveRole()} disabled={mutating || !canManage}>Сохранить роль</button><button className="button secondary" type="button" onClick={() => void revealToken()} disabled={mutating || !canReveal}>Показать сохранённый токен</button></div><label>Профиль для выбранного клиента<select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}><option value="">Без профиля</option>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name || profile.id}</option>)}</select></label><div className="button-row"><button className="button secondary" type="button" onClick={() => void bindProfile()} disabled={!selectedProfileId || mutating || !canManage}>Привязать профиль</button><button className="button secondary" type="button" onClick={() => void unbindProfile()} disabled={!selectedClient.profile_id || mutating || !canManage}>Снять привязку</button></div><div className="button-row"><button className="button secondary" type="button" onClick={() => void rotateToken()} disabled={!supportsManagedActions || mutating}>Ротировать токен</button><button className="button danger" type="button" onClick={() => void revokeToken()} disabled={!supportsManagedActions || mutating}>Отозвать токен</button></div>{!supportsManagedActions && <p className="field-help">OAuth сам обновляет свои токены: роль и профиль меняются здесь, без ротации. Для служебных ключей недоступны неподдерживаемые действия.</p>}</> : <p className="muted">Выберите клиента из инвентаря.</p>}</section><section className="card token-issue-card" aria-labelledby="issue-title"><p className="section-kicker">MANAGED JWT</p><h3 id="issue-title">Выдать managed token</h3><p className="muted">Значение появится здесь и в разделе «Токены и подключение».</p><label>Профиль нового подключения<select aria-label="Профиль нового подключения" value={issueProfileId} onChange={(event) => setIssueProfileId(event.target.value)}><option value="">Без профиля, права из токена</option>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name || profile.id}</option>)}</select></label><label>Роль нового подключения<select aria-label="Роль нового подключения" value={issueRole} onChange={(event) => { setIssueRole(event.target.value); if (event.target.value !== "client") setAccessMode("full"); }}><option value="client">Клиент</option><option value="admin">Администратор</option><option value="owner">Владелец</option></select></label><p className="field-help">Роль администратора разрешает управление через ИИ и просмотр токенов. Профиль может дополнительно ограничить её; полный режим выполнения сам по себе не даёт роль администратора.</p><label>Client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} /></label><label>Срок действия, дней<input type="number" min="1" max="3650" value={ttlDays} onChange={(event) => setTtlDays(event.target.value)} /></label><label>Режим доступа<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}><option value="readonly">Только чтение</option><option value="full">Полный доступ</option></select></label><button className="button primary" type="button" onClick={() => void issueToken()} disabled={!clientId.trim() || issuing}>{issuing ? "Выдаём…" : "Выдать managed token"}</button></section></div>}
+          </article>)}{!visibleClients.length && <p className="muted">Подключений с таким фильтром нет.</p>}</div></section><section className="card client-controls" aria-labelledby="client-controls-title"><p className="section-kicker">SELECTED CLIENT</p><h3 id="client-controls-title">Доступ и токен</h3>{selectedClient ? <><p className="selected-connection-name">{selectedClient.label} · {clientKindLabel(selectedClient.token_kind)}</p><code className="connection-full-id">{selectedClient.id}</code>{selectedClient.token_kind === "oauth" && <p className="field-help">Это регистрация подключения. Выбранная роль действует после следующего запроса, без перевыпуска его токенов.</p>}<label>Роль выбранного подключения<select aria-label="Роль выбранного подключения" value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}><option value="client">Клиент — выполнение по профилю</option><option value="admin">Администратор — управление и токены</option><option value="owner">Владелец — полное управление</option></select></label><div className="button-row"><button className="button secondary" type="button" onClick={() => void saveRole()} disabled={mutating || !canManage}>Сохранить роль</button><button className="button secondary" type="button" onClick={() => void revealToken()} disabled={mutating || !canReveal}>Показать сохранённый токен</button></div><label>Профиль для выбранного клиента<select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}><option value="">Без профиля</option>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name || profile.id}</option>)}</select></label><div className="button-row"><button className="button secondary" type="button" onClick={() => void bindProfile()} disabled={!selectedProfileId || mutating || !canManage}>Привязать профиль</button><button className="button secondary" type="button" onClick={() => void unbindProfile()} disabled={!selectedClient.profile_id || mutating || !canManage}>Снять привязку</button></div><div className="button-row"><button className="button secondary" type="button" onClick={() => void rotateToken()} disabled={!supportsManagedActions || mutating}>Ротировать токен</button><button className="button danger" type="button" onClick={() => void revokeToken()} disabled={!supportsManagedActions || mutating}>Отозвать токен</button></div>{!supportsManagedActions && <p className="field-help">OAuth сам обновляет свои токены: роль и профиль меняются здесь, без ротации. Для служебных ключей недоступны неподдерживаемые действия.</p>}</> : <p className="muted">Выберите клиента из инвентаря.</p>}</section></div>}<section className="card token-issue-card" aria-labelledby="issue-title"><div className="card-heading"><div><p className="section-kicker">НОВЫЙ КЛИЕНТ</p><h3 id="issue-title">Новый клиент: выпустить токен</h3></div>{issueFormOpen && <button className="button secondary" type="button" onClick={() => setIssueFormOpen(false)}>Отмена</button>}</div>{issueFormOpen ? <><p className="muted">Регистрирует клиента и сразу выдаёт готовый Bearer-токен — без OAuth и без браузера.</p><label>Профиль нового подключения<select aria-label="Профиль нового подключения" value={issueProfileId} onChange={(event) => setIssueProfileId(event.target.value)}><option value="">Без профиля, права из токена</option>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name || profile.id}</option>)}</select></label><label>Роль нового подключения<select aria-label="Роль нового подключения" value={issueRole} onChange={(event) => { setIssueRole(event.target.value); if (event.target.value !== "client") setAccessMode("full"); }}><option value="client">Клиент</option><option value="admin">Администратор</option><option value="owner">Владелец</option></select></label><p className="field-help">Роль администратора разрешает управление через ИИ и просмотр токенов. Профиль может дополнительно ограничить её; полный режим выполнения сам по себе не даёт роль администратора.</p><label>Идентификатор клиента<input ref={issueInputRef} value={clientId} onChange={(event) => setClientId(event.target.value)} /></label><label>Срок действия, дней<input type="number" min="1" max="3650" value={ttlDays} onChange={(event) => setTtlDays(event.target.value)} /></label><label>Режим доступа<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}><option value="readonly">Только чтение</option><option value="full">Полный доступ</option></select></label><button className="button primary" type="button" onClick={() => void issueToken()} disabled={!clientId.trim() || issuing}>{issuing ? "Выдаём…" : "Выпустить токен"}</button><p className="field-help">Выдаются scopes <code>{scopeForAccessMode(accessMode)}</code>. Скопируйте заголовок <code>Authorization: Bearer &lt;токен&gt;</code> и вставьте его в файл <code>mcp.json</code> в поле <code>headers</code> нужного сервера.</p></> : <p className="muted">Форма закрыта — токен не выпускался.</p>}{!issueFormOpen && <button className="button secondary" type="button" onClick={focusIssueForm}>Показать форму</button>}</section>
+        {token && <div className="token-callout" role="alert" ref={tokenCalloutRef}><strong>Токен подключения</strong><span>Только что выпущенный токен. Значение показывается один раз, копия хранится на Hub.</span><code>{token.access_token}</code><p className="field-help">Режим доступа: <code>{accessModeLabel(shownAccessMode)}</code></p><p className="field-help">Выданы scopes: <code>{shownScope ?? "неизвестны"}</code></p><p className="field-help">{expiryIsExpected ? "Ожидаемое истечение (рассчитано из запрошенного срока)" : "Истекает"}: <code>{expirySeconds ? formatTimestamp(expirySeconds) : "неизвестно"}</code></p><p className="field-help">Адрес Hub для этого токена: <code>{hubUrl}</code></p><p className="field-help">Готовая строка для сервера в mcp.json, поле headers:</p><code>{`Authorization: Bearer ${token.access_token}`}</code><p className="field-help">Готовая конфигурация mcp.json — скопируйте целиком:</p><code>{mcpConfig}</code><div className="button-row"><button className="button primary" type="button" onClick={() => void copyToken()}>Скопировать bearer</button><button className="button secondary" type="button" onClick={() => void copyAuthorizationHeader()}>Скопировать Authorization</button><button className="button secondary" type="button" onClick={() => void copyServerConfig()}>Скопировать mcp.json</button><button className="text-button" type="button" onClick={() => setToken(null)}>Скрыть</button></div></div>}
       </div>
     </>
   );
@@ -1075,13 +1167,13 @@ function WebhooksScreen() {
       setDraft({
         ...emptyWebhookRoute(),
         kind: "mcp",
-        target: "mcp:shell:admin-server-100:Notify",
+        target: "mcp:shell:server01:Notify",
         tool: "send_message",
         argumentsJson: JSON.stringify({ title: "Событие", message: "{{event.message}}" }, null, 2),
       });
       return;
     }
-    setDraft({ ...emptyWebhookRoute(), kind: "shell", target: "shell:admin-server-100", approvalMode: "ask_before_write" });
+    setDraft({ ...emptyWebhookRoute(), kind: "shell", target: "shell:server01", approvalMode: "ask_before_write" });
   }
 
   async function copyEndpoint(routeID: string): Promise<void> {
@@ -1132,7 +1224,7 @@ function WebhooksScreen() {
                 {draft.authMode === "hmac" && <label>Версия подписи<select value={draft.signatureVersion} onChange={(event) => setDraft({ ...draft, signatureVersion: event.target.value as WebhookRouteDraft["signatureVersion"] })}><option value="v2">v2</option><option value="v1">v1</option></select></label>}
                 {draft.authMode === "hmac" && <label>Допустимое отклонение, секунд<input type="number" min="1" value={draft.maxSkewSeconds} onChange={(event) => setDraft({ ...draft, maxSkewSeconds: event.target.value })} /></label>}
                 <label>Что сделать<select value={draft.kind} onChange={(event) => { const kind = event.target.value as WebhookRouteDraft["kind"]; setDraft({ ...draft, kind, target: kind !== draft.kind ? "" : draft.target }); }}><option value="mcp">Вызвать действие MCP</option><option value="prompt">Передать событие AI-инструменту</option><option value="shell">Запустить фиксированную команду</option></select></label>
-                <label>Где выполнить<input value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })} placeholder="например: mcp:shell:admin-server-100:Notify" /></label>
+                <label>Где выполнить<input value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })} placeholder="например: mcp:shell:server01:Notify" /></label>
                 <label>Подтверждение опасных действий<select value={draft.approvalMode} onChange={(event) => setDraft({ ...draft, approvalMode: event.target.value as WebhookRouteDraft["approvalMode"] })}><option value="">Обычные правила безопасности</option><option value="ask_before_write">Спросить перед изменением</option><option value="bounded_autonomous">Разрешить ограниченно автоматически</option></select></label>
               </div>
               {draft.kind === "shell" ? <div className="form-grid"><label>Команда<input value={draft.command} onChange={(event) => setDraft({ ...draft, command: event.target.value })} /></label><label>Рабочий каталог<input value={draft.cwd} onChange={(event) => setDraft({ ...draft, cwd: event.target.value })} /></label></div> : <><div className="form-grid"><label>Инструмент<input value={draft.tool} onChange={(event) => setDraft({ ...draft, tool: event.target.value })} /></label>{draft.kind === "prompt" && <label>Аргумент prompt<input value={draft.promptArg} onChange={(event) => setDraft({ ...draft, promptArg: event.target.value })} placeholder="message" /></label>}</div><label>Аргументы JSON<textarea className="short-textarea" value={draft.argumentsJson} onChange={(event) => setDraft({ ...draft, argumentsJson: event.target.value })} spellCheck="false" /></label>{draft.kind === "prompt" && <label>Шаблон сообщения<textarea className="short-textarea" value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} /></label>}</>}
@@ -1396,7 +1488,7 @@ export default function App() {
               else navigate("instructions");
             }
           }}>{adminMode ? "Скрыть расширенные" : "Для администратора"}</button>
-          <a className="sidebar-utility" href="/cloudos/">CloudOS</a>
+          <a className="sidebar-utility" href="/cloudos/">CloudOS (дополнительно)</a>
           <a className="logout-link" href="/admin/logout">Выйти</a>
         </div>
       </aside>

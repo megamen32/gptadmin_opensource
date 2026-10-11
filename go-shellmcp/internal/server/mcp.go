@@ -14,6 +14,7 @@ import (
 	"time"
 
 	inspecthost "github.com/megamen32/gptadmin/go-shellmcp/internal/inspect"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
@@ -239,8 +240,8 @@ func (s *Server) mcpTools() []map[string]any {
 			"description": "Run MCP tools/list for one configured child MCP on this host. This checks the child's protocol/tools, not just whether its process exists. Use the ref returned by mcp_manage list or status.",
 			"inputSchema": map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"ref": map[string]any{"type": "string"}},
-				"required":   []string{"ref"}, "additionalProperties": false,
+				"properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}},
+				"required":   []string{"ref"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}},
 			},
 		},
 		{
@@ -249,13 +250,16 @@ func (s *Server) mcpTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"ref":       map[string]any{"type": "string"},
+					"ref":               map[string]any{"type": "string"},
+					"_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"},
 					"name":      map[string]any{"type": "string"},
 					"arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
 				},
-				"required": []string{"ref", "name"}, "additionalProperties": false,
+				"required": []string{"ref", "name"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}},
 			},
 		},
+		{"name": "mcp_request", "description": "Forward a resources/prompts request within a trusted Hub child connection.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
+		{"name": "mcp_connection_close", "description": "Close one trusted Hub child connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
 		{
 			"name":        "system_inspect",
 			"description": "Read bounded, automatically redacted host diagnostics without executing a command. Supports read_file and list_directory on Linux, macOS, Windows and Android.",
@@ -383,6 +387,29 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 		return s.mcpChildTools(ctx, args)
 	case "mcp_call":
 		return s.mcpChildCall(ctx, args)
+	case "mcp_request":
+		return s.mcpChildRequest(ctx, args)
+	case "mcp_connection_close":
+		ref, _ := args["ref"].(string)
+		scope, err := childConnectionScope(args)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateChildConnectionInstance(s.mcpConnectionInstance(ref), args, scope); err != nil {
+			expected, ok := args["_connection_instance"].(string)
+			if !ok || mcpclient.ValidateScope(expected) != nil || !s.childMCP.CanRetryScopeClose(ref, scope) {
+				return nil, err
+			}
+			// Close-only exception: exact retained/confirmed scope, no allocation and
+			// no assertion that an unknown old connector's remote session vanished.
+		}
+		if strings.TrimSpace(ref) == "" || scope == "" {
+			return nil, errors.New("mcp_connection_close requires ref and _connection_scope")
+		}
+		if err := s.childMCP.CloseScope(ref, scope); err != nil {
+			return nil, err
+		}
+		return mcpText("Child MCP connection closed", map[string]any{"ref": ref, "closed": true}), nil
 	case "shell_exec":
 		return s.mcpShellExec(ctx, args)
 	case "system_inspect":
@@ -653,7 +680,23 @@ func (s *Server) mcpChildTools(ctx context.Context, args map[string]any) (map[st
 	if err != nil {
 		return nil, err
 	}
-	tools, err := s.childMCP.ListTools(ctx, agent)
+	scope, err := childConnectionScope(args)
+	if err != nil {
+		return nil, err
+	}
+	generation := s.childMCP.Generation(ref)
+	if err := validateChildConnectionInstance(s.mcpConnectionInstanceAt(ref, generation), args, scope); err != nil {
+		return nil, err
+	}
+	if scope != "" {
+		ctx = mcpclient.WithExpectedGeneration(ctx, generation)
+	}
+	callCtx, cancel, err := childScopedContext(ctx, args, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	tools, err := s.childMCP.ListToolsScoped(callCtx, agent, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -675,9 +718,152 @@ func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[str
 	if !childToolAllowed(agent, name) {
 		return nil, fmt.Errorf("mcp child %q tool %q is not allowed by tool_allowlist", ref, name)
 	}
-	result, err := s.childMCP.CallTool(ctx, agent, name, arguments)
+	scope, err := childConnectionScope(args)
+	if err != nil {
+		return nil, err
+	}
+	generation := s.childMCP.Generation(ref)
+	if err := validateChildConnectionInstance(s.mcpConnectionInstanceAt(ref, generation), args, scope); err != nil {
+		return nil, err
+	}
+	if scope != "" {
+		ctx = mcpclient.WithExpectedGeneration(ctx, generation)
+	}
+	callCtx, cancel, err := childScopedContext(ctx, args, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	result, err := s.childMCP.CallToolScoped(callCtx, agent, name, arguments, scope)
 	if err != nil {
 		return nil, err
 	}
 	return mcpText("Child MCP tool completed", map[string]any{"ref": ref, "name": name, "result": result}), nil
+}
+
+func childConnectionScope(args map[string]any) (string, error) {
+	raw, exists := args["_connection_scope"]
+	if !exists {
+		return "", nil
+	}
+	scope, ok := raw.(string)
+	if !ok {
+		return "", errors.New("_connection_scope must be an opaque string")
+	}
+	if err := mcpclient.ValidateScope(scope); err != nil {
+		return "", err
+	}
+	return strings.ToLower(scope), nil
+}
+
+func (s *Server) mcpChildRequest(ctx context.Context, args map[string]any) (map[string]any, error) {
+	ref, _ := args["ref"].(string)
+	method, _ := args["method"].(string)
+	if strings.TrimSpace(ref) == "" {
+		return nil, errors.New("mcp_request requires ref")
+	}
+	switch method {
+	case "resources/list", "resources/read", "prompts/list", "prompts/get":
+	default:
+		return nil, errors.New("mcp_request method is not allowed; use mcp_tools/mcp_call for tools")
+	}
+	scope, err := childConnectionScope(args)
+	if err != nil {
+		return nil, err
+	}
+	generation := s.childMCP.Generation(ref)
+	if err := validateChildConnectionInstance(s.mcpConnectionInstanceAt(ref, generation), args, scope); err != nil {
+		return nil, err
+	}
+	if scope != "" {
+		ctx = mcpclient.WithExpectedGeneration(ctx, generation)
+	}
+	if scope == "" {
+		return nil, errors.New("mcp_request requires _connection_scope")
+	}
+	agent, err := s.supervisor.Agent(ref)
+	if err != nil {
+		return nil, err
+	}
+	params, _ := args["params"].(map[string]any)
+	if params == nil {
+		params = map[string]any{}
+	}
+	callCtx, cancel, err := childScopedContext(ctx, args, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	result, err := s.childMCP.RequestScoped(callCtx, agent, scope, method, params)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText("Child MCP request completed", map[string]any{"ref": ref, "method": method, "result": result}), nil
+}
+
+// A short trusted Hub admission deadline bounds delayed queued execution. The
+// close operation deliberately does not require a still-live deadline.
+func childScopedContext(ctx context.Context, args map[string]any, scope string) (context.Context, context.CancelFunc, error) {
+	if scope == "" {
+		return ctx, func() {}, nil
+	}
+	raw, ok := args["_connection_expires_at"]
+	if !ok {
+		return nil, nil, errors.New("scoped child operation requires _connection_expires_at")
+	}
+	var expires int64
+	switch value := raw.(type) {
+	case int:
+		expires = int64(value)
+	case int64:
+		expires = value
+	case float64:
+		if value < 0 || value > float64(1<<53) || value != float64(int64(value)) {
+			return nil, nil, errors.New("_connection_expires_at must be an integer Unix millisecond deadline")
+		}
+		expires = int64(value)
+	case json.Number:
+		var err error
+		expires, err = value.Int64()
+		if err != nil {
+			return nil, nil, errors.New("_connection_expires_at must be an integer Unix millisecond deadline")
+		}
+	default:
+		return nil, nil, errors.New("_connection_expires_at must be an integer Unix millisecond deadline")
+	}
+	deadline := time.UnixMilli(expires)
+	now := time.Now()
+	if !deadline.After(now) {
+		return nil, nil, errors.New("scoped child operation admission expired")
+	}
+	if deadline.After(now.Add(time.Minute)) {
+		return nil, nil, errors.New("scoped child admission deadline exceeds one minute")
+	}
+	callCtx, cancel := context.WithDeadline(ctx, deadline)
+	return callCtx, cancel, nil
+}
+
+// Instance validation happens in the executing connector, not just Hub lookup:
+// a delayed queue callback from an older connector cannot recreate its scope.
+func validateChildConnectionInstance(current string, args map[string]any, scope string) error {
+	if scope == "" {
+		return nil
+	}
+	if current == "" {
+		return errors.New("scoped child operations disabled: connector instance unavailable")
+	}
+	if err := mcpclient.ValidateScope(current); err != nil {
+		return errors.New("scoped child operations disabled: invalid connector instance")
+	}
+	expected, ok := args["_connection_instance"].(string)
+	if !ok || expected == "" {
+		return errors.New("scoped child operation requires _connection_instance")
+	}
+	if err := mcpclient.ValidateScope(expected); err != nil {
+		return errors.New("_connection_instance must be 64 hexadecimal characters")
+	}
+	if expected != current {
+		return errors.New("connector instance changed; initialize a new connection")
+	}
+	return nil
 }

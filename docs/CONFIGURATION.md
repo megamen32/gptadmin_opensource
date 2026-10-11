@@ -11,7 +11,7 @@ Full environment-variable reference, auth model, and OAuth setup.
 | `ADMIN_PASSWORD` | **yes** | — | Password for the `/oauth/authorize` HTML form and admin session. |
 | `CTL_TOKEN` | existing installations only | — | Deprecated compatibility bearer; do not create or copy it. It remains valid until its owner explicitly rotates or removes it. |
 | `OAUTH_CLIENT_SECRET` | for `/mcp` | — | Signs OAuth bearer tokens. Generate with `openssl rand -hex 32`. |
-| `PUBLIC_ORIGIN` | recommended | — | Public base URL (e.g. `https://your-hub.bezrabotnyi.com`). Used in OAuth + OpenAPI. |
+| `PUBLIC_ORIGIN` | recommended | — | Public base URL. For the official deployment use `https://mcp.bezrabotnyi.com`; it is used in OAuth + OpenAPI. |
 | `MCP_RESOURCE` | recommended | `$PUBLIC_ORIGIN` | The MCP resource identifier. |
 | `GPTADMIN_RELAX_AUTH_CHECKS` | emergency only | `0` | Set to `1` only during a bounded ingress/auth-state recovery. Keeps signature/key matching but temporarily skips token claim/expiry and OAuth PKCE checks; return to `0` after recovery. |
 | `DEBUG_VERIFY_WORK_LOW_SECURITY_MODE` | bounded developer recovery | `0` | Set to `1` only for a temporary, explicitly authorized developer canary. Enables the tested relaxed OAuth path and automatically completes a correctly signed ShellMCP enrollment after the `ADMIN_PASSWORD` step. It keeps bearer signature/key matching and enrollment signatures, never exposes credentials in the browser, and must be returned to `0` immediately after the canary. |
@@ -147,6 +147,16 @@ The hub implements OAuth endpoints compatible with the OpenAI SDK OAuth flow.
 3. Set `PUBLIC_ORIGIN` to your public hub URL
 4. MCP clients will discover the OAuth endpoints via `/.well-known/...`
 
+For the official public deployment, the client identity is
+`https://mcp.bezrabotnyi.com` and the MCP endpoint is
+`https://mcp.bezrabotnyi.com/mcp`. A generated FRP `u-*` hostname is only a
+tunnel transport address; do not register it as the official ChatGPT/Codex
+identity.
+
+Request the scopes `gptadmin.read gptadmin.exec offline_access` for a normal
+full connection. Use only `gptadmin.read offline_access` for a deliberately
+read-only connection.
+
 ### Connection lifecycle
 
 The Hub issues the OAuth protocol responses, while a given MCP client or its
@@ -160,6 +170,11 @@ OAuth access JWTs remain short lived; the Hub-issued opaque refresh credential
 has a five-calendar-year lifetime and rotates on use. New managed MCP bearers
 without an explicit `ttl_days` default to five years. Existing signed JWTs
 retain their original expiry and are not silently replaced by setup or update.
+
+If OAuth discovery metadata changes, or ChatGPT has frozen the old app
+configuration, recreate the ChatGPT app and authorize it again. Refreshing the
+Actions/tools view does not necessarily replace saved OAuth metadata. For Codex,
+disconnect and recreate the MCP connection when its saved metadata is stale.
 
 ### Where to set the password
 

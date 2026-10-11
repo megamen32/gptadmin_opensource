@@ -36,7 +36,7 @@ func (s *Server) oauthClientsStatePath() string {
 	if s.cfg.ConfigDir == "" {
 		return ""
 	}
-	return filepath.Join(s.cfg.ConfigDir, oauthClientsStateFilename)
+	return filepath.Join(s.authStoreDir(), oauthClientsStateFilename)
 }
 
 func cloneOAuthClientMetadata(metadata oauthClientMetadata) oauthClientMetadata {

@@ -67,6 +67,28 @@ On a system installation the ShellMCP runtime may run privileged so `file:<host>
 
 GrepMesh is provisioned as a companion capability by default when the package contains a native GrepMesh binary. Use `--no-grepmesh` (or `GPTADMIN_SETUP_GREPMESH=0` for unattended bootstrap) to opt out. Existing operator-managed GrepMesh definitions are preserved. On systemd hosts the bundled companion uses its own `gptadmin-grepmesh-mcp.service`; an operator-owned `grepmesh-mcp.service` is not overwritten or managed.
 
+### S21 network device target
+
+The rooted S21 is exposed as the dedicated child target
+`mcp:shell:server01:S21NetworkAgentDevice`. It uses Android Remote
+Control MCP on phone loopback behind a persistent SSH forward; it does not use
+the ADB-backed Callstack `agent-device` Android provider.
+
+On server-100, install or reconcile the target with:
+
+```bash
+sudo ./deploy/android-s21-network-mcp.sh apply
+sudo ./deploy/android-s21-network-mcp.sh status
+```
+
+The installer reads the existing root-managed bearer environment file, writes
+only an environment-file reference into systemd, registers one idempotent child
+definition, and preserves the previous Hub MCP configuration for rollback.
+
+```bash
+sudo ./deploy/android-s21-network-mcp.sh rollback
+```
+
 ## Security
 
 - The agent accepts only its managed device connection
