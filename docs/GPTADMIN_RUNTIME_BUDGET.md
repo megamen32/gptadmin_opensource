@@ -1,4 +1,4 @@
-# GPTAdmin server-100 budget and acceptance
+# GPTAdmin node-100 budget and acceptance
 
 GPTAdmin owns its Hub/service and consumer checks. Canonical infrastructure,
 shared resource policy and admission authority remain in
@@ -8,7 +8,7 @@ UID/native limits, move processes or alter another project's quota.
 
 ## Verified live baseline, 2026-10-08
 
-Read-only measurements on `server01` at
+Read-only measurements on `admin-node-100` at
 18:00:06–08 UTC identified **system** `gptadmin-hub.service`, PID 3152,
 `/system.slice/gptadmin-hub.service`, started 2026-10-01. Querying
 `systemctl --user` would inspect an absent unit and cannot establish live limits.
@@ -42,7 +42,7 @@ protected content to estimate disk use.
 ## Source candidate: Root-selected finite Hub envelope
 
 [`gptadmin-hub-server100-budget.conf`](../deploy/systemd/gptadmin-hub-server100-budget.conf)
-is a server-100 candidate, not evidence of an installed or accepted budget.
+is a node-100 candidate, not evidence of an installed or accepted budget.
 
 | Resource | Candidate | Basis and acceptance limit |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ is a server-100 candidate, not evidence of an installed or accepted budget.
 | Disk state | 4 GiB operating allowance | Older baseline 1.55 GiB. This is a metadata/retention admission allowance, not an enforced aggregate filesystem quota |
 | Temp/spool | 500 MiB aggregate Shell allowance | Existing storagebudget mechanism must actually be invoked; preserve active/outbox paths and verify over-budget behavior |
 | Per-file writes | 2 GiB | LimitFSIZE does not replace aggregate state/retention limits |
-| I/O | Weight 50, read 40 MiB/s, write 20 MiB/s | Device `/dev/nvme0n1` is server-100-specific. Reconfirm deployment device and measure snapshot/callback latency |
+| I/O | Weight 50, read 40 MiB/s, write 20 MiB/s | Device `/dev/nvme0n1` is node-100-specific. Reconfirm deployment device and measure snapshot/callback latency |
 | Parallelism | One small final consumer operation; at most 8 opt-in managed partitions | Legacy facades stay unscoped. No broad MCP rollout or pool increase follows from one canary |
 | GPU | None | No GPU workload |
 
@@ -112,7 +112,7 @@ is required or claimed.
    native Codex consumer, through its preserved enabled name. For GrepMesh,
    `read_text` of the first eight lines of the canonical GPTAdmin `AGENTS.md`
    is an exact read-only consumer operation; use the installed tool schema and
-   `server-100` identity. Capture returned text/IDs/session and verify against
+   `node-100` identity. Capture returned text/IDs/session and verify against
    the known file. A raw Python HTTP replay is API diagnosis, not native proof.
 5. For an opt-in `/connection/.../mcp` claim, select an already enabled real
    HTTP/SSE child and preserve a protected backup of exactly one native entry.

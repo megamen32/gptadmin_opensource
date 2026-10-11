@@ -101,7 +101,7 @@ Existing ChatGPT conversations are available as Agent Herder sessions with `harn
 
 For `chatgpt`, `activation: "always"` / `resume_agent` continue the existing `/c/...` conversation through the same BrowserClaw-owned page. `activation: "if_running"` and `defer` keep the same generic Agent Herder semantics. The separate ChatGPT token driver is the preferred fast read path; BrowserClaw/CDP is the write/resume path.
 
-The BrowserClaw transport is reached through server-100's localhost-only SSH tunnel at `127.0.0.1:39479` → Mac `127.0.0.1:9010`; do not bind integrations to the Mac app's changing internal `9210/9211` ports. The current app is `BrowserOS neo` (`com.browseros.BrowserClaw`). Herder retries the adapter every 30 seconds when the browser side is unavailable. A Mac GUI login is still required for the BrowserOS neo application itself; SSH cannot create an Aqua session at `loginwindow`.
+The BrowserClaw transport is reached through node-100's localhost-only SSH tunnel at `127.0.0.1:39479` → Mac `127.0.0.1:9010`; do not bind integrations to the Mac app's changing internal `9210/9211` ports. The current app is `BrowserOS neo` (`com.browseros.BrowserClaw`). Herder retries the adapter every 30 seconds when the browser side is unavailable. A Mac GUI login is still required for the BrowserOS neo application itself; SSH cannot create an Aqua session at `loginwindow`.
 
 ## Telegram quiet-period trigger
 

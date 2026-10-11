@@ -28,7 +28,7 @@ func TestNetworkProxyIssuesRelayCompatibleRoleTicketsWhenKeyConfigured(t *testin
 	if _, err := controller.Approve(capability.CapabilityID); err != nil {
 		t.Fatal(err)
 	}
-	client, agent, err := controller.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443")
+	client, agent, err := controller.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":443")
 	if err != nil {
 		t.Fatal(err)
 	}

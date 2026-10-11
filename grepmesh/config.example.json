@@ -1,5 +1,5 @@
 {
-  "host_id": "server-100",
+  "host_id": "node-100",
   "bind": "203.0.113.10:9419",
   "local_bind": "127.0.0.1:9419",
   "root": "/home/admin",
@@ -10,9 +10,9 @@
   },
   "peers": [
     {
-      "host_id": "server-88",
+      "host_id": "node-88",
       "local_url": "http://127.0.0.1:9419/mcp",
-      "routable_url": "https://server-88.internal:9419/mcp"
+      "routable_url": "https://node-88.internal:9419/mcp"
     }
   ],
   "limits": {

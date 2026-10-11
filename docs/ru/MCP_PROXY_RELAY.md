@@ -122,7 +122,7 @@ https://hub.example.com/server/hub/mcp
 
 ```text
 https://hub.example.com/server/fileshare/mcp
-https://hub.example.com/server/chromedevtools-server01/mcp
+https://hub.example.com/server/chromedevtools-admin-node-100/mcp
 https://hub.example.com/server/openmemory/mcp
 ```
 

@@ -36,7 +36,7 @@ func TestGranularHubScopesDoNotGrantShellExec(t *testing.T) {
 		if err := authorizeToolCall(r, "hub", tt.tool); err != nil {
 			t.Fatalf("scope %s tool %s denied: %v", tt.scope, tt.tool, err)
 		}
-		if err := authorizeToolCall(r, "shell:server01", "shell_exec"); err == nil {
+		if err := authorizeToolCall(r, "shell:admin-node-100", "shell_exec"); err == nil {
 			t.Fatalf("scope %s unexpectedly grants shell_exec", tt.scope)
 		}
 	}

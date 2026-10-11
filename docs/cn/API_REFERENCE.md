@@ -70,7 +70,7 @@
 ```json
 {
   "servers": [
-    { "name": "server-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```
@@ -81,7 +81,7 @@
 
 ```json
 {
-  "server": "server-01",
+  "server": "node-01",
   "cmd": "systemctl status nginx"
 }
 ```
@@ -105,7 +105,7 @@
 
 在编辑之前创建文件的托管备份。
 
-### `GET /system/info?server=server-01`
+### `GET /system/info?server=node-01`
 
 目标代理的 CPU、RAM、磁盘、正常运行时间。
 

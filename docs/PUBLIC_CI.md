@@ -28,3 +28,13 @@ public-parent drift. It never resets or force-pushes either repository. The old
 snapshot publisher has `push_force=false`, so it fails closed rather than erasing
 this public CI history. The public workflow overlay is versioned under
 `.gitpublic/public/` and deliberately contains no secret input.
+
+The candidate contract runs real packaged Hub executables on isolated runner
+loopback ports. It imports OpenAPI from one actual instance and validates the
+second artifact through Actions and MCP. It does not require a deployed tenant,
+a fleet credential or production secret. Test signing keys are ephemeral fixtures.
+
+If a future publication step needs credentials, use GitHub Actions Secrets with
+minimum permissions and an explicit protected release environment. Never commit
+credentials or transfer owner/fleet credentials into pull-request checks. Current
+public product workflows have no `secrets.*` references or credential input.

@@ -164,7 +164,7 @@ values are expanded from the ShellMCP process environment at request time, so
 secrets do not need to be written into the registry.
 
 Streamable HTTP sessions reuse the negotiated protocol version and session ID,
-recover once from a server-side session reset, and send DELETE when closed.
+recover once from a node-side session reset, and send DELETE when closed.
 Legacy SSE uses its long-lived GET event stream and the endpoint it advertises
 for POST requests.
 

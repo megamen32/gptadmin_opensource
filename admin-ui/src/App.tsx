@@ -1167,13 +1167,13 @@ function WebhooksScreen() {
       setDraft({
         ...emptyWebhookRoute(),
         kind: "mcp",
-        target: "mcp:shell:server01:Notify",
+        target: "mcp:shell:admin-node-100:Notify",
         tool: "send_message",
         argumentsJson: JSON.stringify({ title: "Событие", message: "{{event.message}}" }, null, 2),
       });
       return;
     }
-    setDraft({ ...emptyWebhookRoute(), kind: "shell", target: "shell:server01", approvalMode: "ask_before_write" });
+    setDraft({ ...emptyWebhookRoute(), kind: "shell", target: "shell:admin-node-100", approvalMode: "ask_before_write" });
   }
 
   async function copyEndpoint(routeID: string): Promise<void> {
@@ -1224,7 +1224,7 @@ function WebhooksScreen() {
                 {draft.authMode === "hmac" && <label>Версия подписи<select value={draft.signatureVersion} onChange={(event) => setDraft({ ...draft, signatureVersion: event.target.value as WebhookRouteDraft["signatureVersion"] })}><option value="v2">v2</option><option value="v1">v1</option></select></label>}
                 {draft.authMode === "hmac" && <label>Допустимое отклонение, секунд<input type="number" min="1" value={draft.maxSkewSeconds} onChange={(event) => setDraft({ ...draft, maxSkewSeconds: event.target.value })} /></label>}
                 <label>Что сделать<select value={draft.kind} onChange={(event) => { const kind = event.target.value as WebhookRouteDraft["kind"]; setDraft({ ...draft, kind, target: kind !== draft.kind ? "" : draft.target }); }}><option value="mcp">Вызвать действие MCP</option><option value="prompt">Передать событие AI-инструменту</option><option value="shell">Запустить фиксированную команду</option></select></label>
-                <label>Где выполнить<input value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })} placeholder="например: mcp:shell:server01:Notify" /></label>
+                <label>Где выполнить<input value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })} placeholder="например: mcp:shell:admin-node-100:Notify" /></label>
                 <label>Подтверждение опасных действий<select value={draft.approvalMode} onChange={(event) => setDraft({ ...draft, approvalMode: event.target.value as WebhookRouteDraft["approvalMode"] })}><option value="">Обычные правила безопасности</option><option value="ask_before_write">Спросить перед изменением</option><option value="bounded_autonomous">Разрешить ограниченно автоматически</option></select></label>
               </div>
               {draft.kind === "shell" ? <div className="form-grid"><label>Команда<input value={draft.command} onChange={(event) => setDraft({ ...draft, command: event.target.value })} /></label><label>Рабочий каталог<input value={draft.cwd} onChange={(event) => setDraft({ ...draft, cwd: event.target.value })} /></label></div> : <><div className="form-grid"><label>Инструмент<input value={draft.tool} onChange={(event) => setDraft({ ...draft, tool: event.target.value })} /></label>{draft.kind === "prompt" && <label>Аргумент prompt<input value={draft.promptArg} onChange={(event) => setDraft({ ...draft, promptArg: event.target.value })} placeholder="message" /></label>}</div><label>Аргументы JSON<textarea className="short-textarea" value={draft.argumentsJson} onChange={(event) => setDraft({ ...draft, argumentsJson: event.target.value })} spellCheck="false" /></label>{draft.kind === "prompt" && <label>Шаблон сообщения<textarea className="short-textarea" value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} /></label>}</>}

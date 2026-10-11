@@ -35,10 +35,10 @@ func TestChildSlugQualifiedAliasPreservesUniqueLegacyURL(t *testing.T) {
 }
 
 func TestChildSlugDuplicateReferencesPublishStableQualifiedURLs(t *testing.T) {
-	server := createChildSlugTestServer("mac-mini-2012.lan", "server01")
+	server := createChildSlugTestServer("mac-mini-2012.lan", "node-44")
 	expected := map[string]string{
 		"mcp:shell:mac-mini-2012.lan:AgentBrowser": "shell-mac-mini-2012-lan-agentbrowser",
-		"mcp:shell:server01:AgentBrowser":         "shell-server01-agentbrowser",
+		"mcp:shell:node-44:AgentBrowser":         "shell-server01-agentbrowser",
 	}
 	for attempt := 0; attempt < 64; attempt++ {
 		server.mu.Lock()
@@ -64,7 +64,7 @@ func TestChildSlugDuplicateReferencesPublishStableQualifiedURLs(t *testing.T) {
 		}
 	}
 	server.mu.Lock()
-	delete(server.agents, "shell:server01")
+	delete(server.agents, "shell:node-44")
 	server.mu.Unlock()
 	agent, ok := server.resolveExposedAgent("shell-mac-mini-2012-lan-agentbrowser")
 	if !ok || agent.AgentID != "mcp:shell:mac-mini-2012.lan:AgentBrowser" {

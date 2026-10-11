@@ -71,7 +71,7 @@ first возвращает только `request_id`, `input_url`, `secret_ref`,
 ```json
 {
   "servers": [
-    { "name": "server-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```
@@ -82,7 +82,7 @@ first возвращает только `request_id`, `input_url`, `secret_ref`,
 
 ```json
 {
-  "server": "server-01",
+  "server": "node-01",
   "cmd": "systemctl status nginx"
 }
 ```
@@ -106,7 +106,7 @@ first возвращает только `request_id`, `input_url`, `secret_ref`,
 
 Перед редактированием создайте управляемую резервную копию файла.
 
-### `GET /system/info?server=server-01`
+### `GET /system/info?server=node-01`
 
 ЦП, ОЗУ, диск, время безотказной работы целевого агента.
 

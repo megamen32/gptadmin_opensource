@@ -121,14 +121,14 @@ Example of a two-step event flow:
   "actions": [
     {
       "kind": "mcp",
-      "target": "mcp:shell:server01:Notify",
+      "target": "mcp:shell:admin-node-100:Notify",
       "tool": "send_message",
       "approval_mode": "bounded_autonomous",
       "arguments": {"title": "CRITICAL", "message": "{{event.message}}"}
     },
     {
       "kind": "mcp",
-      "target": "mcp:shell:server01:AgentHerder",
+      "target": "mcp:shell:admin-node-100:AgentHerder",
       "tool": "new_or_resume",
       "approval_mode": "bounded_autonomous",
       "delay_seconds": 30,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish the DNS-01 value through the authenticated SpaceWeb client on the
-# M1. Certbot invokes this as root; the existing server-100 reverse SSH bridge
+# M1. Certbot invokes this as root; the existing node-100 reverse SSH bridge
 # keeps the panel credentials on the machine where they are maintained.
 set -Eeuo pipefail
 

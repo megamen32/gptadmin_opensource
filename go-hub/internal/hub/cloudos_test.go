@@ -35,7 +35,7 @@ func TestCloudOSListsServer100(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(body.Computers) != 1 || body.Computers[0].ID != "server-100" || body.Computers[0].Name != "server-100" || body.Computers[0].Status != "online" {
+	if len(body.Computers) != 1 || body.Computers[0].ID != "node-100" || body.Computers[0].Name != "node-100" || body.Computers[0].Status != "online" {
 		t.Fatalf("unexpected computers: %#v", body.Computers)
 	}
 }

@@ -2,7 +2,7 @@
 
 Публичный туннель для локального порта одной командой — на своём железе,
 почти бесплатно. `ngrok`/`localtunnel`, только шлюзы — наши серверы
-(server-100, server01, server01), а URL живёт на нашем wildcard-домене
+(node-100, server01, server01), а URL живёт на нашем wildcard-домене
 `t.became.bezrabotnyi.com`.
 
 ```
@@ -91,8 +91,8 @@ default_ttl = "72h"
   Версия обязана совпадать с frps на шлюзах (`/etc/frp*/frps.toml`, флот
   обновляется вместе).
 - **Fanout-фейловер**: клиент держит по одному соединению к каждому шлюзу
-  (server-100/домашний вход — best-effort, server01 и server01 — always-on)
-  (server-100/домашний вход, server01, server01) и регистрирует один и тот же
+  (node-100/домашний вход — best-effort, server01 и server01 — always-on)
+  (node-100/домашний вход, server01, server01) и регистрирует один и тот же
   субдомен на всех. Пока жив любой шлюз — туннель работает. Публичный URL
   один: `https://<sub>.t.became.bezrabotnyi.com` (wildcard-сертификат на
   всех трёх nginx).
@@ -108,7 +108,7 @@ default_ttl = "72h"
 
 - **HTTP/HTTPS vhost** (включая websockets) — как у frp `type=http`. TCP-порты
   вне HTTP не пробрасывает (можно добавить `--tcp` поверх frp `type=tcp`).
-- Канонический URL с самой машины server-100 может не открываться — домашний
+- Канонический URL с самой машины node-100 может не открываться — домашний
   NAT не делает hairpin. Из интернета работает; с сервера проверяй напрямую:
   `curl --resolve <sub>.t.became.bezrabotnyi.com:443:185.240.120.152 https://<sub>.t.became.bezrabotnyi.com/`
   (или 212.192.31.128 для server01).

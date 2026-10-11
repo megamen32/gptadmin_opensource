@@ -6,7 +6,7 @@ the standby Hub on `:9001`, and keeps a reclaim-aware proxy on `:9101`.
 
 This directory is safe to commit: it contains no live tokens. The generated `config.yaml` used on HAOS is created by `scripts/deploy_haos_hub_standby.sh` from `/etc/gptadmin/gptadmin.env` on the primary server.
 
-Typical deploy from `server01`:
+Typical deploy from `admin-node-100`:
 
 ```bash
 ./scripts/deploy_haos_hub_standby.sh --deploy

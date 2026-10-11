@@ -129,7 +129,7 @@ jobs:
 
         '
     - name: Black-box candidate as Custom GPT and native MCP client
-      run: "python3 scripts/ci_candidate_contract.py \\\n  --package build/gptadmin-hub.tar.gz \\\n  --client-origin https://your-subdomain.t.became.bezrabotnyi.com\n"
+      run: "python3 scripts/ci_candidate_contract.py \\\n  --package build/gptadmin-hub.tar.gz \\\n  --local-origin\n"
   macos-build:
     runs-on: macos-latest
     timeout-minutes: 30

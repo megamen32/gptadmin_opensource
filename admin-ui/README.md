@@ -24,7 +24,7 @@ same-origin browser credentials:
 - `412 Precondition Failed` is rendered as a stale-edit conflict and never
   overwrites the local draft.
 - Content is limited to 16 KiB by UTF-8 byte length in the client. The Hub
-  remains authoritative and must enforce the same limit server-side.
+  remains authoritative and must enforce the same limit node-side.
 
 Authentication is delegated to the existing same-origin admin session. This
 UI does not persist credentials or tokens in browser storage.

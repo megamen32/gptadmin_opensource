@@ -1,6 +1,6 @@
 # Adding GPTAdmin MCP stdio servers
 
-Use this from `~/gptadmin` on `server01`.
+Use this from `~/gptadmin` on `admin-node-100`.
 
 ## Connector identity
 
@@ -49,7 +49,7 @@ reads it before executing the MCP server.
 
 ```bash
 ./mcp-add chrome-devtools-88 \
-  --agent-id ChromeDevTools-server01 \
+  --agent-id ChromeDevTools-admin-node-88 \
   --run-as-user admin \
   --cwd /home/admin \
   --stdio-format ndjson \

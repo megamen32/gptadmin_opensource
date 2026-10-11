@@ -459,7 +459,7 @@ Tasks:
 3. Identify authentication and authorization boundaries.
 4. Identify serialization and deserialization boundaries.
 5. Identify LLM-specific boundaries: prompts, system prompts, user prompts, retrieval context, tool schemas, MCP servers, agent permissions, output parsers, model responses.
-6. Identify MCP-specific surfaces: registered tool descriptions, tool parameter schemas, resource URIs, server-to-server chains.
+6. Identify MCP-specific surfaces: registered tool descriptions, tool parameter schemas, resource URIs, node-to-server chains.
 
 Output:
 ```
@@ -579,7 +579,7 @@ Tasks:
 2. Identify any user-controllable content that enters prompts or tools.
 3. Identify any model output that flows into code execution, database writes, network calls, browser rendering, files, shell commands, or user-visible authoritative claims.
 4. Identify rate limits, token limits, budget limits, retries, timeouts, and circuit breakers if visible.
-5. Identify MCP-specific surfaces: registered tool descriptions that include prose the model will read, tool parameter schemas, server-to-server chains, and whether untrusted content from external sources can enter tool descriptions or resource outputs.
+5. Identify MCP-specific surfaces: registered tool descriptions that include prose the model will read, tool parameter schemas, node-to-server chains, and whether untrusted content from external sources can enter tool descriptions or resource outputs.
 
 Output:
 ```

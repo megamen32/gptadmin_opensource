@@ -10,9 +10,9 @@ function response(body: object) {
 }
 
 const SERVERS = [
-  { server_id: "shell:server01", name: "Shell: server01", status: "online", kind: "virtual_shell", last_seen: Date.now() / 1000, meta: {} },
-  { server_id: "file:server01", name: "Files: server01", status: "online", kind: "virtual_file", last_seen: Date.now() / 1000, meta: {} },
-  { server_id: "mcp:shell:server01:grepmesh", name: "grepmesh on server01", status: "failed", kind: "child_mcp", last_seen: 1000, meta: { child_ref: "grepmesh" } },
+  { server_id: "shell:admin-node-100", name: "Shell: admin-node-100", status: "online", kind: "virtual_shell", last_seen: Date.now() / 1000, meta: {} },
+  { server_id: "file:admin-node-100", name: "Files: admin-node-100", status: "online", kind: "virtual_file", last_seen: Date.now() / 1000, meta: {} },
+  { server_id: "mcp:shell:admin-node-100:grepmesh", name: "grepmesh on admin-node-100", status: "failed", kind: "child_mcp", last_seen: 1000, meta: { child_ref: "grepmesh" } },
 ];
 
 function stubOverview(servers: unknown[]) {

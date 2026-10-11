@@ -144,15 +144,15 @@ describe("serverStatusLabel", () => {
 
 describe("serverRowQualifier", () => {
   it("names the file target of a host so it is not confused with the host itself", () => {
-    expect(serverRowQualifier("file:server01", "Files: server01", "virtual_file", {})).toBe("Файлы");
+    expect(serverRowQualifier("file:admin-node-100", "Files: admin-node-100", "virtual_file", {})).toBe("Файлы");
     // The bare shell node needs no qualifier: its friendly name is already unambiguous.
-    expect(serverRowQualifier("shell:server01", "Shell: server01", "virtual_shell", {})).toBe("");
+    expect(serverRowQualifier("shell:admin-node-100", "Shell: admin-node-100", "virtual_shell", {})).toBe("");
   });
 
   it("adds the child MCP reference to the inherited parent name", () => {
     expect(serverRowQualifier(
-      "mcp:shell:server01:grepmesh",
-      "grepmesh on server01",
+      "mcp:shell:admin-node-100:grepmesh",
+      "grepmesh on admin-node-100",
       "child_mcp",
       { child_ref: "grepmesh" },
     )).toBe("MCP-компонент: grepmesh");
@@ -160,15 +160,15 @@ describe("serverRowQualifier", () => {
 
   it("falls back to the descriptor name when child_ref is missing", () => {
     expect(serverRowQualifier(
-      "mcp:shell:server01:agent-browser",
-      "agent-browser on server01",
+      "mcp:shell:admin-node-100:agent-browser",
+      "agent-browser on admin-node-100",
       "child_mcp",
       {},
     )).toBe("MCP-компонент: agent-browser");
   });
 
   it("labels standalone MCP servers, virtual MCPs and the hub", () => {
-    expect(serverRowQualifier("server01-browseros", "BrowserOS on server01", "real_mcp", {})).toBe("MCP-сервер: BrowserOS");
+    expect(serverRowQualifier("admin-node-100-browseros", "BrowserOS on admin-node-100", "real_mcp", {})).toBe("MCP-сервер: BrowserOS");
     expect(serverRowQualifier("network-proxy", "Network Proxy", "virtual_mcp", {})).toBe("Встроенный MCP");
     expect(serverRowQualifier("hub", "GPTAdmin Hub", "hub", {})).toBe("Хаб");
   });

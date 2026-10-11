@@ -62,7 +62,7 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.mcpHTTPPost(w, r)
 	case http.MethodGet:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "server-initiated SSE stream is not available"})
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "node-initiated SSE stream is not available"})
 	case http.MethodOptions:
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

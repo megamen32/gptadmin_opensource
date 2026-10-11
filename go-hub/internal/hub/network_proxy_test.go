@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,12 +31,16 @@ func (c *proxyTestClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+func proxyTestIP(last byte) string {
+	return net.IPv4(10, 240, 0, last).String()
+}
+
 func testNetworkProxyPolicy() NetworkProxyPolicy {
 	policy, err := networkProxyPolicyFromArgs(map[string]any{
 		"scope":        "lan",
 		"agent_id":     "shell:proxy-1",
 		"mode":         "pull",
-		"target_cidrs": []string{"203.0.113.10/24"},
+		"target_cidrs": []string{proxyTestIP(0) + "/24"},
 		"target_ports": []int{443},
 		"max_streams":  2,
 		"max_bytes":    1 << 20,
@@ -211,7 +216,7 @@ func TestNetworkProxyScopesAreExplicitAndIsolateDestinations(t *testing.T) {
 	if _, err := controller.Approve(lan.CapabilityID); err != nil {
 		t.Fatalf("approve LAN capability: %v", err)
 	}
-	if _, _, err := controller.IssueStreamGrants(lan.CapabilityID, "203.0.113.10:443"); err != ErrNetworkProxyTargetDenied {
+	if _, _, err := controller.IssueStreamGrants(lan.CapabilityID, proxyTestIP(255)+":443"); err != ErrNetworkProxyTargetDenied {
 		t.Fatalf("LAN broadcast error=%v, want %v", err, ErrNetworkProxyTargetDenied)
 	}
 
@@ -328,7 +333,7 @@ func TestNetworkProxyIssueOffersAuthenticatedRoleBoundOneTimeGrants(t *testing.T
 
 	rec := networkProxyMCPCall(t, s, "proxy-profile", "network_proxy_issue", map[string]any{
 		"capability_id": capability.CapabilityID,
-		"target":        "203.0.113.10:443",
+		"target":        proxyTestIP(8) + ":443",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("issue status=%d body=%s", rec.Code, rec.Body.String())
@@ -347,7 +352,7 @@ func TestNetworkProxyIssueOffersAuthenticatedRoleBoundOneTimeGrants(t *testing.T
 	if clientGrant.Token == "" || agentGrant.Token == "" || clientGrant.Role != "client" || agentGrant.Role != "agent" {
 		t.Fatalf("invalid role-bound grants: client=%+v agent=%+v", clientGrant, agentGrant)
 	}
-	if clientGrant.StreamID == "" || clientGrant.StreamID != agentGrant.StreamID || clientGrant.Target != "203.0.113.10:443" || agentGrant.Target != clientGrant.Target {
+	if clientGrant.StreamID == "" || clientGrant.StreamID != agentGrant.StreamID || clientGrant.Target != proxyTestIP(8)+":443" || agentGrant.Target != clientGrant.Target {
 		t.Fatalf("grants lost stream/target binding: client=%+v agent=%+v", clientGrant, agentGrant)
 	}
 
@@ -362,7 +367,7 @@ func TestNetworkProxyIssueOffersAuthenticatedRoleBoundOneTimeGrants(t *testing.T
 
 	other := networkProxyMCPCall(t, s, "other-profile", "network_proxy_issue", map[string]any{
 		"capability_id": capability.CapabilityID,
-		"target":        "203.0.113.10:443",
+		"target":        proxyTestIP(9) + ":443",
 	})
 	if other.Code != http.StatusForbidden {
 		t.Fatalf("cross-profile issue status=%d body=%s", other.Code, other.Body.String())
@@ -445,7 +450,7 @@ func TestNetworkProxyExpiredCapabilityCannotIssueGrants(t *testing.T) {
 	approveProxyCapabilityHTTP(t, s, capability.CapabilityID)
 	clock.Advance(2 * time.Minute)
 
-	_, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443")
+	_, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":443")
 	if err != ErrNetworkProxyExpired {
 		t.Fatalf("IssueStreamGrants error=%v, want %v", err, ErrNetworkProxyExpired)
 	}
@@ -470,10 +475,10 @@ func TestNetworkProxyRejectsTargetOutsideCIDRAndPort(t *testing.T) {
 		t.Fatalf("Approve: %v", err)
 	}
 
-	if _, _, err := controller.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443"); err != ErrNetworkProxyTargetDenied {
+	if _, _, err := controller.IssueStreamGrants(capability.CapabilityID, net.IPv4(10, 241, 0, 8).String()+":443"); err != ErrNetworkProxyTargetDenied {
 		t.Fatalf("outside CIDR error=%v, want %v", err, ErrNetworkProxyTargetDenied)
 	}
-	if _, _, err := controller.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:80"); err != ErrNetworkProxyTargetDenied {
+	if _, _, err := controller.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":80"); err != ErrNetworkProxyTargetDenied {
 		t.Fatalf("outside port error=%v, want %v", err, ErrNetworkProxyTargetDenied)
 	}
 }
@@ -483,7 +488,7 @@ func TestNetworkProxyOpenRejectsWrongRoleAndReusedJTIHTTP(t *testing.T) {
 	s := newNetworkProxyTestServer(t, clock)
 	capability := requestProxyCapabilityHTTP(t, s, testNetworkProxyPolicy())
 	approveProxyCapabilityHTTP(t, s, capability.CapabilityID)
-	clientGrant, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443")
+	clientGrant, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":443")
 	if err != nil {
 		t.Fatalf("IssueStreamGrants: %v", err)
 	}
@@ -503,7 +508,7 @@ func TestNetworkProxyOpenRejectsWrongRoleAndReusedJTIHTTP(t *testing.T) {
 	if opened.Code != http.StatusOK {
 		t.Fatalf("open status=%d body=%s", opened.Code, opened.Body.String())
 	}
-	if strings.Contains(opened.Body.String(), clientGrant.Token) || strings.Contains(opened.Body.String(), "203.0.113.10:443") {
+	if strings.Contains(opened.Body.String(), clientGrant.Token) || strings.Contains(opened.Body.String(), proxyTestIP(8)+":443") {
 		t.Fatalf("open response leaked grant material: %s", opened.Body.String())
 	}
 
@@ -580,7 +585,7 @@ func TestNetworkProxyRestartDoesNotResurrectActiveCapability(t *testing.T) {
 	if status.State != "expired" {
 		t.Fatalf("restart state=%q, want expired", status.State)
 	}
-	if _, _, err := restarted.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443"); err != ErrNetworkProxyExpired {
+	if _, _, err := restarted.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":443"); err != ErrNetworkProxyExpired {
 		t.Fatalf("restart IssueStreamGrants error=%v, want %v", err, ErrNetworkProxyExpired)
 	}
 }
@@ -590,7 +595,7 @@ func TestNetworkProxyAuditOmitsTokensAndTargets(t *testing.T) {
 	s := newNetworkProxyTestServer(t, clock)
 	capability := requestProxyCapabilityHTTP(t, s, testNetworkProxyPolicy())
 	approveProxyCapabilityHTTP(t, s, capability.CapabilityID)
-	clientGrant, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, "203.0.113.10:443")
+	clientGrant, _, err := s.networkProxy.IssueStreamGrants(capability.CapabilityID, proxyTestIP(8)+":443")
 	if err != nil {
 		t.Fatalf("IssueStreamGrants: %v", err)
 	}
@@ -609,7 +614,7 @@ func TestNetworkProxyAuditOmitsTokensAndTargets(t *testing.T) {
 		t.Fatalf("marshal audit: %v", err)
 	}
 	auditText := string(auditJSON)
-	if strings.Contains(auditText, clientGrant.Token) || strings.Contains(auditText, "203.0.113.10:443") {
+	if strings.Contains(auditText, clientGrant.Token) || strings.Contains(auditText, proxyTestIP(8)+":443") {
 		t.Fatalf("audit leaked token or target: %s", auditText)
 	}
 }

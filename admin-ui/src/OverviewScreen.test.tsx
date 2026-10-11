@@ -13,8 +13,8 @@ const SERVERS = [
   ...Array.from({ length: 38 }, (_, index) => ({ server_id: `shell:node-${index}`, name: `Shell: node-${index}`, status: "online", kind: "virtual_shell", last_seen: Date.now() / 1000, meta: {} })),
   ...Array.from({ length: 12 }, (_, index) => ({ server_id: `shell:stale-${index}`, name: `Shell: stale-${index}`, status: "stale", kind: "virtual_shell", last_seen: 1000, meta: {} })),
   ...["BrowserOS", "UserIO", "S21NetworkAgentDevice"].map((ref) => ({
-    server_id: `mcp:shell:server01:${ref}`,
-    name: ref === "UserIO" ? ref : `${ref} on server01`,
+    server_id: `mcp:shell:admin-node-100:${ref}`,
+    name: ref === "UserIO" ? ref : `${ref} on admin-node-100`,
     status: "failed",
     kind: "child_mcp",
     last_seen: 1000,

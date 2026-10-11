@@ -26,7 +26,7 @@ history and execution replay are not included in the small authorization replica
 Status: complete; v140 receipt and live UI acceptance deployed
 
 - [x] P0.1 Update the public primary and HAOS standby to tested build 140; prove public OAuth metadata and authorization routing without 502.
-- [x] P0.2 Live authenticated GPTADMIN plugin proved a server-side canonical resource-read receipt for `ui://widget/admin-v3.html`, plus a separate live UI render. This is not a captured literal ChatGPT protocol transcript.
+- [x] P0.2 Live authenticated GPTADMIN plugin proved a node-side canonical resource-read receipt for `ui://widget/admin-v3.html`, plus a separate live UI render. This is not a captured literal ChatGPT protocol transcript.
 
 ## M1 — AI-first administration and restart recovery
 
@@ -71,10 +71,10 @@ Status: incremental implementation; see docs/ACCESS_OPERATIONS.md
   and materialize PostgresMCP for OpenCode/ZCode/Codex/Claude. Normal plan is
   selected and remains queued after the newly prioritized S21 goal.
 - [ ] Notify-controlled agent jobs: Normal architecture selected by the user.
-  Agent Herder `create_session`/`new_or_resume` and the server-100 runtime slice
+  Agent Herder `create_session`/`new_or_resume` and the node-100 runtime slice
   are complete for OpenCode and Codex. Next is the allowlisted
   Notify→GPTAdmin→ShellMCP:100 routing slice; Mac follows afterward. This stays
   separate from the S21 debug/remote-control goal and its cellular-call fallback.
 - [x] Make the S21 Android 4G proxy the canonical egress path: installed a
-  boot-persistent, cellular-bound Android bridge with server-100-only LAN
+  boot-persistent, cellular-bound Android bridge with node-100-only LAN
   ingress; verified 4G egress plus boot recovery.

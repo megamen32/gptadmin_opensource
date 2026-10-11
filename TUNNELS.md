@@ -189,7 +189,7 @@ iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex  # Windo
 bezhook 3000 --sub myapp     # -> https://myapp.t.became.bezrabotnyi.com (TTL 72h)
 ```
 
-Fanout на все три frps (server-100 best-effort, server01/server01 always-on), один
+Fanout на все три frps (node-100 best-effort, server01/server01 always-on), один
 стабильный URL, субдомен освобождается при остановке клиента. Детали,
 ограничения и разработка: `bezhook/README.md`. Это НЕ замена hub-туннелю
 `gptadmin-tunnel-frpc` — тот остаётся основным для хаба.

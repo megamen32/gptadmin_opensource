@@ -73,7 +73,7 @@ Read-only проверка production дополнительно установ�
   Это адрес транспортного canary, а не OAuth identity общего ChatGPT/Codex
   connector; официальный MCP endpoint — `https://mcp.bezrabotnyi.com/mcp`.
 - HAOS `203.0.113.10` — единственный включённый удалённый standby, build
-  `1.0.5 / 9d8a427`; server01, server-88 и VUSA выключены в failover config.
+  `1.0.5 / 9d8a427`; node-44, node-88 и VUSA выключены в failover config.
 - Один credential даёт primary 200 и HAOS 401; OAuth signing secret также
   различается, managed token store на HAOS отсутствует. Значения не выводились.
 - Проверка alternate ingress с тем же hostname/SNI: VPN2 certificate expired;

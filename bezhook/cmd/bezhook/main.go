@@ -3,7 +3,7 @@
 //	bezhook 3000                 -> https://your-subdomain.t.gptadmin.example
 //	bezhook 3000 --sub myapp     -> https://myapp.t.became.bezrabotnyi.com
 //
-// Connects to every fleet gateway (server-100, server01, server01) at once, so the
+// Connects to every fleet gateway (node-100, server01, server01) at once, so the
 // tunnel keeps working while any single gateway is alive. Default lease TTL
 // is 72h of process lifetime; --ttl 0 disables the limit.
 package main

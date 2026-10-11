@@ -323,7 +323,7 @@ and `gh pr ready` until publication evidence exists. Before publishing, write:
 
 These files live under `.swarm/` (runtime state, never committed) and double as the
 evidence the gate checks. Keep them current if you edit the PR body or rerun
-validation. The CI `pr-standards` check enforces the same body contract server-side.
+validation. The CI `pr-standards` check enforces the same body contract node-side.
 
 PowerShell-safe pattern:
 

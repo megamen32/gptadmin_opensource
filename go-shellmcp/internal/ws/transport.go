@@ -6,7 +6,7 @@
 //   - text (opcode 0x1) and binary (opcode 0x2) data frames
 //   - ping (0x9), pong (0xA) and close (0x8) control frames
 //   - client->server frames are masked (RFC 6455 section 5.3, mandatory)
-//   - server->client frames are NOT masked (browser/server-side enforcement)
+//   - node->client frames are NOT masked (browser/node-side enforcement)
 //   - no fragmentation: a single data message must fit in a single frame;
 //     multi-frame messages are rejected with an error
 //   - no compression (per-message-deflate, RFC 7692)

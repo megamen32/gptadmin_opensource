@@ -1,7 +1,7 @@
 # Enrolled OAuth reader 88: bounded delivery candidate
 
 Owner: GPTAdmin/Codex55. Scope: two existing gptadmin-node@ instances on
-server01; not legacy ShellMCP, Herder, SSH or native Codex.
+admin-node-88; not legacy ShellMCP, Herder, SSH or native Codex.
 
 Observed before delivery at 20:05Z, three one-second samples: instance RSS/cgroup
 working sets 34.8/35.9 MB; lifetime memory peaks 58.9/61.9 MB; 40/39 tasks;

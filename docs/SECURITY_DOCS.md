@@ -46,7 +46,7 @@ Remote MCP clients use `secret_request` to create a one-time browser entry
 flow and `secret_status` to read metadata only. Values must never be sent in
 MCP JSON, logs, audit records, job inspection or public responses. A managed
 `shell_exec` may receive an opaque `secret_env` mapping; the Hub resolves it
-server-side and redacts the value again at every response boundary.
+node-side and redacts the value again at every response boundary.
 
 The secure defaults are:
 

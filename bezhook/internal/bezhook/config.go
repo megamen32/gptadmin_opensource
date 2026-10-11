@@ -50,13 +50,13 @@ const (
 )
 
 var DefaultEndpoints = []Gateway{
-	// The home edge (server-100 frps via the home NAT) reliably works from the
-	// LAN (server-100's resolver overrides became.bezrabotnyi.com to the home
+	// The home edge (node-100 frps via the home NAT) reliably works from the
+	// LAN (node-100's resolver overrides became.bezrabotnyi.com to the home
 	// ingress). From the internet it is best-effort: public DNS for the name
 	// points at server01 (port 7000 closed there) and the wildcard home entry on
 	// port 7000 is not always forwarded — external clients simply keep this
 	// edge retrying in the background while server01/server01 carry the tunnel.
-	{Addr: "became.bezrabotnyi.com", Port: 7000}, // server-100 (home edge, best-effort)
+	{Addr: "became.bezrabotnyi.com", Port: 7000}, // node-100 (home edge, best-effort)
 	{Addr: "server01.bezrabotnyi.com", Port: 27000},    // server01 (always-on)
 	{Addr: "server01.bezrabotnyi.com", Port: 27001},    // server01 (always-on)
 }
