@@ -41,6 +41,10 @@ jobs:
 
         (cd go-shellmcp && go test ./...)
 
+        (cd go-proxyrelay && go test ./...)
+
+        (cd bezhook && go test ./...)
+
         '
     - name: Build manifest-pinned production Node package
       run: python3 tools/build_node.py --arch amd64
@@ -122,8 +126,7 @@ jobs:
       with:
         node-version: 22
     - name: Build Hub + ShellMCP candidate artifacts
-      run: "chmod +x tools/build.sh\n./tools/build.sh hub shellmcp\ntar -C build -czf build/gptadmin-ci-full.tar.gz \\\n \
-        \ shellmcp grepmesh gptadmin_hub cli hub_source client public\n"
+      run: "chmod +x tools/build.sh\n./tools/build.sh hub shellmcp\ntar -C build -czf build/gptadmin-ci-full.tar.gz \\\n  shellmcp grepmesh gptadmin_hub cli hub_source client public\n"
     - name: Clean-install lifecycle with real execution
       run: 'tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ci-full.tar.gz
 
@@ -200,8 +203,7 @@ jobs:
       shell: pwsh
       run: 'Set-Location go-shellmcp
 
-        go test ./internal/server -run ''^(TestFromEnvUsesWindowsInstallerPollingContract|TestQueueTransportNeverNeedsLocalListener)$''
-        -count=1
+        go test ./internal/server -run ''^(TestFromEnvUsesWindowsInstallerPollingContract|TestQueueTransportNeverNeedsLocalListener)$'' -count=1
 
         '
   public-python:
@@ -216,9 +218,8 @@ jobs:
       with:
         enable-cache: false
     - name: Public source contract and CLI tests
-      run: "python3 - <<'PY'\nfrom pathlib import Path\nfor path in ('private', '.agents', '.gitpublic', 'GPTADMIN_PROMPT.md'):\n\
-        \    assert not Path(path).exists(), path\nPY\nuv sync\nuv run pytest tests/ -q --ignore=tests/test_public_mirror.py\
-        \ --ignore=tests/test_site_docs.py --ignore=tests/test_docs_product_contract.py\n"
+      run: "python3 - <<'PY'\nfrom pathlib import Path\nfor path in ('private', '.agents', '.gitpublic', 'GPTADMIN_PROMPT.md'):\n    assert not Path(path).exists(), path\nPY\nuv sync\nuv run pytest tests/ -q --ignore=tests/test_public_mirror.py --ignore=tests/test_site_docs.py --ignore=tests/test_docs_product_contract.py --ignore=tests/test_release_workflow_contract.py --ignore=tests/test_admin_ui_build_contract.py --deselect=tests/test_completion_matrix.py::test_completion_matrix_commands_execute --deselect=tests/test_golden_paths.py::test_golden_path_commands_execute_once_per_platform_contract --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_auto_tag_uses_the_same_exact_operator_allowlist --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_release_waits_for_installer_and_operator_checks --deselect=tests/test_classify_ci_paths.py::ClassifierTests::test_actual_ci_gate_rejects_failure_and_unjustified_skips --deselect=tests/test_gptadmin_codex_plugin.py::test_gptadmin_marketplace_entry_is_installable_and_points_at_plugin\
+        \ --deselect=tests/test_installer_served_contract.py::test_served_installer_matches_repository_copy\n"
   ci-gate:
     name: Public product CI gate
     if: always()

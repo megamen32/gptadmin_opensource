@@ -3,7 +3,7 @@
 //	bezhook 3000                 -> https://your-subdomain.t.gptadmin.example
 //	bezhook 3000 --sub myapp     -> https://myapp.t.became.bezrabotnyi.com
 //
-// Connects to every fleet gateway (node-100, server01, server01) at once, so the
+// Connects to every fleet gateway (node-100, relay02, relay01) at once, so the
 // tunnel keeps working while any single gateway is alive. Default lease TTL
 // is 72h of process lifetime; --ttl 0 disables the limit.
 package main
@@ -33,7 +33,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintf(os.Stderr, "  bezhook 3000                 random subdomain, 72h ttl\n")
 	fmt.Fprintf(os.Stderr, "  bezhook 3000 --sub myapp     fixed subdomain\n")
 	fmt.Fprintf(os.Stderr, "  bezhook 3000 --ttl 0         no auto-stop\n")
-	fmt.Fprintf(os.Stderr, "  bezhook 8080 --endpoints server01.bezrabotnyi.com:27000\n")
+	fmt.Fprintf(os.Stderr, "  bezhook 8080 --endpoints relay02.bezrabotnyi.com:27000\n")
 }
 
 func main() {

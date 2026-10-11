@@ -96,7 +96,7 @@ func TestFleetSettingsLayering(t *testing.T) {
 	if tok != DefaultToken || dom != DefaultDomain || tlsName != DefaultTLSServerName {
 		t.Fatalf("defaults not applied: %q %q %q", tok, dom, tlsName)
 	}
-	if len(gws) != 3 || gws[1].Addr != "server01.bezrabotnyi.com" || gws[1].Port != 27000 {
+	if len(gws) != 3 || gws[1].Addr != "relay02.bezrabotnyi.com" || gws[1].Port != 27000 {
 		t.Fatalf("default endpoints wrong: %+v", gws)
 	}
 

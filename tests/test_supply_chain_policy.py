@@ -68,5 +68,6 @@ def test_local_workflow_exception_does_not_allow_mutable_or_invalid_references(r
 
 
 def test_local_workflow_and_pinned_third_party_references_are_immutable() -> None:
-    assert _immutable_action_reference("./.github/workflows/operator-ci.yml")
+    local = "operator-ci.yml" if (ROOT / ".github/workflows/operator-ci.yml").exists() else "public-ci.yml"
+    assert _immutable_action_reference("./.github/workflows/" + local)
     assert _immutable_action_reference("actions/checkout@11d5960a326750d5838078e36cf38b85af677262")

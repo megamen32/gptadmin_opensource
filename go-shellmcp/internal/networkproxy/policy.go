@@ -246,7 +246,12 @@ func (p Policy) addressReason(address netip.Addr) string {
 }
 
 var (
-	privatePrefixes         = mustPrefixes("203.0.113.10/8", "203.0.113.10/12", "203.0.113.10/16", "fc00::/7")
+	privatePrefixes = []netip.Prefix{
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 0, 0, 0}), 8),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{172, 16, 0, 0}), 12),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 168, 0, 0}), 16),
+		netip.MustParsePrefix("fc00::/7"),
+	}
 	documentationPrefixes   = mustPrefixes("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
 	benchmarkPrefixes       = mustPrefixes("198.18.0.0/15", "2001:2::/48")
 	carrierGradeNATPrefixes = mustPrefixes("100.64.0.0/10")

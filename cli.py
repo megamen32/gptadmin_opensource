@@ -304,11 +304,11 @@ FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
 FRPC_BASE_URL         = os.environ.get('FRPC_BASE_URL', 'https://became.bezrabotnyi.com/frp-mirror')
 FRPC_SERVER_ADDR_DEFAULT = 'became.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
-FRPC_TOKEN_DEFAULT    = 'E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk='
+FRPC_TOKEN_DEFAULT = os.environ.get('GPTADMIN_FRP_TOKEN', '').strip()
 FRPC_DOMAIN_DEFAULT   = 't.became.bezrabotnyi.com'
 FRPC_SERVER_ENDPOINTS_DEFAULT = os.environ.get(
     'FRPC_SERVER_ENDPOINTS_DEFAULT',
-    'primary=became.bezrabotnyi.com:7000,server01=server01.bezrabotnyi.com:27001,server01=server01.bezrabotnyi.com:27000'
+    'primary=became.bezrabotnyi.com:7000,relay01=relay01.bezrabotnyi.com:27001,relay02=relay02.bezrabotnyi.com:27000'
 ).strip()
 CLOUDFLARED_VERSION   = os.environ.get('CLOUDFLARED_VERSION', 'latest')
 

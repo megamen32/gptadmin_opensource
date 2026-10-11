@@ -28,24 +28,23 @@ func (g Gateway) String() string { return g.Addr + ":" + strconv.Itoa(g.Port) }
 
 // Options is the fully resolved run configuration.
 type Options struct {
-	LocalHost    string
-	LocalPort    int
-	Subdomain    string
-	Domain       string // public suffix, e.g. t.became.bezrabotnyi.com
-	Token        string
+	LocalHost     string
+	LocalPort     int
+	Subdomain     string
+	Domain        string // public suffix, e.g. t.became.bezrabotnyi.com
+	Token         string
 	TLSServerName string
-	Endpoints    []Gateway
-	TTL          time.Duration // 0 = unlimited
-	Quiet        bool
+	Endpoints     []Gateway
+	TTL           time.Duration // 0 = unlimited
+	Quiet         bool
 }
 
-// Baked-in fleet defaults. The token already ships in cli.py
-// (FRPC_TOKEN_DEFAULT); keeping the same value here means bezhook works with
-// zero configuration on the existing frps fleet.
+// Public defaults contain no shared credential. Configure BEZHOOK_TOKEN or
+// the existing protected per-user TOML token for an authenticated gateway.
 const (
 	DefaultDomain        = "t.became.bezrabotnyi.com"
 	DefaultTLSServerName = "t.became.bezrabotnyi.com"
-	DefaultToken         = "E10WCLE7ZFT+0NDgOFWwyPV8fb7hG7cLn320aHL0fVk="
+	DefaultToken         = ""
 	DefaultTTL           = 72 * time.Hour
 )
 
@@ -53,12 +52,12 @@ var DefaultEndpoints = []Gateway{
 	// The home edge (node-100 frps via the home NAT) reliably works from the
 	// LAN (node-100's resolver overrides became.bezrabotnyi.com to the home
 	// ingress). From the internet it is best-effort: public DNS for the name
-	// points at server01 (port 7000 closed there) and the wildcard home entry on
+	// points at relay02 (port 7000 closed there) and the wildcard home entry on
 	// port 7000 is not always forwarded — external clients simply keep this
-	// edge retrying in the background while server01/server01 carry the tunnel.
+	// edge retrying in the background while relay02/relay01 carry the tunnel.
 	{Addr: "became.bezrabotnyi.com", Port: 7000}, // node-100 (home edge, best-effort)
-	{Addr: "server01.bezrabotnyi.com", Port: 27000},    // server01 (always-on)
-	{Addr: "server01.bezrabotnyi.com", Port: 27001},    // server01 (always-on)
+	{Addr: "relay02.bezrabotnyi.com", Port: 27000},    // relay02 (always-on)
+	{Addr: "relay01.bezrabotnyi.com", Port: 27001},    // relay01 (always-on)
 }
 
 // fileConfig mirrors ~/.bezhook.toml (all fields optional).

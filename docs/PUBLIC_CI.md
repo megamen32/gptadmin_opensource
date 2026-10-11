@@ -38,3 +38,24 @@ If a future publication step needs credentials, use GitHub Actions Secrets with
 minimum permissions and an explicit protected release environment. Never commit
 credentials or transfer owner/fleet credentials into pull-request checks. Current
 public product workflows have no `secrets.*` references or credential input.
+
+Public scope excludes obsolete private auto-tag/publication workflow source
+contracts and the private installed marketplace index. Public CI has its own
+fail-closed gate/pinned-actions/secret-input/build checks. Windows and immutable
+workflow tests select the actual active workflow. Golden-path/completion matrix
+inventories are validated; their duplicate recursive full-suite wrappers are not
+executed because the same checks run directly in the main suite and native jobs.
+A private deployed installer's byte comparison cannot match anonymized source;
+real source-exact installer and candidate lifecycle jobs remain required.
+All Go modules (Hub, ShellMCP, ProxyRelay, bezhook) run their own checks.
+These cold platform/Docker/compiler jobs use slow-nightly category, expected600s,
+maximum1800s (Go/Python maximum900s). No ordinary180s completion is claimed.
+
+The historically published FRP bootstrap credential was also present in old
+public history and was confirmed in current server100 client configuration.
+New source removes static credential defaults: use protected GPTADMIN_FRP_TOKEN
+for CLI or BEZHOOK_TOKEN/the existing private TOML config for bezhook. Public
+checks need neither. The existing local export policy scrubs and forbids that
+exact legacy credential. This source repair is not revocation: a coordinated
+fleet gateway/client rotation is still required; history is preserved, never
+silently rewritten. No live gateway/token has been changed by this CI migration.

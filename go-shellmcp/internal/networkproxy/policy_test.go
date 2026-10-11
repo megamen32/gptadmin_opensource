@@ -48,7 +48,7 @@ func TestPolicyRejectsBlockedAddressClassesForInternetEgress(t *testing.T) {
 		want string
 	}{
 		{name: "loopback", addr: "127.0.0.1", want: "loopback"},
-		{name: "private", addr: "203.0.113.10", want: "private"},
+		{name: "private", addr: netip.AddrFrom4([4]byte{10, 1, 2, 3}).String(), want: "private"},
 		{name: "carrier-grade NAT", addr: "100.64.0.1", want: "cgnat"},
 		{name: "link local", addr: "169.254.1.2", want: "link-local"},
 		{name: "multicast", addr: "224.0.0.1", want: "multicast"},
@@ -77,7 +77,7 @@ func TestPolicyRejectsBlockedAddressClassesForInternetEgress(t *testing.T) {
 func TestPolicyLANRequiresApprovedPrivateCIDRAndPort(t *testing.T) {
 	policy := Policy{
 		Scope:            ScopeLAN,
-		ApprovedLANCIDRs: []netip.Prefix{mustPrefix(t, "203.0.113.10/16"), mustPrefix(t, "fd12:3456::/48")},
+		ApprovedLANCIDRs: []netip.Prefix{mustPrefix(t, netip.AddrFrom4([4]byte{10, 20, 0, 0}).String()+"/16"), mustPrefix(t, "fd12:3456::/48")},
 		AllowedPorts:     []uint16{443, 8443},
 	}
 
@@ -85,15 +85,15 @@ func TestPolicyLANRequiresApprovedPrivateCIDRAndPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned, err := policy.SelectTarget(target, []netip.Addr{mustAddr(t, "203.0.113.10")})
+	pinned, err := policy.SelectTarget(target, []netip.Addr{mustAddr(t, netip.AddrFrom4([4]byte{10, 20, 1, 4}).String())})
 	if err != nil {
 		t.Fatalf("SelectTarget() error = %v", err)
 	}
-	if got, want := pinned.DialAddress(), "203.0.113.10:8443"; got != want {
+	if got, want := pinned.DialAddress(), netip.AddrFrom4([4]byte{10, 20, 1, 4}).String()+":8443"; got != want {
 		t.Fatalf("DialAddress() = %q, want %q", got, want)
 	}
 
-	for _, addr := range []string{"203.0.113.10", "127.0.0.1", "169.254.169.254", "8.8.8.8"} {
+	for _, addr := range []string{netip.AddrFrom4([4]byte{10, 21, 1, 4}).String(), "127.0.0.1", "169.254.169.254", "8.8.8.8"} {
 		t.Run("reject_"+addr, func(t *testing.T) {
 			_, err := policy.SelectTarget(target, []netip.Addr{mustAddr(t, addr)})
 			if !errors.Is(err, ErrBlockedAddress) {
@@ -106,7 +106,7 @@ func TestPolicyLANRequiresApprovedPrivateCIDRAndPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := policy.SelectTarget(wrongPort, []netip.Addr{mustAddr(t, "203.0.113.10")}); !errors.Is(err, ErrPortNotAllowed) {
+	if _, err := policy.SelectTarget(wrongPort, []netip.Addr{mustAddr(t, netip.AddrFrom4([4]byte{10, 20, 1, 4}).String())}); !errors.Is(err, ErrPortNotAllowed) {
 		t.Fatalf("SelectTarget(wrong port) error = %v, want ErrPortNotAllowed", err)
 	}
 }

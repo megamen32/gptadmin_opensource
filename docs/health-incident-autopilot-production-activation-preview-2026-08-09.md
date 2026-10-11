@@ -42,8 +42,8 @@ The existing fleet-health configuration currently names these targets:
 | node-44 | `host:node-44` | Linux target; local producer or central SSH adapter |
 | router | `host:router` | OpenWrt has no Python; central SSH adapter uses bounded `logread` |
 | haos | `host:haos` | central SSH adapter uses bounded `logread` |
-| server01 | `host:server01` | central SSH adapter or local producer; current probe shows load violation |
-| server01 | `host:server01` | central SSH adapter or local producer; current probe shows disk at 85% |
+| relay01 | `host:relay01` | central SSH adapter or local producer; current probe shows load violation |
+| relay02 | `host:relay02` | central SSH adapter or local producer; current probe shows disk at 85% |
 
 This list is an activation candidate derived from the current fleet-health
 config, not permission to change every target. The per-host config must be
@@ -58,8 +58,8 @@ Fresh bounded read-only probe evidence (2026-08-09) is:
 | node-44 | load `54.83` / 88 CPUs | 59% | 30,605 MiB | 1 (`gptadmin-tunnel-frpc.service`) | journal |
 | router | load `6.51` / 4 proc fallback | 25% | 11 MiB | n/a | `logread` |
 | haos | load `0.85` / 4 CPUs | 68% | 1,535 MiB | n/a | `logread` |
-| server01 | load `50.83` / 1 CPU | 79% | 413 MiB | 1 (`coturn.service`) | journal/files |
-| server01 | load `0.00` / 1 CPU | 85% | 464 MiB | 0 | journal/files |
+| relay01 | load `50.83` / 1 CPU | 79% | 413 MiB | 1 (`coturn.service`) | journal/files |
+| relay02 | load `0.00` / 1 CPU | 85% | 464 MiB | 0 | journal/files |
 
 The probe is evidence for activation targeting, not a repair authorization.
 The new central adapter was also exercised read-only against `router` and
@@ -67,7 +67,7 @@ The new central adapter was also exercised read-only against `router` and
 lines.
 
 The old fleet-health controller also has a separate correctness gap: a dry-run
-filtered to `server01` emitted a `router` recovery because its state file is global
+filtered to `relay01` emitted a `router` recovery because its state file is global
 to all hosts. This is recorded in
 `/home/admin/gptadmin/.agents/tasks/todo-20260809-fleet-health-dry-run-cross-host-state.md`;
 the new producer must not reuse that filtered state path until reconciled.

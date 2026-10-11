@@ -38,7 +38,7 @@ func TestChildSlugDuplicateReferencesPublishStableQualifiedURLs(t *testing.T) {
 	server := createChildSlugTestServer("mac-mini-2012.lan", "node-44")
 	expected := map[string]string{
 		"mcp:shell:mac-mini-2012.lan:AgentBrowser": "shell-mac-mini-2012-lan-agentbrowser",
-		"mcp:shell:node-44:AgentBrowser":         "shell-server01-agentbrowser",
+		"mcp:shell:node-44:AgentBrowser":         "shell-node-44-agentbrowser",
 	}
 	for attempt := 0; attempt < 64; attempt++ {
 		server.mu.Lock()

@@ -5,6 +5,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "build-and-sync.yml"
+if not WORKFLOW.exists():
+    WORKFLOW = ROOT / ".github" / "workflows" / "public-ci.yml"
 BUILD_SCRIPT = ROOT / "tools" / "build.sh"
 
 

@@ -2,18 +2,18 @@
 
 Публичный туннель для локального порта одной командой — на своём железе,
 почти бесплатно. `ngrok`/`localtunnel`, только шлюзы — наши серверы
-(node-100, server01, server01), а URL живёт на нашем wildcard-домене
+(node-100, relay02, relay01), а URL живёт на нашем wildcard-домене
 `t.became.bezrabotnyi.com`.
 
 ```
 bezhook 3000 --sub myapp
   URL:      https://myapp.t.became.bezrabotnyi.com
   local:    127.0.0.1:3000
-  gateways: became.bezrabotnyi.com:7000, server01.bezrabotnyi.com:27000, server01.bezrabotnyi.com:27001
+  gateways: became.bezrabotnyi.com:7000, relay02.bezrabotnyi.com:27000, relay01.bezrabotnyi.com:27001
   ttl:      72h0m0s  (--ttl 0 = unlimited)
   [ok] became.bezrabotnyi.com:7000 online
-  [ok] server01.bezrabotnyi.com:27000 online
-  [ok] server01.bezrabotnyi.com:27001 online
+  [ok] relay02.bezrabotnyi.com:27000 online
+  [ok] relay01.bezrabotnyi.com:27001 online
 ```
 
 ## Установка одной командой
@@ -78,7 +78,7 @@ bezhook 3000 --backend ngrok             # только ngrok (нужен NGROK_
 ```toml
 token = "..."
 domain = "t.became.bezrabotnyi.com"
-endpoints = ["became.bezrabotnyi.com:7000", "server01.bezrabotnyi.com:27000", "server01.bezrabotnyi.com:27001"]
+endpoints = ["became.bezrabotnyi.com:7000", "relay02.bezrabotnyi.com:27000", "relay01.bezrabotnyi.com:27001"]
 default_ttl = "72h"
 ```
 
@@ -91,8 +91,8 @@ default_ttl = "72h"
   Версия обязана совпадать с frps на шлюзах (`/etc/frp*/frps.toml`, флот
   обновляется вместе).
 - **Fanout-фейловер**: клиент держит по одному соединению к каждому шлюзу
-  (node-100/домашний вход — best-effort, server01 и server01 — always-on)
-  (node-100/домашний вход, server01, server01) и регистрирует один и тот же
+  (node-100/домашний вход — best-effort, relay02 и relay01 — always-on)
+  (node-100/домашний вход, relay02, relay01) и регистрирует один и тот же
   субдомен на всех. Пока жив любой шлюз — туннель работает. Публичный URL
   один: `https://<sub>.t.became.bezrabotnyi.com` (wildcard-сертификат на
   всех трёх nginx).
@@ -111,9 +111,9 @@ default_ttl = "72h"
 - Канонический URL с самой машины node-100 может не открываться — домашний
   NAT не делает hairpin. Из интернета работает; с сервера проверяй напрямую:
   `curl --resolve <sub>.t.became.bezrabotnyi.com:443:185.240.120.152 https://<sub>.t.became.bezrabotnyi.com/`
-  (или 212.192.31.128 для server01).
+  (или 212.192.31.128 для relay01).
 - Вход DNS `*.t.became.bezrabotnyi.com` → 203.0.113.10 (домашний). Если
-  домашний канал лёг, туннели живы на server01/server01 и включаются, как только
+  домашний канал лёг, туннели живы на relay02/relay01 и включаются, как только
   ingress-failover (node-mesh) переключит DNS; вручную — `--resolve`.
 - Windows-бинарник собирается и подписывается checksum-ами, но
   runtime-тестов на Windows из этой среды не было — только Linux-прогон.
@@ -124,7 +124,7 @@ default_ttl = "72h"
 cd bezhook
 make test      # go test ./...
 make dist      # кросс-компиляция в dist/dl + SHA256SUMS
-make deploy    # rsync на server01:/var/www/bezhook (nginx отдаёт /bezhook/)
+make deploy    # rsync на relay02:/var/www/bezhook (nginx отдаёт /bezhook/)
 ```
 
 Исходники: `cmd/bezhook/main.go` (CLI, TTL, сигналы), `internal/bezhook/config.go`

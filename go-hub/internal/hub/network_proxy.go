@@ -580,8 +580,13 @@ func allowedNetworkProxyTarget(policy NetworkProxyPolicy, target string) (string
 
 func privateNetworkProxyPrefix(prefix netip.Prefix) bool {
 	prefix = prefix.Masked()
-	for _, raw := range []string{"203.0.113.10/8", "203.0.113.10/12", "203.0.113.10/16", "fc00::/7"} {
-		privatePrefix := netip.MustParsePrefix(raw)
+	// RFC private ranges are protocol constants, not deployment addresses.
+	for _, privatePrefix := range []netip.Prefix{
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 0, 0, 0}), 8),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{172, 16, 0, 0}), 12),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 168, 0, 0}), 16),
+		netip.MustParsePrefix("fc00::/7"),
+	} {
 		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
 			return true
 		}

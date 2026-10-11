@@ -707,7 +707,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S0.2` Network Tunnel Android/4G proof
 - Owner: Codex
-- Scope: Android arm64 edge binary, public relay on `server01`, local connector,
+- Scope: Android arm64 edge binary, public relay on `relay01`, local connector,
   hostname target and explicit cellular DNS fallback.
 - Baseline / red evidence: Android rejected snake_case offer limits, then could
   not resolve the target or relay hostname through its localhost DNS stub.
@@ -725,10 +725,10 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S0.2` Network Tunnel external data-plane proof
 - Owner: Codex
-- Scope: Ephemeral external relay/agent/client run through `server01`, using a
+- Scope: Ephemeral external relay/agent/client run through `relay01`, using a
   free loopback connector port and a public Internet target.
 - Baseline / red evidence: Existing `203.0.113.10:3126` was unreachable from
-  `server01`; direct `server01` egress worked, confirming the old LAN proxy was not an
+  `relay01`; direct `relay01` egress worked, confirming the old LAN proxy was not an
   external endpoint. A first test port was also rejected because it belonged
   to an unrelated ADB forward.
 - Change: Re-ran on free `127.0.0.1:3137` with fresh one-time tickets. The
