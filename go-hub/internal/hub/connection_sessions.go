@@ -122,6 +122,18 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": headerErr})
 		return
 	}
+	if firstString(body, "method") == "server/discover" {
+		// This endpoint implements the legacy initialize/session lifecycle.
+		// Modern clients probe before initialize; advertising a modern verdict
+		// would incorrectly make them skip the required session handshake.
+		// Negotiate legacy locally, after all owner and routing gates, without
+		// forwarding a metadata probe through a busy peer or allocating state.
+		releaseAuthAdmission(r)
+		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": map[string]any{
+			"code": -32601, "message": "managed child connections require legacy initialize and session lifecycle",
+		}})
+		return
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON-RPC request"})

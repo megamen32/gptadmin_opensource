@@ -2135,7 +2135,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"detail":"full"}}`)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -2150,7 +2150,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	tools := result["tools"].([]any)
 	expectedToolNames := map[string]bool{
 		"ui": true, "resource_receipt": true, "discover": true, "demo": true, "approve_pending_server": true, "settings_schema": true, "settings_get": true, "settings_set": true,
-		"schema": true, "inspect": true, "execute": true, "fleetExec": true, "job": true,
+		"schema": true, "inspect": true, "execute": true, "fleetExec": true, "job": true, "expand": true,
 		"secret_request": true, "secret_status": true,
 	}
 	renderTools := 0
@@ -2208,7 +2208,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 			}
 		}
 	}
-	if len(tools) != 15 || len(expectedToolNames) != 0 {
+	if len(tools) != 16 || len(expectedToolNames) != 0 {
 		t.Fatalf("got Apps SDK tools=%d missing=%v, want exact capability set", len(tools), expectedToolNames)
 	}
 	if renderTools != 1 {

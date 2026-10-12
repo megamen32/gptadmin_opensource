@@ -5960,7 +5960,7 @@ def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[st
     sync_oauth_origin_env(env)
     env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
     env.setdefault('ADMIN_PASSWORD', gen_hex())
-    wanted = clients or {'claude-code', 'codex', 'opencode', 'vscode', 'hermes', 'openclaw', 'zed'}
+    wanted = clients or {'claude-code', 'codex', 'opencode', 'vscode', 'hermes', 'openclaw', 'zed', 'fast-agent', 'zcode'}
     tokens = {
         'GPTADMIN_CLAUDE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CLAUDE_MCP_BEARER')) or make_mcp_bearer_token(env, 'claude-code'),
         'GPTADMIN_CODEX_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CODEX_MCP_BEARER')) or make_mcp_bearer_token(env, 'codex'),
@@ -5969,6 +5969,8 @@ def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[st
         'GPTADMIN_HERMES_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_HERMES_MCP_BEARER')) or make_mcp_bearer_token(env, 'hermes-agent'),
         'GPTADMIN_OPENCLAW_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_OPENCLAW_MCP_BEARER')) or make_mcp_bearer_token(env, 'openclaw-assistant'),
         'GPTADMIN_ZED_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_ZED_MCP_BEARER')) or make_mcp_bearer_token(env, 'zed'),
+        'GPTADMIN_FAST_AGENT_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_FAST_AGENT_MCP_BEARER')) or make_mcp_bearer_token(env, 'fast-agent'),
+        'GPTADMIN_ZCODE_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_ZCODE_MCP_BEARER')) or make_mcp_bearer_token(env, 'zcode'),
         'GPTADMIN_CUSTOM_MCP_BEARER': ('' if rotate else env.get('GPTADMIN_CUSTOM_MCP_BEARER')) or make_mcp_bearer_token(env, 'custom-mcp-client'),
     }
     env.update(tokens)
@@ -5997,6 +5999,10 @@ def configure_ai_mcp_clients(env: dict, *, rotate: bool = False, clients: set[st
         results['openclaw'] = _configure_openclaw_mcp(url, tokens['GPTADMIN_OPENCLAW_MCP_BEARER'])
     if 'zed' in wanted:
         results['zed'] = _configure_zed_mcp(url, tokens['GPTADMIN_ZED_MCP_BEARER'])
+    if 'fast-agent' in wanted:
+        results['fast-agent'] = _configure_fast_agent_mcp(url, tokens['GPTADMIN_FAST_AGENT_MCP_BEARER'])
+    if 'zcode' in wanted:
+        results['zcode'] = _configure_zcode_mcp(url, tokens['GPTADMIN_ZCODE_MCP_BEARER'])
     results['_url'] = url
     if print_custom:
         results['_custom_token'] = tokens['GPTADMIN_CUSTOM_MCP_BEARER']
@@ -6191,6 +6197,85 @@ def _configure_zed_mcp(url: str, token: str) -> str:
     except Exception:
         pass
     return 'ok'
+
+
+def _write_agent_mcp_config(path: Path, url: str, token: str, *, yaml_format: bool = False, agent_card: bool = False) -> str:
+    """Update just GPTAdmin, retaining peer/model settings and file ownership."""
+    try:
+        if yaml_format:
+            import yaml
+            parse = yaml.safe_load
+            render = lambda value: yaml.safe_dump(value, allow_unicode=True, sort_keys=False)
+        else:
+            parse = json.loads
+            render = lambda value: json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+        data = parse(path.read_text()) if path.exists() else {}
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError('configuration must be an object')
+        if agent_card:
+            servers = data.setdefault('servers', [])
+            if not isinstance(servers, list):
+                raise ValueError('agent servers must be a list')
+            if 'gptadmin' not in servers:
+                servers.append('gptadmin')
+        else:
+            mcp = data.setdefault('mcp', {})
+            servers = mcp.setdefault('servers', {})
+            servers['gptadmin'] = {
+                ('transport' if yaml_format else 'type'): 'http',
+                ('protocol_mode' if yaml_format else 'protocolVersion'): 'legacy',
+                'url': url,
+                'headers': {'Authorization': f'Bearer {token}'},
+            }
+        text = render(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        previous = path.stat() if path.exists() else path.parent.stat()
+        if path.exists():
+            backup = path.with_name(path.name + '.bak.gptadmin-mcp.' + time.strftime('%Y%m%d_%H%M%S') + '.' + secrets.token_hex(3))
+            shutil.copy2(path, backup)
+            os.chmod(backup, 0o600)
+            if os.geteuid() == 0:
+                os.chown(backup, previous.st_uid, previous.st_gid)
+        fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.gptadmin-', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if os.geteuid() == 0:
+                os.chown(temporary, previous.st_uid, previous.st_gid)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return 'ok'
+    except Exception as exc:
+        # Parser exceptions may contain credential-bearing source lines.
+        return f'error: cannot update {path}: {type(exc).__name__}'
+
+
+def _configure_fast_agent_mcp(url: str, token: str) -> str:
+    home = USER_HOME / '.fast-agent'
+    if not shutil.which('fast-agent') and not home.exists():
+        return 'skip: fast-agent not found'
+    result = _write_agent_mcp_config(home / 'fast-agent.yaml', url, token, yaml_format=True)
+    # Herder's explicit MiniMax profile does not inherit the default config.
+    profile = USER_HOME / '.config' / 'agent-herder' / 'fast-agent-minimax.yaml'
+    if result == 'ok' and profile.exists():
+        result = _write_agent_mcp_config(profile, url, token, yaml_format=True)
+        card = profile.with_name('fast-agent-minimax-card.yaml')
+        if result == 'ok' and card.exists():
+            result = _write_agent_mcp_config(card, url, token, yaml_format=True, agent_card=True)
+    return result
+
+
+def _configure_zcode_mcp(url: str, token: str) -> str:
+    home = USER_HOME / '.zcode' / 'cli'
+    if not shutil.which('zcode') and not home.exists():
+        return 'skip: zcode not found'
+    return _write_agent_mcp_config(home / 'config.json', url, token)
 
 
 def auto_configure_ai_mcp_clients(env: dict, install_hub: bool) -> None:
@@ -6553,7 +6638,7 @@ def main():
     ap_auth_diag.set_defaults(func=cmd_auth_diagnose)
 
     ap_mcp_connect_top = sub.add_parser('connect-mcp', aliases=['mcp-connect'], help='Подключить GPTAdmin как MCP в локальных AI-клиентах')
-    ap_mcp_connect_top.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode', 'vscode'], help='Кого настроить; можно повторять. По умолчанию все найденные')
+    ap_mcp_connect_top.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode', 'vscode', 'fast-agent', 'zcode'], help='Кого настроить; можно повторять. По умолчанию все найденные')
     ap_mcp_connect_top.add_argument('--fresh', action='store_true', help='Выпустить новые токены для AI MCP clients')
     ap_mcp_connect_top.set_defaults(func=cmd_mcp_connect)
 
@@ -6585,7 +6670,7 @@ def main():
     ap_mcp_token.set_defaults(func=cmd_mcp_token)
 
     ap_mcp_connect = mcp_sub.add_parser('connect', aliases=['self-install', 'install-self'], help='Подключить GPTAdmin как MCP в локальных AI-клиентах')
-    ap_mcp_connect.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode', 'vscode'])
+    ap_mcp_connect.add_argument('--client', action='append', choices=['codex', 'claude', 'claude-code', 'opencode', 'vscode', 'fast-agent', 'zcode'])
     ap_mcp_connect.add_argument('--fresh', action='store_true')
     ap_mcp_connect.set_defaults(func=cmd_mcp_connect)
 

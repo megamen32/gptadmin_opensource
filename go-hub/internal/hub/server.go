@@ -539,6 +539,9 @@ type idempotencyEntry struct {
 }
 
 type Server struct {
+	operationMu sync.Mutex
+	operations  map[string]tokenOperation
+
 	connectionMu          sync.Mutex
 	connectionSessions    map[string]connectionSession
 	connectionExpired     map[string]connectionSession
@@ -1610,6 +1613,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/mcp-relay/list_mcp_agents", s.requireCtl(s.mcpRelayAgents))
 	mux.HandleFunc("/mcp-relay/list_mcp_tools", s.requireCtl(s.mcpRelayTools))
 	mux.HandleFunc("/mcp-relay/tools", s.requireCtl(s.mcpRelayTools))
+	mux.HandleFunc("/mcp-relay/expand", s.requireCtl(s.mcpRelayExpand))
 	mux.HandleFunc("/mcp-relay/call_mcp_tool", s.requireCtl(s.mcpRelayCall))
 	mux.HandleFunc("/mcp-relay/call", s.requireCtl(s.mcpRelayCall))
 	mux.HandleFunc("/mcp-relay/shell_exec", s.requireCtl(s.mcpRelayShellExec))
@@ -2332,6 +2336,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DiscoverResponse"
+  /mcp-relay/expand:
+    post:
+      operationId: expand
+      summary: Read saved operation details without reexecuting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: {type: string}
+                path: {type: string, description: JSON Pointer}
+                offset: {type: integer, minimum: 0}
+                limit: {type: integer, minimum: 1, maximum: 16000}
+              additionalProperties: false
+      responses:
+        "200": {description: Saved data or UTF-8 page; expires after 30 minutes or eviction/restart}
   /mcp-relay/tools:
     post:
       operationId: schema
@@ -2728,6 +2751,8 @@ components:
       additionalProperties: false
       required: [target]
       properties:
+        tool: {type: string, description: Exact tool name; omit for summaries}
+        detail: {type: string, enum: [compact, full]}
         target:
           type: string
           description: Target id from discover. Never use "default".
@@ -2887,6 +2912,25 @@ paths:
       summary: Discover targets
       responses:
         "200": {description: Available MCP servers}
+  /mcp-relay/expand:
+    post:
+      operationId: expand
+      summary: Read saved operation details without reexecuting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: {type: string}
+                path: {type: string, description: JSON Pointer}
+                offset: {type: integer, minimum: 0}
+                limit: {type: integer, minimum: 1, maximum: 16000}
+              additionalProperties: false
+      responses:
+        "200": {description: Saved data or UTF-8 page; expires after 30 minutes or eviction/restart}
   /mcp-relay/tools:
     post:
       operationId: schema
@@ -2899,6 +2943,8 @@ paths:
               type: object
               required: [target]
               properties:
+                tool: {type: string, description: Exact tool name; omit for summaries}
+                detail: {type: string, enum: [compact, full]}
                 target: {type: string, description: 'Target id to use in schema and execute. Never use target="default".'}
               additionalProperties: false
       responses:
@@ -4440,19 +4486,19 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 	}
 	target = selectedTarget
 	if target == "hub" {
-		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, hubTools())}}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, hubTools())}}), target))
 		return
 	}
 	if virtual, ok := virtualMCPDefinitions[target]; ok {
-		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.virtualMCPToolsForRequest(r, virtual)}}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.virtualMCPToolsForRequest(r, virtual)}}), target))
 		return
 	}
 	if strings.HasPrefix(target, "shell:") {
-		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, shellTools())}}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, shellTools())}}), target))
 		return
 	}
 	if strings.HasPrefix(target, "file:") {
-		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, fileTools())}}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, fileTools())}}), target))
 		return
 	}
 	s.mu.Lock()
@@ -4464,11 +4510,11 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": target, "status": "failed", "error": err})
 			return
 		}
-		writeJSON(w, http.StatusOK, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": result}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": result}), target))
 		return
 	}
 	if requestAccessMode(r) == accessModeReadonly {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}})
+		s.writeTokenSchema(w, r, req, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}})
 		return
 	}
 	jobID := s.enqueueRelay(target, "tools/list", nil)
@@ -4477,12 +4523,12 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if truthy(req["background"]) {
-		writeJSON(w, http.StatusOK, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
+		s.writeTokenSchema(w, r, req, map[string]any{"server_id": target, "status": "running", "background": true, "job_id": jobID})
 		return
 	}
 	resp := s.withSchemaContractMetadata(s.waitRelay(jobID, timeoutFromReq(req, s.cfg.DefaultTimeout)))
 	resp = withActionToolHints(resp, target)
-	writeJSON(w, http.StatusOK, resp)
+	s.writeTokenSchema(w, r, req, resp)
 }
 
 func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
@@ -4504,6 +4550,19 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	hasReference := firstString(req, "ref") != ""
+	var referenceErr error
+	req, referenceErr = s.resolveExecutionReference(r, req)
+	if referenceErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": referenceErr.Error()})
+		return
+	}
+	if hasReference {
+		encodedRequest, _ := json.Marshal(req)
+		originalBody.Reset()
+		originalBody.Write(encodedRequest)
+	}
+
 	target := firstString(req, "target", "server_id", "agent_id")
 	toolName := firstString(req, "tool", "tool_name", "name")
 	args := mapValue(req["arguments"])
@@ -4556,7 +4615,7 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 	// calls return job_id/task_id and are read through the job endpoint.
 	waitTimeout := s.cfg.ActionSyncWait
 	resp, status := s.executeMCPTool(r, target, toolName, args, truthy(req["background"]), waitTimeout, firstString(req, "idempotency_key"))
-	writeJSON(w, status, s.formatToolOutput(resp, toolName, req["detail"]))
+	writeJSON(w, status, s.presentTokenOutput(r, "execute", req, resp))
 }
 
 const (
@@ -4831,7 +4890,7 @@ func isReadOnlyTool(target, toolName string) bool {
 	}
 	if target == "hub" {
 		switch toolName {
-		case "discover", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
+		case "expand", "discover", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
 			return true
 		default:
 			return false
@@ -5209,6 +5268,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	if isWebhookHubTool(name) {
 		return s.callWebhookHubTool(name, args)
 	}
+	if name == "expand" {
+		return s.expandOperation(r, args), http.StatusOK
+	}
 	if name == "resource_receipt" {
 		return s.appsSDKResourceReceipt(r, firstString(args, "uri")), http.StatusOK
 	}
@@ -5507,6 +5569,7 @@ func hubTools() []map[string]any {
 		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 	}
+	tools = append(tools, expandToolDefinition(nil, nil))
 	return append(append(append(tools, accessProfileTool()), accessClientTools()...), secretHubTools()...)
 }
 
@@ -8474,10 +8537,24 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "tools/list":
-		result = mcpCacheableResult(map[string]any{"tools": appsSDKToolsForRequest(r)}, 30000, "private")
+		result = mcpCacheableResult(map[string]any{"tools": compactFacadeTools(r, fullDetailRequested(params["detail"]))}, 30000, "private")
 	case "tools/call":
 		name := firstString(params, "name")
 		args := mapValue(params["arguments"])
+		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+			var err error
+			args, err = s.resolveExecutionReference(r, args)
+			if err != nil {
+				rpcErr = map[string]any{"code": -32602, "message": err.Error()}
+				break
+			}
+			if firstString(mapValue(params["arguments"]), "ref") != "" {
+				params["arguments"] = args
+				encoded, _ := json.Marshal(body)
+				originalBody.Reset()
+				originalBody.Write(encoded)
+			}
+		}
 		if name == "" {
 			rpcErr = map[string]any{"code": -32602, "message": "tool name is required"}
 		} else if id := virtualMCPToolID(name); id != "" {
@@ -9252,7 +9329,15 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	}
 }
 
-func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
+func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map[string]any) any {
+	if name == "expand" {
+		return s.expandOperation(r, args)
+	}
+	if name == "discover" || name == "list_mcp_servers" || name == "listMcpServers" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return map[string]any{"servers": s.publicServersLockedWithDetail(r, true), "mesh": s.meshSummaryLocked()}
+	}
 	if id := virtualMCPToolID(name); id != "" {
 		return map[string]any{"status": "failed", "error": "tool is exposed only by the optional virtual MCP " + id}
 	}
@@ -9485,8 +9570,8 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "discover",
 			"title":           "Discover",
-			"description":     "List compact MCP targets. Set detail=full only when metadata is needed.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"detail": map[string]any{"type": "string", "enum": []string{"full"}, "description": "Opt in to transport, capabilities and metadata."}}, "additionalProperties": false},
+			"description":     "List compact MCP targets; query/status filter results. expand(id) reads saved diagnostics without rerunning.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"detail": toolOutputDetailSchema(), "query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}}, "required": []string{"servers"}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
@@ -9530,8 +9615,8 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "schema",
 			"title":           "Schema",
-			"description":     "List target tools; never use target=default.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}}, "required": []string{"target"}, "additionalProperties": false},
+			"description":     "List tool summaries. Set tool to fetch its exact input schema; detail=full lists all schemas. Never use target=default.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "description": "May include schema_version and schema_digest_sha256 as optional cache/debug metadata when listing tools.", "additionalProperties": true}}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
@@ -9572,8 +9657,8 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "execute",
 			"title":           "Execute",
-			"description":     "Execute target/tool. Use schema first; reuse idempotency_key on retry. detail=full adds diagnostics.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema(), "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"target", "tool"}, "additionalProperties": true},
+			"description":     "Execute ref+args from an exact schema call_ref, or target+tool+args. Reuse idempotency_key on retry. expand reads saved details.",
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema(), "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "additionalProperties": true},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
 			"securitySchemes": execSecurity,
@@ -9590,7 +9675,16 @@ func appsSDKTools() []map[string]any {
 			"_meta":           readMeta,
 		},
 	}
-	return append(tools, secretAppsTools()...)
+	tools = append(append(tools, expandToolDefinition(readSecurity, readMeta)), secretAppsTools()...)
+	for _, tool := range tools {
+		if firstString(tool, "name") != "ui" {
+			meta := cloneMap(mapValue(tool["_meta"]))
+			delete(meta, "openai/toolInvocation/invoking")
+			delete(meta, "openai/toolInvocation/invoked")
+			tool["_meta"] = meta
+		}
+	}
+	return tools
 }
 
 const startupInstructionsResourceURI = "gptadmin://startup-instructions"

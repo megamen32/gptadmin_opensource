@@ -144,7 +144,7 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 	}
 	if target == "hub" {
 		switch toolName {
-		case "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
+		case "expand", "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
 			return nil
 		}
 	}
@@ -182,7 +182,7 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 		}
 	}
 	switch name {
-	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob", webhookRoutesListTool, webhookJobGetTool:
+	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "expand", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob", webhookRoutesListTool, webhookJobGetTool:
 		return nil
 	case "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem":
 		target := firstString(args, "target", "server_id", "agent_id")

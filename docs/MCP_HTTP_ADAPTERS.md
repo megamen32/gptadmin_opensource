@@ -12,6 +12,15 @@ through its existing receipt rather than submitted again. Personal credentials
 are never copied between Codex and ZCode. The Hub access token is distinct from
 the downstream service credential stored in its protected owner registry.
 
+Managed `/connection/<slug>/mcp` endpoints use the legacy MCP initialize and
+session-ID lifecycle. A pre-initialize `server/discover` probe receives an
+authenticated, owner-scoped JSON-RPC `-32601` response with its exact request
+ID, so modern clients can fall back to that lifecycle. The probe allocates no
+session or upstream job and is answered locally before peer forwarding. It
+does not advertise a modern stateless handshake. An explicit native client
+`protocolVersion: "legacy"` is also supported; it skips negotiation without
+changing authentication, tools, or session isolation.
+
 ## Personal upstreams
 
 `owner_profile_id` optionally binds one child definition to an exact verified
