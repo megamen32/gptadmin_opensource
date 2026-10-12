@@ -3532,6 +3532,19 @@ func (s *Server) shellRuntimeSettingsLocked() map[string]any {
 	}
 }
 
+// Legacy agents read at most 1 MiB. Updated agents explicitly advertise their
+// bounded queue reader; never commit a lease for an envelope they cannot read.
+func shellQueueResponseLimit(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("max_response_bytes"))
+	if err != nil || n < 1<<20 {
+		return 1 << 20
+	}
+	if n > 64<<20 {
+		return 64 << 20
+	}
+	return n
+}
+
 func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name string) {
 	timeout := boundedQueryDuration(r, "timeout", s.shellQueuePollMaxLocked())
 	deadline := time.Now().Add(timeout)
@@ -3580,6 +3593,19 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			if job == nil || job.Status != "queued" {
 				continue
 			}
+			payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+			encoded, err := json.Marshal(payload)
+			if err != nil || len(encoded)+1 > shellQueueResponseLimit(r) {
+				// Keep the same queued job; no native execution or new action is
+				// admitted. A compatible reader can recover it after an update.
+				s.shellQueues[name] = append([]string{id}, s.shellQueues[name]...)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "queue payload cannot be encoded; job remains queued"})
+				} else {
+					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "queue payload exceeds agent response limit; job remains queued; update agent"})
+				}
+				return
+			}
 			previousStatus, previousStarted := job.Status, job.StartedAt
 			job.Status = "running"
 			job.StartedAt = nowFloat()
@@ -3590,8 +3616,12 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task dispatch persistence failed; retry polling"})
 				return
 			}
-			payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
-			writeJSON(w, http.StatusOK, payload)
+			// Deliver the exact bytes validated before the durable transition.
+			encoded = append(encoded, '\n')
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(encoded)
 			return
 		}
 		remaining := time.Until(deadline)
@@ -8537,7 +8567,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "tools/list":
-		result = mcpCacheableResult(map[string]any{"tools": compactFacadeTools(r, fullDetailRequested(params["detail"]))}, 30000, "private")
+		result = mcpCacheableResult(map[string]any{"tools": nativeFacadeTools(r, compactFacadeTools(r, fullDetailRequested(params["detail"])))}, 30000, "private")
 	case "tools/call":
 		name := firstString(params, "name")
 		args := mapValue(params["arguments"])
@@ -8643,6 +8673,11 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 				result = taskResult
 			} else {
 				result = mcpToolResult(structured)
+				switch name {
+				case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard":
+				default:
+					result = nativeFacadeResult(r, result)
+				}
 			}
 			s.auditToolDecision(r, "hub", name, callArgs, "allow", "", map[string]any{}, http.StatusOK)
 		}

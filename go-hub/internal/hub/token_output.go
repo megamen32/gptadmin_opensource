@@ -21,6 +21,58 @@ const operationMaxItem = 4 << 20
 const operationMaxCount = 128
 const compactResultBytes = 1000
 
+// Native clients that serialize both MCP representations can request a single
+// text representation. Widgets and the default MCP contract stay structured.
+func nativeFacadeTools(r *http.Request, tools []map[string]any) []map[string]any {
+	if r == nil || r.Header.Get("X-GPTAdmin-Result-Mode") != "text" {
+		return tools
+	}
+	out := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		copy := cloneMap(tool)
+		switch firstString(tool, "name") {
+		case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard":
+		default:
+			delete(copy, "outputSchema")
+		}
+		out = append(out, copy)
+	}
+	return out
+}
+
+func nativeFacadeResult(r *http.Request, raw any) any {
+	if r == nil || r.Header.Get("X-GPTAdmin-Result-Mode") != "text" {
+		return raw
+	}
+	result, ok := raw.(map[string]any)
+	if !ok || result["isError"] == true {
+		return raw
+	}
+	structured, exists := result["structuredContent"]
+	blocks := outputRows(result["content"])
+	if !exists || len(blocks) != 1 {
+		return raw
+	}
+	block := mapValue(blocks[0])
+	if len(block) != 2 || firstString(block, "type") != "text" {
+		return raw
+	}
+	decoder := json.NewDecoder(strings.NewReader(firstString(block, "text")))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil || decoder.Decode(new(any)) != io.EOF {
+		return raw
+	}
+	encoded, err := json.Marshal(value)
+	expected, expectedErr := json.Marshal(structured)
+	if err != nil || expectedErr != nil || !bytes.Equal(encoded, expected) {
+		return raw
+	}
+	out := cloneMap(result)
+	delete(out, "structuredContent")
+	return out
+}
+
 type tokenOperation struct {
 	Principal, Target, Facade, Tool, Origin string
 	Created                                 time.Time

@@ -26,6 +26,7 @@ class AgentClientConfigTests(unittest.TestCase):
             self.assertEqual(original['plugins'], result['plugins'])
             self.assertEqual('http', result['mcp']['servers']['gptadmin']['transport'])
             self.assertEqual('legacy', result['mcp']['servers']['gptadmin']['protocol_mode'])
+            self.assertEqual('text', result['mcp']['servers']['gptadmin']['headers']['X-GPTAdmin-Result-Mode'])
             self.assertEqual(text, next(root.glob('*.bak.gptadmin-mcp.*')).read_text())
             self.assertEqual(0o600, stat.S_IMODE(p.stat().st_mode))
             self.assertEqual([], list(root.glob('.*.gptadmin-*')))
@@ -47,6 +48,7 @@ class AgentClientConfigTests(unittest.TestCase):
             self.assertEqual(original['mcp']['servers']['peer'], result['mcp']['servers']['peer'])
             self.assertEqual('http', result['mcp']['servers']['gptadmin']['type'])
             self.assertEqual('legacy', result['mcp']['servers']['gptadmin']['protocolVersion'])
+            self.assertEqual('text', result['mcp']['servers']['gptadmin']['headers']['X-GPTAdmin-Result-Mode'])
 
     def test_bad_shape_does_not_overwrite_or_echo_source(self):
         with tempfile.TemporaryDirectory() as directory:

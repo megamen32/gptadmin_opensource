@@ -9,7 +9,7 @@ PLUGIN = ROOT / "plugins" / "gptadmin"
 def test_gptadmin_plugin_manifest_declares_oauth_mcp_and_workflow_skills():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "gptadmin"
-    assert manifest["version"] == "1.2.0"
+    assert manifest["version"] == "1.2.1"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert "OAuth" in manifest["interface"]["longDescription"]

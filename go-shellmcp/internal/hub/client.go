@@ -27,6 +27,10 @@ type Client struct {
 	Token    string
 }
 
+// Queue arguments may use the Hub's existing 64 MiB request envelope.
+// Advertise this bound so older, 1 MiB readers are never leased larger jobs.
+const queueResponseMaxBytes = 64 << 20
+
 func New(base string, id *security.Identity, token, dnsServer, resolveTo string) *Client {
 	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: newHTTPClient(dnsServer, resolveTo)}
 }
@@ -180,6 +184,7 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	name := beat.Name
 	p := "/queue/" + url.PathEscape(name)
 	q := url.Values{}
+	q.Set("max_response_bytes", fmt.Sprint(queueResponseMaxBytes))
 	if timeout > 0 {
 		q.Set("timeout", fmt.Sprintf("%d", timeout))
 	}
@@ -264,7 +269,7 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	if enc := q.Encode(); enc != "" {
 		p += "?" + enc
 	}
-	resp, body, err := c.do(ctx, http.MethodGet, p, nil)
+	resp, body, err := c.doWithResponseLimit(ctx, http.MethodGet, p, nil, queueResponseMaxBytes)
 	if err != nil {
 		return QueueJob{}, false, err
 	}
@@ -325,6 +330,10 @@ func (c *Client) doJSON(ctx context.Context, method, p string, payload any) (*ht
 	return c.do(ctx, method, p, b)
 }
 func (c *Client) do(ctx context.Context, method, p string, body []byte) (*http.Response, []byte, error) {
+	return c.doWithResponseLimit(ctx, method, p, body, 1<<20)
+}
+
+func (c *Client) doWithResponseLimit(ctx context.Context, method, p string, body []byte, maxBytes int64) (*http.Response, []byte, error) {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {
 		return nil, nil, err
@@ -354,7 +363,14 @@ func (c *Client) do(ctx context.Context, method, p string, body []byte) (*http.R
 	if err != nil {
 		return nil, nil, err
 	}
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("Hub response read failed: %w", err)
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, nil, fmt.Errorf("Hub response exceeds %d bytes", maxBytes)
+	}
 	resp.Body = io.NopCloser(bytes.NewReader(b))
 	return resp, b, nil
 }

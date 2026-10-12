@@ -43,3 +43,17 @@ transport address. It is not the OAuth issuer, resource, or user identity, and
 must not be copied into OAuth metadata or used to work around a failed
 reconnect. A separate Hub may select its own stable HTTPS origin. Keep
 passwords, codes, and tokens out of `.mcp.json` and chat.
+
+## Compact native results
+
+The plugin requests `X-GPTAdmin-Result-Mode: text`. GPTAdmin sends one
+representation when text and structuredContent contain exactly the same JSON.
+Media, errors, distinct content and widget data keep their normal contracts.
+The default tool catalog is ui/discover/schema/execute/job/expand; selected
+child input schemas stay exact. Reuse a valid call_ref and expand only the
+missing result field, without executing the operation again.
+
+Upgrade through `codex plugin add gptadmin@gptadmin-local`. Existing chats may
+retain their loaded tool catalog; validate a fresh native MCP connection.
+Keep the separate legacy gptadmin MCP entry disabled when this plugin supplies
+the same connection, to avoid duplicate tool catalogs.

@@ -6227,7 +6227,7 @@ def _write_agent_mcp_config(path: Path, url: str, token: str, *, yaml_format: bo
                 ('transport' if yaml_format else 'type'): 'http',
                 ('protocol_mode' if yaml_format else 'protocolVersion'): 'legacy',
                 'url': url,
-                'headers': {'Authorization': f'Bearer {token}'},
+                'headers': {'Authorization': f'Bearer {token}', 'X-GPTAdmin-Result-Mode': 'text'},
             }
         text = render(data)
         path.parent.mkdir(parents=True, exist_ok=True)

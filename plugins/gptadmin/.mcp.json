@@ -2,7 +2,10 @@
   "mcpServers": {
     "gptadmin": {
       "type": "http",
-      "url": "https://mcp.bezrabotnyi.com/mcp"
+      "url": "https://mcp.bezrabotnyi.com/mcp",
+      "http_headers": {
+        "X-GPTAdmin-Result-Mode": "text"
+      }
     }
   }
 }
