@@ -18,6 +18,7 @@ import platform as platform_module
 import pwd
 import re
 import secrets
+import signal
 import shutil
 import socket
 import string
@@ -89,6 +90,36 @@ class PreflightError(RuntimeError):
 
 class RuntimeFailure(RuntimeError):
     """Operation failed after it started; maps to exit code 4."""
+
+
+class UpdateBudget:
+    """Catchable operation deadline with a separate finite rollback allowance."""
+    def __init__(self, seconds):
+        if seconds is not None and not 1 <= seconds <= 50:
+            raise UsageError('operation deadline must be between 1 and 50 seconds')
+        self.seconds = seconds
+        self.cleaning = False
+
+    def __enter__(self):
+        if self.seconds is not None:
+            self.previous = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, self.expired)
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    @staticmethod
+    def expired(signum, frame):
+        raise RuntimeFailure('native Node update deadline; rollback required')
+
+    def cleanup(self):
+        if self.seconds is not None and not self.cleaning:
+            self.cleaning = True
+            signal.setitimer(signal.ITIMER_REAL, 80)
+
+    def __exit__(self, *_):
+        if self.seconds is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous)
 
 
 def fail(message: str, code: int) -> 'NoReturn':  # type: ignore[valid-type]
@@ -164,7 +195,10 @@ class Runner:
 
 
 def systemctl(runner: Runner, *args: str, check: bool = True):
-    result = runner.run(['systemctl', *args])
+    try:
+        result = runner.run(['systemctl', *args], timeout=45)
+    except subprocess.TimeoutExpired:
+        raise RuntimeFailure('systemctl operation exceeded its finite deadline') from None
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or '').strip().splitlines()
         raise RuntimeFailure(
@@ -302,18 +336,26 @@ def verify_manifest_schema(manifest, expected_arch: str) -> dict:
 def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
     """Verify every manifest digest, then extract only the whitelisted tree into dest."""
     try:
+        if package.is_symlink() or package.stat().st_size > 128 * 1024**2:
+            raise PreflightError('invalid bounded node archive')
         tar = tarfile.open(package, 'r:gz')
     except (tarfile.TarError, OSError) as error:
         raise PreflightError(f'cannot read package {package}: {type(error).__name__}') from None
     with tar:
         members = {}
-        for member in tar.getmembers():
+        size = 0
+        for member in tar:
+            size += member.size
+            if len(members) >= 64 or size > 256 * 1024**2 or member.name in members:
+                raise PreflightError('node archive count/byte/duplicate limit')
             if member.name.startswith('/') or '..' in Path(member.name).parts:
                 raise PreflightError(f'unsafe package member name: {member.name}')
             members[member.name] = member
         manifest_member = members.get('manifest.json')
         if manifest_member is None or not manifest_member.isfile():
             raise PreflightError('package has no readable manifest.json member')
+        if manifest_member.size > 65536:
+            raise PreflightError('node manifest exceeds byte limit')
         try:
             manifest = json.loads(tar.extractfile(manifest_member).read())
         except (ValueError, OSError) as error:
@@ -1002,6 +1044,11 @@ def cmd_status(args, layout: Layout, runner: Runner) -> None:
 
 
 def cmd_update(args, layout: Layout, runner: Runner) -> None:
+    with UpdateBudget(getattr(args, 'operation_deadline_secs', None)) as budget:
+        return update_with_budget(args, layout, runner, budget)
+
+
+def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudget) -> None:
     require_root()
     name = resolve_instance_name(args.name, layout)
     env = read_installed_env(layout, name)
@@ -1024,35 +1071,48 @@ def cmd_update(args, layout: Layout, runner: Runner) -> None:
 
     unit = layout.unit_instance(name)
     drain_active = False
+    drain_attempted = False
     try:
+        drain_attempted = True
         drain_active = drain_begin(origin, token)
+        if not drain_active and getattr(args, 'require_drain', False):
+            raise RuntimeFailure('automatic update requires the supported drain endpoint')
         if drain_active:
-            drain_wait_ready(origin, token, args.wait_secs)
+            disposition = drain_wait_ready(origin, token, args.wait_secs)
+            if disposition.get('skipped') and getattr(args, 'require_drain', False):
+                raise RuntimeFailure('drain readiness unavailable; automatic update refused')
     except RuntimeFailure:
-        if drain_active:
-            drain_cancel(origin, token)
+        budget.cleanup()
+        # begin may have been accepted before its response/deadline was lost.
+        if drain_attempted and not drain_cancel(origin, token):
+            raise RuntimeFailure('drain admission failed and cancel is unverified; manual recovery required') from None
         raise
 
-    final = next_version_dir(versions_root, new_commit)
-    os.rename(staging, final)
+    final = None
     try:
+        final = next_version_dir(versions_root, new_commit)
+        os.rename(staging, final)
         switch_current(layout, final)
         systemctl(runner, 'restart', unit)
         wait_healthy(origin, new_commit)
     except (RuntimeFailure, OSError) as error:
+        budget.cleanup()
         # ANY failure after the switch rolls back to the previous version dir.
         rollback_note = ''
         try:
             switch_current(layout, current)
             systemctl(runner, 'restart', unit)
             wait_healthy(origin, previous_manifest.get('git_commit') or '')
-            drain_cancel(origin, token)
+            if not drain_cancel(origin, token):
+                raise RuntimeFailure('rollback drain cancel unverified')
         except (RuntimeFailure, OSError) as rollback_error:
             rollback_note = f' ROLLBACK ALSO FAILED: {rollback_error}'
         raise RuntimeFailure(
-            f'update to {final.name} failed ({error});{rollback_note} '
+            f'update to {final.name if final else new_commit} failed ({error});{rollback_note} '
             f'{"rolled back to " + current.name if not rollback_note else "manual recovery required"}') from None
-    drain_cancel(origin, token)
+    budget.cleanup()
+    if not drain_cancel(origin, token):
+        raise RuntimeFailure('new version healthy but drain cancel unverified; manual recovery required')
     print(json.dumps({
         'ok': True, 'command': 'update', 'name': name, 'unit': unit,
         'version_dir': final.name, 'previous_dir': current.name,
@@ -1203,6 +1263,10 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument('--name', default=None, metavar='NAME')
     update.add_argument('--wait-secs', type=float, default=300, metavar='SECS',
                         help='drain ready_to_stop deadline; default 300')
+    update.add_argument('--require-drain', action='store_true',
+                        help='refuse automatic update if drain/readiness is unsupported')
+    update.add_argument('--operation-deadline-secs', type=float, default=None,
+                        help='catchable update deadline (1..50s), plus 80s rollback reserve')
     update.set_defaults(func=cmd_update)
 
     rollback = sub.add_parser('rollback', help='switch to the previous (or named) version and restart')

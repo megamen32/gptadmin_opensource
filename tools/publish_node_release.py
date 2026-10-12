@@ -83,7 +83,7 @@ def verify_tag(repository, tag, source, allow_missing=False):
     refs = json.loads(gh('api', 'repos/' + repository + '/git/matching-refs/tags/' + tag))
     exact = [r for r in refs if r.get('ref') == 'refs/tags/' + tag]
     if not exact and allow_missing:
-        return
+        return False
     if len(exact) != 1:
         raise ValueError('Node release tag is missing or ambiguous')
     obj = exact[0]['object']
@@ -94,7 +94,7 @@ def verify_tag(repository, tag, source, allow_missing=False):
         if obj.get('type') == 'commit':
             if sha != source:
                 raise ValueError('Node release tag differs from accepted source; never rewrite')
-            return
+            return True
         if obj.get('type') != 'tag':
             raise ValueError('Node release tag does not resolve to a commit')
         obj = json.loads(gh('api', 'repos/' + repository + '/git/tags/' + sha))['object']
@@ -114,7 +114,12 @@ def publish(directory, source, repository):
     version = manifests[0]['build_version']
     tag = 'node-v' + str(version) + '-' + source[:12]
     assets = [p for path in packages for p in (path, path.with_name(path.name + '.sha256'))]
-    verify_tag(repository, tag, source, allow_missing=True)
+    if not verify_tag(repository, tag, source, allow_missing=True):
+        # Draft releases do not create their tag until publication. Create
+        # the immutable lightweight ref explicitly so it can be verified first.
+        gh('api', 'repos/' + repository + '/git/refs', '--method', 'POST',
+           '-f', 'ref=refs/tags/' + tag, '-f', 'sha=' + source)
+        verify_tag(repository, tag, source)
     # Listing distinguishes an absent release from API/auth failure. Never
     # interpret failed authentication as permission to create another release.
     releases = json.loads(gh('api', 'repos/' + repository + '/releases?per_page=100'))
@@ -124,7 +129,11 @@ def publish(directory, source, repository):
            '--draft', '--latest=false', '--title', 'GPTAdmin Node ' + str(version),
            '--notes', 'Manifest-verified Linux amd64/arm64 Node binaries. Source: ' + source
            + '. Separate Node channel; the full-platform latest release is preserved.')
-        release = json.loads(gh('api', 'repos/' + repository + '/releases/tags/' + tag))
+        releases = json.loads(gh('api', 'repos/' + repository + '/releases?per_page=100'))
+        matches = [r for r in releases if r.get('tag_name') == tag]
+        if len(matches) != 1:
+            raise ValueError('new Node draft release is missing or ambiguous')
+        release = matches[0]
     verify_tag(repository, tag, source)
     present = {a['name']: a for a in release.get('assets', [])}
     if set(present) - {p.name for p in assets}:
@@ -137,7 +146,8 @@ def publish(directory, source, repository):
             if not release.get('draft'):
                 raise ValueError('published Node release is incomplete; never mutate it')
             gh('release', 'upload', tag, str(path), '--repo', repository)
-    final = json.loads(gh('api', 'repos/' + repository + '/releases/tags/' + tag))
+    # GET /releases/tags only resolves published releases, not this draft.
+    final = json.loads(gh('api', 'repos/' + repository + '/releases/' + str(release['id'])))
     present = {a['name']: a for a in final.get('assets', [])}
     if set(present) != {p.name for p in assets} or not all(asset_matches(present[p.name], p) for p in assets):
         raise ValueError('uploaded Node release digests differ')

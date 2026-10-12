@@ -85,9 +85,11 @@ class NodeReleaseTests(unittest.TestCase):
                     if '/git/matching-refs/' in args[1]:
                         return json.dumps([{'ref':'refs/tags/node-v123-'+SOURCE[:12],
                                             'object':{'type':'commit','sha':SOURCE}}]).encode()
-                    if 'per_page=' in args[1]:return b'[]'
+                    if 'per_page=' in args[1]:
+                        created=any(c[:2]==('release','create') for c in calls)
+                        return json.dumps([{'id':1,'tag_name':'node-v123-'+SOURCE[:12],'draft':True,'assets':[]}] if created else []).encode()
                     count=sum(1 for c in calls if c[:2]==('release','upload'))
-                    return json.dumps({'draft':True,'assets':assets if count==4 else []}).encode()
+                    return json.dumps({'id':1,'draft':True,'assets':assets if count==4 else []}).encode()
                 return b''
             import contextlib
             with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)
@@ -118,6 +120,31 @@ class NodeReleaseTests(unittest.TestCase):
             release.verify_tag(release.REPOSITORY,tag,SOURCE)
         with patch.object(release,'gh',side_effect=[json.dumps(refs).encode(),json.dumps({'object':{'type':'commit','sha':'3'*40}}).encode()]):
             with self.assertRaises(ValueError):release.verify_tag(release.REPOSITORY,tag,SOURCE)
+
+    def test_draft_lookup_uses_id_and_explicit_ref_before_publication(self):
+        # Reproduces the real GitHub 404: drafts have no published tag route.
+        import contextlib
+        with tempfile.TemporaryDirectory() as d:
+            packages=[package(d,a) for a in ('amd64','arm64')]
+            files=[f for p in packages for f in (p,p.with_name(p.name+'.sha256'))]
+            tag='node-v123-'+SOURCE[:12];state={'tag':False,'created':False,'assets':[]};calls=[]
+            def gh(*args):
+                calls.append(args)
+                if args[0]=='api':
+                    endpoint=args[1]
+                    if '/releases/tags/' in endpoint:raise RuntimeError('real draft endpoint404')
+                    if '/git/matching-refs/' in endpoint:return json.dumps([{'ref':'refs/tags/'+tag,'object':{'sha':SOURCE,'type':'commit'}}] if state['tag'] else []).encode()
+                    if endpoint.endswith('/git/refs'):
+                        self.assertIn('--method',args);self.assertIn('sha='+SOURCE,args);state['tag']=True;return b'{}'
+                    if 'per_page=' in endpoint:return json.dumps([{'id':41,'tag_name':tag,'draft':True,'assets':state['assets']}] if state['created'] else []).encode()
+                    if endpoint.endswith('/releases/41'):return json.dumps({'id':41,'draft':True,'assets':state['assets']}).encode()
+                if args[:2]==('release','create'):state['created']=True
+                if args[:2]==('release','upload'):
+                    p=Path(args[3]);state['assets'].append({'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)})
+                if args[:2]==('release','edit'):self.assertEqual(len(state['assets']),4)
+                return b''
+            with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)
+            self.assertEqual(calls[-1][:2],('release','edit'));self.assertTrue(state['tag'])
 
 
 if __name__=='__main__':unittest.main()
