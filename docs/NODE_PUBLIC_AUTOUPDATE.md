@@ -16,7 +16,7 @@ overwritten. A interrupted draft is resumed only with identical verified inputs.
 
 ## Managed Linux Node updater
 
-Reviewed source candidate, NOT yet activated fleet-wide. Install the existing
+Accepted on both managed88 instances; other roles are not yet activated. Install the existing
 manager and gptadmin_node_autoupdate.py into /usr/local/lib/gptadmin root-owned,
 nonwritable by users. Configuration /etc/gptadmin-node/autoupdate.json must have
 {"enabled":true,"names":["exact-existing-node-name"]}. Every active Node@ instance
@@ -32,7 +32,9 @@ is cancelled in the cleanup reserve. Unsupported drain, failed cancel, update,
 rollback or unknown parent timeout creates a protected hold.json: later timer
 runs refuse mutation until the owner verifies recovery. Healthy completed
 instances are recorded separately; a later refusal never claims whole success.
-No action or request is replayed to resolve an UNKNOWN outcome.
+An atomic600 fsynced hold is persisted BEFORE the manager call and cleared only
+after live verification and a fsynced partial receipt. Crash/power loss retains
+the hold. No action or request is replayed to resolve an UNKNOWN outcome.
 
 Finite proposed service budget: RAM256/384MiB, swap0, CPU1/GOMAXPROCS1,
 Tasks64, IOWeight10, systemd wall180s, downloader128MiB/archive payload256MiB,
@@ -40,7 +42,8 @@ temporary disk384MiB plus 512MiB available disk reserve. Downloads accept only
 fixed HTTPS public GitHub hosts, no credentials/cookies, bounded redirects,
 20s socket timeout, bounded bytes and remaining wall. Native Node service budgets
 are separate and preserved. Measure host/UID reserve before runtime installation.
-Timer6h plus up to30min jitter, first boot10min; no timer is currently enabled.
+Timer6h plus up to30min jitter, first boot10min; 88 timer is enabled; the first automatic already-current check completed, and
+its next native run is scheduled. Other fleet timers are not yet enabled.
 
 A managed Node updater cannot replace legacy Hub/HAOS/ShellMCP or the primary's
 nonstandard service. Those roles need their own supported package/controller.

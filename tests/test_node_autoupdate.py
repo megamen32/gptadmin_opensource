@@ -25,6 +25,19 @@ def index(**changes):
 
 
 class NodeAutoupdateTests(unittest.TestCase):
+    def test_intent_record_is_durable_protected_and_replaces_atomically(self):
+        import os,stat
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'hold.json'
+            update.record(path,{'reason':'manager_in_progress'})
+            self.assertEqual(json.loads(path.read_text())['reason'],'manager_in_progress')
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o600)
+            update.record(path,{'reason':'failed_review_required'})
+            self.assertEqual(json.loads(path.read_text())['reason'],'failed_review_required')
+            self.assertEqual(list(Path(d).iterdir()),[path])
+            with patch.object(update,'STATE',Path(d)):update.clear_hold()
+            self.assertFalse(path.exists())
+
     def test_selects_node_channel_without_consuming_legacy_latest_or_drafts(self):
         release,asset,source=update.select_release([index(tag_name='v999'),index(),index(tag_name='node-v124-'+'2'*12,draft=True)],'amd64')
         self.assertEqual(release['tag_name'],TAG);self.assertEqual(source,'1'*12)
@@ -67,6 +80,13 @@ class NodeAutoupdateTests(unittest.TestCase):
         with patch.object(update.urllib.request,'build_opener') as opener:
             with self.assertRaises(RuntimeError):update.get(update.API,100,time.monotonic()-1)
             opener.assert_not_called()
+
+    def test_native_health_has_no_commit_version_is_authoritative(self):
+        with patch.object(manager,'read_installed_env',return_value={}),patch.object(manager,'origin_from_env',return_value='http://unit.invalid'):
+            for commit,expected in [('1'*40,True),('2'*40,False)]:
+                with patch.object(manager,'http_json',side_effect=[(200,{'ok':True}),(200,{'git_commit':commit})]) as http:
+                    self.assertEqual(update.live_matches(manager,'one','1'*40),expected)
+                    self.assertTrue(http.call_args_list[-1].args[1].endswith('/version'))
 
     def test_manager_rejects_duplicate_or_unbounded_member_count_before_extraction(self):
         for duplicate in (True,False):

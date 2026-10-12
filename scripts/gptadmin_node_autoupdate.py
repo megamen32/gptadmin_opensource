@@ -21,6 +21,28 @@ CONFIG = Path('/etc/gptadmin-node/autoupdate.json')
 STATE = Path('/var/lib/gptadmin-node/autoupdate')
 
 
+def record(path, value):
+    """Durable intent/disposition before mutation; no power-loss rearming."""
+    temp=path.with_name(path.name+'.new-'+str(os.getpid()))
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,'w') as stream:
+            json.dump(value,stream);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        os.replace(temp,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def clear_hold():
+    (STATE/'hold.json').unlink()
+    directory=os.open(STATE,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+
+
 def public_url(url):
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != 'https' or parsed.username or parsed.password or parsed.fragment
@@ -114,6 +136,16 @@ def resolve_tag(tag, deadline):
     raise ValueError('unbounded Node tag chain')
 
 
+def live_matches(manager, name, source):
+    env=manager.read_installed_env(manager.DEFAULT_LAYOUT,name)
+    origin=manager.origin_from_env(env)
+    status,_=manager.http_json('GET',origin+'/healthz')
+    if not 200 <= status < 300:
+        return False
+    status,version=manager.http_json('GET',origin+'/version')
+    return status==200 and isinstance(version,dict) and version.get('git_commit')==source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='verify the public package without restarting a service')
@@ -155,14 +187,13 @@ def main():
         if not source.startswith(short):raise ValueError('accepted Node tag differs from manifest source prefix')
         current = manager.current_target(manager.DEFAULT_LAYOUT)
         previous = manager.manifest_summary(current) if current else None
-        def live_matches(name):
-            env=manager.read_installed_env(manager.DEFAULT_LAYOUT,name)
-            status,body=manager.http_json('GET',manager.origin_from_env(env)+'/healthz')
-            return status==200 and isinstance(body,dict) and body.get('git_commit')==source
         if (previous and previous.get('git_commit') == source
                 and previous.get('build_version') == int(release['tag_name'].split('-')[1][1:])
-                and all(live_matches(n) for n in names)):
-            print(json.dumps({'updated':False,'reason':'already_current','tag':release['tag_name']}));return
+                and all(live_matches(manager,n,source) for n in names)):
+            receipt={'updated':False,'complete':True,'reason':'already_current',
+                     'tag':release['tag_name'],'source':source,'instances':names}
+            record(STATE/'last-update.json',receipt)
+            print(json.dumps(receipt));return
         with tempfile.TemporaryDirectory(prefix='package-',dir=STATE) as temp:
             root = Path(temp);package = root / asset['name']
             sha = get(asset['browser_download_url'],128*1024**2,deadline,package)
@@ -180,38 +211,43 @@ def main():
             # role, profile, token, service limit or consumer config is changed.
             results=[]
             for name in names:
-                if live_matches(name):
+                if live_matches(manager,name,source):
                     results.append(name);continue
                 remaining=deadline-time.monotonic()
                 if remaining < 145:
                     receipt={'updated':bool(results),'complete':False,'source':source,
                              'verified_instances':results,'reason':'rollback_reserve_unavailable'}
-                    (STATE/'partial-update.json').write_text(json.dumps(receipt)+'\n')
+                    record(STATE/'partial-update.json',receipt)
                     print(json.dumps(receipt));return
                 # The manager raises a catchable deadline and retains 80s to
                 # roll back. Parent timeout includes an additional 15s margin;
                 # never SIGKILL it at the ordinary operation deadline.
+                record(STATE/'hold.json',{'complete':False,'source':source,
+                    'verified_instances':results,'reason':'manager_in_progress','instance':name})
                 try:
                     result=subprocess.run(['python3',str(MANAGER),'update','--name',name,'--package',str(package),'--wait-secs','20','--require-drain','--operation-deadline-secs','50'],
                                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=145)
                 except subprocess.TimeoutExpired:
                     receipt={'complete':False,'source':source,'verified_instances':results,
                              'reason':'manager_cleanup_unverified','instance':name}
-                    (STATE/'partial-update.json').write_text(json.dumps(receipt)+'\n')
-                    (STATE/'hold.json').write_text(json.dumps(receipt)+'\n')
+                    record(STATE/'partial-update.json',receipt)
+                    record(STATE/'hold.json',receipt)
                     raise RuntimeError('manager cleanup unverified; no further automatic update') from None
                 (STATE/(name+'-last-private.log')).write_bytes(result.stdout+result.stderr)
                 if result.returncode:
-                    (STATE/'hold.json').write_text(json.dumps({'complete':False,'source':source,
-                        'verified_instances':results,'reason':'manager_update_failed_review_required','instance':name})+'\n')
+                    record(STATE/'hold.json',{'complete':False,'source':source,
+                        'verified_instances':results,'reason':'manager_update_failed_review_required','instance':name})
                     raise RuntimeError('native Node update failed; manager rollback/disposition retained')
+                if not live_matches(manager,name,source):
+                    raise RuntimeError('manager returned success but live source not verified; hold retained')
                 results.append(name)
                 # Preserve successful slices even if a later peer refuses.
-                (STATE/'partial-update.json').write_text(json.dumps({'source':source,'verified_instances':results,'complete':False})+'\n')
-            if not all(live_matches(n) for n in names):
+                record(STATE/'partial-update.json',{'source':source,'verified_instances':results,'complete':False})
+                clear_hold()
+            if not all(live_matches(manager,n,source) for n in names):
                 raise RuntimeError('one managed instance did not load accepted Node source')
             receipt={'updated':True,'tag':release['tag_name'],'source':manifest['git_commit'],'instances':results,'sha256':sha}
-            (STATE/'last-update.json').write_text(json.dumps(receipt)+'\n')
+            record(STATE/'last-update.json',receipt)
             print(json.dumps(receipt))
     finally:
         os.close(fd)

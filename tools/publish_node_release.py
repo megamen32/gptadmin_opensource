@@ -125,15 +125,16 @@ def publish(directory, source, repository):
     releases = json.loads(gh('api', 'repos/' + repository + '/releases?per_page=100'))
     release = next((r for r in releases if r.get('tag_name') == tag), None)
     if release is None:
-        gh('release', 'create', tag, '--repo', repository, '--target', source,
-           '--draft', '--latest=false', '--title', 'GPTAdmin Node ' + str(version),
-           '--notes', 'Manifest-verified Linux amd64/arm64 Node binaries. Source: ' + source
-           + '. Separate Node channel; the full-platform latest release is preserved.')
-        releases = json.loads(gh('api', 'repos/' + repository + '/releases?per_page=100'))
-        matches = [r for r in releases if r.get('tag_name') == tag]
-        if len(matches) != 1:
-            raise ValueError('new Node draft release is missing or ambiguous')
-        release = matches[0]
+        # Use the mutation's authoritative response. The releases list may
+        # still be cached before this newly created draft (real CI failure).
+        release = json.loads(gh('api', 'repos/' + repository + '/releases',
+            '--method', 'POST', '-f', 'tag_name=' + tag, '-f', 'target_commitish=' + source,
+            '-F', 'draft=true', '-f', 'make_latest=false',
+            '-f', 'name=GPTAdmin Node ' + str(version),
+            '-f', 'body=Manifest-verified Linux amd64/arm64 Node binaries. Source: ' + source
+            + '. Separate Node channel; the full-platform latest release is preserved.'))
+    if (type(release.get('id')) is not int or release.get('tag_name') != tag):
+        raise ValueError('Node release response identity differs')
     verify_tag(repository, tag, source)
     present = {a['name']: a for a in release.get('assets', [])}
     if set(present) - {p.name for p in assets}:
@@ -145,15 +146,23 @@ def publish(directory, source, repository):
         else:
             if not release.get('draft'):
                 raise ValueError('published Node release is incomplete; never mutate it')
-            gh('release', 'upload', tag, str(path), '--repo', repository)
-    # GET /releases/tags only resolves published releases, not this draft.
-    final = json.loads(gh('api', 'repos/' + repository + '/releases/' + str(release['id'])))
-    present = {a['name']: a for a in final.get('assets', [])}
+            uploaded = json.loads(gh('api', 'https://uploads.github.com/repos/' + repository
+                + '/releases/' + str(release['id']) + '/assets?name=' + path.name,
+                '--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', str(path)))
+            if not asset_matches(uploaded, path):
+                raise ValueError('uploaded Node asset digest differs')
+            present[path.name] = uploaded
     if set(present) != {p.name for p in assets} or not all(asset_matches(present[p.name], p) for p in assets):
         raise ValueError('uploaded Node release digests differ')
     verify_tag(repository, tag, source)
-    if final.get('draft'):
-        gh('release', 'edit', tag, '--repo', repository, '--draft=false', '--latest=false')
+    if release.get('draft'):
+        final = json.loads(gh('api', 'repos/' + repository + '/releases/' + str(release['id']),
+            '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=false'))
+        if final.get('id') != release['id'] or final.get('tag_name') != tag or final.get('draft') is not False:
+            raise ValueError('Node publication response not confirmed')
+        final_assets = {a['name']: a for a in final.get('assets', [])}
+        if set(final_assets) != set(present) or not all(asset_matches(final_assets[p.name], p) for p in assets):
+            raise ValueError('published Node asset closure not confirmed; never rewrite')
     print(json.dumps({'published': True, 'tag': tag, 'source': source, 'assets': [p.name for p in assets],
                       'legacy_latest_preserved': True}))
 
