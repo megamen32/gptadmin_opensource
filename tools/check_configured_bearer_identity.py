@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import time
 
@@ -48,17 +49,20 @@ text = original.decode()
 assert text.count(GUARD) == 1
 command = ['go', 'test', '-json', '-trimpath', '-p', '1', '-parallel', '1',
            '-count=1', '-mod=readonly', '-timeout=30s', '-run', '^TestConfigured(Bearer|OnlyBearer)', './internal/hub']
-try:
-    source.write_text(text.replace(GUARD, '', 1))
-    assert run('identity-red', command) != 0
-    failures = {e['Test'] for e in events('identity-red')
-                if e.get('Action') == 'fail' and e.get('Test')}
-    assert {'TestConfiguredBearerPreservesDurableIdentity',
-            'TestConfiguredBearerCannotResurrectDurableLifecycle/revoked',
-            'TestConfiguredBearerCannotResurrectDurableLifecycle/expired',
-            'TestConfiguredBearerPreservesDurableProfile'} <= failures
-finally:
-    source.write_bytes(original)
+assert sys.argv[1:] in ([], ['--green-only'])
+failures = set()
+if not sys.argv[1:]:
+    try:
+        source.write_text(text.replace(GUARD, '', 1))
+        assert run('identity-red', command) != 0
+        failures = {e['Test'] for e in events('identity-red')
+                    if e.get('Action') == 'fail' and e.get('Test')}
+        assert {'TestConfiguredBearerPreservesDurableIdentity',
+                'TestConfiguredBearerCannotResurrectDurableLifecycle/revoked',
+                'TestConfiguredBearerCannotResurrectDurableLifecycle/expired',
+                'TestConfiguredBearerPreservesDurableProfile'} <= failures
+    finally:
+        source.write_bytes(original)
 run('identity-green', command, 0)
 passes = {e['Test'] for e in events('identity-green')
           if e.get('Action') == 'pass' and e.get('Test')}
@@ -92,6 +96,7 @@ receipt = {'status': 'PASS', 'source': commit, 'category': 'fast unit',
            'expected_seconds': 120, 'maximum_seconds': 150,
            'elapsed_seconds': time.monotonic() - START,
            'red_failures': sorted(failures), 'green_passes': sorted(passes),
+           'red_in_this_run': not sys.argv[1:],
            'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
            'compiler_bytes': cache_bytes, 'compiler_files': cache_files,
            'runtime_acceptance': False, 'model_calls': 0, 'secret_inputs': False}

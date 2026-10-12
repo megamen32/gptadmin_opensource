@@ -17,9 +17,11 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: 1.26.4
+          go-version: 1.27.2
           cache: false
-      - name: Causal RED, selected GREEN and one finite candidate build
+      # Causal RED on this unchanged guard/fixture was captured separately in
+      # run38295671296. Its compiler timeout is retained, not called GREEN.
+      - name: Selected GREEN and one finite candidate build
         shell: bash
         run: |
           set -euo pipefail
@@ -43,7 +45,7 @@ jobs:
             GOMAXPROCS=1 GOMEMLIMIT=384MiB GOTOOLCHAIN=local CGO_ENABLED=0 \
             GOCACHE="$area/cache" GOMODCACHE="$area/modules" GOTMPDIR="$area/tmp" TMPDIR="$area/tmp" \
             /usr/bin/timeout --signal=TERM --kill-after=5s 155s \
-            /usr/bin/python3 tools/check_configured_bearer_identity.py
+            /usr/bin/python3 tools/check_configured_bearer_identity.py --green-only
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
