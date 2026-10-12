@@ -49,7 +49,7 @@ text = original.decode()
 assert text.count(GUARD) == 1
 command = ['go', 'test', '-json', '-trimpath', '-p', '1', '-parallel', '1',
            '-count=1', '-mod=readonly', '-timeout=30s', '-run', '^TestConfigured(Bearer|OnlyBearer)', './internal/hub']
-assert sys.argv[1:] in ([], ['--green-only'])
+assert sys.argv[1:] in ([], ['--green-only'], ['--build-only'])
 failures = set()
 if not sys.argv[1:]:
     try:
@@ -63,12 +63,14 @@ if not sys.argv[1:]:
                 'TestConfiguredBearerPreservesDurableProfile'} <= failures
     finally:
         source.write_bytes(original)
-run('identity-green', command, 0)
-passes = {e['Test'] for e in events('identity-green')
-          if e.get('Action') == 'pass' and e.get('Test')}
-assert len(passes) == 6
-assert any(e.get('Action') == 'pass' and not e.get('Test') for e in events('identity-green'))
-run('identity-vet', ['go', 'vet', '-p', '1', './internal/hub'], 0)
+passes = set()
+if sys.argv[1:] != ['--build-only']:
+    run('identity-green', command, 0)
+    passes = {e['Test'] for e in events('identity-green')
+              if e.get('Action') == 'pass' and e.get('Test')}
+    assert len(passes) == 6
+    assert any(e.get('Action') == 'pass' and not e.get('Test') for e in events('identity-green'))
+    run('identity-vet', ['go', 'vet', '-trimpath', '-p', '1', './internal/hub'], 0)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
 version = (ROOT / 'VERSION').read_text().strip()
 flags = '-s -w'
@@ -97,6 +99,7 @@ receipt = {'status': 'PASS', 'source': commit, 'category': 'fast unit',
            'elapsed_seconds': time.monotonic() - START,
            'red_failures': sorted(failures), 'green_passes': sorted(passes),
            'red_in_this_run': not sys.argv[1:],
+           'green_in_this_run': sys.argv[1:] != ['--build-only'],
            'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
            'compiler_bytes': cache_bytes, 'compiler_files': cache_files,
            'runtime_acceptance': False, 'model_calls': 0, 'secret_inputs': False}

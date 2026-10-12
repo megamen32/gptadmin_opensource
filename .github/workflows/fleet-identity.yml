@@ -1,6 +1,15 @@
 name: Fleet durable identity regression
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Separate an already validated source from cold artifact compilation
+        required: true
+        default: green
+        type: choice
+        options:
+          - green
+          - build
 permissions:
   contents: read
 concurrency:
@@ -41,11 +50,17 @@ jobs:
             --property="WorkingDirectory=$GITHUB_WORKSPACE" \
             /usr/bin/env PATH="$(dirname "$go_binary"):/usr/bin:/bin" \
             GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            IDENTITY_PHASE="${{ inputs.phase }}" \
             IDENTITY_OUTPUT="$GITHUB_WORKSPACE/identity-output" \
             GOMAXPROCS=1 GOMEMLIMIT=384MiB GOTOOLCHAIN=local CGO_ENABLED=0 \
             GOCACHE="$area/cache" GOMODCACHE="$area/modules" GOTMPDIR="$area/tmp" TMPDIR="$area/tmp" \
             /usr/bin/timeout --signal=TERM --kill-after=5s 155s \
-            /usr/bin/python3 tools/check_configured_bearer_identity.py --green-only
+            /bin/bash -c 'set -euo pipefail
+              case "$IDENTITY_PHASE" in
+                green) exec /usr/bin/python3 tools/check_configured_bearer_identity.py --green-only ;;
+                build) exec /usr/bin/python3 tools/check_configured_bearer_identity.py --build-only ;;
+                *) exit 64 ;;
+              esac'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
