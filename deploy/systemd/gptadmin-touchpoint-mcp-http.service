@@ -1,0 +1,34 @@
+[Unit]
+Description=GPTAdmin owner-local session-isolated Touchpoint HTTP MCP singleton
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/var/lib/gptadmin/mcp-http/touchpoint-zcode100/deps
+ExecStart=/home/admin/.local/share/touchpoint-mcp/bin/python /home/admin/gptadmin/tools/python_mcp_session_http.py --config /var/lib/gptadmin/mcp-http/touchpoint-zcode100/binding.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TemporaryFileSystem=/tmp:rw,size=64M,nr_inodes=4096 /var/tmp:rw,size=16M,nr_inodes=1024
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/gptadmin/mcp-http/touchpoint-zcode100
+LimitFSIZE=32M
+MemoryHigh=256M
+MemoryMax=512M
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=128
+IOWeight=10
+TimeoutStopSec=12
+KillMode=control-group
+Restart=no
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

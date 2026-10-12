@@ -101,3 +101,4 @@ deploy/systemd/*
 cloudos-ui/dist/
 
 !deploy/systemd/gptadmin-atv-mcp-http.service
+!deploy/systemd/gptadmin-touchpoint-mcp-http.service
