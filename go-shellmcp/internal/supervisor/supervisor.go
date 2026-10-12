@@ -55,6 +55,12 @@ type Agent struct {
 	Transport string `json:"transport,omitempty"`
 	// ConnectionMode permits audited stateless sharing; empty defaults to session isolation.
 	ConnectionMode string `json:"connection_mode,omitempty"`
+	// OwnerProfileID fences a personal upstream credential to one verified Hub
+	// access profile. Empty preserves existing shared/operator definitions.
+	OwnerProfileID string `json:"owner_profile_id,omitempty"`
+	// ProtocolAdapter translates a known native HTTP API without a local MCP
+	// subprocess. The empty value uses the upstream's ordinary MCP protocol.
+	ProtocolAdapter string `json:"protocol_adapter,omitempty"`
 	// URL is required for remote transports and empty for stdio children.
 	URL string `json:"url,omitempty"`
 	// Headers are attached to remote MCP requests. Values may reference
@@ -267,6 +273,7 @@ func (m *Manager) persistLocked() error {
 
 func normalizeAgent(agent Agent) Agent {
 	agent.Ref = strings.TrimSpace(agent.Ref)
+	agent.OwnerProfileID = strings.TrimSpace(agent.OwnerProfileID)
 	agent.Name = strings.TrimSpace(agent.Name)
 	if agent.Name == "" {
 		agent.Name = agent.Ref
@@ -279,6 +286,9 @@ func normalizeAgent(agent Agent) Agent {
 }
 
 func validateAgent(agent Agent) error {
+	if agent.ProtocolAdapter != "" && (agent.ProtocolAdapter != "agentmemory-rest-v1" || agent.Transport != "streamable-http") {
+		return errors.New("supervisor: unsupported MCP HTTP protocol adapter")
+	}
 	switch agent.ConnectionMode {
 	case "", "session", "stateless":
 	default:

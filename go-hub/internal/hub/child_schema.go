@@ -13,7 +13,7 @@ const childSchemaMethod = "child/tools/list"
 // the parent's executable task under ONE ID, committed before queue release.
 func (s *Server) dispatchChildSchemaLocked(r *http.Request, child Agent, receipt *relayJob) error {
 	current, exists := s.exposedAgentByIDLocked(child.AgentID)
-	if !exists || !isChildMCPAgent(current) || !profileAllowsTarget(r, child.AgentID) {
+	if !exists || !isChildMCPAgent(current) || !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, current) {
 		return errors.New("child schema is not an authorized active target")
 	}
 	child = current
@@ -82,7 +82,7 @@ func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[strin
 		response["status"], response["error"] = "failed", map[string]any{"code": "child_schema_dispatch_failed", "message": message}
 		return response, true
 	}
-	if !profileAllowsTarget(r, child.AgentID) {
+	if !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
 		return failure("access profile denies the child schema receipt")
 	}
 	registration := s.agents[parent]
@@ -141,6 +141,9 @@ func (s *Server) childSchemaJobForRequest(r *http.Request, id string) (map[strin
 }
 
 func (s *Server) childSchemaForRequest(r *http.Request, child Agent) map[string]any {
+	if !agentOwnerConnectionAllowed(r, child) {
+		return map[string]any{"server_id": child.AgentID, "status": "failed", "error": connectionOwnerRPCError()}
+	}
 	s.mu.Lock()
 	id := newID()
 	receipt := &relayJob{ID: id, AgentID: child.AgentID, CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}

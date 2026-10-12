@@ -36,20 +36,21 @@ type rpcResponse struct {
 }
 
 type Client struct {
-	HTTP               *http.Client
-	mu                 sync.Mutex
-	stdio              map[string]*stdioClient
-	starting           map[string]*startingSession
-	generations        map[string]uint64
-	remote             map[string]remoteSession
-	remoteClosing      map[string]bool
-	validator          func(supervisor.Agent) bool
-	scoped             map[string]*scopedPartition
-	scopedEpoch        uint64
-	closedScopes       map[string]closedScopeRecord
-	scopedBlockedUntil time.Time
-	frozenEnv          []string
-	frozenHeaders      bool
+	HTTP                *http.Client
+	mu                  sync.Mutex
+	stdio               map[string]*stdioClient
+	starting            map[string]*startingSession
+	generations         map[string]uint64
+	remote              map[string]remoteSession
+	remoteClosing       map[string]bool
+	validator           func(supervisor.Agent) bool
+	scoped              map[string]*scopedPartition
+	scopedHTTPAdmission chan struct{}
+	scopedEpoch         uint64
+	closedScopes        map[string]closedScopeRecord
+	scopedBlockedUntil  time.Time
+	frozenEnv           []string
+	frozenHeaders       bool
 }
 
 type startingSession struct {

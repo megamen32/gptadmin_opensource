@@ -39,15 +39,20 @@ jobs:
             /usr/bin/env GOMAXPROCS=1 GOMEMLIMIT=384MiB GOTOOLCHAIN=local CGO_ENABLED=0 \
             GOCACHE="$area/cache" GOMODCACHE="$area/modules" GOTMPDIR="$area/tmp" TMPDIR="$area/tmp" \
             /usr/bin/timeout --signal=TERM --kill-after=5s 150s \
-            "$go_binary" test -json -p 1 -parallel 1 -count=1 -mod=readonly -timeout=35s \
-            -run '^(TestManagedNode|TestConnection|TestChildScope)' ./internal/hub \
-            | tee "$area/selected.jsonl"
-          python3 - "$area/selected.jsonl" <<'PY'
+            /bin/bash -c 'set -euo pipefail
+              cd "$2/go-hub"
+              "$1" test -json -p 1 -parallel 1 -count=1 -mod=readonly -timeout=35s \
+                -run "^(TestManagedNode|TestConnection|TestChildScope)" ./internal/hub | tee "$3/selected-hub.jsonl"
+              cd "$2/go-shellmcp"
+              "$1" test -json -p 1 -parallel 1 -count=1 -mod=readonly -timeout=20s \
+                -run "^(TestAgentMemoryREST|TestScoped)" ./internal/mcpclient | tee "$3/selected-memory.jsonl"
+            ' -- "$go_binary" "$GITHUB_WORKSPACE" "$area"
+          python3 - "$area/selected-hub.jsonl" "$area/selected-memory.jsonl" <<'PY'
           import json,sys
-          events=[json.loads(line) for line in open(sys.argv[1]) if line.startswith('{')]
+          events=[json.loads(line) for path in sys.argv[1:] for line in open(path) if line.startswith('{')]
           passes=[e['Test'] for e in events if e.get('Action')=='pass' and e.get('Test')]
-          assert any(e.get('Action')=='pass' and not e.get('Test') for e in events)
-          for expected in ['TestManagedNodeConnectionPath','TestManagedNodeConnectionRefusesLegacyAndBusyPeers','TestManagedNodeConnectionRefusesForeignProfileAndSecondHop','TestManagedNodeConnectionPreservesOwnerSessionAndNoContent','TestManagedNodeLocalExecuteMethodAndHeaders']:
+          assert sum(e.get('Action')=='pass' and not e.get('Test') for e in events)==2
+          for expected in ['TestManagedNodeConnectionPath','TestManagedNodeConnectionRefusesLegacyAndBusyPeers','TestManagedNodeConnectionRefusesForeignProfileAndSecondHop','TestManagedNodeConnectionPreservesOwnerSessionAndNoContent','TestManagedNodeLocalExecuteMethodAndHeaders','TestConnectionOwnerRejectsOtherWideAndUnboundProfiles','TestConnectionOwnerParentShellCannotBypassPrivateRef','TestConnectionOwnerLegacyAndDisabledSemantics','TestAgentMemoryRESTPreservesScopeAndCallerArgs','TestAgentMemoryRESTBoundsListsAndAuditWithoutFallback','TestAgentMemoryRESTRefusesRedirectAndNoSecretErrors','TestAgentMemoryRESTSchemaAndFailureAreTruthful','TestAgentMemoryRESTGenericBackendErrorRemainsError','TestScopedHTTPNamespaceSupportsBoundedMultiServerStartup','TestScopedHTTPBusyRefusesBeforePartitionAndPayload']:
               assert expected in passes, expected
           print(json.dumps({'selected_passes':len(passes),'runtime_acceptance':False}))
           PY

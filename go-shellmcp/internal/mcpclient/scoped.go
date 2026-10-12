@@ -16,7 +16,12 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 )
 
-const maxScopedPartitions = 8
+// Match the Hub's finite 128 downstream namespace slots. This is bookkeeping,
+// not 128 running children/requests: HTTP work is separately capped at eight
+// and managed stdio remains disabled with its original eight-slot ceiling.
+const maxScopedPartitions = 128
+const maxScopedHTTPRequests = 8
+const maxScopedStdioPartitions = 8
 const scopedIdleTTL = 5 * time.Minute
 const closedScopeTTL = 5 * time.Minute
 const maxClosedScopes = 128
@@ -31,6 +36,7 @@ type scopedPartition struct {
 	closeAttempt            *scopeCloseAttempt
 	ref, scope, fingerprint string
 	stateless               bool
+	stdio                   bool
 	client                  *Client
 	ctx                     context.Context
 	cancel                  context.CancelFunc
@@ -158,7 +164,18 @@ func (c *Client) acquireScope(agent supervisor.Agent, scope string, contexts ...
 		return p, effective, nil
 	}
 	if len(c.scoped) >= maxScopedPartitions {
-		return nil, agent, errors.New("mcp scoped connection capacity exhausted (maximum 8)")
+		return nil, agent, errors.New("mcp scoped connection capacity exhausted (maximum 128)")
+	}
+	if agent.Transport == "stdio" {
+		count := 0
+		for _, partition := range c.scoped {
+			if partition.stdio {
+				count++
+			}
+		}
+		if count >= maxScopedStdioPartitions {
+			return nil, agent, errors.New("mcp scoped stdio capacity exhausted (maximum 8)")
+		}
 	}
 	generation := c.generations[agent.Ref]
 	child := New()
@@ -177,7 +194,7 @@ func (c *Client) acquireScope(agent supervisor.Agent, scope string, contexts ...
 		return currentGeneration == generation && (currentValidator == nil || currentValidator(agent))
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &scopedPartition{ref: agent.Ref, scope: scope, fingerprint: fingerprint, stateless: agent.ConnectionMode == "stateless", client: child, ctx: ctx, cancel: cancel, active: 1, idle: make(chan struct{}), lastUsed: now}
+	p := &scopedPartition{ref: agent.Ref, scope: scope, fingerprint: fingerprint, stateless: agent.ConnectionMode == "stateless", stdio: agent.Transport == "stdio", client: child, ctx: ctx, cancel: cancel, active: 1, idle: make(chan struct{}), lastUsed: now}
 	if c.scoped == nil {
 		c.scoped = make(map[string]*scopedPartition)
 	}
@@ -200,6 +217,23 @@ func (c *Client) releaseScope(p *scopedPartition) {
 func (c *Client) RequestScoped(ctx context.Context, agent supervisor.Agent, scope, method string, params any) (map[string]any, error) {
 	if scope == "" {
 		return c.session(ctx, agent, method, params)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if agent.Transport == "streamable-http" || agent.Transport == "sse" {
+		c.mu.Lock()
+		if c.scopedHTTPAdmission == nil {
+			c.scopedHTTPAdmission = make(chan struct{}, maxScopedHTTPRequests)
+		}
+		admission := c.scopedHTTPAdmission
+		c.mu.Unlock()
+		select {
+		case admission <- struct{}{}:
+			defer func() { <-admission }()
+		default:
+			return nil, errors.New("mcp scoped HTTP concurrency exhausted (maximum 8); no request dispatched")
+		}
 	}
 	p, effective, err := c.acquireScope(agent, scope, ctx)
 	if err != nil {

@@ -88,6 +88,10 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	if !s.mcpAuth(w, r) {
 		return
 	}
+	if !agentOwnerProfileAllowed(r, agent) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "personal MCP requires its exact owner profile"})
+		return
+	}
 	principal := connectionPrincipal(r)
 	if principal == "" {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "managed connections require a verified client credential"})

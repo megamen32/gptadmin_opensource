@@ -154,6 +154,7 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 			"url":                       a.URL,
 			"enabled":                   a.Enabled,
 			"connection_mode":           a.ConnectionMode,
+			"owner_profile_id":          a.OwnerProfileID,
 			"connection_scopes_version": 1,
 			"connection_instance":       s.mcpConnectionInstance(a.Ref),
 			"managed_stdio_owner":       configuredUser != "" && configuredUser == runnerUser,

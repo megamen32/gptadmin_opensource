@@ -546,63 +546,63 @@ type Server struct {
 	oauthClientsPersisted map[string]oauthClientMetadata
 	cfg                   Config
 
-	mu                    sync.Mutex
-	authRateMu            sync.Mutex
-	cond                  *sync.Cond
-	agents                map[string]*Agent
-	relayCredentials      map[string]string // SHA-256 digests keyed by agent_id; never retain raw credentials.
-	relayEnrollments      map[string]relayEnrollment
-	relayQueues           map[string][]string
-	relayJobs             map[string]*relayJob
-	shellQueues           map[string][]string
-	localExecutors        map[string]map[string]string
-	localExecutorTokens   map[string]string
-	nodePeers             map[string]nodePeerRoute
-	nodePeersErr          error
-	nodePeerClient        *http.Client
-	nodePeerPinnedClients map[nodePeerRoute]*http.Client
+	mu                        sync.Mutex
+	authRateMu                sync.Mutex
+	cond                      *sync.Cond
+	agents                    map[string]*Agent
+	relayCredentials          map[string]string // SHA-256 digests keyed by agent_id; never retain raw credentials.
+	relayEnrollments          map[string]relayEnrollment
+	relayQueues               map[string][]string
+	relayJobs                 map[string]*relayJob
+	shellQueues               map[string][]string
+	localExecutors            map[string]map[string]string
+	localExecutorTokens       map[string]string
+	nodePeers                 map[string]nodePeerRoute
+	nodePeersErr              error
+	nodePeerClient            *http.Client
+	nodePeerPinnedClients     map[nodePeerRoute]*http.Client
 	nodeBearerAdmissionClient *http.Client
-	nodeBearerAdmissionSlots chan struct{}
-	nodeConns             *nodeConnRegistry
-	membershipMu          sync.Mutex
-	membershipStopOnce    sync.Once
-	membershipStop        chan struct{}
-	membershipDone        sync.WaitGroup
-	membershipLoadErr     error
-	nodeIdentity          *nodeIdentity
-	membership            *nodeMembershipState
-	membershipView        *nodeMembershipView
-	membershipRoutes      map[string]nodePeerRoute
-	authMu                sync.RWMutex
-	authState             authSnapshotState
-	authInitialized       bool
-	authLocalID           string
-	authRuntimeLock       *flock.Flock
-	shellControls         map[string][]shellControl
-	shellJobs             map[string]*shellJob
-	taskOwner             *taskOwner
-	taskRuntimeClosed     bool
-	taskRuntimeStop       chan struct{}
-	idempotency           map[string]*idempotencyEntry
-	oauthCodes            map[string]oauthCode
-	managedMCP            map[string]managedMCPToken
-	oauthClients          map[string]oauthClientMetadata
-	accessProfiles        map[string]AccessProfile
-	approvals             map[string]*approvalRequest
-	autonomous            map[string]*autonomousBudget
-	security              securitySettings
-	securityPath          string
-	webauthnState         webAuthnState
-	webauthnPath          string
-	webauthnSessions      map[string]webAuthnSession
-	telemetry             telemetryState
-	telemetryPath         string
-	telemetryExporter     *telemetryExporter
-	secretStore           *SecretStore
-	secretStoreErr        error
-	audit                 []auditEvent
-	authRate              map[string]authRateWindow
-	failover              FailoverConfig
+	nodeBearerAdmissionSlots  chan struct{}
+	nodeConns                 *nodeConnRegistry
+	membershipMu              sync.Mutex
+	membershipStopOnce        sync.Once
+	membershipStop            chan struct{}
+	membershipDone            sync.WaitGroup
+	membershipLoadErr         error
+	nodeIdentity              *nodeIdentity
+	membership                *nodeMembershipState
+	membershipView            *nodeMembershipView
+	membershipRoutes          map[string]nodePeerRoute
+	authMu                    sync.RWMutex
+	authState                 authSnapshotState
+	authInitialized           bool
+	authLocalID               string
+	authRuntimeLock           *flock.Flock
+	shellControls             map[string][]shellControl
+	shellJobs                 map[string]*shellJob
+	taskOwner                 *taskOwner
+	taskRuntimeClosed         bool
+	taskRuntimeStop           chan struct{}
+	idempotency               map[string]*idempotencyEntry
+	oauthCodes                map[string]oauthCode
+	managedMCP                map[string]managedMCPToken
+	oauthClients              map[string]oauthClientMetadata
+	accessProfiles            map[string]AccessProfile
+	approvals                 map[string]*approvalRequest
+	autonomous                map[string]*autonomousBudget
+	security                  securitySettings
+	securityPath              string
+	webauthnState             webAuthnState
+	webauthnPath              string
+	webauthnSessions          map[string]webAuthnSession
+	telemetry                 telemetryState
+	telemetryPath             string
+	telemetryExporter         *telemetryExporter
+	secretStore               *SecretStore
+	secretStoreErr            error
+	audit                     []auditEvent
+	authRate                  map[string]authRateWindow
+	failover                  FailoverConfig
 
 	updateStatePath     string
 	updateLockPath      string
@@ -4262,6 +4262,7 @@ func childMCPAgents(parent Agent) []Agent {
 			"child_ref":                 ref,
 			"enabled":                   true,
 			"connection_mode":           firstString(descriptor, "connection_mode"),
+			"owner_profile_id":          firstString(descriptor, "owner_profile_id"),
 			"connection_scopes_version": intFromAny(descriptor["connection_scopes_version"]),
 			"connection_instance":       firstString(descriptor, "connection_instance"),
 			"managed_stdio_owner":       truthy(descriptor["managed_stdio_owner"]),
@@ -4565,6 +4566,9 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	if err := s.authorizeMCPConnectionOwner(r, target, toolName, args); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+	}
 	// Drain admission boundary: new submissions are rejected before any
 	// idempotency reservation or job creation; receipt reads stay available.
 	releaseSubmission, admitted := s.beginNodeSubmission(target, toolName)
@@ -7667,6 +7671,10 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	if !s.mcpAuth(w, r) {
 		return
 	}
+	if !agentOwnerProfileAllowed(r, agent) {
+		writeJSON(w, http.StatusForbidden, connectionOwnerRPCError())
+		return
+	}
 	if tail == "card" {
 		writeJSON(w, http.StatusOK, s.agentCard(r, agent))
 		return
@@ -7750,6 +7758,12 @@ func (s *Server) serverActionsOpenAPI(w http.ResponseWriter, r *http.Request, ag
 	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
+		return
+	}
+	if firstString(agent.Meta, "owner_profile_id") != "" {
+		// This legacy schema endpoint has no initialize/DELETE lifecycle. Do
+		// not allocate an unscoped personal upstream just to render OpenAPI.
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "personal MCP schema requires tools/list on its managed /connection endpoint"})
 		return
 	}
 	result, rpcErr := s.agentToolsList(agent)
@@ -7993,6 +8007,9 @@ func compactJSON(v any) string {
 }
 
 func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]any) (any, any, bool) {
+	if !agentOwnerConnectionAllowed(r, agent) {
+		return nil, connectionOwnerRPCError(), false
+	}
 	method := firstString(body, "method")
 	if _, managed := r.Context().Value(connectionContextKey{}).(connectionScope); managed {
 		switch method {
@@ -8164,6 +8181,9 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 }
 
 func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, any) {
+	if !agentOwnerConnectionAllowed(r, agent) {
+		return nil, connectionOwnerRPCError()
+	}
 	releaseAuthAdmission(r)
 	if isChildMCPAgent(agent) {
 		if !profileAllowsTarget(r, agent.AgentID) {
@@ -8203,6 +8223,9 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 }
 
 func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
+	if !agentOwnerConnectionAllowed(r, agent) || s.authorizeMCPConnectionOwner(r, agent.AgentID, name, args) != nil {
+		return nil, connectionOwnerRPCError()
+	}
 	if agent.AgentID != "hub" {
 		releaseAuthAdmission(r)
 	}
@@ -8249,6 +8272,9 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 }
 
 func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
+	if !agentOwnerConnectionAllowed(r, agent) {
+		return nil, connectionOwnerRPCError()
+	}
 	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourcesList(), nil
@@ -8270,6 +8296,9 @@ func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 }
 
 func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (any, any) {
+	if !agentOwnerConnectionAllowed(r, agent) {
+		return nil, connectionOwnerRPCError()
+	}
 	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
 		return s.appsSDKResourceRead(r, uri), nil

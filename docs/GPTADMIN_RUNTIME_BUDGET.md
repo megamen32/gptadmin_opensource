@@ -1,5 +1,46 @@
 # GPTAdmin node-100 budget and acceptance
 
+## HTTP migration continuation, 2026-10-12
+
+The historical candidate/refusal sections below are retained. The selected
+managed-peer release is installed: Hub uses the accepted 3/10GiB RAM, swap0,
+CPU2 and Tasks512 envelope. A 12.10 readback of the unchanged Hub measured
+RSS1,085,124KiB, swap0 and10threads. The unchanged128/256MiB/CPU1/Tasks128/swap0
+Node88 completed the managedHTTP and real native Codex/ZCode acceptance. These
+are narrow samples and do not establish the full migration's peak or savings.
+
+The next source candidate separates lightweight HTTP namespace cardinality
+from execution:128isolated namespaces match the existing Hub128session bound;
+at most8scoped HTTP requests are admitted before any upstream dispatch. A busy
+admission neither creates a partition nor dispatches a payload. ManagedSTDIO
+remains disabled and retains its independent8namespace ceiling. No kernel
+RAM/CPU/tasks/swap or host/UID/native limits change. The constructor-allocation
+unit records actual bytes for128namespaces in hosted CI; it is not transport
+RSS evidence. Before activation, retain that result and measure actual Hub
+RSS/peak/swap/tasks/events during the real HTTP calls and cleanup.
+
+AgentMemory's HTTP adapter runs inside the existing Go owner and reaches the
+already-running authenticated REST backend. It owns no process, native session
+header or local memory fallback. Each credential/profile/ref/definition and
+consumer partition remains separate. Requests/responses are bounded to1MiB,
+HTTP attempt deadline15seconds, no redirects/retries; synthesized export uses
+two sequential bounded reads. UserIO's dedicated HTTP bindings retain separate
+client/upstream credentials. Personal refs are admitted only for their exact
+verified profile on the managed initialize/DELETE path; the generic legacy
+facade and parent ShellMCP route cannot bypass that lifecycle.
+
+Ordinary focused units: expected130/max180seconds including setup, existing
+public hosted finite CPU1/512MiB high/1GiB max/swap0/Tasks128/IO10 and14GiB
+ephemeral disk envelope; the entire selected Go payload has150seconds. Unit
+fixtures assert logic only. Passing units still require exact accepted artifact,
+fresh runtime admission and native consumer proof before any client rollout.
+
+Server44 currently has only the legacy ShellMCP process, whose live limits were
+unbounded at the12.10 readback. Do not describe that process as an enrolled
+finite Node, or infer managedHTTP support from discovery. Its measured service
+budget and supported owner upgrade are a separate rollout step; retain SSH,
+GPU/AVD and other owners' processes.
+
 GPTAdmin owns its Hub/service and consumer checks. Canonical infrastructure,
 shared resource policy and admission authority remain in
 `/home/admin/ServersAdministartion/templates/server100-resource-guard/README.md`.

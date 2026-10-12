@@ -63,14 +63,18 @@ func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, meth
 	}
 	session := c.remote[agent.Ref]
 	if session == nil {
-		switch agent.Transport {
-		case "streamable-http":
-			session = &streamableSession{httpClient: c.HTTP, agent: agent, protocolVersion: protocolVersion, frozenHeaders: c.frozenHeaders}
-		case "sse":
-			session = &legacySSESession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
-		default:
-			c.mu.Unlock()
-			return nil, fmt.Errorf("mcp child %q has unsupported remote transport %q", agent.Ref, agent.Transport)
+		if agent.ProtocolAdapter == "agentmemory-rest-v1" {
+			session = &agentMemoryRESTSession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
+		} else {
+			switch agent.Transport {
+			case "streamable-http":
+				session = &streamableSession{httpClient: c.HTTP, agent: agent, protocolVersion: protocolVersion, frozenHeaders: c.frozenHeaders}
+			case "sse":
+				session = &legacySSESession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
+			default:
+				c.mu.Unlock()
+				return nil, fmt.Errorf("mcp child %q has unsupported remote transport %q", agent.Ref, agent.Transport)
+			}
 		}
 		c.remote[agent.Ref] = session
 	}
