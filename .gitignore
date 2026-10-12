@@ -94,7 +94,10 @@ deploy/systemd/*
 !deploy/systemd/gptadmin-hub-server100-budget.conf
 !deploy/systemd/gptadmin-ci-autofix.service
 !deploy/systemd/gptadmin-ci-autofix.timer
+!deploy/systemd/gptadmin-tgc-mcp-http.service
 .playwright-mcp/
 
 # CloudOS UI fork build output (served from PublicDir)
 cloudos-ui/dist/
+
+!deploy/systemd/gptadmin-atv-mcp-http.service
