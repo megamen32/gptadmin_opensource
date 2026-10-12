@@ -42,7 +42,7 @@ jobs:
             /bin/bash -c 'set -euo pipefail
               cd "$2/go-hub"
               "$1" test -json -p 1 -parallel 1 -count=1 -mod=readonly -timeout=35s \
-                -run "^(TestManagedNode|TestConnection|TestChildScope)" ./internal/hub | tee "$3/selected-hub.jsonl"
+                -run "^(TestManagedNode|TestConnection|TestChildScope|TestTaskControlsPrune|TestTaskReadSnapshotWhileWriterHeld)" ./internal/hub | tee "$3/selected-hub.jsonl"
               cd "$2/go-shellmcp"
               "$1" test -json -p 1 -parallel 1 -count=1 -mod=readonly -timeout=20s \
                 -run "^(TestAgentMemoryREST|TestScoped)" ./internal/mcpclient | tee "$3/selected-memory.jsonl"
@@ -52,7 +52,7 @@ jobs:
           events=[json.loads(line) for path in sys.argv[1:] for line in open(path) if line.startswith('{')]
           passes=[e['Test'] for e in events if e.get('Action')=='pass' and e.get('Test')]
           assert sum(e.get('Action')=='pass' and not e.get('Test') for e in events)==2
-          for expected in ['TestManagedNodeConnectionPath','TestManagedNodeConnectionRefusesLegacyAndBusyPeers','TestManagedNodeConnectionRefusesForeignProfileAndSecondHop','TestManagedNodeConnectionPreservesOwnerSessionAndNoContent','TestManagedNodeLocalExecuteMethodAndHeaders','TestConnectionOwnerRejectsOtherWideAndUnboundProfiles','TestConnectionOwnerParentShellCannotBypassPrivateRef','TestConnectionOwnerLegacyAndDisabledSemantics','TestConnectionProbeReturnsLegacyVerdictWithoutSession','TestConnectionProbeDoesNotForwardToBusyPeer','TestConnectionProbeKeepsOwnerAndRoutingFences','TestAgentMemoryRESTPreservesScopeAndCallerArgs','TestAgentMemoryRESTBoundsListsAndAuditWithoutFallback','TestAgentMemoryRESTRefusesRedirectAndNoSecretErrors','TestAgentMemoryRESTSchemaAndFailureAreTruthful','TestAgentMemoryRESTGenericBackendErrorRemainsError','TestScopedHTTPNamespaceSupportsBoundedMultiServerStartup','TestScopedHTTPBusyRefusesBeforePartitionAndPayload']:
+          for expected in ['TestManagedNodeConnectionPath','TestManagedNodeConnectionRefusesLegacyAndBusyPeers','TestManagedNodeConnectionRefusesForeignProfileAndSecondHop','TestManagedNodeConnectionPreservesOwnerSessionAndNoContent','TestManagedNodeLocalExecuteMethodAndHeaders','TestConnectionOwnerRejectsOtherWideAndUnboundProfiles','TestConnectionOwnerParentShellCannotBypassPrivateRef','TestConnectionOwnerLegacyAndDisabledSemantics','TestConnectionProbeReturnsLegacyVerdictWithoutSession','TestConnectionProbeDoesNotForwardToBusyPeer','TestConnectionProbeKeepsOwnerAndRoutingFences','TestTaskControlsPruneUsesCoveringDoneIndex','TestTaskControlsPrunePreservesActiveRecentAndBoundaryRecords','TestTaskReadSnapshotWhileWriterHeld','TestAgentMemoryRESTPreservesScopeAndCallerArgs','TestAgentMemoryRESTBoundsListsAndAuditWithoutFallback','TestAgentMemoryRESTRefusesRedirectAndNoSecretErrors','TestAgentMemoryRESTSchemaAndFailureAreTruthful','TestAgentMemoryRESTGenericBackendErrorRemainsError','TestScopedHTTPNamespaceSupportsBoundedMultiServerStartup','TestScopedHTTPBusyRefusesBeforePartitionAndPayload']:
               assert expected in passes, expected
           print(json.dumps({'selected_passes':len(passes),'runtime_acceptance':False}))
           PY

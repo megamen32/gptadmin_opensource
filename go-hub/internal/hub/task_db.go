@@ -291,8 +291,14 @@ func (t *taskTransaction) save(state persistedTaskState) error {
 	return nil
 }
 
+// The existing partial done index also contains the WITHOUT ROWID primary
+// key (kind,key). Keep this query covering: choosing the kind primary-key
+// prefix scans unrelated historical payload pages under the shared Hub lock.
+// withTaskDatabase creates this index before executing any transaction callback.
+const pruneTaskControlsSQL = `DELETE FROM task_controls WHERE task_id IN (SELECT key FROM task_records INDEXED BY task_records_done WHERE kind='shell' AND done>0 AND done<?)`
+
 func (t *taskTransaction) prune(taskCutoff, idempotencyCutoff float64) error {
-	if _, err := t.tx.Exec(`DELETE FROM task_controls WHERE task_id IN (SELECT key FROM task_records WHERE kind='shell' AND done>0 AND done<?)`, taskCutoff); err != nil {
+	if _, err := t.tx.Exec(pruneTaskControlsSQL, taskCutoff); err != nil {
 		return err
 	}
 	if _, err := t.tx.Exec(`DELETE FROM task_records WHERE done>0 AND done<?`, taskCutoff); err != nil {
