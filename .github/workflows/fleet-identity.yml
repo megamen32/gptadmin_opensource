@@ -1,0 +1,53 @@
+name: Fleet durable identity regression
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fleet-identity-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  focused:
+    if: github.repository == 'megamen32/gptadmin_opensource'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: 1.26.4
+          cache: false
+      - name: Causal RED, selected GREEN and one finite candidate build
+        shell: bash
+        run: |
+          set -euo pipefail
+          area="$RUNNER_TEMP/fleet-identity"
+          disk="$RUNNER_TEMP/fleet-identity.ext4"
+          truncate -s 14G "$disk"
+          mkfs.ext4 -q -m 0 "$disk"
+          mkdir -p "$area"
+          sudo mount -o loop "$disk" "$area"
+          trap 'sudo umount "$area"; rm -f "$disk"' EXIT
+          sudo chown "$(id -u):$(id -g)" "$area"
+          mkdir -p "$area/cache" "$area/modules" "$area/tmp" identity-output
+          go_binary="$(command -v go)"
+          sudo systemd-run --quiet --pipe --wait --collect --uid="$(id -u)" \
+            --property=CPUQuota=100% --property=MemoryHigh=512M --property=MemoryMax=1G \
+            --property=MemorySwapMax=0 --property=TasksMax=128 --property=IOWeight=10 \
+            --property="WorkingDirectory=$GITHUB_WORKSPACE" \
+            /usr/bin/env PATH="$(dirname "$go_binary"):/usr/bin:/bin" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            IDENTITY_OUTPUT="$GITHUB_WORKSPACE/identity-output" \
+            GOMAXPROCS=1 GOMEMLIMIT=384MiB GOTOOLCHAIN=local CGO_ENABLED=0 \
+            GOCACHE="$area/cache" GOMODCACHE="$area/modules" GOTMPDIR="$area/tmp" TMPDIR="$area/tmp" \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 155s \
+            /usr/bin/python3 tools/check_configured_bearer_identity.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: fleet-identity-${{ github.sha }}
+          path: identity-output/
+          if-no-files-found: error
+          retention-days: 1

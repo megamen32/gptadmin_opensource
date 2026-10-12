@@ -962,6 +962,14 @@ func (s *Server) existingMCPBearerClaims(token string) (map[string]any, bool) {
 	if err := s.refreshManagedMCPStateLocked(); err != nil {
 		return nil, false
 	}
+	// A configured copy of an existing durable key is not another principal.
+	// Let the original verifier retain its identity, policy and lifecycle;
+	// revoked/expired durable records must never fall back to the alias.
+	for _, record := range s.managedMCP {
+		if record.TokenKind == "durable" && record.TokenDigest != "" && hmac.Equal([]byte(record.TokenDigest), []byte(digest)) {
+			return nil, false
+		}
+	}
 	for _, record := range s.managedMCP {
 		if record.TokenKind != configuredMCPBearerTokenKind || record.RevokedAt != 0 || (lifecycle && record.ExpiresAt > 0 && record.ExpiresAt <= now) {
 			continue
