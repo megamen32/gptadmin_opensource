@@ -47,12 +47,12 @@ jobs:
 
         '
     - name: Build manifest-pinned production Node package
-      run: python3 tools/build_node.py --arch amd64
+      run: python3 tools/build_node.py --arch amd64 --arch arm64
     - name: Retain exact artifact for controlled fleet deployment
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: gptadmin-node-${{ github.sha }}
-        path: .tmp/node-packages/gptadmin-node-linux-amd64.tar.gz*
+        path: .tmp/node-packages/gptadmin-node-linux-*.tar.gz*
         if-no-files-found: error
         retention-days: 1
   admin-ui-build:
@@ -249,3 +249,23 @@ jobs:
         PY
 
         '
+
+  node-release:
+    name: Publish verified portable Node binaries
+    needs: ci-gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout exact accepted source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Fetch the exact packages built before the gate
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "gptadmin-node-$GITHUB_SHA" --dir .tmp/node-release
+    - name: Publish a separate immutable Node channel
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 tools/publish_node_release.py --directory .tmp/node-release --source "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
