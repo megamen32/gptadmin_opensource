@@ -85,14 +85,6 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "connection requires a configured child MCP"})
 		return
 	}
-	if intFromAny(agent.Meta["connection_scopes_version"]) < 1 || firstString(agent.Meta, "connection_instance") == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "upstream connector must be upgraded for isolated connections"})
-		return
-	}
-	if agent.Transport == "stdio" && (!truthy(agent.Meta["managed_stdio_owner"]) || !truthy(agent.Meta["managed_stdio_platform"])) {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "stdio connection requires its verified owner-local Unix connector"})
-		return
-	}
 	if !s.mcpAuth(w, r) {
 		return
 	}
@@ -106,6 +98,12 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if s.forwardManagedConnection(w, r, agent, nil) {
+			return
+		}
+		if !managedLocalConnector(w, agent) {
+			return
+		}
 		s.closeConnection(w, r, agent, principal)
 		return
 	}
@@ -118,6 +116,17 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	if headerErr := validateMCP20260728RoutingHeaders(r, body); headerErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": headerErr})
+		return
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON-RPC request"})
+		return
+	}
+	if s.forwardManagedConnection(w, r, agent, encoded) {
+		return
+	}
+	if !managedLocalConnector(w, agent) {
 		return
 	}
 	method := firstString(body, "method")
@@ -160,6 +169,18 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		response["result"] = result
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func managedLocalConnector(w http.ResponseWriter, agent Agent) bool {
+	if intFromAny(agent.Meta["connection_scopes_version"]) < 1 || firstString(agent.Meta, "connection_instance") == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "upstream connector must be upgraded for isolated connections"})
+		return false
+	}
+	if agent.Transport == "stdio" && (!truthy(agent.Meta["managed_stdio_owner"]) || !truthy(agent.Meta["managed_stdio_platform"])) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "stdio connection requires its verified owner-local Unix connector"})
+		return false
+	}
+	return true
 }
 
 func connectionProtocol(requested string) string {

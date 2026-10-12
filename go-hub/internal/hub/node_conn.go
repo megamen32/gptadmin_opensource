@@ -41,6 +41,7 @@ type nodeConnFrame struct {
 	Op       string            `json:"op"`
 	ID       string            `json:"id,omitempty"`
 	Endpoint string            `json:"endpoint,omitempty"`
+	Method   string            `json:"method,omitempty"`
 	Auth     string            `json:"auth,omitempty"`
 	Body     json.RawMessage   `json:"body,omitempty"`
 	Status   int               `json:"status,omitempty"`
@@ -55,14 +56,15 @@ type nodeConnResult struct {
 
 // nodeConn is one live member connection on the writer.
 type nodeConn struct {
-	name       string
-	ws         *websocket.Conn
-	writeMu    sync.Mutex
-	pendingMu  sync.Mutex
-	pending    map[string]chan nodeConnResult
-	lastActive atomic.Int64
-	done       chan struct{}
-	closeOnce  sync.Once
+	name        string
+	managedHTTP bool
+	ws          *websocket.Conn
+	writeMu     sync.Mutex
+	pendingMu   sync.Mutex
+	pending     map[string]chan nodeConnResult
+	lastActive  atomic.Int64
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 func (c *nodeConn) write(frame nodeConnFrame) error {
@@ -201,7 +203,7 @@ func (s *Server) nodeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(nodeConnBodyLimit + (1 << 20))
-	conn := &nodeConn{name: member.Name, ws: ws, pending: map[string]chan nodeConnResult{}, done: make(chan struct{})}
+	conn := &nodeConn{name: member.Name, managedHTTP: r.Header.Get(managedNodeProtocolHeader) == managedNodeProtocol, ws: ws, pending: map[string]chan nodeConnResult{}, done: make(chan struct{})}
 	s.nodeConns.put(conn)
 	log.Printf("node connection established name=%s node_id=%s", member.Name, member.NodeID)
 	s.nodeConnReadLoop(conn, member.Name)
@@ -390,7 +392,7 @@ func (s *Server) nodeConnDialLoop() {
 		// address for split-horizon DNS; the persistent connection must use
 		// the same override or it would loop back to this node's own proxy.
 		ws, _, err := websocket.Dial(ctx, dialURL, &websocket.DialOptions{
-			HTTPHeader: http.Header{"Authorization": {"Bearer " + key}},
+			HTTPHeader: http.Header{"Authorization": {"Bearer " + key}, managedNodeProtocolHeader: {managedNodeProtocol}},
 			HTTPClient: newNodeConnDialClient(s.cfg.NodeWriterConnectTo),
 		})
 		if err != nil {
@@ -481,7 +483,7 @@ func (s *Server) nodeConnServeLoop(ctx context.Context, ws *websocket.Conn) {
 				result := nodeConnFrame{Op: "result", ID: frame.ID, Status: status, Body: body}
 				if len(headers) > 0 {
 					result.Headers = map[string]string{}
-					for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version"} {
+					for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version", "Mcp-Session-Id"} {
 						if value := headers.Get(name); value != "" {
 							result.Headers[name] = value
 						}
@@ -505,7 +507,17 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 	if h, port, err := net.SplitHostPort(host); err == nil && (h == "" || h == "0.0.0.0" || h == "::") {
 		host = net.JoinHostPort("127.0.0.1", port)
 	}
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+	method := http.MethodPost
+	managed := managedConnectionPath(frame.Endpoint)
+	if managed {
+		if frame.Method != http.MethodPost && frame.Method != http.MethodDelete {
+			return http.StatusBadRequest, nil, []byte(`{"detail":"invalid managed peer method"}`)
+		}
+		method = frame.Method
+	} else if frame.Method != "" && frame.Method != http.MethodPost {
+		return http.StatusBadRequest, nil, []byte(`{"detail":"unsupported peer method"}`)
+	}
+	request, err := http.NewRequestWithContext(context.Background(), method,
 		"http://"+host+frame.Endpoint, bytes.NewReader(frame.Body))
 	if err != nil {
 		return http.StatusBadGateway, nil, []byte(`{"detail":"node loopback request construction failed"}`)
@@ -523,18 +535,31 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 			}
 		}
 	}
+	if managed {
+		request.Header.Set(nodePeerHopHeader, "1")
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id"} {
+			if value := frame.Headers[name]; value != "" {
+				request.Header.Set(name, value)
+			}
+		}
+		request.GetBody = nil
+	}
 	timeout := s.cfg.DefaultTimeout
 	if timeout < 20*time.Second {
 		timeout = 20 * time.Second
 	}
 	timeout += 10 * time.Second
-	response, err := (&http.Client{Timeout: timeout}).Do(request)
+	client := &http.Client{Timeout: timeout}
+	if managed {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return http.StatusBadGateway, nil, []byte(`{"detail":"node loopback delivery failed; execution outcome may be unknown"}`)
 	}
 	defer response.Body.Close()
 	headers := http.Header{}
-	for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version"} {
+	for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version", "Mcp-Session-Id"} {
 		if value := response.Header.Get(name); value != "" {
 			headers.Set(name, value)
 		}
