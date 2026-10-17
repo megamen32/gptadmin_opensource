@@ -58,16 +58,27 @@ def token(env: dict[str, str]) -> str:
 
 
 def request(method: str, path: str, bearer: str, payload=None, timeout=20):
+    headers = {
+        "Authorization": "Bearer " + bearer,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/yaml, */*",
+    }
+    # Fetch with this exact caller before dispatch. Direct native MCP uses the
+    # supported outer header so strict downstream business schemas stay intact.
+    if method == 'POST' and (path == '/mcp-relay/call' or (
+            isinstance(payload, dict) and payload.get('method') == 'tools/call')):
+        discovery = request('GET', '/mcp-relay/servers?detail=full', bearer, timeout=timeout)
+        instructions, context = discovery.get('instructions'), discovery.get('context')
+        if (not isinstance(instructions, str) or not instructions.strip()
+                or not isinstance(context, str) or not context):
+            raise RuntimeError('runtime discovery omitted current instructions/context')
+        headers['X-GPTAdmin-Context'] = context
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
         BASE + path,
         data=data,
         method=method,
-        headers={
-            "Authorization": "Bearer " + bearer,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/yaml, */*",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -75,8 +86,7 @@ def request(method: str, path: str, bearer: str, payload=None, timeout=20):
             ctype = resp.headers.get("Content-Type", "")
             return json.loads(body) if "json" in ctype else body.decode()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {body[:1200]}") from exc
+        raise RuntimeError(f"{method} {path} -> HTTP {exc.code}") from None
 
 
 def wait_for_shell(bearer: str) -> dict:

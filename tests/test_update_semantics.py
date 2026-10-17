@@ -365,8 +365,9 @@ def test_local_shell_exec_verifier_retries_a_stranded_job(monkeypatch):
 
     def fake_http(_base, method, path, **kwargs):
         if method == "GET" and path.startswith("/mcp-relay/servers"):
-            return {"servers": [{"server_id": "shell:local", "status": "online"}]}
+            return {"servers": [{"server_id": "shell:local", "status": "online"}], "instructions": "Verifier fixture instructions.", "context": "verifier-context"}
         if method == "POST" and path == "/mcp-relay/call":
+            assert kwargs["payload"]["context"] == "verifier-context"
             marker = kwargs["payload"]["arguments"]["cmd"].split("'")[1]
             job_id = f"job-{len(posted) + 1}"
             posted.append((job_id, marker))
@@ -399,8 +400,9 @@ def test_local_shell_exec_verifier_fails_when_all_probe_jobs_stall(monkeypatch):
 
     def fake_http(_base, method, path, **kwargs):
         if method == "GET" and path.startswith("/mcp-relay/servers"):
-            return {"servers": [{"server_id": "shell:local", "status": "online"}]}
+            return {"servers": [{"server_id": "shell:local", "status": "online"}], "instructions": "Verifier fixture instructions.", "context": "verifier-context"}
         if method == "POST" and path == "/mcp-relay/call":
+            assert kwargs["payload"]["context"] == "verifier-context"
             job_id = f"job-{len(posted) + 1}"
             posted.append(job_id)
             return {"status": "running", "job_id": job_id}

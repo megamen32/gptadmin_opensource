@@ -30,7 +30,10 @@ SPEC.loader.exec_module(live_acceptance)
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Minimal disposable Hub surface used by the runner regression."""
+    """Local logic fixture; actual acceptance uses the compiled Hub below."""
+
+    calls: list[dict[str, Any]] = []
+    failure: str | None = None
 
     def _send(self, status: int, payload: Any, content_type: str = "application/json") -> None:
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -57,10 +60,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
             return
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.calls.append(request)
         if request["method"] == "tools/list":
-            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{"name": "demo"}]}})
+            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{"name": name} for name in ("ui", "discover", "schema", "execute", "job", "expand")]}})
         else:
-            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": {"structuredContent": {"safe": True}}})
+            name = request["params"]["name"]
+            if name == "discover":
+                payload = {"servers": [{"server_id": "hub"}], "instructions": "Read-only local fixture.", "context": "fixture-context"}
+            elif name == "schema":
+                payload = {"response": {"tools": [{"name": "demo", "inputSchema": {"type": "object"}}]}, "call_ref": "fixture-ref"}
+            else:
+                payload = {"status": "ok", "capabilities": ["read_only_demo"]}
+            result = {"structuredContent": payload}
+            if name == "execute" and self.failure:
+                payload.update({"status": "failed", "executed": False, "error": {"code": self.failure, "message": "test-bearer private-provider-text"}})
+                if self.failure == "tool_error":
+                    result["isError"] = True
+            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": result})
 
     def log_message(self, *_args: object) -> None:
         return
@@ -70,6 +86,7 @@ def test_live_runner_checks_public_and_authenticated_surfaces_without_echoing_be
     """The runner must exercise the minimum deployment smoke without leaking auth."""
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    _Handler.calls = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -86,6 +103,30 @@ def test_live_runner_checks_public_and_authenticated_surfaces_without_echoing_be
     assert summary["status"] == "passed"
     assert summary["stages"] == ["health", "version", "connection", "oauth", "openapi", "mcp"]
     assert "test-bearer" not in json.dumps(summary)
+    calls = [call["params"] for call in _Handler.calls if call["method"] == "tools/call"]
+    assert [call["name"] for call in calls] == ["discover", "schema", "execute"]
+    assert calls[1]["arguments"] == {"target": "hub", "tool": "demo", "detail": "full", "context": "fixture-context"}
+    assert calls[2]["arguments"] == {"ref": "fixture-ref", "args": {}}
+
+
+@pytest.mark.parametrize("failure", ["instructions_required", "tool_error"])
+def test_live_runner_rejects_tool_failure_without_echoing_provider_data(failure: str) -> None:
+    """HTTP success cannot turn a refused or failed tool into acceptance."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    _Handler.failure = failure
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(live_acceptance.LiveAcceptanceError) as caught:
+            live_acceptance.run_acceptance(f"http://127.0.0.1:{server.server_port}", "test-bearer")
+        assert "test-bearer" not in str(caught.value)
+        assert "private-provider-text" not in str(caught.value)
+    finally:
+        _Handler.failure = None
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 @pytest.fixture
@@ -114,6 +155,7 @@ def disposable_real_hub(tmp_path: Path):
             "PORT": str(port),
             "CTL_TOKEN": "ctl",
             "ADMIN_PASSWORD": "pw",
+            "GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED": "1",
             "PUBLIC_ORIGIN": f"http://127.0.0.1:{port}",
             "MCP_RESOURCE": f"http://127.0.0.1:{port}",
             "GPTADMIN_CONFIG_DIR": str(config_dir),
@@ -163,7 +205,7 @@ def test_live_runner_checks_actual_go_hub_process(disposable_real_hub: str) -> N
 
     summary = live_acceptance.run_acceptance(disposable_real_hub, "ctl", required_tools={"demo"})
     assert summary["status"] == "passed"
-    assert summary["tool_count"] > 0
+    assert summary["tool_count"] == 6
 
 
 def test_admin_password_login_persists_across_redirect_refresh_and_api(disposable_real_hub: str) -> None:

@@ -2240,6 +2240,17 @@ def _approve_pending_response_ok(res: dict) -> bool:
     return False
 
 
+def _require_instruction_receipt(payload) -> str:
+    """Keep the current instruction document with its caller-bound receipt."""
+    if not isinstance(payload, dict):
+        raise RuntimeError('Hub instruction discovery returned an invalid response')
+    instructions, context = payload.get('instructions'), payload.get('context')
+    if (not isinstance(instructions, str) or not instructions.strip()
+            or not isinstance(context, str) or not context):
+        raise RuntimeError('Hub instruction discovery omitted current instructions/context')
+    return context
+
+
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
     """Approve only the freshly generated same-machine ShellMCP identity.
 
@@ -2312,13 +2323,14 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
         raise RuntimeError('local ShellMCP registration did not appear for cryptographic auto-approval')
 
     target = str(candidate.get('server_id') or '')
+    context = _require_instruction_receipt(discovered)
     result = http_json(
         'POST', '/mcp-relay/call',
-        {'target': 'hub', 'tool': 'approve_pending_server', 'arguments': {'server_id': target}},
+        {'target': 'hub', 'tool': 'approve_pending_server', 'arguments': {'server_id': target}, 'context': context},
         timeout=10.0,
     )
     if not _approve_pending_response_ok(result):
-        raise RuntimeError(f'local ShellMCP auto-approval failed for {target}: {result}')
+        raise RuntimeError(f'local ShellMCP auto-approval failed for {target}')
 
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -5289,10 +5301,28 @@ def _candidate_mcp_rpc(base: str, method: str, params: dict, *, token: str, host
     if not isinstance(payload, dict):
         raise RuntimeError(f'candidate gate: MCP {method} did not return a JSON object')
     if payload.get('error'):
-        raise RuntimeError(f"candidate gate: MCP {method} returned error: {payload.get('error')}")
+        raise RuntimeError(f'candidate gate: MCP {method} returned an error')
     if 'result' not in payload:
         raise RuntimeError(f'candidate gate: MCP {method} response has no result')
     return payload['result']
+
+
+def _candidate_mcp_content(result) -> dict:
+    if not isinstance(result, dict) or result.get('isError'):
+        raise RuntimeError('candidate gate: MCP tool failed')
+    payload = result.get('structuredContent')
+    if not isinstance(payload, dict) or payload.get('error') or payload.get('status') == 'failed':
+        raise RuntimeError('candidate gate: MCP tool returned an invalid result')
+    return payload
+
+
+def _require_candidate_demo(result) -> None:
+    if not isinstance(result, dict) or result.get('error') or result.get('executed') is False:
+        raise RuntimeError('candidate gate: demo execution failed')
+    demo = result.get('response', result)
+    if (not isinstance(demo, dict) or demo.get('status') != 'ok'
+            or 'read_only_demo' not in demo.get('capabilities', [])):
+        raise RuntimeError('candidate gate: safe demo result is missing')
 
 
 def _candidate_tools(payload) -> list[dict]:
@@ -5423,21 +5453,34 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
                 local_base, 'tools/list', {}, token=token, host=client_host, request_id=2,
             )
             mcp_tools = listed.get('tools') if isinstance(listed, dict) else None
-            if not isinstance(mcp_tools, list) or not any(
-                isinstance(item, dict) and str(item.get('name') or '') == 'demo' for item in mcp_tools
-            ):
-                raise RuntimeError('candidate gate: MCP tools/list does not expose safe demo')
-            mcp_called = _candidate_mcp_rpc(
-                local_base, 'tools/call', {'name': 'demo', 'arguments': {}},
+            if not isinstance(mcp_tools, list) or not {'ui', 'discover', 'schema', 'execute', 'job', 'expand'} <= {
+                item.get('name') for item in mcp_tools if isinstance(item, dict)
+            }:
+                raise RuntimeError('candidate gate: MCP core catalog is incomplete')
+            mcp_discovered = _candidate_mcp_content(_candidate_mcp_rpc(
+                local_base, 'tools/call', {'name': 'discover', 'arguments': {}},
                 token=token, host=client_host, request_id=3,
+            ))
+            mcp_context = _require_instruction_receipt(mcp_discovered)
+            mcp_schema = _candidate_mcp_content(_candidate_mcp_rpc(
+                local_base, 'tools/call', {'name': 'schema', 'arguments': {
+                    'target': 'hub', 'tool': 'demo', 'detail': 'full', 'context': mcp_context,
+                }}, token=token, host=client_host, request_id=4,
+            ))
+            definitions = _candidate_tools(mcp_schema)
+            if len(definitions) != 1 or definitions[0].get('name') != 'demo' or not mcp_schema.get('call_ref'):
+                raise RuntimeError('candidate gate: exact MCP demo schema/reference is missing')
+            mcp_called = _candidate_mcp_rpc(
+                local_base, 'tools/call', {'name': 'execute', 'arguments': {'ref': mcp_schema['call_ref'], 'args': {}}},
+                token=token, host=client_host, request_id=5,
             )
-            if not isinstance(mcp_called, dict):
-                raise RuntimeError('candidate gate: MCP tools/call demo returned an invalid result')
+            _require_candidate_demo(_candidate_mcp_content(mcp_called))
 
             # Custom GPT Actions contract, discovered from the candidate's own
             # OpenAPI artifact rather than hard-coded relay paths.
             method, path = ops['discover']
             discovered = _candidate_http(local_base, method, path, host=client_host, token=token)
+            context = _require_instruction_receipt(discovered)
             servers = _candidate_servers(discovered)
             if not servers:
                 raise RuntimeError('candidate gate: discover returned no targets')
@@ -5454,11 +5497,11 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             smethod, spath = ops['schema']
             schema_payload = _candidate_http(
                 local_base, smethod, spath, host=client_host, token=token,
-                payload={'target': selected_target}, timeout=8.0,
+                payload={'target': selected_target, 'tool': 'demo', 'detail': 'full', 'context': context}, timeout=8.0,
             )
             tools = _candidate_tools(schema_payload)
             demo = next((item for item in tools if str(item.get('name') or '') == 'demo'), None)
-            if demo is None:
+            if demo is None or len(tools) != 1:
                 raise RuntimeError('candidate gate: hub schema does not expose the safe demo tool')
             input_schema = demo.get('inputSchema') if isinstance(demo.get('inputSchema'), dict) else {}
             if input_schema.get('required'):
@@ -5467,7 +5510,7 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             emethod, epath = ops['execute']
             result = _candidate_http(
                 local_base, emethod, epath, host=client_host, token=token,
-                payload={'target': selected_target, 'tool_name': 'demo', 'arguments': {}},
+                payload={'target': selected_target, 'tool_name': 'demo', 'arguments': {}, 'context': context},
                 timeout=12.0,
             )
             job_id = str(result.get('job_id') or '') if isinstance(result, dict) else ''
@@ -5489,6 +5532,7 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
                 status = str(result.get('status') or '')
                 if status and status not in {'completed', 'success'}:
                     raise RuntimeError(f'candidate gate: execute returned status {status}')
+            _require_candidate_demo(result)
             return {'status': 'passed', 'client_origin': client_origin, 'target': selected_target, 'custom_gpt': 'passed', 'mcp': 'passed'}
         finally:
             if process.poll() is None:
@@ -5526,6 +5570,7 @@ def _require_real_local_shell_exec(env: dict, timeout_s: int = 90) -> dict:
         time.sleep(0.25)
     if not selected:
         raise RuntimeError('local ShellMCP did not become online for execution verification')
+    context = _require_instruction_receipt(payload)
 
     # A Hub restart can strand one already-dispatched queue job in ``running``
     # even though the new ShellMCP is healthy.  Do not let one stale verifier
@@ -5546,6 +5591,7 @@ def _require_real_local_shell_exec(env: dict, timeout_s: int = 90) -> dict:
                 'tool': 'shell_exec',
                 'arguments': {'cmd': f"printf '{expected}'", 'run_as_user': 'root'},
                 'background': True,
+                'context': context,
             },
             timeout=10.0,
         )

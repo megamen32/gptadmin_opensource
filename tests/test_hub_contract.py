@@ -216,6 +216,7 @@ def hub_contract(
             # Black-box contract follows the production MCP2 default. Strict
             # legacy schema admission is tested separately as explicit opt-in.
             "GPTADMIN_SCHEMA_CONTRACT_VALIDATION": "0",
+            "GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED": "1",
             "GPTADMIN_ROOT": str(ROOT),
             "GPTADMIN_CONFIG_DIR": str(state_dir),
             "GPTADMIN_ARTIFACT_DIR": str(tmp_path / "artifacts"),
@@ -389,12 +390,25 @@ def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     assert "schema_version" not in response_dump
     assert "schema_digest_sha256" not in response_dump
 
+    # The instruction gate precedes target validation. Supplying its receipt
+    # below must reach the target error without disabling the production gate.
+    status, blocked, _ = hub_contract.request(
+        "POST", "/mcp-relay/call", payload={"target": "default", "tool_name": "shell_exec"},
+    )
+    assert status == 428, blocked
+    assert blocked.get("executed") is False
+    assert blocked.get("error", {}).get("code") == "instructions_required"
+    assert "job_id" not in blocked
+
+    context = tools_body.get("context")
+    assert isinstance(context, str) and context
+    assert isinstance(tools_body.get("instructions"), str) and tools_body["instructions"].strip()
     for path, payload in (
         ("/mcp-relay/tools", {"target": "default"}),
         ("/mcp-relay/call", {"target": "default", "tool_name": "shell_exec"}),
         ("/mcp-relay/tools", {"target": "unknown-contract-target"}),
     ):
-        status, body, _ = hub_contract.request("POST", path, payload=payload)
+        status, body, _ = hub_contract.request("POST", path, payload={**payload, "context": context})
         assert status in {400, 404}, body
         assert "job_id" not in body, body
 
@@ -420,9 +434,9 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
     tools = tools_result.get("tools")
     assert isinstance(tools, list)
     names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-    assert {"discover", "schema", "execute"} <= names
+    assert names == {"ui", "discover", "schema", "execute", "job", "expand"}
     discover_schema = next(tool for tool in tools if tool.get("name") == "discover")
-    assert discover_schema["inputSchema"]["properties"]["detail"]["enum"] == ["full"]
+    assert discover_schema["inputSchema"]["properties"]["detail"]["enum"] == ["compact", "full"]
 
     list_servers = hub_contract.rpc(
         "/mcp",
@@ -430,7 +444,10 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
         {"name": "discover", "arguments": {}},
         3,
     )
-    servers = _structured_content(list_servers).get("servers")
+    discovery = _structured_content(list_servers)
+    assert isinstance(discovery.get("instructions"), str) and discovery["instructions"].strip()
+    assert isinstance(discovery.get("context"), str) and discovery["context"]
+    servers = discovery.get("servers")
     assert isinstance(servers, list)
     assert any(server.get("server_id") == "hub" for server in servers if isinstance(server, dict))
 
@@ -442,6 +459,20 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
     )
     detailed_servers = _structured_content(detailed).get("servers")
     assert any("meta" in server for server in detailed_servers if isinstance(server, dict))
+
+    selected = _structured_content(hub_contract.rpc(
+        "/mcp", "tools/call", {
+            "name": "schema",
+            "arguments": {"target": "hub", "tool": "demo", "detail": "full", "context": discovery["context"]},
+        }, 32,
+    ))
+    definitions = selected.get("response", {}).get("tools")
+    assert isinstance(definitions, list) and len(definitions) == 1
+    assert definitions[0]["name"] == "demo"
+    assert isinstance(definitions[0]["inputSchema"], dict)
+    assert selected.get("call_ref")
+    assert "operation_id" not in selected
+    assert "instructions" not in selected
 
     rejected = hub_contract.rpc(
         "/mcp",

@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Secret request and status tools are routed through the generic Hub execution facade.
+- Installation, update verification and acceptance clients obtain the current instruction context before dispatch instead of failing on the new precondition.
 - Exact tool-schema selection stays scoped even with full detail; compact successful replies retain expandable diagnostics.
 - Regression coverage for profile isolation, current-context admission, reader restrictions and cross-node delivery.
 

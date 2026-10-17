@@ -124,6 +124,9 @@ def _schema_signature(schema: dict[str, object] | None) -> dict[str, object] | N
         signature["properties"] = {
             name: _schema_signature(value) for name, value in sorted(schema["properties"].items())  # type: ignore[union-attr]
         }
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in schema:
+            signature[key] = [_schema_signature(item) for item in schema[key]]
     if "items" in schema:
         signature["items"] = _schema_signature(schema["items"])  # type: ignore[arg-type]
     if isinstance(schema.get("additionalProperties"), dict):
@@ -192,29 +195,55 @@ def _core_operation_contract(spec: dict[str, object]) -> dict[str, dict[str, obj
 EXPECTED_GENERATED_CORE_CONTRACT = {
     "GET /mcp-relay/servers": {
         "security": _security({"bearerAuth": []}),
-        "parameters": [_param("query", "detail", False, _schema("string", enum=["full"]))],
+        "parameters": [
+            _param("query", "detail", False, _schema("string", enum=["compact", "full"])),
+            _param("query", "query", False, _schema("string")),
+            _param("query", "status", False, _schema("string")),
+        ],
         "requestBody": None,
-        "responses": {
-            "200": _response(_json_content(_schema_ref("#/components/schemas/DiscoverResponse"))),
-        },
+        "responses": {"200": _response()},
     },
     "POST /mcp-relay/tools": {
         "security": _security({"bearerAuth": []}),
         "parameters": [],
-        "requestBody": _request_body(_json_content(_schema_ref("#/components/schemas/SchemaRequest"))),
-        "responses": {
-            "200": _response(_json_content(_schema_ref("#/components/schemas/Result"))),
-        },
+        "requestBody": _request_body(_json_content(_schema(
+            "object", required=["target"], additionalProperties=False,
+            properties={
+                "target": _schema("string"), "tool": _schema("string"),
+                "detail": _schema("string", enum=["compact", "full"]),
+            },
+        ))),
+        "responses": {"200": _response()},
     },
     "POST /mcp-relay/call": {
         "security": _security({"bearerAuth": []}),
         "parameters": [],
-        "requestBody": _request_body(_json_content(_schema_ref("#/components/schemas/ExecuteRequest"))),
-        "responses": {
-            "200": _response(_json_content(_schema_ref("#/components/schemas/Result"))),
-            "428": _response(_json_content(_schema_ref("#/components/schemas/ApprovalRequired"))),
-            "429": _response(),
-        },
+        "requestBody": _request_body(_json_content(_schema(
+            "object", additionalProperties=True,
+            anyOf=[{"required": ["ref"]}, {"required": ["target", "tool"]}],
+            properties={
+                **{name: _schema("string") for name in (
+                    "ref", "target", "tool", "tool_name", "args_json", "cmd", "query", "cwd", "idempotency_key",
+                )},
+                "args": _schema("object", additionalProperties=True),
+                "arguments": _schema("object", additionalProperties=True),
+                "detail": _schema("string", enum=["compact", "full"]),
+            },
+        ))),
+        "responses": {"200": _response(), "428": _response()},
+    },
+    "POST /mcp-relay/expand": {
+        "security": _security({"bearerAuth": []}),
+        "parameters": [],
+        "requestBody": _request_body(_json_content(_schema(
+            "object", required=["id"], additionalProperties=False,
+            properties={
+                "id": _schema("string"), "path": _schema("string"),
+                "offset": _schema("integer", minimum=0),
+                "limit": _schema("integer", minimum=1, maximum=16000),
+            },
+        ))),
+        "responses": {"200": _response()},
     },
     "GET /mcp-relay/job/{job_id}": {
         "security": _security({"bearerAuth": []}),
@@ -224,168 +253,7 @@ EXPECTED_GENERATED_CORE_CONTRACT = {
             _param("query", "detail", False, _schema("string", enum=["compact", "full"])),
         ],
         "requestBody": None,
-        "responses": {
-            "200": _response(_json_content(_schema_ref("#/components/schemas/Job"))),
-        },
-    },
-    "POST /webhooks/v1/{route}": {
-        "security": _security({"webhookToken": []}),
-        "parameters": [_param("path", "route", True, _schema("string"))],
-        "requestBody": _request_body({"application/json": {}}),
-        "responses": {
-            "202": _response(),
-        },
-    },
-    "GET /webhook-jobs/{job_id}": {
-        "security": _security({"webhookToken": []}),
-        "parameters": [_param("path", "job_id", True, _schema("string"))],
-        "requestBody": None,
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "GET /admin/api/webhook-jobs/{job_id}": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [_param("path", "job_id", True, _schema("string"))],
-        "requestBody": None,
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "GET /webhook-routes": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": None,
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "POST /webhook-routes": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [_param("header", "X-GPTAdmin-Approval-ID", False, _schema("string"))],
-        "requestBody": _request_body(_json_content(_schema_ref("#/components/schemas/WebhookRoute"))),
-        "responses": {
-            "201": _response(),
-        },
-    },
-    "PUT /webhook-routes/{route}": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [
-            _param("header", "X-GPTAdmin-Approval-ID", False, _schema("string")),
-            _param("path", "route", True, _schema("string")),
-        ],
-        "requestBody": _request_body(_json_content(_schema_ref("#/components/schemas/WebhookRoute"))),
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "DELETE /webhook-routes/{route}": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [
-            _param("header", "X-GPTAdmin-Approval-ID", False, _schema("string")),
-            _param("path", "route", True, _schema("string")),
-        ],
-        "requestBody": None,
-        "responses": {
-            "204": _response(),
-        },
-    },
-    "POST /proxy-control/v1/request": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": _request_body(
-            _json_content(
-                _schema(
-                    "object",
-                    required=["profile_id", "policy"],
-                    properties={
-                        "policy": _schema("object", additionalProperties=True),
-                        "profile_id": _schema("string"),
-                    },
-                )
-            )
-        ),
-        "responses": {
-            "201": _response(),
-        },
-    },
-    "POST /proxy-control/v1/approve": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": _request_body(
-            _json_content(
-                _schema(
-                    "object",
-                    required=["capability_id"],
-                    properties={"capability_id": _schema("string")},
-                )
-            )
-        ),
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "POST /proxy-control/v1/issue": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": _request_body(
-            _json_content(
-                _schema(
-                    "object",
-                    required=["capability_id", "target"],
-                    properties={
-                        "capability_id": _schema("string"),
-                        "target": _schema("string"),
-                    },
-                )
-            )
-        ),
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "POST /proxy-control/v1/open": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": _request_body(
-            _json_content(
-                _schema(
-                    "object",
-                    required=["token", "role"],
-                    properties={
-                        "token": _schema("string"),
-                        "role": _schema("string", enum=["client", "agent"]),
-                    },
-                )
-            )
-        ),
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "GET /proxy-control/v1/status": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [_param("query", "capability_id", True, _schema("string"))],
-        "requestBody": None,
-        "responses": {
-            "200": _response(),
-        },
-    },
-    "POST /proxy-control/v1/revoke": {
-        "security": _security({"bearerAuth": []}),
-        "parameters": [],
-        "requestBody": _request_body(
-            _json_content(
-                _schema(
-                    "object",
-                    required=["capability_id"],
-                    properties={"capability_id": _schema("string")},
-                )
-            )
-        ),
-        "responses": {
-            "200": _response(),
-        },
+        "responses": {"200": _response()},
     },
 }
 
@@ -509,12 +377,9 @@ def test_generated_core_openapi_operations_have_structural_contract():
 
         generated = yaml.safe_load(actual.decode("utf-8"))
         actual_contract = _core_operation_contract(generated)
-        assert set(actual_contract) == {
-            "GET /mcp-relay/servers",
-            "POST /mcp-relay/tools",
-            "POST /mcp-relay/call",
-            "GET /mcp-relay/job/{job_id}",
-        }, _render_diff("generated core contract", EXPECTED_GENERATED_CORE_CONTRACT, actual_contract, log_path)
+        assert actual_contract == EXPECTED_GENERATED_CORE_CONTRACT, _render_diff(
+            "generated core contract", EXPECTED_GENERATED_CORE_CONTRACT, actual_contract, log_path,
+        )
         assert all(
             operation["security"] == _security({"bearerAuth": []})
             for operation in actual_contract.values()
