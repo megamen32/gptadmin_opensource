@@ -2,6 +2,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -222,7 +223,9 @@ func compactPersistedOutput(value any) any {
 }
 
 func (s *Server) loadTaskState() error {
-	state, err := s.readTaskState()
+	// A restart restores live work and at most one minute of terminal cache.
+	// Historical payloads remain in SQLite and are hydrated by exact ID.
+	state, err := s.readTaskRecordsQuery(fmt.Sprintf("kind = 'idempotency' OR done = 0 OR done >= %f", nowFloat()-taskCacheSeconds), false)
 	if err != nil {
 		return err
 	}

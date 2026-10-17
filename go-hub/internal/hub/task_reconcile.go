@@ -7,6 +7,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 	if s.cfg.ConfigDir == "" || len(ids) == 0 {
 		return nil
 	}
+	s.pruneExpiredTaskMemoryLocked()
 	pending := append([]string(nil), ids...)
 	seen := map[string]bool{}
 	for len(pending) > 0 {
@@ -32,7 +33,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 				j := s.shellJobs[id]
 				if j == nil || p.Revision > j.Revision {
 					if j == nil {
-						j = &shellJob{}
+						j = &shellJob{CachedAt: nowFloat()}
 						s.shellJobs[id] = j
 					}
 					j.RequestKey = p.RequestKey
@@ -61,10 +62,10 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 				j := s.relayJobs[id]
 				if j == nil || p.Revision > j.Revision {
 					if j == nil {
-						j = &relayJob{}
+						j = &relayJob{CachedAt: nowFloat()}
 						s.relayJobs[id] = j
 					}
-					*j = relayJob{ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
+					*j = relayJob{CachedAt: nowFloat(), ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
 				}
 				if j.Method == "task/group" {
 					pending = append(pending, taskGroupChildIDs(j)...)

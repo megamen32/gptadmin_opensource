@@ -57,3 +57,30 @@ Upgrade through `codex plugin add gptadmin@gptadmin-local`. Existing chats may
 retain their loaded tool catalog; validate a fresh native MCP connection.
 Keep the separate legacy gptadmin MCP entry disabled when this plugin supplies
 the same connection, to avoid duplicate tool catalogs.
+
+## Current profile context (1.3.0)
+
+`discover` and selected `schema` return the current effective profile instructions
+and a `context` receipt. A schema `call_ref` carries that receipt into `execute`.
+Pass `context` on explicit calls and further discovery to avoid repeated text.
+A missing or stale receipt produces `instructions_required` and `executed:false`
+before execution; read the returned text and make the intended call again. Never
+interpret an unrelated timeout as proof that an operation did not run.
+
+This package includes the portable Agent Plugins 1.0 root `plugin.json` and
+`mcp.json`. The existing `.codex-plugin/plugin.json` and `.mcp.json` remain the
+Codex-specific compatibility entrypoints, at the same package version. Portable
+MCP uses `streamable-http` / `headers`; the native compatibility file keeps its
+client-specific `http` / `http_headers` spelling. Neither contains credentials.
+
+Updating a package does not retroactively reload an existing conversation.
+The Hub gate enforces current delivery independently of plugin activation. The
+skill helps the client retain actual instructions, not just a receipt. Per-host
+plugin reload and after-compaction hooks depend on the host; this package does
+not claim a universal hook or automatic changes to every local project.
+
+An optional project instruction, added only by the project owner, can say:
+
+> Before GPTAdmin work, read the current profile returned by discovery/schema.
+> Retain its text and context together. On instructions_required refresh them;
+> inspect receipts before repeating operations with an uncertain outcome.

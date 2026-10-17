@@ -276,10 +276,12 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 		return false
 	}
 	frame := nodeConnFrame{Op: "call", ID: hex.EncodeToString(seed),
-		Endpoint: endpoint, Auth: r.Header.Get("Authorization"), Body: body}
+		Endpoint: endpoint, Auth: r.Header.Get("Authorization"), Body: body, Headers: map[string]string{}}
+	if token := instructionToken(r); token != "" {
+		frame.Headers[instructionContextHeader] = token
+	}
 	if endpoint == "/mcp" {
-		frame.Headers = map[string]string{}
-		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", instructionContextHeader} {
 			if value := r.Header.Get(name); value != "" {
 				frame.Headers[name] = value
 			}
@@ -526,10 +528,13 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 		request.Header.Set("Authorization", frame.Auth)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if token := frame.Headers[instructionContextHeader]; token != "" {
+		request.Header.Set(instructionContextHeader, token)
+	}
 	if frame.Endpoint == "/mcp" {
 		// Match the HTTP peer route. Never propagate a browser cookie, client
 		// session ID or arbitrary frame header into another node's session.
-		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", instructionContextHeader} {
 			if value := frame.Headers[name]; value != "" {
 				request.Header.Set(name, value)
 			}
@@ -537,7 +542,7 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 	}
 	if managed {
 		request.Header.Set(nodePeerHopHeader, "1")
-		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id"} {
+		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id", instructionContextHeader} {
 			if value := frame.Headers[name]; value != "" {
 				request.Header.Set(name, value)
 			}

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -68,7 +69,22 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	// Production managers pin GPTADMIN_AUTH_SOURCE_ID to the writer identity;
 	// the snapshot gate refuses reader traffic otherwise.
 	member.cfg.AuthSourceID = "writer-node-identity"
-	memberServer := httptest.NewServer(member.Handler())
+	// Context portability requires the same signing authority. Preserve the
+	// distinct control credentials and replicate the opaque caller bearer as
+	// before; only this portability fixture shares its instruction signer.
+	member.cfg.OAuthClientSecret = writer.cfg.OAuthClientSecret
+	// Observe the real loopback request without replacing its handler.
+	forwardedHeaders := make(chan http.Header, 2)
+	memberHandler := member.Handler()
+	memberServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/mcp" && r.Header.Get("Mcp-Name") == "execute" {
+			select {
+			case forwardedHeaders <- r.Header.Clone():
+			default:
+			}
+		}
+		memberHandler.ServeHTTP(w, r)
+	}))
 	defer memberServer.Close()
 	// The live-connection executor replays calls against the node's own
 	// configured listener; point it at the test server. A short sync wait
@@ -98,8 +114,8 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	// member's /mcp, which reauthorizes it against the replicated snapshot
 	// token store and executes through its local queue.
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"name":"execute","arguments":{"target":"shell:member-a","tool":"shell_exec","arguments":{"command":"echo node-conn-live-ok"}}}}`)
-	// Diagnostic: the same call direct to the member must succeed; a 401
-	// here is a fixture auth problem, not a transport problem.
+	// A valid bearer alone must not enqueue a command. Missing instructions
+	// are an explicit, side-effect-free refusal, not an accepted receipt.
 	direct := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	direct.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
 	direct.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
@@ -107,8 +123,41 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	direct.Header.Set("Mcp-Name", "execute")
 	directW := httptest.NewRecorder()
 	member.Handler().ServeHTTP(directW, direct)
-	if directW.Code != http.StatusOK {
-		t.Fatalf("member rejected the snapshot bearer directly: %d %s", directW.Code, directW.Body.String())
+	var directRPC map[string]any
+	if err := json.Unmarshal(directW.Body.Bytes(), &directRPC); err != nil {
+		t.Fatal(err)
+	}
+	directResult := mapValue(directRPC["result"])
+	refusal := mapValue(directResult["structuredContent"])
+	if directW.Code != http.StatusOK || directResult["isError"] != true || refusal["executed"] != false ||
+		firstString(mapValue(refusal["error"]), "code") != "instructions_required" {
+		t.Fatalf("member admitted execution without instructions: %d %s", directW.Code, directW.Body.String())
+	}
+	member.mu.Lock()
+	jobsBefore := len(member.shellJobs)
+	member.mu.Unlock()
+	if jobsBefore != 0 {
+		t.Fatalf("instruction refusal created %d commands", jobsBefore)
+	}
+
+	// Bootstrap with the same caller through actual authenticated discovery;
+	// no manually signed receipts and no instruction-gate opt-out.
+	bootstrap := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"discover","arguments":{}}}`))
+	bootstrap.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
+	bootstrap.Header.Set("Content-Type", "application/json")
+	bootstrap.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
+	bootstrap.Header.Set("Mcp-Method", "tools/call")
+	bootstrap.Header.Set("Mcp-Name", "discover")
+	bootstrapW := httptest.NewRecorder()
+	writer.Handler().ServeHTTP(bootstrapW, bootstrap)
+	var bootstrapRPC map[string]any
+	if err := json.Unmarshal(bootstrapW.Body.Bytes(), &bootstrapRPC); err != nil {
+		t.Fatal(err)
+	}
+	instructions := mapValue(mapValue(bootstrapRPC["result"])["structuredContent"])
+	instructionContext := firstString(instructions, "context")
+	if bootstrapW.Code != http.StatusOK || instructionContext == "" || firstString(instructions, "instructions") == "" {
+		t.Fatalf("writer did not deliver instructions: %d %s", bootstrapW.Code, bootstrapW.Body.String())
 	}
 
 	r := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
@@ -116,16 +165,50 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	r.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
 	r.Header.Set("Mcp-Method", "tools/call")
 	r.Header.Set("Mcp-Name", "execute")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(instructionContextHeader, instructionContext)
 	w := httptest.NewRecorder()
-	writer.forwardNodePeerRequest(w, r, "shell:member-a", body, "/mcp")
+	// Include the writer's authentication and admission checks, then traverse
+	// the existing live WebSocket connection to the member's HTTP handler.
+	writer.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("forwarded call failed: %d %s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), `"owner_target":"shell:member-a"`) {
 		t.Fatalf("receipt missing owner metadata contract: %s", w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "job_id") && !strings.Contains(w.Body.String(), "node-conn-live-ok") {
-		t.Fatalf("receipt is neither an accepted job nor an executed result: %s", w.Body.String())
+	var forwardedRPC map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &forwardedRPC); err != nil {
+		t.Fatal(err)
+	}
+	forwardedResult := mapValue(forwardedRPC["result"])
+	receipt := mapValue(forwardedResult["structuredContent"])
+	jobID := firstString(receipt, "job_id")
+	if forwardedRPC["error"] != nil || forwardedResult["isError"] == true || jobID == "" ||
+		(firstString(receipt, "status") != "queued" && firstString(receipt, "status") != "running") {
+		t.Fatalf("expected the owner's pending job receipt: %s", w.Body.String())
+	}
+	member.mu.Lock()
+	job := member.shellJobs[jobID]
+	ownerAdmitted := len(member.shellJobs) == 1 && job != nil && job.Server == "member-a" &&
+		job.Cmd == "echo node-conn-live-ok" && job.Status == "queued"
+	member.mu.Unlock()
+	if !ownerAdmitted {
+		t.Fatal("receipt does not identify exactly one command queued at its owner")
+	}
+	writer.mu.Lock()
+	writerJobs := len(writer.shellJobs)
+	writer.mu.Unlock()
+	if writerJobs != 0 {
+		t.Fatalf("writer duplicated owner work: %d local commands", writerJobs)
+	}
+	select {
+	case observed := <-forwardedHeaders:
+		if observed.Get("Authorization") != r.Header.Get("Authorization") || observed.Get(instructionContextHeader) != instructionContext {
+			t.Fatal("forwarder changed the original caller or lost the instruction receipt")
+		}
+	default:
+		t.Fatal("request never reached the member HTTP handler")
 	}
 }
 

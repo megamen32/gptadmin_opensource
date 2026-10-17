@@ -142,6 +142,26 @@ func (s *Server) withTaskReadDatabase(fn func(*sql.Tx) error) error {
 	if version != 2 {
 		return fmt.Errorf("unsupported task database version %d", version)
 	}
+	// Upgrade derived inventory indexes atomically through the existing writer
+	// before publishing a ready reader; old binaries remain rollback-compatible.
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('task_records_inventory','task_records_status','task_records_server_page')`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 3 {
+		return errTaskSchemaNeedsInit
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE (type='table' AND name='task_status_counts') OR (type='trigger' AND name IN ('task_counts_insert','task_counts_delete','task_counts_update_remove','task_counts_update_add'))`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 5 {
+		return errTaskSchemaNeedsInit
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('task_status_counts') WHERE name='server'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 1 {
+		return errTaskSchemaNeedsInit
+	}
 	if err := fn(tx); err != nil {
 		return err
 	}
@@ -170,6 +190,9 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
     PRIMARY KEY(kind,key)) WITHOUT ROWID`,
 		`CREATE INDEX IF NOT EXISTS task_records_done ON task_records(done) WHERE done > 0`,
 		`CREATE INDEX IF NOT EXISTS task_records_updated ON task_records(kind,updated)`,
+		`CREATE INDEX IF NOT EXISTS task_records_inventory ON task_records(json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind IN ('shell','relay')`,
+		`CREATE INDEX IF NOT EXISTS task_records_status ON task_records(kind,json_extract(payload,'$.status')) WHERE kind IN ('shell','relay')`,
+		`CREATE INDEX IF NOT EXISTS task_records_server_page ON task_records(json_extract(payload,'$.server'),json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind='shell'`,
 		`CREATE TABLE IF NOT EXISTS task_controls (task_id TEXT PRIMARY KEY, server TEXT NOT NULL, next_attempt REAL NOT NULL DEFAULT 0)`,
 		`CREATE INDEX IF NOT EXISTS task_controls_server ON task_controls(server,next_attempt)`,
 		`CREATE TABLE IF NOT EXISTS task_requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, owner TEXT NOT NULL, created REAL NOT NULL, job_id TEXT NOT NULL DEFAULT '', response BLOB, status INTEGER NOT NULL DEFAULT 0)`,
@@ -178,6 +201,9 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 		if _, err = tx.Exec(ddl); err != nil {
 			return err
 		}
+	}
+	if err = ensureTaskCountSchema(tx); err != nil {
+		return err
 	}
 	var version int
 	err = tx.QueryRow(`SELECT version FROM task_store_meta WHERE id=1`).Scan(&version)
@@ -308,15 +334,40 @@ func (t *taskTransaction) prune(taskCutoff, idempotencyCutoff float64) error {
 	return err
 }
 
-// readTaskState is the only full read, on restart/export; normal saves never
+// readTaskState is a full export/test read; startup and normal saves never
 // load or serialize unrelated completed results.
 func (s *Server) readTaskState() (persistedTaskState, error) { return s.readTaskRecords() }
 
 func (s *Server) readTaskRecords(ids ...string) (persistedTaskState, error) {
+	return s.readTaskRecordsQuery("", false, ids...)
+}
+
+func (s *Server) readTaskRecordsQuery(where string, metadata bool, ids ...string) (persistedTaskState, error) {
+	return s.readTaskRecordsSQL(where, metadata, nil, ids...)
+}
+
+func (s *Server) readTaskRecordsSQL(where string, metadata bool, sqlArgs []any, ids ...string) (persistedTaskState, error) {
 	state := persistedTaskState{Relay: map[string]persistedRelayTask{}, Shell: map[string]persistedShellTask{}, Idempotency: map[string]persistedIdempotencyEntry{}}
 	read := func(tx *sql.Tx) error {
-		query := `SELECT kind,key,payload,revision FROM task_records`
-		args := []any{}
+		payload := "payload"
+		if metadata {
+			payload = `json_object('id',key,'server',json_extract(payload,'$.server'),'agent_id',json_extract(payload,'$.agent_id'),'method',json_extract(payload,'$.method'),'params',json_object('name',json_extract(payload,'$.params.name')),'tool_name',json_extract(payload,'$.tool_name'),'created_at',json_extract(payload,'$.created_at'),'started_at',json_extract(payload,'$.started_at'),'completed_at',done,'status',json_extract(payload,'$.status'))`
+		}
+		query := `SELECT kind,key,` + payload + `,revision FROM task_records`
+		if metadata && strings.Contains(where, "ORDER BY") {
+			index := "task_records_inventory"
+			if strings.Contains(where, "$.status") {
+				index = "task_records_status"
+			}
+			if strings.Contains(where, "$.server") {
+				index = "task_records_server_page"
+			}
+			query += " INDEXED BY " + index
+		}
+		if where != "" {
+			query += " WHERE " + where
+		}
+		args := append([]any(nil), sqlArgs...)
 		if len(ids) > 0 {
 			query += ` WHERE kind IN ('shell','relay') AND key IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`
 			for _, id := range ids {

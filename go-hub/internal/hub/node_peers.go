@@ -206,6 +206,10 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	s.mu.Lock()
 	local := s.localExecutors[target] != nil
 	route, routed := s.nodePeerRouteLocked(target)
+	approved := local || routed || s.nodeConns.get(target) != nil
+	if a := s.agents[target]; a != nil && truthy(a.Meta["approved"]) {
+		approved = true
+	}
 	var pinned *http.Client
 	if routed && route.ConnectTo != "" {
 		if pinned = s.nodePeerPinnedClients[route]; pinned == nil {
@@ -237,6 +241,17 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	}
 	if s.nodePeersErr != nil {
 		fail(http.StatusServiceUnavailable, "invalid node peer configuration", false)
+		return true
+	}
+	// Do not pick a newly appeared route after an unverified snapshot. Its
+	// next request can observe enrollment; this request performs no dispatch.
+	if !approved && (s.meshCore != nil || s.meshCoreErr != nil) {
+		return false
+	}
+	// Authorization and registry ownership remain at this product edge. The
+	// shared core verifies the exact owner before any enqueue or network write.
+	if approved && (s.meshCoreErr != nil || s.meshCore.Verify(r.Context(), strings.TrimPrefix(target, "shell:")) != nil) {
+		fail(http.StatusServiceUnavailable, "shared mesh core unavailable", false)
 		return true
 	}
 	// A static route can never replace the process's pinned local executor.
@@ -289,6 +304,9 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	upstream.Header.Set("Authorization", r.Header.Get("Authorization"))
 	upstream.Header.Set("Content-Type", "application/json")
 	upstream.Header.Set(nodePeerHopHeader, "1")
+	if token := instructionToken(r); token != "" {
+		upstream.Header.Set(instructionContextHeader, token)
+	}
 	if endpoint == "/mcp" {
 		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"} {
 			if value := r.Header.Get(name); value != "" {

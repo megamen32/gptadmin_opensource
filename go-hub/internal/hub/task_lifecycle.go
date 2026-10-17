@@ -186,6 +186,13 @@ func (s *Server) mcpTaskCancel(taskID, owner string) (any, any) {
 }
 
 func (s *Server) mcpTaskUpdate(r *http.Request, taskID string, inputResponses map[string]any, owner string) (any, any) {
+	decision := firstString(mapValue(inputResponses["approval"]), "action")
+	if decision == "accept" || firstString(inputResponses, "approvalId", "approval_id") != "" {
+		if failure := s.requireInstructionContext(r, "hub", "tasks/update"); failure != nil {
+			return nil, map[string]any{"code": -32006, "message": "current instructions are required to resume this task", "data": failure}
+		}
+	}
+
 	if taskID == "" {
 		return nil, map[string]any{"code": -32602, "message": "taskId is required"}
 	}

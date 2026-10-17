@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -32,6 +31,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/megamen32/gptadmin/go-hub/internal/cloudos"
+	"github.com/megamen32/gptadmin/go-hub/internal/meshroute"
 )
 
 var BuildVersion = "go-dev"
@@ -64,7 +64,9 @@ type Config struct {
 	// approval round-trip. Fleet Hubs never set this and keep the gate.
 	StandaloneAutoTrust bool
 	// NodePeersJSON maps explicit shell targets to independently reachable node origins.
-	NodePeersJSON string
+	NodePeersJSON  string
+	MeshCoreSocket string
+	MeshCoreHostID string
 	// NodeIdentityFile pins this node's mesh identity; membership heartbeat
 	// and view replication activate only when it exists and parses.
 	NodeIdentityFile string
@@ -118,6 +120,7 @@ type Config struct {
 	FailoverConfigFile         string
 	FailoverStateFile          string
 	FailoverReclaimCommandFile string
+	InstructionContextRequired bool
 	StartupInstructionsFile    string
 	StartupInstructions        string
 	InstructionSetsStateFile   string
@@ -164,6 +167,8 @@ func FromEnv() Config {
 		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
 		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
 		NodePeersJSON:              env("GPTADMIN_NODE_PEERS", ""),
+		MeshCoreSocket:             env("GPTADMIN_MESH_CORE_SOCKET", ""),
+		MeshCoreHostID:             env("GPTADMIN_MESH_CORE_HOST_ID", ""),
 		NodeIdentityFile:           env("GPTADMIN_NODE_IDENTITY", ""),
 		NodeSeedURL:                strings.TrimRight(env("GPTADMIN_NODE_SEED", ""), "/"),
 		NodeWriterConnectTo:        strings.TrimSpace(env("GPTADMIN_NODE_WRITER_CONNECT_TO", "")),
@@ -197,6 +202,7 @@ func FromEnv() Config {
 		FailoverConfigFile:         env("GPTADMIN_FAILOVER_CONFIG_FILE", filepath.Join(cfgDir, "failover_config.json")),
 		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
 		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
+		InstructionContextRequired: truthyString(env("GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED", "1")),
 		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
 		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
 		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
@@ -410,6 +416,7 @@ type relayEnrollment struct {
 }
 
 type relayJob struct {
+	CachedAt     float64        `json:"-"`
 	RequestKey   string         `json:"request_key,omitempty"`
 	Revision     int64          `json:"-"`
 	OwnerID      string         `json:"owner_id,omitempty"`
@@ -433,6 +440,7 @@ type shellControl struct {
 }
 
 type shellJob struct {
+	CachedAt          float64        `json:"-"`
 	RequestKey        string         `json:"request_key,omitempty"`
 	Revision          int64          `json:"-"`
 	OwnerID           string         `json:"owner_id,omitempty"`
@@ -562,6 +570,8 @@ type Server struct {
 	localExecutorTokens       map[string]string
 	nodePeers                 map[string]nodePeerRoute
 	nodePeersErr              error
+	meshCore                  *meshroute.Verifier
+	meshCoreErr               error
 	nodePeerClient            *http.Client
 	nodePeerPinnedClients     map[nodePeerRoute]*http.Client
 	nodeBearerAdmissionClient *http.Client
@@ -746,6 +756,7 @@ func New(cfg Config) *Server {
 		tombstones:        []agentTombstone{},
 	}
 	s.nodePeers, s.nodePeersErr = parseNodePeers(cfg.NodePeersJSON)
+	s.meshCore, s.meshCoreErr = meshroute.New(cfg.MeshCoreSocket, cfg.MeshCoreHostID)
 	s.nodePeerClient = newNodePeerClient(cfg.DefaultTimeout + 10*time.Second)
 	s.nodeBearerAdmissionClient = newNodeBearerAdmissionClient(cfg.NodeWriterConnectTo)
 	s.nodeBearerAdmissionSlots = make(chan struct{}, 8)
@@ -851,9 +862,6 @@ func New(cfg Config) *Server {
 	}
 	if err := s.loadWebhookState(); err != nil {
 		log.Printf("webhook state load failed path=%s err=%v", s.webhookStatePath(), err)
-	}
-	if err := s.loadAuditState(); err != nil {
-		log.Printf("audit state load failed path=%s err=%v", s.auditStatePath(), err)
 	}
 	s.failover = s.loadFailoverConfig()
 	home := os.Getenv("GPTADMIN_HOME")
@@ -1872,8 +1880,19 @@ func requestScheme(r *http.Request) string {
 // browsers reuse the admin password session.
 func (s *Server) withCloudOSAuth(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/cloud-os/") && !s.cloudOSAuthOk(w, r) {
-			return
+		if strings.HasPrefix(r.URL.Path, "/api/v1/cloud-os/") {
+			if !s.cloudOSAuthOk(w, r) {
+				return
+			}
+			if r.Header.Get("Authorization") == "" && s.cfg.AdminPassword != "" && s.adminSessionValid(r) {
+				r = nonAgentWorkflow(r)
+			} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				r = requestWithInstructionContext(r, nil)
+				if failure := s.requireInstructionContext(r, "cloudos", r.URL.Path); failure != nil {
+					writeJSON(w, http.StatusPreconditionRequired, failure)
+					return
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	}
@@ -2918,6 +2937,18 @@ paths:
     get:
       operationId: discover
       summary: Discover targets
+      parameters:
+        - name: query
+          in: query
+          schema: {type: string}
+          description: Match target id or name.
+        - name: status
+          in: query
+          schema: {type: string}
+          description: Filter targets by status.
+        - name: detail
+          in: query
+          schema: {type: string, enum: [compact, full]}
       responses:
         "200": {description: Available MCP servers}
   /mcp-relay/expand:
@@ -2967,8 +2998,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [target, tool]
+              anyOf:
+                - required: [ref]
+                - required: [target, tool]
               properties:
+                ref: {type: string, description: call_ref returned by exact schema or expand}
                 target: {type: string, description: 'Target id to use in schema and execute. Never use target="default".'}
                 tool: {type: string, description: "Tool name from schema."}
                 tool_name: {type: string}
@@ -3288,6 +3322,11 @@ func (s *Server) finishFleetIdempotency(entry *idempotencyEntry, response map[st
 }
 
 func (s *Server) fleetExecForRequest(r *http.Request, req map[string]any, taskMode bool) (map[string]any, int) {
+	r = requestWithInstructionContext(r, req)
+	if failure := s.requireInstructionContext(r, "hub", "fleetExec"); failure != nil {
+		return failure, http.StatusPreconditionRequired
+	}
+	req = withoutInstructionContext(req)
 	cmd := firstString(req, "cmd", "command")
 	if cmd == "" {
 		return map[string]any{"ok": false, "error": "missing cmd"}, http.StatusBadRequest
@@ -3346,7 +3385,7 @@ func (s *Server) fleetExecForRequest(r *http.Request, req map[string]any, taskMo
 		if serverApprovalID != "" {
 			args["approval_id"] = serverApprovalID
 		}
-		policyRequest := requestWithAutomationProfile(r, "fleet-exec", target, "shell_exec", approvalModeAskBeforeWrite)
+		policyRequest := inheritInstructionCaller(r, requestWithAutomationProfile(r, "fleet-exec", target, "shell_exec", approvalModeAskBeforeWrite))
 		result, status := s.executeMCPTool(policyRequest, target, "shell_exec", args, true, s.cfg.DefaultTimeout, "")
 		if taskMode && status == http.StatusPreconditionRequired && firstString(result, "status") == "approval_required" {
 			cleanArgs, _ := approvalArguments(args)
@@ -3591,39 +3630,57 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			return
 		}
 		if q := s.shellQueues[name]; len(q) > 0 {
-			id := q[0]
-			if err := s.refreshTaskRecordsLocked(id); err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+			var readError error
+			choice, err := chooseShellQueueEnvelope(q, shellQueueResponseLimit(r), func(id string) ([]byte, bool, error) {
+				if err := r.Context().Err(); err != nil {
+					return nil, false, err
+				}
+				if err := s.refreshTaskRecordsLocked(id); err != nil {
+					readError = err
+					return nil, false, err
+				}
+				job := s.shellJobs[id]
+				if job == nil || job.Status != "queued" {
+					return nil, false, nil
+				}
+				payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+				encoded, err := json.Marshal(payload)
+				return encoded, true, err
+			})
+			if r.Context().Err() != nil {
 				return
 			}
-			s.shellQueues[name] = q[1:]
-			job := s.shellJobs[id]
-			if job == nil || job.Status != "queued" {
-				continue
-			}
-			payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
-			encoded, err := json.Marshal(payload)
-			if err != nil || len(encoded)+1 > shellQueueResponseLimit(r) {
-				// Keep the same queued job; no native execution or new action is
-				// admitted. A compatible reader can recover it after an update.
-				s.shellQueues[name] = append([]string{id}, s.shellQueues[name]...)
-				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "queue payload cannot be encoded; job remains queued"})
+			if err != nil {
+				if readError != nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
 				} else {
-					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "queue payload exceeds agent response limit; job remains queued; update agent"})
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "queue payload cannot be encoded; job remains queued"})
 				}
 				return
 			}
+			if choice.ID == "" {
+				s.shellQueues[name] = choice.Queue
+				if choice.Oversized {
+					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "queue payload exceeds agent response limit; job remains queued; update agent"})
+				} else {
+					writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked()})
+				}
+				return
+			}
+			// The first compatible job gets one durable lease. Oversized jobs
+			// retain their IDs, arguments and ordering for a later reader update.
+			job := s.shellJobs[choice.ID]
+			encoded := choice.Payload
 			previousStatus, previousStarted := job.Status, job.StartedAt
 			job.Status = "running"
 			job.StartedAt = nowFloat()
 			if err := s.saveTaskStateLocked(job.ID); err != nil {
 				log.Printf("task dispatch commit failed: %v", err)
 				job.Status, job.StartedAt = previousStatus, previousStarted
-				s.shellQueues[name] = append([]string{id}, s.shellQueues[name]...)
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task dispatch persistence failed; retry polling"})
 				return
 			}
+			s.shellQueues[name] = choice.Queue
 			// Deliver the exact bytes validated before the durable transition.
 			encoded = append(encoded, '\n')
 			w.Header().Set("Content-Type", "application/json")
@@ -4158,9 +4215,22 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mcpRelayServers(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	servers := s.publicServersLockedWithDetail(r, fullDetailRequested(r.URL.Query().Get("detail")))
+	servers := s.publicServersLockedWithDetail(r, true)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
+	query := strings.ToLower(r.URL.Query().Get("query"))
+	status := r.URL.Query().Get("status")
+	filtered := make([]map[string]any, 0, len(servers))
+	for _, server := range servers {
+		if status != "" && firstString(server, "status") != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(firstString(server, "server_id")+" "+firstString(server, "name")), query) {
+			continue
+		}
+		filtered = append(filtered, server)
+	}
+	args := map[string]any{"query": query, "status": status, "detail": r.URL.Query().Get("detail")}
+	writeJSON(w, http.StatusOK, s.presentTokenOutput(r, "discover", args, map[string]any{"servers": filtered}))
 }
 
 // mcpRelayAgents is a deprecated compatibility alias for old clients.
@@ -4595,7 +4665,10 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": referenceErr.Error()})
 		return
 	}
-	if hasReference {
+	controlPresent := firstString(req, "context") != "" || firstString(mapValue(req["_meta"]), instructionContextMeta) != ""
+	r = requestWithInstructionContext(r, req)
+	req = withoutInstructionContext(req)
+	if hasReference || controlPresent {
 		encodedRequest, _ := json.Marshal(req)
 		originalBody.Reset()
 		originalBody.Write(encodedRequest)
@@ -4634,6 +4707,11 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
+	r = requestWithInstructionContext(r, req)
+	if failure := s.requireInstructionContext(r, target, toolName); failure != nil {
+		writeJSON(w, http.StatusPreconditionRequired, failure)
+		return
+	}
 	if s.forwardNodePeerCall(w, r, target, originalBody.Bytes()) {
 		return
 	}
@@ -4663,6 +4741,9 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	if failure := s.requireInstructionContext(r, target, toolName); failure != nil {
+		return failure, http.StatusPreconditionRequired
+	}
 	if err := s.authorizeMCPConnectionOwner(r, target, toolName, args); err != nil {
 		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}
@@ -4700,7 +4781,14 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	operation := func() (map[string]any, int) {
 		if target == "hub" {
 			resp, status := s.callHubToolForRequest(r, toolName, args)
-			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
+			// The hub envelope normally reports "completed" regardless of the
+			// inner outcome. A code_mode run is explicitly fail-closed, so never
+			// label a failed or refused script as completed.
+			envelope := "completed"
+			if toolName == codeModeTool && firstString(resp, "status") != "completed" {
+				envelope = "failed"
+			}
+			return map[string]any{"server_id": target, "status": envelope, "response": resp}, status
 		}
 		if virtual, ok := virtualMCPDefinitions[target]; ok {
 			resp, status := s.callVirtualMCP(virtual, AccessProfileIDFromRequest(r), toolName, args)
@@ -5038,6 +5126,7 @@ func toolArgsFromTopLevel(req map[string]any) map[string]any {
 		"arguments": true, "args": true, "args_json": true,
 		"background":           true,
 		"detail":               true,
+		"context":              true,
 		"idempotency_key":      true,
 		"schema_version":       true,
 		"schema_digest_sha256": true,
@@ -5130,6 +5219,7 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 	if raw, ok := req["secret_env"]; ok {
 		args["secret_env"] = raw
 	}
+	r = requestWithInstructionContext(r, req)
 	resp, responseStatus := s.executeMCPTool(r, target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
 	writeJSON(w, responseStatus, resp)
 }
@@ -5169,11 +5259,17 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if j := s.shellJobs[jobID]; j != nil {
 		resp := shellJobResponse(j)
-		if ack && (j.Status == "completed" || j.Status == "failed") {
-			delete(s.shellJobs, jobID)
-		}
+		acknowledge := ack && (j.Status == "completed" || j.Status == "failed")
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, s.formatToolOutput(resp, j.ToolName, outputDetail))
+		result := s.presentTokenOutput(r, "job", map[string]any{"id": jobID, "detail": outputDetail}, resp)
+		if acknowledge {
+			s.mu.Lock()
+			if s.shellJobs[jobID] == j {
+				delete(s.shellJobs, jobID)
+			}
+			s.mu.Unlock()
+		}
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	s.mu.Unlock()
@@ -5285,6 +5381,25 @@ func (s *Server) callHubTool(name string, args map[string]any) (map[string]any, 
 }
 
 func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[string]any) (map[string]any, int) {
+	r = requestWithInstructionContext(r, args)
+	if failure := s.requireFacadeInstructionContext(r, name, args); failure != nil {
+		return failure, http.StatusPreconditionRequired
+	}
+	args = withoutInstructionContext(args)
+	if name == "secret_request" || name == "secret_status" {
+		result := mapValue(s.secretToolForRequest(r, name, args))
+		if firstString(result, "status") == "failed" {
+			return result, http.StatusBadRequest
+		}
+		return result, http.StatusOK
+	}
+	if name == "schema" || name == "discover" {
+		result := mapValue(s.appsSDKCallForRequest(r, name, args))
+		if firstString(result, "status") == "failed" {
+			return result, http.StatusBadRequest
+		}
+		return result, http.StatusOK
+	}
 	if name == "access_clients" || name == "operations" {
 		return s.callAccessClientTool(r, name, args)
 	}
@@ -5311,6 +5426,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	}
 	if name == "resource_receipt" {
 		return s.appsSDKResourceReceipt(r, firstString(args, "uri")), http.StatusOK
+	}
+	if name == codeModeTool {
+		return s.callCodeModeTool(r, args)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5580,7 +5698,8 @@ func (s *Server) callShellToolWithTraceParentAndSecrets(target, toolName string,
 
 func hubTools() []map[string]any {
 	tools := []map[string]any{
-		{"name": "discover", "description": "List registered targets", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "discover", "description": "List registered targets; query and status filter the compact list", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}}},
+		{"name": "schema", "description": "Read exact target/tool schema or compact tool summaries", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}},
 		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{
 			"name":         "resource_receipt",
@@ -5606,9 +5725,17 @@ func hubTools() []map[string]any {
 		{"name": "handover_status", "description": "Read zero-downtime Hub handover state", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{
+			"name":         codeModeTool,
+			"title":        "Code mode",
+			"description":  "Run one short JavaScript that chains MCP tool calls and returns only the value you choose to return. The script body uses plain return and await with mcp.discover, mcp.schema and mcp.call. Each nested call goes through the same authorization, approval, admission and audit path as a direct execute, and honours an idempotency_key when the script supplies one. Scripts are not transactional and nothing is replayed or rolled back: a call that already ran cannot be undone if a later call fails. No filesystem, environment, process, network or timer access.",
+			"inputSchema":  codeModeInputSchema(),
+			"outputSchema": codeModeOutputSchema(),
+			"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
+		},
 	}
 	tools = append(tools, expandToolDefinition(nil, nil))
-	return append(append(append(tools, accessProfileTool()), accessClientTools()...), secretHubTools()...)
+	return instructionAwareFacadeTools(append(append(append(tools, accessProfileTool()), accessClientTools()...), secretHubTools()...))
 }
 
 func shellTools() []map[string]any {
@@ -5664,21 +5791,37 @@ func (s *Server) tasksEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	srv, _ := url.PathUnescape(parts[0])
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		s.mu.Lock()
-		items := []map[string]any{}
-		for _, j := range s.shellJobs {
-			if j.Server == srv {
-				items = append(items, map[string]any{"task_id": j.ID, "job_id": j.ID, "server": j.Server, "cmd": redactSecretValues(j.Cmd, j.SecretValues), "status": j.Status, "result": redactSecretValues(j.Result, j.SecretValues), "error": redactSecretValues(j.Error, j.SecretValues), "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+		limit, offset := 200, 0
+		for key, dest := range map[string]*int{"limit": &limit, "offset": &offset} {
+			if raw := r.URL.Query().Get(key); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 0 || (key == "limit" && (n < 1 || n > 500)) {
+					writeJSON(w, 400, map[string]any{"detail": "invalid tasks pagination"})
+					return
+				}
+				*dest = n
 			}
 		}
+		s.mu.Lock()
+		response, err := s.shellTaskPageLocked(srv, offset, limit)
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"tasks": items, "count": len(items)})
+		if err != nil {
+			writeJSON(w, 503, taskPersistenceFailure(err))
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
+
 	if len(parts) >= 2 {
 		tid, _ := url.PathUnescape(parts[1])
 		if len(parts) == 2 && r.Method == http.MethodGet {
 			s.mu.Lock()
+			if err := s.refreshTaskRecordsLocked(tid); err != nil {
+				s.mu.Unlock()
+				writeJSON(w, 503, taskPersistenceFailure(err))
+				return
+			}
 			j := s.shellJobs[tid]
 			if j == nil || j.Server != srv {
 				s.mu.Unlock()
@@ -5726,7 +5869,7 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
 			return
 		}
-		result, status := s.callHubToolForRequest(r, "settings_set", map[string]any{"settings": req})
+		result, status := s.callHubToolForRequest(nonAgentWorkflow(r), "settings_set", map[string]any{"settings": req})
 		writeJSON(w, status, result)
 	default:
 		w.Header().Set("Allow", "GET, PUT, POST")
@@ -5752,7 +5895,7 @@ func (s *Server) adminSettingsRollback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json"})
 		return
 	}
-	result, status := s.callHubToolForRequest(r, "settings_rollback", req)
+	result, status := s.callHubToolForRequest(nonAgentWorkflow(r), "settings_rollback", req)
 	writeJSON(w, status, result)
 }
 func (s *Server) adminRegistryMaintenance(w http.ResponseWriter, r *http.Request) {
@@ -5786,7 +5929,7 @@ func (s *Server) adminRegistryMaintenance(w http.ResponseWriter, r *http.Request
 		return
 	}
 	delete(req, "action")
-	result, status := s.callHubToolForRequest(r, tool, req)
+	result, status := s.callHubToolForRequest(nonAgentWorkflow(r), tool, req)
 	writeJSON(w, status, result)
 }
 
@@ -6294,9 +6437,11 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.mu.Lock()
-	all := append([]auditEvent(nil), s.audit...)
-	s.mu.Unlock()
+	all, err := s.auditSnapshot()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "recent audit history unavailable"})
+		return
+	}
 	nameFilter := strings.TrimSpace(query.Get("name"))
 	actorFilter := strings.TrimSpace(query.Get("actor"))
 	targetFilter := strings.TrimSpace(query.Get("target"))
@@ -6840,12 +6985,8 @@ func safeAdminNext(v string) string {
 
 func (s *Server) addAuditLocked(name string, fields map[string]any) {
 	event := auditEvent{Time: time.Now().Format(time.RFC3339), Name: name, Fields: fields}
-	s.audit = append(s.audit, event)
+	s.appendAuditMemoryLocked(event)
 	s.enqueueTelemetryAudit(event)
-	maxEvents := s.hubSettingIntLocked("audit_max_events")
-	if len(s.audit) > maxEvents {
-		s.audit = s.audit[len(s.audit)-maxEvents:]
-	}
 	if path := s.auditStatePath(); path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			log.Printf("audit state directory failed path=%s err=%v", path, err)
@@ -6874,41 +7015,6 @@ func (s *Server) auditStatePath() string {
 		return ""
 	}
 	return filepath.Join(s.cfg.ConfigDir, "audit.jsonl")
-}
-
-func (s *Server) loadAuditState() error {
-	path := s.auditStatePath()
-	if path == "" {
-		return nil
-	}
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if err := file.Chmod(0o600); err != nil {
-		return err
-	}
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 2<<20)
-	for scanner.Scan() {
-		var event auditEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return fmt.Errorf("decode audit event: %w", err)
-		}
-		s.audit = append(s.audit, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	maxEvents := s.hubSettingIntLocked("audit_max_events")
-	if len(s.audit) > maxEvents {
-		s.audit = s.audit[len(s.audit)-maxEvents:]
-	}
-	return nil
 }
 
 func readJSON(r *http.Request, dst any) error {
@@ -6947,11 +7053,18 @@ func mcpToolResult(payload any) map[string]any {
 	if err != nil {
 		b = []byte(`{"error":"json encode failed"}`)
 	}
-	return map[string]any{
+	out := map[string]any{
 		"resultType":        "complete",
 		"content":           []map[string]any{{"type": "text", "text": string(b)}},
 		"structuredContent": payload,
 	}
+	if m, ok := payload.(map[string]any); ok && m["executed"] == false {
+		code := firstString(mapValue(m["error"]), "code")
+		if code == "instructions_required" || code == "instructions_unavailable" {
+			out["isError"] = true
+		}
+	}
+	return out
 }
 
 const (
@@ -7913,6 +8026,14 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 			return
 		}
 	}
+	if agent.AgentID == "hub" && (toolName == "execute" || toolName == "callMcpTool" || toolName == "call_mcp_tool") {
+		var err error
+		args, err = s.resolveExecutionReference(r, args)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+	}
 	var authErr error
 	if agent.AgentID == "hub" {
 		authErr = authorizeFacadeCall(r, toolName, args)
@@ -7921,6 +8042,18 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 	}
 	if authErr != nil {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": authErr.Error()})
+		return
+	}
+	r = requestWithInstructionContext(r, args)
+	var failure map[string]any
+	if agent.AgentID == "hub" {
+		failure = s.requireFacadeInstructionContext(r, toolName, args)
+		args = withoutInstructionContext(args)
+	} else {
+		failure = s.requireInstructionContext(r, agent.AgentID, toolName)
+	}
+	if failure != nil {
+		writeJSON(w, http.StatusPreconditionRequired, failure)
 		return
 	}
 	callArgs, approvalID := approvalArguments(args)
@@ -8127,10 +8260,15 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		releaseAuthAdmission(r)
 	}
 	params := mapValue(body["params"])
+	r = requestWithInstructionContext(r, params)
 	switch method {
 	case "server/discover":
 		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
-			return mcpDiscoverResult("gptadmin-server-"+exposedAgentSlug(agent), BuildVersion), nil, false
+			result := mcpDiscoverResult("gptadmin-server-"+exposedAgentSlug(agent), BuildVersion)
+			if s.cfg.InstructionContextRequired {
+				result["instructions"] = instructionBootstrapHint
+			}
+			return result, nil, false
 		}
 		jobID := s.enqueueRelay(agent.AgentID, method, params)
 		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
@@ -8164,6 +8302,13 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 				return nil, map[string]any{"code": -32601, "message": "tool is exposed only by the optional virtual MCP " + id}, false
 			}
 		}
+		if agent.AgentID == "hub" && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
+			var err error
+			args, err = s.resolveExecutionReference(r, args)
+			if err != nil {
+				return nil, map[string]any{"code": -32602, "message": err.Error()}, false
+			}
+		}
 		var authErr error
 		if agent.AgentID == "hub" {
 			authErr = authorizeFacadeCall(r, name, args)
@@ -8172,6 +8317,22 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		}
 		if authErr != nil {
 			return nil, map[string]any{"code": -32003, "message": authErr.Error()}, false
+		}
+		if agent.AgentID == "hub" {
+			var err error
+			if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+				args, err = s.resolveExecutionReference(r, args)
+				if err != nil {
+					return nil, map[string]any{"code": -32602, "message": err.Error()}, false
+				}
+			}
+			r = requestWithInstructionContext(r, args)
+			if failure := s.requireFacadeInstructionContext(r, name, args); failure != nil {
+				return mcpToolResult(failure), nil, false
+			}
+			args = withoutInstructionContext(args)
+		} else if failure := s.requireInstructionContext(r, agent.AgentID, name); failure != nil {
+			return mcpToolResult(failure), nil, false
 		}
 		callArgs, approvalID := approvalArguments(args)
 		if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, name, callArgs, approvalID); blocked {
@@ -8324,6 +8485,24 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 }
 
 func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
+	if agent.AgentID == "hub" && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
+		var err error
+		args, err = s.resolveExecutionReference(r, args)
+		if err != nil {
+			return nil, map[string]any{"code": -32602, "message": err.Error()}
+		}
+	}
+	var failure map[string]any
+	if agent.AgentID == "hub" {
+		r = requestWithInstructionContext(r, args)
+		failure = s.requireFacadeInstructionContext(r, name, args)
+		args = withoutInstructionContext(args)
+	} else {
+		failure = s.requireInstructionContext(r, agent.AgentID, name)
+	}
+	if failure != nil {
+		return mcpToolResult(failure), nil
+	}
 	if !agentOwnerConnectionAllowed(r, agent) || s.authorizeMCPConnectionOwner(r, agent.AgentID, name, args) != nil {
 		return nil, connectionOwnerRPCError()
 	}
@@ -8561,11 +8740,15 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	method := firstString(body, "method")
 	params := mapValue(body["params"])
+	r = requestWithInstructionContext(r, params)
 	var result any
 	var rpcErr any
 	switch method {
 	case "server/discover":
 		result = mcpDiscoverResult("gptadmin-go-hub", BuildVersion)
+		if s.cfg.InstructionContextRequired {
+			mapValue(result)["instructions"] = instructionBootstrapHint
+		}
 	case "initialize":
 		// Legacy compatibility shim; MCP 2026-07-28 itself is stateless.
 		protocol := connectionProtocol(firstString(params, "protocolVersion"))
@@ -8602,6 +8785,12 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			s.auditToolDecision(r, "hub", name, args, "deny", err.Error(), nil, http.StatusForbidden)
 			rpcErr = map[string]any{"code": -32003, "message": err.Error()}
 		} else {
+			r = requestWithInstructionContext(r, args)
+			if failure := s.requireFacadeInstructionContext(r, name, args); failure != nil {
+				result = mcpToolResult(failure)
+				break
+			}
+			args = withoutInstructionContext(args)
 			if nodePeerJobTool(name) && s.routeNodePeerJob(w, r, args, originalBody.Bytes()) {
 				return
 			}
@@ -9395,7 +9584,7 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 			return s.withSchemaContractMetadata(response)
 		}
 	}
-	if name == "demo" {
+	if name == "demo" || name == "pending" || name == "list_pending_servers" || name == "approve_pending_server" {
 		result, _ := s.callHubToolForRequest(r, name, args)
 		return result
 	}
@@ -9483,8 +9672,17 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 		if exists && isChildMCPAgent(child) {
 			result = s.childSchemaForRequest(r, child)
 		} else {
+			waitBudget := s.cfg.DefaultTimeout
+			if r != nil {
+				if err := r.Context().Err(); err != nil {
+					return map[string]any{"server_id": target, "status": "failed", "error": err.Error()}
+				}
+				if deadline, ok := r.Context().Deadline(); ok {
+					waitBudget = minDuration(waitBudget, time.Until(deadline))
+				}
+			}
 			jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
-			result = s.waitRelay(jobID, s.cfg.DefaultTimeout)
+			result = s.waitRelay(jobID, waitBudget)
 		}
 	}
 	if response, ok := result["response"].(map[string]any); ok {
@@ -9613,7 +9811,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "discover",
 			"title":           "Discover",
-			"description":     "List compact MCP targets; query/status filter results. expand(id) reads saved diagnostics without rerunning.",
+			"description":     "Read profile instructions and targets. query/status filter; context avoids repeated instructions.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"detail": toolOutputDetailSchema(), "query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}}, "required": []string{"servers"}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
@@ -9658,7 +9856,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "schema",
 			"title":           "Schema",
-			"description":     "List tool summaries. Set tool to fetch its exact input schema; detail=full lists all schemas. Never use target=default.",
+			"description":     "Read profile instructions and exact tool schema. full preserves tool selection. Reuse call_ref or context.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "response": map[string]any{"type": "object", "description": "May include schema_version and schema_digest_sha256 as optional cache/debug metadata when listing tools.", "additionalProperties": true}}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
@@ -9700,7 +9898,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "execute",
 			"title":           "Execute",
-			"description":     "Execute ref+args from an exact schema call_ref, or target+tool+args. Reuse idempotency_key on retry. expand reads saved details.",
+			"description":     "Read instructions first. Use call_ref or context+target+tool+args. instructions_required means not executed.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema(), "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "additionalProperties": true},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
@@ -9727,7 +9925,7 @@ func appsSDKTools() []map[string]any {
 			tool["_meta"] = meta
 		}
 	}
-	return tools
+	return instructionAwareFacadeTools(tools)
 }
 
 const startupInstructionsResourceURI = "gptadmin://startup-instructions"

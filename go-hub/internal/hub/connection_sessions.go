@@ -102,6 +102,9 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if !s.connectionCoreRoute(w, r, agent) {
+			return
+		}
 		if s.forwardManagedConnection(w, r, agent, nil) {
 			return
 		}
@@ -137,6 +140,9 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON-RPC request"})
+		return
+	}
+	if !s.connectionCoreRoute(w, r, agent) {
 		return
 	}
 	if s.forwardManagedConnection(w, r, agent, encoded) {
@@ -185,6 +191,20 @@ func (s *Server) connectionMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		response["result"] = result
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// The original authenticated child owner is the mesh destination. Core
+// unavailability cannot allocate another session or select a different host.
+func (s *Server) connectionCoreRoute(w http.ResponseWriter, r *http.Request, agent Agent) bool {
+	if s.meshCore == nil && s.meshCoreErr == nil {
+		return true
+	}
+	parent := firstString(agent.Meta, "parent_server_id")
+	if !strings.HasPrefix(parent, "shell:") || strings.TrimPrefix(parent, "shell:") == "" || s.meshCoreErr != nil || s.meshCore.Verify(r.Context(), strings.TrimPrefix(parent, "shell:")) != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "shared mesh core unavailable"})
+		return false
+	}
+	return true
 }
 
 func managedLocalConnector(w http.ResponseWriter, agent Agent) bool {
@@ -287,6 +307,10 @@ func (s *Server) closeExpiredConnections(r *http.Request) {
 	for scope, session := range pending {
 		if session.CloseJob != "" {
 			s.mu.Lock()
+			if err := s.refreshTaskRecordsLocked(session.CloseJob); err != nil {
+				s.mu.Unlock()
+				continue
+			}
 			job := s.shellJobs[session.CloseJob]
 			state := ""
 			closed := false

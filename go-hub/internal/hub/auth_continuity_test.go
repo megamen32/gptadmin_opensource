@@ -249,12 +249,55 @@ func TestAuthContinuityReaderCannotMutateProfilesThroughMCP(t *testing.T) {
 	if got := authContinuityHTTP(b, "POST", "/admin/api/auth-snapshot/apply", "fixture-owner", export.Body.Bytes()); got.Code != 200 {
 		t.Fatal(got.Body.String())
 	}
-	before, _ := os.ReadFile(b.accessProfilesStatePath())
+	before, err := os.ReadFile(b.accessProfilesStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"access_profiles","args":{"action":"create","id":"forbidden","profile":{"access_mode":"full","allowed_targets":["*"],"allowed_tools":["*"]}}}}}`)
+	// Without current instructions, reject before attempting a mutation.
+	blocked := authContinuityHTTP(b, "POST", "/mcp", "fixture-owner", body)
+	var blockedRPC map[string]any
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockedRPC); err != nil {
+		t.Fatal(err)
+	}
+	blockedResult := mapValue(blockedRPC["result"])
+	bootstrap := mapValue(blockedResult["structuredContent"])
+	if blocked.Code != http.StatusOK || blockedResult["isError"] != true || bootstrap["executed"] != false ||
+		firstString(mapValue(bootstrap["error"]), "code") != "instructions_required" ||
+		firstString(bootstrap, "instructions") == "" || firstString(bootstrap, "context") == "" {
+		t.Fatalf("missing instruction refusal before mutation: %d %s", blocked.Code, blocked.Body.String())
+	}
+	unchanged, err := os.ReadFile(b.accessProfilesStatePath())
+	if err != nil || !bytes.Equal(before, unchanged) {
+		t.Fatalf("instruction refusal changed profiles (read error: %v)", err)
+	}
+
+	// Return the actually delivered receipt, not a fabricated context or a
+	// disabled gate. The reader must still reject the identical mutation.
+	var call map[string]any
+	if err := json.Unmarshal(body, &call); err != nil {
+		t.Fatal(err)
+	}
+	mapValue(mapValue(call["params"])["arguments"])["context"] = bootstrap["context"]
+	body, err = json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := authContinuityHTTP(b, "POST", "/mcp", "fixture-owner", body)
-	after, _ := os.ReadFile(b.accessProfilesStatePath())
-	if !bytes.Equal(before, after) || !strings.Contains(got.Body.String(), "reader") {
-		t.Fatalf("MCP reader mutation not rejected: %d %s", got.Code, got.Body.String())
+	var rpc map[string]any
+	if err := json.Unmarshal(got.Body.Bytes(), &rpc); err != nil {
+		t.Fatal(err)
+	}
+	outcome := mapValue(mapValue(rpc["result"])["structuredContent"])
+	denial := mapValue(mapValue(outcome["error"])["response"])
+	if firstString(outcome, "status") != "failed" ||
+		!strings.Contains(firstString(denial, "detail", "error", "message"), "reader") ||
+		firstString(mapValue(outcome["error"]), "code") == "instructions_required" {
+		t.Fatalf("reader policy was not reached after bootstrap: %d %s", got.Code, got.Body.String())
+	}
+	after, err := os.ReadFile(b.accessProfilesStatePath())
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("reader changed profiles after receiving instructions (read error: %v)", err)
 	}
 }
 

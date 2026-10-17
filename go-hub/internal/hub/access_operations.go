@@ -82,11 +82,7 @@ func (s *Server) appendAccessOperation(fields map[string]any) error {
 		}
 	}
 	s.mu.Lock()
-	s.audit = append(s.audit, event)
-	max := s.hubSettingIntLocked("audit_max_events")
-	if len(s.audit) > max {
-		s.audit = s.audit[len(s.audit)-max:]
-	}
+	s.appendAuditMemoryLocked(event)
 	s.mu.Unlock()
 	return nil
 }

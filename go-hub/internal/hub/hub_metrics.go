@@ -44,18 +44,19 @@ func (s *Server) hubMetrics(w http.ResponseWriter, r *http.Request) {
 		agentStatuses[status]++
 	}
 	payload := map[string]any{
-		"build_version":      BuildVersion,
-		"agents":             len(s.agents),
-		"relay_jobs":         len(s.relayJobs),
-		"relay_queue_jobs":   relayQueueJobs,
-		"shell_jobs":         len(s.shellJobs),
-		"shell_queue_jobs":   shellQueueJobs,
-		"task_statuses":      taskStatuses,
-		"agent_statuses":     agentStatuses,
-		"audit_events":       len(s.audit),
-		"telemetry_enabled":  telemetry.Enabled,
-		"telemetry_counters": telemetry.Counters,
-		"security_preset":    s.security.Preset,
+		"build_version":                BuildVersion,
+		"agents":                       len(s.agents),
+		"relay_jobs":                   len(s.relayJobs),
+		"relay_queue_jobs":             relayQueueJobs,
+		"shell_jobs":                   len(s.shellJobs),
+		"completed_task_cache_seconds": taskCacheSeconds,
+		"shell_queue_jobs":             shellQueueJobs,
+		"task_statuses":                taskStatuses,
+		"agent_statuses":               agentStatuses,
+		"audit_events":                 len(s.audit),
+		"telemetry_enabled":            telemetry.Enabled,
+		"telemetry_counters":           telemetry.Counters,
+		"security_preset":              s.security.Preset,
 	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, payload)

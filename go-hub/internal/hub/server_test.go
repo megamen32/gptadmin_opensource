@@ -18,7 +18,8 @@ import (
 
 func TestListServersUsesHubKind(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
-	r := httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_servers", nil)
+	// kind is present in the full diagnostic view, not compact discovery.
+	r := httptest.NewRequest(http.MethodGet, "/mcp-relay/list_mcp_servers?detail=full", nil)
 	r.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -2730,9 +2731,12 @@ func TestAuditTrailSurvivesHubRestartWithRestrictivePermissions(t *testing.T) {
 	}
 
 	restarted := New(cfg)
-	restarted.mu.Lock()
-	defer restarted.mu.Unlock()
-	for _, event := range restarted.audit {
+	defer restarted.Close()
+	events, err := restarted.auditSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
 		if event.Name == "restartable_test_event" && event.Fields["target"] == "hub" {
 			return
 		}
@@ -3859,11 +3863,26 @@ func TestActionsCallStillReturnsFastCompletionInline(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["status"] != "completed" {
-		t.Fatalf("fast completion was forced to background: %v", body)
+	// Require the actual exit code: a missing field or queued receipt is not
+	// successful inline completion, even though success no longer has status.
+	if code, exists := body["returncode"]; !exists || code != float64(0) {
+		t.Fatalf("fast completion did not include a successful exit code: %v", body)
+	}
+	if body["error"] != nil || body["background"] == true ||
+		firstString(body, "status") == "queued" || firstString(body, "status") == "running" {
+		t.Fatalf("unexpected pending or failed command: %v", body)
 	}
 	if firstString(body, "stdout") != "quick-ok" {
 		t.Fatalf("unexpected quick result: %v", body)
+	}
+	operationID := firstString(body, "operation_id")
+	if operationID == "" {
+		t.Fatal("inline completion lost its diagnostic reference")
+	}
+	disclosed := s.expandOperation(req, map[string]any{"id": operationID})
+	original := mapValue(disclosed["data"])
+	if firstString(original, "status") != "completed" || firstString(original, "job_id") == "" {
+		t.Fatalf("original completed receipt missing from disclosure: %v", disclosed)
 	}
 }
 

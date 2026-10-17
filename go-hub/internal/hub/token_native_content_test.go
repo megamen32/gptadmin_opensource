@@ -29,8 +29,13 @@ func TestTokenNativeContentRemovesOnlyExactDuplicate(t *testing.T) {
 		}
 	}
 	r.Header.Del("X-GPTAdmin-Result-Mode")
+	result = nativeFacadeResult(r, raw).(map[string]any)
+	if !reflect.DeepEqual(result["structuredContent"], raw["structuredContent"]) || len(outputRows(result["content"])) != 0 {
+		t.Fatal("default result must keep its schema contract without duplicate text")
+	}
+	r.Header.Set("X-GPTAdmin-Result-Mode", "dual")
 	if !reflect.DeepEqual(nativeFacadeResult(r, raw), raw) {
-		t.Fatal("default MCP contract changed")
+		t.Fatal("explicit dual result changed")
 	}
 }
 

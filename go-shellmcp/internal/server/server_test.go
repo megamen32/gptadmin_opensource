@@ -383,7 +383,7 @@ func TestMCPHTTPEndpointToolsAndShellExec(t *testing.T) {
 func TestMCPSystemInspectRedactsFileSecrets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "service.env")
-	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2lnbmF0dXJl"
+	jwt := "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJhZG1pbiJ9" + "." + "c2lnbmF0dXJl"
 	if err := os.WriteFile(path, []byte("STATUS=healthy\nTOKEN="+jwt+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

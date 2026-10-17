@@ -3,9 +3,13 @@ module github.com/megamen32/gptadmin/go-hub
 go 1.26.0
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/fastschema/qjs v0.0.6
 	github.com/go-webauthn/webauthn v0.15.0
 	github.com/gofrs/flock v0.13.0
 	github.com/megamen32/gptadmin/go-shellmcp v0.0.0
+	github.com/megamen32/mesh-core/bindings/go v0.0.0-20261012024130-daa657b5a5aa
+	github.com/tetratelabs/wazero v1.9.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.58.0
@@ -14,7 +18,6 @@ require (
 replace github.com/megamen32/gptadmin/go-shellmcp => ../go-shellmcp
 
 require (
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect

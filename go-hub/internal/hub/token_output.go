@@ -21,8 +21,8 @@ const operationMaxItem = 4 << 20
 const operationMaxCount = 128
 const compactResultBytes = 1000
 
-// Native clients that serialize both MCP representations can request a single
-// text representation. Widgets and the default MCP contract stay structured.
+// Native clients may opt in to text-only results. The default keeps the
+// structured contract (including cached outputSchema) without duplicate text.
 func nativeFacadeTools(r *http.Request, tools []map[string]any) []map[string]any {
 	if r == nil || r.Header.Get("X-GPTAdmin-Result-Mode") != "text" {
 		return tools
@@ -41,7 +41,7 @@ func nativeFacadeTools(r *http.Request, tools []map[string]any) []map[string]any
 }
 
 func nativeFacadeResult(r *http.Request, raw any) any {
-	if r == nil || r.Header.Get("X-GPTAdmin-Result-Mode") != "text" {
+	if r == nil || r.Header.Get("X-GPTAdmin-Result-Mode") == "dual" {
 		return raw
 	}
 	result, ok := raw.(map[string]any)
@@ -69,11 +69,16 @@ func nativeFacadeResult(r *http.Request, raw any) any {
 		return raw
 	}
 	out := cloneMap(result)
-	delete(out, "structuredContent")
+	if r.Header.Get("X-GPTAdmin-Result-Mode") == "text" {
+		delete(out, "structuredContent")
+	} else {
+		out["content"] = []any{}
+	}
 	return out
 }
 
 type tokenOperation struct {
+	InstructionContext                      string
 	Principal, Target, Facade, Tool, Origin string
 	Created                                 time.Time
 	Data                                    []byte
@@ -294,9 +299,14 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 			return map[string]any{"status": "failed", "error": err.Error()}
 		}
 	}
+	r = requestWithInstructionContext(r, args)
+	if failure := s.requireFacadeInstructionContext(r, name, args); failure != nil {
+		return failure
+	}
+	args = withoutInstructionContext(args)
 	execution := name == "execute" || name == "call_mcp_tool" || name == "callMcpTool"
 	rawArgs := args
-	if execution {
+	if execution || nodePeerJobTool(name) {
 		if e := validateToolOutputDetail(args["detail"]); e != nil {
 			return map[string]any{"status": "failed", "error": e.Error()}
 		}
@@ -307,7 +317,35 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 	return s.presentTokenOutput(r, name, args, raw)
 }
 
-func (s *Server) presentTokenOutput(r *http.Request, name string, args map[string]any, raw any) any {
+func (s *Server) presentTokenOutput(r *http.Request, name string, args map[string]any, raw any) (presented any) {
+	r = requestWithInstructionContext(r, args)
+	defer func() { presented = s.presentInstructionContext(r, name, args, presented) }()
+	// Scope a selected schema even in full mode; full means detail, not breadth.
+	if (name == "schema" || name == "list_mcp_tools" || name == "listMcpTools") && firstString(args, "tool") != "" {
+		if value, ok := raw.(map[string]any); ok {
+			raw = compactSchema(value, args)
+		}
+	}
+	if (name == "discover" || name == "list_mcp_servers" || name == "listMcpServers") && (firstString(args, "query") != "" || firstString(args, "status") != "") {
+		if value, ok := raw.(map[string]any); ok {
+			filtered := []any{}
+			q := strings.ToLower(firstString(args, "query"))
+			st := firstString(args, "status")
+			for _, entry := range outputRows(value["servers"]) {
+				row := mapValue(entry)
+				if st != "" && firstString(row, "status") != st {
+					continue
+				}
+				if q != "" && !strings.Contains(strings.ToLower(firstString(row, "server_id")+" "+firstString(row, "name")), q) {
+					continue
+				}
+				filtered = append(filtered, entry)
+			}
+			value = cloneMap(value)
+			value["servers"] = filtered
+			raw = value
+		}
+	}
 	full := args["detail"] == "full"
 	if args["detail"] == nil || args["detail"] == "" {
 		s.mu.Lock()
@@ -323,6 +361,7 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 		return raw
 	}
 	out := payload
+	readableGrepMesh := false
 	originFacade := name
 	schemaResult := name == "schema" || name == "list_mcp_tools" || name == "listMcpTools" || ((name == "job" || name == "get_mcp_job" || name == "getMcpJob") && mapValue(payload["response"])["tools"] != nil)
 	if schemaResult && name != "schema" {
@@ -342,13 +381,25 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 				out = compactHubOutput(out)
 			} else if target := firstString(args, "target", "server_id", "agent_id"); strings.HasPrefix(target, "mcp:") {
 				out = compactChildOutput(out, target, firstString(args, "tool", "tool_name", "name"))
+				out, readableGrepMesh = compactGrepMeshOutput(out, target, firstString(args, "tool", "tool_name", "name"))
+			}
+		} else if nodePeerJobTool(name) {
+			target, tool := s.tokenJobRoute(firstString(args, "id", "job_id"))
+			out = compactToolOutput(payload, tool)
+			if strings.HasPrefix(target, "mcp:") {
+				out = compactChildOutput(out, target, tool)
+				out, readableGrepMesh = compactGrepMeshOutput(out, target, tool)
 			}
 		}
 	}
+	if execution {
+		out = leanExecutionOutput(payload, out, firstString(args, "target", "server_id", "agent_id"), firstString(args, "tool", "tool_name", "name"))
+	}
 	encoded, _ := json.Marshal(out)
-	preview := len(encoded) > compactResultBytes && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
+	disclosure := execution && firstString(args, "target", "server_id", "agent_id") == "hub" && (firstString(args, "tool", "tool_name", "name") == "expand" || firstString(args, "tool", "tool_name", "name") == "schema")
+	preview := !disclosure && !readableGrepMesh && len(encoded) > compactResultBytes && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
 	changed := !reflect.DeepEqual(payload, out)
-	if execution && !preview && firstString(args, "target", "server_id", "agent_id") != "hub" {
+	if (execution || nodePeerJobTool(name)) && !preview && !readableGrepMesh && firstString(out, "job_id") != "" {
 		return out
 	}
 	if !preview && !changed {
@@ -374,6 +425,119 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 	}
 	return out
 }
+
+func (s *Server) tokenJobRoute(id string) (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if job := s.shellJobs[id]; job != nil {
+		if job.ToolName == "mcp_call" && firstString(job.Arguments, "ref") != "" && firstString(job.Arguments, "name") != "" {
+			return "mcp:shell:" + job.Server + ":" + firstString(job.Arguments, "ref"), firstString(job.Arguments, "name")
+		}
+		return "shell:" + job.Server, job.ToolName
+	}
+	return "", ""
+}
+
+// GrepMesh text-only JSON is protocol data, not another business text block.
+// Decode only this known child, keeping the original receipt for disclosure.
+func compactGrepMeshOutput(raw map[string]any, target, tool string) (map[string]any, bool) {
+	if !strings.Contains(strings.ToLower(target), "grepmesh") {
+		return raw, false
+	}
+	upstream := mapValue(raw["result"])
+	blocks := outputRows(upstream["content"])
+	if len(blocks) != 1 || len(mapValue(blocks[0])) != 2 || firstString(mapValue(blocks[0]), "type") != "text" || truthyAny(upstream["isError"]) {
+		return raw, false
+	}
+	for key := range upstream {
+		if key != "content" && key != "isError" {
+			return raw, false
+		}
+	}
+	decoder := json.NewDecoder(strings.NewReader(firstString(mapValue(blocks[0]), "text")))
+	decoder.UseNumber()
+	var decoded map[string]any
+	if decoder.Decode(&decoded) != nil || decoder.Decode(new(any)) != io.EOF || decoded == nil {
+		return raw, false
+	}
+	out := cloneMap(raw)
+	out["result"] = decoded
+	if hasMediaOrFailure(decoded) {
+		return out, false
+	}
+	// Unknown semantic fields are retained rather than silently summarized.
+	for key := range decoded {
+		switch key {
+		case "chunks", "results", "paths", "path", "start_line", "end_line", "host_id", "target_host_id", "origin_host", "host_status", "partial", "truncated", "hop_count", "request_id", "artifact_id":
+		default:
+			return out, false
+		}
+	}
+	var lines []string
+	switch tool {
+	case "read_text":
+		if decoded["chunks"] == nil || firstString(decoded, "path") == "" {
+			return out, false
+		}
+		for _, chunk := range outputRows(decoded["chunks"]) {
+			row := mapValue(chunk)
+			if len(row) != 3 || row["start_line"] == nil || row["end_line"] == nil || row["lines"] == nil {
+				return out, false
+			}
+			for _, line := range outputRows(row["lines"]) {
+				item := mapValue(line)
+				text, ok := item["text"].(string)
+				if !ok || len(item) != 2 || item["line_number"] == nil {
+					return out, false
+				}
+				lines = append(lines, fmt.Sprint(item["line_number"])+": "+text)
+			}
+		}
+	case "search":
+		if decoded["results"] == nil {
+			return out, false
+		}
+		for _, item := range outputRows(decoded["results"]) {
+			row := mapValue(item)
+			if len(row) != 3 || firstString(row, "path") == "" || firstString(row, "loc") == "" {
+				return out, false
+			}
+			text, ok := row["data"].(string)
+			if !ok {
+				return out, false
+			}
+			lines = append(lines, firstString(row, "path")+":"+firstString(row, "loc")+"\n"+text)
+		}
+	default:
+		return out, false
+	}
+	text := strings.Join(lines, "\n")
+	view := map[string]any{"host": firstString(decoded, "target_host_id", "host_id"), "text": text}
+	if path := firstString(decoded, "path"); path != "" {
+		view["path"] = path
+	}
+	for _, key := range []string{"partial", "truncated"} {
+		if flag, ok := decoded[key]; ok {
+			view[key] = flag
+		}
+	}
+	for _, key := range []string{"host_status", "origin_host", "artifact_id"} {
+		if value, ok := decoded[key]; ok {
+			view[key] = value
+		}
+	}
+	if len(text) > compactResultBytes {
+		prefix := utf8Prefix([]byte(text), compactResultBytes)
+		if index := strings.LastIndex(prefix, "\n"); index > 0 {
+			prefix = prefix[:index]
+		}
+		view["text"] = prefix
+		view["truncated"] = true
+		view["text_bytes"] = len(text)
+	}
+	out["result"] = view
+	return out, true
+}
 func utf8Prefix(data []byte, n int) string {
 	if len(data) <= n {
 		return string(data)
@@ -386,7 +550,7 @@ func utf8Prefix(data []byte, n int) string {
 func hasMediaOrFailure(value any) bool {
 	switch v := value.(type) {
 	case map[string]any:
-		if truthyAny(v["isError"]) || v["error"] != nil || v["status"] == "failed" || v["status"] == "approval_required" {
+		if truthyAny(v["isError"]) || v["error"] != nil || v["status"] == "failed" || v["status"] == "approval_required" || v["status"] == "running" || v["status"] == "queued" || v["status"] == "input_required" || v["status"] == "cancelled" || (v["returncode"] != nil && intFromAny(v["returncode"]) != 0) {
 			return true
 		}
 		if kind := firstString(v, "type"); kind == "image" || kind == "audio" || kind == "resource" || kind == "resource_link" {
@@ -482,6 +646,12 @@ func outputRows(value any) []any {
 	switch rows := value.(type) {
 	case []any:
 		return rows
+	case []string:
+		out := make([]any, len(rows))
+		for i, row := range rows {
+			out[i] = row
+		}
+		return out
 	case []map[string]any:
 		out := make([]any, len(rows))
 		for i, row := range rows {
@@ -591,6 +761,9 @@ func (s *Server) resolveExecutionReference(r *http.Request, args map[string]any)
 	delete(out, "ref")
 	out["target"] = item.Target
 	out["tool"] = item.Tool
+	if firstString(out, "context") == "" && item.InstructionContext != "" {
+		out["context"] = item.InstructionContext
+	}
 	return out, nil
 }
 

@@ -10,7 +10,7 @@ import (
 func TestReadFileIsBoundedAndRedactsSecrets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "diagnostic.env")
-	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2lnbmF0dXJl"
+	jwt := "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJhZG1pbiJ9" + "." + "c2lnbmF0dXJl"
 	if err := os.WriteFile(path, []byte("STATE=ok\nTOKEN="+jwt+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

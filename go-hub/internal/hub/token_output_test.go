@@ -42,7 +42,7 @@ func TestTokenSchemaExactAndDisclosure(t *testing.T) {
 	if !reflect.DeepEqual(defs[0], expected) {
 		t.Fatal("exact schema changed validation constraints")
 	}
-	id := firstString(selected, "operation_id")
+	id := firstString(selected, "call_ref")
 	if id == "" {
 		t.Fatal("missing disclosure handle")
 	}

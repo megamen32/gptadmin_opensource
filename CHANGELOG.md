@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Authorization: Bearer ...` header for `mcp.json`.
 
 
+## [1024] - 2026-10-17
+
+### Added
+- Code Mode chains authorized MCP tools in a bounded JavaScript runtime and returns only selected JSON.
+- Profile-specific instruction delivery before execution, with versioned context receipts and refresh after rule changes.
+- Portable GPTAdmin plugin 1.3.0 packaging alongside the existing Codex format.
+
+### Fixed
+- Secret request and status tools are routed through the generic Hub execution facade.
+- Exact tool-schema selection stays scoped even with full detail; compact successful replies retain expandable diagnostics.
+- Regression coverage for profile isolation, current-context admission, reader restrictions and cross-node delivery.
+
 ## [139] - 2026-08-02
 
 ### Fixed

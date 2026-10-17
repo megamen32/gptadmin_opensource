@@ -35,13 +35,21 @@ paths:
       summary: Discover targets
       description: List compact MCP targets. Add detail=full only when metadata is needed.
       parameters:
+        - name: query
+          in: query
+          schema: {type: string}
+          description: Match target id or name.
+        - name: status
+          in: query
+          schema: {type: string}
+          description: Filter targets by status.
         - name: detail
           in: query
           required: false
           description: Opt in to transport, capabilities and metadata.
           schema:
             type: string
-            enum: [full]
+            enum: [compact, full]
       responses:
         "200":
           description: Available MCP servers
@@ -49,6 +57,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DiscoverResponse"
+  /mcp-relay/expand:
+    post:
+      operationId: expand
+      summary: Read saved operation details without executing again
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: {type: string}
+                path: {type: string, description: JSON Pointer}
+                offset: {type: integer, minimum: 0}
+                limit: {type: integer, minimum: 1, maximum: 16000}
+              additionalProperties: false
+      responses:
+        "200":
+          description: Saved data or bounded UTF-8 page
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
   /mcp-relay/tools:
     post:
       operationId: schema
@@ -677,7 +708,7 @@ components:
     McpServer:
       type: object
       additionalProperties: true
-      required: [server_id, name, kind, status]
+      required: [server_id, status]
       properties:
         server_id:
           type: string
@@ -692,7 +723,7 @@ components:
           nullable: true
         status:
           type: string
-          enum: [online, offline, stale]
+          enum: [online, offline, stale, failed, awaiting_approval]
         last_seen:
           type: number
           nullable: true
@@ -708,6 +739,12 @@ components:
       additionalProperties: false
       required: [target]
       properties:
+        tool:
+          type: string
+          description: Return the exact schema of this tool; omit for summaries.
+        detail:
+          type: string
+          enum: [compact, full]
         target:
           type: string
           description: Target id from discover. Never use "default".
@@ -723,8 +760,16 @@ components:
     ExecuteRequest:
       type: object
       additionalProperties: true
-      required: [target, tool]
+      anyOf:
+        - required: [ref]
+        - required: [target, tool]
       properties:
+        ref:
+          type: string
+          description: call_ref returned by exact schema or expand.
+        detail:
+          type: string
+          enum: [compact, full]
         target:
           type: string
           description: Target id from discover. Never use "default".

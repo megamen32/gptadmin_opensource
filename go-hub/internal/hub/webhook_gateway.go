@@ -695,7 +695,7 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 		if err != nil {
 			return nil, err
 		}
-		policyRequest := requestWithAutomationProfile(nil, "webhook", action.Target, "shell_exec", action.ApprovalMode)
+		policyRequest := nonAgentWorkflow(requestWithAutomationProfile(nil, "webhook", action.Target, "shell_exec", action.ApprovalMode))
 		result, status := s.executeMCPTool(policyRequest, action.Target, "shell_exec", map[string]any{
 			"cmd":     command,
 			"cwd":     cwd,
@@ -730,7 +730,7 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("webhook target rejected: %s", detail)
 		}
-		policyRequest := requestWithAutomationProfile(nil, "webhook", selectedTarget, action.Tool, action.ApprovalMode)
+		policyRequest := nonAgentWorkflow(requestWithAutomationProfile(nil, "webhook", selectedTarget, action.Tool, action.ApprovalMode))
 		result, resultStatus := s.executeMCPTool(policyRequest, selectedTarget, action.Tool, arguments, false, timeout, "")
 		if resultStatus < http.StatusOK || resultStatus >= http.StatusMultipleChoices {
 			return nil, fmt.Errorf("webhook MCP action failed with status %d: %v", resultStatus, result)

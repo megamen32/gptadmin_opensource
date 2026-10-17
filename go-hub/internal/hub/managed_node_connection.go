@@ -62,7 +62,7 @@ func (s *Server) forwardManagedConnection(w http.ResponseWriter, r *http.Request
 		return true
 	}
 	frame := nodeConnFrame{Op: "call", ID: hex.EncodeToString(seed), Endpoint: r.URL.Path, Method: r.Method, Auth: r.Header.Get("Authorization"), Body: body, Headers: map[string]string{}}
-	for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id"} {
+	for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id", instructionContextHeader} {
 		if value := r.Header.Get(name); value != "" {
 			frame.Headers[name] = value
 		}

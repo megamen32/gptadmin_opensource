@@ -2,6 +2,8 @@ package hub
 
 import "log"
 
+const taskCacheSeconds = 60
+
 func taskTerminal(status string) bool {
 	return status == "completed" || status == "failed" || status == "cancelled"
 }
@@ -25,6 +27,7 @@ func (s *Server) maintainTaskStateLocked() ([]string, error) {
 	if s.taskRuntimeClosed {
 		return nil, nil
 	}
+	s.pruneExpiredTaskMemoryLocked()
 	ids := []string{}
 	for id, j := range s.shellJobs {
 		if j != nil && !taskTerminal(j.Status) {
@@ -52,4 +55,31 @@ func (s *Server) maintainTaskStateLocked() ([]string, error) {
 	}
 	s.cond.Broadcast()
 	return expired, nil
+}
+
+// Only the one-minute terminal cache expires here; durable retention is unchanged.
+// Live group children, active jobs and failed/uncommitted writes stay resident.
+func (s *Server) pruneExpiredTaskMemoryLocked() {
+	if s.cfg.ConfigDir == "" {
+		return
+	}
+	protected := map[string]bool{}
+	for _, group := range s.relayJobs {
+		if group != nil && !taskTerminal(group.Status) {
+			for _, id := range taskGroupChildIDs(group) {
+				protected[id] = true
+			}
+		}
+	}
+	cutoff := nowFloat() - taskCacheSeconds
+	for id, job := range s.shellJobs {
+		if !protected[id] && job != nil && job.Revision > 0 && taskTerminal(job.Status) && job.DoneAt > 0 && job.DoneAt < cutoff && job.CachedAt < cutoff {
+			delete(s.shellJobs, id)
+		}
+	}
+	for id, job := range s.relayJobs {
+		if !protected[id] && job != nil && job.Revision > 0 && taskTerminal(job.Status) && job.DoneAt > 0 && job.DoneAt < cutoff && job.CachedAt < cutoff {
+			delete(s.relayJobs, id)
+		}
+	}
 }

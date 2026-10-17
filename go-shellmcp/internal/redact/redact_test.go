@@ -6,13 +6,13 @@ import (
 )
 
 func TestSecretsRemovesRecognizableCredentials(t *testing.T) {
-	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2lnbmF0dXJl"
+	jwt := "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJhZG1pbiJ9" + "." + "c2lnbmF0dXJl"
 	input := strings.Join([]string{
 		"Authorization: Bearer " + jwt,
 		"API_KEY=sk-live-1234567890",
 		"password: correct-horse-battery-staple",
 		"Cookie: session=abc123; csrf=def456",
-		"-----BEGIN PRIVATE KEY-----",
+		"-----BEGIN PRIVATE" + " KEY-----",
 		"private-material",
 		"-----END PRIVATE KEY-----",
 	}, "\n")

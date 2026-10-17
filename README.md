@@ -138,6 +138,8 @@ CloudOS не входит в обычный hub-пакет: это отдель�
 |------------|---------|
 | **Server administration** | restart systemd services, manage firewall/nginx/fail2ban/sshd, install packages |
 | **Write & run code** | edit files, run type-check/lint/build, launch subagents ("run codex to fix this bug") |
+| **[Code Mode](docs/CODE_MODE.md)** | chain authorized MCP calls in a short JavaScript script and return only the selected JSON result |
+| **[Profile context](docs/INSTRUCTION_CONTEXT.md)** | deliver current instructions before execution; reuse context with compact results |
 | **Fix & clean PRs** | find fork in memory, keep one feature commit, force-push via SSH |
 | **Check logs** | parse journalctl/nginx/postgres, find anomalies, suggest & apply fixes |
 | **Web search** | via chrome-devtools MCP — agent opens pages, reads docs, searches |
