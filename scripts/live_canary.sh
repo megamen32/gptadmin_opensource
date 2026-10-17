@@ -89,9 +89,26 @@ discover_status() {
 }
 
 execute_stdout() {
+	# The 1067a84 instruction-context gate rejects any execute that arrives
+	# without a context token. Follow the product contract: fetch the schema
+	# once (it returns the current context), then echo it on the execute call.
+	local context
+	context="$(curl -sS -m 20 -X POST -H "Authorization: Bearer $BEARER" \
+		-H 'Content-Type: application/json' \
+		-d '{"target":"hub","tool_name":"schema","args":{"target":"hub","tool":"discover"}}' \
+		"$1/mcp-relay/call" 2>/dev/null \
+		| python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["response"]["context"])
+except Exception:
+    pass' 2>/dev/null)"
+	if [ -z "$context" ]; then
+		echo "context unavailable"
+		return
+	fi
 	curl -sS -m 60 -X POST -H "Authorization: Bearer $BEARER" \
 		-H 'Content-Type: application/json' \
-		-d "{\"target\":\"$TARGET\",\"tool_name\":\"shell_exec\",\"cmd\":\"hostname\"}" \
+		-d "{\"target\":\"$TARGET\",\"tool_name\":\"shell_exec\",\"context\":\"$context\",\"cmd\":\"hostname\"}" \
 		"$1/mcp-relay/call" 2>/dev/null \
 		| grep -oP '(?<="stdout":")[^"]*'
 }
