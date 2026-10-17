@@ -2251,6 +2251,36 @@ def _require_instruction_receipt(payload) -> str:
     return context
 
 
+def _installer_instruction_context(discovered, fetch_tools) -> str:
+    """Allow old installers only after a closed schema proves no context support.
+
+    Partial/malformed receipts are never a legacy signal. Native tools/list
+    advertises the schema facade even when legacy hubTools() does not.
+    """
+    if not isinstance(discovered, dict) or 'instructions' in discovered or 'context' in discovered:
+        return _require_instruction_receipt(discovered)
+    advertised = fetch_tools()
+    if (not isinstance(advertised, dict) or advertised.get('jsonrpc') != '2.0'
+            or advertised.get('id') != 1 or advertised.get('error') is not None):
+        raise RuntimeError('Hub context capability schema is unavailable')
+    response = advertised.get('result')
+    tools = response.get('tools') if isinstance(response, dict) and response.get('error') is None and not response.get('isError') else None
+    if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
+        raise RuntimeError('Hub context capability schema is invalid')
+    selected = [tool for tool in tools if tool.get('name') == 'schema']
+    definition = selected[0].get('inputSchema') if len(selected) == 1 else None
+    properties = definition.get('properties') if isinstance(definition, dict) else None
+    target = properties.get('target') if isinstance(properties, dict) else None
+    if (not isinstance(properties, dict) or definition.get('type') != 'object'
+            or definition.get('additionalProperties') is not False
+            or not isinstance(target, dict) or target.get('type') != 'string'
+            or any(key in definition for key in ('$ref', 'anyOf', 'oneOf', 'allOf'))):
+        raise RuntimeError('Hub context capability schema is ambiguous')
+    if 'context' in properties:
+        raise RuntimeError('Hub instruction discovery omitted current instructions/context')
+    return ''
+
+
 def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shellmcp: bool) -> None:
     """Approve only the freshly generated same-machine ShellMCP identity.
 
@@ -2288,7 +2318,10 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode('utf-8', 'replace')
+            body = response.read(1024 * 1024 + 1)
+            if len(body) > 1024 * 1024:
+                raise RuntimeError('local Hub discovery/schema response exceeds installer limit')
+            body = body.decode('utf-8', 'replace')
             return json.loads(body or '{}')
 
     deadline = time.monotonic() + 30
@@ -2323,10 +2356,13 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
         raise RuntimeError('local ShellMCP registration did not appear for cryptographic auto-approval')
 
     target = str(candidate.get('server_id') or '')
-    context = _require_instruction_receipt(discovered)
+    context = _installer_instruction_context(discovered, lambda: http_json(
+        'POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}, timeout=5.0,
+    ))
     result = http_json(
         'POST', '/mcp-relay/call',
-        {'target': 'hub', 'tool': 'approve_pending_server', 'arguments': {'server_id': target}, 'context': context},
+        {'target': 'hub', 'tool': 'approve_pending_server', 'arguments': {'server_id': target},
+         **({'context': context} if context else {})},
         timeout=10.0,
     )
     if not _approve_pending_response_ok(result):
@@ -5272,7 +5308,7 @@ def _openapi_operation_map(text: str) -> dict[str, tuple[str, str]]:
     return operations
 
 
-def _candidate_http(base: str, method: str, path: str, *, host: str = '', token: str = '', payload=None, timeout: float = 12.0):
+def _candidate_http(base: str, method: str, path: str, *, host: str = '', token: str = '', payload=None, timeout: float = 12.0, max_response_bytes: int = 0):
     data = None if payload is None else json.dumps(payload).encode('utf-8')
     headers = {'Accept': 'application/json, text/yaml, */*', 'User-Agent': 'gptadmin-candidate-gate/1'}
     if host:
@@ -5283,7 +5319,9 @@ def _candidate_http(base: str, method: str, path: str, *, host: str = '', token:
         headers['Content-Type'] = 'application/json'
     request = urllib.request.Request(base.rstrip('/') + path, data=data, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - explicit local/public update probe
-        body = response.read()
+        body = response.read(max_response_bytes + 1) if max_response_bytes else response.read()
+        if max_response_bytes and len(body) > max_response_bytes:
+            raise RuntimeError('candidate API response exceeds installer limit')
         if not 200 <= response.status < 300:
             raise RuntimeError(f'candidate API {method} {path} returned HTTP {response.status}')
         ctype = response.headers.get('Content-Type', '')
@@ -5570,7 +5608,10 @@ def _require_real_local_shell_exec(env: dict, timeout_s: int = 90) -> dict:
         time.sleep(0.25)
     if not selected:
         raise RuntimeError('local ShellMCP did not become online for execution verification')
-    context = _require_instruction_receipt(payload)
+    context = _installer_instruction_context(payload, lambda: _candidate_http(
+        base, 'POST', '/mcp', token=token,
+        payload={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}, timeout=5.0, max_response_bytes=1024 * 1024,
+    ))
 
     # A Hub restart can strand one already-dispatched queue job in ``running``
     # even though the new ShellMCP is healthy.  Do not let one stale verifier
@@ -5591,7 +5632,7 @@ def _require_real_local_shell_exec(env: dict, timeout_s: int = 90) -> dict:
                 'tool': 'shell_exec',
                 'arguments': {'cmd': f"printf '{expected}'", 'run_as_user': 'root'},
                 'background': True,
-                'context': context,
+                **({'context': context} if context else {}),
             },
             timeout=10.0,
         )

@@ -14,7 +14,10 @@ import pytest
 import cli
 
 
-@pytest.mark.parametrize("failure", [None, "missing_context", "http_428"])
+@pytest.mark.parametrize("failure", [
+    None, "missing_context", "http_428", "legacy", "legacy_428",
+    "new_missing_context", "schema_error", "unknown_schema", "malformed_receipt",
+])
 def test_local_autoapproval_carries_matching_discovery_context_once(monkeypatch, failure):
     identity = {"server_id": "local-signed-id", "public_key": "local-public-key"}
     monkeypatch.setattr(cli, "_load_local_shellmcp_identity", lambda *_args, **_kwargs: identity)
@@ -31,32 +34,83 @@ def test_local_autoapproval_carries_matching_discovery_context_once(monkeypatch,
         assert request.full_url.startswith("http://127.0.0.1:9234/")
         payload = json.loads(request.data) if request.data else None
         calls.append((request.method, request.full_url, payload))
-        if request.method == "GET":
-            online = any(method == "POST" for method, _, _ in calls)
+        capability_probe = request.full_url.endswith("/mcp")
+        if capability_probe:
+            assert payload == {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+            assert timeout <= 5
+            # Exact inputSchema from public v1021 server.go appsSDKTools(),
+            # lines 8971-8974; it is absent from that version's hubTools().
+            schema = {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"], "additionalProperties": False}
+            if failure == "new_missing_context":
+                schema["properties"]["context"] = {"type": "string"}
+            if failure == "unknown_schema":
+                schema.pop("additionalProperties")
+            body = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "schema", "inputSchema": schema}]}}
+            if failure == "schema_error":
+                body["error"] = {"code": -32601, "message": "private-provider-text"}
+        elif request.method == "GET":
+            online = any(url.endswith("/mcp-relay/call") for _, url, _ in calls)
             server = {**pending, "status": "online", "last_seen": time.time()} if online else pending
-            body = {"servers": [server, foreign], "instructions": "Current local fixture instructions."}
-            if failure != "missing_context":
-                body["context"] = "current-caller-context"
+            body = {"servers": [server, foreign]}
+            if failure not in {"legacy", "legacy_428", "new_missing_context", "schema_error", "unknown_schema"}:
+                body["instructions"] = "Current local fixture instructions."
+                if failure != "missing_context":
+                    body["context"] = 42 if failure == "malformed_receipt" else "current-caller-context"
         else:
-            assert payload == {
-                "target": "hub", "tool": "approve_pending_server",
-                "arguments": {"server_id": "shell:local"}, "context": "current-caller-context",
-            }
-            if failure == "http_428":
+            expected = {"target": "hub", "tool": "approve_pending_server", "arguments": {"server_id": "shell:local"}}
+            if failure not in {"legacy", "legacy_428"}:
+                expected["context"] = "current-caller-context"
+            assert payload == expected
+            if failure in {"http_428", "legacy_428"}:
                 raise urllib.error.HTTPError(request.full_url, 428, "Precondition Required", {}, None)
             body = {"status": "completed", "response": {"ok": True}}
         return io.BytesIO(json.dumps(body).encode())
 
     monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
-    if failure == "missing_context":
-        with pytest.raises(RuntimeError, match="instructions/context"):
+    rejected = {"missing_context", "new_missing_context", "schema_error", "unknown_schema", "malformed_receipt"}
+    if failure in rejected:
+        with pytest.raises(RuntimeError) as caught:
             cli.maybe_autoapprove_local_shellmcp({"HUB_PORT": "9234"}, True, True)
-    elif failure == "http_428":
+        assert "private-provider-text" not in str(caught.value)
+    elif failure in {"http_428", "legacy_428"}:
         with pytest.raises(urllib.error.HTTPError):
             cli.maybe_autoapprove_local_shellmcp({"HUB_PORT": "9234"}, True, True)
     else:
         cli.maybe_autoapprove_local_shellmcp({"HUB_PORT": "9234"}, True, True)
-    assert sum(method == "POST" for method, _, _ in calls) == (0 if failure == "missing_context" else 1)
+    assert sum(url.endswith("/mcp-relay/call") for _, url, _ in calls) == (0 if failure in rejected else 1)
+    assert sum(url.endswith("/mcp") for _, url, _ in calls) == (
+        1 if failure in {"legacy", "legacy_428", "new_missing_context", "schema_error", "unknown_schema"} else 0
+    )
+
+
+def test_legacy_runtime_verifier_uses_same_capability_proof_before_one_probe(monkeypatch):
+    monkeypatch.setattr(cli, "_load_local_shellmcp_identity", lambda *_args, **_kwargs: {"public_key": "pk"})
+    monkeypatch.setattr(cli, "_server_matches_local_shell_identity", lambda *_args: True)
+    monkeypatch.setattr(cli, "make_mcp_bearer_token", lambda *_args, **_kwargs: "fixture-bearer")
+    calls = []
+
+    def http(base, method, path, **kwargs):
+        assert base == "http://127.0.0.1:9234"
+        assert kwargs["token"] == "fixture-bearer"
+        calls.append(path)
+        if path.startswith("/mcp-relay/servers"):
+            return {"servers": [{"server_id": "shell:local", "status": "online"}]}
+        if path == "/mcp":
+            assert kwargs["max_response_bytes"] == 1024 * 1024
+            assert kwargs["payload"] == {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+            return {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{
+                "name": "schema", "inputSchema": {
+                    "type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"], "additionalProperties": False,
+                },
+            }]}}
+        assert path == "/mcp-relay/call"
+        assert "context" not in kwargs["payload"]
+        marker = kwargs["payload"]["arguments"]["cmd"].split("'")[1]
+        return {"returncode": 0, "stdout": marker}
+
+    monkeypatch.setattr(cli, "_candidate_http", http)
+    assert cli._require_real_local_shell_exec({"HUB_PORT": "9234"}, timeout_s=9)["status"] == "passed"
+    assert calls == ["/mcp-relay/servers?detail=full", "/mcp", "/mcp-relay/call"]
 
 
 @pytest.mark.parametrize("result", [
