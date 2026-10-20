@@ -23,8 +23,9 @@ dig() {
   fi
   printf '%s\n' '"test-value"'
 }
-# Poll faster in this local test, using the real monotonic shell elapsed time.
-sleep() { command sleep "$PROBE_INTERVAL"; }
+# Advance Bash's elapsed-time counter deterministically instead of relying on
+# wall-clock scheduling around integer-second SECONDS boundaries.
+sleep() { SECONDS=$((SECONDS + PROBE_INTERVAL)); }
 export -f dig sleep
 bash "$1"
 '''
