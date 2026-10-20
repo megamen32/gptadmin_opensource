@@ -1,4 +1,4 @@
-# GPTAdmin server-100 budget and acceptance
+# GPTAdmin node-100 budget and acceptance
 
 ## HTTP migration continuation, 2026-10-12
 
@@ -49,7 +49,7 @@ UID/native limits, move processes or alter another project's quota.
 
 ## Verified live baseline, 2026-10-08
 
-Read-only measurements on `admin-server-100` at
+Read-only measurements on `admin-node-100` at
 18:00:06–08 UTC identified **system** `gptadmin-hub.service`, PID 3152,
 `/system.slice/gptadmin-hub.service`, started 2026-10-01. Querying
 `systemctl --user` would inspect an absent unit and cannot establish live limits.
@@ -83,7 +83,7 @@ protected content to estimate disk use.
 ## Source candidate: Root-selected finite Hub envelope
 
 [`gptadmin-hub-server100-budget.conf`](../deploy/systemd/gptadmin-hub-server100-budget.conf)
-is a server-100 candidate, not evidence of an installed or accepted budget.
+is a node-100 candidate, not evidence of an installed or accepted budget.
 
 | Resource | Candidate | Basis and acceptance limit |
 | --- | --- | --- |
@@ -94,7 +94,7 @@ is a server-100 candidate, not evidence of an installed or accepted budget.
 | Disk state | 4 GiB operating allowance | Older baseline 1.55 GiB. This is a metadata/retention admission allowance, not an enforced aggregate filesystem quota |
 | Temp/spool | 500 MiB aggregate Shell allowance | Existing storagebudget mechanism must actually be invoked; preserve active/outbox paths and verify over-budget behavior |
 | Per-file writes | 2 GiB | LimitFSIZE does not replace aggregate state/retention limits |
-| I/O | Weight 50, read 40 MiB/s, write 20 MiB/s | Device `/dev/nvme0n1` is server-100-specific. Reconfirm deployment device and measure snapshot/callback latency |
+| I/O | Weight 50, read 40 MiB/s, write 20 MiB/s | Device `/dev/nvme0n1` is node-100-specific. Reconfirm deployment device and measure snapshot/callback latency |
 | Parallelism | One small final consumer operation; at most 8 opt-in managed partitions | Legacy facades stay unscoped. No broad MCP rollout or pool increase follows from one canary |
 | GPU | None | No GPU workload |
 
@@ -153,7 +153,7 @@ is required or claimed.
    native Codex consumer, through its preserved enabled name. For GrepMesh,
    `read_text` of the first eight lines of the canonical GPTAdmin `AGENTS.md`
    is an exact read-only consumer operation; use the installed tool schema and
-   `server-100` identity. Capture returned text/IDs/session and verify against
+   `node-100` identity. Capture returned text/IDs/session and verify against
    the known file. A raw Python HTTP replay is API diagnosis, not native proof.
 5. For an opt-in `/connection/.../mcp` claim, select an already enabled real
    HTTP/SSE child and preserve a protected backup of exactly one native entry.
@@ -304,7 +304,7 @@ The Go soft memory target is reduced from2GiB to256MiB. This is separate from th
 
 Installed five-minute cache acceptance: sourcea5aba55/primary1658673, native hostname and Herder tools-read completed. Actual old receipt200/33ms, full history89244rows/200displayed with no cache refill. Process/service peak290500608/280117248B (277/267MiB), no swap/high/max/OOM. The200-row admin page took11.45s because its temporary metadata inventory still scanned all history; owned follow-up moves counts and pagination to SQLite expression indexes and batches displayed payload reads. A real SQLite missing-index regression is RED. Fresh available host~33GiB and measured277MiB process peak justify reviewed outer MemoryHigh512MiB/MemoryMax1GiB, swap0; CPU2/tasks512/I/O40Mread20Mwrite unchanged. Go soft256MiB and source-test budget unchanged.
 
-Indexed paging final80focused checks GREEN10.025s, peak656859136B/no swap/OOM. Derived SQLite inventory/status/server-page indexes initialize atomically via the existing cold schema writer; version2/history/rollback stay compatible. Page reads explicitly select the matching index, return only requested metadata and batch displayed payloads, never all-history Go maps. Final runtime activation and same native acceptance follow.
+Indexed paging final80focused checks GREEN10.025s, peak656859136B/no swap/OOM. Derived SQLite inventory/status/node-page indexes initialize atomically via the existing cold schema writer; version2/history/rollback stay compatible. Page reads explicitly select the matching index, return only requested metadata and batch displayed payloads, never all-history Go maps. Final runtime activation and same native acceptance follow.
 
 Latest human correction: "10гигов это ок сервис важный". Retain the existing service MemoryHigh6GiB/MemoryMax10GiB and swap0; the proposed1GiB cap was never applied. Lower actual usage through lazy history/five-minute cache and Go soft256MiB, without restricting the important service to1GiB. Source/tests for indexed paging are unchanged.
 
@@ -312,7 +312,7 @@ Actual indexed200-row history latency remained RED (>3s): WITHOUT ROWID + JSON-e
 
 Final durable counter regression and integrated81focused cases GREEN, peak655212544B, swap/OOM0. Counter migration is derived/atomic and rollback-compatible; count/page requests no longer read all task results. Latest service10GiB emergency ceiling remains unchanged.
 
-Final aggregates include owner/server, so the legacy server-filtered total also avoids the slow JSON-expression count.81focused cases GREEN6.588s, peak673710080B/no swap/OOM. Only derived counters may be atomically rebuilt during format upgrade; all task records, IDs/results and version2 rollback compatibility stay intact.
+Final aggregates include owner/server, so the legacy node-filtered total also avoids the slow JSON-expression count.81focused cases GREEN6.588s, peak673710080B/no swap/OOM. Only derived counters may be atomically rebuilt during format upgrade; all task records, IDs/results and version2 rollback compatibility stay intact.
 
 ## Final installed acceptance
 Source052a13a installed as numeric1022 Hub+executor, primary1822345, binary SHA256 58df9de2304d581661a78404a6ce82d6f19524315bb30c4d33cf8345fe05dc75. Native hostname jobb8bd8055af593dba6e5ed8bb22e84cf7 completed; native Herder tools-read job86a71036ceeed69808cd0bbb428f760a completed. Real old receipt200/58ms, full89399-task history200-row page281ms (previous11.45s), older offset10000 page610ms, legacy cold server page137ms, audit81ms. Derived per-status/server counts exactly match a real read-only durable snapshot. Runtime cache remains small rather than refilling history. Warm20s measured GoRSS peak89.48MiB/final70.17MiB and service peak80.64MiB/final61.33MiB, no swap/high/max/OOM and no automatic restarts. These are observed canary measurements, not a promise that every future MCP child workload fits300MiB. Human-selected high6GiB/emergency10GiB retained, Go soft256MiB.81focused checks GREEN6.588s. No task replay/manual cancellation; durable receipts and2GiB audit archive preserved. Original unrelated fleet milestone remains open.

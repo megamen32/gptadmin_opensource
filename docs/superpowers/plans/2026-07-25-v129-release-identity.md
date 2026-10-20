@@ -4,7 +4,7 @@
 
 **Goal:** Publish and deploy exact v129 Hub artifact with matching tag, VERSION, manifest, SBOM and runtime identity, restoring /connect.json.
 
-**Architecture:** Tagged builds use committed VERSION without increment and reject tag/version mismatch. Tag CI passes this mode. The deploy uses only the verified v129 Hub artifact and preserves configuration, Tunnel, server-88 and the existing rollback snapshot.
+**Architecture:** Tagged builds use committed VERSION without increment and reject tag/version mismatch. Tag CI passes this mode. The deploy uses only the verified v129 Hub artifact and preserves configuration, Tunnel, node-88 and the existing rollback snapshot.
 
 **Tech Stack:** Bash, GitHub Actions YAML, pytest, Go Hub, systemd.
 
@@ -12,7 +12,7 @@
 
 - Candidate descends from b00795b14c64703d7b44abb04cf2677e4ae31790 and includes the current /connect.json handler.
 - Preserve current dirty .vscode/settings.json, AGENTS.md, CLAUDE.md, docs/BUGS.md, docs/WORKLOG.md and the unrelated secret-ingress plan.
-- Do not use mutable latest assets; do not touch Tunnel, HAOS or server-88.
+- Do not use mutable latest assets; do not touch Tunnel, HAOS or node-88.
 - Never print credentials or environment-file values.
 
 ---
@@ -172,7 +172,7 @@ Run the Hub artifact with disposable port/state. Require health, version, /conne
 
 - [ ] **Step 3: Atomic Hub-only swap**
 
-Validate checksum in a temporary remote path, atomically replace only the Hub binary, and start gptadmin-hub.service once. Do not edit config, unit, nginx, Tunnel, HAOS or server-88.
+Validate checksum in a temporary remote path, atomically replace only the Hub binary, and start gptadmin-hub.service once. Do not edit config, unit, nginx, Tunnel, HAOS or node-88.
 
 - [ ] **Step 4: Live acceptance and rollback**
 
@@ -180,4 +180,4 @@ Require loopback then public health/version/connect/OAuth, browser login-refresh
 
 - [ ] **Step 5: Record completion only after delayed stability**
 
-Observe through the real delayed-stop window with cheap health/discovery/auth probes. Keep Tunnel and server-88 open unless separately proven.
+Observe through the real delayed-stop window with cheap health/discovery/auth probes. Keep Tunnel and node-88 open unless separately proven.

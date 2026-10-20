@@ -36,7 +36,7 @@
   child MCP sessions are closed with the server.
 - 2026-07-12: Stale outbox results rejected by Hub with HTTP 404 are removed
   instead of retried forever. Production restart cleared five stale entries.
-- 2026-07-12: Deployed updated Go Hub and ShellMCP on admin-server-100.
+- 2026-07-12: Deployed updated Go Hub and ShellMCP on admin-node-100.
   Production long-poll smoke test passed end-to-end: `mcp_manage` persisted a
   stdio child, `mcp_tools` discovered `echo`, and `mcp_call` returned
   `echo:production-ok`; the temporary child and definition were then removed.

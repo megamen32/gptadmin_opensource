@@ -39,7 +39,7 @@ To use the value in a managed shell job, pass only the reference:
 }
 ```
 
-The Hub resolves the reference server-side, injects it only into the approved
+The Hub resolves the reference node-side, injects it only into the approved
 job, and redacts it from MCP results, job inspection, audit records and logs.
 Readonly profiles cannot request or inspect secrets. The `file` metadata is an
 opaque Hub-managed storage reference, not permission to read the file through

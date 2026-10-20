@@ -44,7 +44,7 @@
 
 ## 2026-07-25 - MCP-QUEUED-JOBS-NOT-EXECUTING-20260725 - queued MCP jobs do not complete - awaiting client smoke
 
-- Component: Hub queue delivery and server-100 ShellMCP worker.
+- Component: Hub queue delivery and node-100 ShellMCP worker.
 - Evidence: production service journal and Hub metrics at 2026-07-25 22:57 MSK.
 - Confirmed facts: 18 shell jobs were queued; ShellMCP started with `queue=false`; an explicit `long_poll`/queue configuration restart logged `queue=true` and reduced `shell_queue_jobs` to 0 within five seconds.
 - Root cause: ShellMCP queue polling was disabled by deployed configuration drift; a restart without explicit queue mode could not recover jobs.
@@ -428,9 +428,9 @@ Rules:
 
 ## 2026-07-23 - ANDROID-LAN-PROXY-FW-20260723 - LAN proxy blocked by host firewall - fixed
 
-- Component: `android-4g-lan-proxy.service` on admin-server-100.
+- Component: `android-4g-lan-proxy.service` on admin-node-100.
 - First observed: 2026-07-23.
-- Symptom / evidence: Runtime probe `mac-curl-3126-20260723` stalled connecting to the LAN listener. The service was listening on `203.0.113.10:3126`, and a server-local proxy request completed successfully, while the UFW user rules had no TCP/3126 allow entry and the INPUT policy was deny.
+- Symptom / evidence: Runtime probe `mac-curl-3126-20260723` stalled connecting to the LAN listener. The service was listening on `203.0.113.10:3126`, and a node-local proxy request completed successfully, while the UFW user rules had no TCP/3126 allow entry and the INPUT policy was deny.
 - Root cause: The deployment created the LAN listener but did not install a matching UFW allow rule.
 - Fix / verification: Added UFW TCP rules limited to the private LAN ranges and
   made the deployment script install the matching rule idempotently for the
@@ -498,9 +498,9 @@ Rules:
 
 ## 2026-07-23 - FAILOVER-PHYSICAL-INGRESS-20260723 - Physical Hub failover has no active takeover path - fixed
 
-- Component: `server-100` Hub watchdog/FRP path and HAOS standby.
+- Component: `node-100` Hub watchdog/FRP path and HAOS standby.
 - First observed: 2026-07-23.
-- Symptom / evidence: Runtime artifact `failover-runtime-20260723-01` shows `gptadmin-hub-watchdog.timer=bad` on `server-100`, no active failover watchdog/proxy unit, HAOS reachable on `:9001`, and HAOS `:9101` refusing connections. The public route therefore has no verified takeover owner when the primary Hub is stopped.
+- Symptom / evidence: Runtime artifact `failover-runtime-20260723-01` shows `gptadmin-hub-watchdog.timer=bad` on `node-100`, no active failover watchdog/proxy unit, HAOS reachable on `:9001`, and HAOS `:9101` refusing connections. The public route therefore has no verified takeover owner when the primary Hub is stopped.
 - Root cause: Physical deployment wiring is incomplete or invalid even though the repository Docker failover harness passes; the HAOS standby is only a local Hub and the public tunnel/proxy promotion path is not active.
 - Fix / verification: Added the systemd-free HAOS watchdog/proxy runtime, ARM64 FRP packaging, one valid FRP config/process per endpoint, secret-safe reclaim key fallback, dead-child pipe fix, reclaim cooldown reset, and primary FRP `BindsTo=gptadmin-hub.service`. `7` focused regressions passed; physical drill stopped only the Hub, systemd showed Hub inactive and FRP failed, public fallback `/healthz` and `/version` returned `200` with the standby build, automatic reclaim logged `reclaimed_primary`, and final public responses returned primary build `128` with both primary units active.
 - Next action: Keep the second physical fallback host disabled until its own deployment drill is run under S3.4.
@@ -584,7 +584,7 @@ Rules:
 
 ## 2026-07-23 - SERVER100-PRIMARY-BASELINE-20260723 - Primary Hub baseline was already down - fixed
 
-- Component: `admin-server-100` primary Hub/FRP units and listeners.
+- Component: `admin-node-100` primary Hub/FRP units and listeners.
 - First observed: 2026-07-23.
 - Symptom / evidence: Immutable artifact `trash/logs/server100-primary-baseline-20260723-01.txt` records `gptadmin-hub.service=inactive`, `gptadmin-tunnel-frpc.service=failed`, watchdog timer `bad`, port `9001` owned by nginx, and port `7000` owned by frps; no `gptadmin_hub` process is present.
 - Root cause: Under investigation; likely stale edge ownership after the previous physical drill, with nginx retaining the Hub port while the systemd Hub unit is dead.
@@ -640,7 +640,7 @@ Rules:
 
 ## 2026-07-24 - LIVE-RUNTIME-INACTIVE-20260724 - Known live Hub and ShellMCP runtimes are unavailable - open
 
-- Component: `admin-server-100` Hub/Tunnel and `admin-server-88` ShellMCP deployment contract.
+- Component: `admin-node-100` Hub/Tunnel and `admin-node-88` ShellMCP deployment contract.
 - First observed: 2026-07-24, read-only SSH smoke; immutable evidence `trash/logs/live-runtime-smoke-20260724.md`, `trash/logs/live-runtime-smoke-20260724-rerun.md`, and canonical-unit rerun `trash/logs/live-runtime-canonical-unit-rerun-20260724.md`.
 - Confirmed fact: Server-100 Hub `:9001` health/version remain unreachable with the Hub unit inactive and a stale/unattributed listener; Tunnel is failed with `router config conflict`. Server-88's expected user unit is absent, while the root `shellmcp.service` is active but has no expected listener and repeatedly receives queue-poll `401 unauthorized` responses.
 - Root-cause hypothesis: External deployment drift has split the expected unit/artifact contract and invalidated the Hub/Tunnel/ShellMCP credentials or routing configuration; this is not a source-test failure.
@@ -724,18 +724,18 @@ Rules:
 - Component: Primary public Hub origin and WebUI login path.
 - First observed: 2026-07-24, user report that WebUI login is unavailable; immutable evidence `trash/logs/webui-login-probe-20260724.md`.
 - Confirmed fact: `https://<retired-legacy-origin>` returns nginx HTTP `502` for `/admin/login`, `/healthz`, OAuth discovery and `/connect.json`. A personal Tunnel returns an old `1.0.5` Hub with `/connect.json` `404` and is not a current-build replacement.
-- Root-cause hypothesis: Primary origin has no healthy current Hub backend, consistent with the server-100 Hub inactive and Tunnel router conflict evidence.
-- Fix / verification: Immutable evidence `trash/logs/webui-login-repair-20260724.md` records a private server-100 rollback artifact, one Hub start, direct/LAN/public HTTP 200 responses for the login surface, and a real browser snapshot showing the password field and `Войти` button. No password was entered or submitted.
+- Root-cause hypothesis: Primary origin has no healthy current Hub backend, consistent with the node-100 Hub inactive and Tunnel router conflict evidence.
+- Fix / verification: Immutable evidence `trash/logs/webui-login-repair-20260724.md` records a private node-100 rollback artifact, one Hub start, direct/LAN/public HTTP 200 responses for the login surface, and a real browser snapshot showing the password field and `Войти` button. No password was entered or submitted.
 - Status: fixed for primary-origin availability and the unauthenticated browser login surface; authenticated acceptance remains pending.
 - Next action: Sign in manually with the existing AdminPassword, then run the authenticated live acceptance runner; keep the separate Tunnel/ShellMCP runtime drift under `LIVE-RUNTIME-INACTIVE-20260724`.
 
 ## 2026-07-24 - DEPLOYMENT-PROBE-HISTORICAL-JOURNAL-20260724 - Runtime probe reports stale Tunnel conflicts - fixed
 
 - Component: `tests/e2e/deployment_runtime.py` Hub probe.
-- First observed: 2026-07-24, immediately after the authorized server-100 Hub start; immutable evidence `trash/logs/webui-login-repair-20260724.md` records the Hub as healthy while the fresh probe reported `tunnel_router_conflict`.
+- First observed: 2026-07-24, immediately after the authorized node-100 Hub start; immutable evidence `trash/logs/webui-login-repair-20260724.md` records the Hub as healthy while the fresh probe reported `tunnel_router_conflict`.
 - Confirmed fact: The probe searches the last 200 Tunnel journal lines without anchoring them to the current Tunnel process start, so an old conflict can fail an otherwise healthy Hub check.
 - Root-cause hypothesis: The fixed-size journal tail was added as a convenient failure detector but has no temporal boundary.
-- Fix / verification: Added the RED regression `test_hub_probe_anchors_tunnel_conflict_to_current_service_start`, anchored the remote journal query to `ExecMainStartTimestamp`, and reran the real server-100 probe; it now passes with Hub active/running, port 9001 HTTP 200, and `router_conflict=false`.
+- Fix / verification: Added the RED regression `test_hub_probe_anchors_tunnel_conflict_to_current_service_start`, anchored the remote journal query to `ExecMainStartTimestamp`, and reran the real node-100 probe; it now passes with Hub active/running, port 9001 HTTP 200, and `router_conflict=false`.
 - Status: fixed.
 - Next action: Preserve the start-anchored probe in the completion-matrix acceptance run.
 
@@ -745,13 +745,13 @@ Rules:
 - First observed: 2026-07-24, immediately after the primary Hub recovery; the real probe returned `status=passed` while `gptadmin-tunnel-frpc.service` remained failed and intentionally untouched.
 - Confirmed fact: The Hub probe checks Hub health and conflict text but does not include the Tunnel unit state in its readiness decision.
 - Root-cause hypothesis: The probe contract treated Tunnel conflict text as the only proxy signal, so a failed Tunnel with no current conflict was indistinguishable from a healthy one.
-- Fix / verification: Added the RED regression `test_hub_probe_rejects_failed_tunnel_even_when_hub_is_healthy`, made the probe include Tunnel unit state, and reran server-100; it now fails truthfully with `tunnel_service_not_running` while Hub remains active and port 9001 returns HTTP 200.
+- Fix / verification: Added the RED regression `test_hub_probe_rejects_failed_tunnel_even_when_hub_is_healthy`, made the probe include Tunnel unit state, and reran node-100; it now fails truthfully with `tunnel_service_not_running` while Hub remains active and port 9001 returns HTTP 200.
 - Status: fixed.
 - Next action: Preserve the explicit Tunnel-state gate in the completion-matrix acceptance run; repair the external Tunnel separately under the approved reclaim safety sequence.
 
 ## 2026-07-24 - PERSONAL-TUNNEL-ROUTE-20260724 - Personal Tunnel has no Hub route - fixed
 
-- Component: Personal Tunnel edge and server-100 `gptadmin-tunnel-frpc.service`.
+- Component: Personal Tunnel edge and node-100 `gptadmin-tunnel-frpc.service`.
 - First observed: 2026-07-24, user report for `/admin/`; immutable evidence `trash/logs/personal-tunnel-route-probe-20260724.md`.
 - Confirmed fact: Browser and HTTP probes receive the FRP 404 page for `/admin/`; all tested Hub paths return 404 across the hostname's observed DNS addresses. Server-100 Hub is healthy, while the canonical Tunnel service is failed.
 - Root-cause hypothesis: The personal Tunnel route is absent because the canonical FRP client is not running; the edge response is therefore not reaching Hub.
@@ -777,13 +777,13 @@ Rules:
 - Confirmed facts: The release builder copies `public/admin` to `public/admin-legacy`, but the copied HTML requests `/admin/style.css` and `/admin/app.js`; after the React cutover those URLs target the primary `/admin/` payload rather than the legacy directory.
 - Root-cause hypothesis: Absolute legacy asset URLs resolve outside the copied `/admin/legacy/` directory, so the browser renders the HTML with default styles.
 - Fix / verification: Added the RED Python regression, changed both static references to document-relative URLs, and extended the Go static-handler regression to assert `/admin/legacy/style.css` returns CSS with `text/css; charset=utf-8`; focused and full suites are green.
-- Fix / verification: Deployed only the corrected `index.html` atomically to server-100; the target hash matches the tested source, the previous file is backed up, Hub stayed active with the same PID, and the unauthenticated CSS request still returns the login gate.
+- Fix / verification: Deployed only the corrected `index.html` atomically to node-100; the target hash matches the tested source, the previous file is backed up, Hub stayed active with the same PID, and the unauthenticated CSS request still returns the login gate.
 - Status: fixed in the live primary static payload; authenticated visual verification remains pending.
 - Next action: Hard-refresh the supplied browser tab and confirm the styled console; if stale, clear only this origin's cached site data.
 
 ## 2026-07-26 - ANDROID-USB-ADB-BRIDGE-20260726 - USB device shadowed by stale Wi-Fi ADB serial - fixed
 
-- Component: `android-4g-lan-proxy.service` on admin-server-100.
+- Component: `android-4g-lan-proxy.service` on admin-node-100.
 - First observed: 2026-07-26; `adb devices -l` showed the Samsung device on USB while the bridge repeatedly reported that the configured ADB device was unavailable.
 - Confirmed facts: `/etc/gptadmin/gptadmin.env` named an obsolete Wi-Fi ADB address; after ADB restart the Samsung serial `R5CR702SRFP` appeared as `device usb:1-3`; the hard-coded internal forward port `3127` collided with an Xray listener.
 - Root cause: The bridge trusted a configured Wi-Fi serial ahead of a connected USB device and had no fallback when its fixed ADB-forward port was occupied.

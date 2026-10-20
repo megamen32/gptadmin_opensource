@@ -19,7 +19,7 @@ is expected to be centrally available through GPTADMIN.
   the target `shell:*` execution surface. A local checkout or GitHub Actions
   result is not server proof.
 - Identify the target from live inventory; for this project the expected target
-  is `shell:admin-server-100`.
+  is `shell:admin-node-100`.
 - Treat Memos as an existing backend. Do not create a second database or copy
   credentials/data.
 
@@ -74,7 +74,7 @@ dialogs, screenshots, text input, or end-to-end mobile verification, prefer
 **Agent Device** over raw ADB automation.
 
 - `agent-device` must be installed globally and available on the target host
-  through the normal service `PATH`. On server-100 the canonical binary is
+  through the normal service `PATH`. On node-100 the canonical binary is
   `/usr/local/bin/agent-device`.
 - Prefer the native child MCP ref `AgentDevice` (`agent-device mcp`) when it is
   registered in ShellMCP. Use structured device tools such as `devices`,

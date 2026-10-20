@@ -84,7 +84,7 @@ curl -sS -X GET https://<your-hub>/mcp-relay/servers \
 ```text
 POST /mcp-relay/call
 {
-  "target": "shell:admin-server-100",
+  "target": "shell:admin-node-100",
   "tool": "shell_exec",
   "args": { "cmd": "uptime" }
 }

@@ -223,7 +223,7 @@ most six Linux product jobs (12 CPU / 48 GB / 84 GB across separate VMs) in one 
 The main concurrency group cancels obsolete validation. Go source regressions run before release and produce a manifest-pinned Node artifact.
 All Linux CI including release packaging uses isolated hosted VMs; the release
 packaging job has a 90-minute deadline, macOS/Windows jobs 30 minutes. No fleet
-cgroup or server-88 runner limits are changed. Operator
+cgroup or node-88 runner limits are changed. Operator
 changes require the always-run hosted controller/docs checks and aggregate CI
 gate. Workflow routing changes require full product CI. Auto-tag retains its
 existing workflow-only exclusion and adds only the exact operator paths; no

@@ -237,7 +237,7 @@ Run for modes 1, 2, 3, or custom security review. Build one coverage unit for ev
 
 Apply OWASP ASVS 5.0.0 for web controls. Apply OWASP Top 10 for LLM Applications 2025 for LLM/agent/RAG/MCP surfaces: prompt injection, sensitive information disclosure, supply chain, data/model poisoning, improper output handling, excessive agency, system prompt leakage, vector/embedding weaknesses, misinformation, and unbounded consumption.
 
-MCP-specific checks: tool description poisoning, hidden instructions in tool metadata, untrusted resource content, context exfiltration to tools/logs, server-chain lateral movement, missing allow-lists, missing per-session permissions, arbitrary server URLs, and anomalous request/response behavior.
+MCP-specific checks: tool description poisoning, hidden instructions in tool metadata, untrusted resource content, context exfiltration to tools/logs, node-chain lateral movement, missing allow-lists, missing per-session permissions, arbitrary server URLs, and anomalous request/response behavior.
 
 Supply-chain checks: phantom imports, undeclared dependencies, non-existent packages, typosquatting/dependency confusion/slopsquatting, unbounded ranges, install scripts, binary downloads, native addons, pinned actions, token scopes, artifact signing, SLSA v1.2 provenance/attestation, dependency update tooling, and OpenSSF Scorecard-style hygiene.
 

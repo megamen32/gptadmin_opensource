@@ -28,7 +28,7 @@ authority. Verify the managed connection before changing only that client's
 entry with a protected backup and compare-and-swap. Preserve loaded foreign
 sessions. Retain the original client entry and service configuration for rollback.
 
-The installed server-100 connection is `TGC-ZCode100`, exposed at
+The installed node-100 connection is `TGC-ZCode100`, exposed at
 `/connection/tgc-zcode100/mcp` on the existing tenant origin. Its dedicated
 `zcode-tgc-admin-100-managed` profile allows only this child target and
 preserves the original tool authority. Other profiles cannot use this personal

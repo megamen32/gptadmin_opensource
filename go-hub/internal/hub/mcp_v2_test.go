@@ -71,8 +71,8 @@ func TestHubMCP20260728StatelessDiscover(t *testing.T) {
 func TestHubMCP20260728TasksLifecycle(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
 	s.mu.Lock()
-	s.shellJobs["task-1"] = &shellJob{ID: "task-1", Server: "admin-server-100", CreatedAt: nowFloat(), Status: "queued", Cmd: "sleep 60"}
-	s.shellQueues["admin-server-100"] = append(s.shellQueues["admin-server-100"], "task-1")
+	s.shellJobs["task-1"] = &shellJob{ID: "task-1", Server: "admin-node-100", CreatedAt: nowFloat(), Status: "queued", Cmd: "sleep 60"}
+	s.shellQueues["admin-node-100"] = append(s.shellQueues["admin-node-100"], "task-1")
 	s.mu.Unlock()
 
 	get := mcpV2Request(t, s, "tasks/get", `{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"taskId":"task-1","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}`)
@@ -80,7 +80,7 @@ func TestHubMCP20260728TasksLifecycle(t *testing.T) {
 		t.Fatalf("get=%v", get)
 	}
 	progress := mapValue(mapValue(get["_meta"])["io.gptadmin/taskProgress"])
-	if firstString(progress, "stage") != "working" || firstString(progress, "target") != "shell:admin-server-100" {
+	if firstString(progress, "stage") != "working" || firstString(progress, "target") != "shell:admin-node-100" {
 		t.Fatalf("task progress=%v", get["_meta"])
 	}
 

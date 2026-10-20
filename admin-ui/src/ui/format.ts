@@ -1,7 +1,7 @@
 export function friendlyServerName(serverId?: string, name?: string): string {
   const id = serverId || "";
   const raw = name || id.replace(/^shell:/, "");
-  const match = raw.match(/(?:admin-server-|server-)(\d+)$/);
+  const match = raw.match(/(?:admin-node-|node-)(\d+)$/);
   return match ? `Сервер ${match[1]}` : raw || "Без имени";
 }
 

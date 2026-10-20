@@ -54,7 +54,7 @@ native case/attempt/result/cleanup receipts, schema digests and safe metadata
 proofs. The initial candidate harness syntax failure is retained separately;
 its failed run performed no SDK or backend operation.
 
-### Installed server-100 Touchpoint slice
+### Installed node-100 Touchpoint slice
 
 The finite owner service was installed from published source. Its original
 Touchpoint interpreter/package remain unchanged; a private dedicated carrier

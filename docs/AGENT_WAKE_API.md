@@ -80,7 +80,7 @@ POST
 
 A repeated request with the same idempotency key and identical body returns the original `job_id` with `duplicate: true` and is not delivered twice. Reusing an idempotency key for different content is rejected.
 
-The live secret location on server-100 is documented operationally as `/etc/gptadmin/secrets/agent-wake-v1.env` (root-only). Do not copy the value into source control.
+The live secret location on node-100 is documented operationally as `/etc/gptadmin/secrets/agent-wake-v1.env` (root-only). Do not copy the value into source control.
 
 ## Response model
 

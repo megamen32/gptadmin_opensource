@@ -58,7 +58,7 @@ For other clients, pick an adapter:
 
 Ask your AI in plain language:
 
-- «покажи статус nginx на server-01»
+- «покажи статус nginx на node-01»
 - «поставь docker на vps-prod»
 - «почему openchamber отдаёт 503? посмотри логи»
 - «запусти codex чтобы пофиксить баг в этом репо»

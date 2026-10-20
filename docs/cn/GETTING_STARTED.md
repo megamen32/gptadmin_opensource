@@ -52,7 +52,7 @@ gptadmin connect-mcp
 
 用简单的语言询问你的人工智能：
 
-- «покажи статус nginx на server-01»
+- «покажи статус nginx на node-01»
 - «поставь docker на vps-prod»
 - «почему openchamber отдаёт 503？ посмотри логи»
 - «запусти Codex чтобы пофиксить баг в этом репо»

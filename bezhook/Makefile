@@ -4,7 +4,7 @@
 VERSION ?= $(shell grep -m1 'var version' cmd/bezhook/main.go | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 DIST := dist
-MIRROR_HOST ?= server01.bezrabotnyi.com
+MIRROR_HOST ?= relay02.bezrabotnyi.com
 MIRROR_DIR ?= /var/www/bezhook
 
 .PHONY: build test vet dist checksums deploy clean

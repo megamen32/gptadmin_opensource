@@ -9,13 +9,13 @@ import (
 
 func TestGrepMeshTopologyNodeIsControlOnlyAndUsesRoutablePeerURL(t *testing.T) {
 	agent := Agent{
-		AgentID:      "server-88",
+		AgentID:      "node-88",
 		Kind:         "grepmesh",
 		Status:       "online",
 		LastSeen:     42,
 		Capabilities: []string{"search_text", "read_text"},
 		Meta: map[string]any{
-			"host_id":          "server-88",
+			"host_id":          "node-88",
 			"service":          "grepmesh-mcp",
 			"local_url":        "http://127.0.0.1:9419/mcp",
 			"advertise_url":    "https://203.0.113.10:9419/mcp",
@@ -31,7 +31,7 @@ func TestGrepMeshTopologyNodeIsControlOnlyAndUsesRoutablePeerURL(t *testing.T) {
 	if !ok {
 		t.Fatal("expected GrepMesh agent to produce a topology node")
 	}
-	if got := node["host_id"]; got != "server-88" {
+	if got := node["host_id"]; got != "node-88" {
 		t.Fatalf("host_id = %#v", got)
 	}
 	if got := node["local_url"]; got != "http://127.0.0.1:9419/mcp" {
@@ -52,7 +52,7 @@ func TestGrepMeshTopologyNodeIsControlOnlyAndUsesRoutablePeerURL(t *testing.T) {
 }
 
 func TestGrepMeshTopologyNodeIgnoresOtherAgents(t *testing.T) {
-	if _, ok := grepMeshTopologyNode(Agent{AgentID: "shell:server-100", Kind: "virtual_shell"}); ok {
+	if _, ok := grepMeshTopologyNode(Agent{AgentID: "shell:node-100", Kind: "virtual_shell"}); ok {
 		t.Fatal("non-GrepMesh agent was projected")
 	}
 }
@@ -60,20 +60,20 @@ func TestGrepMeshTopologyNodeIgnoresOtherAgents(t *testing.T) {
 func TestGrepMeshTopologyEndpointIsReadOnlyAndFiltered(t *testing.T) {
 	s := New(Config{CtlToken: "ctl"})
 	s.mu.Lock()
-	s.agents["server-88"] = &Agent{
-		AgentID:      "server-88",
+	s.agents["node-88"] = &Agent{
+		AgentID:      "node-88",
 		Kind:         "grepmesh",
 		Status:       "online",
 		Capabilities: []string{"search_text", "read_text"},
 		Meta: map[string]any{
-			"host_id":       "server-88",
+			"host_id":       "node-88",
 			"local_url":     "http://127.0.0.1:9419/mcp",
 			"peer_url":      "https://203.0.113.10:9419/mcp",
 			"generation":    7,
 			"Authorization": "do-not-return",
 		},
 	}
-	s.agents["shell:server-100"] = &Agent{AgentID: "shell:server-100", Kind: "virtual_shell"}
+	s.agents["shell:node-100"] = &Agent{AgentID: "shell:node-100", Kind: "virtual_shell"}
 	s.mu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/mcp-relay/grepmesh", nil)
@@ -89,7 +89,7 @@ func TestGrepMeshTopologyEndpointIsReadOnlyAndFiltered(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Nodes) != 1 || body.Nodes[0]["host_id"] != "server-88" {
+	if len(body.Nodes) != 1 || body.Nodes[0]["host_id"] != "node-88" {
 		t.Fatalf("nodes = %#v", body.Nodes)
 	}
 	if _, ok := body.Nodes[0]["Authorization"]; ok {

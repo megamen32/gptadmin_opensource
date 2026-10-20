@@ -787,8 +787,8 @@ func New(cfg Config) *Server {
 		}
 	}
 	s.cloudOSRegistry.Register(&cloudos.Computer{
-		ID:           "server-100",
-		Name:         "server-100",
+		ID:           "node-100",
+		Name:         "node-100",
 		OS:           "linux",
 		Capabilities: []string{"status"},
 		Status:       "online",
@@ -7765,7 +7765,7 @@ func oauthRedirectMatches(issued, requested string) bool {
 }
 
 // oauthRefreshToken rotates a durable OAuth refresh credential and returns a
-// short-lived access JWT. Refresh credentials are server-stored digests so a
+// short-lived access JWT. Refresh credentials are node-stored digests so a
 // Hub restart and OAuth signing-key change do not erase client authorization.
 func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	resource := strings.TrimRight(r.Form.Get("resource"), "/")

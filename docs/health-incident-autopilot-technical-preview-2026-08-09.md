@@ -259,7 +259,7 @@ evidence bundle must include:
 
 ## Live implementation receipt (2026-08-09)
 
-The Fleet/SSH activation is complete for server-100: the health credential
+The Fleet/SSH activation is complete for node-100: the health credential
 scope is present, `health-incident-fleet.timer` is active/enabled,
 `fleet-health.timer` is inactive/disabled, and Telegram health delivery is
 fail-closed until its mode is explicitly activated. NoticePlace, Agent

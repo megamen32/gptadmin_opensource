@@ -79,7 +79,7 @@
 - Consumes: the tested CLI and rebuilt Go binaries.
 - Produces: one active Go ShellMCP on each reachable platform and Hub list/call evidence.
 
-- [ ] On server-100, regenerate the direct registry, retire every `gptadmin-mcp-*` Python relay unit, restart `shellmcp.service`, and prove nested MCP list/call through Hub.
+- [ ] On node-100, regenerate the direct registry, retire every `gptadmin-mcp-*` Python relay unit, restart `shellmcp.service`, and prove nested MCP list/call through Hub.
 - [ ] On Mac, deploy the Go-only CLI/binary, kickstart launchd, require no new `401`, no listener and an online Hub identity.
 - [ ] On Android, repair the live ADB bridge target, start the installed Go arm64 binary, and require online Hub registration with no Python process.
 - [ ] On each reachable Windows machine, deploy or repair the Go Windows task and require online Hub registration; if a host is unreachable, report that external blocker separately from installer/CI proof.

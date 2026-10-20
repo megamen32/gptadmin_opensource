@@ -71,7 +71,7 @@ List registered shellmcp agents.
 ```json
 {
   "servers": [
-    { "name": "server-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```
@@ -82,7 +82,7 @@ Execute a shell command on a target agent.
 
 ```json
 {
-  "server": "server-01",
+  "server": "node-01",
   "cmd": "systemctl status nginx"
 }
 ```
@@ -106,7 +106,7 @@ Get the status of a background task.
 
 Create a managed backup of a file before editing.
 
-### `GET /system/info?server=server-01`
+### `GET /system/info?server=node-01`
 
 CPU, RAM, disk, uptime for a target agent.
 

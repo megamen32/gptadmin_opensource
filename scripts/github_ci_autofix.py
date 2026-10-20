@@ -491,7 +491,7 @@ def queue_notice(db, row, state, reason):
             "body": f"Репозиторий {row['repo']}. {reason}. Проверка: {row['url']}",
             "dedup_key": "github-ci-autofix:" + row["key"],
             "event_type": "health.recovered" if recovered else "health.degraded",
-            "source_id": "gptadmin-ci-autofix", "host_id": "admin-server-100",
+            "source_id": "gptadmin-ci-autofix", "host_id": "admin-node-100",
             "signal_type": "github_ci", "correlation_id": row["key"],
             "trace_refs": [row["url"]]}
     if recovered:

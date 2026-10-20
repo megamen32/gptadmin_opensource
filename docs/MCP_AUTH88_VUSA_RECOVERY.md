@@ -6,8 +6,8 @@ Hub. Реплики уже имеют ту же generation/digest, что writer
 собственный enrolled node credential и pinned writer admission, затем сохраняет
 локальные проверки profile/target/tool. Signing key не копируется на readers.
 
-Второй runtime-дефект: PUBLIC_ORIGIN у admin-server-88 был физическим
-LAN-адресом, а у server-88-unified отсутствовал. Управляемые токены из общей
+Второй runtime-дефект: PUBLIC_ORIGIN у admin-node-88 был физическим
+LAN-адресом, а у node-88-unified отсутствовал. Управляемые токены из общей
 реплики поэтому отвергались по issuer. Использовать существующий логический
 контракт writer (PUBLIC_ORIGIN/MCP_RESOURCE/его exact legacy aliases), а
 GPTADMIN_NODE_PUBLIC_URL задавать отдельно для собственного FRP endpoint узла.

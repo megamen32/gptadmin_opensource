@@ -403,7 +403,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: `Codex`
 - Scope: Complete the locked-down admin passkey browser flow and its same-origin/CSP boundaries on the single integration branch.
 - Baseline / red evidence: The new browser contract first failed because login HTML had no ceremony controls; real Chromium then exposed two runtime defects: login endpoints were inaccessible without internal credentials, and the library's zero ceremony expiry was rejected immediately. CSP also initially blocked same-origin fetches.
-- Change: Added the passkey browser ceremony to `/admin/login`, restricted pre-session begin/finish to same-origin browser requests or existing internal/admin credentials, allowed only same-origin API connections in the login CSP, and made zero expiry conditional while retaining one-time server-side ceremony state.
+- Change: Added the passkey browser ceremony to `/admin/login`, restricted pre-session begin/finish to same-origin browser requests or existing internal/admin credentials, allowed only same-origin API connections in the login CSP, and made zero expiry conditional while retaining one-time node-side ceremony state.
 - Verification: Focused WebAuthn/policy tests pass; Chromium virtual-authenticator run completed registration, WebAuthn proof, `locked_down` transition, logout and passkey login to `/admin/`; full Hub, race/vet, Python, matrix, Darwin and Docker gates pass. No secret material was emitted.
 - Delivery: Pending the current linear integration commit; no push, deployment or merge performed. Preserve the unrelated untracked remote-secret-ingress plan.
 - Next: Obtain external OIDC, real MCP-client, physical-standby, OTEL-backend and CI-publication evidence before closing the remaining roadmap gates.
@@ -602,7 +602,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: `Codex` → next operator/agent
 - Scope: Migrate the existing HAOS standby from the local operator-built app to the public Home Assistant Apps repository, preserve `/data`, and perform fresh install plus physical failover acceptance.
 - Baseline / evidence: Public repository `https://github.com/megamen32/gptadmin-haos-addons` is public at `cb8b4f2`; package `ghcr.io/megamen32/gptadmin-haos-hub-standby:1.0.5` is public and anonymous ARM64 pull passed with digest `sha256:aea6ee350052c90b2ace1de5cb66d2171dd3faeed1383b42df5f10229676de6d`. Live HAOS remains on the previously verified operator deployment `1.0.4`; no migration has been performed.
-- Handoff plan: (1) add the public repository URL in HAOS Apps and confirm the `gptadmin_hub_standby` app resolves to `1.0.5`; (2) back up current Supervisor options and `/data` before touching the existing app; (3) configure only `AdminPassword`, public Hub URL, Tunnel/failover endpoints and rank/threshold options, letting the app generate internal credentials; (4) verify container state, Hub `:9001`, fallback proxy `:9101`, and generated runtime state without printing secrets; (5) stop only `gptadmin-hub.service` on `server-100`, verify primary FRP binding plus public `/healthz` and `/version` takeover, restore Hub, and verify signed reclaim; (6) keep the old local add-on source backup until the public app passes the drill.
+- Handoff plan: (1) add the public repository URL in HAOS Apps and confirm the `gptadmin_hub_standby` app resolves to `1.0.5`; (2) back up current Supervisor options and `/data` before touching the existing app; (3) configure only `AdminPassword`, public Hub URL, Tunnel/failover endpoints and rank/threshold options, letting the app generate internal credentials; (4) verify container state, Hub `:9001`, fallback proxy `:9101`, and generated runtime state without printing secrets; (5) stop only `gptadmin-hub.service` on `node-100`, verify primary FRP binding plus public `/healthz` and `/version` takeover, restore Hub, and verify signed reclaim; (6) keep the old local add-on source backup until the public app passes the drill.
 - Release handoff: Merge draft PR `https://github.com/megamen32/gptadmin/pull/23` before relying on the main-branch release workflow. Configure `HAOS_ADDONS_REPO_TOKEN` only if automatic synchronization to the public Apps repository is desired; otherwise run the allowlist exporter and review its diff for each release.
 - Verification already complete: `13` focused public/failover tests, Go Hub and Go ShellMCP tests, YAML/secret/path scan, ARM64 image build, public package visibility and anonymous pull.
 - Delivery: Source branch `codex/haos-addon-public` and public Apps repository are pushed; existing credentials and live HAOS runtime were not changed.
@@ -623,10 +623,10 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S3.4`
 - Owner: `Codex`
-- Scope: Physical `server-100` Hub failure path, HAOS standby, watchdog, fallback proxy and FRP ingress; repository tests/docs and live verification.
+- Scope: Physical `node-100` Hub failure path, HAOS standby, watchdog, fallback proxy and FRP ingress; repository tests/docs and live verification.
 - Baseline / red evidence: Runtime artifact `failover-runtime-20260723-01` shows `gptadmin-hub-watchdog.timer=bad`, no active physical failover proxy/tunnel path, HAOS `:9001` healthy but `:9101` refused, and Docker-only failover coverage is insufficient for the reported outage.
 - Change: Added the HAOS systemd-free watchdog/proxy runtime, ARM64 FRP packaging and credential handoff, one valid FRP config/process per endpoint, secret-safe signed reclaim verification, watchdog pipe lifecycle fix, reclaim cooldown reset, primary FRP `BindsTo=gptadmin-hub.service`, deployment version/update flow, regression tests and failover documentation.
-- Verification: `python3 -m pytest -q tests/test_haos_failover_runtime.py tests/test_failover_unit_contract.py` passed `7`; Go Hub tests passed during HAOS package build; Docker failover black-box scenarios passed; `frpc verify` passed for all three ARM64 failover configs. Live drill stopped only Hub on `server-100`, systemd stopped FRP, HAOS promoted and public `/healthz`/`/version` returned `200`; primary restart produced automatic `reclaimed_primary`, fallback FRP exited, and public returned primary build `128`. Final HAOS app is `1.0.4` started.
+- Verification: `python3 -m pytest -q tests/test_haos_failover_runtime.py tests/test_failover_unit_contract.py` passed `7`; Go Hub tests passed during HAOS package build; Docker failover black-box scenarios passed; `frpc verify` passed for all three ARM64 failover configs. Live drill stopped only Hub on `node-100`, systemd stopped FRP, HAOS promoted and public `/healthz`/`/version` returned `200`; primary restart produced automatic `reclaimed_primary`, fallback FRP exited, and public returned primary build `128`. Final HAOS app is `1.0.4` started.
 - Delivery: Live HAOS deployment completed; existing credentials preserved and not printed.
 - Next: Run the separate second-physical-fallback drill required by S3.4.
 
@@ -637,7 +637,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Scope: `android-4g-lan-proxy.service`, LAN firewall rules, Mac SOCKS5/HTTP
   smoke; no public Internet bind.
 - Baseline / red evidence: The service listened on `203.0.113.10:3126` and
-  passed a server-local proxy smoke, but the Mac TCP connection stalled; UFW
+  passed a node-local proxy smoke, but the Mac TCP connection stalled; UFW
   had default-deny input and no TCP/3126 allow rule.
 - Change: Added idempotent private-LAN UFW rules to the deployment script and
   applied the TCP/3126 rules on the live host without exposing a public bind.
@@ -707,7 +707,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S0.2` Network Tunnel Android/4G proof
 - Owner: Codex
-- Scope: Android arm64 edge binary, public relay on `server01`, local connector,
+- Scope: Android arm64 edge binary, public relay on `relay01`, local connector,
   hostname target and explicit cellular DNS fallback.
 - Baseline / red evidence: Android rejected snake_case offer limits, then could
   not resolve the target or relay hostname through its localhost DNS stub.
@@ -725,10 +725,10 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S0.2` Network Tunnel external data-plane proof
 - Owner: Codex
-- Scope: Ephemeral external relay/agent/client run through `server01`, using a
+- Scope: Ephemeral external relay/agent/client run through `relay01`, using a
   free loopback connector port and a public Internet target.
 - Baseline / red evidence: Existing `203.0.113.10:3126` was unreachable from
-  `server01`; direct `server01` egress worked, confirming the old LAN proxy was not an
+  `relay01`; direct `relay01` egress worked, confirming the old LAN proxy was not an
   external endpoint. A first test port was also rejected because it belonged
   to an unrelated ADB forward.
 - Change: Re-ran on free `127.0.0.1:3137` with fresh one-time tickets. The
@@ -851,10 +851,10 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.2`
 - Owner: Codex with Sol security review
 - Scope: Installer update auth preservation and legacy systemd ShellMCP overrides
-- Baseline / red evidence: server-88 Go ShellMCP polls returned repeated `401 unauthorized`; effective service environment came from a legacy Go-primary drop-in instead of the canonical Hub environment.
+- Baseline / red evidence: node-88 Go ShellMCP polls returned repeated `401 unauthorized`; effective service environment came from a legacy Go-primary drop-in instead of the canonical Hub environment.
 - Change: Preserve legacy auth aliases during updates; remove all legacy Go-primary systemd overrides; make Linux/Android installers reuse stored credentials; add Hub `awaiting_approval` state and `approve_pending_server` MCP tool that gates queue delivery.
-- Verification: RED tests reproduced both token rewrite and approval bypass. Python `126 passed, 2 skipped`; Go Hub `go test ./...` passed. Server-88 canonical env was repaired, legacy overrides removed, current Go ShellMCP rebuilt and restarted; Hub reports server-88 `online` with fresh `last_seen`. Hub MCP `tools/list` exposes `approve_pending_server`; `pending` call returns a structured empty list.
-- Delivery: Live server-100 Hub and server-88 ShellMCP restarted with locally built binaries. The changes are pushed to `main`.
+- Verification: RED tests reproduced both token rewrite and approval bypass. Python `126 passed, 2 skipped`; Go Hub `go test ./...` passed. Server-88 canonical env was repaired, legacy overrides removed, current Go ShellMCP rebuilt and restarted; Hub reports node-88 `online` with fresh `last_seen`. Hub MCP `tools/list` exposes `approve_pending_server`; `pending` call returns a structured empty list.
+- Delivery: Live node-100 Hub and node-88 ShellMCP restarted with locally built binaries. The changes are pushed to `main`.
 - Next: Run CI release verification for the pushed auth/approval lifecycle changes.
 
 ## 2026-07-19 - Remove Python MCP transport runtimes - handed-off
@@ -868,7 +868,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
   services whose effective command is the Python generic relay; ten are active
   and one failed. The generated Go supervisor registry launches the same Python
   relay instead of the configured child command. Android is stale with no
-  ShellMCP process; both Windows identities are stale. Mac and server-100 are
+  ShellMCP process; both Windows identities are stale. Mac and node-100 are
   currently online through Go queue mode with no listener.
 - Change: ShellMCP now writes a direct Go child registry, retires Linux and
   macOS orphan relay units, uses the canonical service name, persists the Mac
@@ -1030,7 +1030,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: `tools/list` exposes long `list_mcp_*`, `call_mcp_tool` and `get_mcp_job` names plus repeated prose; current contract does not use the shorter discover/schema/execute/job vocabulary.
 - Change: Canonical MCP tools are now `discover`, `schema`, `execute`, `job`, `inspect`, and `ui`; old names remain accepted but are not advertised. OpenAPI operation IDs and component schemas use the same compact vocabulary. Canonical execute uses `target/tool/args`; old `tool_name/arguments` remain accepted. Downstream ShellMCP names were retained and their descriptions shortened because they are separate capability contracts.
 - Verification: Red canonical-surface test first; Hub tests and race detector; ShellMCP Go tests; Python `97 passed, 2 skipped`; `tools/list` payload is capped by a regression assertion at 12000 bytes.
-- Delivery: Commit `9adf894` pushed to `main`; Build, Sync, Release run `29419512851` passed across build/release, macOS, Windows and Docker failover; Hub rebuilt with this commit and `gptadmin-hub.service` restarted active on `admin-server-100`; live smoke passed `discover`, `schema(target=hub)`, and `execute(tool=status)`, advertising only compact names. Website docs commit `bc76d8c` and parent pointer `1290935` are pushed.
+- Delivery: Commit `9adf894` pushed to `main`; Build, Sync, Release run `29419512851` passed across build/release, macOS, Windows and Docker failover; Hub rebuilt with this commit and `gptadmin-hub.service` restarted active on `admin-node-100`; live smoke passed `discover`, `schema(target=hub)`, and `execute(tool=status)`, advertising only compact names. Website docs commit `bc76d8c` and parent pointer `1290935` are pushed.
 - Next: Keep legacy names through the documented migration window; remove aliases only in a planned breaking release after client telemetry confirms migration.
 
 ## 2026-07-15 - Relax repeated MCP discovery - completed
@@ -1041,7 +1041,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: Public instructions required `Always call listMcpAgents first` and prescribed discovery/schema before every infrastructure action.
 - Change: Discover once when target is unknown; reuse a healthy target and schema; repeat only after stale/disconnected state, unknown tool schema, or explicit refresh. Added a black-box prompt guard and clarified the philosophy.
 - Verification: `python3 -m pytest tests/test_hub_contract.py -q` (`5 passed`); Build, Sync, Release run `29420583122` passed.
-- Delivery: Commit `0ff518f` pushed to `main`; both prompt files synchronized to `/opt/gptadmin/public` on `admin-server-100`; no Hub restart required because only static instructions changed.
+- Delivery: Commit `0ff518f` pushed to `main`; both prompt files synchronized to `/opt/gptadmin/public` on `admin-node-100`; no Hub restart required because only static instructions changed.
 - Next: Observe client behavior; do not reintroduce mandatory per-call discovery without measured correctness evidence.
 
 ## 2026-07-15 - Idempotent MCP writes - completed
@@ -1052,7 +1052,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: A write can complete while its response is lost; a retry currently has no Hub-level duplicate key and may enqueue the same operation twice.
 - Change: Added one Hub-level deduplication layer shared by HTTP and MCP Apps calls. It scopes keys by caller authorization fingerprint, fingerprints target/tool/arguments, reuses the original result/job, rejects conflicting reuse with `409`, refreshes background records when downstream results arrive, and bounds memory with a 15-minute TTL and 1024-entry limit.
 - Verification: Red tests first; `go test ./...` in `go-hub` and `go-shellmcp`; `go test -race ./internal/hub`; `python3 -m pytest tests/ --ignore=tests/e2e` (`97 passed, 2 skipped`).
-- Delivery: Commit `0227a34` pushed to `main`; Build, Sync, Release run `29417782872` passed across build/release, macOS, Windows and Docker failover; `/opt/gptadmin/bin/gptadmin_hub` rebuilt from this commit and `gptadmin-hub.service` restarted active on `admin-server-100`; live duplicate smoke returned one job id for two identical `shell:server01` calls.
+- Delivery: Commit `0227a34` pushed to `main`; Build, Sync, Release run `29417782872` passed across build/release, macOS, Windows and Docker failover; `/opt/gptadmin/bin/gptadmin_hub` rebuilt from this commit and `gptadmin-hub.service` restarted active on `admin-node-100`; live duplicate smoke returned one job id for two identical `shell:node-44` calls.
 - Next: Add durable idempotency recovery semantics only as a separate milestone; current retry safety is bounded to the running Hub process.
 
 ## 2026-07-15 - Align integration contract with existing Hub flow - completed
@@ -1085,7 +1085,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: The attached client probe read `structuredContent.response.servers`, but production returns the list at `structuredContent.servers`; direct production inspection reports 27 servers while that parser reports zero.
 - Change: Added a direct MCP JSON-RPC restart-contract test. Generic stdio relay now treats failed polling or registration as unregistered and retries registration with capped backoff before sending another poll. Docker failover now starts a real generic relay and fake stdio MCP, validates authenticated `list_mcp_servers`, then requires an `echo` tool call through the promoted fallback.
 - Verification: Red Python regression tests proved one-time registration and polling after a failed recovery registration; green `go test ./...` and `go vet ./...` in Hub/ShellMCP, Python `97 passed, 2 skipped`, and Docker failover suite with all tunnel, Hub, combined, agent, reclaim and ranked-fallback scenarios passing locally.
-- Delivery: Commit `7ab87c9` pushed to `main`; Build, Sync, Release run `29359978802` passed, including Docker failover, macOS, Windows and Android artifact jobs. Production generic relay runtime copies on `admin-server-100` were synchronized and its ten `gptadmin-mcp-*` services restarted as user-owned processes; authenticated Hub smoke reports all ten online.
+- Delivery: Commit `7ab87c9` pushed to `main`; Build, Sync, Release run `29359978802` passed, including Docker failover, macOS, Windows and Android artifact jobs. Production generic relay runtime copies on `admin-node-100` were synchronized and its ten `gptadmin-mcp-*` services restarted as user-owned processes; authenticated Hub smoke reports all ten online.
 - Next: None.
 
 ## 2026-07-14 - Redacted security environment metadata - completed
@@ -1487,7 +1487,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.5`
 - Owner: Codex
 - Scope: Hub-owned encrypted one-time browser secret entry, MCP request/status
-  tools, server-side `secret_env` injection, redaction, documentation and
+  tools, node-side `secret_env` injection, redaction, documentation and
   executable completion-matrix coverage.
 - Baseline / red evidence: New exact Apps SDK capability test first rejected
   the two advertised secret tools; a new persistence regression first found
@@ -2213,17 +2213,17 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.2`
 - Owner: Codex
 - Scope: External Custom GPT relay, FRP origin migration, and ShellMCP agents on
-  `admin-server-100`, `admin-server-88`, and `server01`.
+  `admin-node-100`, `admin-node-88`, and `node-44`.
 - Baseline / red evidence: Server-100 root ShellMCP rejected ordinary commands
-  without `SHELLMCP_DEFAULT_USER`; server01 ran an older listener build with
+  without `SHELLMCP_DEFAULT_USER`; node-44 ran an older listener build with
   `queue=false` and then returned queue `401 unauthorized`; live FRP installs
   could retain a private `HUB_PUBLIC_URL` after update. The new origin regression
   test failed before the code change.
 - Change: `sync_oauth_origin_env()` now derives the canonical HTTPS origin from
-  enabled FRP settings, preventing private-origin drift. Live server-100 env was
+  enabled FRP settings, preventing private-origin drift. Live node-100 env was
   repaired with the external origin and `admin` default user. Server-44 was
   migrated to the working Go ShellMCP binary, canonical shared token, outbound
-  long-poll queue, and heartbeat disabled; server-88 was aligned to the same
+  long-poll queue, and heartbeat disabled; node-88 was aligned to the same
   queue/heartbeat policy. Existing per-host identities were preserved.
 - Verification: Focused Python `30 passed`; full Python `133 passed, 2 skipped`;
   Go Hub and Go ShellMCP `go test ./...` passed. External Custom GPT OpenAPI
@@ -2231,7 +2231,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
   authenticated `hostname && uptime` completed with returncode 0 on all three.
   All three ShellMCP services are active and recent logs show no queue 401 or
   heartbeat failure.
-- Delivery: Live runtime changes applied and restarted; server01 binary backup
+- Delivery: Live runtime changes applied and restarted; node-44 binary backup
   retained at `/opt/gptadmin/bin/rootd-go.bak.codex-20260722`. Source changes in
   `cli.py` and `tests/test_update_semantics.py` remain uncommitted locally.
 - Next: Commit the source regression fix when publication is requested.
@@ -2241,7 +2241,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.2`
 - Owner: Codex
 - Scope: Android S21 4G egress, ADB transport, and LAN proxy exposure from
-  `admin-server-100`.
+  `admin-node-100`.
 - Baseline / red evidence: Android shell traffic could ping over `rmnet4`, but
   the existing ShellMCP queue route to the private Hub address was unreachable;
   no proxy daemon existed and LAN port 3126 was free. The first proxy smoke
@@ -2357,8 +2357,8 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S1.1`, `S3.4`
 - Owner: Codex / deployment owner
-- Scope: Read-only runtime probes for server-100 Hub/Tunnel and server-88 ShellMCP.
-- Baseline / red evidence: `trash/logs/live-runtime-smoke-20260724.md` records server-100 Hub `:9001` unreachable with Hub inactive/Tunnel failed and server-88 `:25900` unreachable with user ShellMCP inactive.
+- Scope: Read-only runtime probes for node-100 Hub/Tunnel and node-88 ShellMCP.
+- Baseline / red evidence: `trash/logs/live-runtime-smoke-20260724.md` records node-100 Hub `:9001` unreachable with Hub inactive/Tunnel failed and node-88 `:25900` unreachable with user ShellMCP inactive.
 - Change: No runtime mutation; preserved external state and kept local source acceptance separate.
 - Verification: SSH `BatchMode` probes completed without credentials or service changes.
 - Delivery: External blocker; no deploy or push from this branch.
@@ -2391,7 +2391,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S1.1`, `S3.4`
 - Owner: Codex / deployment owner
 - Scope: Fresh direct-IP read-only probes for the known Hub/Tunnel and ShellMCP hosts.
-- Baseline / red evidence: `trash/logs/live-runtime-smoke-20260724-rerun.md` records server-100 Hub inactive/Tunnel failed with `:9001` unreachable and server-88 ShellMCP inactive with `:25900` unreachable.
+- Baseline / red evidence: `trash/logs/live-runtime-smoke-20260724-rerun.md` records node-100 Hub inactive/Tunnel failed with `:9001` unreachable and node-88 ShellMCP inactive with `:25900` unreachable.
 - Change: No runtime mutation; direct IPs were used after the SSH aliases failed DNS resolution, and existing service state was preserved.
 - Verification: Both SSH probes completed in BatchMode and returned the same inactive/unreachable runtime result.
 - Delivery: External blocker; no deploy, restart or credential change.
@@ -2652,7 +2652,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S0.1`, `S1.3`, `S4.1`
 - Owner: Codex
 - Scope: Reconcile the remaining plan rows with the current executable evidence and recheck installed client handshakes and external runtime availability.
-- Verification: completion matrix has 63 rows with command/evidence metadata; real installed `codex`, `claude` and `opencode` disposable-Hub handshake passes (`1 passed in 18.53s`); focused secure secret-ingress tests pass; current server-100 probe reports Hub `inactive`, Tunnel `failed`, health `000`, and server-88 reports ShellMCP `inactive`, health `000`.
+- Verification: completion matrix has 63 rows with command/evidence metadata; real installed `codex`, `claude` and `opencode` disposable-Hub handshake passes (`1 passed in 18.53s`); focused secure secret-ingress tests pass; current node-100 probe reports Hub `inactive`, Tunnel `failed`, health `000`, and node-88 reports ShellMCP `inactive`, health `000`.
 - Delivery: Local proxy, endpoints, hooks, MCP forwarding, file sharing, profiles, security policy, secret ingress and client-CLI evidence are green. The repeated runtime observation remains `LIVE-RUNTIME-INACTIVE-20260724`; no deployment or restart was performed.
 - Next: Use an explicitly authorized deployment session to restore the supported release, then run the existing live acceptance runner through the public Tunnel and named clients.
 
@@ -2662,8 +2662,8 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: Codex
 - Scope: Reconcile the expected external service names with the actual read-only systemd and port state before any deployment action.
 - Evidence: `trash/logs/live-runtime-canonical-unit-rerun-20260724.md` and BUG `LIVE-RUNTIME-INACTIVE-20260724`.
-- Confirmed: server-100 has an inactive Hub, a stale/unattributed `:9001` listener and Tunnel `router config conflict`; server-88 lacks the expected user unit, while the root `shellmcp.service` is active but polls its queue with HTTP 401 and exposes no expected listener.
-- Delivery: Corrected the BUG record so it no longer mislabels server-88's canonical system service as inactive; no remote state was changed.
+- Confirmed: node-100 has an inactive Hub, a stale/unattributed `:9001` listener and Tunnel `router config conflict`; node-88 lacks the expected user unit, while the root `shellmcp.service` is active but polls its queue with HTTP 401 and exposes no expected listener.
+- Delivery: Corrected the BUG record so it no longer mislabels node-88's canonical system service as inactive; no remote state was changed.
 - Next: Deployment owner must reconcile units/artifacts/auth and rerun the authenticated live acceptance runner.
 
 ## 2026-07-24 - Doctor detects legacy ShellMCP deployment drift - completed locally
@@ -2675,7 +2675,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Change: Added a secret-free unit contract check for `rootd-go` and `rootd-go-canary`; the check reports an actionable update message and increments doctor issues.
 - Verification: RED then GREEN focused regression; `python3 -m pytest tests/test_doctor_json.py -q` -> `5 passed`.
 - Delivery: Local diagnosis is now fail-closed for the observed deployment drift; the remote unit and credentials remain unchanged.
-- Next: Run `gptadmin doctor --json` on server-88 after the authorized deployment repair and require no `shellmcp_unit` error.
+- Next: Run `gptadmin doctor --json` on node-88 after the authorized deployment repair and require no `shellmcp_unit` error.
 
 ## 2026-07-24 - Doctor rejects stale Hub listeners - completed locally
 
@@ -2685,7 +2685,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: `test_doctor_rejects_tcp_listener_without_hub_health` failed because the doctor checked only `connect_ex`.
 - Change: For an explicitly configured `HUB_HOST`/`HUB_BIND`, doctor now performs a bounded local `/healthz` JSON probe and reports `hub_local_health` as an error on stale or foreign listeners.
 - Verification: RED then GREEN regression; `python3 -m pytest tests/test_doctor_json.py -q` -> `6 passed`.
-- Delivery: The observed server-100 stale `:9001` listener will now be diagnosable by the product without exposing response data or credentials.
+- Delivery: The observed node-100 stale `:9001` listener will now be diagnosable by the product without exposing response data or credentials.
 - Next: Re-run `gptadmin doctor --json` during the authorized external repair.
 
 ## 2026-07-24 - Secret-safe deployment runtime runner - completed locally
@@ -2695,7 +2695,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Scope: Automate read-only diagnosis of canonical Hub/Tunnel and ShellMCP deployment state before any external repair.
 - Baseline / red evidence: No service-level runner existed; new tests initially failed on the missing parser/SSH probe API.
 - Change: Added `tests/e2e/deployment_runtime.py` with fixed remote scripts, whitelist-only parsing and redacted JSON; added the operation to `tests/fixtures/completion-matrix.json` and documented it in `docs/LIVE_ACCEPTANCE.md`.
-- Verification: runner/docs tests `8 passed`; completion matrix `12 passed`; actual probes report server-100 issues `hub_service_not_running`, `hub_health_failed`, `tunnel_router_conflict` and server-88 issues `legacy_shellmcp_binary`, `queue_auth_failed`.
+- Verification: runner/docs tests `8 passed`; completion matrix `12 passed`; actual probes report node-100 issues `hub_service_not_running`, `hub_health_failed`, `tunnel_router_conflict` and node-88 issues `legacy_shellmcp_binary`, `queue_auth_failed`.
 - Delivery: The remaining external repair now has a repeatable, non-mutating evidence command; no credentials, stderr or remote state are returned or changed.
 - Next: After authorized repair, rerun both probes and `tests/e2e/live_acceptance.py` with a short-lived scoped connection.
 
@@ -2734,7 +2734,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S1.1`, `S1.3`
 - Owner: Codex
 - Scope: Restore the primary Hub backend and verify the unauthenticated WebUI login path without handling credentials.
-- Baseline / red evidence: `trash/logs/webui-login-probe-20260724.md` recorded HTTP 502 from the primary origin; server-100 Hub was inactive and Tunnel was failed.
+- Baseline / red evidence: `trash/logs/webui-login-probe-20260724.md` recorded HTTP 502 from the primary origin; node-100 Hub was inactive and Tunnel was failed.
 - Change: Created private rollback artifact `/var/backups/gptadmin/server100-webui-20260724T214223Z` and started only `gptadmin-hub.service` once; nginx, Tunnel, DNS, credentials, configs and standby were left unchanged.
 - Verification: `trash/logs/webui-login-repair-20260724.md` records Hub direct/LAN/public HTTP 200 responses for `/healthz`, `/version` and `/admin/login`, OAuth discovery HTTP 200, and a real Playwright login-page snapshot with password field and `Войти` button. No password was submitted.
 - Delivery: Primary WebUI availability restored in the current linear worktree; remote mutation is rollback-preserved and separately evidenced.
@@ -2745,9 +2745,9 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S1.1`, `S3.5`
 - Owner: Codex
 - Scope: Keep the secret-safe Hub runtime probe truthful after the primary Hub recovery.
-- Baseline / red evidence: Real server-100 probe reported `tunnel_router_conflict` although Hub was active and healthy; the runner searched an unbounded historical journal tail.
+- Baseline / red evidence: Real node-100 probe reported `tunnel_router_conflict` although Hub was active and healthy; the runner searched an unbounded historical journal tail.
 - Change: Anchored Tunnel conflict detection to the service `ExecMainStartTimestamp`; added regression coverage before implementation.
-- Verification: RED then GREEN; `python3 -m pytest tests/test_deployment_runtime.py -q` -> `5 passed`; real server-100 probe -> `status=passed`, Hub active/running, port 9001 HTTP 200, `router_conflict=false`.
+- Verification: RED then GREEN; `python3 -m pytest tests/test_deployment_runtime.py -q` -> `5 passed`; real node-100 probe -> `status=passed`, Hub active/running, port 9001 HTTP 200, `router_conflict=false`.
 - Delivery: Commit `366290a`; no additional remote mutation.
 - Next: Run the completion matrix, then perform the remaining authenticated and non-WebUI runtime acceptance.
 
@@ -2756,9 +2756,9 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S1.1`, `S3.5`
 - Owner: Codex
 - Scope: Ensure the Hub/Tunnel deployment probe cannot report success while the canonical Tunnel unit is failed.
-- Baseline / red evidence: Real server-100 probe reported `status=passed` with Hub healthy but `gptadmin-tunnel-frpc.service=failed`.
+- Baseline / red evidence: Real node-100 probe reported `status=passed` with Hub healthy but `gptadmin-tunnel-frpc.service=failed`.
 - Change: Added Tunnel unit state to the fixed remote protocol and made `active/running` a Hub probe requirement; added a failing regression before implementation.
-- Verification: RED then GREEN; `python3 -m pytest tests/test_deployment_runtime.py -q` -> `6 passed`; real server-100 probe now truthfully reports `tunnel_service_not_running`.
+- Verification: RED then GREEN; `python3 -m pytest tests/test_deployment_runtime.py -q` -> `6 passed`; real node-100 probe now truthfully reports `tunnel_service_not_running`.
 - Delivery: Commit `a1c5b66`; no additional remote mutation.
 - Next: Run completion-matrix verification, then repair Tunnel only after signed reclaim/lease evidence is available.
 
@@ -2768,7 +2768,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: Codex
 - Scope: Diagnose the user-reported personal Tunnel `/admin/` 404 without touching credentials or edge configuration.
 - Baseline / red evidence: `trash/logs/personal-tunnel-route-probe-20260724.md` records a real browser FRP 404 page and HTTP 404 for all tested Hub paths across all observed DNS addresses.
-- Change: No remote mutation; compared the edge response with the healthy server-100 Hub and reran the secret-safe deployment probe.
+- Change: No remote mutation; compared the edge response with the healthy node-100 Hub and reran the secret-safe deployment probe.
 - Verification: Hub is `active/running` with port 9001 HTTP 200; canonical Tunnel is `failed/failed` and the probe reports `tunnel_service_not_running`.
 - Delivery: Root cause is narrowed to the missing/failed Tunnel route; preserve the current healthy Hub.
 - Next: After manual WebUI authentication, perform the backup-first signed-reclaim Tunnel repair and repeat public/browser acceptance.
@@ -2778,7 +2778,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Milestone: `S1.1`, `S3.4`
 - Owner: Codex
 - Scope: Restore the missing personal Tunnel route without changing credentials, configs, nginx, DNS, standby or Hub.
-- Baseline / red evidence: `trash/logs/personal-tunnel-route-probe-20260724.md` recorded the browser FRP 404 page and failed server-100 Tunnel unit.
+- Baseline / red evidence: `trash/logs/personal-tunnel-route-probe-20260724.md` recorded the browser FRP 404 page and failed node-100 Tunnel unit.
 - Change: Verified private backup/hash continuity and HAOS reclaim ownership, then started `gptadmin-tunnel-frpc.service` exactly once at `2026-07-24T22:52:21Z`.
 - Verification: `trash/logs/personal-tunnel-route-repair-20260724.md` records 3 successful proxy registrations, 0 conflicts/failures/restarts, HTTP 200 on all observed personal-edge addresses, and build `128` / commit `fdca78d` on personal and primary origins.
 - Delivery: Personal Tunnel and primary Hub are healthy; HAOS has no fallback `frpc` process.
@@ -2793,7 +2793,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Change: `go-hub/internal/hub/server.go` now validates all same-name session cookies and accepts a valid signed value even when a stale duplicate precedes it; `tests/test_live_acceptance.py` contains the non-optional process-level black-box regression.
 - Verification: RED then GREEN; `python3 -m pytest tests/test_live_acceptance.py -q` -> `3 passed`; focused Hub auth test passes; live HTTPS duplicate-cookie flow passes after deployment.
 - Delivery: Commit `3c4baf4`; binary build `128` deployed with rollback backup `/var/backups/gptadmin/server100-admin-auth-20250725T005926Z`.
-- Next: User refreshes and signs in; then run authenticated live acceptance and continue the remaining server-88 runtime gate.
+- Next: User refreshes and signs in; then run authenticated live acceptance and continue the remaining node-88 runtime gate.
 
 ## 2026-07-25 - Legacy admin CSS asset-path repair - completed locally
 
@@ -2803,7 +2803,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: Live authenticated screenshot shows the legacy console unstyled; source `public/admin/index.html` points at `/admin/style.css` and `/admin/app.js`, while release packaging copies that payload to `/admin-legacy/`.
 - Change: Added a release-contract regression, changed `public/admin/index.html` to use document-relative `style.css` and `app.js`, and extended the Go static-handler regression to verify the CSS response.
 - Verification: RED then GREEN; focused UI/admin contracts `17 passed`; full Python suite `247 passed, 3 skipped`; `go test ./...` passed; `git diff --check` passed.
-- Delivery: Atomically deployed only `admin-legacy/index.html` to server-100 at `20260725T020209Z`; rollback backup and hashes are recorded in `trash/logs/admin-legacy-css-deploy-20260725T020209Z.md`; no restart or binary change.
+- Delivery: Atomically deployed only `admin-legacy/index.html` to node-100 at `20260725T020209Z`; rollback backup and hashes are recorded in `trash/logs/admin-legacy-css-deploy-20260725T020209Z.md`; no restart or binary change.
 - Next: Hard-refresh the supplied browser tab and confirm the styled console; leave the separate clean `v129` release integration for a dedicated release task.
 
 ## 2026-07-25 - Production user-path recovery - active
@@ -2812,14 +2812,14 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Objective: restore and prove the real public browser path: styled admin UI, one password login, refresh, authenticated overview and harmless MCP call through the Tunnel.
 - Baseline / red evidence: a sanitized incident log recorded HTTP `502` for the public `/admin/` browser navigation at `2026-07-25T15:05:38+03:00`; the disposable host-local log is intentionally not a source-tree dependency.
 - Exit gate: root cause is identified; the failed production component is recovered with rollback material; browser login/refresh, overview, harmless MCP and one bounded Hub/Tunnel stability window pass with sanitized immutable evidence.
-- Now: trace the public edge, canonical Tunnel and Hub read-only. Next: repair the failed component only after a backup/rollback preflight. Not now: server-88 repair, v129 integration, new features, or repeated heavy matrices.
+- Now: trace the public edge, canonical Tunnel and Hub read-only. Next: repair the failed component only after a backup/rollback preflight. Not now: node-88 repair, v129 integration, new features, or repeated heavy matrices.
 
 ### Active evidence update
 
 - Root cause and rollback material: `gptadmin-hub.service` was cleanly stopped at `2026-07-25T08:57:09+03:00`; the protected remote snapshot is `/var/backups/gptadmin/primary-recovery-20260725T151500Z` (mode `0700`, nine files plus manifest).
 - Recovery: started only the Hub once. Local and public health are HTTP `200`, Hub commit is `fdca78d`, and `NRestarts=0`. The canonical primary Tunnel unit remains failed and is not restarted while HAOS route ownership is unresolved.
 - Browser evidence: `output/playwright/gptadmin-production/.playwright-cli/page-2026-07-25T15-20-39-775Z.png` shows `GPTAdmin Login` and zero console errors.
-- Remaining exit gates: manual secret-safe AdminPassword login, refresh and overview; authenticated harmless MCP call; a bounded stability observation matched to the delayed-stop window; then server-88 repair. The visible internal-credential login copy is separately tracked as `ADMIN-LOGIN-LEGACY-CREDENTIAL-COPY-20260725`.
+- Remaining exit gates: manual secret-safe AdminPassword login, refresh and overview; authenticated harmless MCP call; a bounded stability observation matched to the delayed-stop window; then node-88 repair. The visible internal-credential login copy is separately tracked as `ADMIN-LOGIN-LEGACY-CREDENTIAL-COPY-20260725`.
 
 ### Active blocker / decision
 
@@ -2834,8 +2834,8 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Starting point: Branch `codex/haos-addon-public`, commit `b00795b14c64703d7b44abb04cf2677e4ae31790`. Preserve the existing user-owned `.vscode/settings.json` change and untracked `docs/superpowers/plans/2026-07-24-remote-secret-ingress.md`. The instruction changes in `AGENTS.md` and `CLAUDE.md` are intentionally uncommitted at this checkpoint.
 - NOW: Hard-refresh and verify the real browser flow above. If it fails, stop all roadmap work and repair only the failing production path. After it passes, run one bounded stability observation long enough to cover the previously observed delayed-stop window; use cheap health/auth probes and do not rerun unchanged full suites.
 - NOW exit gate: Browser login and refresh pass; Hub and Tunnel remain healthy for the observation window; authenticated overview and harmless MCP acceptance pass; immutable sanitized evidence is recorded.
-- NEXT 1: Repair server-88 from legacy `rootd-go`/queue-auth drift to the supported Go ShellMCP using existing credentials. Verify `doctor --json`, deployment/runtime probe, queue authentication, one harmless tool call, file sharing, profile selection, and read-only/security-policy enforcement.
-- NEXT 2: Reconcile `LIVE-RUNTIME-INACTIVE-20260724` in `docs/BUGS.md` against immutable post-repair evidence. Close only the portions actually verified; keep server-88 open until its runtime gate is green.
+- NEXT 1: Repair node-88 from legacy `rootd-go`/queue-auth drift to the supported Go ShellMCP using existing credentials. Verify `doctor --json`, deployment/runtime probe, queue authentication, one harmless tool call, file sharing, profile selection, and read-only/security-policy enforcement.
+- NEXT 2: Reconcile `LIVE-RUNTIME-INACTIVE-20260724` in `docs/BUGS.md` against immutable post-repair evidence. Close only the portions actually verified; keep node-88 open until its runtime gate is green.
 - NEXT 3: Integrate a single clean `v129` release from the linear branch. Run the full verification ladder once at this release boundary, canary it, verify rollback material, then repeat the real browser and authenticated MCP smoke.
 - NOT NOW: The unrelated HAOS recovery HAProxy job, new ecosystem/catalog work, metrics/docs polish, and repeated clean-clone/cross-platform matrices before the release boundary unless a shared contract changes.
 - Verification budget: Focused regression tests while repairing a concrete failure; one subsystem suite after a coherent repair batch; full suites, matrix and packaging exactly once before `v129` delivery.
@@ -2857,7 +2857,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Objective (user): "cloud os доделать: найти лучшую основу для fork — web ui like mac os with terminal finder browser etc. — форкнуть и использовать; все ноды по умолчанию часть cloud os."
 - Fork base: PuruVJ/macos-web (MIT, commit 1420480, vendored as `cloudos-ui/` with `FORK.md`). Puter rejected: mandatory second Node backend/DB/auth violates "CloudOS is only a client of the hub". DaedalOS rejected: Windows-style.
 - Change: new Svelte apps Terminal/Finder/Browser/Computers over the hub `/api/v1/cloud-os/*` APIs; hub now serves the built UI statically from `PublicDir/cloudos-ui` (reverse proxy to the 3030 Next.js service removed); cloudos shell exec/inspect/tabs got a foreground wait-timeout floor so a 0 DefaultTimeout no longer answers "still running" before execution.
-- Verification: `go vet` + full `go test ./...` green (new `cloudos_ui_static_test.go`: serves dist, blocks traversal, 503 when not installed); real browser canary on the deployed hub: Terminal ran `hostname && echo CLOUDOS-CANARY-OK` on `admin-server-100` and printed the real output; Finder listed the real `/home/admin` (464 entries, 245 folders); Computers showed 23 machines (7 online, nodes + direct agents) with no pairing; Browser listed real BrowserClaw/AgentBrowser connectors; personal tunnel `https://your-subdomain.t.became.bezrabotnyi.com/cloudos/` returns 200. Screenshot: `.tmp/cloudos-live-canary-20260910.png`.
+- Verification: `go vet` + full `go test ./...` green (new `cloudos_ui_static_test.go`: serves dist, blocks traversal, 503 when not installed); real browser canary on the deployed hub: Terminal ran `hostname && echo CLOUDOS-CANARY-OK` on `admin-node-100` and printed the real output; Finder listed the real `/home/admin` (464 entries, 245 folders); Computers showed 23 machines (7 online, nodes + direct agents) with no pairing; Browser listed real BrowserClaw/AgentBrowser connectors; personal tunnel `https://your-subdomain.t.became.bezrabotnyi.com/cloudos/` returns 200. Screenshot: `.tmp/cloudos-live-canary-20260910.png`.
 - Nodes by default: every unified-node shell executor is projected by `/api/v1/cloud-os/shell/computers` and rendered across all CloudOS apps — no opt-in.
 - Deploy: binaries rebuilt and installed atomically to `/opt/gptadmin/bin` (with `.pre-cloudos-*` backup), dist copied to `/opt/gptadmin/public/cloudos-ui`, `gptadmin-hub.service` restarted once.
 - Not now: xterm.js PTY sessions, file open/edit in Finder, porting the old opencode/grepmesh apps, auth on /cloudos/ (unchanged existing behavior).

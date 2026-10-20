@@ -22,12 +22,12 @@ func TestTokenGrepMeshReadableLinesAndFullDisclosure(t *testing.T) {
 	for i := 1; i <= 8; i++ {
 		lines = append(lines, map[string]any{"line_number": i, "text": fmt.Sprintf("строка %d", i)})
 	}
-	data := map[string]any{"host_id": "server-100", "path": "/example", "partial": false, "truncated": false, "origin_host": "server01", "host_status": "degraded", "artifact_id": "read-artifact", "chunks": []any{map[string]any{"start_line": 1, "end_line": 8, "lines": lines}}}
+	data := map[string]any{"host_id": "node-100", "path": "/example", "partial": false, "truncated": false, "origin_host": "node-44", "host_status": "degraded", "artifact_id": "read-artifact", "chunks": []any{map[string]any{"start_line": 1, "end_line": 8, "lines": lines}}}
 	raw := grepTextResult(data)
 	args := map[string]any{"target": "mcp:shell:100:GrepMesh", "tool": "read_text"}
 	out := mapValue(s.presentTokenOutput(nil, "execute", args, raw))
 	result := mapValue(out["result"])
-	if result["path"] != "/example" || result["host"] != "server-100" || !strings.Contains(firstString(result, "text"), "8: строка 8") || out["preview"] != nil {
+	if result["path"] != "/example" || result["host"] != "node-100" || !strings.Contains(firstString(result, "text"), "8: строка 8") || out["preview"] != nil {
 		t.Fatalf("readable data lost: %#v", out)
 	}
 	for _, key := range []string{"host_status", "origin_host", "artifact_id"} {
@@ -106,7 +106,7 @@ func TestTokenHTTPDiscoveryFiltersAndCompactContract(t *testing.T) {
 
 func TestTokenQueuedChildJobUsesSameReadablePresentation(t *testing.T) {
 	s := New(Config{})
-	data := map[string]any{"host_id": "server-100", "path": "/example", "partial": false, "chunks": []any{map[string]any{"start_line": 1, "end_line": 1, "lines": []any{map[string]any{"line_number": 1, "text": "содержательный результат"}}}}}
+	data := map[string]any{"host_id": "node-100", "path": "/example", "partial": false, "chunks": []any{map[string]any{"start_line": 1, "end_line": 1, "lines": []any{map[string]any{"line_number": 1, "text": "содержательный результат"}}}}}
 	upstream := grepTextResult(data)["result"]
 	wrapped := map[string]any{"resultType": "complete", "content": []any{map[string]any{"type": "text", "text": "Child MCP tool completed"}}, "structuredContent": map[string]any{"ref": "GrepMesh", "name": "read_text", "result": upstream}}
 	j := &shellJob{ID: "unit-child", Server: "100", ToolName: "mcp_call", Arguments: map[string]any{"ref": "GrepMesh", "name": "read_text"}, Status: "completed", Result: wrapped}

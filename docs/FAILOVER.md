@@ -110,7 +110,7 @@ The suite uses real Go hubs, watchdog and proxy processes. Its local ingress
 and FRP-client doubles isolate the repository-owned failover contract from the
 external FRP service. It does not replace the physical HAOS drill: that drill
 must verify `:9001`, `:9101`, one live `frpc` process per configured endpoint,
-the public health route after stopping `server-100`, and signed reclaim after
+the public health route after stopping `node-100`, and signed reclaim after
 the primary returns.
 
 ## Design rule

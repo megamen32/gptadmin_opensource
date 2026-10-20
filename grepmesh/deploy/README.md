@@ -1,7 +1,7 @@
 # GrepMesh rollout
 
 `manifest.two-node.json` is the first real vertical-slice manifest for
-server-100 and server-88. It uses the known LAN/VPN addresses, keeps agent
+node-100 and node-88. It uses the known LAN/VPN addresses, keeps agent
 entrypoints on `127.0.0.1:9419`, and uses the management listener only for
 peer-to-peer calls.
 
@@ -12,7 +12,7 @@ allowlist. The rollout helper refuses to mutate a host when that file is
 missing.
 
 The service runs as `admin-search` and receives the `admin`
-supplementary group at process start. This is required on server-88 where
+supplementary group at process start. This is required on node-88 where
 `/home/admin` is `0750`; it grants only the files already readable by that
 group, while explicit secret excludes remain active.
 

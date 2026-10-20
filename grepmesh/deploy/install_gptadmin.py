@@ -74,7 +74,7 @@ def main() -> int:
     backup(agent_path, stamp)
     agent = {
         "agent_id": "GrepMesh",
-        "name": "grepmesh via admin-server-100",
+        "name": "grepmesh via admin-node-100",
         "hub_url": "http://127.0.0.1:9001",
         "token_file": str(root / "mcp-relay.token"),
         "command": "/usr/local/bin/npx",

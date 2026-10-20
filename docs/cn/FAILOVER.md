@@ -108,7 +108,7 @@ docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-co
 并且 FRP 客户端将存储库拥有的故障转移合约与
 外部 FRP 服务。它不会取代物理 HAOS 演练：即演练
 必须验证 `:9001`、`:9101`、每个配置的端点一个实时 `frpc` 进程，
-停止`server-100`后的公共卫生路线，并在之后签署回收
+停止`node-100`后的公共卫生路线，并在之后签署回收
 初级回报。
 
 ## 设计规则

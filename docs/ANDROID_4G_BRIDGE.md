@@ -16,7 +16,7 @@ cellular network alone is not LTE proof when Wi-Fi is also connected.
 
 ## Recovery check
 
-On `admin-server-100`:
+On `admin-node-100`:
 
 ```bash
 adb kill-server

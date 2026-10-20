@@ -20,7 +20,7 @@ def test_canonical_gptadmin_nginx_keeps_web_and_api_separate():
     assert "artifacts/" in text
     assert 'return 301 https://$SITE_DOMAIN\\$request_uri;' in text
 
-    # A server-level redirect would bypass all location routing and recreate
+    # A node-level redirect would bypass all location routing and recreate
     # the historical bug where /mcp and /actions/openapi.yaml went to became.
     assert "server_name $DOMAIN www.$DOMAIN;\n    return 301" not in text
 

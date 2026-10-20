@@ -141,7 +141,7 @@ pre-confirmed findings.
 
 ### PR title and body compliance check
 
-Before deeper analysis, verify the PR meets the commit-pr skill's publication contract (the CI `pr-standards` check enforces the same requirements server-side — this step surfaces issues earlier):
+Before deeper analysis, verify the PR meets the commit-pr skill's publication contract (the CI `pr-standards` check enforces the same requirements node-side — this step surfaces issues earlier):
 
 - **Title format:** `<type>(<scope>): <description>` — lowercase description, no trailing period, allowed types: `feat`, `fix`, `perf`, `revert`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`.
 - **Body contract:** `Closes #<issue-number>` as the first line (when the PR resolves an issue), followed by `## Summary`, `## Invariant audit` (all 12 invariants), and `## Test plan` sections.

@@ -79,7 +79,7 @@ helper не меняет cleanup API. Старые TXT не заменяют п�
 
 Четыре authoritative NS вернули точную клиентскую A-запись primary. Реальный
 MCP `execute` с существующим managed bearer через VPN2 выполнил `printf` на
-`shell:admin-server-100`; обычный DNS-путь вернул тот же job
+`shell:admin-node-100`; обычный DNS-путь вернул тот же job
 `bf1a1ea91902178bd56e85cc9953cba6` по тому же idempotency key. Это доказывает
 восстановление входа, а не независимость backend от primary.
 

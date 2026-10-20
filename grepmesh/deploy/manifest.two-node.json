@@ -34,7 +34,7 @@
   },
   "targets": [
     {
-      "host_id": "server-100",
+      "host_id": "node-100",
       "ssh_alias": "local",
       "bind": "203.0.113.10:9419",
       "local_bind": "127.0.0.1:9419",
@@ -47,19 +47,19 @@
       },
       "peers": [
         {
-          "host_id": "server-88",
+          "host_id": "node-88",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         },
         {
-          "host_id": "server01",
+          "host_id": "node-44",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         }
       ]
     },
     {
-      "host_id": "server-88",
+      "host_id": "node-88",
       "ssh_alias": "88",
       "bind": "203.0.113.10:9419",
       "local_bind": "127.0.0.1:9419",
@@ -72,19 +72,19 @@
       },
       "peers": [
         {
-          "host_id": "server-100",
+          "host_id": "node-100",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         },
         {
-          "host_id": "server01",
+          "host_id": "node-44",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         }
       ]
     },
     {
-      "host_id": "server01",
+      "host_id": "node-44",
       "ssh_alias": "44",
       "bind": "203.0.113.10:9419",
       "local_bind": "127.0.0.1:9419",
@@ -96,12 +96,12 @@
       },
       "peers": [
         {
-          "host_id": "server-100",
+          "host_id": "node-100",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         },
         {
-          "host_id": "server-88",
+          "host_id": "node-88",
           "local_url": "http://127.0.0.1:9419/mcp",
           "routable_url": "http://203.0.113.10:9419/mcp"
         }
