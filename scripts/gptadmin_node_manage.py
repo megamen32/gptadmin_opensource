@@ -304,6 +304,17 @@ def http_json(method: str, url: str, *, token: str | None = None, body=None,
     return status, payload
 
 
+def parse_build_version(value) -> int | None:
+    """Normalize the Hub's JSON integer or decimal-string build version."""
+    if type(value) is int:
+        build = value
+    elif isinstance(value, str) and re.fullmatch(r'[1-9][0-9]{0,8}', value):
+        build = int(value)
+    else:
+        return None
+    return build if 1 <= build <= 999_999_999 else None
+
+
 def validate_name(name: str) -> None:
     allowed = set(string.ascii_letters + string.digits + '_-.')
     if not name or len(name) > 64 or name[0] not in string.ascii_letters + string.digits \
@@ -1395,11 +1406,12 @@ def active_node_versions(layout: Layout, names: list[str]) -> dict[str, dict]:
     for name in names:
         env = read_primary_effective_env() if name == 'primary' else read_installed_env(layout, name)
         status, version = http_json('GET', origin_from_env(env) + '/version')
+        build = parse_build_version(version.get('build_version')) if isinstance(version, dict) else None
         if (status != 200 or not isinstance(version, dict) or version.get('name') != 'gptadmin-go-hub'
                 or not re.fullmatch(r'[0-9a-f]{40}', str(version.get('git_commit', '')))
-                or type(version.get('build_version')) is not int or version['build_version'] < 1):
+                or build is None):
             raise PreflightError(f'live Node version could not be verified for {name}')
-        versions[name] = {'git_commit': version['git_commit'], 'build_version': version['build_version']}
+        versions[name] = {'git_commit': version['git_commit'], 'build_version': build}
     return versions
 
 
@@ -1437,10 +1449,12 @@ def prepare_primary_node(layout: Layout, runner: Runner) -> None:
     if not (env.get('CTL_TOKEN') or env.get('ADMIN_PASSWORD')):
         raise PreflightError('primary unified Node lacks its local drain credential')
     status, version = http_json('GET', origin_from_env(env) + '/version')
+    build = parse_build_version(version.get('build_version')) if isinstance(version, dict) else None
     if (status != 200 or not isinstance(version, dict) or version.get('name') != 'gptadmin-go-hub'
             or not re.fullmatch(r'[0-9a-f]{40}', str(version.get('git_commit', '')))
-            or type(version.get('build_version')) is not int):
+            or build is None):
         raise PreflightError('primary unified Node version could not be verified')
+    version = {**version, 'build_version': build}
     version_dir = current_target(layout)
     if version_dir is not None:
         validate_primary_current(version_dir, version)

@@ -199,6 +199,24 @@ class NodeAutoupdateTests(unittest.TestCase):
                     with self.subTest(exec_path=exec_path):
                         self.assertTrue(manager.primary_unified_node(PrimaryRunner(exec_path)))
 
+    def test_active_node_versions_accepts_numeric_build_version_string_from_live_api(self):
+        live_version = {
+            'name': 'gptadmin-go-hub',
+            'git_commit': '1' * 40,
+            'build_version': '1024',
+        }
+        with patch.object(manager, 'read_primary_effective_env', return_value={
+            'GPTADMIN_HUB_HOST': '127.0.0.1', 'GPTADMIN_HUB_PORT': '9001',
+        }), patch.object(manager, 'http_json', return_value=(200, live_version)):
+            versions = manager.active_node_versions(manager.Layout(), ['primary'])
+        self.assertEqual(versions, {
+            'primary': {'git_commit': '1' * 40, 'build_version': 1024},
+        })
+        self.assertEqual(manager.parse_build_version(1024), 1024)
+        for invalid in (True, 1.5, '0', '01024', 'latest', 0):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(manager.parse_build_version(invalid))
+
     def test_existing_primary_current_must_match_live_version_and_manifest_digest(self):
         with tempfile.TemporaryDirectory() as d:
             version_dir=Path(d)/'version';binary=version_dir/'bin'/'gptadmin-node'
