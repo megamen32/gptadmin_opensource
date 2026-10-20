@@ -12,8 +12,19 @@ authoritative source because their protected inputs are intentionally excluded
 from the public tree. Public CI keeps Go, Python/CLI, admin UI, real candidate,
 installer/failover and platform checks. It must report failures honestly.
 
-Publish committed source using the installed privacy policy, preserving the
-existing public history:
+In the private checkout, install the local pre-push hook once:
+
+```sh
+python3 .gitpublic/publish_hook.py install
+```
+
+After that, `git push origin main` publishes the sanitized public descendant
+before the private push completes. The hook ignores other remotes and branches,
+checks that the pushed commit is the checked-out private `main`, and blocks the
+private push if the public scanner or non-force public push fails.
+
+For manual recovery, publish committed source with the installed privacy policy,
+preserving the existing public history:
 
 ```sh
 python3 tools/publish_public_source.py prepare --receipt /home/admin/gptadmin/.tmp/PUBLICATION/receipt.json
