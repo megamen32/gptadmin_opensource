@@ -1445,7 +1445,7 @@ def prepare_primary_node(layout: Layout, runner: Runner) -> None:
         raise PreflightError('primary Node environment is not root-owned and private')
     if PRIMARY_BINARY.is_symlink() or not PRIMARY_BINARY.is_file() or PRIMARY_BINARY.stat().st_uid != 0:
         raise PreflightError('primary unified Node binary is not a protected regular file')
-    env = parse_env_file(PRIMARY_ENV_FILE)
+    env = read_primary_effective_env()
     if not (env.get('CTL_TOKEN') or env.get('ADMIN_PASSWORD')):
         raise PreflightError('primary unified Node lacks its local drain credential')
     status, version = http_json('GET', origin_from_env(env) + '/version')

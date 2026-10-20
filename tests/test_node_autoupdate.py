@@ -217,6 +217,39 @@ class NodeAutoupdateTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertIsNone(manager.parse_build_version(invalid))
 
+    def test_primary_adoption_reads_drain_credential_from_effective_systemd_environment(self):
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            primary_env=root/'primary.env'
+            primary_env.write_text('GPTADMIN_HUB_HOST=127.0.0.1\nGPTADMIN_HUB_PORT=9001\n')
+            base_env=root/'gptadmin.env'
+            base_env.write_text('CTL_TOKEN=unit-only\n')
+            binary=root/'gptadmin-node'
+            binary.write_bytes(b'unit-primary-binary')
+            layout=manager.Layout(opt_root=root/'opt',state_root=root/'state',config_root=root/'config')
+            dropin=root/'systemd'/'gptadmin-hub.service.d'/'zzzzzz-node-autoupdate.conf'
+            original_stat=Path.stat
+            def stat_with_protected_systemd_files(path,*args,**kwargs):
+                if path in (primary_env,binary):
+                    return SimpleNamespace(st_uid=0,st_mode=stat.S_IFREG|0o600)
+                return original_stat(path,*args,**kwargs)
+            with patch.object(manager,'PRIMARY_ENV_FILE',primary_env), \
+                 patch.object(manager,'PRIMARY_BASE_ENV_FILE',base_env), \
+                 patch.object(manager,'PRIMARY_BINARY',binary), \
+                 patch.object(manager,'PRIMARY_DROPIN',dropin), \
+                 patch.object(manager,'primary_unified_node',return_value=True), \
+                 patch.object(manager,'http_json',return_value=(200,{
+                    'name':'gptadmin-go-hub','git_commit':'1'*40,'build_version':'1024'})), \
+                 patch.object(manager,'current_target',return_value=None), \
+                 patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(Path,'stat',stat_with_protected_systemd_files):
+                manager.prepare_primary_node(layout,manager.Runner())
+            self.assertTrue(layout.current_link().is_symlink())
+            version_dir=next(layout.versions_root().iterdir())
+            manifest=json.loads((version_dir/'manifest.json').read_text())
+            self.assertEqual(manifest['build_version'],1024)
+
     def test_existing_primary_current_must_match_live_version_and_manifest_digest(self):
         with tempfile.TemporaryDirectory() as d:
             version_dir=Path(d)/'version';binary=version_dir/'bin'/'gptadmin-node'
