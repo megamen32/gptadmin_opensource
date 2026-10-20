@@ -75,6 +75,7 @@ Environment=GOMAXPROCS=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 PrivateTmp=true
 ProtectHome=read-only
+ReadWritePaths=/usr/local/lib/gptadmin
 ProtectSystem=full
 '''
 AUTOUPDATE_TIMER_TEXT = '''[Unit]

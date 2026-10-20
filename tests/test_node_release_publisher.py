@@ -34,6 +34,14 @@ def checksum(path):
 
 
 class NodeReleaseTests(unittest.TestCase):
+    def test_product_ci_does_not_duplicate_the_workflow_run_release_publisher(self):
+        root=Path(__file__).resolve().parents[1]
+        candidates=(root/'.gitpublic/public/.github/workflows/public-ci.yml',
+                    root/'.github/workflows/public-ci.yml')
+        workflow=next((path for path in candidates if path.is_file()),None)
+        self.assertIsNotNone(workflow)
+        self.assertNotRegex(workflow.read_text(),r'(?m)^  node-release:')
+
     def test_public_node_release_waits_for_full_product_ci_and_uses_exact_tested_commit(self):
         root=Path(__file__).resolve().parents[1]
         candidates=(root/'.gitpublic/public/.github/workflows/publish-node-release.yml',

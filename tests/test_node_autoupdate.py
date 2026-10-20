@@ -66,6 +66,11 @@ class NodeAutoupdateTests(unittest.TestCase):
                      'CPUQuota=100%','TasksMax=128','IOWeight=10','Environment=GOMAXPROCS=1'):
             with self.subTest(line=line):self.assertIn(line,unit)
 
+    def test_autoupdate_service_can_refresh_helpers_under_protect_system(self):
+        unit=manager.AUTOUPDATE_SERVICE_TEXT
+        self.assertIn('ProtectSystem=full',unit)
+        self.assertIn('ReadWritePaths=/usr/local/lib/gptadmin',unit)
+
     def test_intent_record_is_durable_protected_and_replaces_atomically(self):
         import os,stat
         with tempfile.TemporaryDirectory() as d:

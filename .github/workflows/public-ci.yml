@@ -249,23 +249,3 @@ jobs:
         PY
 
         '
-
-  node-release:
-    name: Publish verified portable Node binaries
-    needs: ci-gate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      contents: write
-    steps:
-    - name: Checkout exact accepted source
-      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-    - name: Fetch the exact packages built before the gate
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "gptadmin-node-$GITHUB_SHA" --dir .tmp/node-release
-    - name: Publish a separate immutable Node channel
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: python3 tools/publish_node_release.py --directory .tmp/node-release --source "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
