@@ -96,6 +96,25 @@ class NodeAutoupdateTests(unittest.TestCase):
         update.validate_release_freshness(1024,'1'*40,1024,['1'*40])
         update.validate_release_freshness(1025,'2'*40,1024,['1'*40])
 
+    def test_higher_live_build_retires_the_older_configured_source_baseline(self):
+        config={'minimum_build_version':1027,'minimum_sources':['f'*40]}
+        live={'primary':{'build_version':1028,'git_commit':'9'*40}}
+        minimum,sources=update.freshness_baseline(config,live)
+        self.assertEqual(minimum,1028)
+        self.assertEqual(sources,['9'*40])
+        update.validate_release_freshness(1028,'9'*40,minimum,sources)
+
+    def test_same_highest_live_build_still_rejects_multiple_sources(self):
+        config={'minimum_build_version':1027,'minimum_sources':['f'*40]}
+        live={
+            'primary':{'build_version':1028,'git_commit':'9'*40},
+            'replica':{'build_version':1028,'git_commit':'8'*40},
+        }
+        minimum,sources=update.freshness_baseline(config,live)
+        self.assertEqual(minimum,1028)
+        with self.assertRaisesRegex(ValueError,'same build version has a different source'):
+            update.validate_release_freshness(1028,'9'*40,minimum,sources)
+
     def test_missing_architecture_wrong_url_digest_or_asset_size_refuses(self):
         for field,value in [('name','gptadmin-node-linux-arm64.tar.gz'),('size',129*1024**2),
                             ('browser_download_url','https://github.com/other/repo/release'),('digest','sha256:no')]:

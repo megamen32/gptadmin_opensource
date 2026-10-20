@@ -153,6 +153,17 @@ def validate_release_freshness(candidate_version, candidate_sha, minimum_version
         raise ValueError('same build version has a different source')
 
 
+def freshness_baseline(config, live_versions):
+    """Keep source pins scoped to their minimum version after nodes advance."""
+    configured_version = config.get('minimum_build_version', 0)
+    live_version = max((item['build_version'] for item in live_versions.values()), default=0)
+    baseline_version = max(configured_version, live_version)
+    sources = set(config.get('minimum_sources', [])) if configured_version == baseline_version else set()
+    sources.update(item['git_commit'] for item in live_versions.values()
+                   if item['build_version'] == baseline_version)
+    return baseline_version, sorted(sources)
+
+
 def resolve_tag(tag, deadline):
     obj = json.loads(get('https://api.github.com/repos/'+REPOSITORY+'/git/ref/tags/'+tag,65536,deadline))['object']
     for _ in range(4):
@@ -344,11 +355,8 @@ def main():
         version = release.get('build_version')
         if version is None:
             version = int(release['tag_name'].split('-')[1][1:])
-        baseline_version = max([config.get('minimum_build_version', 0)] +
-                               [item['build_version'] for item in live_versions.values()])
-        baseline_sources = set(config.get('minimum_sources', []))
-        baseline_sources.update(item['git_commit'] for item in live_versions.values())
-        validate_release_freshness(version, source, baseline_version, sorted(baseline_sources))
+        baseline_version, baseline_sources = freshness_baseline(config, live_versions)
+        validate_release_freshness(version, source, baseline_version, baseline_sources)
         current = manager.current_target(manager.DEFAULT_LAYOUT)
         previous = manager.manifest_summary(current) if current else None
         if (previous and previous.get('git_commit') == source
