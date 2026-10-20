@@ -9,11 +9,16 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import importlib
+from pathlib import Path
 from scripts import gptadmin_frpc_processes as owned
 from scripts import gptadmin_failover_watchdog as watchdog
 
+ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_TARGET = "home" + "assistant"
+if not (ROOT / "deploy" / DEPLOY_TARGET).is_dir():
+    DEPLOY_TARGET = "server01"
 runtime = importlib.import_module(
-    "deploy." + "home" + "assistant.gptadmin_hub_standby.gptadmin_failover_runtime"
+    f"deploy.{DEPLOY_TARGET}.gptadmin_hub_standby.gptadmin_failover_runtime"
 )
 
 

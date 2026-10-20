@@ -6,9 +6,11 @@ import importlib
 
 import pytest
 
-failover_config = importlib.import_module(
-    "deploy." + "home" + "assistant.gptadmin_hub_standby.gptadmin_failover_config"
-)
+ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_TARGET = "home" + "assistant"
+if not (ROOT / "deploy" / DEPLOY_TARGET).is_dir():
+    DEPLOY_TARGET = "server01"
+failover_config = importlib.import_module(f"deploy.{DEPLOY_TARGET}.gptadmin_hub_standby.gptadmin_failover_config")
 build_failover_config = failover_config.build_failover_config
 build_failover_state = failover_config.build_failover_state
 ensure_internal_secrets = failover_config.ensure_internal_secrets
@@ -85,7 +87,7 @@ def test_internal_credentials_are_generated_and_persisted(tmp_path: Path) -> Non
 
 
 def test_public_app_source_is_not_the_instance_template() -> None:
-    source = Path(__file__).parents[1] / "deploy" / ("home" + "assistant") / "gptadmin_hub_standby"
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
     assert not (source / "config.yaml").exists()
     assert (source / "config.yaml.template").exists()
     assert "gptadmin_failover_config.py" in (source / "Dockerfile").read_text()
@@ -93,7 +95,7 @@ def test_public_app_source_is_not_the_instance_template() -> None:
 
 
 def test_standby_template_preserves_existing_client_bearer_inputs() -> None:
-    source = Path(__file__).parents[1] / "deploy" / ("home" + "assistant") / "gptadmin_hub_standby"
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
     template = (source / "config.yaml.template").read_text(encoding="utf-8")
     run_script = (source / "run.sh").read_text(encoding="utf-8")
 
