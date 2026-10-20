@@ -216,10 +216,7 @@ for AI-driven onboarding; use this alternative only for authorized local setup.
 
 The CLI's `--url` shortcut launches `mcp-remote` as a stdio bridge; it is distinct
 from native `transport: "streamable-http"`. The helper writes the system
-registry (`/etc/gptadmin/mcp.json` by default), generates the aggregate supervisor
-config (`/etc/gptadmin/mcp-supervisor.json`), restarts ShellMCP and prints config
-status. It does not create one systemd unit per child. Use `--force` only for an
-intentional replacement. A service restart can affect other children.
+registry (`/etc/gptadmin/mcp.json` by default), generates the aggregate Go ShellMCP supervisor config (`/etc/gptadmin/mcp-supervisor.json`), restarts it and prints config status. It does not create one systemd unit per child. Use `--force` only for an intentional replacement. A service restart can affect other children.
 
 CLI registry projection and native `mcp_manage` are separate configuration
 routes. Check the active `SHELLMCP_MCP_CONFIG` and its owner before mixing them;
