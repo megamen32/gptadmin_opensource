@@ -30,6 +30,9 @@ class Agent:
         self.root.mkdir(parents=True, exist_ok=True)
         self.state = Path(args.state).expanduser()
         self.state.parent.mkdir(parents=True, exist_ok=True)
+        # Bearer the *hub* accepts. Distinct from --token, which is this
+        # agent's own token the hub presents when calling back into it.
+        self.hub_token = args.hub_token or os.environ.get("GPTADMIN_CLOUDOS_HUB_BEARER", "")
         previous = {}
         if self.state.exists():
             try:
@@ -45,23 +48,71 @@ class Agent:
         os.chmod(temporary, 0o600)
         temporary.replace(self.state)
 
-    def pair(self):
-        body = json.dumps({"name": self.name, "os": self.os_name,
-            "capabilities": ["files", "terminal"], "session_id": platform.node(),
-            "endpoint": self.endpoint, "agent_token": self.token}).encode()
-        req = urllib.request.Request(self.hub + "/computers/pair", body, {"Content-Type": "application/json"})
+    def hub_headers(self, context=None):
+        """Auth + instruction-context headers for hub calls.
+
+        The whole /api/v1/cloud-os/ surface rejects unauthenticated callers
+        (regression fix 2026-09-10), and guarded methods additionally answer
+        428 `instructions_required` until the caller echoes back the `context`
+        from that first response.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.hub_token:
+            headers["Authorization"] = "Bearer " + self.hub_token
+        if context:
+            headers["X-GPTAdmin-Context"] = context
+        return headers
+
+    def hub_post(self, path, payload=None):
+        """POST to the hub, transparently satisfying the instructions handshake."""
+        body = json.dumps(payload).encode() if payload is not None else None
+        # method="POST" is mandatory: a Request without data defaults to GET,
+        # and the hub routes GET /computers/{id}/heartbeat to the status
+        # handler, which rejects the id ("{id}/heartbeat") as unknown.
+        req = urllib.request.Request(self.hub + path, body, self.hub_headers(), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            # 428: the hub did not execute the call and handed back a context
+            # token. Replay the identical call once with that context.
+            if error.code != 428:
+                raise
+            context = json.loads(error.read() or b"{}").get("context", "")
+            if not context:
+                raise
+        req = urllib.request.Request(self.hub + path, body, self.hub_headers(context), method="POST")
         with urllib.request.urlopen(req, timeout=10) as response:
-            self.computer_id = json.load(response)["computer"]["id"]
+            return json.load(response)
+
+    def pair(self):
+        previous_id = self.computer_id
+        self.computer_id = self.hub_post("/computers/pair", {
+            "name": self.name, "os": self.os_name,
+            "capabilities": ["files", "terminal"], "session_id": platform.node(),
+            "endpoint": self.endpoint, "agent_token": self.token,
+        })["computer"]["id"]
         self.save_state()
+        print(f"paired computer {self.computer_id} (previous={previous_id or 'none'})", flush=True)
 
     def heartbeat(self):
+        # Only re-pair when the hub genuinely does not know this computer.
+        # Re-pairing mints a brand-new computer id on every failure, so a
+        # transient error (or an expired auth token) would otherwise replace
+        # our registration every cycle and leave stale entries behind.
+        if not self.computer_id:
+            self.pair(); return
         try:
-            if not self.computer_id:
+            self.hub_post("/computers/" + self.computer_id + "/heartbeat")
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                print(f"heartbeat: hub does not know {self.computer_id}; re-pairing", flush=True)
                 self.pair(); return
-            req = urllib.request.Request(self.hub + "/computers/" + self.computer_id + "/heartbeat", method="POST")
-            with urllib.request.urlopen(req, timeout=10): pass
-        except Exception:
-            self.pair()
+            # Auth or precondition problems must not destroy a valid pairing;
+            # log and retry on the next tick.
+            print(f"heartbeat failed (HTTP {error.code}); keeping computer {self.computer_id}", flush=True)
+        except Exception as exc:
+            print(f"heartbeat failed ({exc}); keeping computer {self.computer_id}", flush=True)
 
     def files(self, requested):
         path = within(self.root, requested)
@@ -118,11 +169,22 @@ def handler(agent):
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--hub", required=True); parser.add_argument("--name", required=True)
     parser.add_argument("--os", required=True); parser.add_argument("--listen", required=True); parser.add_argument("--root", required=True)
-    parser.add_argument("--state", required=True); parser.add_argument("--token"); args = parser.parse_args()
-    agent = Agent(args); agent.endpoint = "http://" + args.listen; agent.heartbeat()
+    parser.add_argument("--state", required=True); parser.add_argument("--token"); parser.add_argument("--hub-token"); args = parser.parse_args()
+    agent = Agent(args); agent.endpoint = "http://" + args.listen
+    # A transient hub failure at startup must not kill the process: systemd
+    # would restart it in a tight loop (this unit accumulated 50k+ restarts
+    # while the hub rejected the agent's unauthenticated calls). Keep serving
+    # and let the heartbeat loop recover the pairing.
+    try:
+        agent.heartbeat()
+    except Exception as exc:
+        print(f"initial heartbeat failed ({exc}); will retry", flush=True)
     def heartbeat_loop():
         while True:
-            agent.heartbeat()
+            try:
+                agent.heartbeat()
+            except Exception as exc:
+                print(f"heartbeat error ({exc})", flush=True)
             time.sleep(20)
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     ThreadingHTTPServer((args.listen.rsplit(":", 1)[0], int(args.listen.rsplit(":", 1)[1])), handler(agent)).serve_forever()
