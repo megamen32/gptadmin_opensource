@@ -235,6 +235,7 @@ func TestAccessProfileSharedConfigRefreshAndWorkspacePersistence(t *testing.T) {
 		"allowed_targets": []string{"hub"},
 		"allowed_tools":   []string{"discover"},
 		"workspace_refs":  []any{workspace},
+		"tool_rules":      []any{map[string]any{"target": "shell:machine-a", "tool": "system_inspect", "actions": []string{"list_directory"}, "read_only": true}},
 	}
 	created := accessProfileTestRequest(t, first, http.MethodPut, "/admin/api/access-profiles/z-profile", create, map[string]string{"If-Match": "*"})
 	if created.Code != http.StatusOK || created.Header().Get("ETag") != `"1"` {
@@ -244,7 +245,7 @@ func TestAccessProfileSharedConfigRefreshAndWorkspacePersistence(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &createdProfile); err != nil {
 		t.Fatal(err)
 	}
-	if createdProfile.InstructionSetID != defaultInstructionSetID || len(createdProfile.WorkspaceRefs) != 1 || createdProfile.WorkspaceRefs[0].StartupDocument != "AGENTS.md" {
+	if createdProfile.InstructionSetID != defaultInstructionSetID || len(createdProfile.WorkspaceRefs) != 1 || createdProfile.WorkspaceRefs[0].StartupDocument != "AGENTS.md" || len(createdProfile.ToolRules) != 1 || !createdProfile.ToolRules[0].ReadOnly {
 		t.Fatalf("profile defaults were not applied: %+v", createdProfile)
 	}
 
@@ -512,5 +513,134 @@ func TestAccessProfileNormalizesNamedInstructionSetReference(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "approval_mode") {
 		t.Fatalf("normalizeAccessProfile error = %v, want unsupported approval_mode", err)
+	}
+}
+
+func TestAccessProfileToolRulesValidateAndDeepClone(t *testing.T) {
+	p := AccessProfile{ID: "rules", Version: 1, AccessMode: accessModeFull, AllowedTargets: []string{"host"}, AllowedTools: []string{"file_editor"}, ToolRules: []AccessToolRule{{Target: "host", Tool: "file_editor", Actions: []string{"view"}, ReadOnly: true}}}
+	n, err := normalizeAccessProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cloneAccessProfile(n)
+	c.ToolRules[0].Actions[0] = "delete"
+	if n.ToolRules[0].Actions[0] != "view" {
+		t.Fatal("clone shared tool rule actions")
+	}
+	p.ToolRules = []AccessToolRule{{Target: "*", Tool: "file_editor", ReadOnly: true}}
+	if validateAccessProfile(p) == nil {
+		t.Fatal("wildcard readonly rule accepted")
+	}
+}
+
+// No copy path may alias the caller's slices: the stored profile, the
+// clone helpers and the state reader each own their rule actions.
+func TestAccessProfileToolRulesAreDeepCopiedOnEveryCopyPath(t *testing.T) {
+	cfg := Config{
+		CtlToken:          "ctl",
+		ConfigDir:         t.TempDir(),
+		OAuthClientSecret: "oauth-secret",
+		PublicOrigin:      "https://hub.example",
+		MCPResource:       "https://hub.example",
+	}
+	s := New(cfg)
+
+	actions := []string{"view"}
+	profile := AccessProfile{
+		ID:             "copies",
+		Version:        1,
+		AccessMode:     accessModeFull,
+		ApprovalMode:   approvalModeUnrestricted,
+		AllowedTargets: []string{"file:host"},
+		AllowedTools:   []string{"file_editor"},
+		ToolRules:      []AccessToolRule{{Target: "file:host", Tool: "file_editor", Actions: actions}},
+	}
+	if _, err := s.updateAccessProfiles(func(profiles map[string]AccessProfile) error {
+		profiles[profile.ID] = profile
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actions[0] = "delete"
+
+	s.mu.Lock()
+	stored := s.accessProfiles["copies"]
+	s.mu.Unlock()
+	if stored.ToolRules[0].Actions[0] != "view" {
+		t.Fatalf("stored profile aliases the caller's action slice: %+v", stored.ToolRules[0])
+	}
+
+	clone := cloneAccessProfile(stored)
+	clone.ToolRules[0].Actions[0] = "delete"
+	clone.AllowedTargets[0] = "file:other"
+	if stored.ToolRules[0].Actions[0] != "view" || stored.AllowedTargets[0] != "file:host" {
+		t.Fatalf("cloneAccessProfile shares slices with its source: %+v", stored)
+	}
+
+	clones := cloneAccessProfiles(map[string]AccessProfile{"copies": stored})
+	clones["copies"].ToolRules[0].Actions[0] = "delete"
+	if stored.ToolRules[0].Actions[0] != "view" {
+		t.Fatal("cloneAccessProfiles shares the action slice")
+	}
+
+	loaded, err := readAccessProfilesState(s.accessProfilesStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded["copies"].ToolRules[0].Actions[0] = "delete"
+	reloaded, err := readAccessProfilesState(s.accessProfilesStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded["copies"].ToolRules[0].Actions[0] != "view" {
+		t.Fatal("readAccessProfilesState shares the action slice")
+	}
+}
+
+// The rules and the version survive a restart, and the next update continues
+// from the stored version.
+func TestAccessProfileToolRulesSurviveReloadAndKeepTheirVersion(t *testing.T) {
+	cfg := Config{
+		CtlToken:          "ctl",
+		ConfigDir:         t.TempDir(),
+		OAuthClientSecret: "oauth-secret",
+		PublicOrigin:      "https://hub.example",
+		MCPResource:       "https://hub.example",
+	}
+	s := New(cfg)
+	path := "/admin/api/access-profiles/reload"
+	create := map[string]any{
+		"id":              "reload",
+		"name":            "Reload profile",
+		"access_mode":     "full",
+		"allowed_targets": []string{"file:host"},
+		"allowed_tools":   []string{"file_editor"},
+		"tool_rules": []any{map[string]any{
+			"target": "file:host", "tool": "file_editor", "actions": []string{"view"}, "read_only": true,
+		}},
+	}
+	if created := accessProfileTestRequest(t, s, http.MethodPut, path, create, map[string]string{"If-Match": "*"}); created.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	restarted := New(cfg)
+	got := accessProfileTestRequest(t, restarted, http.MethodGet, path, nil, nil)
+	if got.Code != http.StatusOK || got.Header().Get("ETag") != `"1"` {
+		t.Fatalf("reload status=%d etag=%q body=%s", got.Code, got.Header().Get("ETag"), got.Body.String())
+	}
+	var profile AccessProfile
+	if err := json.Unmarshal(got.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	if len(profile.ToolRules) != 1 || len(profile.ToolRules[0].Actions) != 1 || profile.ToolRules[0].Actions[0] != "view" || !profile.ToolRules[0].ReadOnly {
+		t.Fatalf("rules did not survive the reload: %+v", profile.ToolRules)
+	}
+	if profile.Version != 1 {
+		t.Fatalf("reloaded version = %d, want 1", profile.Version)
+	}
+
+	updated := accessProfileTestRequest(t, restarted, http.MethodPut, path, create, map[string]string{"If-Match": `"1"`})
+	if updated.Code != http.StatusOK || updated.Header().Get("ETag") != `"2"` {
+		t.Fatalf("update after reload status=%d etag=%q body=%s", updated.Code, updated.Header().Get("ETag"), updated.Body.String())
 	}
 }

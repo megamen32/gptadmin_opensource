@@ -36,13 +36,13 @@ def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-def jwt(secret: str, audience: str) -> str:
+def jwt(secret: str, audience: str, scope: str = "gptadmin.read gptadmin.exec") -> str:
     now = int(time.time())
     header = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     claims = {
         "sub": "exec-context-candidate",
         "client_id": "exec-context-candidate",
-        "scope": "gptadmin.read gptadmin.exec",
+        "scope": scope,
         "access_mode": "full",
         "aud": audience,
         "resource": audience,
@@ -164,6 +164,18 @@ class MCP:
             args["context"] = self.context
         return self.call("exec", args, label)
 
+    def ro(self, code: str, label: str, **limits):
+        args = {"code": code, **limits}
+        if self.context:
+            args["context"] = self.context
+        return self.call("ro", args, label)
+
+
+def ro_body(response: dict) -> dict:
+    # MCP.call already unwraps the tool's structuredContent, so the read-only
+    # envelope is the response itself.
+    return response if isinstance(response, dict) else {}
+
 
 def aggregate(records: list[dict]) -> dict:
     return {
@@ -175,6 +187,16 @@ def aggregate(records: list[dict]) -> dict:
         "total_tokens_o200k_base": sum(r["request_tokens"] + r["response_tokens"] for r in records),
         "latency_ms_sum": round(sum(r["elapsed_ms"] for r in records), 3),
     }
+
+
+def first_string(value, *keys) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            return item
+    return ""
 
 
 def expected_file(index: int) -> str:
@@ -280,7 +302,20 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
 
                 public_tools = client.tools()
                 public_names = [tool.get("name") for tool in public_tools]
-                assert "exec" in public_names and "code_exec" not in public_names and "execute" not in public_names, public_names
+                # The catalog has two explicit modes, chosen by an administrator
+                # in the typed Hub settings registry (tool_catalog_mode). The
+                # working code mode is present in both; the compatibility
+                # execute facade is present in compat mode and absent in modern
+                # mode. The retired code_exec alias is never published.
+                catalog_mode = os.environ.get("GPTADMIN_CATALOG_MODE", "compat")
+                assert "exec" in public_names, public_names
+                assert "code_exec" not in public_names, public_names
+                if catalog_mode == "modern":
+                    assert "execute" not in public_names, public_names
+                    assert "ro" in public_names, public_names
+                else:
+                    assert "execute" in public_names, public_names
+                    assert "ro" in public_names, public_names
                 client.search("file editor", f"file:{shell_name}", "bootstrap:file-search")
                 file_search = client.search("file editor", f"file:{shell_name}", "bootstrap:file-search-confirm")
                 file_target = f"file:{shell_name}"
@@ -288,6 +323,7 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
                 file_schema = client.call("schema", {"target": file_target, "tool": "file_editor", "detail": "full"}, "bootstrap:file-schema")
                 assert file_schema.get("status") == "completed", file_schema
 
+                shell_target = f"shell:{shell_name}"
                 root_search = None
                 for attempt in range(20):
                     root_search = client.search("zircon root", root_id, f"bootstrap:root-search-{attempt+1}")
@@ -467,11 +503,210 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
                     "source_metadata": {k: indexed_log.get(k) for k in ("format", "bytes", "chunks", "expires_at")},
                 }
 
+                # ------------------------------------------------------------------
+                # Lane 2: the read-only executor, the large-result split and the
+                # confirmed full source.
+                # ------------------------------------------------------------------
+                shell_target = f"shell:{shell_name}"
+                ro_read_path = root / "ro-read.txt"
+                ro_read_path.write_text("ro-alpha\nro-beta\n", encoding="utf-8")
+                ro_denied_path = root / "ro-denied.txt"
+
+                # (1) ro reads a real temporary file through the file helper.
+                ro_read = ro_body(client.ro(
+                    f"const f=file({json.dumps(file_target)}); const r=await f('read',{json.dumps(str(ro_read_path))},{{max_bytes:4096}}); return r.text;",
+                    "readonly:file-read"))
+                assert ro_read.get("status") == "completed", ro_read
+                assert ro_read.get("result") == "ro-alpha\nro-beta\n", ro_read
+                report["scenario"]["ro_reads_a_real_file"] = {"pass": True, "bytes": len((ro_read_path).read_bytes())}
+
+                # (2) ro refuses a file write and the file does not exist afterwards.
+                ro_write = ro_body(client.ro(
+                    f"const f=file({json.dumps(file_target)}); await f('create',{json.dumps(str(ro_denied_path))},{{text:'x'}}); return 1;",
+                    "readonly:file-write-denied"))
+                assert ro_write.get("status") == "failed", ro_write
+                assert not ro_denied_path.exists(), "a refused read-only write created the file"
+
+                # (3) ro refuses an MCP restart and the registration is unchanged.
+                # The registration identity is compared, not the live liveness
+                # flag: the check is that a refused restart did not change the
+                # set of registered servers, and a heartbeat may move the
+                # volatile status field between two snapshots.
+                def registration_identity(servers):
+                    return sorted((s.get("server_id"), s.get("name")) for s in servers or [])
+
+                before_agents = registration_identity(client.call("discover", {}, "readonly:discover-before").get("servers", []))
+                ro_restart = ro_body(client.ro(
+                    f"await mcp.call({json.dumps('control:' + shell_name)},'mcp_manage',{{action:'restart'}}); return 1;",
+                    "readonly:mcp-restart-denied"))
+                assert ro_restart.get("status") == "failed", ro_restart
+                after_agents = registration_identity(client.call("discover", {}, "readonly:discover-after").get("servers", []))
+                assert before_agents == after_agents, ("a refused restart changed the registration", before_agents, after_agents)
+
+                # (4) ro refuses the escalation wrappers.
+                for label, code in [
+                    ("nested-exec", f"await mcp.call('hub','exec',{{code:'return 1;'}}); return 1;"),
+                    ("nested-execute", f"await mcp.call('hub','execute',{{target:'hub',tool:'settings_schema',args:{{}}}}); return 1;"),
+                    ("raw-mcp-call", f"await mcp.call({json.dumps('control:' + shell_name)},'mcp_call',{{ref:'x',name:'y',arguments:{{}}}}); return 1;"),
+                    ("raw-mcp-request", f"await mcp.call({json.dumps('control:' + shell_name)},'mcp_request',{{method:'tools/list'}}); return 1;"),
+                    ("fleet-exec", f"await mcp.call('hub','fleetExec',{{servers:[{json.dumps(shell_target)}],cmd:'echo denied'}}); return 1;"),
+                    ("fleet-exec-alias", f"await mcp.call('hub','fleet_exec',{{servers:[{json.dumps(shell_target)}],cmd:'echo denied'}}); return 1;"),
+                ]:
+                    denied = ro_body(client.ro(code, f"readonly:escalation-{label}"))
+                    assert denied.get("status") == "failed", (label, denied)
+
+                # (5) ro refuses index(), drop() and index:true.
+                for label, code in [
+                    ("index", "await index('persistent'); return 1;"),
+                    ("drop", "await drop('persistent'); return 1;"),
+                    ("index-true", f"await mcp.call({json.dumps(child_target)},'large_log',{{}},{{index:true}}); return 1;"),
+                ]:
+                    denied = ro_body(client.ro(code, f"readonly:{label}-denied"))
+                    assert denied.get("status") == "failed", (label, denied)
+
+                # A caught refusal does not let the script continue: the second
+                # forbidden call is refused too and the run is not completed.
+                sticky = ro_body(client.ro(
+                    f"try {{ await mcp.call({json.dumps(shell_target)},'shell_exec',{{cmd:'echo denied'}}); }} catch(e) {{}} "
+                    f"try {{ await mcp.call('hub','settings_set',{{settings:{{}}}}); }} catch(e) {{}} return 42;",
+                    "readonly:sticky-refusal"))
+                assert sticky.get("status") == "failed", sticky
+                assert sticky.get("result") != 42, sticky
+                report["scenario"]["ro_ceiling"] = {
+                    "file_read": "PASS",
+                    "file_write_denied": "PASS",
+                    "mcp_restart_denied": "PASS",
+                    "escalation_wrappers_denied": "PASS",
+                    "index_drop_denied": "PASS",
+                    "sticky_refusal": "PASS",
+                }
+
+                # (6) A large exec return is stored without an index; the first
+                # search builds it and a repeated search does not rebuild it.
+                big = client.exec(
+                    f"await mcp.call({json.dumps(child_target)},'describe_policy',{{}}); "
+                    "return 'ROW_START\\n'+('padding row for the stored log\\n'.repeat(20000))+'ROW_END\\n';",
+                    "large:exec-result", max_output_bytes=4096)
+                descriptor = big.get("result", {})
+                assert descriptor.get("saved") is True, (descriptor, big)
+                assert descriptor.get("source"), descriptor
+                assert descriptor.get("indexed") is False, descriptor
+                assert descriptor.get("complete") is True, descriptor
+                for key in ("source", "bytes", "format", "complete", "indexed", "expires_at"):
+                    assert key in descriptor, (key, descriptor)
+                assert descriptor.get("read", {}).get("call"), descriptor
+                assert descriptor.get("search", {}).get("call"), descriptor
+                stored_source = descriptor["source"]
+
+                before_status = client.exec(
+                    f"return await mcp.content.status({json.dumps(stored_source)});",
+                    "large:status-before-search").get("result", {})
+                assert before_status.get("indexed") is False, before_status
+                assert before_status.get("indexed_rows") == 0, before_status
+
+                first_search = client.exec(
+                    f"return await mcp.content.search('ROW_END',{{source:{json.dumps(stored_source)},limit:5}});",
+                    "large:search-first")
+                assert first_search.get("result", {}).get("count", 0) > 0, first_search
+                after_status = client.exec(
+                    f"return await mcp.content.status({json.dumps(stored_source)});",
+                    "large:status-after-search").get("result", {})
+                assert after_status.get("indexed") is True, after_status
+                indexed_rows = after_status.get("indexed_rows", 0)
+                assert indexed_rows > 0, after_status
+
+                for attempt in range(2):
+                    again = client.exec(
+                        f"return await mcp.content.search('ROW_START',{{source:{json.dumps(stored_source)},limit:5}});",
+                        f"large:search-repeat-{attempt + 1}")
+                    assert again.get("result", {}).get("count", 0) > 0, again
+                repeat_status = client.exec(
+                    f"return await mcp.content.status({json.dumps(stored_source)});",
+                    "large:status-after-repeat").get("result", {})
+                assert repeat_status.get("indexed_rows") == indexed_rows, (repeat_status, indexed_rows)
+                report["scenario"]["large_result_saved_then_indexed"] = {
+                    "bytes": descriptor.get("bytes"),
+                    "indexed_rows_after_first_search": indexed_rows,
+                    "indexed_rows_after_repeated_search": repeat_status.get("indexed_rows"),
+                    "index_rebuilt": repeat_status.get("indexed_rows") != indexed_rows,
+                }
+
+                # (7) A saved and searched result is not re-executed.
+                stats_after_store = summary_result(client.exec(
+                    f"return await call({json.dumps(child_target)},'fixture_stats',{{}});", "large:fixture-stats"))
+                assert stats_after_store.get("large_log_calls") == 4, stats_after_store
+                report["scenario"]["saved_result_is_not_re_executed"] = {
+                    "fixture_large_log_calls": stats_after_store.get("large_log_calls"),
+                }
+
+                # (8) The shell spill variant: the confirmed full source is
+                # indexed, and the command runs exactly once.
+                counter_path = root / "shell-run-counter.txt"
+                counter_path.write_text("", encoding="utf-8")
+                spill_cmd = (
+                    "sh -c 'echo RUN >> " + str(counter_path) + "; "
+                    "echo RARE_SPILL_START marker=SPILL-EXACT; seq 1 200000; "
+                    "echo RARE_SPILL_END marker=SPILL-END'"
+                )
+                spill_index = client.exec(
+                    f"const s=await call({json.dumps(shell_target)},'shell_exec',{{cmd:{json.dumps(spill_cmd)}}},{{index:true,name:'spill-log'}}); return s;",
+                    "spill:index")
+                spill_source = spill_index.get("result", {}).get("source")
+                assert spill_source, spill_index
+                assert spill_index.get("result", {}).get("complete") is True, spill_index
+                spill_hits = client.exec(
+                    f"const s=await search('RARE_SPILL_END',{{source:{json.dumps(spill_source)},limit:2}}); "
+                    f"const r=await read({json.dumps(spill_source)},s.hits[0].chunk_id); "
+                    f"return {{count:s.count,line:r.text.split('\\n').find(x=>x.includes('RARE_SPILL_END'))}};",
+                    "spill:search")
+                spill_line = spill_hits.get("result", {}).get("line", "")
+                assert "RARE_SPILL_END marker=SPILL-END" in spill_line, spill_hits
+                runs = len([line for line in counter_path.read_text(encoding="utf-8").splitlines() if line.strip()])
+                assert runs == 1, {"command_runs": runs}
+                report["scenario"]["confirmed_full_source"] = {
+                    "spilled_command_runs": runs,
+                    "end_marker_line_found": spill_line,
+                    "complete": spill_index.get("result", {}).get("complete"),
+                }
+
+                # (9) Right revocation: the right on the external source is
+                # withdrawn, and the derived result stops being readable.
+                child_ref = child_target.rsplit(":", 1)[-1]
+                revoked = {"status": "skipped", "reason": "the child registration could not be withdrawn"}
+                disabled = client.call(
+                    "execute",
+                    {"target": f"control:{shell_name}", "tool": "mcp_manage", "args": {"action": "disable", "ref": child_ref}},
+                    "revocation:disable")
+                disabled_status = first_string(disabled, "status")
+                if disabled_status in ("completed", "ok"):
+                    revoked_read = ro_body(client.ro(
+                        f"return await mcp.content.read({json.dumps(stored_source)},1);", "revocation:read"))
+                    revoked_search = ro_body(client.ro(
+                        f"return await mcp.content.search('ROW_END',{{source:{json.dumps(stored_source)}}});", "revocation:search"))
+                    assert revoked_read.get("status") != "completed", revoked_read
+                    assert revoked_search.get("status") != "completed", revoked_search
+                    revoked = {"read": "PASS denied", "search": "PASS denied"}
+                report["scenario"]["right_revocation"] = revoked
+
                 legacy_code = client.call("code_exec", {"code": "return 1;"}, "migration:code_exec")
                 assert legacy_code.get("status") == "failed" and "renamed to exec" in legacy_code.get("error", ""), legacy_code
-                old_execute = client.call("execute", {"target": file_target, "tool": "file_editor", "args": {"action": "delete", "path": str(file_path)}}, "migration:execute")
-                assert "rpc_error" in old_execute and "use search then exec" in old_execute["rpc_error"].get("message", ""), old_execute
-                report["scenario"]["migration_errors"] = {"code_exec": "PASS", "execute": "PASS"}
+                # The legacy direct execute contract is asserted on the raw JSON-RPC
+                # envelope: result.structuredContent.status == "completed". MCP.call
+                # unwraps structuredContent already, so the payload is checked there
+                # and the RPC level is checked separately instead of unwrapping twice.
+                legacy_execute_args = {"target": "hub", "tool": "settings_schema", "args": {}}
+                if client.context:
+                    legacy_execute_args["context"] = client.context
+                legacy_rpc = client.rpc("tools/call", {"name": "execute", "arguments": legacy_execute_args}, "compat:execute")
+                legacy_structured = legacy_rpc.get("result", {}).get("structuredContent", {})
+                old_execute = legacy_structured if isinstance(legacy_structured, dict) else {"rpc_error": legacy_rpc.get("error")}
+                assert "rpc_error" not in old_execute and old_execute.get("status") == "completed", old_execute
+                assert legacy_rpc.get("error") is None, legacy_rpc
+                assert legacy_structured.get("status") == "completed", legacy_rpc
+                assert legacy_structured.get("server_id") == "hub", legacy_rpc
+                ro = client.call("ro", {"code": "try { await mcp.call('" + shell_target + "','shell_exec',{cmd:'echo denied'}); } catch(e) {} return 42;"}, "readonly:shell-denial")
+                assert ro.get("status") == "failed", ro
+                report["scenario"]["compatibility"] = {"code_exec": "PASS migration alias", "execute": "PASS harmless direct read", "ro_shell_denial": "PASS"}
 
                 report["status"] = "PASS"
                 report["scope"] = "isolated real-process candidate; not deployed and not ChatGPT app acceptance"

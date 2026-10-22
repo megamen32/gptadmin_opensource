@@ -188,7 +188,14 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			}
 			seen[key] = true
 			definitions[key] = tool
-			rows = append(rows, map[string]any{"target": target, "name": name, "title": firstString(tool, "title"), "description": firstString(tool, "description"), "labels": labels, "settings": settings})
+			row := map[string]any{"target": target, "name": name, "title": firstString(tool, "title"), "description": firstString(tool, "description"), "labels": labels, "settings": settings}
+			if rule, ok := profileToolRule(r, target, name); ok {
+				row["read_only_rule"] = rule.ReadOnly
+				if len(rule.Actions) > 0 {
+					row["allowed_actions"] = append([]string(nil), rule.Actions...)
+				}
+			}
+			rows = append(rows, row)
 		}
 	}
 	s.mu.Lock()
@@ -260,6 +267,16 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		}
 		if err := authorizeToolCall(r, target, checkName); err != nil {
 			continue
+		}
+		// The FTS round trip persists only the indexed columns, so the action
+		// level of the matching rule is re-attached here: a hit must publish
+		// the same allowed_actions and read_only_rule the schema facade
+		// publishes.
+		if rule, ok := profileToolRule(r, target, name); ok {
+			hit["read_only_rule"] = rule.ReadOnly
+			if len(rule.Actions) > 0 {
+				hit["allowed_actions"] = append([]string(nil), rule.Actions...)
+			}
 		}
 		definition := definitions[target+"\x00"+name]
 		var schema any

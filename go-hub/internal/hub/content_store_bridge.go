@@ -13,7 +13,11 @@ import (
 	"github.com/fastschema/qjs"
 )
 
-var defaultExecContentLimits = ContentLimits{MaxSourceBytes: 2 << 20, MaxTotalBytes: 32 << 20, MaxSources: 128, TTL: 24 * time.Hour}
+// contentMaxSourceBytes is the largest single source the content store keeps.
+// It is also the largest result the executor can store instead of returning.
+const contentMaxSourceBytes = 2 << 20
+
+var defaultExecContentLimits = ContentLimits{MaxSourceBytes: contentMaxSourceBytes, MaxTotalBytes: 32 << 20, MaxSources: 128, TTL: 24 * time.Hour}
 
 func (s *Server) contentStoreForExec() (*ContentStore, error) {
 	s.contentMu.Lock()
@@ -56,6 +60,15 @@ func (s *Server) contentStoreForExec() (*ContentStore, error) {
 }
 
 func (b *codeModeBridge) indexContent(text, name, origin, format string) (map[string]any, error) {
+	return b.saveContent(text, name, origin, format, true, true)
+}
+
+// saveContent stores one result.
+//
+// eager builds the search index right away. complete records whether the
+// stored bytes are the whole result; it is false only for a source that the
+// caller explicitly agreed to store as a part.
+func (b *codeModeBridge) saveContent(text, name, origin, format string, eager, complete bool) (map[string]any, error) {
 	principal := operationPrincipal(b.request)
 	if principal == "" {
 		return nil, errors.New("authenticated principal required")
@@ -70,7 +83,17 @@ func (b *codeModeBridge) indexContent(text, name, origin, format string) (map[st
 	if err != nil {
 		return nil, err
 	}
-	source, err := store.IndexFormatted(principal, name, origin, format, text)
+	var source ContentSource
+	switch {
+	case eager && complete:
+		source, err = store.IndexFormatted(principal, name, origin, format, text)
+	case eager:
+		source, err = store.IndexIncompleteFormatted(principal, name, origin, format, text)
+	case complete:
+		source, err = store.SaveFormatted(principal, name, origin, format, text)
+	default:
+		source, err = store.SaveIncompleteFormatted(principal, name, origin, format, text)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -78,14 +101,23 @@ func (b *codeModeBridge) indexContent(text, name, origin, format string) (map[st
 }
 
 func contentSourceMap(x ContentSource) map[string]any {
-	var origin any = map[string]any{"kind": "exec_text"}
-	if x.Origin != "" && x.Origin != "exec:index" {
-		pair := strings.SplitN(x.Origin, "\x00", 2)
-		if len(pair) == 2 {
-			origin = map[string]any{"target": pair[0], "tool": pair[1]}
+	origin := contentOriginDescription(x.Origin)
+	return mapValue(redactPublicMetadata(map[string]any{"source": x.ID, "name": x.Name, "origin": origin, "format": x.Format, "bytes": x.Bytes, "chunks": x.Chunks, "indexed": x.Indexed, "complete": x.Complete, "created_at": x.CreatedAt.UTC().Format(time.RFC3339), "expires_at": x.ExpiresAt.UTC().Format(time.RFC3339)}))
+}
+
+// contentSourceStatusMap describes one stored source, including whether its
+// search index has been built yet and how many index rows it owns. It is the
+// observable proof that saving does not index and that the first search does.
+func contentSourceStatusMap(s *ContentStore, principal string, x ContentSource) map[string]any {
+	out := contentSourceMap(x)
+	indexedRows := 0
+	if s != nil {
+		if rows, err := s.SearchIndexRows(principal, x.ID); err == nil {
+			indexedRows = rows
 		}
 	}
-	return mapValue(redactPublicMetadata(map[string]any{"source": x.ID, "name": x.Name, "origin": origin, "format": x.Format, "bytes": x.Bytes, "chunks": x.Chunks, "created_at": x.CreatedAt.UTC().Format(time.RFC3339), "expires_at": x.ExpiresAt.UTC().Format(time.RFC3339)}))
+	out["indexed_rows"] = indexedRows
+	return out
 }
 
 func normalizeCodeModeFileEditor(raw any) any {
@@ -220,20 +252,75 @@ func (b *codeModeBridge) contentOriginAllowed(target, tool string) bool {
 			return false
 		}
 	}
+	if !b.contentOriginAllowedInMode(target, tool) {
+		return false
+	}
 	return !isChildMCPTarget(b.server, target, b.request) || isChildCatalogTarget(b.server, target, b.request)
 }
 
-func (b *codeModeBridge) contentSourceAllowed(meta ContentSource) bool {
-	if meta.Origin == "exec:index" {
+// contentOriginAllowedInMode applies the read-only execution ceiling to one
+// origin.
+//
+// The origin does not record which action produced the data, so a mixed tool
+// is allowed when at least one of its read actions is allowed. A read-only
+// script must not be able to read content that was produced by an operation
+// the read-only ceiling refuses, for example a shell command.
+func (b *codeModeBridge) contentOriginAllowedInMode(target, tool string) bool {
+	if !b.readOnly {
 		return true
 	}
+	if readOnlyExecToolAllowed(b.request, target, tool, map[string]any{}) {
+		return true
+	}
+	for action := range readActionTools[tool] {
+		if readOnlyExecToolAllowed(b.request, target, tool, map[string]any{"action": action}) {
+			return true
+		}
+	}
+	return false
+}
+
+// contentSourceAllowed re-checks the caller's current rights on the data of a
+// stored source.
+//
+// A derived result carries every source it was built from. Every one of them
+// must still be allowed: a result that was assembled from two reads is not
+// readable again as soon as one of the two is denied.
+func (b *codeModeBridge) contentSourceAllowed(meta ContentSource) bool {
 	if meta.Origin == "" {
 		return false
 	}
-	pair := strings.SplitN(meta.Origin, "\x00", 2)
-	return len(pair) == 2 && b.contentOriginAllowed(pair[0], pair[1])
+	origins := contentOriginList(meta.Origin)
+	if len(origins) == 0 {
+		return false
+	}
+	for _, origin := range origins {
+		if origin == contentFreeTextOrigin {
+			continue
+		}
+		pair := strings.SplitN(origin, contentOriginSeparator, 2)
+		if len(pair) != 2 || !b.contentOriginAllowed(pair[0], pair[1]) {
+			return false
+		}
+	}
+	return true
 }
 
+// content serves the content helpers inside one script.
+//
+// What a script may write is decided by the read-only execution ceiling, and
+// the distinction is deliberate:
+//
+//   - A service audit is the Hub's own trail of what happened. It is not the
+//     caller's data and it is not the user's stored sources.
+//   - A bounded response cache and the search cache of an allowed read are
+//     caches. Building them changes what the Hub has to recompute, not what
+//     the user stored.
+//   - Creating, changing or deleting a stored source IS a change to the user's
+//     data. A read-only run never does it.
+//
+// So a read-only run may read a stored source, search it and build its search
+// index, and it may not create, re-index as a new source, or delete one.
 func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 	if err := b.entry(); err != nil {
 		return nil, err
@@ -254,20 +341,63 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 	}
 	switch kind {
 	case "index":
+		if b.readOnly {
+			return nil, b.fail("forbidden", "read-only execution cannot create persistent content sources", nil)
+		}
 		name := firstString(opts, "name")
-		origin := "exec:index"
+		origin := contentFreeTextOrigin
 		target, tool := firstString(opts, "target"), firstString(opts, "tool")
 		if target != "" || tool != "" {
 			if !b.contentOriginAllowed(target, tool) {
 				return nil, b.fail("forbidden", "index origin target/tool is not authorized", nil)
 			}
-			origin = target + "\x00" + tool
+			origin = contentOriginSingle(target, tool)
 		}
+		// The indexed text may have been assembled from several reads. The
+		// source is bound to every one of them, so a later revocation of any of
+		// them also revokes the saved text.
+		origin = contentOriginMerge(origin, b.contentOrigins())
 		meta, e := b.indexContent(arg, name, origin, "text")
 		if e != nil {
 			return nil, b.fail("content_index_failed", e.Error(), nil)
 		}
 		return b.jsonValue(this, meta), nil
+	case "indexSource":
+		// Building the search index of a source the caller may already read is
+		// a cache build, not a change to the user's data. It is allowed in a
+		// read-only run; the origin permission of the source is still
+		// re-checked, exactly as for a read or a search.
+		source := arg
+		if source == "" {
+			source = firstString(opts, "source")
+		}
+		if source == "" {
+			return nil, b.fail("invalid_arguments", "indexSource requires a source id", nil)
+		}
+		meta, e := store.Source(principal, source)
+		if e != nil || !b.contentSourceAllowed(meta) {
+			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
+		}
+		// Building the index of a stored source never re-reads the source tool
+		// and never re-runs the operation that produced it.
+		indexed, e := store.IndexSource(principal, source)
+		if e != nil {
+			return nil, b.fail("content_index_failed", e.Error(), nil)
+		}
+		return b.jsonValue(this, contentSourceStatusMap(store, principal, indexed)), nil
+	case "status":
+		source := arg
+		if source == "" {
+			source = firstString(opts, "source")
+		}
+		if source == "" {
+			return nil, b.fail("invalid_arguments", "status requires a source id", nil)
+		}
+		meta, e := store.Source(principal, source)
+		if e != nil || !b.contentSourceAllowed(meta) {
+			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
+		}
+		return b.jsonValue(this, contentSourceStatusMap(store, principal, meta)), nil
 	case "search":
 		source := firstString(opts, "source")
 		limit := intFromAny(opts["limit"])
@@ -309,6 +439,9 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 		}
 		return b.jsonValue(this, map[string]any{"source": source, "chunk_id": chunkID, "text": value}), nil
 	case "delete":
+		if b.readOnly {
+			return nil, b.fail("forbidden", "read-only execution cannot delete content sources", nil)
+		}
 		if err := store.Delete(principal, arg); err != nil {
 			return nil, b.fail("content_delete_failed", "content source could not be deleted", nil)
 		}

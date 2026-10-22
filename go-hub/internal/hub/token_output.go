@@ -22,6 +22,11 @@ const operationMaxItem = 4 << 20
 const operationMaxCount = 128
 const compactResultBytes = 1000
 
+// rawExecutionResultBytes is the budget of the direct execute facade. The
+// compatibility facade returns the raw hub envelope, so the preview only
+// takes over when the envelope genuinely does not fit into the context.
+const rawExecutionResultBytes = 64 * 1024
+
 // Native clients may opt in to text-only results. The default keeps the
 // structured contract (including cached outputSchema) without duplicate text.
 func nativeFacadeTools(r *http.Request, tools []map[string]any) []map[string]any {
@@ -88,7 +93,7 @@ type tokenOperation struct {
 func expandToolDefinition(security []map[string]any, meta map[string]any) map[string]any {
 	return map[string]any{
 		"name": "expand", "title": "Раскрыть операцию",
-		"description": "Read saved operation details without executing again. id=operation_id; path is a JSON Pointer. offset/limit page UTF-8 bytes. Expires after 30 minutes, eviction or restart.",
+		"description": "Read saved operation details without executing again. id=operation_id; path is a JSON Pointer; offset/limit page UTF-8 bytes. Expires after 30 minutes, eviction or restart.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 			"id": map[string]any{"type": "string"}, "path": map[string]any{"type": "string"},
 			"offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 16000},
@@ -293,8 +298,9 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 	if name == "code_exec" {
 		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
 	}
-	if name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
-		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
+	if name == "ro" {
+		response, _ := s.callCodeModeToolMode(r, args, true)
+		return response
 	}
 	if name == "expand" {
 		return s.expandOperation(r, args)
@@ -346,7 +352,7 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 				if st != "" && firstString(row, "status") != st {
 					continue
 				}
-				if q != "" && !strings.Contains(strings.ToLower(firstString(row, "server_id")+" "+firstString(row, "name")), q) {
+				if !discoveryRowMatchesQuery(row, q) {
 					continue
 				}
 				filtered = append(filtered, entry)
@@ -407,7 +413,15 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 	}
 	encoded, _ := json.Marshal(out)
 	disclosure := execution && firstString(args, "target", "server_id", "agent_id") == "hub" && (firstString(args, "tool", "tool_name", "name") == "expand" || firstString(args, "tool", "tool_name", "name") == "schema")
-	preview := name != "search" && name != "exec" && !disclosure && !readableGrepMesh && len(encoded) > compactResultBytes && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
+	// The direct execute facade returns the raw hub envelope. A preview must
+	// not silently replace the business result of a compatibility facade, so
+	// the preview only takes over when the raw envelope genuinely does not
+	// fit; above that the operation receipt keeps the payload recoverable.
+	previewLimit := compactResultBytes
+	if execution {
+		previewLimit = rawExecutionResultBytes
+	}
+	preview := name != "search" && name != "exec" && !disclosure && !readableGrepMesh && len(encoded) > previewLimit && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
 	changed := !reflect.DeepEqual(payload, out)
 	if (execution || nodePeerJobTool(name)) && !preview && !readableGrepMesh && firstString(out, "job_id") != "" {
 		return out
@@ -586,6 +600,36 @@ func hasMediaOrFailure(value any) bool {
 	}
 	return false
 }
+
+// discoveryRowMatchesQuery reports whether a discovery row matches the
+// caller's query. A paired surface (control:, file:) is a surface of another
+// server, not a server of its own: a query selects servers, so a paired row
+// matches only when the query names the surface itself and never on the host
+// name alone. Without this rule a host query returns the host and every
+// surface of that host, and the caller cannot tell them apart.
+func discoveryRowMatchesQuery(row map[string]any, query string) bool {
+	if query == "" {
+		return true
+	}
+	id := firstString(row, "server_id")
+	name := firstString(row, "name")
+	if !strings.Contains(strings.ToLower(id+" "+name), query) {
+		return false
+	}
+	paired, _ := row["paired"].(bool)
+	if !paired {
+		return true
+	}
+	if strings.EqualFold(id, query) || strings.EqualFold(name, query) {
+		return true
+	}
+	prefix := id
+	if index := strings.Index(id, ":"); index > 0 {
+		prefix = id[:index]
+	}
+	return prefix != "" && strings.Contains(query, strings.ToLower(prefix))
+}
+
 func compactDiscovery(raw, args map[string]any) map[string]any {
 	servers := make([]map[string]any, 0)
 	query := strings.ToLower(firstString(args, "query"))
@@ -595,7 +639,7 @@ func compactDiscovery(raw, args map[string]any) map[string]any {
 		if status != "" && firstString(server, "status") != status {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(firstString(server, "server_id")+" "+firstString(server, "name")), query) {
+		if !discoveryRowMatchesQuery(server, query) {
 			continue
 		}
 		entry := map[string]any{"server_id": server["server_id"], "status": server["status"]}
@@ -677,19 +721,12 @@ func outputRows(value any) []any {
 func compactFacadeTools(r *http.Request, full bool) []map[string]any {
 	tools := appsSDKToolsForRequest(r)
 	if full || requestAccessMode(r) == accessModeReadonly {
-		return tools
+		return withReadOnlyExecTool(r, withoutExecuteFacade(r, tools))
 	}
 	if profile, ok := AccessProfileFromRequest(r); ok && !containsString(profile.AllowedTools, "*") {
-		return tools
+		return withReadOnlyExecTool(r, withoutExecuteFacade(r, tools))
 	}
-	selected := make([]map[string]any, 0, 8)
-	for _, tool := range tools {
-		switch firstString(tool, "name") {
-		case "ui", "search", "discover", "schema", "exec", "job", "expand":
-			selected = append(selected, tool)
-		}
-	}
-	return selected
+	return nativeShortCatalogTools(r, tools)
 }
 
 func (s *Server) writeTokenSchema(w http.ResponseWriter, r *http.Request, args map[string]any, raw any) {

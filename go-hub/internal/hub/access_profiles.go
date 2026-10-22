@@ -44,16 +44,25 @@ type WorkspaceRef struct {
 // managed MCP client. Policy evaluation is intentionally implemented by the
 // later policy worker; this type only carries its stable inputs.
 type AccessProfile struct {
-	ID               string         `json:"id"`
-	Name             string         `json:"name"`
-	InstructionSetID string         `json:"instruction_set_id"`
-	AccessMode       string         `json:"access_mode"`
-	ApprovalMode     string         `json:"approval_mode"`
-	AllowedTargets   []string       `json:"allowed_targets"`
-	AllowedTools     []string       `json:"allowed_tools"`
-	WorkspaceRefs    []WorkspaceRef `json:"workspace_refs"`
-	Version          int64          `json:"version"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	InstructionSetID string           `json:"instruction_set_id"`
+	AccessMode       string           `json:"access_mode"`
+	ApprovalMode     string           `json:"approval_mode"`
+	AllowedTargets   []string         `json:"allowed_targets"`
+	AllowedTools     []string         `json:"allowed_tools"`
+	ToolRules        []AccessToolRule `json:"tool_rules,omitempty"`
+	WorkspaceRefs    []WorkspaceRef   `json:"workspace_refs"`
+	Version          int64            `json:"version"`
+	UpdatedAt        time.Time        `json:"updated_at"`
+}
+
+// AccessToolRule narrows one exact target/tool pair already allowed by the profile.
+type AccessToolRule struct {
+	Target   string   `json:"target"`
+	Tool     string   `json:"tool"`
+	Actions  []string `json:"actions,omitempty"`
+	ReadOnly bool     `json:"read_only,omitempty"`
 }
 
 type accessProfilesState struct {
@@ -61,14 +70,15 @@ type accessProfilesState struct {
 }
 
 type accessProfileRequest struct {
-	ID               string         `json:"id"`
-	Name             string         `json:"name"`
-	InstructionSetID string         `json:"instruction_set_id"`
-	AccessMode       string         `json:"access_mode"`
-	ApprovalMode     string         `json:"approval_mode"`
-	AllowedTargets   []string       `json:"allowed_targets"`
-	AllowedTools     []string       `json:"allowed_tools"`
-	WorkspaceRefs    []WorkspaceRef `json:"workspace_refs"`
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	InstructionSetID string           `json:"instruction_set_id"`
+	AccessMode       string           `json:"access_mode"`
+	ApprovalMode     string           `json:"approval_mode"`
+	AllowedTargets   []string         `json:"allowed_targets"`
+	AllowedTools     []string         `json:"allowed_tools"`
+	ToolRules        []AccessToolRule `json:"tool_rules,omitempty"`
+	WorkspaceRefs    []WorkspaceRef   `json:"workspace_refs"`
 }
 
 type clientBindingRequest struct {
@@ -105,7 +115,50 @@ func cloneAccessProfile(profile AccessProfile) AccessProfile {
 	profile.AllowedTargets = append([]string(nil), profile.AllowedTargets...)
 	profile.AllowedTools = append([]string(nil), profile.AllowedTools...)
 	profile.WorkspaceRefs = append([]WorkspaceRef(nil), profile.WorkspaceRefs...)
+	profile.ToolRules = append([]AccessToolRule(nil), profile.ToolRules...)
+	for i := range profile.ToolRules {
+		profile.ToolRules[i].Actions = append([]string(nil), profile.ToolRules[i].Actions...)
+	}
 	return profile
+}
+
+func normalizeAccessToolRules(rules []AccessToolRule) ([]AccessToolRule, error) {
+	if len(rules) > accessProfileMaxListItems {
+		return nil, errors.New("tool_rules has too many entries")
+	}
+	out := make([]AccessToolRule, len(rules))
+	seen := map[string]bool{}
+	for i, rule := range rules {
+		target, err := normalizeAccessProfileString(rule.Target, "tool_rules.target", true)
+		if err != nil {
+			return nil, err
+		}
+		tool, err := normalizeAccessProfileString(rule.Tool, "tool_rules.tool", true)
+		if err != nil {
+			return nil, err
+		}
+		if rule.ReadOnly && (target == "*" || tool == "*") {
+			return nil, errors.New("read_only tool rules require an exact target and tool")
+		}
+		key := target + "\x00" + tool
+		if seen[key] {
+			return nil, errors.New("tool_rules contain a duplicate target/tool pair")
+		}
+		seen[key] = true
+		actions, err := normalizeAccessProfileList(rule.Actions, "tool_rules.actions")
+		if err != nil {
+			return nil, err
+		}
+		normalized := AccessToolRule{Target: target, Tool: tool, Actions: actions, ReadOnly: rule.ReadOnly}
+		// A rule may narrow a known write down to one of its read actions, but
+		// it may never certify a known write as read-only. The classification
+		// tables live in access_policy.go and are the single source of truth.
+		if ruleDeclaresKnownWrite(normalized) {
+			return nil, fmt.Errorf("tool_rules rule for %q/%q cannot be read_only: %s", target, tool, ruleWriteRefusal(normalized))
+		}
+		out[i] = normalized
+	}
+	return out, nil
 }
 
 func requestWithAccessProfile(r *http.Request, profile AccessProfile) *http.Request {
@@ -441,6 +494,10 @@ func normalizeAccessProfile(profile AccessProfile) (AccessProfile, error) {
 	if err != nil {
 		return AccessProfile{}, err
 	}
+	toolRules, err := normalizeAccessToolRules(profile.ToolRules)
+	if err != nil {
+		return AccessProfile{}, err
+	}
 	workspaceRefs, err := normalizeWorkspaceRefs(profile.WorkspaceRefs)
 	if err != nil {
 		return AccessProfile{}, err
@@ -452,6 +509,7 @@ func normalizeAccessProfile(profile AccessProfile) (AccessProfile, error) {
 	profile.AllowedTargets = allowedTargets
 	profile.AllowedTools = allowedTools
 	profile.WorkspaceRefs = workspaceRefs
+	profile.ToolRules = toolRules
 	return profile, nil
 }
 
@@ -555,6 +613,7 @@ func (s *Server) adminAccessProfile(w http.ResponseWriter, r *http.Request) {
 			ApprovalMode:     strings.ToLower(strings.TrimSpace(req.ApprovalMode)),
 			AllowedTargets:   req.AllowedTargets,
 			AllowedTools:     req.AllowedTools,
+			ToolRules:        req.ToolRules,
 			WorkspaceRefs:    req.WorkspaceRefs,
 			Version:          1,
 			UpdatedAt:        time.Now().UTC(),

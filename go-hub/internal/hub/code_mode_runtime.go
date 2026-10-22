@@ -50,7 +50,7 @@ const (
 	// An object envelope preserves primitive and array results across the
 	// QuickJS module boundary. Logs use the bounded host bridge so they cannot
 	// be silently clipped or dropped.
-	codeModeWrapperPrefix = "const __safeJSON=globalThis.__codeModeSafeJSON;globalThis.console=Object.freeze({log:(...a)=>globalThis.__codeModeLog(__safeJSON.stringify(a,(_,v)=>typeof v==='bigint'?v.toString():v))});const file=target=>{if(!target.startsWith('file:'))target='file:'+target;const f=(kind,path,opts={})=>globalThis.__codeModeFileCall(kind,target,path,opts);for(const k of ['ls','read','create','replace','batchEdit','checkpoint'])f[k]=(path,opts={})=>f(k,path,opts);f.readMany=async(paths,opts={})=>{const rows=[];for(const p of paths)rows.push(await f('read',p,opts));return rows;};return Object.freeze(f);};export default {value: await (async () => {\n"
+	codeModeWrapperPrefix = "const __safeJSON=globalThis.__codeModeSafeJSON;globalThis.console=Object.freeze({log:(...a)=>globalThis.__codeModeLog(__safeJSON.stringify(a,(_,v)=>typeof v==='bigint'?v.toString():v))});const file=target=>{if(!target.startsWith('file:'))target='file:'+target;const f=(kind,path,opts={})=>globalThis.__codeModeFileCall(kind,target,path,opts);for(const k of ['ls','read','create','replace','batchEdit','checkpoint'])f[k]=(path,opts={})=>f(k,path,opts);f.readMany=async(paths,opts={})=>{const rows=[];for(const p of paths)rows.push(await f('read',p,opts));return rows;};f.readAll=async(path,opts={})=>{const cap=opts.max_bytes??2097152;if(!Number.isInteger(cap)||cap<1||cap>8388608)throw Error('readAll max_bytes must be 1..8388608');const parts=[];let start=1,bytes=0,hash='',last;for(;;){const r=await f('read',path,{start_line:start,end_line:start+2499,max_bytes:262144});if(!r.text_exact||!r.source_sha256)throw Error('Exact readAll requires an updated file node');if(r.file_bytes>cap)throw Error('File exceeds readAll byte budget');if(hash&&hash!==r.source_sha256)throw Error('File changed during readAll');hash=r.source_sha256;parts.push(r.text);bytes+=r.bytes;last=r;if(r.line_count===0||r.end_line>=r.line_count)break;if(r.end_line<start)throw Error('A line exceeds the bounded file read size');start=r.end_line+1;}if(bytes!==last.file_bytes)throw Error('Incomplete full-file read');return {path,text:parts.join(''),bytes,file_bytes:bytes,line_count:last.line_count,source_sha256:hash,text_exact:true,truncated:false};};f.index=async(path,opts={})=>{const r=await f.readAll(path,{max_bytes:opts.max_bytes??2097152});const d=await index(r.text,{name:opts.name??path,target,tool:'file_editor'});return {...d,source_sha256:r.source_sha256};};return Object.freeze(f);};export default {value: await (async () => {\n"
 	codeModeWrapperSuffix = "\n})()};\n"
 )
 
@@ -227,8 +227,15 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 	if evalErr != nil {
 		return nil, bridge.annotate(bridge.classify(evalErr, elapsed))
 	}
-	if len(value) > limits.maxOut+64 {
-		return nil, bridge.annotate(codeModeFailure("output_too_large", "serialized result exceeds the configured output budget"))
+	// The envelope is decoded before the output budget is applied: an oversized
+	// result is stored in full and replaced by a small descriptor, instead of
+	// failing the run and losing what the script produced.
+	//
+	// A result that cannot be stored cannot be returned either, so a very
+	// large envelope is refused before it is decoded. The failure is honest
+	// about the operations that already executed.
+	if len(value) > 2*contentMaxSourceBytes {
+		return nil, bridge.annotate(&codeModeError{code: "content_storage_limit", detail: fmt.Sprintf("the serialized result is %d bytes and cannot be stored; the storage limit is %d bytes", len(value), contentMaxSourceBytes), call: bridge.calls(), receipt: bridge.lastReceiptSnapshot()})
 	}
 	decoded, convErr := decodeCodeModeValue(value)
 	if convErr != nil {
@@ -245,10 +252,132 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 		return nil, bridge.annotate(codeModeFailure("invalid_return", "returned value cannot be serialized as JSON"))
 	}
 	logsJSON, _ := json.Marshal(logs)
-	if len(encoded)+len(logsJSON) > limits.maxOut {
-		return nil, bridge.annotate(codeModeFailure("output_too_large", fmt.Sprintf("serialized result and logs use %d bytes; limit is %d", len(encoded)+len(logsJSON), limits.maxOut)))
+	if len(encoded)+len(logsJSON) <= limits.maxOut {
+		// A small result is returned exactly as before: no descriptor and no
+		// store write.
+		return &codeModeResult{result: decoded, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
 	}
-	return &codeModeResult{result: decoded, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
+	// The result does not fit the output budget. It is stored in full and the
+	// model receives a small descriptor instead. The script is never re-run.
+	if bridge.readOnly {
+		// A read-only run must not write into the user's stored sources, so it
+		// cannot use the store to make an oversized result fit. The failure is
+		// honest about the operations that already executed.
+		return nil, bridge.annotate(&codeModeError{code: "output_too_large", detail: fmt.Sprintf("the serialized result and logs use %d bytes; limit is %d. A read-only run cannot store the result", len(encoded)+len(logsJSON), limits.maxOut), call: bridge.calls(), receipt: bridge.lastReceiptSnapshot()})
+	}
+	descriptor, saveErr := s.saveCodeModeResult(r, bridge, decoded, encoded)
+	if saveErr != nil {
+		// A storage failure is reported honestly, together with the number of
+		// operations that already executed.
+		return nil, bridge.annotate(&codeModeError{code: "content_storage_limit", detail: saveErr.Error(), call: bridge.calls(), receipt: bridge.lastReceiptSnapshot()})
+	}
+	descriptorJSON, err := json.Marshal(descriptor)
+	if err != nil {
+		return nil, bridge.annotate(codeModeFailure("invalid_return", "the saved result descriptor cannot be serialized"))
+	}
+	if len(descriptorJSON)+len(logsJSON) > limits.maxOut {
+		// The descriptor and the logs together still have to fit the budget.
+		// The saved source is named, so the result is not lost.
+		return nil, bridge.annotate(&codeModeError{code: "output_too_large", detail: fmt.Sprintf("the saved result descriptor and the logs use %d bytes; limit is %d", len(descriptorJSON)+len(logsJSON), limits.maxOut), call: bridge.calls(), receipt: map[string]any{"source": firstString(descriptor, "source")}})
+	}
+	return &codeModeResult{result: descriptor, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
+}
+
+// codeModeResultSourceName is the name of a result that was stored because it
+// did not fit the output budget.
+const codeModeResultSourceName = "exec-result"
+
+// saveCodeModeResult stores an oversized result in full and returns the
+// descriptor the model receives instead of the result itself.
+//
+// The stored bytes are the whole result: a string is stored as text, every
+// other value as its JSON encoding. Nothing is truncated.
+//
+// Saving alone creates no search index. The stored source starts unindexed
+// and the first search over it builds the index, so a large result that is
+// only kept does not pay for an index nobody searches.
+//
+// The source is bound to every target/tool the run read, so a right that is
+// withdrawn from any of them withdraws the saved result too.
+func (s *Server) saveCodeModeResult(r *http.Request, bridge *codeModeBridge, decoded any, encoded []byte) (map[string]any, error) {
+	principal := operationPrincipal(r)
+	if principal == "" {
+		return nil, errors.New("an authenticated principal is required to store a result")
+	}
+	store, err := s.contentStoreForExec()
+	if err != nil {
+		return nil, err
+	}
+	text, format, complete := codeModeResultPayload(decoded, encoded)
+	if !complete {
+		// The script returned a tail. The server may still know the complete
+		// output of the operation that produced it.
+		jobID, target := bridge.partialSource()
+		if output, ok := s.codeModeConfirmedFullOutput(r, jobID, target); ok {
+			text, format, complete = output.Text, "stdout", true
+		}
+	}
+	origin := bridge.contentOrigins()
+	var source ContentSource
+	if complete {
+		source, err = store.SaveFormatted(principal, codeModeResultSourceName, origin, format, text)
+	} else {
+		// The stored bytes are only a part. The marker is permanent.
+		source, err = store.SaveIncompleteFormatted(principal, codeModeResultSourceName, origin, format, text)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"saved":      true,
+		"source":     source.ID,
+		"name":       source.Name,
+		"bytes":      source.Bytes,
+		"format":     source.Format,
+		"complete":   source.Complete,
+		"indexed":    source.Indexed,
+		"chunks":     source.Chunks,
+		"created_at": source.CreatedAt.UTC().Format(time.RFC3339),
+		"expires_at": source.ExpiresAt.UTC().Format(time.RFC3339),
+		"origin":     contentOriginDescription(source.Origin),
+		"read":       map[string]any{"call": "mcp.content.read", "args": map[string]any{"source": source.ID, "chunk_id": 1}},
+		"search":     map[string]any{"call": "mcp.content.search", "args": map[string]any{"source": source.ID, "query": "<term>"}},
+		"index":      map[string]any{"call": "mcp.content.indexSource", "args": map[string]any{"source": source.ID}},
+		"note":       "The result did not fit the output budget and was stored in full. It was not re-run. Read it with mcp.content.read, find something in it with mcp.content.search (the first search builds the index), or build the index now with mcp.content.indexSource.",
+	}, nil
+}
+
+// codeModeResultPayload returns the text that is stored for a returned value.
+//
+// A string is stored as it is. Every other value is stored as its JSON
+// encoding, so nothing of the result is lost. A returned tool result that is
+// only a tail is recognised, because a tail must never be stored as if it
+// were the whole result.
+func codeModeResultPayload(value any, encoded []byte) (string, string, bool) {
+	if text, ok := value.(string); ok {
+		return text, "text", true
+	}
+	if text, format, tail := codeModeResultTail(value); tail {
+		return text, format, false
+	}
+	return string(encoded), "json", true
+}
+
+// codeModeResultTail reports whether a returned value is only a tail of a
+// larger result, and which text it carries.
+func codeModeResultTail(value any) (string, string, bool) {
+	m := mapValue(value)
+	if len(m) == 0 {
+		return "", "", false
+	}
+	text := firstString(m, "stdout")
+	if text == "" {
+		return "", "", false
+	}
+	if truthy(m["_spilled"]) || intFromAny(m["stdout_bytes"]) > len([]byte(text)) {
+		return text, "stdout", true
+	}
+	return "", "", false
 }
 
 // newCodeModeRuntime builds an isolated runtime with no host capabilities.

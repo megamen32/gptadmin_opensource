@@ -35,7 +35,7 @@ const __schemaMCP = globalThis.__codeModeSchema;
 const __searchMCP = globalThis.__codeModeSearch;
 const __facadeMCP = globalThis.__codeModeFacade;
 const __fileMCP = globalThis.__codeModeFile;
-const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } return __callMCP(v); };
+const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } return __callMCP(v); };
 const search = (query, opts={}) => (typeof opts.source==='string' || opts.scope==='content') ? __contentMCP('search',query,opts) : __searchMCP(query,opts);
 const __contentMCP = globalThis.__codeModeContent;
 const __nativeJSONStringify = JSON.stringify.bind(JSON);
@@ -57,6 +57,8 @@ globalThis.mcp = Object.freeze({
   }),
   content: Object.freeze({
     index: (text,opts={}) => __contentMCP('index',text,opts),
+    indexSource: (source,opts={}) => __contentMCP('indexSource',source,opts),
+    status: (source,opts={}) => __contentMCP('status',source,opts),
     search: (query,opts={}) => __contentMCP('search',query,opts),
     read: (source,chunk_id,opts={}) => __contentMCP('read',source,{chunk_id,...opts}),
     delete: (source) => __contentMCP('delete',source,{}),
@@ -84,12 +86,21 @@ type codeModeBridge struct {
 	ctx      context.Context
 	deadline time.Time
 	limits   codeModeLimits
+	readOnly bool
 
 	mu          sync.Mutex
 	callCount   int
 	logs        []any
 	logBytes    int
 	lastReceipt map[string]any
+	// origins records every target/tool this run read. A result derived from
+	// the run is bound to all of them, not only to the last call, so a right
+	// that is withdrawn from any of them also withdraws the derived result.
+	origins []string
+	// partialJob is the job of the last call that returned only a tail. It is
+	// the handle to the confirmed full output of that operation.
+	partialJob    string
+	partialTarget string
 	// fatal is set once, by the first nested call that did not complete. Later
 	// bridge calls are refused even if the script catches the exception, and the
 	// whole run ends as failed. A script cannot acknowledge a failed or pending
@@ -105,7 +116,7 @@ type codeModeFatal struct {
 }
 
 func newCodeModeBridge(s *Server, r *http.Request, ctx context.Context, deadline time.Time, limits codeModeLimits) *codeModeBridge {
-	return &codeModeBridge{server: s, request: r, ctx: ctx, deadline: deadline, limits: limits}
+	return &codeModeBridge{server: s, request: r, ctx: ctx, deadline: deadline, limits: limits, readOnly: readOnlyExecRequest(r)}
 }
 
 func (b *codeModeBridge) calls() int {
@@ -118,6 +129,58 @@ func (b *codeModeBridge) fatalReceipt() *codeModeFatal {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.fatal
+}
+
+// recordOrigin remembers one source this run read.
+//
+// Every read is recorded, not only the last one: a result that is derived from
+// the whole run must be revoked together with any of its sources.
+func (b *codeModeBridge) recordOrigin(target, tool string) {
+	if target == "" || tool == "" {
+		return
+	}
+	origin := contentOriginSingle(target, tool)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, existing := range b.origins {
+		if existing == origin {
+			return
+		}
+	}
+	b.origins = append(b.origins, origin)
+}
+
+// contentOrigins returns the origin encoding for everything this run read.
+func (b *codeModeBridge) contentOrigins(extra ...string) string {
+	b.mu.Lock()
+	origins := append([]string(nil), b.origins...)
+	b.mu.Unlock()
+	return contentOriginMerge(append(origins, extra...)...)
+}
+
+// lastReceiptSnapshot returns a copy of the receipt of the last completed
+// nested call.
+func (b *codeModeBridge) lastReceiptSnapshot() map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return cloneMap(b.lastReceipt)
+}
+
+// recordPartialSource remembers the job of a call that returned only a tail.
+func (b *codeModeBridge) recordPartialSource(jobID, target string) {
+	if jobID == "" {
+		return
+	}
+	b.mu.Lock()
+	b.partialJob, b.partialTarget = jobID, target
+	b.mu.Unlock()
+}
+
+// partialSource returns the job of the last call that returned only a tail.
+func (b *codeModeBridge) partialSource() (string, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.partialJob, b.partialTarget
 }
 
 // fail records the first non-completing outcome. Later failures never overwrite
@@ -206,6 +269,9 @@ func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
 		args["query"] = query
 	}
 	request := b.request.WithContext(b.ctx)
+	if b.readOnly && firstString(args, "target") != "" && !profileAllowsTarget(request, firstString(args, "target")) {
+		return nil, b.fail("forbidden", "access profile denies this target", nil)
+	}
 	if err := authorizeFacadeCall(request, "search", args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
@@ -231,6 +297,9 @@ func (b *codeModeBridge) facade(this *qjs.This) (*qjs.Value, error) {
 		return nil, b.fail("invalid_arguments", "only job and expand facade helpers are available", nil)
 	}
 	request := b.request.WithContext(b.ctx)
+	if b.readOnly && name == "job" && (!profileAllowsTarget(request, "hub") || !profileAllowsTool(request, "job")) {
+		return nil, b.fail("forbidden", "access profile denies this facade", nil)
+	}
 	if err := authorizeFacadeCall(request, name, args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
@@ -381,6 +450,9 @@ func (b *codeModeBridge) discover(this *qjs.This) (*qjs.Value, error) {
 		args["query"] = query
 	}
 	request := b.request.WithContext(b.ctx)
+	if b.readOnly && !profileAllowsTarget(request, "hub") {
+		return nil, b.fail("forbidden", "access profile denies this target", nil)
+	}
 	if err := authorizeFacadeCall(request, "discover", args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
@@ -420,6 +492,9 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 	// schema contract metadata are exactly what a direct execute would receive.
 	// The run context is applied so an aborted caller stops the schema path.
 	schemaRequest := b.request.WithContext(b.ctx)
+	if b.readOnly && !profileAllowsTarget(schemaRequest, target) {
+		return nil, b.fail("forbidden", "access profile denies this target", nil)
+	}
 	schemaArgs := map[string]any{"target": target, "tool": tool, "detail": "compact"}
 	if err := authorizeFacadeCall(schemaRequest, "schema", schemaArgs); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
@@ -513,6 +588,9 @@ func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Valu
 		target = firstString(resolved, "target")
 		tool = firstString(resolved, "tool")
 	}
+	if b.readOnly && (truthy(args["__indexResult"]) || truthy(args["index"])) {
+		return nil, b.fail("forbidden", "read-only execution cannot create persistent content sources", nil)
+	}
 	if target == "" || tool == "" {
 		return nil, b.fail("invalid_arguments", "mcp.call requires ref, or target and tool", nil)
 	}
@@ -546,9 +624,19 @@ func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Valu
 	if payload["ok"] != true {
 		// Stop the run on the first non-completing call. The script still sees
 		// the exception, but no further call can succeed.
-		b.fail(firstString(payload, "status"), firstString(payload, "detail"), payload)
+		//
+		// A refused call is a policy refusal, not a runtime fault: it is
+		// reported as forbidden so the caller can tell the two apart.
+		code := firstString(payload, "status")
+		if intFromAny(payload["http_status"]) == http.StatusForbidden {
+			code = "forbidden"
+		}
+		b.fail(code, firstString(payload, "detail"), payload)
 		return b.jsonValue(this, payload), nil
 	}
+	// The call succeeded, so its target/tool is a source of everything this
+	// run derives from it.
+	b.recordOrigin(target, tool)
 	usable := codeModeUsableValueForTool(response, target, tool)
 	if strings.HasPrefix(target, "file:") && tool == "file_editor" {
 		usable = normalizeCodeModeFileEditor(usable)
@@ -565,16 +653,67 @@ func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Valu
 	b.mu.Lock()
 	b.lastReceipt = receipt
 	b.mu.Unlock()
+	// A tail is not the full log. Remember the job, so the confirmed full
+	// output can be used instead of the tail when this result is stored.
+	if strings.HasPrefix(target, "shell:") && tool == "shell_exec" {
+		if _, _, partial, _ := contentTextForIndex(usable, target, tool, ""); partial {
+			b.recordPartialSource(firstString(receipt, "job_id", "task_id"), target)
+		}
+	}
 	if indexResult {
+		if b.readOnly {
+			return nil, b.fail("forbidden", "read-only execution cannot create persistent content sources", receipt)
+		}
 		text, format, partial, extractErr := contentTextForIndex(usable, target, tool, firstString(args, "__indexText"))
 		if extractErr != nil {
 			return nil, b.fail("content_index_failed", extractErr.Error(), receipt)
 		}
+		complete := true
 		if partial {
-			return nil, b.fail("content_index_partial", "partial or spilled tool output cannot be indexed without an explicit complete read", receipt)
+			// The tool returned only a tail. The server may still know the
+			// complete output of this exact operation, so the confirmed source
+			// is used instead of making the caller hunt for a path.
+			jobID := firstString(receipt, "job_id", "task_id")
+			output, confirmed := b.server.codeModeConfirmedFullOutput(b.request, jobID, target)
+			if confirmed {
+				text, format, partial, complete = output.Text, "stdout", false, true
+			} else {
+				// There is no confirmed full source. A tail is never indexed as
+				// if it were the full log.
+				reason := output.Reason
+				if reason == "" {
+					reason = "the tool returned only a part of its output"
+				}
+				part := map[string]any{
+					"complete": false,
+					"reason":   reason,
+					"format":   format,
+					"bytes":    len([]byte(text)),
+				}
+				if jobID != "" {
+					part["job_id"] = jobID
+				}
+				if !truthy(args["__indexAllowPartial"]) {
+					failed := cloneMap(receipt)
+					for key, value := range part {
+						failed[key] = value
+					}
+					return nil, b.fail("content_index_partial", "partial or spilled tool output cannot be indexed without an explicit complete read: "+reason, failed)
+				}
+				// The caller explicitly agreed to store a part. The
+				// incompleteness marker is permanent.
+				complete = false
+				receipt = cloneMap(receipt)
+				for key, value := range part {
+					receipt[key] = value
+				}
+			}
 		}
 		name := firstString(args, "__indexName")
-		meta, indexErr := b.indexContent(text, name, target+"\x00"+tool, format)
+		// The indexed text is bound to this call and to every other source the
+		// run read, so withdrawing any of them withdraws the saved text too.
+		origin := contentOriginMerge(contentOriginSingle(target, tool), b.contentOrigins())
+		meta, indexErr := b.saveContent(text, name, origin, format, true, complete)
 		if indexErr != nil {
 			return nil, b.fail("content_index_failed", indexErr.Error(), receipt)
 		}
@@ -664,12 +803,12 @@ func codeModeOperationReceipt(response map[string]any, target, tool string, payl
 // dispatch mirrors the ordinary execute path for one nested call, in the same
 // order, so authorization can never be weaker than a direct call.
 func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string, callArgs, contract map[string]any, timeout time.Duration, idempotencyKey string) (map[string]any, int) {
-	if err := authorizeToolCall(callRequest, target, tool); err != nil {
-		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
-	}
 	selected, status, detail := b.server.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
 		return map[string]any{"status": "failed", "error": detail}, status
+	}
+	if err := authorizeToolAction(callRequest, selected, tool, callArgs); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}
 	contractArgs := map[string]any{"target": selected, "tool": tool, "arguments": callArgs}
 	for key, value := range contract {

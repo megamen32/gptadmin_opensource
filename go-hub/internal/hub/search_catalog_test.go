@@ -38,7 +38,11 @@ func TestSQLiteFTSSearchNamesDescriptionsLabelsAndPunctuation(t *testing.T) {
 	}
 }
 
-func TestPublicFacadeRetiresDirectExecute(t *testing.T) {
+// The direct execute facade is published again: the owner un-banned the
+// direct API, and a client that loads the catalog must be able to see it.
+// The compat catalog mode keeps the working code mode (exec) and the search
+// facade next to it, and the retired code_exec alias stays absent.
+func TestPublicFacadePublishesDirectExecute(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
 	t.Cleanup(func() { _ = s.Close() })
 	listed := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
@@ -47,20 +51,19 @@ func TestPublicFacadeRetiresDirectExecute(t *testing.T) {
 	for _, item := range tools {
 		names[firstString(mapValue(item), "name")] = true
 	}
-	if names["execute"] || names["callMcpTool"] || names["call_mcp_tool"] || !names["search"] || !names["exec"] {
+	if !names["execute"] || names["callMcpTool"] || names["call_mcp_tool"] || !names["search"] || !names["exec"] || names["code_exec"] {
 		t.Fatalf("public tool list has old/new facade mismatch: %v", names)
 	}
 	fullNames := map[string]bool{}
 	for _, tool := range appsSDKTools() {
 		fullNames[firstString(tool, "name")] = true
 	}
-	if fullNames["execute"] || !fullNames["search"] || !fullNames["exec"] {
-		t.Fatalf("canonical facade list has old/new mismatch: %v", fullNames)
+	if !fullNames["execute"] {
+		t.Fatalf("canonical facade list has no direct execute: %v", fullNames)
 	}
-	called := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"demo"}}}`)
-	err := firstString(mapValue(called["error"]), "message")
-	if !strings.Contains(err, "direct tool execution was removed") || !strings.Contains(err, "exec") {
-		t.Fatalf("stale direct call lacked migration error: %#v", called)
+	called := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"settings_schema","args":{}}}}`)
+	if called["error"] != nil || firstString(mapValue(mapValue(called["result"])["structuredContent"]), "status") != "completed" {
+		t.Fatalf("unadvertised direct safe read failed: %#v", called)
 	}
 	legacy := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute","arguments":{"code":"return {answer:42};"}}}`)
 	legacyValue := mapValue(mapValue(legacy["result"])["structuredContent"])
@@ -81,7 +84,7 @@ func TestPublicFacadeRetiresDirectExecute(t *testing.T) {
 	if modernRec.Code != 200 || modern["error"] != nil || intFromAny(mapValue(modernValue["result"])["answer"]) != 43 {
 		t.Fatalf("cached execute header was not canonicalized before routing validation: %v", modern)
 	}
-	for _, args := range []string{`{"code":"return 1;","target":"hub","tool":"demo"}`, `{"code":"return 1;","args":{}}`, `{"code":"return 1;","background":true}`, `{"target":"hub","tool":"demo","args":{}}`} {
+	for _, args := range []string{`{"code":"return 1;","target":"hub","tool":"demo"}`, `{"code":"return 1;","args":{}}`, `{"code":"return 1;","background":true}`} {
 		body := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"execute","arguments":` + args + `}}`
 		bad := postMCPRPC(t, s, body)
 		if bad["error"] == nil {
@@ -91,6 +94,12 @@ func TestPublicFacadeRetiresDirectExecute(t *testing.T) {
 	reader := requestWithAuthClaims(httptest.NewRequest("POST", "/mcp", nil), map[string]any{"sub": "reader", "client_id": "reader", "scope": "gptadmin.read", "access_mode": accessModeReadonly})
 	if err := authorizeToolCall(reader, "hub", "exec"); err == nil {
 		t.Fatal("legacy alias granted a read-only caller exec")
+	}
+	if err := authorizeFacadeCall(reader, "ro", nil); err != nil {
+		t.Fatalf("readonly scope cannot use ro: %v", err)
+	}
+	if err := authorizeFacadeCall(reader, "exec", nil); err == nil {
+		t.Fatal("readonly scope gained exec")
 	}
 }
 

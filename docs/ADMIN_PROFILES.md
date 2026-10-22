@@ -24,6 +24,57 @@ selected set affect subsequent MCP initialization and the startup resource
 without restarting Hub. Instruction text remains guidance only: permissions,
 approvals and authentication are authoritative.
 
+## Fine-grained tool rules
+
+A profile may narrow its `allowed_targets` and `allowed_tools` further with
+`tool_rules`. Rules only narrow: a rule never grants a target or a tool that
+the profile does not already allow.
+
+```json
+{
+  "target": "file:admin-node-100",
+  "tool": "file_editor",
+  "actions": ["view"],
+  "read_only": true
+}
+```
+
+- `target` and `tool` name one canonical target/tool pair. `*` is accepted as a
+  wildcard for either field, and a wildcard pair may not claim `read_only`.
+- `actions` restricts the tool to the listed `action` values. A missing action,
+  a non-string action and an action outside the list are all refused. A rule
+  without `actions` does not restrict the action.
+- `read_only` marks the operation as a read. It may only be claimed for
+  operations that really are reads: a known write operation (`shell_exec`,
+  `mcp_call`, `mcp_request`, `fleetExec`) and a write action of a mixed tool
+  (`file_editor` `create`, `file_checkpoint` `restore`, `mcp_manage` `restart`)
+  are rejected when a rule claims them safe. The check happens when the profile
+  is written, not only when it is used.
+
+When a profile declares rules, a business call that is not named by a rule is
+denied. The routing facades `ro`, `exec`, `search`, `schema`, `discover`, `job`
+and `expand` keep their own facade permission, and `execute` remains a routing
+facade whose resolved target/tool is checked against the rules in turn — so a
+fine-grained profile stays usable without becoming unrestricted.
+
+The same args-aware check applies to every execution path: the JS bridge, the
+direct `execute` facade, the per-agent MCP endpoint, the Actions/relay route
+and the virtual MCP route. A rule is always evaluated against the canonical
+target and tool, after aliases and `ref` resolution.
+
+Approval and the bounded-autonomous budget follow the real operation, not the
+tool name. Reading `file_editor` with `action=view` does not consume write
+budget, and a script container (`exec`, `ro`) never consumes a write approval
+for the whole script — every nested operation is checked on its own target,
+tool and action.
+
+Search and schema listings publish the restriction with the tool
+(`allowed_actions`, `read_only_rule`) instead of hiding a mixed tool, and the
+restriction is enforced strictly at call time.
+
+Rules are persisted with the profile, deep-copied on every copy path, and the
+profile version is incremented on every update that changes them.
+
 ## Network Tunnel capability boundary
 
 The future Network Tunnel is an opt-in capability, not a consequence of

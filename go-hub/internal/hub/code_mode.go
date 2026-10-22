@@ -42,6 +42,8 @@ func codeModeInputSchema() map[string]any {
 	}
 }
 
+func readonlyExecInputSchema() map[string]any { return codeModeInputSchema() }
+
 func codeModeOutputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -83,12 +85,20 @@ func codeModeOutputSchema() map[string]any {
 // inside executeMCPTool before this runs. Each nested mcp.call repeats that
 // same path with the same request, so no call can exceed the caller's rights.
 func (s *Server) callCodeModeTool(r *http.Request, args map[string]any) (map[string]any, int) {
+	return s.callCodeModeToolMode(r, args, false)
+}
+
+func (s *Server) callCodeModeToolMode(r *http.Request, args map[string]any, readonly bool) (map[string]any, int) {
 	// code_mode is reachable from more than one caller (the execute facade, the
 	// Hub bridge, a direct hub tool dispatch). Each nested call re-checks the
 	// caller's policy, so the tool's own entry must also clear the caller's
 	// target/tool authorization and read-only boundary before any script runs.
 	if r != nil {
-		if err := authorizeToolCall(r, "hub", codeModeTool); err != nil {
+		entryTool := codeModeTool
+		if readonly {
+			entryTool = "ro"
+		}
+		if err := authorizeToolCall(r, "hub", entryTool); err != nil {
 			return codeModeFailed("forbidden", err.Error(), 0), http.StatusForbidden
 		}
 	}
@@ -104,6 +114,9 @@ func (s *Server) callCodeModeTool(r *http.Request, args map[string]any) (map[str
 		// No request means no caller identity. Fail closed instead of running a
 		// script with a synthesized privileged context.
 		return codeModeFailed("unauthenticated", "code_mode requires an authenticated caller", 0), http.StatusUnauthorized
+	}
+	if readonly {
+		r = requestWithReadOnlyExec(r)
 	}
 	run, runErr := s.runCodeMode(r.Context(), r, code, limits)
 	if runErr != nil {
@@ -156,7 +169,7 @@ func codeModeStatusFor(code string) int {
 		return http.StatusBadRequest
 	case "recursive_call_denied", "capability_denied", "forbidden":
 		return http.StatusForbidden
-	case "timeout", "memory_limit", "stack_limit", "call_limit_exceeded", "busy", "output_too_large":
+	case "timeout", "memory_limit", "stack_limit", "call_limit_exceeded", "busy", "output_too_large", "content_storage_limit":
 		return http.StatusTooManyRequests
 	case "unauthenticated", "reference_unavailable", "approval_required", "target_unavailable", "discover_unavailable", "schema_unavailable", "cancelled":
 		return http.StatusForbidden

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,11 @@ func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes in
 	if err != nil {
 		return nil, err
 	}
+	sourceHash := ""
+	if rawView {
+		sum := sha256.Sum256(raw)
+		sourceHash = fmt.Sprintf("%x", sum)
+	}
 	content := normalizeLF(string(raw))
 	lines := logicalLines(content)
 	if startLine <= 0 {
@@ -108,7 +114,7 @@ func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes in
 	}
 	if len(lines) == 0 {
 		if rawView {
-			return mcpText("", map[string]any{"ok": true, "action": "view", "path": path, "text": "", "text_exact": true, "bytes": 0, "file_bytes": 0, "line_count": 0, "line_ids": []string{}, "start_line": 1, "end_line": 0, "truncated": false}), nil
+			return mcpText("", map[string]any{"ok": true, "action": "view", "path": path, "text": "", "text_exact": true, "source_sha256": sourceHash, "bytes": 0, "file_bytes": 0, "line_count": 0, "line_ids": []string{}, "start_line": 1, "end_line": 0, "truncated": false}), nil
 		}
 		return mcpText("[empty file]", map[string]any{"ok": true, "action": "view", "path": path, "line_count": 0, "view": "[empty file]", "truncated": false}), nil
 	}
@@ -152,7 +158,7 @@ func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes in
 			}
 		}
 		partial := truncated || startLine > 1
-		return mcpText(selected, map[string]any{"ok": true, "action": "view", "path": path, "text": selected, "text_exact": true, "bytes": len(selected), "file_bytes": len(raw), "line_count": len(lines), "line_ids": ids, "start_line": startLine, "end_line": last, "truncated": partial}), nil
+		return mcpText(selected, map[string]any{"ok": true, "action": "view", "path": path, "text": selected, "text_exact": true, "source_sha256": sourceHash, "bytes": len(selected), "file_bytes": len(raw), "line_count": len(lines), "line_ids": ids, "start_line": startLine, "end_line": last, "truncated": partial}), nil
 	}
 	return mcpText(view, map[string]any{
 		"ok": true, "action": "view", "path": path, "line_count": len(lines),

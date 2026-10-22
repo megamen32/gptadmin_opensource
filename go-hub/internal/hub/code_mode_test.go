@@ -31,6 +31,42 @@ func codeModeRun(t *testing.T, s *Server, r *http.Request, args map[string]any) 
 	return s.callCodeModeTool(r, args)
 }
 
+func TestReadOnlyExecCeilingAndStickyFailure(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	ro := func(code string) (map[string]any, int) {
+		return s.callCodeModeToolMode(r, map[string]any{"code": code}, true)
+	}
+	good, status := ro("const a=[2,1]; a.sort(); return {sum:a[0]+a[1], d:await mcp.call('hub','settings_schema',{})};")
+	if status != http.StatusOK || firstString(good, "status") != "completed" {
+		t.Fatalf("read-only aggregation failed: %v", good)
+	}
+	for _, code := range []string{
+		"try { await mcp.call('shell:fixture','shell_exec',{cmd:'echo denied'}); } catch(e) {} return await mcp.call('hub','settings_schema',{});",
+		"try { await mcp.call('file:fixture','file_editor',{action:'create',path:'/tmp/ro-denied',content:'x'}); } catch(e) {} return 1;",
+		"try { await mcp.call('control:fixture','mcp_manage',{action:'restart'}); } catch(e) {} return 1;",
+		"try { await index('persistent'); } catch(e) {} return 1;",
+	} {
+		got, st := ro(code)
+		if st == http.StatusOK || firstString(got, "status") == "completed" {
+			t.Fatalf("read-only ceiling allowed/caught denied call: %v", got)
+		}
+	}
+}
+
+func TestAccessProfileToolRulesExactPairsAndActions(t *testing.T) {
+	r := httptest.NewRequest("POST", "/mcp", nil)
+	r = requestWithAccessProfile(r, AccessProfile{ID: "rules", AccessMode: accessModeFull, AllowedTargets: []string{"service-a", "service-b"}, AllowedTools: []string{"inspect", "edit"}, ToolRules: []AccessToolRule{{Target: "service-a", Tool: "inspect", Actions: []string{"view"}}, {Target: "service-b", Tool: "edit", Actions: []string{"apply"}}}})
+	if err := authorizeToolAction(r, "service-a", "inspect", map[string]any{"action": "view"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ target, tool, action string }{{"service-a", "edit", "apply"}, {"service-b", "inspect", "view"}, {"service-b", "edit", "undo"}} {
+		if authorizeToolAction(r, tc.target, tc.tool, map[string]any{"action": tc.action}) == nil {
+			t.Fatalf("unexpected allow %s/%s/%s", tc.target, tc.tool, tc.action)
+		}
+	}
+}
+
 // A pure script needs no tool calls and returns exactly what it chooses.
 func TestCodeModeReturnsOnlySelectedResult(t *testing.T) {
 	s, r := codeModeFixture(t)
@@ -46,6 +82,47 @@ func TestCodeModeReturnsOnlySelectedResult(t *testing.T) {
 	}
 	if intFromAny(response["calls"]) != 0 {
 		t.Fatalf("pure script reported tool calls: %v", response["calls"])
+	}
+}
+
+// A read-only caller is offered the read-only code facade and never a
+// write-capable routing facade: the direct execute facade and the exec
+// facade are refused for it, so advertising them would be catalog hygiene
+// for a tool the caller may not use.
+//
+// The direct execute facade is published to ordinary callers (the retired
+// contract kept it unadvertised), so the full catalog must contain it.
+func TestReadonlyToolAdvertisementScopesAndUnadvertisedExecute(t *testing.T) {
+	r := httptest.NewRequest("POST", "/mcp", nil)
+	r = requestWithAuthClaims(r, map[string]any{"scope": "gptadmin.read", "access_mode": accessModeReadonly})
+	tools := compactFacadeTools(r, false)
+	foundRO, foundExec, foundExecute := false, false, false
+	for _, tool := range tools {
+		switch firstString(tool, "name") {
+		case "ro":
+			foundRO = true
+			meta := mapValue(tool["annotations"])
+			if meta["readOnlyHint"] != true || meta["destructiveHint"] != false {
+				t.Fatalf("bad ro annotations: %v", meta)
+			}
+		case "exec":
+			foundExec = true
+		case "execute":
+			foundExecute = true
+		}
+	}
+	if !foundRO || foundExec || foundExecute {
+		t.Fatalf("readonly facade visibility: ro=%v exec=%v execute=%v", foundRO, foundExec, foundExecute)
+	}
+	full := appsSDKTools()
+	publishedExecute := false
+	for _, tool := range full {
+		if firstString(tool, "name") == "execute" {
+			publishedExecute = true
+		}
+	}
+	if !publishedExecute {
+		t.Fatal("direct execute facade is not published to ordinary callers")
 	}
 }
 
@@ -362,15 +439,22 @@ func TestCodeModeEnforcesCallBudget(t *testing.T) {
 
 // A returned value larger than the output cap is a failure, not a truncated
 // success.
+// An oversized result that still fits the storage limit is stored in full and
+// described by a small descriptor, so the run does not lose what the script
+// produced. See TestOversizedExecResultIsSavedUnindexedAndIndexedOnFirstSearch.
+//
+// A result that cannot be stored is still rejected, and the rejection says
+// which operations already executed.
 func TestCodeModeRejectsOversizedOutput(t *testing.T) {
 	s, r := codeModeFixture(t)
+	defer s.Close()
 	response, status := codeModeRun(t, s, r, map[string]any{
-		"code": "return 'x'.repeat(200000);", "max_output_bytes": 1024,
+		"code": "return 'x'.repeat(3000000);", "max_output_bytes": 1024,
 	})
 	if status == http.StatusOK {
-		t.Fatalf("oversized output reported success: %v", response)
+		t.Fatalf("an unstorable oversized output reported success: %v", response)
 	}
-	if code := firstString(mapValue(response["error"]), "code"); code != "output_too_large" {
+	if code := firstString(mapValue(response["error"]), "code"); code != "content_storage_limit" {
 		t.Fatalf("oversized output failure code = %q: %v", code, response)
 	}
 }

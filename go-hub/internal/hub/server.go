@@ -372,6 +372,7 @@ func intPtr(v int) *int { return &v }
 
 var hubSettingRegistry = []hubSettingDefinition{
 	{Key: "tool_output_verbose", Type: "boolean", Category: "transport", Title: "Подробные ответы инструментов", Description: "Включать служебные поля и полные обёртки execute/job. По умолчанию выключено; detail=full или compact меняет формат одного ответа без повторного выполнения.", Default: false, RestartRequired: false, Advanced: true, Order: 50},
+	{Key: "tool_catalog_mode", Type: "string", Category: "transport", Title: "Каталог инструментов", Description: "Какой короткий каталог отдаётся в tools/list. compat — совместимый execute (одна точка входа для всех возможностей); modern — code-mode exec/ro и поиск search. Переключение обратимо.", Default: catalogModeCompat, Options: []string{catalogModeCompat, catalogModeModern}, RestartRequired: false, Order: 60},
 	{Key: "mcp_auto_cleanup_enabled", Type: "boolean", Category: "mcp_registry", Title: "Автоочистка stale MCP", Description: "Автоматически удалять stale non-shell MCP по retention policy.", Default: true, RestartRequired: false, Order: 5},
 	{Key: "stale_mcp_retention_days", Type: "integer", Category: "mcp_registry", Title: "Удаление stale MCP", Description: "Удалять stale non-shell MCP из registry после указанного срока.", Default: defaultStaleMCPRetentionDays, Minimum: intPtr(1), Maximum: intPtr(3650), Unit: "days", RestartRequired: false, Order: 10},
 	{Key: "mcp_offline_after_seconds", Type: "integer", Category: "agent_lifecycle", Title: "Порог offline", Description: "Считать агент offline, если Hub не видел poll/heartbeat дольше этого времени.", Default: 90, Minimum: intPtr(15), Maximum: intPtr(86400), Unit: "seconds", RestartRequired: false, Order: 10},
@@ -1419,6 +1420,15 @@ func validateHubSettingValue(key string, value any) (any, error) {
 			return nil, fmt.Errorf("%s must be <= %d", key, *def.Maximum)
 		}
 		return v, nil
+	case "string":
+		v, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s must be string", key)
+		}
+		if len(def.Options) > 0 && !containsString(def.Options, v) {
+			return nil, fmt.Errorf("%s must be one of %s", key, strings.Join(def.Options, ", "))
+		}
+		return v, nil
 	default:
 		return nil, fmt.Errorf("unsupported hub setting type %q", def.Type)
 	}
@@ -1442,6 +1452,20 @@ func (s *Server) hubSettingBoolLocked(key string) bool {
 	}
 	def, _ := hubSettingDefinitionFor(key)
 	v, _ := def.Default.(bool)
+	return v
+}
+
+// hubSettingStringLocked returns a string setting. An unknown key or an
+// invalid value falls back to the registered default, so a corrupted
+// configuration never removes a published capability.
+func (s *Server) hubSettingStringLocked(key string) string {
+	if value, ok := s.settings.Values[key]; ok {
+		if v, err := validateHubSettingValue(key, value); err == nil {
+			return v.(string)
+		}
+	}
+	def, _ := hubSettingDefinitionFor(key)
+	v, _ := def.Default.(string)
 	return v
 }
 
@@ -4312,7 +4336,7 @@ func (s *Server) mcpRelayServers(w http.ResponseWriter, r *http.Request) {
 		if status != "" && firstString(server, "status") != status {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(firstString(server, "server_id")+" "+firstString(server, "name")), query) {
+		if !discoveryRowMatchesQuery(server, query) {
 			continue
 		}
 		filtered = append(filtered, server)
@@ -4347,12 +4371,16 @@ func (s *Server) publicServersLockedWithDetail(r *http.Request, detail bool) []m
 }
 
 func compactServer(server map[string]any) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"server_id": server["server_id"],
 		"name":      server["name"],
 		"kind":      server["kind"],
 		"status":    server["status"],
 	}
+	if paired, _ := server["paired"].(bool); paired {
+		out["paired"] = true
+	}
+	return out
 }
 
 func fullDetailRequested(value any) bool {
@@ -4367,7 +4395,7 @@ func fullDetailRequested(value any) bool {
 }
 
 func agentAsServer(a Agent) map[string]any {
-	return map[string]any{
+	server := map[string]any{
 		"server_id":    a.AgentID,
 		"name":         a.Name,
 		"kind":         a.Kind,
@@ -4377,6 +4405,11 @@ func agentAsServer(a Agent) map[string]any {
 		"capabilities": a.Capabilities,
 		"meta":         redactPublicMetadata(a.Meta),
 	}
+	if firstString(a.Meta, "backing_server_id") != "" {
+		// A paired surface (control:, file:) is a surface of another server.
+		server["paired"] = true
+	}
+	return server
 }
 
 // redactPublicMetadata removes credentials from agent metadata before it is
@@ -4846,6 +4879,9 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+	if err := authorizeToolAction(r, target, toolName, args); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+	}
 	if failure := s.requireInstructionContext(r, target, toolName); failure != nil {
 		return failure, http.StatusPreconditionRequired
 	}
@@ -4864,7 +4900,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		s.auditToolDecision(r, target, toolName, callArgs, "deny", "approval required", response, http.StatusPreconditionRequired)
 		return response, http.StatusPreconditionRequired
 	}
-	if response, blocked := s.boundedAutonomousGate(r, target, toolName); blocked {
+	if response, blocked := s.boundedAutonomousGate(r, target, toolName, callArgs); blocked {
 		s.auditToolDecision(r, target, toolName, callArgs, "deny", "bounded autonomous budget exhausted", response, http.StatusTooManyRequests)
 		return response, http.StatusTooManyRequests
 	}
@@ -5066,7 +5102,16 @@ func approvalArguments(args map[string]any) (map[string]any, string) {
 
 func (s *Server) approvalGate(r *http.Request, target, toolName string, args map[string]any, approvalID string) (map[string]any, bool) {
 	profile, bound := AccessProfileFromRequest(r)
-	if !bound || profile.ApprovalMode != approvalModeAskBeforeWrite || isReadOnlyTool(target, toolName) {
+	if !bound || profile.ApprovalMode != approvalModeAskBeforeWrite {
+		return nil, false
+	}
+	if isCodeModeContainer(target, toolName) {
+		// A script container has no side effect of its own. Each nested
+		// operation is gated on its own target/tool/action, so the container
+		// must not consume the caller's write approval for the whole script.
+		return nil, false
+	}
+	if !operationIsWrite(target, toolName, args) || profileRuleAllowsRead(r, target, toolName, args) {
 		return nil, false
 	}
 	actor := s.actorForRequest(r)
@@ -5106,9 +5151,16 @@ func (s *Server) approvalGate(r *http.Request, target, toolName string, args map
 	}, true
 }
 
-func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string) (map[string]any, bool) {
+func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string, args map[string]any) (map[string]any, bool) {
 	profile, bound := AccessProfileFromRequest(r)
-	if !bound || profile.ApprovalMode != approvalModeBoundedAutonomous || isReadOnlyTool(target, toolName) {
+	if !bound || profile.ApprovalMode != approvalModeBoundedAutonomous {
+		return nil, false
+	}
+	if isCodeModeContainer(target, toolName) {
+		// The container never consumes write budget; the nested operations do.
+		return nil, false
+	}
+	if !operationIsWrite(target, toolName, args) || profileRuleAllowsRead(r, target, toolName, args) {
 		return nil, false
 	}
 	key := profile.ID + "\x00" + s.actorForRequest(r)
@@ -5136,6 +5188,12 @@ func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string)
 }
 
 func isReadOnlyTool(target, toolName string) bool {
+	if target == "hub" && toolName == "ro" {
+		return true
+	}
+	if target == "hub" && toolName == "exec" {
+		return false
+	}
 	if target == "control:hub" {
 		return toolName == "control_catalog" || isReadOnlyTool("hub", toolName)
 	}
@@ -5564,6 +5622,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	if name == codeModeTool {
 		return s.callCodeModeTool(r, args)
 	}
+	if name == "ro" {
+		return s.callCodeModeToolMode(r, args, true)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fields := map[string]any{"tool": name}
@@ -5861,6 +5922,14 @@ func hubTools() []map[string]any {
 		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{
+			"name":         "ro",
+			"title":        "Read only code",
+			"description":  "Run bounded read-only JavaScript. Shell commands, writes and persistent indexing are refused; the read-only ceiling still applies to every nested call.",
+			"inputSchema":  readonlyExecInputSchema(),
+			"outputSchema": codeModeOutputSchema(),
+			"annotations":  map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+		},
+		{
 			"name":         "exec",
 			"title":        "Think in Code",
 			"description":  "Run short isolated JavaScript using search and await mcp.call(target, tool, args). Intermediate data stays in the sandbox; return only the chosen value. No filesystem, environment, process, network or timer access.",
@@ -5874,10 +5943,25 @@ func hubTools() []map[string]any {
 }
 
 func shellTools() []map[string]any {
-	return []map[string]any{
+	return append([]map[string]any{
 		{"name": "shell_exec", "description": "Run one command as the configured default non-root user; use run_as_user=root only when privileged shell execution is intentional. File reads/edits/checkpoints live on the paired file:<host> target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}, "description": "Command timeout in seconds; pass 15 for a 15-second timeout. Omit or use null for the executor default."}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
+	}, childMCPToolDefinitions()...)
+}
+
+// childMCPToolDefinitions are the tools a ShellMCP host exposes for the child
+// MCP servers it hosts. They are published on the shell target and on the
+// paired control target, so a model can discover and call a child MCP without
+// guessing a second routing convention.
+func childMCPToolDefinitions() []map[string]any {
+	return []map[string]any{
+		{"name": "mcp_manage", "description": "Inspect or manage child MCP definitions on this ShellMCP host. Configuration is persisted by ShellMCP; restart action is explicit.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
+		{"name": "mcp_tools", "description": "Read tools/list for one configured child MCP. Use the ref returned by mcp_manage.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref"}, "additionalProperties": false}},
+		{"name": "mcp_call", "description": "Call a named tool on a child MCP hosted by this node.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
+		{"name": "mcp_connection_close", "description": "Close one owned child MCP connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
+		{"name": "mcp_request", "description": "Forward a supported resource or prompt request to a child MCP.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
 	}
 }
+
 
 func controlToolNames() []string {
 	return []string{"control_catalog", "mcp_manage", "mcp_tools", "mcp_call", "mcp_connection_close", "mcp_request"}
@@ -5895,19 +5979,10 @@ func controlTools(target string) []map[string]any {
 		out = append(out, controlCatalogToolDefinition())
 		return out
 	}
-	allowed := map[string]bool{}
-	for _, name := range controlToolNames() {
-		allowed[name] = true
-	}
-	return []map[string]any{
-		controlCatalogToolDefinition(),
-		{"name": "mcp_manage", "description": "Inspect or manage child MCP definitions on this ShellMCP host. Configuration is persisted by ShellMCP; restart action is explicit.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
-		{"name": "mcp_tools", "description": "Read tools/list for one configured child MCP. Use the ref returned by mcp_manage.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref"}, "additionalProperties": false}},
-		{"name": "mcp_call", "description": "Call a named tool on a child MCP hosted by this node.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
-		{"name": "mcp_connection_close", "description": "Close one owned child MCP connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
-		{"name": "mcp_request", "description": "Forward a supported resource or prompt request to a child MCP.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
-	}
+	return append([]map[string]any{controlCatalogToolDefinition()}, childMCPToolDefinitions()...)
 }
+
+
 
 func searchToolDefinition() map[string]any {
 	return map[string]any{"name": "search", "title": "Search tools", "description": "Search caller-visible tool names, descriptions and control settings. Returns schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
@@ -8239,7 +8314,9 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 	if agent.AgentID == "hub" {
 		authErr = authorizeFacadeCall(r, toolName, args)
 	} else {
-		authErr = authorizeToolCall(r, agent.AgentID, toolName)
+		// The args-aware gate: a rule that names one action must not be
+		// satisfied by the presence of the tool alone.
+		authErr = authorizeToolAction(r, agent.AgentID, toolName, args)
 	}
 	if authErr != nil {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": authErr.Error()})
@@ -8262,7 +8339,7 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 		writeJSON(w, http.StatusPreconditionRequired, approvalResponse)
 		return
 	}
-	if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, toolName); blocked {
+	if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, toolName, args); blocked {
 		writeJSON(w, http.StatusTooManyRequests, budgetResponse)
 		return
 	}
@@ -8498,9 +8575,6 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if name == "" {
 			return nil, map[string]any{"code": -32602, "message": "tool name is required"}, false
 		}
-		if agent.AgentID == "hub" && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
-			return nil, map[string]any{"code": -32601, "message": "direct tool execution was removed; use search then exec"}, false
-		}
 		if agent.AgentID == "hub" {
 			if id := virtualMCPToolID(name); id != "" {
 				return nil, map[string]any{"code": -32601, "message": "tool is exposed only by the optional virtual MCP " + id}, false
@@ -8517,7 +8591,9 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if agent.AgentID == "hub" {
 			authErr = authorizeFacadeCall(r, name, args)
 		} else {
-			authErr = authorizeToolCall(r, agent.AgentID, name)
+			// The args-aware gate: a rule that names one action must not be
+			// satisfied by the presence of the tool alone.
+			authErr = authorizeToolAction(r, agent.AgentID, name, args)
 		}
 		if authErr != nil {
 			return nil, map[string]any{"code": -32003, "message": authErr.Error()}, false
@@ -8545,7 +8621,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 			}
 			return nil, map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}, false
 		}
-		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name); blocked {
+		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name, args); blocked {
 			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
 		}
 		if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" {
@@ -8670,7 +8746,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		return s.agentToolsList(agent)
 	}
 	if agent.AgentID == "hub" {
-		return map[string]any{"tools": appsSDKToolsForRequest(r)}, nil
+		return map[string]any{"tools": withReadOnlyExecTool(r, withoutExecuteFacade(r, appsSDKToolsForRequest(r)))}, nil
 	}
 	if isVirtualMCPAgent(agent) {
 		return map[string]any{"tools": s.virtualMCPToolsForRequest(r, agent)}, nil
@@ -8945,7 +9021,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "GPTAdmin MCP", "tools": appsSDKToolsForRequest(r)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "GPTAdmin MCP", "tools": withReadOnlyExecTool(r, withoutExecuteFacade(r, appsSDKToolsForRequest(r)))})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -9001,7 +9077,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "tools/list":
-		result = mcpCacheableResult(map[string]any{"tools": nativeFacadeTools(r, compactFacadeTools(r, fullDetailRequested(params["detail"])))}, 30000, "private")
+		result = mcpCacheableResult(map[string]any{"tools": nativeFacadeTools(r, compactFacadeTools(requestWithCatalogMode(r, s.toolCatalogMode()), fullDetailRequested(params["detail"])))}, 30000, "private")
 	case "tools/call":
 		name := firstString(params, "name")
 		args := mapValue(params["arguments"])
@@ -9013,9 +9089,20 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			name = "exec"
 			params["name"] = "exec"
 		}
-		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
-			rpcErr = map[string]any{"code": -32601, "message": "direct tool execution was removed; use search then exec"}
+		if (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") && !profileAllowsTarget(r, firstString(args, "target", "server_id", "agent_id")) {
+			rpcErr = map[string]any{"code": -32003, "message": "access profile denies this target"}
 			break
+		}
+		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+			args = cloneMap(args)
+			if len(mapValue(args["args"])) > 0 && len(mapValue(args["arguments"])) == 0 {
+				args["arguments"] = args["args"]
+			}
+			if len(mapValue(args["arguments"])) == 0 && firstString(args, "args_json") != "" {
+				if parsed, e := toolArgsFromJSON(firstString(args, "args_json")); e == nil {
+					args["arguments"] = parsed
+				}
+			}
 		}
 		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
 			var err error
@@ -9063,6 +9150,8 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			}
 			// Local submissions on /mcp fail with the node peer failure
 			// envelope; receipt reads and read-only tools stay available.
+			// The direct execute facade is a submission too: a drained node
+			// must refuse it with the same envelope, not run it.
 			if !nodePeerJobTool(name) && !isReadOnlyTool("hub", name) && s.nodeDrainBlocked() {
 				s.writeNodeDrainFailure(w, "/mcp", originalBody.Bytes(), "hub", "")
 				return
@@ -9097,15 +9186,25 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			skipHubApproval := mcpTasksOptedIn(params) && (name == "fleetExec" || name == "fleet_exec")
+			// The execute facade is a router, not an operation: it has no side
+			// effect of its own. Its business call is gated on its own target,
+			// tool and action inside executeMCPTool, and its code-only spelling
+			// is the code-mode container, whose nested calls are gated
+			// individually. The router must not consume a second write budget
+			// or ask for a second approval.
+			gateTarget, gateTool := "hub", name
+			if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+				gateTarget, gateTool = "hub", codeModeTool
+			}
 			if !skipHubApproval {
-				if approvalResponse, blocked := s.approvalGate(r, "hub", name, callArgs, approvalID); blocked {
+				if approvalResponse, blocked := s.approvalGate(r, gateTarget, gateTool, callArgs, approvalID); blocked {
 					s.recordActivationTelemetry("failure")
 					s.auditToolDecision(r, "hub", name, callArgs, "deny", "approval required", approvalResponse, http.StatusPreconditionRequired)
 					rpcErr = map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}
 					break
 				}
 			}
-			if budgetResponse, blocked := s.boundedAutonomousGate(r, "hub", name); blocked {
+			if budgetResponse, blocked := s.boundedAutonomousGate(r, gateTarget, gateTool, args); blocked {
 				s.recordActivationTelemetry("failure")
 				s.auditToolDecision(r, "hub", name, callArgs, "deny", "bounded autonomous budget exhausted", budgetResponse, http.StatusTooManyRequests)
 				rpcErr = map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}
@@ -9282,7 +9381,10 @@ func (s *Server) taskOutputResourceRead(r *http.Request, uri, owner string) map[
 		}
 	}
 	inspection := mapValue(structured["inspection"])
-	content := firstString(inspection, "content")
+	// The chunk is returned byte for byte: a trim would drop the trailing
+	// newline of every chunk and merge the lines across a chunk boundary, so
+	// the recovered source would not be the source that was written.
+	content, _ := inspection["content"].(string)
 	bytesRead := int64(intFromAny(inspection["bytes_read"]))
 	totalSize := int64(intFromAny(inspection["size"]))
 	actualOffset := int64(intFromAny(inspection["offset"]))
@@ -9754,11 +9856,11 @@ func canonicalizeLegacyExecuteCode(body map[string]any) (bool, string) {
 	code := firstString(args, "code")
 	allowed := map[string]bool{"code": true, "context": true, "timeout_ms": true, "max_calls": true, "heap_bytes": true, "max_output_bytes": true}
 	if code == "" {
-		return false, "direct tool execution was removed; use search then exec"
+		return false, ""
 	}
 	for key := range args {
 		if !allowed[key] {
-			return false, "legacy execute accepts code and exec budgets only; use search then exec for MCP tools"
+			return false, "legacy code alias cannot mix code with direct execution arguments"
 		}
 	}
 	params["name"] = "exec"
@@ -9819,7 +9921,10 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		}
 		return s.callShellTool(selectedTarget, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout)
 	case "execute", "call_mcp_tool", "callMcpTool":
-		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
+		// The direct execute facade is a router, not a privileged path: it
+		// resolves the target and the tool and then runs the ordinary
+		// authorized dispatch (executeMCPTool).
+		return s.appsSDKCallMCP(nil, name, args)
 	case "job", "get_mcp_job", "getMcpJob":
 		if err := validateToolOutputDetail(args["detail"]); err != nil {
 			return map[string]any{"status": "failed", "error": err.Error()}
@@ -9852,7 +9957,7 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
 	}
 	if name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
-		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
+		return s.appsSDKCallMCP(r, name, args)
 	}
 	if name == "expand" {
 		return s.expandOperation(r, args)
@@ -9995,6 +10100,20 @@ func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]an
 	}
 	target := firstString(args, "target", "server_id", "agent_id")
 	toolName := firstString(args, "tool", "tool_name", "name")
+	// A code-only call is the old transport spelling of exec. A call that
+	// mixes code with routing arguments is refused before anything runs, so
+	// a caller can never be unsure which path executed. This mirrors
+	// authorizeExecuteFacade, which refuses the same mixed call.
+	if code := firstString(args, "code"); code != "" {
+		if target != "" || toolName != "" {
+			return map[string]any{"status": "failed", "error": "execute accepts either code or target/tool, not both"}
+		}
+		response, status := s.callCodeModeTool(r, args)
+		if status >= http.StatusBadRequest {
+			return response
+		}
+		return response
+	}
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool_name"}
 	}
@@ -10097,7 +10216,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "resource_receipt",
 			"title":           "Resource read receipt",
-			"description":     "Read one GPTAdmin MCP resource and return only its URI, MIME type, byte size, SHA-256 digest, content count, and success status. Resource contents are never returned.",
+			"description":     "Read one GPTAdmin MCP resource receipt: URI, MIME type, byte size, SHA-256, content count, status. Contents are never returned.",
 			"inputSchema":     resourceReceiptInputSchema(),
 			"outputSchema":    resourceReceiptOutputSchema(),
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
@@ -10113,11 +10232,6 @@ func appsSDKTools() []map[string]any {
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
 			"_meta":           readMeta,
-		},
-		{
-			"name": "search", "title": "Search tools", "description": "Search caller-visible tools and settings with SQLite FTS5. Returns schemas and short exec call hints; coverage states when remote schemas have not been read.",
-			"inputSchema":  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false},
-			"outputSchema": map[string]any{"type": "object", "additionalProperties": true}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}, "securitySchemes": readSecurity, "_meta": readMeta,
 		},
 		{
 			"name":            "demo",
@@ -10180,9 +10294,28 @@ func appsSDKTools() []map[string]any {
 			"_meta":           readMeta,
 		},
 		{
+			"name":        "execute",
+			"title":       "Execute",
+			"description": "Call one tool directly: execute({target, tool, args}). execute({code}) is the code-only spelling of exec.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"target":          map[string]any{"type": "string"},
+				"tool":            map[string]any{"type": "string"},
+				"args":            map[string]any{"type": "object", "additionalProperties": true},
+				"ref":             map[string]any{"type": "string"},
+				"background":      map[string]any{"type": "boolean"},
+				"idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax},
+				"detail":          toolOutputDetailSchema(),
+				"code":            map[string]any{"type": "string"},
+			}, "additionalProperties": true},
+			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
+			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
+			"securitySchemes": execSecurity,
+			"_meta":           execMeta,
+		},
+		{
 			"name":        "fleetExec",
 			"title":       "Fleet execute",
-			"description": "Run one command across multiple ShellMCP targets. Returns per-target approvals first, then one parent task.",
+			"description": "Run one command across multiple ShellMCP targets; returns per-target approvals, then one parent task.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 				"servers":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Shell server names or shell:* ids; omit for all online shell agents."},
 				"cmd":             map[string]any{"type": "string"},
@@ -10195,10 +10328,6 @@ func appsSDKTools() []map[string]any {
 			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
 			"securitySchemes": execSecurity,
 			"_meta":           execMeta,
-		},
-		{
-			"name": "exec", "title": "Think in Code", "description": "Run short JavaScript in the isolated sandbox. Use search then await mcp.call(target, tool, args); intermediate data stays inside the VM and only your return value is sent.",
-			"inputSchema": codeModeInputSchema(), "outputSchema": codeModeOutputSchema(), "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}, "securitySchemes": execSecurity, "_meta": execMeta,
 		},
 		{
 			"name":            "job",

@@ -39,13 +39,11 @@ func executeReliabilityCall(t *testing.T, s *Server, name string, args map[strin
 func TestExecuteReferenceLifecycleRecovery(t *testing.T) {
 	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "ctl"})
 	defer s.Close()
-	for _, name := range []string{"execute", "callMcpTool", "call_mcp_tool"} {
-		response := executeReliabilityCall(t, s, name, map[string]any{"target": "hub", "tool": "demo", "args": map[string]any{}})
-		if response["error"] == nil || firstString(mapValue(response["error"]), "message") != "direct tool execution was removed; use search then exec" {
-			t.Fatalf("legacy direct route was not rejected: %v", response)
-		}
+	response := executeReliabilityCall(t, s, "execute", map[string]any{"target": "hub", "tool": "settings_schema", "args": map[string]any{}})
+	if response["error"] != nil || firstString(mapValue(mapValue(response["result"])["structuredContent"]), "status") != "completed" {
+		t.Fatalf("legacy direct safe call failed: %v", response)
 	}
-	response := executeReliabilityCall(t, s, "code_exec", map[string]any{"code": "return 42;"})
+	response = executeReliabilityCall(t, s, "code_exec", map[string]any{"code": "return 42;"})
 	if firstString(mapValue(mapValue(response["result"])["structuredContent"]), "error") == "" {
 		t.Fatalf("code_exec did not return migration guidance: %v", response)
 	}
@@ -64,7 +62,10 @@ func TestExecuteExportStableWithLargeInventoryAndReconnect(t *testing.T) {
 		for _, row := range tools {
 			names = append(names, firstString(mapValue(row), "name"))
 		}
-		if !reflect.DeepEqual(names, []string{"ui", "discover", "search", "schema", "exec", "job", "expand"}) {
+		// The compat catalog mode is the default: it publishes the routing
+		// primitives, the working code mode and the compatibility execute
+		// facade. The modern mode publishes the code-mode catalog instead.
+		if !reflect.DeepEqual(names, []string{"discover", "search", "schema", "exec", "ro", "execute"}) {
 			t.Fatalf("routing catalog changed: %v", names)
 		}
 		return tools
@@ -132,7 +133,7 @@ func TestExecuteUnavailableReferenceDoesNotWeakenGates(t *testing.T) {
 	defer s.Close()
 	// The non-MCP facade gets the same non-execution/recovery contract.
 	direct := mapValue(s.appsSDKCallForRequest(r, "execute", map[string]any{"ref": "op_gone"}))
-	if direct["status"] != "failed" || !strings.Contains(firstString(direct, "error"), "use search then exec") {
+	if direct["status"] != "failed" || firstString(mapValue(direct["error"]), "code") != "schema_reference_unavailable" {
 		t.Fatalf("direct facade lost reference recovery: %v", direct)
 	}
 	// An explicit new call still needs the normal current instruction context.

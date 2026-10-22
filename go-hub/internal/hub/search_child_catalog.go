@@ -208,7 +208,7 @@ func (s *Server) rootSearchCatalogForRequest(r *http.Request, targetFilter strin
 				if authorizeToolCall(r, agent.AgentID, name) != nil {
 					continue
 				}
-				rows = append(rows, map[string]any{"target": agent.AgentID, "name": name, "title": firstString(tool, "title"), "description": firstString(tool, "description"), "inputSchema": mapValue(tool["inputSchema"]), "labels": agent.Name + " registered MCP"})
+				rows = append(rows, catalogRuleMetadata(r, agent.AgentID, name, map[string]any{"target": agent.AgentID, "name": name, "title": firstString(tool, "title"), "description": firstString(tool, "description"), "inputSchema": mapValue(tool["inputSchema"]), "labels": agent.Name + " registered MCP"}))
 			}
 			if entry.err != "" {
 				coverage["complete"] = false
@@ -460,7 +460,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 				if authorizeToolCall(r, child.AgentID, firstString(tool, "name")) != nil {
 					continue
 				}
-				rows = append(rows, map[string]any{"target": child.AgentID, "name": firstString(tool, "name"), "title": firstString(tool, "title"), "description": firstString(tool, "description"), "inputSchema": mapValue(tool["inputSchema"]), "labels": child.Name + " " + exposedAgentSlug(child) + " child MCP"})
+				rows = append(rows, catalogRuleMetadata(r, child.AgentID, firstString(tool, "name"), map[string]any{"target": child.AgentID, "name": firstString(tool, "name"), "title": firstString(tool, "title"), "description": firstString(tool, "description"), "inputSchema": mapValue(tool["inputSchema"]), "labels": child.Name + " " + exposedAgentSlug(child) + " child MCP"}))
 			}
 			if entry.err != "" {
 				coverage["complete"] = false

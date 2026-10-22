@@ -109,7 +109,7 @@ func (s *Server) webhookHTTPPolicyGate(w http.ResponseWriter, r *http.Request, t
 		writeJSON(w, http.StatusPreconditionRequired, response)
 		return false
 	}
-	if response, blocked := s.boundedAutonomousGate(r, "hub", toolName); blocked {
+	if response, blocked := s.boundedAutonomousGate(r, "hub", toolName, args); blocked {
 		s.auditToolDecision(r, "hub", toolName, args, "deny", "bounded autonomous budget exhausted", response, http.StatusTooManyRequests)
 		writeJSON(w, http.StatusTooManyRequests, response)
 		return false

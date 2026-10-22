@@ -223,11 +223,25 @@ func allowedCatalogTools(r *http.Request, target string, names ...string) []stri
 func filterCatalogTools(r *http.Request, target string, tools []map[string]any) []map[string]any {
 	result := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		if authorizeToolCall(r, target, firstString(tool, "name")) == nil {
-			result = append(result, tool)
+		name := firstString(tool, "name")
+		if authorizeToolCall(r, target, name) == nil {
+			result = append(result, catalogRuleMetadata(r, target, name, tool))
 		}
 	}
 	return result
+}
+
+// catalogRuleMetadata publishes the action level of the matching profile rule
+// next to a catalog row. The coarse gate only proves that the tool may be
+// used at all; the action level tells the caller which actions are allowed.
+func catalogRuleMetadata(r *http.Request, target, name string, row map[string]any) map[string]any {
+	if rule, ok := profileToolRule(r, target, name); ok {
+		row["read_only_rule"] = rule.ReadOnly
+		if len(rule.Actions) > 0 {
+			row["allowed_actions"] = append([]string(nil), rule.Actions...)
+		}
+	}
+	return row
 }
 
 func selectedToolDefinitions(definitions []map[string]any, names ...string) []map[string]any {

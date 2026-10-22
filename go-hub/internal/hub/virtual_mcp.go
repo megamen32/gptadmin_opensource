@@ -163,7 +163,9 @@ func (s *Server) virtualMCPToolsForRequest(r *http.Request, agent Agent) []map[s
 }
 
 func (s *Server) callVirtualMCPTool(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
-	if err := authorizeToolCall(r, agent.AgentID, name); err != nil {
+	// The args-aware gate: a rule that names one action must not be
+	// satisfied by the presence of the tool alone.
+	if err := authorizeToolAction(r, agent.AgentID, name, args); err != nil {
 		return nil, map[string]any{"code": -32003, "message": err.Error()}
 	}
 	result, status := s.callVirtualMCP(agent, AccessProfileIDFromRequest(r), name, args)

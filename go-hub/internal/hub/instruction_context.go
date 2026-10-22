@@ -194,7 +194,7 @@ func instructionExempt(target, tool string) bool {
 		return false
 	}
 	switch tool {
-	case "discover", "list_mcp_servers", "listMcpServers", "search", "schema", "list_mcp_tools", "listMcpTools", "expand", "job", "get_mcp_job", "getMcpJob", "status", "hub_status", "diagnose", "demo", "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "pending", "list_pending_servers", "settings_get", "settings_schema", "settings_history", "handover_status", "secret_status", "operations", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones":
+	case "discover", "list_mcp_servers", "listMcpServers", "search", "schema", "list_mcp_tools", "listMcpTools", "expand", "job", "get_mcp_job", "getMcpJob", "status", "hub_status", "diagnose", "demo", "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "pending", "list_pending_servers", "settings_get", "settings_schema", "settings_history", "handover_status", "secret_status", "operations", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "ro":
 		return true
 	}
 	return false
@@ -232,8 +232,8 @@ func (s *Server) requireFacadeInstructionContext(r *http.Request, name string, a
 	if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
 		target = firstString(args, "target", "server_id", "agent_id")
 		tool = firstString(args, "tool", "tool_name", "name")
-	} else if name == "exec" {
-		target, tool = "hub", "exec"
+	} else if name == "exec" || name == "ro" {
+		target, tool = "hub", name
 	}
 	return s.requireInstructionContext(r, target, tool)
 }
@@ -303,7 +303,7 @@ func instructionAwareFacadeTools(tools []map[string]any) []map[string]any {
 		name := firstString(tool, "name")
 		// Header/_meta also work. This convenience field belongs only to our
 		// facades, not to any upstream child's strict argument schema.
-		if name != "discover" && name != "schema" && name != "execute" && name != "fleetExec" {
+		if name != "discover" && name != "schema" && name != "execute" && name != "fleetExec" && name != "ro" {
 			continue
 		}
 		properties := mapValue(mapValue(tool["inputSchema"])["properties"])
