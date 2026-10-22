@@ -176,10 +176,19 @@ configuration, recreate the ChatGPT app and authorize it again. Refreshing the
 Actions/tools view does not necessarily replace saved OAuth metadata. For Codex,
 disconnect and recreate the MCP connection when its saved metadata is stale.
 
-### Where to set the password
+### Where to find the admin password
 
-In the web panel: `/admin` → **Security** → set `ADMIN_PASSWORD` and generate
-`OAUTH_CLIENT_SECRET`. Or set them as env vars when starting the hub.
+There is no default admin password. GPTAdmin setup generates `ADMIN_PASSWORD`
+unless the installer or operator supplied one. On Linux/macOS, the installer
+saves it in the protected `gptadmin.env` configuration file: by default this is
+`/etc/gptadmin/gptadmin.env` for a system install or
+`~/.config/gptadmin/gptadmin.env` for a user install. Windows setup displays
+the generated password when installation finishes. If someone else installed
+GPTAdmin, ask that administrator for access to the password. Do not share the
+configuration file contents; it also contains other secrets.
+
+To change the password, an operator can set `ADMIN_PASSWORD` in the Hub's
+environment and restart the Hub.
 
 ## Example `.env`
 

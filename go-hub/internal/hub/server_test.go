@@ -1258,7 +1258,9 @@ func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := New(Config{CtlToken: "ctl", AdminPassword: "pw", OAuthClientSecret: "oauth-secret", PublicDir: tmp, DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
+	adminPasswordFixture := "admin-password-fixture-2026-10-23"
+	oauthSecretFixture := "oauth-secret-fixture-2026-10-23"
+	s := New(Config{CtlToken: "ctl", AdminPassword: adminPasswordFixture, OAuthClientSecret: oauthSecretFixture, PublicDir: tmp, DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	h := s.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
@@ -1268,7 +1270,13 @@ func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("unauthorized admin page status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "AdminPassword") || !strings.Contains(w.Body.String(), "Connect") || strings.Contains(w.Body.String(), "secret-admin") {
+	if !strings.Contains(w.Body.String(), "Если GPTAdmin устанавливали не вы") ||
+		!strings.Contains(w.Body.String(), "Пароля по умолчанию нет") ||
+		!strings.Contains(w.Body.String(), `href="https://became.bezrabotnyi.com/#/docs/CONFIGURATION"`) ||
+		!strings.Contains(w.Body.String(), `name="password"`) ||
+		strings.Contains(w.Body.String(), adminPasswordFixture) ||
+		strings.Contains(w.Body.String(), oauthSecretFixture) ||
+		strings.Contains(w.Body.String(), "secret-admin") {
 		t.Fatalf("unauthorized admin page leaked content or missed login form: %s", w.Body.String())
 	}
 
@@ -1279,7 +1287,7 @@ func TestAdminPasswordLoginCookieProtectsStaticAndAPI(t *testing.T) {
 		t.Fatalf("unauthorized static asset status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	form := "password=pw&next=%2Fadmin%2F"
+	form := "password=" + adminPasswordFixture + "&next=%2Fadmin%2F"
 	req = httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w = httptest.NewRecorder()
