@@ -303,6 +303,12 @@ func authorizeToolAction(r *http.Request, target, tool string, args map[string]a
 	if err := authorizeToolCall(r, target, tool); err != nil {
 		return err
 	}
+	// A temporary, file-driven rule may refuse one caller a Codex session
+	// start. It never grants anything and never touches the other access of
+	// that caller.
+	if err := authorizeCodexCallerBan(r, target, tool, args); err != nil {
+		return err
+	}
 	if err := authorizeToolRuleAction(r, target, tool, args); err != nil {
 		return err
 	}
