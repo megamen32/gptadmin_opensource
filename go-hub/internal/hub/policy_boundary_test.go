@@ -33,6 +33,9 @@ func policyJobCounts(s *Server) (int, int) {
 	return len(s.shellJobs), len(s.relayJobs)
 }
 
+// The legacy bridge cannot execute a write. Under the new contract it is
+// refused even earlier than the profile gate: the direct execute facade it
+// used is retired. Both refusals are a denial, and neither may queue work.
 func TestMCPPromptCallCannotBypassProfilePolicy(t *testing.T) {
 	s := newPolicyBoundaryServer(t)
 	body := `{"tool":"execute","args":{"target":"shell:target","tool":"shell_exec","arguments":{"cmd":"id"}}}`
@@ -40,12 +43,16 @@ func TestMCPPromptCallCannotBypassProfilePolicy(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden && !strings.Contains(rec.Body.String(), "policy") && !strings.Contains(rec.Body.String(), "read-only") {
+	if rec.Code != http.StatusForbidden {
 		t.Fatalf("legacy bridge write was not denied: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	answer := rec.Body.String()
+	if !strings.Contains(answer, "execute") || strings.Contains(answer, `"status":"completed"`) {
+		t.Fatalf("legacy bridge refusal does not explain itself: status=%d body=%s", rec.Code, answer)
 	}
 	shellJobs, relayJobs := policyJobCounts(s)
 	if shellJobs != 0 || relayJobs != 0 {
-		t.Fatalf("legacy bridge bypass queued work: shell=%d relay=%d body=%s", shellJobs, relayJobs, rec.Body.String())
+		t.Fatalf("legacy bridge bypass queued work: shell=%d relay=%d body=%s", shellJobs, relayJobs, answer)
 	}
 }
 

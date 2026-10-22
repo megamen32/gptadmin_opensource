@@ -33,6 +33,10 @@ acceptance criteria changing with it.
 4. **The instruction set says what actually exists.** The startup instructions
    must not describe a tool as retired while the server still handles it, and
    must not describe a tool as available while the catalog omits it.
+5. **The retirement is detectable from the client side.** A client that still
+   calls the old spelling must receive a deterministic, documented answer that
+   names the replacement, instead of a transport-level "unknown tool" that the
+   client cannot act on.
 
 ## What the rule requires before a tool is *restored*
 
@@ -42,24 +46,45 @@ handler:
 - it must be reachable in a catalog that the client actually loads;
 - the way it is published must be chosen **explicitly** and be verifiable by
   the operator, not inferred from a user-agent or a connection shape;
-- the modern catalog and the compatibility catalog must both keep every tool
-  that the product promises to work, and a mode switch must never remove a
-  working entry point.
+- every entry point the product promises to work must stay in the catalog, and
+  a change must never remove a working entry point.
 
 ## How it is applied in this repository
 
-- The tool catalog has two explicit modes, `tool_catalog_mode` in the typed
-  Hub settings registry: `compat` publishes the compatibility `execute`
-  facade next to the code-mode facades, `modern` publishes the code-mode
-  facades and the search facade. The mode is an operator setting, it is
-  readable through the same settings API the client already uses, and it is
-  never guessed from a request header.
-- The working `exec` facade is present in **both** modes. Switching the mode
-  never removes a working entry point.
+- The public tool catalog has **one** explicit surface. An ordinary caller
+  loads `discover search schema exec ro job expand`; the Apps SDK / full
+  catalog adds the administrative and reader tools; a read-only identity loads
+  `ui resource_receipt discover demo schema inspect job expand search ro`. The
+  surface is not selected by a mode switch and never guessed from a request
+  header — there is no `tool_catalog_mode` setting any more.
+- The direct `execute(target, tool, args)` facade is **not published to
+  anybody**. A caller that still sends it receives a deterministic answer
+  instead of a silent miss:
+
+      HTTP 200, no JSON-RPC error
+      structuredContent = {
+        "status": "failed",
+        "error": {
+          "code": "execute_facade_retired",
+          "message": "the direct execute facade is no longer public; use search, then exec for writes and ro for reads"
+        }
+      }
+
+  The migration path is therefore observable from the client side, which is
+  what rule 5 asks for.
+- The working `exec` and `ro` facades are present for every caller that is
+  allowed to use them, and the task readers `job` and `expand` stay published,
+  because a client must be able to read the result of a task it started.
 - The code-only spelling `execute({code})` keeps working as the old transport
   form of `exec`; a call that mixes `code` with direct routing arguments is
   refused before anything runs.
-- A read-only client is never offered a write-capable routing facade, in
-  either mode.
+- A read-only client is never offered a write-capable routing facade.
+- The internal dispatcher (`executeMCPTool`), the authenticated
+  `/admin/api/mcp/execute` endpoint and the node-peer transport stay exactly as
+  they are, with their ACL, ownership, idempotency and drain behaviour. They
+  are not the public client surface, and they are what the internal consumers
+  (`ro`, `exec`, relay, agent routes, peer hops) depend on. Keeping them is
+  also the independent recovery path the rule asks for: a rollback does not
+  depend on the retired public spelling.
 - Every installed Node version stays on disk and the manager can switch back
   to the previous one, so a bad release has an independent recovery path.

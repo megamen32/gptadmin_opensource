@@ -85,7 +85,26 @@ func TestAccessClientIssueBindingAndHistorySurviveRestart(t *testing.T) {
 func TestAccessNativeMCPProfileTool(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
 	defer s.Close()
-	_ = postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"access_profiles","arguments":{"action":"create","id":"native","profile":{"access_mode":"full","approval_mode":"unrestricted","allowed_targets":["*"],"allowed_tools":["*"]}}}}}`)
+	// The public write path is exec: search, then exec for writes. The direct
+	// execute facade is retired, so the native MCP surface reaches the owner
+	// tool through the script container.
+	code := `return await mcp.call("hub","access_profiles",{action:"create",id:"native",profile:{access_mode:"full",approval_mode:"unrestricted",allowed_targets:["*"],allowed_tools:["*"]}});`
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "exec", "arguments": map[string]any{"code": code}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := postMCPRPC(t, s, string(payload))
+	structured := mapValue(mapValue(body["result"])["structuredContent"])
+	if firstString(structured, "status") != "completed" {
+		t.Fatalf("the native MCP exec call did not complete: %#v", body)
+	}
+	created := mapValue(structured["result"])
+	if firstString(created, "id") != "native" || firstString(created, "approval_mode") != "unrestricted" {
+		t.Fatalf("the native MCP tool did not create the profile: %#v", created)
+	}
 	if s.accessProfiles["native"].ApprovalMode != "unrestricted" {
 		t.Fatal("native MCP tool did not persist a profile")
 	}

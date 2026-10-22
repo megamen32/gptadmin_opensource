@@ -13,7 +13,7 @@ Every session-oriented integration follows three explicit calls:
    supported by each session.
 2. `schema` returns the exact input schema and version for one selected
    operation.
-3. `execute` runs one operation against the selected session with a
+3. `exec` runs one operation against the selected session with a
    caller-stable `idempotency_key`.
 
 The caller must select the session from `discover`, use the operation and
@@ -27,7 +27,7 @@ operation gets a new key.
 | --- | --- |
 | `discover` | `discover` (legacy aliases: `list_mcp_agents`, `list_mcp_servers`) |
 | `schema` | `schema` for the selected `target` (legacy alias: `list_mcp_tools`) |
-| `execute` | `execute` with the same `target` and `tool` (legacy alias: `call_mcp_tool`) |
+| `exec` | `exec` with `mcp.call({target, tool, args, idempotency_key})` |
 
 The selected `target` is the current stable agent/server identity. A separate
 executor session and schema version are not currently part of the ordinary
@@ -35,24 +35,32 @@ Hub relay contract because MCP tool schemas are fetched directly from the
 selected server.
 
 The current Hub implementation exposes the stable `discover -> schema ->
-execute` flow through the MCP and relay facades. The request-scoped policy
+exec` flow through the MCP and relay facades. The request-scoped policy
 decision is applied before schema lookup and execution, and the same target
 identity is carried through queued calls and results.
-In short, the implemented contract is `discover -> schema -> execute`.
+In short, the implemented contract is `discover -> schema -> exec`.
+
+The direct `execute(target, tool, args)` facade is **not public**: it is not in
+`tools/list` and a call that still sends it receives the deterministic
+`execute_facade_retired` answer with the migration path. The code-only
+spelling `execute({code})` stays as the old transport alias of `exec`. The
+internal dispatcher, the authenticated `/admin/api/mcp/execute` endpoint and
+the relay route keep the direct form, with their ACL, ownership, idempotency
+and drain behaviour unchanged.
 
 By default, schema responses and the public Action contract contain no schema
 version/digest binding. Schema version/digest is an explicit opt-in: set
 `GPTADMIN_SCHEMA_CONTRACT_VALIDATION=true` only for
 clients that explicitly need schema admission: then schema responses include
-`schema_version` and deterministic `schema_digest_sha256`, and an `execute`
-call with an incomplete or stale pair receives `409 schema_mismatch` before the
+`schema_version` and deterministic `schema_digest_sha256`, and a call with an
+incomplete or stale pair receives `409 schema_mismatch` before the
 selected tool is invoked. The public Action document is served with
 `Cache-Control: no-store` so a disabled contract cannot be retained as a
 client-side prerequisite.
 
 ## Remaining Gaps
 
-`execute` accepts an optional caller-stable `idempotency_key`. The Hub
+`exec` accepts an optional caller-stable `idempotency_key`. The Hub
 fingerprints `target`, `tool_name`, and `arguments` under the authenticated
 caller scope. A retry with the same key and fingerprint reuses the original
 job/result; reusing the key for a different operation returns `409 Conflict`.
@@ -61,7 +69,7 @@ short TTL, so this is retry safety, not a claim of exactly-once execution after
 a Hub restart. Background `job_id` remains the completion handle.
 
 The schema identity is recomputed against the selected target for each
-version-bound execute call. It is a freshness guard, not a claim of durable
+version-bound call. It is a freshness guard, not a claim of durable
 exactly-once execution or a replacement for the existing idempotency key.
 
 ## GPTAdmin Scope
@@ -92,7 +100,7 @@ proves all of the following:
    across its supported restart boundary;
 3. a normal refresh path preserves access without an operator action;
 4. after that restart or refresh, the integration completes a real harmless
-   `discover -> schema -> execute` interaction.
+   `discover -> schema -> exec` interaction.
 
 When an external client owns the state, the Hub suite cannot substitute for
 that client-level test. Record a redacted immutable client-run artifact along
@@ -103,5 +111,5 @@ credential or to silently downgrade authentication.
 The current Hub implementation and policy path are covered by:
 
 ```bash
-cd go-hub && go test ./internal/hub -run 'TestMCPIntegrationDiscoverSchemaExecuteConformance' -count=1
+cd go-hub && go test ./internal/hub -run 'TestMCPIntegrationDiscoverSchemaToolCallConformance' -count=1
 ```

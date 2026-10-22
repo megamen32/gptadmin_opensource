@@ -5,19 +5,26 @@ short JavaScript program in the existing QuickJS/Wazero sandbox. Intermediate
 MCP answers stay there; return only the requested value. `code_exec` is retired
 and returns a migration error.
 
-`exec` and `ro` are the advertised executors. `execute` is published by the
-compatibility catalog mode (`tool_catalog_mode=compat`, the default), so a client
-that cached an older connector schema still finds a working tool; the modern
-mode (`tool_catalog_mode=modern`) publishes only the short catalog. The mode is
-an explicit admin setting — it is never guessed from a user agent.
+The public catalog is deliberately short:
 
-Direct `execute(target,tool,args)` works again on the same request-aware
-dispatcher (`ref`, context, aliases, background, idempotency, approvals, audit,
-receipt) and is checked by the same args-aware policy gate as every other
-execution path. The code-only spelling `execute({code})` remains as the old
-transport alias and canonicalizes to `exec` before policy checks. A call that
-mixes `code` with direct routing arguments is refused before anything is
-executed.
+- `search` — find the capability that is needed.
+- `ro` — read and analyse without changing anything.
+- `exec` — run JavaScript, including several MCP calls and the processing of
+  their results.
+
+The task readers `job` and `expand` stay published, because a client has to be
+able to read the result of a task it started.
+
+The direct `execute(target,tool,args)` facade is **not public**. It invites one
+tool call per request instead of one script that batches the calls, and its
+name costs more tokens per call than `exec` and `ro` (`exec` is one token in
+`o200k_base`, `code_exec` is two; inside JavaScript `call` is one token and
+`mcp.call` is three). A client that still calls it receives the explicit
+`execute_facade_retired` answer with the migration path. The code-only
+spelling `execute({code})` stays as the old transport alias and canonicalizes
+to `exec` before policy checks; a call that mixes `code` with direct routing
+arguments is refused before anything is executed. The internal dispatcher
+(`executeMCPTool`) stays: `ro`, `exec`, the relay and the agent routes use it.
 
 ```javascript
 const hits = await search("file editor", {target: "file:node"});

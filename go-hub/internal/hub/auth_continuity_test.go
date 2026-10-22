@@ -253,7 +253,9 @@ func TestAuthContinuityReaderCannotMutateProfilesThroughMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"access_profiles","args":{"action":"create","id":"forbidden","profile":{"access_mode":"full","allowed_targets":["*"],"allowed_tools":["*"]}}}}}`)
+	// The direct execute facade is retired. The mutation goes through the
+	// exec facade, which dispatches it on the authorized path.
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"code":"return await mcp.call('hub','access_profiles',{action:'create',id:'forbidden',profile:{access_mode:'full',allowed_targets:['*'],allowed_tools:['*']}});"}}}`)
 	// Without current instructions, reject before attempting a mutation.
 	blocked := authContinuityHTTP(b, "POST", "/mcp", "fixture-owner", body)
 	var blockedRPC map[string]any
@@ -289,11 +291,25 @@ func TestAuthContinuityReaderCannotMutateProfilesThroughMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	outcome := mapValue(mapValue(rpc["result"])["structuredContent"])
-	denial := mapValue(mapValue(outcome["error"])["response"])
+	receipt := mapValue(mapValue(outcome["error"])["receipt"])
 	if firstString(outcome, "status") != "failed" ||
-		!strings.Contains(firstString(denial, "detail", "error", "message"), "reader") ||
+		firstString(receipt, "tool") != "access_profiles" ||
+		intFromAny(receipt["http_status"]) < 400 ||
 		firstString(mapValue(outcome["error"]), "code") == "instructions_required" {
 		t.Fatalf("reader policy was not reached after bootstrap: %d %s", got.Code, got.Body.String())
+	}
+	// The refusal is the reader's own authority, not an accident of the
+	// facade: the same business call on the internal dispatcher says so.
+	readerRequest := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	readerRequest.Header.Set("Authorization", "Bearer fixture-owner")
+	readerRequest = requestWithInstructionContext(readerRequest, map[string]any{"context": bootstrap["context"]})
+	denied, status := b.executeMCPTool(readerRequest, "hub", "access_profiles", map[string]any{
+		"action":  "create",
+		"id":      "forbidden",
+		"profile": map[string]any{"access_mode": "full", "allowed_targets": []string{"*"}, "allowed_tools": []string{"*"}},
+	}, false, time.Second, "")
+	if status < 400 || !strings.Contains(firstString(mapValue(denied["response"]), "detail", "error", "message"), "reader") {
+		t.Fatalf("reader authority did not refuse the mutation: %d %v", status, denied)
 	}
 	after, err := os.ReadFile(b.accessProfilesStatePath())
 	if err != nil || !bytes.Equal(before, after) {

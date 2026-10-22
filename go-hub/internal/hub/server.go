@@ -372,7 +372,6 @@ func intPtr(v int) *int { return &v }
 
 var hubSettingRegistry = []hubSettingDefinition{
 	{Key: "tool_output_verbose", Type: "boolean", Category: "transport", Title: "Подробные ответы инструментов", Description: "Включать служебные поля и полные обёртки execute/job. По умолчанию выключено; detail=full или compact меняет формат одного ответа без повторного выполнения.", Default: false, RestartRequired: false, Advanced: true, Order: 50},
-	{Key: "tool_catalog_mode", Type: "string", Category: "transport", Title: "Каталог инструментов", Description: "Какой короткий каталог отдаётся в tools/list. compat — совместимый execute (одна точка входа для всех возможностей); modern — code-mode exec/ro и поиск search. Переключение обратимо.", Default: catalogModeCompat, Options: []string{catalogModeCompat, catalogModeModern}, RestartRequired: false, Order: 60},
 	{Key: "mcp_auto_cleanup_enabled", Type: "boolean", Category: "mcp_registry", Title: "Автоочистка stale MCP", Description: "Автоматически удалять stale non-shell MCP по retention policy.", Default: true, RestartRequired: false, Order: 5},
 	{Key: "stale_mcp_retention_days", Type: "integer", Category: "mcp_registry", Title: "Удаление stale MCP", Description: "Удалять stale non-shell MCP из registry после указанного срока.", Default: defaultStaleMCPRetentionDays, Minimum: intPtr(1), Maximum: intPtr(3650), Unit: "days", RestartRequired: false, Order: 10},
 	{Key: "mcp_offline_after_seconds", Type: "integer", Category: "agent_lifecycle", Title: "Порог offline", Description: "Считать агент offline, если Hub не видел poll/heartbeat дольше этого времени.", Default: 90, Minimum: intPtr(15), Maximum: intPtr(86400), Unit: "seconds", RestartRequired: false, Order: 10},
@@ -4013,6 +4012,9 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		job.Status = "failed"
 		job.Error = res.Error
 	}
+	// A receipt that shares the task id follows the dispatch job into its
+	// terminal state, so no record of this task stays unfinished.
+	s.finishTaskRecordsLocked(job.ID, job.Status, job.Error)
 	fields := map[string]any{"server": name, "job_id": res.ID, "status": job.Status}
 	if job.TraceID != "" {
 		fields["trace_id"] = job.TraceID
@@ -4301,6 +4303,9 @@ func (s *Server) mcpRelayResult(w http.ResponseWriter, r *http.Request) {
 	} else {
 		job.Status = "completed"
 	}
+	// A dispatch job that shares the task id follows the receipt into its
+	// terminal state, so no record of this task stays unfinished.
+	s.finishTaskRecordsLocked(job.ID, job.Status, job.Error)
 	for _, entry := range s.idempotency {
 		if entry.JobID == job.ID {
 			entry.Response = cloneMap(relayJobResponse(job))
@@ -5962,7 +5967,6 @@ func childMCPToolDefinitions() []map[string]any {
 	}
 }
 
-
 func controlToolNames() []string {
 	return []string{"control_catalog", "mcp_manage", "mcp_tools", "mcp_call", "mcp_connection_close", "mcp_request"}
 }
@@ -5981,8 +5985,6 @@ func controlTools(target string) []map[string]any {
 	}
 	return append([]map[string]any{controlCatalogToolDefinition()}, childMCPToolDefinitions()...)
 }
-
-
 
 func searchToolDefinition() map[string]any {
 	return map[string]any{"name": "search", "title": "Search tools", "description": "Search caller-visible tool names, descriptions and control settings. Returns schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
@@ -9077,7 +9079,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "tools/list":
-		result = mcpCacheableResult(map[string]any{"tools": nativeFacadeTools(r, compactFacadeTools(requestWithCatalogMode(r, s.toolCatalogMode()), fullDetailRequested(params["detail"])))}, 30000, "private")
+		result = mcpCacheableResult(map[string]any{"tools": nativeFacadeTools(r, compactFacadeTools(r, fullDetailRequested(params["detail"])))}, 30000, "private")
 	case "tools/call":
 		name := firstString(params, "name")
 		args := mapValue(params["arguments"])
@@ -9088,6 +9090,12 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if legacyCodeAlias && name == "execute" {
 			name = "exec"
 			params["name"] = "exec"
+		}
+		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+			// The code-only spelling was rewritten to exec above, so only the
+			// direct routing form reaches this point. It is no longer public.
+			result = mcpToolResult(retiredExecuteFacadeResult())
+			break
 		}
 		if (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") && !profileAllowsTarget(r, firstString(args, "target", "server_id", "agent_id")) {
 			rpcErr = map[string]any{"code": -32003, "message": "access profile denies this target"}
@@ -10094,6 +10102,24 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 	return s.withSchemaContractMetadata(result)
 }
 
+// retiredExecuteFacadeMessage explains the retirement of the direct execute
+// facade to a client that still calls it.
+const retiredExecuteFacadeMessage = "the direct execute facade is no longer public; use search, then exec for writes and ro for reads"
+
+// retiredExecuteFacadeResult is the answer for a public call of the direct
+// execute facade. The facade is not public any more: it invites one tool call
+// per request instead of one script that batches the calls, and its name
+// costs more tokens per call than exec and ro. The internal dispatcher stays.
+func retiredExecuteFacadeResult() map[string]any {
+	return map[string]any{
+		"status": "failed",
+		"error": map[string]any{
+			"code":    "execute_facade_retired",
+			"message": retiredExecuteFacadeMessage,
+		},
+	}
+}
+
 func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]any) any {
 	if err := validateToolOutputDetail(args["detail"]); err != nil {
 		return map[string]any{"status": "failed", "error": err.Error()}
@@ -10114,35 +10140,14 @@ func (s *Server) appsSDKCallMCP(r *http.Request, name string, args map[string]an
 		}
 		return response
 	}
-	if toolName == "" {
-		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool_name"}
-	}
-	callArgs := mapValue(args["arguments"])
-	if len(callArgs) == 0 {
-		callArgs = mapValue(args["args"])
-	}
-	if len(callArgs) == 0 && firstString(args, "args_json") != "" {
-		var err error
-		callArgs, err = toolArgsFromJSON(firstString(args, "args_json"))
-		if err != nil {
-			return map[string]any{"server_id": target, "status": "failed", "error": err.Error()}
-		}
-	}
-	if len(callArgs) == 0 {
-		callArgs = toolArgsFromTopLevel(args)
-	}
-	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
-	if status != http.StatusOK {
-		return map[string]any{"server_id": target, "status": "failed", "error": map[string]any{"status_code": status, "message": detail}}
-	}
-	if response, blocked := s.validateSchemaContract(r, selectedTarget, args); blocked {
-		return response
-	}
-	response, status := s.executeMCPTool(r, selectedTarget, toolName, callArgs, truthy(args["background"]), s.cfg.DefaultTimeout, firstString(args, "idempotency_key"))
-	if status >= http.StatusBadRequest {
-		return map[string]any{"server_id": selectedTarget, "status": "failed", "error": response}
-	}
-	return s.formatToolOutput(response, toolName, args["detail"])
+	// The direct routing form of this facade is no longer public. It invites
+	// one tool call per request instead of one script that batches the calls,
+	// and its name costs more tokens per call than exec and ro. The internal
+	// dispatcher stays: ro, exec, the relay and the agent routes call
+	// executeMCPTool directly.
+	result := retiredExecuteFacadeResult()
+	result["server_id"] = target
+	return result
 }
 
 func resourceReceiptInputSchema() map[string]any {
@@ -10292,25 +10297,6 @@ func appsSDKTools() []map[string]any {
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,
 			"_meta":           readMeta,
-		},
-		{
-			"name":        "execute",
-			"title":       "Execute",
-			"description": "Call one tool directly: execute({target, tool, args}). execute({code}) is the code-only spelling of exec.",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
-				"target":          map[string]any{"type": "string"},
-				"tool":            map[string]any{"type": "string"},
-				"args":            map[string]any{"type": "object", "additionalProperties": true},
-				"ref":             map[string]any{"type": "string"},
-				"background":      map[string]any{"type": "boolean"},
-				"idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax},
-				"detail":          toolOutputDetailSchema(),
-				"code":            map[string]any{"type": "string"},
-			}, "additionalProperties": true},
-			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
-			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
-			"securitySchemes": execSecurity,
-			"_meta":           execMeta,
 		},
 		{
 			"name":        "fleetExec",

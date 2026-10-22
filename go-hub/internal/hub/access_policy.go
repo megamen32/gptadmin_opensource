@@ -162,6 +162,13 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 		case "expand", "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
 			return nil
 		}
+		// The read-only executor is the one execution surface a read-only
+		// identity may load: every nested operation is checked individually
+		// against the read-only ceiling. The task read facades read a receipt
+		// the caller may already reach.
+		if toolName == "ro" || toolName == "job" || toolName == "get_mcp_job" || toolName == "getMcpJob" {
+			return nil
+		}
 	}
 	if target == "control:hub" && isReadOnlyTool("hub", toolName) {
 		return nil
@@ -173,6 +180,12 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 		return nil
 	}
 	if strings.HasPrefix(target, "file:") && toolName == "system_inspect" {
+		return nil
+	}
+	if _, mixed := readActionTools[toolName]; mixed {
+		// A mixed tool is decided by its action. The coarse gate does not see
+		// the arguments, so it admits the tool and the args-aware gate below
+		// refuses every action that is not a known read action.
 		return nil
 	}
 	return errors.New("read-only client cannot call this tool")
@@ -293,8 +306,32 @@ func authorizeToolAction(r *http.Request, target, tool string, args map[string]a
 	if err := authorizeToolRuleAction(r, target, tool, args); err != nil {
 		return err
 	}
+	if err := authorizeReadOnlyIdentityAction(r, target, tool, args); err != nil {
+		return err
+	}
 	if readOnlyExecRequest(r) && !readOnlyExecToolAllowed(r, target, tool, args) {
 		return errors.New("read-only execution refuses this target/tool/action")
+	}
+	return nil
+}
+
+// authorizeReadOnlyIdentityAction is the access-mode ceiling of a read-only
+// identity. A mixed tool is admitted by the coarse gate, because the coarse
+// gate cannot see the action; here, where the arguments are known, every
+// action that is not a known read action is refused. A read-only identity
+// keeps the read-only executor, the search facade and the permitted reads,
+// and never gains a write path.
+func authorizeReadOnlyIdentityAction(r *http.Request, target, tool string, args map[string]any) error {
+	if requestAccessMode(r) != accessModeReadonly {
+		return nil
+	}
+	reads, mixed := readActionTools[tool]
+	if !mixed {
+		return nil
+	}
+	action := firstString(args, "action")
+	if action == "" || !reads[action] {
+		return errors.New("read-only client cannot call this tool")
 	}
 	return nil
 }
@@ -305,11 +342,12 @@ func authorizeToolAction(r *http.Request, target, tool string, args map[string]a
 
 // readActionTools maps a mixed tool to the actions that provably do not
 // mutate state. The lists are verified against the shipped implementations:
-//   file_editor      view reads; create/str_replace/batch_edit/delete write
-//   file_checkpoint  list/diff read; create/restore/delete/cleanup/gc write
-//   file_backup      list reads; backup/restore/cleanup write
-//   mcp_manage       list/status/config read; upsert/remove/enable/disable/restart write
-//   system_inspect   read_file/list_directory read only
+//
+//	file_editor      view reads; create/str_replace/batch_edit/delete write
+//	file_checkpoint  list/diff read; create/restore/delete/cleanup/gc write
+//	file_backup      list reads; backup/restore/cleanup write
+//	mcp_manage       list/status/config read; upsert/remove/enable/disable/restart write
+//	system_inspect   read_file/list_directory read only
 var readActionTools = map[string]map[string]bool{
 	"file_editor":     {"view": true},
 	"file_checkpoint": {"list": true, "diff": true},
@@ -581,23 +619,9 @@ func authorizeExecuteFacade(r *http.Request, args map[string]any) error {
 		}
 		return authorizeToolAction(r, "hub", codeModeTool, nil)
 	}
-	if args == nil {
-		// A catalog listing has no arguments to check yet.
-		return nil
-	}
-	if target == "" || tool == "" {
-		return errors.New("execute requires an explicit target and tool")
-	}
-	callArgs := mapValue(args["arguments"])
-	if len(callArgs) == 0 {
-		callArgs = mapValue(args["args"])
-	}
-	if len(callArgs) == 0 && firstString(args, "args_json") != "" {
-		if parsed, err := toolArgsFromJSON(firstString(args, "args_json")); err == nil {
-			callArgs = parsed
-		}
-	}
-	return authorizeToolAction(r, target, tool, callArgs)
+	// The direct routing form of the facade is no longer public. The code-only
+	// spelling above stays as the old transport alias of exec.
+	return errors.New(retiredExecuteFacadeMessage)
 }
 
 func appsSDKToolsForRequest(r *http.Request) []map[string]any {

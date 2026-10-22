@@ -1,8 +1,8 @@
 # GPTAdmin: компактный обмен с агентами
 
-Обычный MCP-каталог содержит `ui`, `discover`, `schema`, `execute`, `job`,
-`expand`. Остальные возможности доступны через `schema(target="hub")` и
-`execute`; полный каталог можно получить через `tools/list` с
+Обычный MCP-каталог содержит `discover`, `search`, `schema`, `exec`, `ro`,
+`job`, `expand`. Остальные возможности доступны через `schema(target="hub")`
+и `exec`; полный каталог можно получить через `tools/list` с
 `params.detail="full"`. Явно ограниченные профили сохраняют свой список.
 После обновления новые MCP-подключения получают этот каталог автоматически;
 старому клиенту, который кеширует схемы, нужно обновить подключение.
@@ -13,9 +13,9 @@
 2. `schema(target)` возвращает названия, краткие описания, обязательные поля
    и annotations. Это каталог, а не полный контракт аргументов.
 3. `schema(target, tool)` возвращает **неизменённую точную схему** выбранного
-   инструмента и `call_ref`. Вызов `execute(ref=call_ref, args=...)` сокращает
-   исходящие аргументы; старый `execute(target, tool, args)` остаётся доступен.
-   Ссылка разрешается до авторизации, approval, маршрутизации и idempotency.
+   инструмента и `call_ref`. Вызов `mcp.call({ref: call_ref, args: ...})`
+   внутри `exec` сокращает исходящие аргументы. Ссылка разрешается до
+   авторизации, approval, маршрутизации и idempotency.
 4. Крупные обычные ответы получают явные `preview`, `truncated`, `bytes`,
    `operation_id`. Ошибки, approvals, медиа и resource blocks не обрезаются.
    Маленький shell-ответ остаётся коротким; его durable `job_id` раскрывается
@@ -100,10 +100,10 @@ GrepMesh `read_text` и компактный `search` показывают ну�
 Статус источников, `partial`, `truncated`, происхождение и artifact handle
 сохраняются. Большой текст сокращается по границе строки/UTF-8, а исходный
 receipt доступен через `expand`. Это работает и при чтении завершённого `job`.
-`execute(target="hub", tool="expand", args=...)` также не обрезает страницу
-повторно. Для клиента с устаревшим импортом доступны
-`execute(target="hub", tool="discover", args={query,status})` и
-`execute(target="hub", tool="schema", args={target,tool})`.
+`mcp.call({target:"hub", tool:"expand", args:...})` внутри `exec` также не
+обрезает страницу повторно. Для клиента с устаревшим импортом доступны
+`mcp.call({target:"hub", tool:"discover", args:{query,status}})` и
+`mcp.call({target:"hub", tool:"schema", args:{target,tool}})`.
 Прямые query/status/tool/ref/expand доступны в MCP и Actions-контрактах;
 hosted приложение должно обновить собственный импорт инструментов.
 

@@ -720,7 +720,14 @@ func outputRows(value any) []any {
 // specialized tools remain callable, with exact schemas under schema(target=hub).
 func compactFacadeTools(r *http.Request, full bool) []map[string]any {
 	tools := appsSDKToolsForRequest(r)
-	if full || requestAccessMode(r) == accessModeReadonly {
+	if requestAccessMode(r) == accessModeReadonly {
+		// A read-only identity gets the read primitives, the search facade and
+		// the read-only executor. The search facade is published for it as
+		// well: a client that may only read still has to find the tools it is
+		// allowed to read.
+		return withReadOnlyExecTool(r, withSearchFacadeTool(r, withoutExecuteFacade(r, tools)))
+	}
+	if full {
 		return withReadOnlyExecTool(r, withoutExecuteFacade(r, tools))
 	}
 	if profile, ok := AccessProfileFromRequest(r); ok && !containsString(profile.AllowedTools, "*") {

@@ -39,13 +39,45 @@ func executeReliabilityCall(t *testing.T, s *Server, name string, args map[strin
 func TestExecuteReferenceLifecycleRecovery(t *testing.T) {
 	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "ctl"})
 	defer s.Close()
+	// The direct execute facade is no longer public. The refusal is explicit
+	// and points at the surviving routes instead of pretending to run.
 	response := executeReliabilityCall(t, s, "execute", map[string]any{"target": "hub", "tool": "settings_schema", "args": map[string]any{}})
-	if response["error"] != nil || firstString(mapValue(mapValue(response["result"])["structuredContent"]), "status") != "completed" {
-		t.Fatalf("legacy direct safe call failed: %v", response)
+	refusal := mapValue(mapValue(response["result"])["structuredContent"])
+	if response["error"] != nil || firstString(mapValue(refusal["error"]), "code") != "execute_facade_retired" {
+		t.Fatalf("retired facade did not refuse with migration guidance: %v", response)
+	}
+	// The same safe call still runs through the surviving container.
+	response = executeReliabilityCall(t, s, "exec", map[string]any{"code": "return await mcp.call('hub','settings_schema',{});"})
+	payload := mapValue(mapValue(response["result"])["structuredContent"])
+	if response["error"] != nil || firstString(payload, "status") != "completed" {
+		t.Fatalf("safe call unusable after the facade retirement: %v", response)
 	}
 	response = executeReliabilityCall(t, s, "code_exec", map[string]any{"code": "return 42;"})
 	if firstString(mapValue(mapValue(response["result"])["structuredContent"]), "error") == "" {
 		t.Fatalf("code_exec did not return migration guidance: %v", response)
+	}
+	// One task id can own a shell record and a relay receipt at the same time.
+	// Cancel has to finalise both, otherwise the node keeps counting the
+	// receipt as unfinished work and the drain can never become ready.
+	const shared = "shared-reference-task"
+	s.mu.Lock()
+	s.shellJobs[shared] = &shellJob{ID: shared, Server: "reference-host", Status: "running", ToolName: "shell_exec"}
+	s.relayJobs[shared] = &relayJob{ID: shared, AgentID: "mcp:shell:reference-host:fixture", Status: "running", Method: childSchemaMethod}
+	s.cancelTaskLocked(shared)
+	cancelledShell, cancelledRelay := s.shellJobs[shared].Status, s.relayJobs[shared].Status
+	s.mu.Unlock()
+	if !taskTerminal(cancelledShell) || !taskTerminal(cancelledRelay) {
+		t.Fatalf("cancel left a shared task record running: shell=%s relay=%s", cancelledShell, cancelledRelay)
+	}
+	// A receipt whose owner is gone heals itself instead of waiting forever.
+	const orphan = "orphaned-reference-receipt"
+	s.mu.Lock()
+	s.relayJobs[orphan] = &relayJob{ID: orphan, AgentID: "mcp:shell:reference-host:fixture", Status: "running", Method: childSchemaMethod, CreatedAt: nowFloat() - 7200}
+	repaired := s.reconcileSharedTaskRecordsLocked()
+	orphanStatus := s.relayJobs[orphan].Status
+	s.mu.Unlock()
+	if len(repaired) == 0 || !taskTerminal(orphanStatus) {
+		t.Fatalf("orphaned receipt did not heal: repaired=%v status=%s", repaired, orphanStatus)
 	}
 }
 
@@ -63,9 +95,9 @@ func TestExecuteExportStableWithLargeInventoryAndReconnect(t *testing.T) {
 			names = append(names, firstString(mapValue(row), "name"))
 		}
 		// The compat catalog mode is the default: it publishes the routing
-		// primitives, the working code mode and the compatibility execute
-		// facade. The modern mode publishes the code-mode catalog instead.
-		if !reflect.DeepEqual(names, []string{"discover", "search", "schema", "exec", "ro", "execute"}) {
+		// primitives, the working code mode and the published task reader.
+		// The modern mode publishes the code-mode catalog instead.
+		if !reflect.DeepEqual(names, []string{"discover", "search", "schema", "exec", "ro", "job", "expand"}) {
 			t.Fatalf("routing catalog changed: %v", names)
 		}
 		return tools

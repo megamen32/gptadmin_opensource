@@ -221,39 +221,55 @@ func TestAccessToolRulesNeverWidenAllowedTargetsOrTools(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // A profile with rules denies every business call that is not named, but the
-// routing facades keep their own facade permission.
+// sanctioned facades keep their own facade permission.
 func TestAccessProfileToolRulesDenyUnnamedBusinessCallsButKeepFacades(t *testing.T) {
 	profile := accessToolRulesProfile()
 	profile.AllowedTools = []string{
 		"ro", "exec", "search", "schema", "discover", "job", "expand", "execute",
-		"file_editor", "system_inspect",
+		"file_editor", "system_inspect", "hub_status", "access_profiles",
+	}
+	profile.ToolRules = []AccessToolRule{
+		{Target: "file:host", Tool: "file_editor", Actions: []string{"view"}},
+		{Target: "hub", Tool: "hub_status"},
 	}
 	r := accessToolRulesRequest(t, profile)
 
+	// The sanctioned facades of the short public catalog stay reachable.
 	for _, facade := range []string{"ro", "exec", "search", "schema", "discover", "job", "expand"} {
 		if err := authorizeFacadeCall(r, facade, nil); err != nil {
 			t.Errorf("facade %q denied for a profile with rules: %v", facade, err)
 		}
 	}
-	// execute stays usable as a routing facade.
-	if err := authorizeFacadeCall(r, "execute", nil); err != nil {
-		t.Fatalf("execute routing facade denied: %v", err)
+	// The direct execute facade is retired: a profile that names it still
+	// cannot route a business call through it.
+	if err := authorizeFacadeCall(r, "execute", nil); err == nil || !strings.Contains(err.Error(), "no longer public") {
+		t.Fatalf("execute routing facade is still usable: %v", err)
 	}
-	// The business target/tool behind execute still needs a rule.
-	if err := authorizeFacadeCall(r, "execute", map[string]any{
-		"target": "file:host", "tool": "system_inspect", "arguments": map[string]any{},
-	}); err == nil {
-		t.Fatal("execute reached a business call without a rule")
+	// The business target/tool behind the exec facade still needs a rule.
+	if err := authorizeToolAction(r, "file:host", "system_inspect", map[string]any{}); err == nil {
+		t.Fatal("exec reached a business call without a rule")
 	}
-	// A rule covered business call is reachable through execute.
-	if err := authorizeFacadeCall(r, "execute", map[string]any{
-		"target": "file:host", "tool": "file_editor", "arguments": map[string]any{"action": "view"},
-	}); err != nil {
-		t.Fatalf("execute refused a rule covered business call: %v", err)
+	// A rule covered business call is reachable through the exec facade.
+	if err := authorizeToolAction(r, "file:host", "file_editor", map[string]any{"action": "view"}); err != nil {
+		t.Fatalf("exec refused a rule covered business call: %v", err)
 	}
 	// A business call without a rule is denied on the direct path too.
 	if err := authorizeToolAction(r, "file:host", "system_inspect", map[string]any{}); err == nil {
 		t.Fatal("business call without a rule was allowed")
+	}
+
+	// The exec facade applies the same rule to the business call it forwards
+	// to: an unnamed pair is refused, a named pair runs.
+	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "ctl"})
+	defer s.Close()
+	denied, status := s.callCodeModeTool(r, map[string]any{"code": "return await mcp.call('hub','access_profiles',{action:'list'});"})
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "forbidden" ||
+		!strings.Contains(firstString(mapValue(denied["error"]), "message"), "no rule") {
+		t.Fatalf("exec reached an unnamed business call: %d %v", status, denied)
+	}
+	allowed, status := s.callCodeModeTool(r, map[string]any{"code": "return await mcp.call('hub','hub_status',{});"})
+	if status != http.StatusOK || firstString(allowed, "status") != "completed" {
+		t.Fatalf("exec refused a rule covered business call: %d %v", status, allowed)
 	}
 }
 

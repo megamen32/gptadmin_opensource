@@ -351,13 +351,26 @@ func TestMCPRelayCallIdempotencyReturnsCompletedResultAfterRetry(t *testing.T) {
 func TestMCPAppsCallUsesSameIdempotencyContract(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", RelayAgentToken: "relay", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	registerRelayAgent(t, s, "demo")
-	payload := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_mcp_tool","arguments":{"target":"demo","tool_name":"write","arguments":{"value":"one"},"idempotency_key":"apps-write-1","background":true}}}`
-	first := postMCPRPC(t, s, payload)
-	second := postMCPRPC(t, s, strings.Replace(payload, `"id":1`, `"id":2`, 1))
-	firstStructured := mapValue(mapValue(first["result"])["structuredContent"])
-	secondStructured := mapValue(mapValue(second["result"])["structuredContent"])
-	if firstStructured["job_id"] != secondStructured["job_id"] {
-		t.Fatalf("MCP Apps retry created different jobs: first=%v second=%v", firstStructured, secondStructured)
+	// The public direct call facade is retired, so the Apps SDK call path is
+	// the internal dispatcher that the facade used. The idempotency contract
+	// is unchanged: a retry with the same key returns the same job.
+	r := httptest.NewRequest(http.MethodPost, "/mcp-relay/call_mcp_tool", nil)
+	r.Header.Set("Authorization", "Bearer ctl")
+	call := func() map[string]any {
+		t.Helper()
+		response, _ := s.executeMCPTool(r, "demo", "write", map[string]any{"value": "one"}, true, time.Second, "apps-write-1")
+		return response
+	}
+	first := call()
+	second := call()
+	if firstString(first, "job_id") == "" || firstString(first, "job_id") != firstString(second, "job_id") {
+		t.Fatalf("MCP Apps retry created different jobs: first=%v second=%v", first, second)
+	}
+	s.mu.Lock()
+	queued := len(s.relayQueues["demo"])
+	s.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("MCP Apps retry queued another job: queue length=%d", queued)
 	}
 }
 
@@ -375,10 +388,29 @@ func TestMCPToolsExposeCompactCanonicalNames(t *testing.T) {
 		name, _ := tool["name"].(string)
 		got[name] = tool
 	}
-	for _, name := range []string{"discover", "schema", "execute", "fleetExec", "job", "inspect", "ui"} {
+	for _, name := range []string{"discover", "schema", "fleetExec", "job", "inspect", "ui"} {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("missing canonical tool %q; tools=%v", name, got)
 		}
+	}
+	// The direct execute facade is not published any more. The public catalog
+	// answers with search, exec and ro instead of one tool call per request.
+	for _, retired := range []string{"execute", "call_mcp_tool", "callMcpTool", "code_exec"} {
+		if _, ok := got[retired]; ok {
+			t.Fatalf("retired tool %q must not be advertised in tools/list", retired)
+		}
+	}
+	short := map[string]bool{}
+	for _, tool := range compactFacadeTools(httptest.NewRequest(http.MethodPost, "/mcp", nil), false) {
+		short[firstString(tool, "name")] = true
+	}
+	for _, required := range []string{"discover", "search", "schema", "exec", "ro", "job", "expand"} {
+		if !short[required] {
+			t.Fatalf("public short catalog misses %q: %v", required, short)
+		}
+	}
+	if short["execute"] {
+		t.Fatalf("public short catalog publishes the retired execute facade: %v", short)
 	}
 	for _, legacy := range []string{"list_mcp_servers", "list_mcp_tools", "call_mcp_tool", "get_mcp_job"} {
 		if _, ok := got[legacy]; ok {
@@ -393,7 +425,7 @@ func TestMCPToolsExposeCompactCanonicalNames(t *testing.T) {
 	}
 }
 
-func TestMCPIntegrationDiscoverSchemaExecuteConformance(t *testing.T) {
+func TestMCPIntegrationDiscoverSchemaToolCallConformance(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	call := func(id int, name, arguments string) map[string]any {
 		t.Helper()
@@ -418,28 +450,47 @@ func TestMCPIntegrationDiscoverSchemaExecuteConformance(t *testing.T) {
 		t.Fatalf("default schema exposed opt-in metadata: %v", response)
 	}
 
-	execute := call(3, "execute", `{"target":"hub","tool":"demo","arguments":{"probe":"conformance"},"idempotency_key":"conformance-demo-1"}`)
-	executeJSON, err := json.Marshal(execute)
+	// The direct execute facade is not public any more. A client that still
+	// calls it gets the deterministic migration answer, not a business call.
+	retired := call(3, "execute", `{"target":"hub","tool":"demo","arguments":{"probe":"conformance"},"idempotency_key":"conformance-demo-1"}`)
+	retiredContent := mapValue(mapValue(retired["result"])["structuredContent"])
+	if retired["error"] != nil || firstString(retiredContent, "status") != "failed" || firstString(mapValue(retiredContent["error"]), "code") != "execute_facade_retired" {
+		t.Fatalf("the retired execute facade is not refused with the migration answer: %#v", retired)
+	}
+
+	// The internal dispatcher still runs the same business call: ro, exec, the
+	// relay and the agent routes use it.
+	dispatched, status := s.executeMCPTool(nil, "hub", "demo", map[string]any{"probe": "conformance"}, false, s.cfg.DefaultTimeout, "conformance-demo-1")
+	dispatchedJSON, err := json.Marshal(dispatched)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(executeJSON), `"status":"ok"`) {
-		t.Fatalf("execute did not return the safe demo result: %s", executeJSON)
+	if status != http.StatusOK || !strings.Contains(string(dispatchedJSON), `"status":"ok"`) {
+		t.Fatalf("the internal dispatcher did not return the safe demo result: status=%d result=%s", status, dispatchedJSON)
 	}
-	staleMetadata := call(4, "execute", `{"target":"hub","tool":"demo","arguments":{"probe":"stale-metadata"},"schema_version":"legacy","schema_digest_sha256":"stale"}`)
-	staleMetadataJSON, err := json.Marshal(staleMetadata)
+
+	// Stale schema metadata does not block an ordinary call: the metadata is
+	// a discovery aid, never a prerequisite. The surviving submission route
+	// strips it before the selected tool is called.
+	staleMetadata := postHubJSON(t, s, "/mcp-relay/call", "ctl", `{"target":"hub","tool_name":"demo","arguments":{"probe":"stale-metadata"},"schema_version":"legacy","schema_digest_sha256":"stale"}`)
+	staleJSON, err := json.Marshal(staleMetadata)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(staleMetadataJSON), `"status":"ok"`) {
-		t.Fatalf("execute blocked a call with stale schema metadata: %s", staleMetadataJSON)
+	if !strings.Contains(string(staleJSON), `"status":"ok"`) {
+		t.Fatalf("the submission route blocked a call with stale schema metadata: %s", staleJSON)
 	}
-	metadataLeak := call(5, "execute", `{"target":"hub","tool":"unsupported-schema-probe","schema_version":"legacy","schema_digest_sha256":"stale"}`)
-	metadataLeakJSON, err := json.Marshal(metadataLeak)
-	if err != nil {
-		t.Fatal(err)
+
+	// Schema metadata never reaches the selected tool as an argument.
+	leakReq := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"hub","tool_name":"unsupported-schema-probe","schema_version":"legacy","schema_digest_sha256":"stale"}`))
+	leakReq.Header.Set("Authorization", "Bearer ctl")
+	leakRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(leakRec, leakReq)
+	metadataLeakJSON := leakRec.Body.String()
+	if leakRec.Code != http.StatusBadRequest || !strings.Contains(metadataLeakJSON, "unsupported hub tool") {
+		t.Fatalf("the submission route did not report the unsupported tool: status=%d body=%s", leakRec.Code, metadataLeakJSON)
 	}
-	if strings.Contains(string(metadataLeakJSON), "schema_version") || strings.Contains(string(metadataLeakJSON), "schema_digest_sha256") {
+	if strings.Contains(metadataLeakJSON, "schema_version") || strings.Contains(metadataLeakJSON, "schema_digest_sha256") {
 		t.Fatalf("schema metadata leaked into tool arguments: %s", metadataLeakJSON)
 	}
 }
@@ -983,7 +1034,7 @@ func TestReadonlyManagedTokenCannotCallShellExec(t *testing.T) {
 	globalList.Header.Set("Content-Type", "application/json")
 	globalListed := httptest.NewRecorder()
 	h.ServeHTTP(globalListed, globalList)
-	if globalListed.Code != http.StatusOK || !strings.Contains(globalListed.Body.String(), `"name":"inspect"`) || strings.Contains(globalListed.Body.String(), `"name":"execute"`) {
+	if globalListed.Code != http.StatusOK || !strings.Contains(globalListed.Body.String(), `"name":"inspect"`) || !strings.Contains(globalListed.Body.String(), `"name":"ro"`) || !strings.Contains(globalListed.Body.String(), `"name":"search"`) || strings.Contains(globalListed.Body.String(), `"name":"exec"`) || strings.Contains(globalListed.Body.String(), `"name":"execute"`) {
 		t.Fatalf("global readonly tool list is unsafe: status=%d body=%s", globalListed.Code, globalListed.Body.String())
 	}
 
@@ -1007,13 +1058,53 @@ func TestReadonlyManagedTokenCannotCallShellExec(t *testing.T) {
 		t.Fatal("readonly inspection did not queue system_inspect")
 	}
 
-	facade := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_mcp_tool","arguments":{"target":"shell:test","tool_name":"shell_exec","arguments":{"cmd":"whoami"}}}}`))
+	// The direct execute facade is retired: a read-only identity must not be
+	// able to reach shell_exec through it, and the refusal must not queue a
+	// shell job.
+	facade := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:test","tool":"shell_exec","arguments":{"cmd":"whoami"}}}}`))
 	facade.Header.Set("Authorization", "Bearer "+token)
 	facade.Header.Set("Content-Type", "application/json")
 	facadeRec := httptest.NewRecorder()
 	h.ServeHTTP(facadeRec, facade)
-	if facadeRec.Code != http.StatusOK || !strings.Contains(facadeRec.Body.String(), "read-only") {
-		t.Fatalf("readonly facade shell_exec was not denied: status=%d body=%s", facadeRec.Code, facadeRec.Body.String())
+	if facadeRec.Code != http.StatusOK || !strings.Contains(facadeRec.Body.String(), "execute_facade_retired") {
+		t.Fatalf("readonly facade shell_exec was not refused: status=%d body=%s", facadeRec.Code, facadeRec.Body.String())
+	}
+	s.mu.Lock()
+	facadeQueued := false
+	for _, job := range s.shellJobs {
+		if job.ToolName == "shell_exec" {
+			facadeQueued = true
+		}
+	}
+	s.mu.Unlock()
+	if facadeQueued {
+		t.Fatal("the refused facade queued a shell_exec job")
+	}
+
+	// The write-capable code facade stays closed for a read-only identity.
+	execCall := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"exec","arguments":{"code":"return 1;"}}}`))
+	execCall.Header.Set("Authorization", "Bearer "+token)
+	execCall.Header.Set("Content-Type", "application/json")
+	execRec := httptest.NewRecorder()
+	h.ServeHTTP(execRec, execCall)
+	var execBody map[string]any
+	if err := json.Unmarshal(execRec.Body.Bytes(), &execBody); err != nil {
+		t.Fatal(err)
+	}
+	execError := mapValue(execBody["error"])
+	if execBody["error"] == nil || !strings.Contains(firstString(execError, "message"), "read-only") {
+		t.Fatalf("readonly identity reached the exec facade: status=%d body=%s", execRec.Code, execRec.Body.String())
+	}
+	s.mu.Lock()
+	execQueued := false
+	for _, job := range s.shellJobs {
+		if job.ToolName == "shell_exec" {
+			execQueued = true
+		}
+	}
+	s.mu.Unlock()
+	if execQueued {
+		t.Fatal("the refused exec facade queued a shell_exec job")
 	}
 
 	pinnedList := httptest.NewRequest(http.MethodPost, "/server/file-test/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
@@ -1891,7 +1982,7 @@ func TestAppsSDKRejectsDefaultTarget(t *testing.T) {
 		args map[string]any
 	}{
 		{name: "list_mcp_tools", args: map[string]any{"target": "default"}},
-		{name: "call_mcp_tool", args: map[string]any{"target": "default", "tool_name": "shell_exec"}},
+		{name: "inspect", args: map[string]any{"target": "default"}},
 	} {
 		result, ok := s.appsSDKCall(tc.name, tc.args).(map[string]any)
 		if !ok {
@@ -1905,21 +1996,25 @@ func TestAppsSDKRejectsDefaultTarget(t *testing.T) {
 			t.Fatalf("%s did not reject default target: %v", tc.name, result)
 		}
 	}
+
+	// The retired direct call facade answers deterministically instead of
+	// guessing a target.
+	retired, ok := s.appsSDKCall("call_mcp_tool", map[string]any{"target": "default", "tool_name": "shell_exec"}).(map[string]any)
+	if !ok {
+		t.Fatalf("call_mcp_tool returned %T, want map", retired)
+	}
+	if retired["status"] != "failed" || firstString(mapValue(retired["error"]), "code") != "execute_facade_retired" {
+		t.Fatalf("the retired facade did not refuse deterministically: %v", retired)
+	}
 }
 
 func TestAppsSDKCallForwardsArbitraryTopLevelToolArgs(t *testing.T) {
-	var callSchema map[string]any
+	// The direct call facade is not published any more, and its schema went
+	// with it: no published tool may carry the retired routing arguments.
 	for _, tool := range appsSDKTools() {
-		if tool["name"] == "execute" {
-			callSchema = tool["inputSchema"].(map[string]any)
-			break
+		if name := firstString(tool, "name"); name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
+			t.Fatalf("the retired direct call facade is still published: %v", name)
 		}
-	}
-	if callSchema == nil || callSchema["additionalProperties"] != true {
-		t.Fatalf("execute schema must permit arbitrary selected-tool fields: %v", callSchema)
-	}
-	if _, ok := callSchema["properties"].(map[string]any)["args"]; !ok {
-		t.Fatalf("execute schema must expose args: %v", callSchema)
 	}
 
 	s := New(Config{CtlToken: "ctl", RelayAgentToken: "relay", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
@@ -1933,17 +2028,27 @@ func TestAppsSDKCallForwardsArbitraryTopLevelToolArgs(t *testing.T) {
 		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	done := make(chan any, 1)
+	// The forwarding contract now lives in the internal dispatcher, which the
+	// Apps SDK call path used: every top-level field of the selected tool has
+	// to reach the upstream call unchanged.
+	clientArgs := map[string]any{
+		"target":     "OpenMemory",
+		"tool_name":  "openmemory_store_project",
+		"content":    "release notes",
+		"project_id": "gptadmin",
+		"tags":       []any{"release", "mcp"},
+		"metadata":   map[string]any{"source": "chatgpt"},
+		"type":       "project",
+	}
+	toolArgs := toolArgsFromTopLevel(clientArgs)
+	if len(toolArgs) != 5 {
+		t.Fatalf("the top-level tool arguments were not extracted: %v", toolArgs)
+	}
+
+	done := make(chan struct{})
 	go func() {
-		done <- s.appsSDKCall("call_mcp_tool", map[string]any{
-			"target":     "OpenMemory",
-			"tool_name":  "openmemory_store_project",
-			"content":    "release notes",
-			"project_id": "gptadmin",
-			"tags":       []any{"release", "mcp"},
-			"metadata":   map[string]any{"source": "chatgpt"},
-			"type":       "project",
-		})
+		defer close(done)
+		s.executeMCPTool(nil, "OpenMemory", "openmemory_store_project", toolArgs, false, time.Second, "")
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -2151,7 +2256,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 	tools := result["tools"].([]any)
 	expectedToolNames := map[string]bool{
 		"ui": true, "resource_receipt": true, "discover": true, "demo": true, "approve_pending_server": true, "settings_schema": true, "settings_get": true, "settings_set": true,
-		"schema": true, "inspect": true, "execute": true, "fleetExec": true, "job": true, "expand": true,
+		"schema": true, "inspect": true, "fleetExec": true, "job": true, "expand": true,
 		"secret_request": true, "secret_status": true,
 	}
 	renderTools := 0
@@ -2209,7 +2314,7 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 			}
 		}
 	}
-	if len(tools) != 16 || len(expectedToolNames) != 0 {
+	if len(tools) != 15 || len(expectedToolNames) != 0 {
 		t.Fatalf("got Apps SDK tools=%d missing=%v, want exact capability set", len(tools), expectedToolNames)
 	}
 	if renderTools != 1 {
@@ -2319,16 +2424,19 @@ func TestAppsSDKMetadataAndWidget(t *testing.T) {
 		}
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"resource_receipt","args":{"uri":"ui://widget/admin-v3.html"}}}}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
+	// The plugin bridge moved from the retired direct facade to the exec
+	// script: the code-only spelling of execute still runs, and through it the
+	// receipt reader stays reachable.
+	bridged := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute","arguments":{"code":"return await mcp.call('hub','resource_receipt',{uri:'ui://widget/admin-v3.html'});"}}}`)))
+	bridged.Header.Set("Authorization", "Bearer "+token)
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "unsupported hub tool") || !strings.Contains(w.Body.String(), wantDigest) {
-		t.Fatalf("existing plugin bridge cannot reach resource receipt: status=%d body=%s", w.Code, w.Body.String())
+	h.ServeHTTP(w, bridged)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), wantDigest) {
+		t.Fatalf("the exec bridge cannot reach the resource receipt: status=%d body=%s", w.Code, w.Body.String())
 	}
 	for _, forbidden := range []string{"<html", "GPTAdmin MCP</title>", "ui/notifications/tool-result"} {
 		if strings.Contains(w.Body.String(), forbidden) {
-			t.Fatalf("plugin bridge receipt leaked widget content %q: %s", forbidden, w.Body.String())
+			t.Fatalf("the exec bridge receipt leaked widget content %q: %s", forbidden, w.Body.String())
 		}
 	}
 }

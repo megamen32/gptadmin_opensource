@@ -39,13 +39,31 @@ func TestLegacySchemaContractValidationExplicitOptIn(t *testing.T) {
 	if version == "" {
 		t.Fatalf("schema omitted version: %v", response)
 	}
-	stale := call(2, "execute", fmt.Sprintf(`{"target":"hub","tool":"demo","arguments":{"probe":"stale"},"schema_version":%q,"schema_digest_sha256":"%064d"}`, version, 0))
-	staleJSON, err := json.Marshal(stale)
+	staleDigest := fmt.Sprintf("%064d", 0)
+	// The legacy schema contract gate is internal and unchanged. It refuses
+	// stale metadata for every business call, whoever submits it.
+	gate := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	blocked, isBlocked := s.validateSchemaContract(gate, "hub", map[string]any{
+		"target": "hub", "tool": "demo",
+		"schema_version": version, "schema_digest_sha256": staleDigest,
+	})
+	if !isBlocked || firstString(mapValue(blocked["error"]), "code") != "schema_mismatch" {
+		t.Fatalf("opt-in MCP gate did not reject stale metadata: %v", blocked)
+	}
+	// The public surface refuses it as well: the exec facade forwards the
+	// stale metadata to the same gate and the business tool never runs.
+	code := fmt.Sprintf("return await mcp.call({target:'hub',tool:'demo',args:{probe:'stale'},schema_version:%q,schema_digest_sha256:%q});", version, staleDigest)
+	arguments, err := json.Marshal(map[string]any{"code": code})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(staleJSON), "schema_mismatch") {
-		t.Fatalf("opt-in MCP gate did not reject stale metadata: %s", staleJSON)
+	stale := call(2, "exec", string(arguments))
+	structured := mapValue(mapValue(stale["result"])["structuredContent"])
+	receipt := mapValue(mapValue(structured["error"])["receipt"])
+	if firstString(structured, "status") != "failed" ||
+		intFromAny(receipt["http_status"]) != http.StatusConflict ||
+		!strings.Contains(firstString(mapValue(structured["error"]), "message"), "schema metadata does not match") {
+		t.Fatalf("opt-in MCP gate did not reject stale metadata: %v", structured)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(fmt.Sprintf(`{"target":"hub","tool_name":"hub_status","arguments":{},"schema_version":%q,"schema_digest_sha256":"%064d"}`, version, 0)))

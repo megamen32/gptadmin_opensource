@@ -77,7 +77,7 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	forwardedHeaders := make(chan http.Header, 2)
 	memberHandler := member.Handler()
 	memberServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/mcp" && r.Header.Get("Mcp-Name") == "execute" {
+		if r.URL.Path == "/mcp-relay/call" {
 			select {
 			case forwardedHeaders <- r.Header.Clone():
 			default:
@@ -111,25 +111,23 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	waitForNodeConn(t, writer, "shell:member-a")
 
 	// The production cross-node path: the original MCP bearer travels to the
-	// member's /mcp, which reauthorizes it against the replicated snapshot
-	// token store and executes through its local queue.
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"name":"execute","arguments":{"target":"shell:member-a","tool":"shell_exec","arguments":{"command":"echo node-conn-live-ok"}}}}`)
+	// member's own relay endpoint, which reauthorizes it against the
+	// replicated snapshot token store and executes through its local queue.
+	// The direct execute facade is retired; the authenticated relay route is
+	// the surviving submission path over a live node connection.
+	body := []byte(`{"target":"shell:member-a","tool":"shell_exec","arguments":{"command":"echo node-conn-live-ok"},"background":true}`)
 	// A valid bearer alone must not enqueue a command. Missing instructions
 	// are an explicit, side-effect-free refusal, not an accepted receipt.
-	direct := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	direct := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader(body))
 	direct.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
-	direct.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
-	direct.Header.Set("Mcp-Method", "tools/call")
-	direct.Header.Set("Mcp-Name", "execute")
+	direct.Header.Set("Content-Type", "application/json")
 	directW := httptest.NewRecorder()
 	member.Handler().ServeHTTP(directW, direct)
-	var directRPC map[string]any
-	if err := json.Unmarshal(directW.Body.Bytes(), &directRPC); err != nil {
+	var refusal map[string]any
+	if err := json.Unmarshal(directW.Body.Bytes(), &refusal); err != nil {
 		t.Fatal(err)
 	}
-	directResult := mapValue(directRPC["result"])
-	refusal := mapValue(directResult["structuredContent"])
-	if directW.Code != http.StatusOK || directResult["isError"] != true || refusal["executed"] != false ||
+	if directW.Code != http.StatusPreconditionRequired || refusal["executed"] != false ||
 		firstString(mapValue(refusal["error"]), "code") != "instructions_required" {
 		t.Fatalf("member admitted execution without instructions: %d %s", directW.Code, directW.Body.String())
 	}
@@ -160,11 +158,8 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 		t.Fatalf("writer did not deliver instructions: %d %s", bootstrapW.Code, bootstrapW.Body.String())
 	}
 
-	r := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer fixture-mcp-bearer-0123456789abcdefghijklmnop")
-	r.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
-	r.Header.Set("Mcp-Method", "tools/call")
-	r.Header.Set("Mcp-Name", "execute")
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set(instructionContextHeader, instructionContext)
 	w := httptest.NewRecorder()
@@ -177,14 +172,12 @@ func TestNodeConnForwardsCallOverLiveConnection(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"owner_target":"shell:member-a"`) {
 		t.Fatalf("receipt missing owner metadata contract: %s", w.Body.String())
 	}
-	var forwardedRPC map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &forwardedRPC); err != nil {
+	var receipt map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &receipt); err != nil {
 		t.Fatal(err)
 	}
-	forwardedResult := mapValue(forwardedRPC["result"])
-	receipt := mapValue(forwardedResult["structuredContent"])
 	jobID := firstString(receipt, "job_id")
-	if forwardedRPC["error"] != nil || forwardedResult["isError"] == true || jobID == "" ||
+	if receipt["error"] != nil || jobID == "" ||
 		(firstString(receipt, "status") != "queued" && firstString(receipt, "status") != "running") {
 		t.Fatalf("expected the owner's pending job receipt: %s", w.Body.String())
 	}

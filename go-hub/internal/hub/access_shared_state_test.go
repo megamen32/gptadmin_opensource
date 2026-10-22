@@ -293,7 +293,10 @@ func TestSharedAccessNativeMCPAdministrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := sharedAccessCall(t, b, token, "POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "execute", "arguments": map[string]any{"target": "hub", "tool": "access_profiles", "arguments": map[string]any{"action": "list"}}}})
+	// The direct execute facade is retired. The native MCP surface routes a
+	// business call through the exec facade, which dispatches it on the
+	// authorized path.
+	w := sharedAccessCall(t, b, token, "POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "exec", "arguments": map[string]any{"code": "return await mcp.call('hub','access_profiles',{action:'list'});"}}})
 	if w.Code != 200 {
 		t.Fatalf("native MCP status=%d", w.Code)
 	}
@@ -301,7 +304,15 @@ func TestSharedAccessNativeMCPAdministrator(t *testing.T) {
 	if err = json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response["error"] != nil || !bytes.Contains(w.Body.Bytes(), []byte("profiles")) {
-		t.Fatal("native MCP administration did not reach profile handler")
+	if response["error"] != nil {
+		t.Fatalf("native MCP returned a protocol error: %s", w.Body.String())
+	}
+	structured := mapValue(mapValue(response["result"])["structuredContent"])
+	if firstString(structured, "status") != "completed" {
+		t.Fatalf("native MCP administration did not complete: %s", w.Body.String())
+	}
+	result := mapValue(structured["result"])
+	if result["profiles"] == nil {
+		t.Fatalf("native MCP administration did not reach profile handler: %s", w.Body.String())
 	}
 }

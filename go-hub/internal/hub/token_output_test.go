@@ -145,11 +145,35 @@ func TestTokenDiscoveryFiltersAndFailureMedia(t *testing.T) {
 	}
 }
 
+// nativeCatalogToolNames lists the published tool names in catalog order.
+func nativeCatalogToolNames(tools []map[string]any) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, firstString(tool, "name"))
+	}
+	return names
+}
+
 func TestTokenNativeCatalogStillRoutesAllCapabilities(t *testing.T) {
 	compact := compactFacadeTools(nil, false)
 	full := compactFacadeTools(nil, true)
-	if len(compact) != 6 || len(full) != 16 {
-		t.Fatalf("catalog sizes %d/%d", len(compact), len(full))
+	// The public catalog stays short and still routes every capability: find
+	// (search), read (ro), write (exec), inspect (schema, discover) and the
+	// two task readers (job, expand).
+	wantCompact := []string{"discover", "search", "schema", "exec", "ro", "job", "expand"}
+	if got := nativeCatalogToolNames(compact); !reflect.DeepEqual(got, wantCompact) {
+		t.Fatalf("public catalog %v, want %v", got, wantCompact)
+	}
+	// The full Apps SDK catalog keeps every specialized tool. The direct
+	// execute facade is published to nobody.
+	wantFull := []string{"ui", "resource_receipt", "discover", "demo", "approve_pending_server", "settings_schema", "settings_get", "settings_set", "schema", "inspect", "fleetExec", "job", "expand", "secret_request", "secret_status"}
+	if got := nativeCatalogToolNames(full); !reflect.DeepEqual(got, wantFull) {
+		t.Fatalf("full catalog %v, want %v", got, wantFull)
+	}
+	for _, name := range append(nativeCatalogToolNames(compact), nativeCatalogToolNames(full)...) {
+		if name == "execute" {
+			t.Fatal("the public catalog publishes the retired execute facade")
+		}
 	}
 	hasExpand := false
 	for _, tool := range hubTools() {
@@ -158,7 +182,7 @@ func TestTokenNativeCatalogStillRoutesAllCapabilities(t *testing.T) {
 		}
 	}
 	if !hasExpand {
-		t.Fatal("existing execute clients cannot disclose operations")
+		t.Fatal("clients cannot disclose operations")
 	}
 }
 

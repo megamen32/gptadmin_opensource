@@ -216,14 +216,20 @@ func TestFacadeExecuteTaskUsesNestedApprovalCheckpoint(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
 	profile := AccessProfile{
 		ID: "ask-facade", AccessMode: accessModeFull, ApprovalMode: approvalModeAskBeforeWrite,
-		AllowedTargets: []string{"shell:test"}, AllowedTools: []string{"execute", "shell_exec"}, Version: 1,
+		AllowedTargets: []string{"hub", "shell:test"}, AllowedTools: []string{"exec", "shell_exec"}, Version: 1,
 	}
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:test","tool":"shell_exec","args":{"cmd":"printf FACADE_APPROVED"}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"facade-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}`
+	// The direct execute facade is retired. The surviving container is exec:
+	// a router with no side effect of its own, so the approval checkpoint
+	// belongs to the nested write and never to the container.
+	s.mu.Lock()
+	s.agents["shell:test"] = &Agent{AgentID: "shell:test", Name: "test", Kind: "shell", Status: "online", LastSeen: nowFloat(), Meta: map[string]any{"approved": true}}
+	s.mu.Unlock()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"code":"return await mcp.call('shell:test','shell_exec',{cmd:'printf FACADE_APPROVED'});"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"facade-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer ctl")
 	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
 	req.Header.Set("Mcp-Method", "tools/call")
-	req.Header.Set("Mcp-Name", "execute")
+	req.Header.Set("Mcp-Name", "exec")
 	req = requestWithAccessProfile(req, profile)
 	rec := httptest.NewRecorder()
 	s.mcpEndpoint(rec, req)
@@ -240,19 +246,17 @@ func TestFacadeExecuteTaskUsesNestedApprovalCheckpoint(t *testing.T) {
 	if rpc.Error != nil {
 		t.Fatalf("rpc error=%v body=%s", rpc.Error, rec.Body.String())
 	}
-	if rpc.Result["resultType"] != "task" || rpc.Result["status"] != "input_required" {
-		t.Fatalf("result=%v", rpc.Result)
+	payload := mapValue(rpc.Result["structuredContent"])
+	if firstString(payload, "status") != "failed" {
+		t.Fatalf("guarded write was not stopped: %v", payload)
 	}
-	taskID := firstString(rpc.Result, "taskId")
-	requests := mapValue(rpc.Result["inputRequests"])
-	approvalReq := mapValue(requests["approval"])
-	message := firstString(mapValue(approvalReq["params"]), "message")
-	approvalID := ""
-	if i := strings.LastIndex(message, "Approval handle: "); i >= 0 {
-		approvalID = strings.TrimSpace(message[i+len("Approval handle: "):])
+	failure := mapValue(payload["error"])
+	if firstString(failure, "code") != "approval_required" {
+		t.Fatalf("guarded write was not checkpointed: %v", payload)
 	}
-	if taskID == "" || approvalID == "" {
-		t.Fatalf("missing task/approval: %v", rpc.Result)
+	approvalID := firstString(mapValue(failure["receipt"]), "approval_id")
+	if approvalID == "" {
+		t.Fatalf("missing approval handle: %v", payload)
 	}
 	s.mu.Lock()
 	approval := s.approvals[approvalID]
@@ -264,22 +268,30 @@ func TestFacadeExecuteTaskUsesNestedApprovalCheckpoint(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatalf("approval routed to wrapper: %#v", approval)
 	}
+	// The container is a router: it must not become the approval subject.
+	for id, other := range s.approvals {
+		if id != approvalID && (other.Target == "hub" || other.Tool == codeModeTool) {
+			s.mu.Unlock()
+			t.Fatalf("container consumed its own approval: %#v", other)
+		}
+	}
+	if q := s.shellQueues["test"]; len(q) != 0 {
+		s.mu.Unlock()
+		t.Fatalf("task dispatched before approval: %v", q)
+	}
 	approval.Status = "approved"
 	s.mu.Unlock()
-	updated, errAny := s.mcpTaskUpdate(req, taskID, map[string]any{"approval": map[string]any{"action": "accept", "content": map[string]any{"approved": true}}}, "")
-	if errAny != nil {
-		t.Fatalf("update err=%v", errAny)
+
+	// The approved checkpoint releases exactly one guarded write to its owner.
+	released, status := s.executeMCPTool(req, "shell:test", "shell_exec",
+		map[string]any{"cmd": "printf FACADE_APPROVED", "approval_id": approvalID}, true, time.Second, "")
+	if status != http.StatusOK {
+		t.Fatalf("approved write was not released: status=%d response=%v", status, released)
 	}
-	if mapValue(updated)["resultType"] != "complete" || len(mapValue(updated)) != 1 {
-		t.Fatalf("update ack=%v", updated)
-	}
-	post, postErr := s.mcpTaskGet(taskID, "")
-	if postErr != nil || mapValue(post)["status"] != "working" {
-		t.Fatalf("post-update task=%v err=%v", post, postErr)
-	}
+	jobID := firstString(released, "job_id")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if q := s.shellQueues["test"]; len(q) != 1 || q[0] != taskID {
+	if q := s.shellQueues["test"]; len(q) != 1 || q[0] != jobID {
 		t.Fatalf("queue=%v", q)
 	}
 	if s.approvals[approvalID].Status != "consumed" {

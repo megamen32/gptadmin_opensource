@@ -1,91 +1,43 @@
 package hub
 
 import (
-	"context"
 	"net/http"
 )
 
-// The public tool catalog has two explicit modes. Both are chosen by an
-// administrator in the typed Hub settings registry (tool_catalog_mode).
-// Nothing is inferred from a user agent, a language header or a connection
-// shape: a client that loaded the catalog must be able to read which mode is
-// active from the same settings API it already uses.
+// The public tool catalog of GPTAdmin is deliberately short:
 //
-//	compat: the short catalog carries the compatibility execute facade next
-//	        to the code-mode facade. Legacy clients keep one entry point that
-//	        routes every capability, and the working code mode stays visible.
-//	modern: the short catalog prefers the code-mode facades (exec/ro) and
-//	        the FTS search facade, and hides the compatibility execute.
-const (
-	catalogModeCompat = "compat"
-	catalogModeModern = "modern"
-)
+//	search: find the capability that is needed.
+//	ro:     read and analyse without changing anything.
+//	exec:   run JavaScript, including several MCP calls and the processing of
+//	        their results.
+//
+// The direct execute(target, tool, args) facade is not public. It invites one
+// tool call per request instead of one script that batches the calls, and its
+// name costs more tokens per call than the short names above. The internal
+// dispatcher stays: ro, exec, the relay and the agent routes use it.
+//
+// The task readers (job, expand) stay published, because a client has to be
+// able to read the result of a task it started.
 
-// compatShortCatalogNames is the routing set of the compat mode. It carries
-// both executors, the search facade, the schema and discover primitives and
-// the compatibility execute facade. The remaining capabilities stay
-// reachable through the execute facade, which routes every capability:
-// job and expand through execute(target="hub", tool=...), the ui facade
-// through the full catalog.
-var compatShortCatalogNames = []string{"discover", "search", "schema", "exec", "ro", "execute"}
+// publicCatalogNames is the routing set of the public catalog.
+var publicCatalogNames = []string{"discover", "search", "schema", "exec", "ro", "job", "expand"}
 
-// modernShortCatalogNames is the routing set of the modern mode. It is the
-// code-mode first catalog: search finds a tool, exec runs it, ro runs a
-// bounded read-only script.
-var modernShortCatalogNames = []string{"ui", "discover", "search", "schema", "exec", "ro", "job", "expand"}
+// readOnlyCatalogNames is the routing set of a read-only caller. It carries the
+// read primitives, the task readers and the read-only code facade, and never
+// the write-capable exec facade.
+var readOnlyCatalogNames = []string{"ui", "discover", "search", "schema", "ro", "job", "expand"}
 
-// readOnlyShortCatalogNames is the routing set of a read-only caller. It
-// carries the read primitives and the read-only code facade, and never the
-// write-capable execute or exec facades.
-var readOnlyShortCatalogNames = []string{"ui", "discover", "search", "schema", "ro"}
-
-type catalogModeKey struct{}
-
-// requestWithCatalogMode attaches the active catalog mode to the request so
-// the catalog builders stay free functions with a stable signature.
-func requestWithCatalogMode(r *http.Request, mode string) *http.Request {
-	if r == nil {
-		return nil
-	}
-	return r.WithContext(context.WithValue(r.Context(), catalogModeKey{}, mode))
-}
-
-// catalogModeFromRequest returns the catalog mode for this request. An absent
-// or unknown mode is the compat mode: the compatibility entry point must
-// never disappear because of a missing context value.
-func catalogModeFromRequest(r *http.Request) string {
-	if r == nil {
-		return catalogModeCompat
-	}
-	mode, _ := r.Context().Value(catalogModeKey{}).(string)
-	if mode != catalogModeModern {
-		return catalogModeCompat
-	}
-	return mode
-}
-
-// toolCatalogMode returns the explicitly configured catalog mode.
-func (s *Server) toolCatalogMode() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.hubSettingStringLocked("tool_catalog_mode")
-}
-
-// nativeShortCatalogTools builds the short routing catalog of the active
-// mode. The code-mode and search facades are published separately, because
-// the Apps SDK catalog keeps one execution entry point and stays inside its
-// payload budget.
+// nativeShortCatalogTools builds the short routing catalog. The code-mode and
+// search facades are published separately, because the Apps SDK catalog keeps
+// one execution entry point and stays inside its payload budget.
 func nativeShortCatalogTools(r *http.Request, tools []map[string]any) []map[string]any {
-	names := compatShortCatalogNames
-	if catalogModeFromRequest(r) == catalogModeModern {
-		names = modernShortCatalogNames
-	}
+	names := publicCatalogNames
 	if requestAccessMode(r) == accessModeReadonly {
 		// A read-only caller must not be offered a write-capable routing
-		// facade: the execute and exec entries are refused for it anyway, and
-		// advertising a tool the caller may not use is catalog hygiene. The
-		// read-only code facade ro is the only executor it may load.
-		names = readOnlyShortCatalogNames
+		// facade: the exec entry is refused for it anyway, and advertising a
+		// tool the caller may not use is catalog hygiene. The read-only code
+		// facade ro is the only executor it may load.
+		names = readOnlyCatalogNames
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {
@@ -138,14 +90,11 @@ func codeModeCatalogTool(name string) map[string]any {
 	}
 }
 
-// withoutExecuteFacade hides the direct execute facade from a read-only
-// caller. Every business call through it is denied by the read-only ceiling,
-// and the catalog must not advertise a write path to a read-only client: the
-// read-only code facade ro is the only execution surface it may use.
+// withoutExecuteFacade hides the direct execute facade from every catalog.
+// The facade is not public: it invites one tool call per request instead of
+// one script that batches the calls. The internal dispatcher stays, so ro,
+// exec, the relay and the agent routes keep working.
 func withoutExecuteFacade(r *http.Request, tools []map[string]any) []map[string]any {
-	if r == nil || requestAccessMode(r) != accessModeReadonly {
-		return tools
-	}
 	out := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		if firstString(tool, "name") == "execute" {
@@ -175,4 +124,18 @@ func withReadOnlyExecTool(r *http.Request, tools []map[string]any) []map[string]
 	out := make([]map[string]any, 0, len(tools)+1)
 	out = append(out, tools...)
 	return append(out, codeModeCatalogTool("ro"))
+}
+
+// withSearchFacadeTool publishes the FTS search facade to a caller whose
+// catalog does not carry it yet. A read-only identity needs the search facade
+// to find the tools it is allowed to read.
+func withSearchFacadeTool(r *http.Request, tools []map[string]any) []map[string]any {
+	for _, tool := range tools {
+		if firstString(tool, "name") == "search" {
+			return tools
+		}
+	}
+	out := make([]map[string]any, 0, len(tools)+1)
+	out = append(out, tools...)
+	return append(out, searchCatalogTool())
 }

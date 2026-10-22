@@ -153,6 +153,7 @@ func TestCompactToolOutputExecuteDetailDoesNotReexecuteOrLeakToTool(t *testing.T
 			s := New(Config{CtlToken: "ctl", RelayAgentToken: "relay", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 			registerRelayAgent(t, s, "demo")
 			var id string
+			var refusal map[string]any
 			for _, detail := range []string{"compact", "full", "compact"} {
 				args := `{"target":"demo","tool":"write","query":"hello","background":true,"idempotency_key":"same-write","detail":"` + detail + `"}`
 				var result map[string]any
@@ -162,23 +163,67 @@ func TestCompactToolOutputExecuteDetailDoesNotReexecuteOrLeakToTool(t *testing.T
 					body := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":`+args+`}}`)
 					result = mapValue(mapValue(body["result"])["structuredContent"])
 				}
-				if id == "" {
-					id = firstString(result, "job_id")
+				if transport == "http" {
+					// The relay route is unchanged: the presentation detail
+					// never changes the execution identity.
+					if id == "" {
+						id = firstString(result, "job_id")
+					}
+					if id == "" || result["job_id"] != id {
+						t.Fatalf("detail changed execution identity: %#v", result)
+					}
+					if detail == "full" && result["server_id"] != "demo" {
+						t.Fatalf("missing full envelope: %#v", result)
+					}
+					if detail == "compact" && (result["server_id"] != nil || result["background"] != nil) {
+						t.Fatalf("verbose pending response: %#v", result)
+					}
+					continue
 				}
-				if id == "" || result["job_id"] != id {
-					t.Fatalf("detail changed execution identity: %#v", result)
+				// The public execute facade is retired. The call is refused
+				// before anything runs, so there is no execution identity to
+				// vary with the presentation detail.
+				if firstString(result, "status") != "failed" {
+					t.Fatalf("the retired execute facade was not refused: %#v", result)
 				}
-				if detail == "full" && result["server_id"] != "demo" {
-					t.Fatalf("missing full envelope: %#v", result)
+				failure := mapValue(result["error"])
+				if firstString(failure, "code") != "execute_facade_retired" {
+					t.Fatalf("the refusal does not explain the migration: %#v", result)
 				}
-				if detail == "compact" && (result["server_id"] != nil || result["background"] != nil) {
-					t.Fatalf("verbose pending response: %#v", result)
+				message := firstString(failure, "message")
+				for _, hint := range []string{"search", "exec", "ro"} {
+					if !strings.Contains(message, hint) {
+						t.Fatalf("the refusal does not point at %q: %#v", hint, result)
+					}
+				}
+				if refusal == nil {
+					refusal = result
+				} else if !reflect.DeepEqual(result, refusal) {
+					t.Fatalf("the refusal changed with the presentation detail: %#v", result)
 				}
 			}
 			s.mu.Lock()
 			queued := len(s.relayQueues["demo"])
-			forwarded := cloneMap(mapValue(s.relayJobs[id].Params["arguments"]))
+			jobs := len(s.relayJobs)
+			var forwarded map[string]any
+			if id != "" {
+				forwarded = cloneMap(mapValue(s.relayJobs[id].Params["arguments"]))
+			}
 			s.mu.Unlock()
+			if transport == "mcp" {
+				// The refusal executed nothing and leaked no tool payload.
+				if queued != 0 || jobs != 0 {
+					t.Fatalf("the retired facade executed a tool: queued=%d jobs=%d", queued, jobs)
+				}
+				encoded, _ := json.Marshal(refusal)
+				if strings.Contains(string(encoded), "hello") {
+					t.Fatalf("the refusal leaked the tool arguments: %s", encoded)
+				}
+				if len(refusal) != 2 || len(mapValue(refusal["error"])) != 2 {
+					t.Fatalf("the refusal leaked tool internals: %#v", refusal)
+				}
+				return
+			}
 			if queued != 1 || !reflect.DeepEqual(forwarded, map[string]any{"query": "hello"}) {
 				t.Fatalf("reexecuted or forwarded presentation args: queued=%d args=%#v", queued, forwarded)
 			}
@@ -226,19 +271,31 @@ func TestCompactToolOutputInvalidDetailRejectedBeforeExecution(t *testing.T) {
 }
 
 func TestCompactToolOutputContractsAndContextBudget(t *testing.T) {
-	for _, name := range []string{"execute", "job"} {
-		found := false
-		for _, tool := range appsSDKTools() {
-			if tool["name"] == name {
-				found = true
-				detail := mapValue(mapValue(mapValue(tool["inputSchema"])["properties"])["detail"])
-				if !reflect.DeepEqual(detail["enum"], []string{"compact", "full"}) {
-					t.Fatalf("%s missing detail schema: %#v", name, detail)
-				}
-			}
+	// Every published tool that offers the presentation detail publishes the
+	// same compact/full contract.
+	detailTools := map[string]bool{}
+	for _, tool := range appsSDKTools() {
+		name := firstString(tool, "name")
+		properties := mapValue(mapValue(tool["inputSchema"])["properties"])
+		detail, present := properties["detail"]
+		if !present {
+			continue
 		}
-		if !found {
-			t.Fatalf("missing tool %s", name)
+		detailTools[name] = true
+		if !reflect.DeepEqual(mapValue(detail)["enum"], []string{"compact", "full"}) {
+			t.Fatalf("%s missing detail schema: %#v", name, detail)
+		}
+	}
+	// The task readers and the schema reader still carry the detail contract.
+	for _, name := range []string{"discover", "schema", "job"} {
+		if !detailTools[name] {
+			t.Fatalf("the published catalog lost the detail contract of %s", name)
+		}
+	}
+	// The retired execute facade is not published any more.
+	for _, tool := range appsSDKTools() {
+		if firstString(tool, "name") == "execute" {
+			t.Fatal("the Apps SDK catalog publishes the retired execute facade")
 		}
 	}
 	s, j := compactOutputFixture(t)

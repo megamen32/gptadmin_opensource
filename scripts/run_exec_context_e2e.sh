@@ -9,7 +9,7 @@ mkdir -p "$out_dir" "$cache_dir"
 export GOCACHE="$cache_dir"
 export GOMAXPROCS="${GOMAXPROCS:-4}"
 
-build_version=1029
+build_version=1031
 ldflags="-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=${build_version} -X github.com/megamen32/gptadmin/go-shellmcp/internal/server.BuildVersion=${build_version}"
 (
   cd "$repo_root/go-hub"

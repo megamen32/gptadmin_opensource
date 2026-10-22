@@ -90,9 +90,9 @@ func TestCodeModeReturnsOnlySelectedResult(t *testing.T) {
 // facade are refused for it, so advertising them would be catalog hygiene
 // for a tool the caller may not use.
 //
-// The direct execute facade is published to ordinary callers (the retired
-// contract kept it unadvertised), so the full catalog must contain it.
-func TestReadonlyToolAdvertisementScopesAndUnadvertisedExecute(t *testing.T) {
+// The direct execute facade is not public any more, so neither the read-only
+// catalog nor the full catalog may contain it.
+func TestReadonlyToolAdvertisementScopesAndNoExecuteFacade(t *testing.T) {
 	r := httptest.NewRequest("POST", "/mcp", nil)
 	r = requestWithAuthClaims(r, map[string]any{"scope": "gptadmin.read", "access_mode": accessModeReadonly})
 	tools := compactFacadeTools(r, false)
@@ -115,14 +115,10 @@ func TestReadonlyToolAdvertisementScopesAndUnadvertisedExecute(t *testing.T) {
 		t.Fatalf("readonly facade visibility: ro=%v exec=%v execute=%v", foundRO, foundExec, foundExecute)
 	}
 	full := appsSDKTools()
-	publishedExecute := false
 	for _, tool := range full {
 		if firstString(tool, "name") == "execute" {
-			publishedExecute = true
+			t.Fatal("the direct execute facade must not be published to anybody")
 		}
-	}
-	if !publishedExecute {
-		t.Fatal("direct execute facade is not published to ordinary callers")
 	}
 }
 

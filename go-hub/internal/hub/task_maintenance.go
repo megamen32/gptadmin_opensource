@@ -48,7 +48,8 @@ func (s *Server) maintainTaskStateLocked() ([]string, error) {
 	change := s.beginTaskMutationLocked(ids...)
 	expired := s.expireOrphanedShellJobsLocked()
 	groups := s.refreshTaskGroupsLocked()
-	if len(expired) > 0 || groups > 0 {
+	repaired := s.reconcileSharedTaskRecordsLocked()
+	if len(expired) > 0 || groups > 0 || len(repaired) > 0 {
 		if err := change.commit(); err != nil {
 			return nil, err
 		}

@@ -38,11 +38,12 @@ func TestSQLiteFTSSearchNamesDescriptionsLabelsAndPunctuation(t *testing.T) {
 	}
 }
 
-// The direct execute facade is published again: the owner un-banned the
-// direct API, and a client that loads the catalog must be able to see it.
-// The compat catalog mode keeps the working code mode (exec) and the search
-// facade next to it, and the retired code_exec alias stays absent.
-func TestPublicFacadePublishesDirectExecute(t *testing.T) {
+// The public catalog is deliberately short: search finds the capability, exec
+// runs the script that batches the calls, ro runs a bounded read-only script,
+// and the task readers stay published. The direct execute facade is not
+// public: a client that still calls it gets the explicit migration answer,
+// while the code-only spelling keeps working as the old transport alias.
+func TestPublicFacadePublishesShortSurface(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
 	t.Cleanup(func() { _ = s.Close() })
 	listed := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
@@ -51,24 +52,72 @@ func TestPublicFacadePublishesDirectExecute(t *testing.T) {
 	for _, item := range tools {
 		names[firstString(mapValue(item), "name")] = true
 	}
-	if !names["execute"] || names["callMcpTool"] || names["call_mcp_tool"] || !names["search"] || !names["exec"] || names["code_exec"] {
-		t.Fatalf("public tool list has old/new facade mismatch: %v", names)
+	for _, required := range []string{"search", "exec", "ro", "job", "expand"} {
+		if !names[required] {
+			t.Fatalf("public tool list misses %q: %v", required, names)
+		}
+	}
+	for _, retired := range []string{"execute", "callMcpTool", "call_mcp_tool", "code_exec"} {
+		if names[retired] {
+			t.Fatalf("public tool list publishes %q: %v", retired, names)
+		}
 	}
 	fullNames := map[string]bool{}
 	for _, tool := range appsSDKTools() {
 		fullNames[firstString(tool, "name")] = true
 	}
-	if !fullNames["execute"] {
-		t.Fatalf("canonical facade list has no direct execute: %v", fullNames)
+	if fullNames["execute"] {
+		t.Fatalf("canonical facade list publishes the direct execute facade: %v", fullNames)
 	}
 	called := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"settings_schema","args":{}}}}`)
-	if called["error"] != nil || firstString(mapValue(mapValue(called["result"])["structuredContent"]), "status") != "completed" {
-		t.Fatalf("unadvertised direct safe read failed: %#v", called)
+	structured := mapValue(mapValue(called["result"])["structuredContent"])
+	if firstString(structured, "status") != "failed" || firstString(mapValue(structured["error"]), "code") != "execute_facade_retired" {
+		t.Fatalf("the direct execute facade is not refused with the migration answer: %#v", called)
 	}
 	legacy := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute","arguments":{"code":"return {answer:42};"}}}`)
 	legacyValue := mapValue(mapValue(legacy["result"])["structuredContent"])
 	if legacy["error"] != nil || intFromAny(mapValue(legacyValue["result"])["answer"]) != 42 {
-		t.Fatalf("code-only legacy alias did not use exec: %#v", legacy)
+		t.Fatalf("the code-only alias of exec stopped working: %#v", legacy)
+	}
+}
+
+// The direct execute facade is not public any more. The public catalog
+// publishes the short surface instead, and a client that still calls execute
+// gets the explicit migration answer. The code-only spelling of execute
+// keeps working as the old transport alias of exec.
+func TestPublicFacadeRefusesDirectExecute(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	t.Cleanup(func() { _ = s.Close() })
+	listed := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	tools := outputRows(mapValue(listed["result"])["tools"])
+	names := map[string]bool{}
+	for _, item := range tools {
+		names[firstString(mapValue(item), "name")] = true
+	}
+	if names["execute"] || names["callMcpTool"] || names["call_mcp_tool"] || names["code_exec"] {
+		t.Fatalf("public tool list publishes a retired facade: %v", names)
+	}
+	for _, required := range []string{"search", "exec", "ro"} {
+		if !names[required] {
+			t.Fatalf("public tool list misses %q: %v", required, names)
+		}
+	}
+	fullNames := map[string]bool{}
+	for _, tool := range appsSDKTools() {
+		fullNames[firstString(tool, "name")] = true
+	}
+	if fullNames["execute"] {
+		t.Fatalf("canonical facade list publishes the direct execute facade: %v", fullNames)
+	}
+	called := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"settings_schema","args":{}}}}`)
+	structured := mapValue(mapValue(called["result"])["structuredContent"])
+	if called["error"] != nil || firstString(structured, "status") != "failed" || firstString(mapValue(structured["error"]), "code") != "execute_facade_retired" {
+		t.Fatalf("the direct execute facade is not refused with the migration answer: %#v", called)
+	}
+	legacy := postMCPRPC(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute","arguments":{"code":"return {answer:42};"}}}`)
+	legacyValue := mapValue(mapValue(legacy["result"])["structuredContent"])
+	if legacy["error"] != nil || intFromAny(mapValue(legacyValue["result"])["answer"]) != 42 {
+		t.Fatalf("the code-only alias of exec stopped working: %#v", legacy)
 	}
 	modernBody := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute","arguments":{"code":"return {answer:43};"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
 	modernReq := httptest.NewRequest("POST", "/mcp", strings.NewReader(modernBody))

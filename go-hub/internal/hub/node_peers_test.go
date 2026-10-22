@@ -363,12 +363,15 @@ func TestNodePeersJobHintSchema(t *testing.T) {
 }
 
 func TestNodePeersMCPPreservesProtocolAndBearer(t *testing.T) {
-	body := ` {"jsonrpc":"2.0","id":"original-id","method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:nodeB","tool":"shell_exec","arguments":{"cmd":"true","approval_id":"owner-approval"},"background":true,"idempotency_key":"same-key"}}} `
+	// The direct execute facade is no longer public. The surviving MCP peer
+	// hop is the published job reader: the receipt travels to its owner
+	// unchanged, with the caller's bearer and the MCP routing headers.
+	body := ` {"jsonrpc":"2.0","id":"original-id","method":"tools/call","params":{"name":"job","arguments":{"id":"owner-job","owner_target":"shell:nodeB"}}} `
 	var calls atomic.Int32
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		data, _ := io.ReadAll(r.Body)
-		if r.URL.Path != "/mcp" || string(data) != body || r.Header.Get("Authorization") != "Bearer caller-token" || r.Header.Get("MCP-Protocol-Version") != mcpProtocolVersion || r.Header.Get("Mcp-Method") != "tools/call" || r.Header.Get("Mcp-Name") != "execute" {
+		if r.URL.Path != "/mcp" || string(data) != body || r.Header.Get("Authorization") != "Bearer caller-token" || r.Header.Get("MCP-Protocol-Version") != mcpProtocolVersion || r.Header.Get("Mcp-Method") != "tools/call" || r.Header.Get("Mcp-Name") != "job" {
 			t.Errorf("MCP request was converted: %s %s", r.URL.Path, data)
 		}
 		writeJSON(w, 200, map[string]any{"jsonrpc": "2.0", "id": "original-id", "result": mcpToolResult(map[string]any{"job_id": "owner-job"})})
@@ -400,7 +403,7 @@ func TestNodePeersMCPRejectsSecondHop(t *testing.T) {
 	owner := httptest.NewServer(b.Handler())
 	defer owner.Close()
 	a := peerTestHub(t, "token", map[string]string{"shell:nodeB": owner.URL})
-	w := peerTestMCPCall(a, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:nodeB","tool":"shell_exec","arguments":{"cmd":"true"}}}}`, "token")
+	w := peerTestMCPCall(a, `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"job","arguments":{"id":"missing","owner_target":"shell:nodeB"}}}`, "token")
 	var envelope map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)

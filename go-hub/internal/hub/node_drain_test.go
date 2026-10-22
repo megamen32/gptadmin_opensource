@@ -132,7 +132,9 @@ func TestNodeDrainRejectsSubmissionsAndKeepsReads(t *testing.T) {
 		t.Fatalf("peer submission not drained: %d %s", w.Code, w.Body.String())
 	}
 	// /mcp keeps the node peer failure envelope: -32000 with retryable data.
-	w = peerTestMCPCall(s, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"execute","arguments":{"target":"shell:local","tool":"shell_exec","arguments":{"cmd":"printf during"}}}}`, "drain-owner")
+	// The direct execute facade is retired, so the surviving write-capable
+	// public spelling is the code-mode container.
+	w = peerTestMCPCall(s, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"exec","arguments":{"code":"return 1;"}}}`, "drain-owner")
 	var envelope map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)

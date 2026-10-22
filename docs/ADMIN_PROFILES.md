@@ -53,14 +53,16 @@ the profile does not already allow.
 
 When a profile declares rules, a business call that is not named by a rule is
 denied. The routing facades `ro`, `exec`, `search`, `schema`, `discover`, `job`
-and `expand` keep their own facade permission, and `execute` remains a routing
-facade whose resolved target/tool is checked against the rules in turn — so a
-fine-grained profile stays usable without becoming unrestricted.
+and `expand` keep their own facade permission, and every target/tool resolved
+behind them is checked against the rules in turn — so a fine-grained profile
+stays usable without becoming unrestricted. The direct `execute` facade is no
+longer published to any caller; the checks it used to carry live on the
+facades above and on the internal dispatcher.
 
 The same args-aware check applies to every execution path: the JS bridge, the
-direct `execute` facade, the per-agent MCP endpoint, the Actions/relay route
-and the virtual MCP route. A rule is always evaluated against the canonical
-target and tool, after aliases and `ref` resolution.
+code-mode facades (`exec`, `ro`), the per-agent MCP endpoint, the
+Actions/relay route and the virtual MCP route. A rule is always evaluated
+against the canonical target and tool, after aliases and `ref` resolution.
 
 Approval and the bounded-autonomous budget follow the real operation, not the
 tool name. Reading `file_editor` with `action=view` does not consume write

@@ -43,18 +43,26 @@ hostname for TLS certificate verification and SNI. Connections are pooled per
 configured URL/IP pair, so two physical nodes sharing a logical hostname cannot
 share a pool. No DNS or hosts-file changes are required.
 
-Through `/mcp`, execute normally:
+Submit to a peer through the authenticated relay route, which forwards to the
+peer and lets the peer execute locally:
 
-```json
-{"name":"execute","arguments":{"target":"shell:nodeB","tool":"shell_exec","args":{"cmd":"printf hello"},"background":true,"idempotency_key":"example-1"}}
+```sh
+curl -X POST https://hub.example/mcp-relay/call \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"target":"shell:nodeB","tool":"shell_exec","args":{"cmd":"printf hello"},"background":true,"idempotency_key":"example-1"}'
 ```
 
-Read the returned job through the **same entrypoint**, using the same target as
-execute (also available as `result._meta.owner_target`):
+Read the returned job through the **public** `job` facade, using the same
+target as the submission (also available as `result._meta.owner_target`):
 
 ```json
 {"name":"job","arguments":{"id":"<returned-job-id>","owner_target":"shell:nodeB"}}
 ```
+
+The public MCP facade no longer carries a direct routing form: `execute` is
+retired for every caller, so the only public way to address another node is
+the `job` reader. Submission to a peer stays on the authenticated relay route
+above, which is also the route the retired public spelling used internally.
 
 Job IDs remain unchanged. Existing local `job {id}` reads remain compatible.
 The owner hint selects only an explicitly configured route, never a caller URL.

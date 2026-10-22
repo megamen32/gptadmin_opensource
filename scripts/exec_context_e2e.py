@@ -302,20 +302,19 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
 
                 public_tools = client.tools()
                 public_names = [tool.get("name") for tool in public_tools]
-                # The catalog has two explicit modes, chosen by an administrator
-                # in the typed Hub settings registry (tool_catalog_mode). The
-                # working code mode is present in both; the compatibility
-                # execute facade is present in compat mode and absent in modern
-                # mode. The retired code_exec alias is never published.
-                catalog_mode = os.environ.get("GPTADMIN_CATALOG_MODE", "compat")
+                # The public catalog is deliberately short: search finds the
+                # capability, ro reads it, exec runs the script that batches the
+                # calls. The direct execute facade is not public, and the retired
+                # code_exec alias is never published. The task readers stay
+                # published, because a client has to read the result of a task
+                # it started.
                 assert "exec" in public_names, public_names
+                assert "ro" in public_names, public_names
+                assert "search" in public_names, public_names
+                assert "job" in public_names, public_names
+                assert "expand" in public_names, public_names
+                assert "execute" not in public_names, public_names
                 assert "code_exec" not in public_names, public_names
-                if catalog_mode == "modern":
-                    assert "execute" not in public_names, public_names
-                    assert "ro" in public_names, public_names
-                else:
-                    assert "execute" in public_names, public_names
-                    assert "ro" in public_names, public_names
                 client.search("file editor", f"file:{shell_name}", "bootstrap:file-search")
                 file_search = client.search("file editor", f"file:{shell_name}", "bootstrap:file-search-confirm")
                 file_target = f"file:{shell_name}"
@@ -673,12 +672,18 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
                 # withdrawn, and the derived result stops being readable.
                 child_ref = child_target.rsplit(":", 1)[-1]
                 revoked = {"status": "skipped", "reason": "the child registration could not be withdrawn"}
-                disabled = client.call(
-                    "execute",
-                    {"target": f"control:{shell_name}", "tool": "mcp_manage", "args": {"action": "disable", "ref": child_ref}},
+                # The direct execute facade is not public, so the business call
+                # runs inside the public executor.
+                disabled = client.exec(
+                    "return await mcp.call(" + json.dumps(f"control:{shell_name}") + ",'mcp_manage',"
+                    "{action:'disable',ref:" + json.dumps(child_ref) + "});",
                     "revocation:disable")
-                disabled_status = first_string(disabled, "status")
-                if disabled_status in ("completed", "ok"):
+                inner = disabled.get("result") if isinstance(disabled.get("result"), dict) else {}
+                disabled_ok = (
+                    first_string(disabled, "status") == "completed"
+                    and (inner.get("ok") is True or first_string(inner, "status") in ("completed", "ok"))
+                )
+                if disabled_ok:
                     revoked_read = ro_body(client.ro(
                         f"return await mcp.content.read({json.dumps(stored_source)},1);", "revocation:read"))
                     revoked_search = ro_body(client.ro(
@@ -690,23 +695,21 @@ def run(candidate: Path, fixture: Path, root_fixture: Path) -> dict:
 
                 legacy_code = client.call("code_exec", {"code": "return 1;"}, "migration:code_exec")
                 assert legacy_code.get("status") == "failed" and "renamed to exec" in legacy_code.get("error", ""), legacy_code
-                # The legacy direct execute contract is asserted on the raw JSON-RPC
-                # envelope: result.structuredContent.status == "completed". MCP.call
-                # unwraps structuredContent already, so the payload is checked there
-                # and the RPC level is checked separately instead of unwrapping twice.
-                legacy_execute_args = {"target": "hub", "tool": "settings_schema", "args": {}}
+                # The direct execute facade is not public any more. A client that
+                # still calls it gets the explicit migration answer instead of a
+                # silent fallback, and the public surface stays search/ro/exec.
+                retired_args = {"target": "hub", "tool": "settings_schema", "args": {}}
                 if client.context:
-                    legacy_execute_args["context"] = client.context
-                legacy_rpc = client.rpc("tools/call", {"name": "execute", "arguments": legacy_execute_args}, "compat:execute")
-                legacy_structured = legacy_rpc.get("result", {}).get("structuredContent", {})
-                old_execute = legacy_structured if isinstance(legacy_structured, dict) else {"rpc_error": legacy_rpc.get("error")}
-                assert "rpc_error" not in old_execute and old_execute.get("status") == "completed", old_execute
-                assert legacy_rpc.get("error") is None, legacy_rpc
-                assert legacy_structured.get("status") == "completed", legacy_rpc
-                assert legacy_structured.get("server_id") == "hub", legacy_rpc
+                    retired_args["context"] = client.context
+                retired = client.call("execute", retired_args, "public:execute-retired")
+                assert retired.get("status") == "failed", retired
+                assert first_string(retired.get("error"), "code") == "execute_facade_retired", retired
+                # The task read facade stays reachable, because the public catalog
+                # publishes it.
+                assert "job" in public_names, public_names
                 ro = client.call("ro", {"code": "try { await mcp.call('" + shell_target + "','shell_exec',{cmd:'echo denied'}); } catch(e) {} return 42;"}, "readonly:shell-denial")
                 assert ro.get("status") == "failed", ro
-                report["scenario"]["compatibility"] = {"code_exec": "PASS migration alias", "execute": "PASS harmless direct read", "ro_shell_denial": "PASS"}
+                report["scenario"]["compatibility"] = {"code_exec": "PASS migration alias", "execute": "PASS refused with migration answer", "job": "PASS published task reader", "ro_shell_denial": "PASS"}
 
                 report["status"] = "PASS"
                 report["scope"] = "isolated real-process candidate; not deployed and not ChatGPT app acceptance"

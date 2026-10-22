@@ -36,12 +36,56 @@ func (s *Server) expireOrphanedShellJobsLocked() []string {
 			"code":    "orphaned_running_task",
 			"message": fmt.Sprintf("shell task remained running for %.0fs, exceeding orphan threshold %ds", now-job.StartedAt, maxAge),
 		}
+		// A receipt that shares the task id follows the expired job into its
+		// terminal state.
+		s.finishTaskRecordsLocked(job.ID, "failed", job.Error)
 		if job.Server != "" {
 			s.shellControls[job.Server] = append(s.shellControls[job.Server], shellControl{TaskID: job.ID})
 		}
 		expired = append(expired, job.ID)
 	}
 	return expired
+}
+
+// reconcileSharedTaskRecordsLocked finalizes receipts that can no longer
+// finish. A receipt shares the id of the dispatch job that carries the call.
+// When that job is already terminal, the receipt follows it. When the job is
+// gone and the receipt has waited past the orphan threshold, the receipt is
+// failed: a receipt that never finishes keeps the node from draining, and a
+// node that cannot drain cannot be updated.
+func (s *Server) reconcileSharedTaskRecordsLocked() []string {
+	now := nowFloat()
+	minAge := s.hubSettingIntLocked("orphan_shell_job_min_age_seconds")
+	if minAge < 300 {
+		minAge = 300
+	}
+	repaired := []string{}
+	for id, receipt := range s.relayJobs {
+		if receipt == nil || taskTerminal(receipt.Status) {
+			continue
+		}
+		if job := s.shellJobs[id]; job != nil {
+			if !taskTerminal(job.Status) {
+				continue
+			}
+			s.finishTaskRecordsLocked(id, job.Status, job.Error)
+			repaired = append(repaired, id)
+			continue
+		}
+		started := receipt.StartedAt
+		if started <= 0 {
+			started = receipt.CreatedAt
+		}
+		if started <= 0 || now-started <= float64(minAge) {
+			continue
+		}
+		s.finishTaskRecordsLocked(id, "failed", map[string]any{
+			"code":    "orphaned_task_receipt",
+			"message": "the dispatch job of this receipt is gone; the receipt was failed instead of waiting forever",
+		})
+		repaired = append(repaired, id)
+	}
+	return repaired
 }
 
 func (s *Server) refreshTaskGroupsLocked() int {
@@ -127,25 +171,45 @@ func (s *Server) refreshTaskGroupLocked(group *relayJob) {
 	}
 }
 
-func (s *Server) cancelTaskLocked(taskID string) {
-	if j := s.shellJobs[taskID]; j != nil {
-		if j.Status == "completed" || j.Status == "failed" || j.Status == "cancelled" {
-			return
+// finishTaskRecordsLocked brings every record that shares one task id to a
+// terminal state. A child schema receipt and the shell job that carries the
+// actual call share the id, so finishing only one of them leaves the node
+// with permanently unfinished work: the receipt keeps the drain from ever
+// becoming ready, the task can never be read as finished, and the node cannot
+// be updated until somebody cleans it up by hand.
+func (s *Server) finishTaskRecordsLocked(taskID string, status string, taskErr any) {
+	now := nowFloat()
+	if j := s.shellJobs[taskID]; j != nil && !taskTerminal(j.Status) {
+		j.Status = status
+		j.DoneAt = now
+		if taskErr != nil {
+			j.Error = taskErr
 		}
+	}
+	if j := s.relayJobs[taskID]; j != nil && !taskTerminal(j.Status) {
+		j.Status = status
+		j.DoneAt = now
+		if taskErr != nil {
+			j.Error = taskErr
+		}
+	}
+}
+
+func (s *Server) cancelTaskLocked(taskID string) {
+	if j := s.shellJobs[taskID]; j != nil && !taskTerminal(j.Status) {
 		wasRunning := j.Status == "running"
 		j.Status = "cancelled"
 		j.DoneAt = nowFloat()
 		if wasRunning {
 			s.shellControls[j.Server] = append(s.shellControls[j.Server], shellControl{TaskID: j.ID})
 		}
-		return
 	}
-	if j := s.relayJobs[taskID]; j != nil {
-		if j.Status == "completed" || j.Status == "failed" || j.Status == "cancelled" {
-			return
-		}
+	// The receipt and the dispatch job share the task id. Both have to reach a
+	// terminal state, otherwise the receipt stays unfinished forever.
+	if j := s.relayJobs[taskID]; j != nil && !taskTerminal(j.Status) {
 		j.Status = "cancelled"
 		j.DoneAt = nowFloat()
+		j.Error = map[string]any{"code": "task_cancelled", "message": "the task was cancelled"}
 	}
 }
 

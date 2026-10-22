@@ -11,6 +11,26 @@ import (
 	"testing"
 )
 
+// managedCatalogToolNames lists the tool names of a tools/list answer.
+func managedCatalogToolNames(t *testing.T, body string) map[string]bool {
+	t.Helper()
+	var parsed struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, tool := range parsed.Result.Tools {
+		names[tool.Name] = true
+	}
+	return names
+}
+
 func TestManagedClientAccessProfilePersistsBindsAndEnforcesPolicy(t *testing.T) {
 	cfg := Config{
 		CtlToken:          "ctl",
@@ -104,11 +124,16 @@ func TestManagedClientAccessProfilePersistsBindsAndEnforcesPolicy(t *testing.T) 
 	if list.Code != http.StatusOK {
 		t.Fatalf("managed tools/list status=%d body=%s", list.Code, list.Body.String())
 	}
-	if strings.Contains(list.Body.String(), `"name":"execute"`) {
-		t.Fatalf("managed tools/list exposes forbidden execute: %s", list.Body.String())
-	}
-	if !strings.Contains(list.Body.String(), `"name":"discover"`) {
+	boundNames := managedCatalogToolNames(t, list.Body.String())
+	if !boundNames["discover"] {
 		t.Fatalf("managed tools/list hides allowed discover: %s", list.Body.String())
+	}
+	// The bound profile allows one tool only. The retired execute facade is
+	// published to nobody, and no other catalog entry may leak into it.
+	for _, forbidden := range []string{"execute", "exec", "search", "schema", "job", "expand"} {
+		if boundNames[forbidden] {
+			t.Fatalf("managed tools/list exposes forbidden %s: %s", forbidden, list.Body.String())
+		}
 	}
 
 	discover := mcp(restarted, issuedBody.AccessToken, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"discover","arguments":{}}}`)
@@ -116,9 +141,16 @@ func TestManagedClientAccessProfilePersistsBindsAndEnforcesPolicy(t *testing.T) 
 		t.Fatalf("allowed discover failed status=%d body=%s", discover.Code, discover.Body.String())
 	}
 
-	forbidden := mcp(restarted, issuedBody.AccessToken, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute","arguments":{"target":"hub","tool":"discover"}}}`)
-	if forbidden.Code != http.StatusOK || !strings.Contains(forbidden.Body.String(), "error") {
-		t.Fatalf("forbidden execute status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	// A published tool that the profile does not allow stays refused. The
+	// refusal has to come from the profile, not from the retired facade.
+	for _, denied := range []struct{ name, arguments string }{
+		{"schema", `{"target":"hub"}`},
+		{"exec", `{"code":"return 1;"}`},
+	} {
+		forbidden := mcp(restarted, issuedBody.AccessToken, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"`+denied.name+`","arguments":`+denied.arguments+`}}`)
+		if forbidden.Code != http.StatusOK || !strings.Contains(forbidden.Body.String(), "access profile denies this facade") {
+			t.Fatalf("forbidden %s status=%d body=%s", denied.name, forbidden.Code, forbidden.Body.String())
+		}
 	}
 
 	unbound := request(restarted, http.MethodPost, "/admin/api/mcp/issue-token", "ctl", map[string]any{
@@ -135,9 +167,79 @@ func TestManagedClientAccessProfilePersistsBindsAndEnforcesPolicy(t *testing.T) 
 		t.Fatal(err)
 	}
 	full := mcp(restarted, unboundBody.AccessToken, `{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}`)
-	if full.Code != http.StatusOK || !strings.Contains(full.Body.String(), `"name":"execute"`) {
-		t.Fatalf("unbound tools/list lost full behavior: status=%d body=%s", full.Code, full.Body.String())
+	if full.Code != http.StatusOK {
+		t.Fatalf("unbound tools/list status=%d body=%s", full.Code, full.Body.String())
 	}
+	// An unbound client keeps the whole public catalog: the read primitives,
+	// the write-capable exec container and the task readers.
+	unboundNames := managedCatalogToolNames(t, full.Body.String())
+	for _, name := range []string{"discover", "search", "schema", "exec", "ro", "job", "expand"} {
+		if !unboundNames[name] {
+			t.Fatalf("unbound tools/list lost %s: %s", name, full.Body.String())
+		}
+	}
+	if unboundNames["execute"] {
+		t.Fatalf("unbound tools/list publishes the retired execute facade: %s", full.Body.String())
+	}
+
+	t.Run("read-only profile keeps the read primitives and loses the write paths", func(t *testing.T) {
+		readerCfg := Config{
+			CtlToken:          "ctl",
+			ConfigDir:         t.TempDir(),
+			OAuthClientSecret: "oauth-secret",
+			PublicOrigin:      "https://hub.example",
+			MCPResource:       "https://hub.example",
+		}
+		reader := New(readerCfg)
+		defer reader.Close()
+		readerProfile := map[string]any{
+			"id":              "reader",
+			"access_mode":     "readonly",
+			"allowed_targets": []string{"hub"},
+			"allowed_tools":   []string{"ro", "search"},
+		}
+		if response := accessProfileTestRequest(t, reader, http.MethodPut, "/admin/api/access-profiles/reader", readerProfile, map[string]string{"If-Match": "*"}); response.Code != http.StatusOK {
+			t.Fatalf("read-only profile status=%d body=%s", response.Code, response.Body.String())
+		}
+		readerIssued := accessProfileTestRequest(t, reader, http.MethodPost, "/admin/api/mcp/issue-token", map[string]any{"client_id": "reader-client", "ttl_days": 1}, nil)
+		if readerIssued.Code != http.StatusOK {
+			t.Fatalf("issue read-only token status=%d body=%s", readerIssued.Code, readerIssued.Body.String())
+		}
+		var readerBody struct {
+			TokenID     string `json:"token_id"`
+			AccessToken string `json:"access_token"`
+		}
+		if err := json.Unmarshal(readerIssued.Body.Bytes(), &readerBody); err != nil {
+			t.Fatal(err)
+		}
+		if binding := accessProfileTestRequest(t, reader, http.MethodPut, "/admin/api/client-bindings/"+url.PathEscape(readerBody.TokenID), map[string]string{"profile_id": "reader"}, nil); binding.Code != http.StatusOK {
+			t.Fatalf("bind read-only token status=%d body=%s", binding.Code, binding.Body.String())
+		}
+		readerList := mcp(reader, readerBody.AccessToken, `{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}`)
+		if readerList.Code != http.StatusOK {
+			t.Fatalf("read-only tools/list status=%d body=%s", readerList.Code, readerList.Body.String())
+		}
+		readerNames := managedCatalogToolNames(t, readerList.Body.String())
+		for _, name := range []string{"ro", "search"} {
+			if !readerNames[name] {
+				t.Fatalf("read-only tools/list hides %s: %s", name, readerList.Body.String())
+			}
+		}
+		for _, name := range []string{"exec", "execute", "settings_set", "approve_pending_server"} {
+			if readerNames[name] {
+				t.Fatalf("read-only tools/list exposes write tool %s: %s", name, readerList.Body.String())
+			}
+		}
+		for _, denied := range []struct{ name, arguments string }{
+			{"exec", `{"code":"return 1;"}`},
+			{"shell_exec", `{"cmd":"id"}`},
+		} {
+			response := mcp(reader, readerBody.AccessToken, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"`+denied.name+`","arguments":`+denied.arguments+`}}`)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "access profile denies this facade") {
+				t.Fatalf("read-only client may call %s: status=%d body=%s", denied.name, response.Code, response.Body.String())
+			}
+		}
+	})
 }
 
 func TestAccessProfileCASInventoryAndAuthContext(t *testing.T) {
