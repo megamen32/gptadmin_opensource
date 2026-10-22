@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,27 @@ func codexCallerBanRequest(t *testing.T, clientID, userAgent string) *http.Reque
 		r.Header.Set("User-Agent", userAgent)
 	}
 	return r
+}
+
+func TestCodexCallerBanRefusalIsTypedAndCarriesTheCaller(t *testing.T) {
+	writeCodexCallerBanFixture(t, `{
+		"version": 1,
+		"enabled": true,
+		"clients": ["chatgpt-connector"],
+		"target_suffixes": [":AgentHerder"],
+		"tools": ["new_or_resume"],
+		"denied_harness": "codex"
+	}`)
+
+	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
+	err := authorizeCodexCallerBan(r, "mcp:shell:admin-node-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
+	var banErr *CodexCallerBanError
+	if !errors.As(err, &banErr) {
+		t.Fatalf("refusal is not a CodexCallerBanError: %#v", err)
+	}
+	if banErr.Caller != "chatgpt-connector" || banErr.Tool != "new_or_resume" || banErr.Target != "mcp:shell:admin-node-100:AgentHerder" {
+		t.Fatalf("refusal lost its evidence: %#v", banErr)
+	}
 }
 
 func TestCodexCallerBanIsOffWithoutRuleFile(t *testing.T) {

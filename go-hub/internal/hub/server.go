@@ -4885,6 +4885,10 @@ const (
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
 	if err := authorizeToolAction(r, target, toolName, args); err != nil {
+		var banErr *CodexCallerBanError
+		if errors.As(err, &banErr) {
+			s.auditToolDecision(r, target, toolName, args, "deny", banErr.Reason, nil, http.StatusForbidden)
+		}
 		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}
 	if failure := s.requireInstructionContext(r, target, toolName); failure != nil {

@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -78,14 +77,21 @@ func loadCodexCallerBan() CodexCallerBan {
 // codexCallerBanCallerMatches reports whether the authenticated caller is the
 // one the rule names. The client id is the durable identity; the user agent
 // is the fallback for connectors that share one client id.
+func codexCallerBanCallerID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+		return firstString(claims, "client_id", "sub")
+	}
+	return ""
+}
+
 func codexCallerBanCallerMatches(ban CodexCallerBan, r *http.Request) bool {
 	if r == nil {
 		return false
 	}
-	clientID := ""
-	if claims, ok := r.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
-		clientID = firstString(claims, "client_id", "sub")
-	}
+	clientID := codexCallerBanCallerID(r)
 	if clientID != "" && containsString(ban.Clients, clientID) {
 		return true
 	}
@@ -127,6 +133,17 @@ func codexCallerBanTargetMatches(ban CodexCallerBan, target string) bool {
 	return false
 }
 
+// CodexCallerBanError is the refusal of the temporary caller ban. It is a
+// distinct type so every path can record the refusal in the hub audit.
+type CodexCallerBanError struct {
+	Reason string
+	Caller string
+	Target string
+	Tool   string
+}
+
+func (e *CodexCallerBanError) Error() string { return e.Reason }
+
 // authorizeCodexCallerBan refuses a Codex session start for a banned caller.
 // The refusal is explicit and explains itself, so the caller can act on it.
 func authorizeCodexCallerBan(r *http.Request, target, tool string, args map[string]any) error {
@@ -151,5 +168,6 @@ func authorizeCodexCallerBan(r *http.Request, target, tool string, args map[stri
 	if reason == "" {
 		reason = "this caller may not start " + ban.DeniedHarness + " sessions"
 	}
-	return errors.New(reason)
+	caller := codexCallerBanCallerID(r)
+	return &CodexCallerBanError{Reason: reason, Caller: caller, Target: target, Tool: tool}
 }

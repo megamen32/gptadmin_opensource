@@ -808,6 +808,10 @@ func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string
 		return map[string]any{"status": "failed", "error": detail}, status
 	}
 	if err := authorizeToolAction(callRequest, selected, tool, callArgs); err != nil {
+		var banErr *CodexCallerBanError
+		if errors.As(err, &banErr) {
+			b.server.auditToolDecision(callRequest, selected, tool, callArgs, "deny", banErr.Reason, nil, http.StatusForbidden)
+		}
 		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}
 	contractArgs := map[string]any{"target": selected, "tool": tool, "arguments": callArgs}

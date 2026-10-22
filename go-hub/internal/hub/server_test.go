@@ -1346,7 +1346,7 @@ func TestAdminLegacyRouteRedirectsToUnifiedConsole(t *testing.T) {
 	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "AdminPassword") || !strings.Contains(w.Body.String(), "Connect") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "GPTAdmin Login") || !strings.Contains(w.Body.String(), "Пароль администратора") {
 		t.Fatalf("legacy admin should use the shared login gate: status=%d body=%s", w.Code, w.Body.String())
 	}
 
@@ -1406,7 +1406,7 @@ func TestAuthPagesUseApprovedAuthenticationLanguage(t *testing.T) {
 		t.Fatalf("admin login status=%d body=%s", w.Code, w.Body.String())
 	}
 	loginPage := w.Body.String()
-	for _, want := range []string{"AdminPassword", "Connect"} {
+	for _, want := range []string{"GPTAdmin Login", "Пароль администратора", "CONFIGURATION"} {
 		if !strings.Contains(loginPage, want) {
 			t.Fatalf("admin login page missing %q: %s", want, loginPage)
 		}
