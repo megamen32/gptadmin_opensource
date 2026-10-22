@@ -147,11 +147,20 @@ export function formatRelativeTimestamp(value: string | number | null | undefine
   }
 }
 
+/** A zero/missing last_seen is the Hub's "never polled" sentinel, not a reply at the Unix epoch. */
+export function hasServerLastSeen(value: string | number | null | undefined): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string" && !value.trim()) return false;
+  const date = typeof value === "number" ? fromEpoch(value) : fromString(value);
+  return date !== null && date.getTime() > 0;
+}
+
 /**
  * Метка «последнего ответа» с учётом состояния узла: у работающего сервера
  * `last_seen` догоняет текущие часы, поэтому показываем «N минут назад»,
  * а у stale/failed метка и есть сигнал — там оставляем точное время.
  */
 export function formatServerLastSeen(status: string | undefined, value: string | number | null | undefined): string {
+  if (!hasServerLastSeen(value)) return "Ещё не отвечал";
   return status === "online" ? formatRelativeTimestamp(value) : formatTimestamp(value);
 }

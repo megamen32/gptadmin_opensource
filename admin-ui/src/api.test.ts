@@ -83,6 +83,28 @@ describe("admin API contracts", () => {
     }));
   });
 
+  it("restores only a matching weak profile version ETag before If-Match", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(profile, { ETag: 'W/"2"' }),
+    ).mockResolvedValueOnce(
+      jsonResponse({ ...profile, version: 3 }, { ETag: 'W/"3"' }),
+    ).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "access profile version does not match" }), { status: 412 }),
+    );
+
+    const loaded = await getAccessProfile("ops");
+    expect(loaded.etag).toBe('W/"2"');
+    await putAccessProfile(loaded.value, loaded.etag);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/admin/api/access-profiles/ops", expect.objectContaining({
+      headers: expect.objectContaining({ "If-Match": '"2"' }),
+    }));
+
+    await expect(putAccessProfile({ ...profile, version: 3 }, 'W/"2"')).rejects.toMatchObject({ status: 412 });
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/admin/api/access-profiles/ops", expect.objectContaining({
+      headers: expect.objectContaining({ "If-Match": 'W/"2"' }),
+    }));
+  });
+
   it("uses typed client binding and unbinding calls without accepting a secret", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse({ client_id: "jwt-1", profile_id: "ops" }))

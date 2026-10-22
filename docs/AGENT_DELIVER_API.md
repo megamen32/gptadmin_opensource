@@ -2,6 +2,35 @@
 
 `agent-deliver-v1` is the preferred machine-to-agent ingress. It reuses GPTAdmin Webhooks and Agent Herder; it does not introduce another webhook service or queue.
 
+## Admin console setup
+
+In the admin console, open **Вебхуки и агенты** (`#webhooks`). This page manages
+the same operator-owned routes as `GET/POST /webhook-routes` and
+`PUT/DELETE /webhook-routes/{id}`. The action target and tool fields are
+free-form; there is no Agent Deliver target picker or test-sink catalog. The
+console does not return saved route secrets, and replacing a route requires
+entering its secret again.
+
+The existing adapter contract in this repository is a Shell action on
+`shell:admin-node-100`, invoking
+`python3 /home/admin/gptadmin/scripts/agent_deliver.py '{{json}}'` with
+`cwd` set to `/home/admin/gptadmin`. The webhook gateway substitutes the
+event as a data-only environment value for the quoted `{{json}}` placeholder;
+the script validates the schema and target before calling Agent Herder's
+`deliver` tool. This is the fixed adapter path documented for the
+`agent-deliver-v1` route, not a dynamically discovered MCP target.
+
+Route presence and the installed adapter revision are runtime facts: first
+check the secret-free route list and confirm the Shell host has the adapter
+from the intended checkout. Do not create or replace the production
+`agent-deliver-v1` route as a test. To create an isolated route, use a distinct
+route ID, a newly managed HMAC v2 secret, and a disposable Agent Herder target
+whose exact name and workspace are owned by the test. Set `delivery.create` to
+`never` when the target must already exist. The event schema and delivery
+policies below define the payload contract. A `202` webhook response proves
+only that a job was accepted; inspect its terminal job result to prove the
+adapter's delivery outcome.
+
 ## Flow
 
 ```text

@@ -307,6 +307,49 @@ describe("Profiles", () => {
 });
 
 describe("Clients / Auth", () => {
+  it("keeps a stored client token out of ordinary views until the operator explicitly reveals it", async () => {
+    window.history.replaceState(null, "", "#clients");
+    const tokenValue = "stored-token-fixture";
+    const clients = [
+      { id: "jwt-existing", client_id: "qa-client", token_kind: "managed_jwt", status: "active", access_mode: "readonly", profile_id: null, scope: "mcp", redirect_uris: [], issued_at: null, created_at: null, expires_at: null, revoked_at: null },
+    ];
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/admin/api/clients") return new Response(JSON.stringify({ clients }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/access-profiles") return new Response(JSON.stringify({ profiles: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/admin/api/mcp/tokens/jwt-existing/value") return new Response(JSON.stringify({ token_id: "jwt-existing", client_id: "qa-client", access_token: tokenValue }), { status: 200, headers: { "Content-Type": "application/json" } });
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    try {
+      render(<App />);
+      expect(await screen.findByRole("heading", { name: "Клиенты" })).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(tokenValue);
+      expect(screen.getByRole("button", { name: "Показать сохранённый токен" })).toBeEnabled();
+
+      await userEvent.click(screen.getByRole("link", { name: "Подключение" }));
+      expect(await screen.findByRole("heading", { name: "Авторизация" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Выданный токен подключения")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("link", { name: "Клиенты" }));
+      await screen.findByRole("heading", { name: "Клиенты" });
+      await userEvent.click(screen.getByRole("button", { name: "Показать сохранённый токен" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(tokenValue);
+      await userEvent.click(screen.getByRole("button", { name: "Скопировать bearer" }));
+      expect(writeText).toHaveBeenCalledWith(tokenValue);
+
+      await userEvent.click(screen.getByRole("link", { name: "Подключение" }));
+      expect(await screen.findByLabelText("Выданный токен подключения")).toHaveValue(tokenValue);
+      expect(fetchMock).toHaveBeenCalledWith("/admin/api/mcp/tokens/jwt-existing/value", expect.objectContaining({ credentials: "same-origin" }));
+    } finally {
+      if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("retains an issued bearer when navigating between clients and connections", async () => {
     window.history.replaceState(null, "", "#clients");
     const clients = [

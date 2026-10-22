@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
-import { formatServerLastSeen, formatTimestamp, friendlyActionName, friendlyServerName, jobStatusLabel, serverRowQualifier, serverStatusLabel } from "./ui/format";
+import { formatServerLastSeen, formatTimestamp, friendlyActionName, friendlyServerName, hasServerLastSeen, jobStatusLabel, serverRowQualifier, serverStatusLabel } from "./ui/format";
 
 type Server = {
   server_id?: string;
@@ -133,7 +133,8 @@ export default function OverviewScreen() {
           <div className="card-heading"><div><p className="section-kicker">ТРЕБУЕТ ВНИМАНИЯ</p><h2>Серверы</h2></div><span className="count-pill">{problems.length}</span></div>
           <div className="compact-list">{problems.map((server) => {
             const qualifier = serverRowQualifier(server.server_id, server.name, server.kind, server.meta);
-            return <a className="compact-row" href="#agents" key={server.server_id ?? server.name}><span className={`status-dot status-${server.status ?? "unknown"}`} /><span><strong>{friendlyServerName(server.server_id, server.name)}{qualifier ? <span className="small-pill"> · {qualifier}</span> : null}</strong><small>{serverStatusLabel(server.status)}{server.last_seen ? <span title={formatTimestamp(server.last_seen)}> · последний ответ {formatServerLastSeen(server.status, server.last_seen)}</span> : ""}</small></span></a>;
+            const hasLastSeen = hasServerLastSeen(server.last_seen);
+            return <a className="compact-row" href="#agents" key={server.server_id ?? server.name}><span className={`status-dot status-${server.status ?? "unknown"}`} /><span><strong>{friendlyServerName(server.server_id, server.name)}{qualifier ? <span className="small-pill"> · {qualifier}</span> : null}</strong><small>{serverStatusLabel(server.status)}{hasLastSeen ? <span title={formatTimestamp(server.last_seen)}> · последний ответ {formatServerLastSeen(server.status, server.last_seen)}</span> : " · Ещё не отвечал"}</small></span></a>;
           })}</div>
         </article>}
 

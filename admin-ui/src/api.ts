@@ -387,10 +387,18 @@ export async function getAccessProfile(id: string): Promise<{ value: AccessProfi
   return { value: parseAccessProfile(await responseJSON(response)), etag: responseETag(response) };
 }
 
+function profileIfMatchETag(etag: string, version: number): string {
+  // The live reverse proxy can weaken the profile version ETag. The Hub uses
+  // that numeric version as its strong If-Match compare token, so restore the
+  // strong form only when the weak tag exactly matches the profile we loaded.
+  const weakVersion = /^W\/"(\d+)"$/.exec(etag);
+  return weakVersion?.[1] === String(version) ? `"${version}"` : etag;
+}
+
 export async function putAccessProfile(profile: AccessProfile, etag: string): Promise<{ value: AccessProfile; etag: string }> {
   const response = await request(`${accessProfilesEndpoint}/${encodeURIComponent(profile.id)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", "If-Match": etag },
+    headers: { "Content-Type": "application/json", "If-Match": profileIfMatchETag(etag, profile.version) },
     body: JSON.stringify({
       id: profile.id,
       name: profile.name,

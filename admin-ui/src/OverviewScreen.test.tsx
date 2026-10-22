@@ -50,3 +50,23 @@ it("lists every problem node and localises the failed status", async () => {
   expect(rows[0].textContent).toContain("MCP-компонент: BrowserOS");
   expect(rows[0].textContent).toContain("Ошибка");
 });
+
+it("shows missing last_seen as never answered in the attention list", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input).startsWith("/admin/api/overview")) {
+      return response({
+        servers: [{ server_id: "hub", name: "Control:Hub", status: "stale", last_seen: "0", meta: {} }],
+        server_counts: { online: 0, offline: 0, stale: 1 },
+        client_count: 0,
+        jobs: { recent: [], queued: [], background: [] },
+      });
+    }
+    throw new Error(`Unexpected request ${String(input)}`);
+  });
+  render(<OverviewScreen />);
+
+  const row = await screen.findByRole("link", { name: /Control:Hub/ });
+  expect(row.textContent).toContain("Ещё не отвечал");
+  expect(row.textContent).not.toContain("последний ответ");
+  expect(row.textContent).not.toMatch(/01\.01\.1970/);
+});

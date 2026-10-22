@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
-import { formatServerLastSeen, formatTimestamp, friendlyServerName, serverRowQualifier, serverStatusLabel } from "./ui/format";
+import { formatServerLastSeen, formatTimestamp, friendlyServerName, hasServerLastSeen, serverRowQualifier, serverStatusLabel } from "./ui/format";
 
 type Server = {
   server_id?: string;
@@ -104,9 +104,12 @@ export default function AgentsScreen() {
   }, [load]);
 
   const filtered = useMemo(() => servers.filter((server) => {
-    if (status !== "all" && server.status !== status) return false;
+    if (status === "offline" && server.status !== "offline" && server.status !== "stale") return false;
+    if (status !== "all" && status !== "offline" && server.status !== status) return false;
     if (!filter.trim()) return true;
-    return JSON.stringify(server).toLowerCase().includes(filter.trim().toLowerCase());
+    const displayName = friendlyServerName(server.server_id, server.name);
+    const qualifier = serverRowQualifier(server.server_id, server.name, server.kind, server.meta);
+    return `${displayName} ${qualifier} ${JSON.stringify(server)}`.toLowerCase().includes(filter.trim().toLowerCase());
   }), [servers, filter, status]);
   const selected = servers.find((server) => server.server_id === selectedId) ?? null;
 
@@ -119,13 +122,14 @@ export default function AgentsScreen() {
         <div className="list-toolbar"><input className="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Фильтр серверов" /><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Все статусы</option><option value="online">Работают</option><option value="offline">Недоступны</option><option value="stale">Давно не отвечают</option><option value="failed">Ошибка</option></select></div>
         {filtered.length === 0 && !loading ? <div className="compact-empty"><strong>Серверов не найдено</strong><span>Измените фильтр или обновите данные.</span></div> : <div className="compact-list">{filtered.map((server) => {
           const qualifier = serverRowQualifier(server.server_id, server.name, server.kind, server.meta);
-          const lastSeen = server.last_seen ? formatServerLastSeen(server.status, server.last_seen) : "";
-          return <button type="button" className={`node-native-row ${selectedId === server.server_id ? "selected" : ""}`} key={server.server_id || server.name} onClick={() => setSelectedId(server.server_id || null)}><span className={`status-dot status-${server.status || "unknown"}`} /><span className="node-native-main"><strong>{friendlyServerName(server.server_id, server.name)}{qualifier ? <span className="small-pill"> · {qualifier}</span> : null}</strong><small>{server.last_seen ? <span title={formatTimestamp(server.last_seen)}>Последний ответ: {lastSeen}</span> : "Ожидаем данные о последнем ответе"}</small></span><span className="node-native-status">{serverStatusLabel(server.status)}</span></button>;
+          const hasLastSeen = hasServerLastSeen(server.last_seen);
+          const lastSeen = formatServerLastSeen(server.status, server.last_seen);
+          return <button type="button" className={`node-native-row ${selectedId === server.server_id ? "selected" : ""}`} key={server.server_id || server.name} onClick={() => setSelectedId(server.server_id || null)}><span className={`status-dot status-${server.status || "unknown"}`} /><span className="node-native-main"><strong>{friendlyServerName(server.server_id, server.name)}{qualifier ? <span className="small-pill"> · {qualifier}</span> : null}</strong><small>{hasLastSeen ? <span title={formatTimestamp(server.last_seen)}>Последний ответ: {lastSeen}</span> : "Ещё не отвечал"}</small></span><span className="node-native-status">{serverStatusLabel(server.status)}</span></button>;
         })}</div>}
       </article>
       {selected && <aside className="card agent-detail-pane">
         <div className="card-heading"><div><p className="section-kicker">ПОДРОБНОСТИ</p><h2>{friendlyServerName(selected.server_id, selected.name)}</h2></div><button className="text-button" type="button" onClick={() => setSelectedId(null)}>Закрыть</button></div>
-        <dl className="detail-facts"><div><dt>Технический ID</dt><dd>{selected.server_id || "—"}</dd></div><div><dt>Состояние</dt><dd>{serverStatusLabel(selected.status)}</dd></div><div><dt>Тип узла</dt><dd>{serverRowQualifier(selected.server_id, selected.name, selected.kind, selected.meta) || selected.kind || "—"}</dd></div><div><dt>Тип подключения</dt><dd>{selected.kind || "—"}</dd></div><div><dt>Последний ответ</dt><dd title={formatTimestamp(selected.last_seen)}>{formatServerLastSeen(selected.status, selected.last_seen)}</dd></div></dl>
+        <dl className="detail-facts"><div><dt>Технический ID</dt><dd>{selected.server_id || "—"}</dd></div><div><dt>Состояние</dt><dd>{serverStatusLabel(selected.status)}</dd></div><div><dt>Тип узла</dt><dd>{serverRowQualifier(selected.server_id, selected.name, selected.kind, selected.meta) || selected.kind || "—"}</dd></div><div><dt>Тип подключения</dt><dd>{selected.kind || "—"}</dd></div><div><dt>Последний ответ</dt><dd title={hasServerLastSeen(selected.last_seen) ? formatTimestamp(selected.last_seen) : undefined}>{formatServerLastSeen(selected.status, selected.last_seen)}</dd></div></dl>
         <details className="detail-section technical-details"><summary>Технические возможности</summary><div className="pill-wrap">{selected.capabilities?.length ? selected.capabilities.map((cap) => <span className="small-pill" key={cap}>{cap}</span>) : <span className="muted-help">Не переданы</span>}</div></details>
         <details className="detail-section technical-details"><summary>Метаданные</summary>{Object.keys(selected.meta ?? {}).length ? <dl className="meta-grid">{Object.entries(selected.meta ?? {}).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{textValue(value)}</dd></div>)}</dl> : <p className="muted-help">Нет метаданных.</p>}</details>
       </aside>}

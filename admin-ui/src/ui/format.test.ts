@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_TIMESTAMP, formatRelativeTimestamp, formatServerLastSeen, formatTimestamp, serverRowQualifier, serverStatusLabel } from "./format";
+import { EMPTY_TIMESTAMP, formatRelativeTimestamp, formatServerLastSeen, formatTimestamp, hasServerLastSeen, serverRowQualifier, serverStatusLabel } from "./format";
 
 const SECONDS = 1784917200;
 const MILLISECONDS = SECONDS * 1000;
@@ -125,6 +125,14 @@ describe("formatServerLastSeen", () => {
   it("keeps the exact time for stale and failed nodes, where the stamp is the signal", () => {
     expect(formatServerLastSeen("stale", old)).toBe(formatTimestamp(old));
     expect(formatServerLastSeen("failed", old)).toBe(formatTimestamp(old));
+  });
+
+  it("treats zero and missing last_seen values as never answered, not the epoch", () => {
+    for (const value of [0, "0", "0.0", "1970-01-01T00:00:00.000Z", null, undefined, ""]) {
+      expect(hasServerLastSeen(value)).toBe(false);
+      expect(formatServerLastSeen("online", value)).toBe("Ещё не отвечал");
+    }
+    expect(hasServerLastSeen(1)).toBe(true);
   });
 });
 
