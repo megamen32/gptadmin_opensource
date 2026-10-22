@@ -170,6 +170,27 @@ describe("admin API contracts", () => {
 
     await expect(putAccessProfile(profile, '"1"')).rejects.toMatchObject({ status: 412 });
   });
+
+  it("surfaces a safe validation detail from a failed profile write", async () => {
+    const invalidDraft = {
+      ...profile,
+      external_workspace_refs: profile.external_workspace_refs.map((ref) => ({ ...ref, shell_target: "" })),
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ detail: "workspace_refs.shell_target must not be empty" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(putAccessProfile(invalidDraft, '"1"')).rejects.toMatchObject({
+      status: 400,
+      message: "workspace_refs.shell_target must not be empty",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).workspace_refs[0]).toMatchObject({
+      machine_id: "machine-a",
+      workspace_path: "/srv/ops",
+      shell_target: "",
+    });
+  });
 });
 
 it("preserves the real Go profile fields and does not invent required empty workspaces", async () => {

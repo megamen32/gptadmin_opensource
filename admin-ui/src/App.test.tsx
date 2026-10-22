@@ -155,6 +155,7 @@ const profileFixture = {
 type ProfileFetchOptions = {
   profiles?: unknown[];
   putStatus?: number;
+  putErrorDetail?: string;
   failList?: boolean;
 };
 
@@ -183,9 +184,10 @@ function mockProfileFetch(options: ProfileFetchOptions = {}) {
         headers: { "Content-Type": "application/json", ETag: '"7"' },
       });
     }
-    if (path === "/admin/api/access-profiles/ops" && init?.method === "PUT") {
-      expect(new Headers(init.headers).get("If-Match")).toBe('"7"');
-      if (options.putStatus === 412) return new Response(JSON.stringify({ detail: "stale" }), { status: 412 });
+    if (path.startsWith("/admin/api/access-profiles/") && init?.method === "PUT") {
+      const creating = path !== "/admin/api/access-profiles/ops";
+      expect(new Headers(init.headers).get("If-Match")).toBe(creating ? "*" : '"7"');
+      if (options.putStatus) return new Response(JSON.stringify({ detail: options.putErrorDetail ?? "stale" }), { status: options.putStatus });
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       return new Response(JSON.stringify({ ...profileFixture, ...body, version: 8 }), {
         status: 200,
@@ -232,6 +234,7 @@ describe("Profiles", () => {
     await userEvent.type(screen.getByLabelText("Название профиля"), "Новый профиль");
     await userEvent.click(screen.getByRole("button", { name: "Добавить рабочее пространство" }));
     expect(screen.getByLabelText("Рабочее пространство 2: путь")).toBeInTheDocument();
+    expect(screen.getByLabelText("Рабочее пространство 1: shell target")).toBeRequired();
   });
 
   it("marks an optimistic-concurrency conflict as stale and offers reload", async () => {
@@ -248,6 +251,46 @@ describe("Profiles", () => {
     expect(await screen.findByText(/Профиль устарел/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Загрузить актуальную версию" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Сохранить профиль" })).toBeDisabled();
+  });
+
+  it("keeps the edited profile visible and reports the server validation after a failed save", async () => {
+    const fetchMock = mockProfileFetch({ profiles: [], putStatus: 400, putErrorDetail: "workspace_refs.shell_target must not be empty" });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Создать профиль" }));
+
+    await userEvent.type(screen.getByLabelText("Идентификатор профиля"), "qa23-folderwrite-fix-20261023");
+    await userEvent.type(screen.getByLabelText("Название профиля"), "QA23 folder write save reproduction");
+    await userEvent.type(screen.getByLabelText("Разрешённые цели"), "file:admin-node-100");
+    await userEvent.type(screen.getByLabelText("Разрешённые инструменты"), "file_editor");
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: machine id"), { target: { value: "admin-node-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a" } });
+    await userEvent.click(screen.getByRole("button", { name: "Добавить рабочее пространство" }));
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: machine id"), { target: { value: "admin-node-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Создать профиль" }).closest("form")!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("workspace_refs.shell_target must not be empty");
+    expect(screen.queryByText("Не удалось загрузить профиль")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Название профиля")).toHaveValue("QA23 folder write save reproduction");
+    expect(screen.getByRole("button", { name: "Создать профиль" })).toBeEnabled();
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
+    expect(JSON.parse(String(putCall?.[1]?.body)).workspace_refs).toEqual([
+      {
+        machine_id: "admin-node-100",
+        workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a",
+        startup_document: "AGENTS.md",
+        shell_target: "",
+      },
+      {
+        machine_id: "admin-node-100",
+        workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b",
+        startup_document: "AGENTS.md",
+        shell_target: "",
+      },
+    ]);
   });
 
   it("exposes an error state and retry without hiding navigation", async () => {

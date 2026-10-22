@@ -326,7 +326,17 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     headers: { Accept: "application/json", ...init?.headers },
   });
   if (!response.ok) {
-    throw new ApiError(response.status, "Запрос к Hub не выполнен.");
+    let message = "Запрос к Hub не выполнен.";
+    try {
+      const body: unknown = await response.clone().json();
+      if (typeof body === "object" && body !== null && "detail" in body) {
+        const detail = (body as { detail?: unknown }).detail;
+        if (typeof detail === "string" && detail.trim()) message = detail;
+      }
+    } catch {
+      // Keep the generic message when the error body is absent or not JSON.
+    }
+    throw new ApiError(response.status, message);
   }
   return response;
 }
