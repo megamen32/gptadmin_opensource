@@ -562,6 +562,10 @@ type Server struct {
 	cfg                   Config
 
 	mu                            sync.Mutex
+	toolSearchMu                  sync.Mutex
+	toolSearches                  map[string]*toolSearchIndex
+	contentMu                     sync.Mutex
+	contentStore                  *ContentStore
 	authRateMu                    sync.Mutex
 	cond                          *sync.Cond
 	agents                        map[string]*Agent
@@ -774,6 +778,7 @@ func New(cfg Config) *Server {
 		agentPolicies:     map[string]agentCleanupPolicy{},
 		tombstones:        []agentTombstone{},
 	}
+	s.toolSearches = map[string]*toolSearchIndex{}
 	s.nodePeers, s.nodePeersErr = parseNodePeers(cfg.NodePeersJSON)
 	s.meshCore, s.meshCoreErr = meshroute.New(cfg.MeshCoreSocket, cfg.MeshCoreHostID)
 	s.nodePeerClient = newNodePeerClient(cfg.DefaultTimeout + 10*time.Second)
@@ -4430,6 +4435,7 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 	agents := make([]Agent, 0, len(s.agents)+len(virtualMCPDefinitions)+1)
 	hub := s.hubAgentLocked()
 	agents = append(agents, s.withExposeMetaLocked(hub, r))
+	agents = append(agents, s.withExposeMetaLocked(Agent{AgentID: "control:hub", Name: "Control: Hub", Kind: "virtual_control", Transport: "internal", Status: "online", Capabilities: []string{"hub_settings", "webhooks", "failover"}, Meta: map[string]any{"backing_server_id": "hub"}}, r))
 	for _, virtual := range s.virtualAgentsLocked() {
 		agents = append(agents, s.withExposeMetaLocked(virtual, r))
 	}
@@ -4441,6 +4447,9 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 		if strings.HasPrefix(cp.AgentID, "shell:") && supportsPairedFileTarget(cp) {
 			fileAgent := fileAgentForShell(cp)
 			agents = append(agents, s.withExposeMetaLocked(fileAgent, r))
+		}
+		if strings.HasPrefix(cp.AgentID, "shell:") {
+			agents = append(agents, s.withExposeMetaLocked(controlAgentForShell(cp), r))
 		}
 	}
 	usedSlugs := map[string]bool{}
@@ -4616,6 +4625,19 @@ func (s *Server) selectMCPRelayTarget(target string) (string, int, string) {
 	}
 	if target == "hub" {
 		return target, http.StatusOK, ""
+	}
+	if target == "control:hub" {
+		return target, http.StatusOK, ""
+	}
+	if strings.HasPrefix(target, "control:") {
+		backing := "shell:" + strings.TrimPrefix(target, "control:")
+		s.mu.Lock()
+		_, exists := s.agents[backing]
+		s.mu.Unlock()
+		if exists {
+			return target, http.StatusOK, ""
+		}
+		return "", http.StatusNotFound, fmt.Sprintf("unknown control server %s", strings.TrimPrefix(target, "control:"))
 	}
 	if strings.HasPrefix(target, "file:") {
 		backing := "shell:" + strings.TrimPrefix(target, "file:")
@@ -4862,6 +4884,26 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	durableRequestKey := ""
 	operation := func() (map[string]any, int) {
+		if target == "control:hub" {
+			if toolName == "control_catalog" {
+				return map[string]any{"server_id": target, "status": "completed", "response": s.controlCatalog(r, target, firstString(args, "section"))}, http.StatusOK
+			}
+			resp, status := s.callHubToolForRequest(r, toolName, args)
+			return map[string]any{"server_id": target, "status": "completed", "response": resp}, status
+		}
+		if strings.HasPrefix(target, "control:") {
+			backing := "shell:" + strings.TrimPrefix(target, "control:")
+			if !containsString(controlToolNames(), toolName) {
+				return map[string]any{"server_id": target, "status": "failed", "error": "tool is not exposed by control target"}, http.StatusBadRequest
+			}
+			if err := s.authorizeMCPConnectionOwner(r, backing, toolName, args); err != nil {
+				return map[string]any{"server_id": target, "status": "failed", "error": err.Error()}, http.StatusForbidden
+			}
+			if toolName == "control_catalog" {
+				return map[string]any{"server_id": target, "status": "completed", "response": s.controlCatalog(r, target, firstString(args, "section"))}, http.StatusOK
+			}
+			return s.callShellToolWithTraceParentAndSecrets(backing, toolName, s.shellConnectionArguments(r, backing, toolName, args), background, timeout, requestTraceID(r), requestTraceParent(r), nil, durableRequestKey), http.StatusOK
+		}
 		if target == "hub" {
 			resp, status := s.callHubToolForRequest(r, toolName, args)
 			// The hub envelope normally reports "completed" regardless of the
@@ -5094,12 +5136,18 @@ func (s *Server) boundedAutonomousGate(r *http.Request, target, toolName string)
 }
 
 func isReadOnlyTool(target, toolName string) bool {
+	if target == "control:hub" {
+		return toolName == "control_catalog" || isReadOnlyTool("hub", toolName)
+	}
+	if strings.HasPrefix(target, "control:") {
+		return toolName == "mcp_tools" || toolName == "control_catalog"
+	}
 	if toolName == "resources/list" || toolName == "resources/read" {
 		return true
 	}
 	if target == "hub" {
 		switch toolName {
-		case "expand", "discover", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
+		case "expand", "discover", "search", "demo", "resource_receipt", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "hub_status", "status", "schema", "list_mcp_tools", "listMcpTools", "job", "get_mcp_job", "getMcpJob", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
 			return true
 		default:
 			return false
@@ -5510,6 +5558,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	if name == "resource_receipt" {
 		return s.appsSDKResourceReceipt(r, firstString(args, "uri")), http.StatusOK
 	}
+	if name == "search" {
+		return s.searchToolsForRequest(r, args), http.StatusOK
+	}
 	if name == codeModeTool {
 		return s.callCodeModeTool(r, args)
 	}
@@ -5782,6 +5833,7 @@ func (s *Server) callShellToolWithTraceParentAndSecrets(target, toolName string,
 func hubTools() []map[string]any {
 	tools := []map[string]any{
 		{"name": "discover", "description": "List registered targets; query and status filter the compact list", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}}},
+		searchToolDefinition(),
 		{"name": "schema", "description": "Read exact target/tool schema or compact tool summaries", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}},
 		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{
@@ -5809,9 +5861,9 @@ func hubTools() []map[string]any {
 		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{
-			"name":         codeModeTool,
-			"title":        "Code mode",
-			"description":  "Run one short JavaScript that chains MCP tool calls and returns only the value you choose to return. The script body uses plain return and await with mcp.discover, mcp.schema and mcp.call. Each nested call goes through the same authorization, approval, admission and audit path as a direct execute, and honours an idempotency_key when the script supplies one. Scripts are not transactional and nothing is replayed or rolled back: a call that already ran cannot be undone if a later call fails. No filesystem, environment, process, network or timer access.",
+			"name":         "exec",
+			"title":        "Think in Code",
+			"description":  "Run short isolated JavaScript using search and await mcp.call(target, tool, args). Intermediate data stays in the sandbox; return only the chosen value. No filesystem, environment, process, network or timer access.",
 			"inputSchema":  codeModeInputSchema(),
 			"outputSchema": codeModeOutputSchema(),
 			"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
@@ -5824,18 +5876,47 @@ func hubTools() []map[string]any {
 func shellTools() []map[string]any {
 	return []map[string]any{
 		{"name": "shell_exec", "description": "Run one command as the configured default non-root user; use run_as_user=root only when privileged shell execution is intentional. File reads/edits/checkpoints live on the paired file:<host> target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}, "description": "Command timeout in seconds; pass 15 for a 15-second timeout. Omit or use null for the executor default."}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
-		{"name": "mcp_manage", "description": "Manage child MCP definitions on this selected ShellMCP host. Use list/status/config to inspect; upsert/remove/enable/disable/restart to change or run them. GPTAdmin Hub only routes the call and does not start the child elsewhere. To manage another machine, select that machine's ShellMCP target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
-		{"name": "mcp_tools", "description": "Run MCP tools/list for one configured child MCP on this host. Use the ref returned by mcp_manage list or status.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}}}},
-		{"name": "mcp_call", "description": "Call one named tool on a child MCP running or connected through this ShellMCP host. Use mcp_tools first; arguments are passed to the child.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "name"}, "additionalProperties": false, "dependentRequired": map[string]any{"_connection_scope": []string{"_connection_expires_at", "_connection_instance"}}}},
-		{"name": "mcp_connection_close", "description": "Close one Hub-owned child MCP connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
-		{"name": "mcp_request", "description": "Forward a supported child resource or prompt request.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_instance": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
 	}
+}
+
+func controlToolNames() []string {
+	return []string{"control_catalog", "mcp_manage", "mcp_tools", "mcp_call", "mcp_connection_close", "mcp_request"}
+}
+
+func controlTools(target string) []map[string]any {
+	if target == "control:hub" {
+		allowed := map[string]bool{"settings_schema": true, "settings_get": true, "settings_set": true, "settings_history": true, "settings_rollback": true, "handover_status": true, "handover_start": true, "diagnose": true, "webhook_routes_list": true, "webhook_route_create": true, "webhook_route_replace": true, "webhook_route_delete": true, "webhook_job_get": true}
+		out := []map[string]any{}
+		for _, tool := range hubTools() {
+			if allowed[firstString(tool, "name")] {
+				out = append(out, tool)
+			}
+		}
+		out = append(out, controlCatalogToolDefinition())
+		return out
+	}
+	allowed := map[string]bool{}
+	for _, name := range controlToolNames() {
+		allowed[name] = true
+	}
+	return []map[string]any{
+		controlCatalogToolDefinition(),
+		{"name": "mcp_manage", "description": "Inspect or manage child MCP definitions on this ShellMCP host. Configuration is persisted by ShellMCP; restart action is explicit.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "upsert", "remove", "enable", "disable", "restart", "status", "config"}}, "ref": map[string]any{"type": []string{"string", "null"}}, "config": map[string]any{"type": []string{"object", "null"}, "additionalProperties": true}}, "required": []string{"action"}, "additionalProperties": false}},
+		{"name": "mcp_tools", "description": "Read tools/list for one configured child MCP. Use the ref returned by mcp_manage.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref"}, "additionalProperties": false}},
+		{"name": "mcp_call", "description": "Call a named tool on a child MCP hosted by this node.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}}, "required": []string{"ref", "name"}, "additionalProperties": false}},
+		{"name": "mcp_connection_close", "description": "Close one owned child MCP connection partition.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}}, "required": []string{"ref", "_connection_scope", "_connection_instance"}, "additionalProperties": false}},
+		{"name": "mcp_request", "description": "Forward a supported resource or prompt request to a child MCP.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "_connection_scope": map[string]any{"type": "string"}, "_connection_instance": map[string]any{"type": "string"}, "_connection_expires_at": map[string]any{"type": "integer"}, "method": map[string]any{"type": "string", "enum": []string{"resources/list", "resources/read", "prompts/list", "prompts/get"}}, "params": map[string]any{"type": "object", "additionalProperties": true}}, "required": []string{"ref", "_connection_scope", "_connection_expires_at", "_connection_instance", "method"}, "additionalProperties": false}},
+	}
+}
+
+func searchToolDefinition() map[string]any {
+	return map[string]any{"name": "search", "title": "Search tools", "description": "Search caller-visible tool names, descriptions and control settings. Returns schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
 }
 
 func fileTools() []map[string]any {
 	return []map[string]any{
 		{"name": "system_inspect", "description": "Read bounded redacted files/directories without shell commands. On a system-mode installation this paired file target runs through the privileged ShellMCP runtime and can inspect root-owned configuration while preserving redaction boundaries.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}}, "path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576}}, "required": []string{"action", "path"}, "additionalProperties": false}},
-		{"name": "file_editor", "description": "Primary text file tool. view returns bounded current text with N:hhhh line ids; str_replace changes exact text and on no/multiple match returns current candidate text with fresh N:hhhh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects the whole batch if any id is stale. Successful edits return a compact diff with fresh ids. create/delete are supported. Existing ownership/mode are preserved; privileged system-mode file targets can edit root-owned files without shell/sed/python.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"view", "create", "str_replace", "batch_edit", "delete"}}, "path": map[string]any{"type": "string"}, "content": map[string]any{"type": []string{"string", "null"}}, "old_text": map[string]any{"type": []string{"string", "null"}}, "new_text": map[string]any{"type": []string{"string", "null"}}, "replace_all": map[string]any{"type": "boolean", "default": false}, "start_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "end_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144}, "operations": map[string]any{"type": []string{"array", "null"}, "maxItems": 50, "items": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"replace", "insert"}}, "start": map[string]any{}, "end": map[string]any{}, "content": map[string]any{"type": "string"}}, "required": []string{"action", "start", "content"}, "additionalProperties": false}}}, "required": []string{"action", "path"}, "additionalProperties": false}},
+		{"name": "file_editor", "description": "Primary text file tool. view returns bounded current text with N:hhhh line ids; str_replace changes exact text and on no/multiple match returns current candidate text with fresh N:hhhh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects the whole batch if any id is stale. Successful edits return a compact diff with fresh ids. create/delete are supported. Existing ownership/mode are preserved; privileged system-mode file targets can edit root-owned files without shell/sed/python.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"view", "create", "str_replace", "batch_edit", "delete"}}, "path": map[string]any{"type": "string"}, "content": map[string]any{"type": []string{"string", "null"}}, "old_text": map[string]any{"type": []string{"string", "null"}}, "new_text": map[string]any{"type": []string{"string", "null"}}, "replace_all": map[string]any{"type": "boolean", "default": false}, "raw": map[string]any{"type": "boolean", "default": false, "description": "view: exact selected bytes, original newline endings and line IDs"}, "start_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "end_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144}, "operations": map[string]any{"type": []string{"array", "null"}, "maxItems": 50, "items": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"replace", "insert"}}, "start": map[string]any{}, "end": map[string]any{}, "content": map[string]any{"type": "string"}}, "required": []string{"action", "start", "content"}, "additionalProperties": false}}}, "required": []string{"action", "path"}, "additionalProperties": false}},
 		{"name": "file_checkpoint", "description": "Explicit durable filesystem checkpoints using SHA-256 content-addressed gzip storage and manifests. create snapshots files/directories; diff compares to live state; restore automatically creates a restore-safety checkpoint first, so rollback is itself reversible. Use checkpoints at meaningful boundaries, not before every edit. Privileged system-mode file targets preserve owner/group/mode for system files.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"create", "list", "diff", "restore", "delete", "cleanup", "gc"}, "default": "create"}, "path": map[string]any{"type": []string{"string", "null"}}, "paths": map[string]any{"type": []string{"array", "null"}, "items": map[string]any{"type": "string"}}, "checkpoint_id": map[string]any{"type": []string{"string", "null"}}, "name": map[string]any{"type": []string{"string", "null"}}, "ttl_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "default": 30}, "limit": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_age_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0}}, "additionalProperties": false}},
 		{"name": "file_backup", "description": "Legacy compatibility backup/restore tool. Prefer file_checkpoint for durable restore points and file_editor for normal edits; do not create a backup before every edit.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"backup", "list", "cleanup", "restore"}, "default": "backup"}, "path": map[string]any{"type": []string{"string", "null"}}, "backup_id": map[string]any{"type": []string{"string", "null"}}, "ttl_days": map[string]any{"type": []string{"integer", "null"}, "default": 30}, "label": map[string]any{"type": []string{"string", "null"}}, "use_sudo": map[string]any{"type": "boolean", "default": false}, "overwrite": map[string]any{"type": "boolean", "default": false}, "limit": map[string]any{"type": []string{"integer", "null"}}, "max_age_days": map[string]any{"type": []string{"integer", "null"}}}, "additionalProperties": false}},
 	}
@@ -5863,6 +5944,12 @@ func fileAgentForShell(shell Agent) Agent {
 	host := strings.TrimPrefix(shell.AgentID, "shell:")
 	meta := map[string]any{"backing_server_id": shell.AgentID, "paired": true}
 	return Agent{AgentID: "file:" + host, Name: "Files: " + host, Kind: "virtual_file", Transport: shell.Transport, Status: shell.Status, LastSeen: shell.LastSeen, Capabilities: []string{"files", "checkpoints"}, Meta: meta}
+}
+
+func controlAgentForShell(shell Agent) Agent {
+	host := strings.TrimPrefix(shell.AgentID, "shell:")
+	meta := map[string]any{"backing_server_id": shell.AgentID, "management": "ShellMCP child MCP lifecycle"}
+	return Agent{AgentID: "control:" + host, Name: "Control: " + host, Kind: "virtual_control", Transport: shell.Transport, Status: shell.Status, LastSeen: shell.LastSeen, Capabilities: []string{"node_control", "child_mcp_management"}, Meta: meta}
 }
 
 func (s *Server) tasksEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -8377,7 +8464,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 	r = requestWithInstructionContext(r, params)
 	switch method {
 	case "server/discover":
-		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
+		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || strings.HasPrefix(agent.AgentID, "control:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
 			result := mcpDiscoverResult("gptadmin-server-"+exposedAgentSlug(agent), BuildVersion)
 			if s.cfg.InstructionContextRequired {
 				result["instructions"] = instructionBootstrapHint
@@ -8389,7 +8476,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		return result, rpcErr, false
 	case "initialize":
 		// Legacy compatibility shim for pre-2026-07-28 MCP clients.
-		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
+		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || strings.HasPrefix(agent.AgentID, "control:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
 			return map[string]any{"protocolVersion": connectionProtocol(firstString(params, "protocolVersion")), "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + exposedAgentSlug(agent), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
 		}
 		jobID := s.enqueueRelay(agent.AgentID, method, params)
@@ -8410,6 +8497,9 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		args := mapValue(params["arguments"])
 		if name == "" {
 			return nil, map[string]any{"code": -32602, "message": "tool name is required"}, false
+		}
+		if agent.AgentID == "hub" && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
+			return nil, map[string]any{"code": -32601, "message": "direct tool execution was removed; use search then exec"}, false
 		}
 		if agent.AgentID == "hub" {
 			if id := virtualMCPToolID(name); id != "" {
@@ -8543,6 +8633,9 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 	if strings.HasPrefix(agent.AgentID, "file:") {
 		return map[string]any{"tools": fileTools()}, nil
 	}
+	if strings.HasPrefix(agent.AgentID, "control:") {
+		return map[string]any{"tools": controlTools(agent.AgentID)}, nil
+	}
 	if isChildMCPAgent(agent) {
 		parent := firstString(agent.Meta, "parent_server_id")
 		ref := firstString(agent.Meta, "child_ref")
@@ -8588,6 +8681,9 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 	if strings.HasPrefix(agent.AgentID, "file:") {
 		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, fileTools())}, nil
 	}
+	if strings.HasPrefix(agent.AgentID, "control:") {
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, controlTools(agent.AgentID))}, nil
+	}
 	if isChildMCPAgent(agent) {
 		result, err := s.agentToolsList(agent)
 		if err != nil {
@@ -8628,6 +8724,25 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 			return mcpToolResult(s.appsSDKResourceReceipt(r, firstString(args, "uri"))), nil
 		}
 		return mcpToolResult(s.appsSDKCallForRequest(r, name, args)), nil
+	}
+	if strings.HasPrefix(agent.AgentID, "control:") {
+		if agent.AgentID == "control:hub" {
+			if name == "control_catalog" {
+				return s.controlCatalog(r, agent.AgentID, firstString(args, "section")), nil
+			}
+			return mcpToolResult(s.appsSDKCallForRequest(r, name, args)), nil
+		}
+		backing := "shell:" + strings.TrimPrefix(agent.AgentID, "control:")
+		if !containsString(controlToolNames(), name) {
+			return nil, map[string]any{"code": -32601, "message": "tool is not exposed by control target"}
+		}
+		if err := s.authorizeMCPConnectionOwner(r, backing, name, args); err != nil {
+			return nil, connectionOwnerRPCError()
+		}
+		if name == "control_catalog" {
+			return s.controlCatalog(r, agent.AgentID, firstString(args, "section")), nil
+		}
+		return unwrapMCPUpstream(s.callShellToolWithTraceParent(backing, name, s.shellConnectionArguments(r, backing, name, args), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r)))
 	}
 	if isVirtualMCPAgent(agent) {
 		return s.callVirtualMCPTool(r, agent, name, args)
@@ -8848,6 +8963,20 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := body["id"]
+	legacyCodeAlias, aliasErr := canonicalizeLegacyExecuteCode(body)
+	if aliasErr != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": aliasErr}})
+		return
+	}
+	if legacyCodeAlias {
+		encoded, _ := json.Marshal(body)
+		originalBody.Reset()
+		originalBody.Write(encoded)
+		r.Header = r.Header.Clone()
+		if r.Header.Get("Mcp-Name") == "execute" {
+			r.Header.Set("Mcp-Name", "exec")
+		}
+	}
 	if headerErr := validateMCP20260728RoutingHeaders(r, body); headerErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": id, "error": headerErr})
 		return
@@ -8876,6 +9005,18 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		name := firstString(params, "name")
 		args := mapValue(params["arguments"])
+		if name == "code_exec" {
+			result = mcpToolResult(map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"})
+			break
+		}
+		if legacyCodeAlias && name == "execute" {
+			name = "exec"
+			params["name"] = "exec"
+		}
+		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
+			rpcErr = map[string]any{"code": -32601, "message": "direct tool execution was removed; use search then exec"}
+			break
+		}
 		if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
 			var err error
 			args, err = s.resolveExecutionReference(r, args)
@@ -9600,6 +9741,31 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "result": s.appsSDKCallForRequest(bridgeRequest, tool, args)})
 }
 
+// canonicalizeLegacyExecuteCode accepts only the narrow stale-schema ChatGPT
+// transport shape. It rewrites the public name before routing, policy,
+// instruction, approval, audit, or execution handling. Direct tool arguments
+// are never accepted through this compatibility path.
+func canonicalizeLegacyExecuteCode(body map[string]any) (bool, string) {
+	params := mapValue(body["params"])
+	if firstString(body, "method") != "tools/call" || firstString(params, "name") != "execute" {
+		return false, ""
+	}
+	args := mapValue(params["arguments"])
+	code := firstString(args, "code")
+	allowed := map[string]bool{"code": true, "context": true, "timeout_ms": true, "max_calls": true, "heap_bytes": true, "max_output_bytes": true}
+	if code == "" {
+		return false, "direct tool execution was removed; use search then exec"
+	}
+	for key := range args {
+		if !allowed[key] {
+			return false, "legacy execute accepts code and exec budgets only; use search then exec for MCP tools"
+		}
+	}
+	params["name"] = "exec"
+	body["params"] = params
+	return true, ""
+}
+
 func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	switch name {
 	case "secret_request", "secret_status":
@@ -9613,7 +9779,7 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 			"app":          "GPTAdmin MCP",
 			"server_count": len(servers),
 			"servers":      servers,
-			"hint":         "Interactive dashboard rendered. The widget can call discover, schema, execute, and job through the MCP Apps bridge.",
+			"hint":         "Interactive dashboard rendered. Search tools, then use exec for calls; discover/schema remain read-only compatibility tools.",
 		}
 	case "resource_receipt":
 		return s.appsSDKResourceReceipt(nil, firstString(args, "uri"))
@@ -9653,7 +9819,7 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		}
 		return s.callShellTool(selectedTarget, "system_inspect", toolArgsFromTopLevel(args), false, s.cfg.DefaultTimeout)
 	case "execute", "call_mcp_tool", "callMcpTool":
-		return s.appsSDKCallMCP(nil, name, args)
+		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
 	case "job", "get_mcp_job", "getMcpJob":
 		if err := validateToolOutputDetail(args["detail"]); err != nil {
 			return map[string]any{"status": "failed", "error": err.Error()}
@@ -9682,8 +9848,24 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 }
 
 func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map[string]any) any {
+	if name == "code_exec" {
+		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
+	}
+	if name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
+		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
+	}
 	if name == "expand" {
 		return s.expandOperation(r, args)
+	}
+	if name == "search" {
+		return s.searchToolsForRequest(r, args)
+	}
+	if name == "exec" {
+		response, status := s.callCodeModeTool(r, args)
+		if status >= http.StatusBadRequest {
+			return response
+		}
+		return response
 	}
 	if name == "discover" || name == "list_mcp_servers" || name == "listMcpServers" {
 		s.mu.Lock()
@@ -9745,12 +9927,6 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 	if name == "fleetExec" || name == "fleet_exec" {
 		response, _ := s.fleetExecForRequest(r, args, false)
 		return response
-	}
-	if name == "call_mcp_tool" || name == "callMcpTool" {
-		return s.appsSDKCallMCP(r, name, args)
-	}
-	if name == "execute" {
-		return s.appsSDKCallMCP(r, name, args)
 	}
 	result := s.appsSDKCall(name, args)
 	if requestAccessMode(r) != accessModeReadonly || (name != "schema" && name != "list_mcp_tools" && name != "listMcpTools") {
@@ -9939,6 +10115,11 @@ func appsSDKTools() []map[string]any {
 			"_meta":           readMeta,
 		},
 		{
+			"name": "search", "title": "Search tools", "description": "Search caller-visible tools and settings with SQLite FTS5. Returns schemas and short exec call hints; coverage states when remote schemas have not been read.",
+			"inputSchema":  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false},
+			"outputSchema": map[string]any{"type": "object", "additionalProperties": true}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}, "securitySchemes": readSecurity, "_meta": readMeta,
+		},
+		{
 			"name":            "demo",
 			"title":           "Safe connection check",
 			"description":     "Run a read-only connection check without shell execution, file access or credentials.",
@@ -10016,14 +10197,8 @@ func appsSDKTools() []map[string]any {
 			"_meta":           execMeta,
 		},
 		{
-			"name":            "execute",
-			"title":           "Execute",
-			"description":     "Read instructions first. Use call_ref or context+target+tool+args. instructions_required means not executed.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"ref": map[string]any{"type": "string"}, "target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "args": map[string]any{"type": "object", "additionalProperties": true}, "background": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema(), "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "additionalProperties": true},
-			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
-			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
-			"securitySchemes": execSecurity,
-			"_meta":           execMeta,
+			"name": "exec", "title": "Think in Code", "description": "Run short JavaScript in the isolated sandbox. Use search then await mcp.call(target, tool, args); intermediate data stays inside the VM and only your return value is sent.",
+			"inputSchema": codeModeInputSchema(), "outputSchema": codeModeOutputSchema(), "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}, "securitySchemes": execSecurity, "_meta": execMeta,
 		},
 		{
 			"name":            "job",

@@ -24,11 +24,15 @@ The included skills define the safe workflow:
 
 1. complete OAuth in the browser and verify the authenticated MCP connection;
 2. inspect the active profile before choosing a target or tool;
-3. discover a child MCP, read its schema, and install/use it through GPTAdmin;
+3. use `search` to find caller-visible tools and settings, then run concise
+   `exec` JavaScript for calls and aggregation;
 4. use the memory MCP explicitly named by the active GPTAdmin profile.
 
 OAuth success is not the same as business acceptance: after authorization,
-verify `tools/list`, then run a read-only discovery before any write or command.
+verify `tools/list`, then run a read-only `search` before any write or command.
+`discover` and `schema` remain available for read-only compatibility. The public
+direct `execute(target, tool, args)` route is retired; use `search` plus
+`exec` instead.
 
 ## Recovery and tunnel boundary
 
@@ -49,20 +53,29 @@ passwords, codes, and tokens out of `.mcp.json` and chat.
 The plugin requests `X-GPTAdmin-Result-Mode: text`. GPTAdmin sends one
 representation when text and structuredContent contain exactly the same JSON.
 Media, errors, distinct content and widget data keep their normal contracts.
-The default tool catalog is ui/discover/schema/execute/job/expand; selected
-child input schemas stay exact. Reuse a valid call_ref and expand only the
-missing result field, without executing the operation again.
+The public tool catalog is `ui`, `discover`, `schema`, `search`, `exec`,
+`job`, and `expand`. Use `search` results to obtain a concise schema and a
+ready-to-use JavaScript call or scoped handle. `exec` keeps intermediate
+data in the sandbox and returns only the selected result. Use `job` or `expand`
+to inspect an existing operation receipt; never replay an uncertain write.
+
+This package currently describes and configures the Codex plugin entrypoint.
+The MCP facade itself is client-independent, but this repository does not
+claim certification or end-to-end testing for a fixed number of other clients.
+Each client integration must be inventoried and verified separately.
 
 Upgrade through `codex plugin add gptadmin@gptadmin-local`. Existing chats may
 retain their loaded tool catalog; validate a fresh native MCP connection.
 Keep the separate legacy gptadmin MCP entry disabled when this plugin supplies
 the same connection, to avoid duplicate tool catalogs.
 
-## Current profile context (1.3.0)
+## Current profile context
 
-`discover` and selected `schema` return the current effective profile instructions
-and a `context` receipt. A schema `call_ref` carries that receipt into `execute`.
-Pass `context` on explicit calls and further discovery to avoid repeated text.
+`discover`, selected `schema`, and search results return the current effective
+profile instructions and a `context` receipt. Pass the context when refreshing
+read-only search/discovery/schema results or when it is required by the current
+client contract. `exec` uses the authenticated caller context for each
+nested operation.
 A missing or stale receipt produces `instructions_required` and `executed:false`
 before execution; read the returned text and make the intended call again. Never
 interpret an unrelated timeout as proof that an operation did not run.
@@ -81,6 +94,7 @@ not claim a universal hook or automatic changes to every local project.
 
 An optional project instruction, added only by the project owner, can say:
 
-> Before GPTAdmin work, read the current profile returned by discovery/schema.
-> Retain its text and context together. On instructions_required refresh them;
-> inspect receipts before repeating operations with an uncertain outcome.
+> Before GPTAdmin work, read the current profile returned by search or the
+> compatibility discovery/schema tools. Retain its text and context together.
+> On `instructions_required`, refresh them; inspect job/expand receipts before
+> repeating operations with an uncertain outcome.

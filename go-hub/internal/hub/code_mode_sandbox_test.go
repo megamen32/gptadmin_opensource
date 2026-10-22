@@ -64,7 +64,7 @@ func TestCodeModeBuiltinModulesCannotReadHostFilesOrEnvironment(t *testing.T) {
 
 func TestCodeModeReadHelpersHonorProfile(t *testing.T) {
 	s, r := codeModeFixture(t)
-	r = requestWithAccessProfile(r, AccessProfile{ID: "script-only", Version: 1, AccessMode: accessModeFull, ApprovalMode: approvalModeUnrestricted, AllowedTargets: []string{"hub"}, AllowedTools: []string{"code_mode"}})
+	r = requestWithAccessProfile(r, AccessProfile{ID: "script-only", Version: 1, AccessMode: accessModeFull, ApprovalMode: approvalModeUnrestricted, AllowedTargets: []string{"hub"}, AllowedTools: []string{"exec"}})
 	for _, code := range []string{"return mcp.discover();", "return mcp.schema('hub','status');"} {
 		result, status := codeModeRun(t, s, r, map[string]any{"code": code})
 		if status == http.StatusOK || firstString(mapValue(result["error"]), "code") != "forbidden" {
@@ -75,9 +75,9 @@ func TestCodeModeReadHelpersHonorProfile(t *testing.T) {
 
 func TestCodeModeSchemaListContainsToolNames(t *testing.T) {
 	s, r := codeModeFixture(t)
-	result, status := codeModeRun(t, s, r, map[string]any{"code": "const s=await mcp.schema('hub'); return {hasCodeMode:s.tools.includes('code_mode'),hasEmpty:s.tools.includes('')};"})
+	result, status := codeModeRun(t, s, r, map[string]any{"code": "const s=await mcp.search('exec'); return {hasCodeExec:s.results.some(x=>x.name==='exec'),hasEmpty:s.results.some(x=>x.name==='')};"})
 	value := mapValue(result["result"])
-	if status != http.StatusOK || value["hasCodeMode"] != true || value["hasEmpty"] != false {
+	if status != http.StatusOK || value["hasCodeExec"] != true || value["hasEmpty"] != false {
 		t.Fatalf("invalid schema names: %v", result)
 	}
 }

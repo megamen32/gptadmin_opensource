@@ -1,12 +1,7 @@
 package hub
 
-// code_mode is a Hub tool, reachable exactly like every other Hub tool:
-//
-//	schema(target=hub, tool=code_mode)          -> discover the contract
-//	execute(target=hub, tool=code_mode, args=…) -> run one script
-//
-// It is an additive extension: existing targets, tools and envelopes are
-// unchanged, and a script's nested calls travel the ordinary execute path.
+// exec is the public sandbox entry. Scripts search the caller-visible
+// catalog and call tools through the ordinary authorized dispatch path.
 
 import (
 	"net/http"
@@ -22,8 +17,9 @@ func codeModeInputSchema() map[string]any {
 				"type":        "string",
 				"minLength":   1,
 				"maxLength":   codeModeMaxCodeBytes,
-				"description": "Async JavaScript function body. Use plain return and await. Available API: mcp.discover(query?), mcp.schema(target, tool?), mcp.call({target, tool, args?, ref?, idempotency_key?, schema_version?, schema_digest_sha256?}). No filesystem, environment, process, network or timer access.",
+				"description": "Short async JavaScript body. Top-level await, call/search, mcp.call/search/schema/discover/job/expand and files.* are available. Explicitly return only the chosen result. File helpers call authorized file:<host> MCP tools. No host filesystem, environment, process, network or timers.",
 			},
+			"context": map[string]any{"type": "string", "description": "Instruction context returned by search when required."},
 			"timeout_ms": map[string]any{
 				"type": "integer", "minimum": 100,
 				"maximum":     int(codeModeMaxTimeout / 1e6),
@@ -33,12 +29,12 @@ func codeModeInputSchema() map[string]any {
 			"max_calls": map[string]any{
 				"type": "integer", "minimum": 1, "maximum": codeModeMaxCallsCeiling,
 				"default":     codeModeDefaultMaxCalls,
-				"description": "Maximum mcp.discover + mcp.schema + mcp.call invocations.",
+				"description": "Maximum mcp.search + mcp.call invocations.",
 			},
 			"max_output_bytes": map[string]any{
 				"type": "integer", "minimum": 256, "maximum": codeModeMaxOutBytes,
 				"default":     codeModeDefaultOutBytes,
-				"description": "Maximum serialized size of the returned value.",
+				"description": "Maximum combined serialized size of the returned value and console.log entries.",
 			},
 		},
 		"required":             []string{"code"},
@@ -52,6 +48,7 @@ func codeModeOutputSchema() map[string]any {
 		"properties": map[string]any{
 			"status":     map[string]any{"type": "string", "enum": []string{"completed", "failed"}},
 			"result":     map[string]any{"description": "Exactly the value the script returned."},
+			"logs":       map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{}}, "description": "Structured console.log arguments, included in the combined output budget."},
 			"calls":      map[string]any{"type": "integer", "minimum": 0},
 			"elapsed_ms": map[string]any{"type": "integer", "minimum": 0},
 			"limits": map[string]any{
@@ -95,7 +92,7 @@ func (s *Server) callCodeModeTool(r *http.Request, args map[string]any) (map[str
 			return codeModeFailed("forbidden", err.Error(), 0), http.StatusForbidden
 		}
 	}
-	code := firstString(args, "code", "script", "source")
+	code := firstString(args, "code")
 	if code == "" {
 		return codeModeFailed("invalid_arguments", "code is required", 0), http.StatusBadRequest
 	}
@@ -115,6 +112,7 @@ func (s *Server) callCodeModeTool(r *http.Request, args map[string]any) (map[str
 	return map[string]any{
 		"status":     "completed",
 		"result":     run.result,
+		"logs":       run.logs,
 		"calls":      run.calls,
 		"elapsed_ms": run.elapsed.Milliseconds(),
 		"limits": map[string]any{

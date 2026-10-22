@@ -17,7 +17,7 @@ import (
 const instructionContextHeader = "X-GPTAdmin-Context"
 const instructionContextMeta = "io.gptadmin/context"
 const instructionContextTTL = 30 * time.Minute
-const instructionBootstrapHint = "Before execution, read the current profile instructions returned by discover/schema. Use the resulting call_ref, or pass its context with explicit calls. instructions_required means this call was not executed. Keep the instruction text with its context; after losing the text, obtain it again. Read job/expand to inspect existing operations, never blindly replay them."
+const instructionBootstrapHint = "Before exec, read the current profile instructions returned by search (discover/schema remain read-only compatibility tools). Pass the returned context to exec when required. instructions_required means no call ran. Read job/expand to inspect existing operations; never replay an uncertain write."
 
 type instructionContextKey struct{}
 type instructionOriginKey struct{}
@@ -194,7 +194,7 @@ func instructionExempt(target, tool string) bool {
 		return false
 	}
 	switch tool {
-	case "discover", "list_mcp_servers", "listMcpServers", "schema", "list_mcp_tools", "listMcpTools", "expand", "job", "get_mcp_job", "getMcpJob", "status", "hub_status", "diagnose", "demo", "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "pending", "list_pending_servers", "settings_get", "settings_schema", "settings_history", "handover_status", "secret_status", "operations", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones":
+	case "discover", "list_mcp_servers", "listMcpServers", "search", "schema", "list_mcp_tools", "listMcpTools", "expand", "job", "get_mcp_job", "getMcpJob", "status", "hub_status", "diagnose", "demo", "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "pending", "list_pending_servers", "settings_get", "settings_schema", "settings_history", "handover_status", "secret_status", "operations", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones":
 		return true
 	}
 	return false
@@ -232,6 +232,8 @@ func (s *Server) requireFacadeInstructionContext(r *http.Request, name string, a
 	if name == "execute" || name == "callMcpTool" || name == "call_mcp_tool" {
 		target = firstString(args, "target", "server_id", "agent_id")
 		tool = firstString(args, "tool", "tool_name", "name")
+	} else if name == "exec" {
+		target, tool = "hub", "exec"
 	}
 	return s.requireInstructionContext(r, target, tool)
 }
@@ -250,7 +252,7 @@ func (s *Server) bindInstructionContext(ref, token string) {
 // The actual instruction text is visible to the model, never hidden in _meta.
 // A context supplied by the caller suppresses repetition only while still valid.
 func (s *Server) presentInstructionContext(r *http.Request, name string, args map[string]any, raw any) any {
-	bootstrap := name == "discover" || name == "list_mcp_servers" || name == "listMcpServers" || name == "schema" || name == "list_mcp_tools" || name == "listMcpTools"
+	bootstrap := name == "discover" || name == "list_mcp_servers" || name == "listMcpServers" || name == "search" || name == "schema" || name == "list_mcp_tools" || name == "listMcpTools"
 	if !bootstrap {
 		return raw
 	}

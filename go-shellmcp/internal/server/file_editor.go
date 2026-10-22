@@ -25,6 +25,7 @@ type fileEditorArgs struct {
 	StartLine  int                 `json:"start_line"`
 	EndLine    int                 `json:"end_line"`
 	MaxBytes   int                 `json:"max_bytes"`
+	Raw        bool                `json:"raw"`
 	Operations []fileEditOperation `json:"operations"`
 }
 
@@ -59,7 +60,7 @@ func (s *Server) mcpFileEditor(args map[string]any) (map[string]any, error) {
 
 	switch req.Action {
 	case "view":
-		return s.fileEditorView(path, req.StartLine, req.EndLine, req.MaxBytes)
+		return s.fileEditorViewMode(path, req.StartLine, req.EndLine, req.MaxBytes, req.Raw)
 	case "create":
 		return s.fileEditorCreate(path, req.Content)
 	case "str_replace":
@@ -74,6 +75,10 @@ func (s *Server) mcpFileEditor(args map[string]any) (map[string]any, error) {
 }
 
 func (s *Server) fileEditorView(path string, startLine, endLine, maxBytes int) (map[string]any, error) {
+	return s.fileEditorViewMode(path, startLine, endLine, maxBytes, false)
+}
+
+func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes int, rawView bool) (map[string]any, error) {
 	raw, _, err := readEditableFile(path)
 	if err != nil {
 		return nil, err
@@ -102,6 +107,9 @@ func (s *Server) fileEditorView(path string, startLine, endLine, maxBytes int) (
 		maxBytes = 256 << 10
 	}
 	if len(lines) == 0 {
+		if rawView {
+			return mcpText("", map[string]any{"ok": true, "action": "view", "path": path, "text": "", "text_exact": true, "bytes": 0, "file_bytes": 0, "line_count": 0, "line_ids": []string{}, "start_line": 1, "end_line": 0, "truncated": false}), nil
+		}
 		return mcpText("[empty file]", map[string]any{"ok": true, "action": "view", "path": path, "line_count": 0, "view": "[empty file]", "truncated": false}), nil
 	}
 	var b strings.Builder
@@ -127,6 +135,25 @@ func (s *Server) fileEditorView(path string, startLine, endLine, maxBytes int) (
 		truncated = true
 	}
 	view := b.String()
+	if rawView {
+		// The annotated editor view deliberately normalises CRLF and omits the
+		// final newline. Programmatic reads must preserve the exact selected
+		// bytes instead of trying to reconstruct them from that display.
+		rawLines := strings.SplitAfter(string(raw), "\n")
+		if len(rawLines) > 0 && rawLines[len(rawLines)-1] == "" {
+			rawLines = rawLines[:len(rawLines)-1]
+		}
+		selected := ""
+		ids := []string{}
+		if last >= startLine {
+			selected = strings.Join(rawLines[startLine-1:last], "")
+			for i := startLine; i <= last; i++ {
+				ids = append(ids, lineID(i, lines[i-1]))
+			}
+		}
+		partial := truncated || startLine > 1
+		return mcpText(selected, map[string]any{"ok": true, "action": "view", "path": path, "text": selected, "text_exact": true, "bytes": len(selected), "file_bytes": len(raw), "line_count": len(lines), "line_ids": ids, "start_line": startLine, "end_line": last, "truncated": partial}), nil
+	}
 	return mcpText(view, map[string]any{
 		"ok": true, "action": "view", "path": path, "line_count": len(lines),
 		"start_line": startLine, "end_line": last, "view": view, "truncated": truncated,

@@ -29,14 +29,52 @@ import (
 // codeModeAPISource exposes the host bridge under one frozen `mcp` namespace.
 // qjs only supports global binding, so the functions are bound to hidden
 // globals first and then removed again.
-const codeModeAPISource = `globalThis.mcp = Object.freeze({
-  discover: globalThis.__codeModeDiscover,
-  schema: globalThis.__codeModeSchema,
-  call: globalThis.__codeModeCall,
+const codeModeAPISource = `const __callMCP = globalThis.__codeModeCall;
+const __discoverMCP = globalThis.__codeModeDiscover;
+const __schemaMCP = globalThis.__codeModeSchema;
+const __searchMCP = globalThis.__codeModeSearch;
+const __facadeMCP = globalThis.__codeModeFacade;
+const __fileMCP = globalThis.__codeModeFile;
+const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } return __callMCP(v); };
+const search = (query, opts={}) => (typeof opts.source==='string' || opts.scope==='content') ? __contentMCP('search',query,opts) : __searchMCP(query,opts);
+const __contentMCP = globalThis.__codeModeContent;
+const __nativeJSONStringify = JSON.stringify.bind(JSON);
+Object.defineProperty(globalThis, '__codeModeSafeJSON', {value:Object.freeze({stringify:(value,replacer)=>__nativeJSONStringify(value,replacer)}), configurable:false, writable:false});
+globalThis.mcp = Object.freeze({
+  discover: (...a) => __discoverMCP(...a),
+  schema: (...a) => __schemaMCP(...a),
+  search, call,
+  job: (id, owner_target) => __facadeMCP('job', {id, owner_target}),
+  expand: (id, path='', offset=0, limit=4096) => __facadeMCP('expand', {id, path, offset, limit}),
+  files: Object.freeze({
+    ls: (target,path,max_bytes=65536) => __fileMCP('ls',target,path,{max_bytes}),
+    read: (target,path,opts={}) => __fileMCP('read',target,path,opts),
+    readMany: async (target,paths,opts={}) => { const out=[]; for(const path of paths) out.push(await __fileMCP('read',target,path,opts)); return out; },
+    create: (target,path,text) => __fileMCP('create',target,path,{text}),
+    replace: (target,path,old_text,new_text,opts={}) => __fileMCP('replace',target,path,{old_text,new_text,...opts}),
+    batchEdit: (target,path,operations,opts={}) => __fileMCP('batchEdit',target,path,{operations,...opts}),
+    checkpoint: (target,path,opts={}) => __fileMCP('checkpoint',target,path,opts),
+  }),
+  content: Object.freeze({
+    index: (text,opts={}) => __contentMCP('index',text,opts),
+    search: (query,opts={}) => __contentMCP('search',query,opts),
+    read: (source,chunk_id,opts={}) => __contentMCP('read',source,{chunk_id,...opts}),
+    delete: (source) => __contentMCP('delete',source,{}),
+  }),
 });
+globalThis.call = call;
+globalThis.search = search;
+globalThis.index = mcp.content.index;
+globalThis.read = mcp.content.read;
+globalThis.drop = mcp.content.delete;
+globalThis.__codeModeFileCall = (kind,target,path,opts={}) => __fileMCP(kind,target,path,opts);
 delete globalThis.__codeModeDiscover;
 delete globalThis.__codeModeSchema;
+delete globalThis.__codeModeSearch;
 delete globalThis.__codeModeCall;
+delete globalThis.__codeModeFacade;
+delete globalThis.__codeModeFile;
+delete globalThis.__codeModeContent;
 `
 
 // codeModeBridge installs mcp.discover, mcp.schema and mcp.call into a sandbox.
@@ -47,8 +85,11 @@ type codeModeBridge struct {
 	deadline time.Time
 	limits   codeModeLimits
 
-	mu        sync.Mutex
-	callCount int
+	mu          sync.Mutex
+	callCount   int
+	logs        []any
+	logBytes    int
+	lastReceipt map[string]any
 	// fatal is set once, by the first nested call that did not complete. Later
 	// bridge calls are refused even if the script catches the exception, and the
 	// whole run ends as failed. A script cannot acknowledge a failed or pending
@@ -94,11 +135,182 @@ func (b *codeModeBridge) fail(code, message string, receipt map[string]any) *cod
 func (b *codeModeBridge) install(ctx *qjs.Context) error {
 	ctx.SetFunc("__codeModeDiscover", b.discover)
 	ctx.SetFunc("__codeModeSchema", b.schema)
+	ctx.SetFunc("__codeModeSearch", b.search)
 	ctx.SetFunc("__codeModeCall", b.call)
+	ctx.SetFunc("__codeModeFacade", b.facade)
+	ctx.SetFunc("__codeModeFile", b.file)
+	ctx.SetFunc("__codeModeContent", b.content)
+	ctx.SetFunc("__codeModeLog", b.log)
 	if _, err := ctx.Eval("code_mode_api.js", qjs.Code(codeModeAPISource)); err != nil {
 		return fmt.Errorf("cannot expose the code_mode API: %w", err)
 	}
 	return nil
+}
+
+func (b *codeModeBridge) log(this *qjs.This) (*qjs.Value, error) {
+	args := this.Args()
+	if len(args) == 0 || args[0] == nil || args[0].IsUndefined() || args[0].IsNull() {
+		return nil, b.fail("invalid_log", "console.log could not serialize its arguments", nil)
+	}
+	encoded := args[0].String()
+	var values []any
+	if json.Unmarshal([]byte(encoded), &values) != nil {
+		return nil, b.fail("invalid_log", "console.log arguments must be JSON serializable", nil)
+	}
+	entry := any(values)
+	entryJSON, _ := json.Marshal(entry)
+	b.mu.Lock()
+	used := b.logBytes + len(entryJSON)
+	if used > b.limits.maxOut {
+		b.mu.Unlock()
+		return nil, b.fail("output_too_large", fmt.Sprintf("console.log would exceed the %d byte combined output budget", b.limits.maxOut), nil)
+	}
+	b.logBytes = used
+	b.logs = append(b.logs, entry)
+	b.mu.Unlock()
+	return this.Context().ParseJSON("null"), nil
+}
+
+func (b *codeModeBridge) logValues() []any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]any, len(b.logs))
+	copy(out, b.logs)
+	return out
+}
+
+func (b *codeModeBridge) annotate(err *codeModeError) *codeModeError {
+	if err == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err.call == 0 {
+		err.call = b.callCount
+	}
+	if err.receipt == nil && b.lastReceipt != nil {
+		err.receipt = cloneMap(b.lastReceipt)
+	}
+	return err
+}
+
+func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
+	if err := b.entry(); err != nil {
+		return nil, err
+	}
+	args := codeModeObjectArg(this, 0)
+	for k, v := range codeModeObjectArg(this, 1) {
+		args[k] = v
+	}
+	if query := codeModeStringArg(this, 0); query != "" {
+		args["query"] = query
+	}
+	request := b.request.WithContext(b.ctx)
+	if err := authorizeFacadeCall(request, "search", args); err != nil {
+		return nil, b.fail("forbidden", err.Error(), nil)
+	}
+	result := b.server.searchToolsForRequest(request, args)
+	if firstString(result, "status") == "failed" {
+		return nil, b.fail("search_unavailable", firstString(result, "error"), nil)
+	}
+	return b.jsonValue(this, result), nil
+}
+
+// facade exposes the small read-only Hub receipt facade inside the same
+// authenticated request. It does not expose client-only apps or services.
+func (b *codeModeBridge) facade(this *qjs.This) (*qjs.Value, error) {
+	if err := b.entry(); err != nil {
+		return nil, err
+	}
+	if _, err := b.remaining(); err != nil {
+		return nil, err
+	}
+	name := codeModeStringArg(this, 0)
+	args := codeModeObjectArg(this, 1)
+	if name != "job" && name != "expand" {
+		return nil, b.fail("invalid_arguments", "only job and expand facade helpers are available", nil)
+	}
+	request := b.request.WithContext(b.ctx)
+	if err := authorizeFacadeCall(request, name, args); err != nil {
+		return nil, b.fail("forbidden", err.Error(), nil)
+	}
+	result := mapValue(b.server.appsSDKCallForRequest(request, name, args))
+	if status := firstString(result, "status"); status == "failed" || status == "approval_required" || status == "running" || status == "queued" {
+		receipt := map[string]any{"status": status}
+		for _, key := range []string{"job_id", "task_id", "operation_id"} {
+			if v := firstString(result, key); v != "" {
+				receipt[key] = v
+			}
+		}
+		return nil, b.fail("facade_incomplete", firstString(result, "error", "message", "detail", "status"), receipt)
+	}
+	return b.jsonValue(this, redactPublicMetadata(result)), nil
+}
+
+// file calls are conveniences over the existing file:<host> MCP contract.
+// Every operation remains a separately authorized dispatch.
+func (b *codeModeBridge) file(this *qjs.This) (*qjs.Value, error) {
+	kind := codeModeStringArg(this, 0)
+	target, path := codeModeStringArg(this, 1), codeModeStringArg(this, 2)
+	if !strings.HasPrefix(target, "file:") {
+		return nil, b.fail("invalid_arguments", "file helpers require an explicit file:<host> target", nil)
+	}
+	opts := codeModeObjectArg(this, 3)
+	var tool string
+	args := map[string]any{"path": path}
+	indexResult := truthy(opts["index"])
+	switch kind {
+	case "ls":
+		tool = "system_inspect"
+		args["action"], args["max_bytes"] = "list_directory", opts["max_bytes"]
+	case "read":
+		tool = "file_editor"
+		args["action"] = "view"
+		args["raw"] = true
+		for _, k := range []string{"start_line", "end_line", "max_bytes"} {
+			if v, ok := opts[k]; ok {
+				args[k] = v
+			}
+		}
+	case "replace":
+		tool = "file_editor"
+		args["action"] = "str_replace"
+		for _, k := range []string{"old_text", "new_text", "replace_all", "max_bytes"} {
+			if v, ok := opts[k]; ok {
+				args[k] = v
+			}
+		}
+	case "batchEdit":
+		tool = "file_editor"
+		args["action"] = "batch_edit"
+		for _, k := range []string{"operations", "max_bytes"} {
+			if v, ok := opts[k]; ok {
+				args[k] = v
+			}
+		}
+	case "checkpoint":
+		tool = "file_checkpoint"
+		for _, k := range []string{"action", "label", "ttl_days", "checkpoint_id"} {
+			if v, ok := opts[k]; ok {
+				args[k] = v
+			}
+		}
+		if args["action"] == nil {
+			args["action"] = "create"
+		}
+	case "create":
+		tool = "file_editor"
+		args["action"], args["content"] = "create", opts["text"]
+	default:
+		return nil, b.fail("invalid_arguments", "unknown file helper", nil)
+	}
+	call := map[string]any{"target": target, "tool": tool, "args": args}
+	if indexResult {
+		call["__indexResult"] = true
+		call["__indexText"] = "file-text"
+		call["__indexName"] = path
+	}
+	return b.runCall(this, call)
 }
 
 // entry performs the checks every bridge function must pass before it may touch
@@ -275,6 +487,10 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 // later call is refused and the whole script ends as failed with the original
 // receipt, so a script cannot swallow an error and keep producing effects.
 func (b *codeModeBridge) call(this *qjs.This) (*qjs.Value, error) {
+	return b.runCall(this, codeModeObjectArg(this, 0))
+}
+
+func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Value, error) {
 	if err := b.entry(); err != nil {
 		return nil, err
 	}
@@ -282,8 +498,8 @@ func (b *codeModeBridge) call(this *qjs.This) (*qjs.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := codeModeObjectArg(this, 0)
 	ref := firstString(args, "ref")
+	indexResult := truthy(args["__indexResult"])
 	target := firstString(args, "target", "server_id", "agent_id")
 	tool := firstString(args, "tool", "tool_name", "name")
 
@@ -303,6 +519,9 @@ func (b *codeModeBridge) call(this *qjs.This) (*qjs.Value, error) {
 	// Re-check recursion after resolution: the canonical tool is what runs.
 	if target == "hub" && tool == codeModeTool {
 		return nil, b.fail("recursive_call_denied", "a code_mode script cannot call code_mode", nil)
+	}
+	if target == "hub" && tool == "code_exec" {
+		return nil, b.fail("migration_required", "code_exec was renamed to exec; use search then exec", nil)
 	}
 	if callArgs := mapValue(args["args"]); callArgs != nil {
 		resolvedArgs = callArgs
@@ -328,8 +547,118 @@ func (b *codeModeBridge) call(this *qjs.This) (*qjs.Value, error) {
 		// Stop the run on the first non-completing call. The script still sees
 		// the exception, but no further call can succeed.
 		b.fail(firstString(payload, "status"), firstString(payload, "detail"), payload)
+		return b.jsonValue(this, payload), nil
 	}
-	return b.jsonValue(this, payload), nil
+	usable := codeModeUsableValueForTool(response, target, tool)
+	if strings.HasPrefix(target, "file:") && tool == "file_editor" {
+		usable = normalizeCodeModeFileEditor(usable)
+	}
+	receipt := codeModeOperationReceipt(response, target, tool, payload)
+	if terminal, _ := codeModeCallTerminal(response, codeModeInnerResult(response), status); terminal == "completed" {
+		redactedResult := redactPublicMetadata(usable)
+		if encoded, encodeErr := json.Marshal(redactedResult); encodeErr == nil && len(encoded) <= 2048 {
+			receipt["result"] = redactedResult
+		} else {
+			receipt["result_omitted"] = "operation result exceeded 2048 bytes"
+		}
+	}
+	b.mu.Lock()
+	b.lastReceipt = receipt
+	b.mu.Unlock()
+	if indexResult {
+		text, format, partial, extractErr := contentTextForIndex(usable, target, tool, firstString(args, "__indexText"))
+		if extractErr != nil {
+			return nil, b.fail("content_index_failed", extractErr.Error(), receipt)
+		}
+		if partial {
+			return nil, b.fail("content_index_partial", "partial or spilled tool output cannot be indexed without an explicit complete read", receipt)
+		}
+		name := firstString(args, "__indexName")
+		meta, indexErr := b.indexContent(text, name, target+"\x00"+tool, format)
+		if indexErr != nil {
+			return nil, b.fail("content_index_failed", indexErr.Error(), receipt)
+		}
+		return b.jsonValue(this, meta), nil
+	}
+	return b.jsonValue(this, usable), nil
+}
+
+func codeModeUsableValue(response map[string]any) any {
+	return codeModeUsableValueForTool(response, "", "")
+}
+
+func codeModeUsableValueForTool(response map[string]any, target, tool string) any {
+	if raw, ok := response["response"]; ok && raw != nil {
+		encoded, err := json.Marshal(raw)
+		if err == nil {
+			var value any
+			if json.Unmarshal(encoded, &value) == nil {
+				business := mapValue(value)
+				structured := mapValue(business["structuredContent"])
+				if nested := mapValue(structured["result"]); len(nested) > 0 && firstString(structured, "server") != "" {
+					// This is the ShellMCP child-call transport envelope, whose
+					// result is an MCP response. Unwrap only this identified shape.
+					business = nested
+					structured = mapValue(nested["structuredContent"])
+					if firstString(structured, "name") != "" && firstString(structured, "ref") != "" {
+						business = mapValue(structured["result"])
+						structured = mapValue(business["structuredContent"])
+					}
+				}
+				// ShellMCP's command envelope is stable and identifiable. Unwrap
+				// that known transport shape so short scripts can use r.stdout.
+				if target != "" && strings.HasPrefix(target, "shell:") && tool == "shell_exec" {
+					for depth := 0; depth < 4; depth++ {
+						current := mapValue(structured["result"])
+						if len(current) == 0 {
+							if _, has := structured["stdout"]; has {
+								return structured
+							}
+							break
+						}
+						structured = mapValue(current["structuredContent"])
+						if len(structured) == 0 {
+							structured = current
+						}
+					}
+					if _, has := structured["stdout"]; has {
+						return structured
+					}
+				}
+				// For child and ordinary MCP tools, prefer structured business
+				// data while preserving content alongside it. Do not unwrap an
+				// arbitrary tool's `result` property.
+				if len(structured) > 0 {
+					if content, exists := business["content"]; exists {
+						structured = cloneMap(structured)
+						structured["content"] = content
+					}
+					return structured
+				}
+				return business
+			}
+		}
+	}
+	value := cloneMap(response)
+	delete(value, "server_id")
+	return value
+}
+
+func codeModeOperationReceipt(response map[string]any, target, tool string, payload map[string]any) map[string]any {
+	receipt := map[string]any{"target": target, "tool": tool, "status": firstString(payload, "status")}
+	for _, key := range []string{"job_id", "task_id", "operation_id", "approval_id"} {
+		if value := firstString(response, key); value != "" {
+			receipt[key] = value
+		}
+	}
+	if result := mapValue(response["response"]); len(result) > 0 {
+		for _, key := range []string{"job_id", "task_id", "operation_id", "approval_id"} {
+			if value := firstString(result, key); value != "" {
+				receipt[key] = value
+			}
+		}
+	}
+	return receipt
 }
 
 // dispatch mirrors the ordinary execute path for one nested call, in the same
@@ -409,7 +738,40 @@ func codeModeCallPayload(response map[string]any, status int, target, tool strin
 
 // codeModeCallTerminal classifies a nested call. Only an explicit 2xx
 // completion is success; a running receipt is never presented as usable data.
+// Inspect only identified MCP transport envelopes, never arbitrary business
+// result fields. A completed transport can still carry a failed file/MCP call.
+func codeModeNestedTransportFailure(inner map[string]any) (bool, string) {
+	current := inner
+	for depth := 0; depth < 6 && len(current) > 0; depth++ {
+		if truthyAny(current["isError"]) || firstString(current, "resultType") == "error" || firstString(current, "error") != "" {
+			detail := firstString(current, "error", "message", "detail")
+			if detail == "" {
+				for _, v := range outputRows(current["content"]) {
+					if firstString(mapValue(v), "type") == "text" {
+						detail = firstString(mapValue(v), "text")
+						break
+					}
+				}
+			}
+			if detail == "" {
+				detail = "nested MCP tool failed"
+			}
+			return true, string(utf8Prefix([]byte(detail), 2048))
+		}
+		structured := mapValue(current["structuredContent"])
+		if firstString(structured, "server") != "" || (firstString(structured, "ref") != "" && firstString(structured, "name") != "") {
+			current = mapValue(structured["result"])
+			continue
+		}
+		break
+	}
+	return false, ""
+}
+
 func codeModeCallTerminal(response, inner map[string]any, status int) (string, string) {
+	if failed, detail := codeModeNestedTransportFailure(inner); failed {
+		return "failed", detail
+	}
 	switch firstString(response, "status") {
 	case "approval_required":
 		return "approval_required", "this call needs an administrator approval before it can run"
@@ -505,7 +867,7 @@ func codeModeObjectArg(this *qjs.This, index int) map[string]any {
 	if value == nil || value.IsUndefined() || value.IsNull() {
 		return map[string]any{}
 	}
-	encoded, err := value.JSONStringify()
+	encoded, err := stringifyCodeModeValue(value)
 	if err != nil || strings.TrimSpace(encoded) == "" {
 		return map[string]any{}
 	}
@@ -527,7 +889,7 @@ const codeModeMaxIntermediateJSON = 8 << 20
 // ever cross the boundary; no host object is exposed. A payload that cannot be
 // encoded or is too large is a hard, sticky failure rather than a silent
 // partial object the script might trust.
-func (b *codeModeBridge) jsonValue(this *qjs.This, payload map[string]any) *qjs.Value {
+func (b *codeModeBridge) jsonValue(this *qjs.This, payload any) *qjs.Value {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		b.fail("invalid_intermediate", "a tool response could not be encoded as JSON", nil)

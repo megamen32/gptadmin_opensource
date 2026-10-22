@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,186 @@ func TestCodeModeReturnsOnlySelectedResult(t *testing.T) {
 	}
 	if intFromAny(response["calls"]) != 0 {
 		t.Fatalf("pure script reported tool calls: %v", response["calls"])
+	}
+}
+
+func TestExecAliasesRootMCPAndOptInContentAcrossRuns(t *testing.T) {
+	s, r := codeModeFixture(t)
+	path := filepath.Join(s.cfg.ConfigDir, "exec-content.sqlite")
+	first, status := codeModeRun(t, s, r, map[string]any{"code": `
+		const d=await mcp.discover('hub');
+		const schema=await mcp.schema('hub','demo');
+		const called=await call('hub','demo',{});
+		const found=await search('demo',{target:'hub'});
+		return {targets:d.servers.length, tool:schema.tool, status:called.status, hits:found.results.length};
+	`})
+	if status != http.StatusOK || firstString(first, "status") != "completed" {
+		t.Fatalf("root composition failed: %d %#v", status, first)
+	}
+	result := mapValue(first["result"])
+	if firstString(result, "tool") != "demo" || firstString(result, "status") != "ok" || intFromAny(result["hits"]) == 0 {
+		t.Fatalf("root MCP/facade aliases returned unexpected data: %#v", result)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("ordinary exec unexpectedly created content store: %v", err)
+	}
+	indexed, status := codeModeRun(t, s, r, map[string]any{"code": `return await index('start-marker\nnoise\nrare-MID-needle\nnoise\nend-marker',{name:'fixture-log'});`})
+	if status != http.StatusOK || firstString(indexed, "status") != "completed" {
+		t.Fatalf("opt-in indexing failed: %d %#v", status, indexed)
+	}
+	meta := mapValue(indexed["result"])
+	source := firstString(meta, "source")
+	if source == "" || intFromAny(meta["bytes"]) == 0 || firstString(meta, "name") != "fixture-log" {
+		t.Fatalf("index did not return bounded source metadata: %#v", meta)
+	}
+	followup, status := codeModeRun(t, s, r, map[string]any{"code": `const hits=await mcp.content.search('rare MID needle',{source:` + fmt.Sprintf("%q", source) + `}); const body=await mcp.content.read(` + fmt.Sprintf("%q", source) + `,hits.hits[0].chunk_id); return {count:hits.count,text:body.text};`})
+	if status != http.StatusOK || firstString(followup, "status") != "completed" {
+		t.Fatalf("cross-run source lookup failed: %d %#v", status, followup)
+	}
+	answer := mapValue(followup["result"])
+	if intFromAny(answer["count"]) == 0 || !strings.Contains(firstString(answer, "text"), "rare-MID-needle") {
+		t.Fatalf("follow-up search missed exact source content: %#v", answer)
+	}
+	other := requestWithAuthClaims(r, map[string]any{"sub": "different-principal", "client_id": "different-principal", "scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull})
+	denied, status := codeModeRun(t, s, other, map[string]any{"code": `return await mcp.content.read(` + fmt.Sprintf("%q", source) + `,1);`})
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+		t.Fatalf("source crossed principal boundary: %d %#v", status, denied)
+	}
+}
+
+func TestContentSearchRevalidatesOriginBeforeReturningSnippets(t *testing.T) {
+	s, r := codeModeFixture(t)
+	target := "mcp:shell:content-parent:personal-log"
+	s.mu.Lock()
+	s.agents["shell:content-parent"] = &Agent{AgentID: "shell:content-parent", Name: "fixture", Kind: "virtual_shell", Status: "online", Meta: map[string]any{"approved": true, "mcp_agents": []any{map[string]any{"ref": "personal-log", "name": "personal log", "enabled": true, "owner_profile_id": "owner-profile"}}}}
+	s.mu.Unlock()
+	store, err := s.contentStoreForExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.IndexFormatted(operationPrincipal(r), "private-source", target+"\x00read_log", "content-text", "first line\nUNIQUE_PRIVATE_MARKER\nlast line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted, _ := json.Marshal(source.ID)
+	code := `return await mcp.content.search('UNIQUE_PRIVATE_MARKER',{source:` + string(quoted) + `});`
+	denied, status := codeModeRun(t, s, r, map[string]any{"code": code})
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+		t.Fatalf("owner connection check was skipped for content search: %d %#v", status, denied)
+	}
+	encoded, _ := json.Marshal(denied)
+	if strings.Contains(string(encoded), "UNIQUE_PRIVATE_MARKER") || strings.Contains(string(encoded), source.ID) {
+		t.Fatalf("denied source details leaked through scoped search: %s", encoded)
+	}
+	// Even if the current child is visible, disabling it must immediately remove
+	// its snippets from all-sources search without deleting the stored source.
+	s.mu.Lock()
+	s.agents["shell:content-parent"].Meta["mcp_agents"] = []any{map[string]any{"ref": "personal-log", "name": "personal log", "enabled": false, "owner_profile_id": "owner-profile"}}
+	s.mu.Unlock()
+	all, status := codeModeRun(t, s, r, map[string]any{"code": "return await mcp.content.search('UNIQUE_PRIVATE_MARKER');"})
+	if status != http.StatusOK || intFromAny(mapValue(all["result"])["count"]) != 0 {
+		t.Fatalf("disabled origin appeared in all-sources search: %d %#v", status, all)
+	}
+}
+
+func TestContentSearchRechecksDisabledRegisteredRoot(t *testing.T) {
+	s, r := codeModeFixture(t)
+	root := &Agent{AgentID: "root:content-fixture", Name: "root fixture", Kind: "remote_mcp", Status: "online", Meta: map[string]any{"enabled": true}}
+	s.mu.Lock()
+	s.agents[root.AgentID] = root
+	s.mu.Unlock()
+	store, err := s.contentStoreForExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.IndexFormatted(operationPrincipal(r), "root source", root.AgentID+"\x00read_log", "text", "ROOT_PRIVATE_MARKER\nsecond line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := json.Marshal(source.ID)
+	code := `return await mcp.content.search('ROOT_PRIVATE_MARKER',{source:` + string(q) + `});`
+	visible, status := codeModeRun(t, s, r, map[string]any{"code": code})
+	if status != http.StatusOK || intFromAny(mapValue(visible["result"])["count"]) != 1 {
+		t.Fatalf("authorized root source not searchable: %d %#v", status, visible)
+	}
+	s.mu.Lock()
+	root.Meta["enabled"] = false
+	s.mu.Unlock()
+	denied, status := codeModeRun(t, s, r, map[string]any{"code": code})
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+		t.Fatalf("disabled registered root source remained readable: %d %#v", status, denied)
+	}
+	all, status := codeModeRun(t, s, r, map[string]any{"code": "return await mcp.content.search('ROOT_PRIVATE_MARKER');"})
+	if status != http.StatusOK || intFromAny(mapValue(all["result"])["count"]) != 0 {
+		t.Fatalf("disabled registered root leaked into all-source search: %d %#v", status, all)
+	}
+}
+
+func TestCodeModeConsoleLogPreservesJSONAndCountsAgainstOutputBudget(t *testing.T) {
+	s, r := codeModeFixture(t)
+	response, status := codeModeRun(t, s, r, map[string]any{
+		"code": "console.log({phase:'ready', count:2}); return {ok:true};",
+	})
+	if status != http.StatusOK || response["status"] != "completed" {
+		t.Fatalf("structured log failed: %d %v", status, response)
+	}
+	logs := outputRows(response["logs"])
+	if len(logs) != 1 || firstString(mapValue(outputRows(logs[0])[0]), "phase") != "ready" {
+		t.Fatalf("console.log did not preserve useful JSON: %#v", response["logs"])
+	}
+	tooLarge, status := codeModeRun(t, s, r, map[string]any{
+		"code": "console.log('x'.repeat(1100)); return 1;", "max_output_bytes": 1024,
+	})
+	if status == http.StatusOK || firstString(mapValue(tooLarge["error"]), "code") != "output_too_large" {
+		t.Fatalf("oversized logs were silently clipped/dropped: %d %#v", status, tooLarge)
+	}
+}
+
+func TestCodeModeSerializationFailureRetainsNestedCallReceipt(t *testing.T) {
+	s, r := codeModeFixture(t)
+	b := newCodeModeBridge(s, r, r.Context(), time.Now().Add(time.Second), codeModeLimits{maxCalls: 3, maxOut: 1024})
+	b.mu.Lock()
+	b.callCount = 1
+	b.lastReceipt = map[string]any{"target": "shell:fixture", "tool": "shell_exec", "status": "completed", "task_id": "task-1"}
+	b.mu.Unlock()
+	err := b.annotate(codeModeFailure("invalid_return", "BigInt cannot be serialized"))
+	if err.call != 1 || firstString(err.receipt, "target") != "shell:fixture" || firstString(err.receipt, "task_id") != "task-1" {
+		t.Fatalf("post-dispatch failure lost operation receipt: %#v", err)
+	}
+}
+
+func TestCodeModeRetainedJSONSerializationSurvivesRepeatedHostCalls(t *testing.T) {
+	s, r := codeModeFixture(t)
+	response, status := codeModeRun(t, s, r, map[string]any{"code": `
+		// Mutating the script's global JSON serializer must not corrupt bridge
+		// argument copies or the final envelope serializer captured by the host.
+		globalThis.JSON.stringify = () => "\\u0003";
+		const rows=[];
+		for(let i=0;i<24;i++) {
+			const result=await mcp.call('hub','demo',{iteration:i, locale:'Привет 🌍'});
+			rows.push({i,status:result.status,locale:'Привет 🌍'});
+		}
+		return {calls:rows.length,first:rows[0],last:rows[23]};
+	`})
+	if status != http.StatusOK || firstString(response, "status") != "completed" {
+		t.Fatalf("retained serialization failed after host calls: %d %#v", status, response)
+	}
+	result := mapValue(response["result"])
+	first, last := mapValue(result["first"]), mapValue(result["last"])
+	if intFromAny(result["calls"]) != 24 || firstString(first, "status") != "ok" || firstString(last, "status") != "ok" || firstString(last, "locale") != "Привет 🌍" {
+		t.Fatalf("serialized host results were corrupted: %#v", result)
+	}
+}
+
+func TestCodeModeRetainedSerializerStillRejectsBigIntAndCycles(t *testing.T) {
+	s, r := codeModeFixture(t)
+	for name, code := range map[string]string{"bigint": "return 1n;", "cycle": "const x={}; x.self=x; return x;"} {
+		t.Run(name, func(t *testing.T) {
+			response, status := codeModeRun(t, s, r, map[string]any{"code": code})
+			if status == http.StatusOK || firstString(response, "status") != "failed" || firstString(mapValue(response["error"]), "code") == "" {
+				t.Fatalf("non-JSON result was accepted: %d %#v", status, response)
+			}
+		})
 	}
 }
 
@@ -201,8 +383,8 @@ func TestCodeModeDeniedForReadOnlyCaller(t *testing.T) {
 	if err := authorizeToolCall(readOnly, "hub", codeModeTool); err == nil {
 		t.Fatal("read-only client may not call code_mode")
 	}
-	if err := authorizeFacadeCall(readOnly, "execute", map[string]any{"target": "hub", "tool": codeModeTool}); err == nil {
-		t.Fatal("read-only client may not reach code_mode through execute")
+	if err := authorizeFacadeCall(readOnly, "exec", map[string]any{"code": "return 1;"}); err == nil {
+		t.Fatal("read-only client may not reach exec")
 	}
 	if isReadOnlyTool("hub", codeModeTool) {
 		t.Fatal("code_mode must not be treated as a read-only tool")
@@ -223,7 +405,7 @@ func TestCodeModeDeniedByAccessProfile(t *testing.T) {
 	})
 	restricted = requestWithAccessProfile(restricted, AccessProfile{
 		ID: "ops", AccessMode: accessModeFull, ApprovalMode: approvalModeAskBeforeWrite,
-		AllowedTargets: []string{"hub"}, AllowedTools: []string{"discover", "schema", "execute"}, Version: 1,
+		AllowedTargets: []string{"hub"}, AllowedTools: []string{"discover", "schema"}, Version: 1,
 	})
 	if err := authorizeToolCall(restricted, "hub", codeModeTool); err == nil {
 		t.Fatal("profile without code_mode still ran a script")
@@ -379,11 +561,7 @@ func TestCodeModeIsolatesRuns(t *testing.T) {
 // reaches the caller.
 func TestCodeModeCallsHubToolThroughDispatch(t *testing.T) {
 	s, r := codeModeFixture(t)
-	response, status := s.callCodeModeTool(r, map[string]any{
-		"code": "const res = mcp.call({ target: 'hub', tool: 'handover_status' });\n" +
-			"if (!res.ok) { return { ok: false, status: res.status, detail: res.detail }; }\n" +
-			"return { ok: true, state: res.result.state };",
-	})
+	response, status := s.callCodeModeTool(r, map[string]any{"code": "const res = await mcp.call('hub', 'demo', {});\nreturn { ok: res.status === 'ok', state: res.status };"})
 	if status != http.StatusOK || response["status"] != "completed" {
 		t.Fatalf("nested hub call failed: status=%d body=%v", status, response)
 	}
@@ -450,7 +628,7 @@ func TestCodeModeStopsAfterFailedNestedCall(t *testing.T) {
 	s, r := codeModeFixture(t)
 	response, status := codeModeRun(t, s, r, map[string]any{
 		"code": "let first;\n" +
-			"try { first = mcp.call({ target: 'hub', tool: 'settings_set', args: { settings: {} } }); }\n" +
+			"try { first = await mcp.call('shell:missing', 'shell_exec', {cmd:'true'}); }\n" +
 			"catch (e) { /* the script pretends nothing happened */ }\n" +
 			"return { survived: true };",
 	})
@@ -464,8 +642,8 @@ func TestCodeModeStopsAfterFailedNestedCall(t *testing.T) {
 func TestCodeModeRefusesCallsAfterFailure(t *testing.T) {
 	s, r := codeModeFixture(t)
 	response, status := codeModeRun(t, s, r, map[string]any{
-		"code": "try { mcp.call({ target: 'hub', tool: 'settings_set', args: { settings: {} } }); } catch (e) {}\n" +
-			"try { await mcp.discover(); return 'second-call-allowed'; } catch (e) { return 'stopped'; }",
+		"code": "try { await mcp.call('shell:missing', 'shell_exec', {cmd:'true'}); } catch (e) {}\n" +
+			"try { await mcp.call('hub','demo',{}); return 'second-call-allowed'; } catch (e) { return 'stopped'; }",
 	})
 	if status == http.StatusOK {
 		t.Fatalf("run continued past the first failure: %v", response)

@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 // These exercise the real handler and persisted configuration, not a ChatGPT
@@ -38,56 +37,17 @@ func executeReliabilityCall(t *testing.T, s *Server, name string, args map[strin
 }
 
 func TestExecuteReferenceLifecycleRecovery(t *testing.T) {
-	for _, lifecycle := range []string{"expired", "evicted", "restarted"} {
-		t.Run(lifecycle, func(t *testing.T) {
-			s, _, _ := instructionFixture(t)
-			defer func() { _ = s.Close() }()
-			getSchema := func() map[string]any {
-				response := executeReliabilityCall(t, s, "schema", map[string]any{"target": "hub", "tool": "demo", "detail": "full"})
-				result := mapValue(mapValue(response["result"])["structuredContent"])
-				if response["error"] != nil || firstString(result, "call_ref") == "" {
-					t.Fatalf("schema unavailable: %v", response)
-				}
-				return result
-			}
-			ref := firstString(getSchema(), "call_ref")
-			switch lifecycle {
-			case "expired":
-				item := s.operations[ref]
-				item.Created = time.Now().Add(-operationTTL - time.Second)
-				s.operations[ref] = item
-			case "evicted":
-				delete(s.operations, ref)
-			case "restarted":
-				if err := s.Close(); err != nil {
-					t.Fatal(err)
-				}
-				s = New(s.cfg)
-			}
-			for _, name := range []string{"execute", "callMcpTool", "call_mcp_tool"} {
-				response := executeReliabilityCall(t, s, name, map[string]any{"ref": ref, "args": map[string]any{}})
-				result := mapValue(response["result"])
-				payload := mapValue(result["structuredContent"])
-				if response["error"] != nil || result["isError"] != true || payload["executed"] != false || firstString(mapValue(payload["error"]), "code") != "schema_reference_unavailable" {
-					t.Fatalf("stale ref must be actionable tool error without execution: %v", response)
-				}
-				if len(outputRows(result["content"])) == 0 {
-					t.Fatal("recovery guidance hidden from text-only clients")
-				}
-			}
-			if len(s.shellJobs) != 0 || len(s.relayJobs) != 0 {
-				t.Fatal("stale reference dispatched work")
-			}
-			// Do not replay the old operation: obtain an exact fresh schema, then
-			// make a new harmless call carrying its current instruction receipt.
-			fresh := getSchema()
-			recovered := executeReliabilityCall(t, s, "execute", map[string]any{"ref": fresh["call_ref"], "args": map[string]any{}})
-			result := mapValue(recovered["result"])
-			payload := mapValue(result["structuredContent"])
-			if recovered["error"] != nil || result["isError"] == true || hasMediaOrFailure(payload) || mapValue(payload["response"])["status"] != "ok" {
-				t.Fatalf("fresh schema did not restore execution: %v", recovered)
-			}
-		})
+	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "ctl"})
+	defer s.Close()
+	for _, name := range []string{"execute", "callMcpTool", "call_mcp_tool"} {
+		response := executeReliabilityCall(t, s, name, map[string]any{"target": "hub", "tool": "demo", "args": map[string]any{}})
+		if response["error"] == nil || firstString(mapValue(response["error"]), "message") != "direct tool execution was removed; use search then exec" {
+			t.Fatalf("legacy direct route was not rejected: %v", response)
+		}
+	}
+	response := executeReliabilityCall(t, s, "code_exec", map[string]any{"code": "return 42;"})
+	if firstString(mapValue(mapValue(response["result"])["structuredContent"]), "error") == "" {
+		t.Fatalf("code_exec did not return migration guidance: %v", response)
 	}
 }
 
@@ -104,7 +64,7 @@ func TestExecuteExportStableWithLargeInventoryAndReconnect(t *testing.T) {
 		for _, row := range tools {
 			names = append(names, firstString(mapValue(row), "name"))
 		}
-		if !reflect.DeepEqual(names, []string{"ui", "discover", "schema", "execute", "job", "expand"}) {
+		if !reflect.DeepEqual(names, []string{"ui", "discover", "search", "schema", "exec", "job", "expand"}) {
 			t.Fatalf("routing catalog changed: %v", names)
 		}
 		return tools
@@ -152,16 +112,16 @@ func TestExecuteExportStableWithLargeInventoryAndReconnect(t *testing.T) {
 				t.Fatal("compact discovery leaked inventory diagnostics")
 			}
 		}
-		schema := executeReliabilityCall(t, s, "schema", map[string]any{"target": "shell:fixture-079", "tool": "shell_exec", "detail": "compact"})
+		schema := executeReliabilityCall(t, s, "schema", map[string]any{"target": "hub", "tool": "demo", "detail": "compact"})
 		selected := mapValue(mapValue(schema["result"])["structuredContent"])
 		definitions := outputRows(mapValue(selected["response"])["tools"])
-		if len(definitions) != 1 || firstString(mapValue(definitions[0]), "name") != "shell_exec" || mapValue(definitions[0])["inputSchema"] == nil || firstString(selected, "call_ref") == "" {
+		if len(definitions) != 1 || firstString(mapValue(definitions[0]), "name") != "demo" || mapValue(definitions[0])["inputSchema"] == nil || firstString(selected, "context") == "" {
 			t.Fatalf("exact compact shell schema not callable: %v", schema)
 		}
 		// Use a real safe Hub operation; never fake a child execution result.
-		execution := executeReliabilityCall(t, s, "execute", map[string]any{"target": "hub", "tool": "demo", "context": selected["context"]})
+		execution := executeReliabilityCall(t, s, "exec", map[string]any{"code": "return await mcp.call('hub','demo',{});", "context": firstString(mapValue(mapValue(schema["result"])["structuredContent"]), "context")})
 		payload := mapValue(mapValue(execution["result"])["structuredContent"])
-		if execution["error"] != nil || mapValue(payload["response"])["status"] != "ok" {
+		if execution["error"] != nil || firstString(mapValue(payload["result"]), "status") != "ok" {
 			t.Fatalf("execute unusable after discovery/reconnect: %v", execution)
 		}
 	}
@@ -172,11 +132,11 @@ func TestExecuteUnavailableReferenceDoesNotWeakenGates(t *testing.T) {
 	defer s.Close()
 	// The non-MCP facade gets the same non-execution/recovery contract.
 	direct := mapValue(s.appsSDKCallForRequest(r, "execute", map[string]any{"ref": "op_gone"}))
-	if direct["executed"] != false || firstString(mapValue(direct["error"]), "code") != "schema_reference_unavailable" {
+	if direct["status"] != "failed" || !strings.Contains(firstString(direct, "error"), "use search then exec") {
 		t.Fatalf("direct facade lost reference recovery: %v", direct)
 	}
 	// An explicit new call still needs the normal current instruction context.
-	blocked := executeReliabilityCall(t, s, "execute", map[string]any{"target": "hub", "tool": "code_mode", "args": map[string]any{"code": "return 42;"}})
+	blocked := executeReliabilityCall(t, s, "exec", map[string]any{"code": "return 42;"})
 	payload := mapValue(mapValue(blocked["result"])["structuredContent"])
 	if payload["executed"] != false || firstString(mapValue(payload["error"]), "code") != "instructions_required" {
 		t.Fatalf("reference recovery bypassed instruction gate: %v", blocked)
@@ -186,11 +146,11 @@ func TestExecuteUnavailableReferenceDoesNotWeakenGates(t *testing.T) {
 		requestWithAccessProfile(r, AccessProfile{ID: "restricted", AccessMode: "full", AllowedTargets: []string{"hub"}, AllowedTools: []string{"discover", "schema"}}),
 	} {
 		for _, tool := range compactFacadeTools(req, false) {
-			if firstString(tool, "name") == "execute" {
+			if firstString(tool, "name") == "exec" {
 				t.Fatal("restricted profile/read-only caller gained Execute")
 			}
 		}
-		if authorizeFacadeCall(req, "execute", map[string]any{"target": "shell:fixture", "tool": "shell_exec"}) == nil {
+		if authorizeFacadeCall(req, "exec", map[string]any{"code": "return 1;"}) == nil {
 			t.Fatal("restricted caller gained execution")
 		}
 	}

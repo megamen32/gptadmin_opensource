@@ -16,26 +16,29 @@ transport only. A separately configured Hub uses its own stable HTTPS origin.
 
 ## Canonical workflow
 
-1. Read the active GPTAdmin profile or startup instructions and state which
-   profile is being used. If no profile is available, ask before selecting a
-   write-capable target.
-2. Call the Hub's discovery tool and choose an explicit target id. Never guess
-   `target="default"` and never infer a target from a display label alone.
-3. Read the selected target's schema before calling a tool. For a ShellMCP
-   target, inspect `mcp_manage` first.
-4. To install a child MCP, use `mcp_manage` with the documented `upsert` action
-   and the approved child definition. Use the Hub's approval flow for writes;
-   do not pass secrets through command arguments or `--env` values.
-5. Verify the child with `mcp_manage` `status`, then use `mcp_tools` to read its
-   real `tools/list` response. Only then call a child tool through `mcp_call`.
-6. For long-running calls, preserve the returned job id and poll it through the
-   Hub's job operation. Report the actual result and target, not just an HTTP
-   acceptance.
+1. Call `search` with a specific query and bounded filters, then read the
+   returned profile instructions and choose an explicit target from the result.
+   Never guess `target="default"` or infer a target from a display label alone.
+2. Use its argument schema and ready-to-run JavaScript call (or scoped handle)
+   with `exec({code})`. For child MCP lifecycle work, search for the
+   supported management capability and inspect its exact schema in the result.
+3. Use the existing approval flow for writes. Never pass secrets through
+   command arguments or child environment values.
+4. Verify changes using the real child service and its actual `tools/list`
+   response, then call child tools through `exec` under the caller's
+   profile and authorization.
+5. For long-running calls, preserve the returned job id and inspect it through
+   `job`; use `expand` for needed receipt detail. Report the actual result and
+   target, not just an HTTP acceptance.
+
+`discover` and `schema` remain available as read-only compatibility tools.
+Direct public `execute(target, tool, args)` is retired; do not call it or provide
+it as a fallback.
 
 ## Profiles and permissions
 
 A profile can restrict targets, tools, access mode, approvals, write budgets,
-and virtual MCPs. If discovery or schema omits a target/tool, treat it as
+and virtual MCPs. If search or compatibility discovery/schema omits a target/tool, treat it as
 unavailable. Do not bypass the profile with a direct URL, legacy bearer, admin
 endpoint, or guessed tool name.
 

@@ -32,10 +32,8 @@ import (
 )
 
 const (
-	// codeModeTool is the Hub tool name, discoverable through
-	// schema(target=hub, tool=code_mode) and callable through the unchanged
-	// execute(target=hub, tool=code_mode, args={code: ...}).
-	codeModeTool = "code_mode"
+	// exec is the only public entry to the isolated script runtime.
+	codeModeTool = "exec"
 
 	// Defaults are deliberately small: a script is a short fan-out, not a job.
 	codeModeDefaultTimeout   = 30 * time.Second
@@ -50,8 +48,9 @@ const (
 	codeModeDefaultConcur    = 8
 
 	// An object envelope preserves primitive and array results across the
-	// QuickJS module boundary. The envelope never leaves this implementation.
-	codeModeWrapperPrefix = "export default {value: await (async () => {\n"
+	// QuickJS module boundary. Logs use the bounded host bridge so they cannot
+	// be silently clipped or dropped.
+	codeModeWrapperPrefix = "const __safeJSON=globalThis.__codeModeSafeJSON;globalThis.console=Object.freeze({log:(...a)=>globalThis.__codeModeLog(__safeJSON.stringify(a,(_,v)=>typeof v==='bigint'?v.toString():v))});const file=target=>{if(!target.startsWith('file:'))target='file:'+target;const f=(kind,path,opts={})=>globalThis.__codeModeFileCall(kind,target,path,opts);for(const k of ['ls','read','create','replace','batchEdit','checkpoint'])f[k]=(path,opts={})=>f(k,path,opts);f.readMany=async(paths,opts={})=>{const rows=[];for(const p of paths)rows.push(await f('read',p,opts));return rows;};return Object.freeze(f);};export default {value: await (async () => {\n"
 	codeModeWrapperSuffix = "\n})()};\n"
 )
 
@@ -108,6 +107,7 @@ func resolveCodeModeLimits(args map[string]any) (codeModeLimits, error) {
 // included unless the script explicitly returns them.
 type codeModeResult struct {
 	result  any
+	logs    []any
 	calls   int
 	limits  codeModeLimits
 	elapsed time.Duration
@@ -225,28 +225,30 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 		return nil, &codeModeError{code: fatal.code, detail: fatal.message, call: bridge.calls(), receipt: fatal.receipt}
 	}
 	if evalErr != nil {
-		return nil, bridge.classify(evalErr, elapsed)
+		return nil, bridge.annotate(bridge.classify(evalErr, elapsed))
 	}
 	if len(value) > limits.maxOut+64 {
-		return nil, codeModeFailure("output_too_large", "serialized result exceeds the configured output budget")
+		return nil, bridge.annotate(codeModeFailure("output_too_large", "serialized result exceeds the configured output budget"))
 	}
 	decoded, convErr := decodeCodeModeValue(value)
 	if convErr != nil {
-		return nil, codeModeFailure("invalid_return", convErr.Error())
+		return nil, bridge.annotate(codeModeFailure("invalid_return", convErr.Error()))
 	}
 	envelope, ok := decoded.(map[string]any)
 	if !ok {
-		return nil, codeModeFailure("invalid_return", "sandbox returned an invalid result envelope")
+		return nil, bridge.annotate(codeModeFailure("invalid_return", "sandbox returned an invalid result envelope"))
 	}
 	decoded = envelope["value"]
+	logs := bridge.logValues()
 	encoded, err := json.Marshal(decoded)
 	if err != nil {
-		return nil, codeModeFailure("invalid_return", "returned value cannot be serialized as JSON")
+		return nil, bridge.annotate(codeModeFailure("invalid_return", "returned value cannot be serialized as JSON"))
 	}
-	if len(encoded) > limits.maxOut {
-		return nil, codeModeFailure("output_too_large", fmt.Sprintf("returned %d bytes; limit is %d", len(encoded), limits.maxOut))
+	logsJSON, _ := json.Marshal(logs)
+	if len(encoded)+len(logsJSON) > limits.maxOut {
+		return nil, bridge.annotate(codeModeFailure("output_too_large", fmt.Sprintf("serialized result and logs use %d bytes; limit is %d", len(encoded)+len(logsJSON), limits.maxOut)))
 	}
-	return &codeModeResult{result: decoded, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
+	return &codeModeResult{result: decoded, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
 }
 
 // newCodeModeRuntime builds an isolated runtime with no host capabilities.
@@ -325,11 +327,38 @@ func evalCodeMode(rt *qjs.Runtime, source string) (out string, err error) {
 	if value == nil || value.IsUndefined() {
 		return "", errors.New("sandbox did not return its result envelope")
 	}
-	text, err := value.JSONStringify()
+	text, err := stringifyCodeModeValue(value)
 	if err != nil {
 		return "", fmt.Errorf("result is not JSON serializable: %s", firstLineOfError(err))
 	}
 	return text, nil
+}
+
+// stringifyCodeModeValue avoids qjs.Value.JSONStringify in v0.0.6: its C
+// helper frees both JS_JSONStringify's value and ToCString buffer before Go
+// copies the packed pointer. Invoke JSON.stringify from the retained JSON
+// object, keep the resulting JS string Value alive while String copies it, then
+// release that Value. This preserves the runtime's ordinary JSON semantics,
+// including BigInt/cycle errors, without reading freed wasm memory.
+func stringifyCodeModeValue(value *qjs.Value) (string, error) {
+	if value == nil {
+		return "undefined", nil
+	}
+	ctx := value.Context()
+	safeJSON := ctx.Global().GetPropertyStr("__codeModeSafeJSON")
+	defer safeJSON.Free()
+	if safeJSON == nil || !safeJSON.IsObject() {
+		return "", errors.New("safe JSON serializer is unavailable")
+	}
+	serialized, err := safeJSON.InvokeJS("stringify", value)
+	if err != nil {
+		return "", err
+	}
+	defer serialized.Free()
+	if serialized.IsUndefined() {
+		return "undefined", nil
+	}
+	return serialized.String(), nil
 }
 
 func firstLineOfPanic(r any) string {

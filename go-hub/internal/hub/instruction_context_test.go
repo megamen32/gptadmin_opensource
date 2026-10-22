@@ -25,7 +25,7 @@ func instructionFixture(t *testing.T) (*Server, *http.Request, string) {
 }
 func instructionDiscovery(t *testing.T, s *Server, r *http.Request) map[string]any {
 	t.Helper()
-	out := mapValue(s.appsSDKCallForRequest(r, "discover", map[string]any{}))
+	out := mapValue(s.appsSDKCallForRequest(r, "search", map[string]any{"query": "status"}))
 	if firstString(out, "context") == "" || firstString(out, "instructions") == "" {
 		t.Fatalf("missing bootstrap text and context: %v", out)
 	}
@@ -34,7 +34,7 @@ func instructionDiscovery(t *testing.T, s *Server, r *http.Request) map[string]a
 func TestInstructionContextDeliveryAndReuse(t *testing.T) {
 	s, r, _ := instructionFixture(t)
 	initial := instructionDiscovery(t, s, r)
-	repeated := mapValue(s.appsSDKCallForRequest(r, "discover", map[string]any{"context": initial["context"]}))
+	repeated := mapValue(s.appsSDKCallForRequest(r, "search", map[string]any{"query": "status", "context": initial["context"]}))
 	if repeated["instructions"] != nil || repeated["context"] != nil {
 		t.Fatal("current context repeated the instruction document")
 	}
@@ -45,64 +45,52 @@ func TestInstructionContextDeliveryAndReuse(t *testing.T) {
 }
 func TestInstructionContextRequiredBeforePureCode(t *testing.T) {
 	s, r, _ := instructionFixture(t)
-	args := map[string]any{"target": "hub", "tool": "code_mode", "args": map[string]any{"code": "return {answer:42};"}}
-	blocked := mapValue(s.appsSDKCallForRequest(r, "execute", args))
+	args := map[string]any{"code": "return {answer:42};"}
+	blocked := mapValue(s.appsSDKCallForRequest(r, "exec", args))
 	if blocked["executed"] != false || firstString(mapValue(blocked["error"]), "code") != "instructions_required" {
 		t.Fatalf("missing pre-execution receipt: %v", blocked)
 	}
 	args["context"] = blocked["context"]
-	out := mapValue(s.appsSDKCallForRequest(r, "execute", args))
+	args["context"] = blocked["context"]
+	out := mapValue(s.appsSDKCallForRequest(r, "exec", args))
 	if mapValue(out["result"])["answer"] != json.Number("42") {
 		t.Fatalf("current context not accepted: %v", out)
 	}
-	if out["response"] != nil || out["limits"] != nil {
-		t.Fatal("compact output retained runtime diagnostics")
-	}
-	if firstString(out, "operation_id") == "" {
-		t.Fatal("diagnostic expansion reference absent")
+	if out["logs"] == nil || out["response"] != nil {
+		t.Fatal("exec did not return its normalized result and bounded logs")
 	}
 	delete(args, "context")
-	if again := mapValue(s.appsSDKCallForRequest(r, "execute", args)); again["executed"] != false {
-		t.Fatal("receipt delivery became an account-global acknowledgement")
+	if again := mapValue(s.appsSDKCallForRequest(r, "exec", args)); again["executed"] != false {
+		t.Fatal("instruction delivery became an account-global acknowledgement")
 	}
 }
-func TestInstructionContextExactFullSchemaAndReference(t *testing.T) {
+func TestInstructionContextSearchThenCodeExec(t *testing.T) {
 	s, r, _ := instructionFixture(t)
-	schema := mapValue(s.appsSDKCallForRequest(r, "schema", map[string]any{"target": "hub", "tool": "secret_request", "detail": "full"}))
-	definitions := outputRows(mapValue(schema["response"])["tools"])
-	if len(definitions) != 1 || firstString(mapValue(definitions[0]), "name") != "secret_request" {
-		t.Fatal("full detail changed selected schema scope")
+	search := mapValue(s.appsSDKCallForRequest(r, "search", map[string]any{"query": "demo", "target": "hub"}))
+	if firstString(search, "context") == "" || firstString(search, "instructions") == "" {
+		t.Fatalf("search did not bootstrap instructions: %v", search)
 	}
-	ref := firstString(schema, "call_ref")
-	if ref == "" || schema["operation_id"] != nil {
-		t.Fatal("schema has a missing or duplicate reference")
-	}
-	issued := mapValue(s.appsSDKCallForRequest(r, "execute", map[string]any{"ref": ref, "args": map[string]any{"label": "fixture"}, "detail": "full"}))
-	if firstString(mapValue(issued["response"]), "secret_ref") == "" {
-		t.Fatalf("schema reference did not carry its instruction context: %v", issued)
-	}
-	if s.expandOperation(r, map[string]any{"id": ref})["status"] == "failed" {
-		t.Fatal("schema reference cannot expand")
+	code := map[string]any{"code": "return await mcp.call('hub','demo',{});", "context": search["context"]}
+	issued := mapValue(s.appsSDKCallForRequest(r, "exec", code))
+	if firstString(mapValue(issued["result"]), "status") != "ok" {
+		t.Fatalf("exec failed after search bootstrap: %v", issued)
 	}
 }
 func TestInstructionContextRefreshAndInspection(t *testing.T) {
 	s, r, path := instructionFixture(t)
-	schema := mapValue(s.appsSDKCallForRequest(r, "schema", map[string]any{"target": "hub", "tool": "code_mode"}))
+	search := mapValue(s.appsSDKCallForRequest(r, "search", map[string]any{"query": "demo", "target": "hub"}))
 	if err := os.WriteFile(path, []byte("Fixture instructions version two."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	args := map[string]any{"ref": schema["call_ref"], "args": map[string]any{"code": "return {answer:42};"}}
-	blocked := mapValue(s.appsSDKCallForRequest(r, "execute", args))
+	args := map[string]any{"code": "return {answer:42};", "context": search["context"]}
+	blocked := mapValue(s.appsSDKCallForRequest(r, "exec", args))
 	if blocked["executed"] != false || !strings.Contains(firstString(blocked, "instructions"), "version two") {
 		t.Fatalf("stale reference did not refresh rules: %v", blocked)
 	}
 	args["context"] = blocked["context"]
-	out := mapValue(s.appsSDKCallForRequest(r, "execute", args))
+	out := mapValue(s.appsSDKCallForRequest(r, "exec", args))
 	if mapValue(out["result"])["answer"] != json.Number("42") {
 		t.Fatalf("refreshed rules not usable: %v", out)
-	}
-	if s.expandOperation(r, map[string]any{"id": schema["call_ref"]})["status"] == "failed" {
-		t.Fatal("instruction refresh blocked inspection")
 	}
 }
 func TestInstructionContextMetadataReadIsNotDelivery(t *testing.T) {

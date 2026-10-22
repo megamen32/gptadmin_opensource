@@ -139,6 +139,9 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 	if target == "hub" && hubGranularScopeAllows(r, toolName) {
 		return nil
 	}
+	if toolName == "search" || toolName == "control_catalog" {
+		return nil
+	}
 	if requestAccessMode(r) != accessModeReadonly {
 		return nil
 	}
@@ -147,6 +150,9 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 		case "expand", "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:
 			return nil
 		}
+	}
+	if target == "control:hub" && isReadOnlyTool("hub", toolName) {
+		return nil
 	}
 	if target == "webhooks" && (toolName == webhookRoutesListTool || toolName == webhookJobGetTool) {
 		return nil
@@ -161,6 +167,11 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 }
 
 func authorizeFacadeCall(r *http.Request, name string, args map[string]any) error {
+	// These public names are retired. Let stale clients receive the explicit
+	// migration response instead of a misleading profile-denied response.
+	if name == "code_exec" || name == "execute" {
+		return nil
+	}
 	if !profileAllowsTool(r, name) {
 		return errors.New("access profile denies this facade")
 	}
@@ -182,7 +193,7 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 		}
 	}
 	switch name {
-	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "expand", "discover", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob", webhookRoutesListTool, webhookJobGetTool:
+	case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard", "resource_receipt", "expand", "discover", "search", "demo", "list_mcp_servers", "listMcpServers", "list_mcp_agents", "listMcpAgents", "pending", "list_pending_servers", "job", "get_mcp_job", "getMcpJob", webhookRoutesListTool, webhookJobGetTool:
 		return nil
 	case "schema", "list_mcp_tools", "listMcpTools", "inspect", "inspect_system", "inspectSystem":
 		target := firstString(args, "target", "server_id", "agent_id")
@@ -192,6 +203,8 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 		return nil
 	case "execute", "call_mcp_tool", "callMcpTool":
 		return authorizeToolCall(r, firstString(args, "target", "server_id", "agent_id"), firstString(args, "tool", "tool_name", "name"))
+	case "exec":
+		return authorizeToolCall(r, "hub", "exec")
 	default:
 		return errors.New("read-only client cannot call this tool")
 	}

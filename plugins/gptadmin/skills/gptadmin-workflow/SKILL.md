@@ -5,19 +5,25 @@ description: Use GPTAdmin for server or child-MCP work; obtain the effective pro
 
 # GPTAdmin workflow
 
-Before the first GPTAdmin operation in this task, call `discover` or the exact
-`schema(target, tool)` that the work needs. Read the returned `instructions`.
-The authenticated connection selects the profile; do not invent or substitute it.
-Keep the instruction text with its `context`. A schema's `call_ref` already carries
-that context; use `execute({ref, args})` for the next operation. Explicit target
-calls use `execute({target, tool, args, context})`. Reuse `context` with subsequent
-discovery/schema calls so the same instructions are not sent repeatedly.
+Before ordinary GPTAdmin work, call `search` with a specific query and bounded
+filters supported by its schema. Read the returned `instructions` and use the
+result's argument schema plus short JavaScript example or scoped handle. The
+authenticated connection selects the profile; do not invent or substitute it.
+Keep the instruction text with its `context`. Run the operation through
+`exec({code})`, using `call(target, tool, args)` or the returned handle.
+Aggregate, filter, and count in JavaScript, then explicitly return only the
+selected result. Do not use direct public `execute`; it has been retired.
+
+`discover` and `schema` remain read-only compatibility tools for cases where
+their target/schema detail is needed. `ui`, `job`, and `expand` remain available
+for the interface and existing operation receipts. Reuse the current context
+when refreshing read-only search/discovery/schema results.
 
 `instructions_required` with `executed:false` means this attempt did not start.
-Read its updated instructions and use the returned context, or get a new exact
-schema. No separate acknowledgement command is needed. A timeout or missing
-response is different: inspect the existing `job` or `expand` receipt before
-retrying, and reuse the action's idempotency key where supported.
+Read its updated instructions and use the returned context, or refresh search or
+the exact read-only schema. A timeout or missing response is different: inspect
+the existing `job` or `expand` receipt before retrying. Never replay a write
+whose outcome may already have been accepted.
 
 After compaction or switching tasks, retain both the instruction text and receipt.
 If the text is no longer available, omit context and obtain it again. A receipt
@@ -25,7 +31,8 @@ without the text is not a substitute for reading. Instructions guide the workflo
 user intent, permissions and approvals remain authoritative.
 
 Default responses are compact. Use `detail:"full"` or `expand(id)` only for needed
-diagnostics. A complete schema uses one `call_ref`, which also works with `expand`.
+diagnostics. A search result may supply a scoped handle that avoids another
+schema lookup. `expand` inspects an existing receipt/result and never re-executes it.
 Never remove an error, pending approval, partial-execution warning or output
 continuation from your interpretation merely because the rest is concise.
 

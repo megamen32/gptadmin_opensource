@@ -292,6 +292,7 @@ func (s *Server) mcpTools() []map[string]any {
 					"start_line":  map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "view: first line, default 1"},
 					"end_line":    map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "view: inclusive last line, default start+199"},
 					"max_bytes":   map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144, "description": "view response byte cap, default 65536"},
+					"raw":         map[string]any{"type": "boolean", "default": false, "description": "view: return exact selected text, original newlines, byte counts and line IDs instead of annotated display"},
 					"operations": map[string]any{
 						"type": []string{"array", "null"}, "maxItems": 50,
 						"items": map[string]any{

@@ -290,6 +290,12 @@ func (s *Server) expandOperation(r *http.Request, args map[string]any) map[strin
 }
 
 func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
+	if name == "code_exec" {
+		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
+	}
+	if name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
+		return map[string]any{"status": "failed", "error": "direct tool execution was removed; use search then exec"}
+	}
 	if name == "expand" {
 		return s.expandOperation(r, args)
 	}
@@ -401,7 +407,7 @@ func (s *Server) presentTokenOutput(r *http.Request, name string, args map[strin
 	}
 	encoded, _ := json.Marshal(out)
 	disclosure := execution && firstString(args, "target", "server_id", "agent_id") == "hub" && (firstString(args, "tool", "tool_name", "name") == "expand" || firstString(args, "tool", "tool_name", "name") == "schema")
-	preview := !disclosure && !readableGrepMesh && len(encoded) > compactResultBytes && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
+	preview := name != "search" && name != "exec" && !disclosure && !readableGrepMesh && len(encoded) > compactResultBytes && name != "discover" && name != "list_mcp_servers" && name != "listMcpServers" && name != "schema" && name != "list_mcp_tools" && name != "listMcpTools" && name != "ui" && name != "render_gptadmin_dashboard" && name != "renderGptadminDashboard" && !hasMediaOrFailure(out)
 	changed := !reflect.DeepEqual(payload, out)
 	if (execution || nodePeerJobTool(name)) && !preview && !readableGrepMesh && firstString(out, "job_id") != "" {
 		return out
@@ -676,10 +682,10 @@ func compactFacadeTools(r *http.Request, full bool) []map[string]any {
 	if profile, ok := AccessProfileFromRequest(r); ok && !containsString(profile.AllowedTools, "*") {
 		return tools
 	}
-	selected := make([]map[string]any, 0, 6)
+	selected := make([]map[string]any, 0, 8)
 	for _, tool := range tools {
 		switch firstString(tool, "name") {
-		case "ui", "discover", "schema", "execute", "job", "expand":
+		case "ui", "search", "discover", "schema", "exec", "job", "expand":
 			selected = append(selected, tool)
 		}
 	}

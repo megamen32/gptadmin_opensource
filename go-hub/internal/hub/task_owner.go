@@ -74,6 +74,8 @@ func (s *Server) taskOwnerAlive(owner string) (bool, error) {
 // have stopped. It is idempotent; a closed runtime cannot create new tasks.
 func (s *Server) Close() error {
 	s.stopMembershipLoops()
+	childSearchCaches.Delete(s)
+	registeredRootSearchCaches.Delete(s)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.taskRuntimeClosed {
@@ -105,5 +107,23 @@ func (s *Server) Close() error {
 			closeErr = err
 		}
 	}
+	s.toolSearchMu.Lock()
+	for _, index := range s.toolSearches {
+		index.mu.Lock()
+		if err := index.db.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+		index.mu.Unlock()
+	}
+	s.toolSearches = nil
+	s.toolSearchMu.Unlock()
+	s.contentMu.Lock()
+	if s.contentStore != nil {
+		if err := s.contentStore.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+		s.contentStore = nil
+	}
+	s.contentMu.Unlock()
 	return closeErr
 }
