@@ -1377,6 +1377,51 @@ def shellmcp_systemctl_property(runner: Runner, unit: str, key: str) -> str:
     return result.stdout.strip()
 
 
+def shellmcp_environment_files_match(value: str, expected: Path) -> bool:
+    body = value.strip()
+    if body.startswith('{') and body.endswith('}'):
+        body = body[1:-1].strip()
+    entries = []
+    offset = 0
+    pattern = re.compile(r'([^\s{}]+)\s+\(ignore_errors=(yes|no)\)')
+    while offset < len(body):
+        while offset < len(body) and body[offset].isspace():
+            offset += 1
+        if offset == len(body):
+            break
+        match = pattern.match(body, offset)
+        if not match:
+            return False
+        entries.append((match.group(1), match.group(2)))
+        offset = match.end()
+    return entries == [(str(expected), 'no')]
+
+
+def shellmcp_execstart_matches(value: str, expected: str) -> bool:
+    text = value.strip()
+    if not (text.startswith('{') and text.endswith('}')):
+        return False
+    fields = [field.strip() for field in text[1:-1].split(';') if field.strip()]
+    if fields[:3] != [f'path={expected}', f'argv[]={expected}', 'ignore_errors=no']:
+        return False
+    seen = set()
+    metadata_patterns = {
+        'start_time': r'.+',
+        'stop_time': r'.+',
+        'pid': r'\d+',
+        'code': r'\((?:null|exited|killed|dumped)\)',
+        'status': r'[^;]+',
+    }
+    for field in fields[3:]:
+        key, separator, raw_value = field.partition('=')
+        if not separator or key not in metadata_patterns or key in seen:
+            return False
+        if not re.fullmatch(metadata_patterns[key], raw_value):
+            return False
+        seen.add(key)
+    return True
+
+
 def verify_shellmcp_service_contract(layout: Layout, runner: Runner) -> tuple[bool, dict]:
     """Require the known active service and preserve its env/user/argument contract."""
     active = systemctl(runner, 'is-active', SHELLMCP_SERVICE, check=False)
@@ -1385,7 +1430,7 @@ def verify_shellmcp_service_contract(layout: Layout, runner: Runner) -> tuple[bo
     user = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'User')
     env_files = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'EnvironmentFiles')
     exec_start = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'ExecStart')
-    if user != 'root' or str(layout.shellmcp_env_file) not in env_files:
+    if user != 'root' or not shellmcp_environment_files_match(env_files, layout.shellmcp_env_file):
         raise PreflightError('active ShellMCP unit user or EnvironmentFile differs from the supported contract')
     dropin = layout.shellmcp_service_dropin
     if (dropin.exists() or dropin.is_symlink()) and (dropin.is_symlink() or not dropin.is_file()):
@@ -1395,7 +1440,7 @@ def verify_shellmcp_service_contract(layout: Layout, runner: Runner) -> tuple[bo
         raise PreflightError('ShellMCP package drop-in exists with unexpected contents')
     expected = (str(layout.shellmcp_current_link() / 'bin' / 'shellmcp') if managed
                 else str(SHELLMCP_LEGACY_BINARY))
-    if not re.search(r'\{ path=' + re.escape(expected) + r' ; argv\[\]=' + re.escape(expected) + r' ;', exec_start):
+    if not shellmcp_execstart_matches(exec_start, expected):
         raise PreflightError('active ShellMCP ExecStart differs from the supported no-argument binary contract')
     return managed, {'active': active.stdout.strip(), 'user': user,
                      'environment_file': str(layout.shellmcp_env_file), 'exec_start': expected}

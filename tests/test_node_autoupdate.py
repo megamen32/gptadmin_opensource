@@ -36,6 +36,38 @@ class NodeAutoupdateTests(unittest.TestCase):
         parsed=manager.build_parser().parse_args(['shellmcp','rollback','--to','abc'])
         self.assertIs(parsed.func,manager.cmd_shellmcp_rollback)
 
+    def test_shellmcp_service_contract_rejects_extra_environment_files_and_arguments(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            expected=str(manager.SHELLMCP_LEGACY_BINARY)
+            cases=[
+                (f'{env} (ignore_errors=no) {root}/unexpected.env (ignore_errors=no)',
+                 f'{{ path={expected} ; argv[]={expected} ; ignore_errors=no ; }}'),
+                (f'{env} (ignore_errors=no)',
+                 f'{{ path={expected} ; argv[]={expected} ; argv[1]=--config ; ignore_errors=no ; }}'),
+                (f'{env} (ignore_errors=no)',
+                 f'prefix {{ path={expected} ; argv[]={expected} ; ignore_errors=no ; }} suffix'),
+            ]
+            for env_files,exec_start in cases:
+                class ServiceRunner:
+                    def run(self,argv,timeout=None):
+                        value={'User':'root','EnvironmentFiles':env_files,
+                            'ExecStart':exec_start}[argv[4]]
+                        return SimpleNamespace(returncode=0,stdout=value,stderr='')
+                with self.subTest(env_files=env_files,exec_start=exec_start), \
+                     patch.object(manager,'systemctl',return_value=SimpleNamespace(
+                         returncode=0,stdout='active',stderr='')):
+                    with self.assertRaises(manager.PreflightError):
+                        manager.verify_shellmcp_service_contract(layout,ServiceRunner())
+            systemd_exec=('{ path='+expected+' ; argv[]='+expected+
+                ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }')
+            self.assertTrue(manager.shellmcp_environment_files_match(
+                f'{{ {env} (ignore_errors=no) }}',env))
+            self.assertTrue(manager.shellmcp_execstart_matches(systemd_exec,expected))
+
     def test_shellmcp_update_switches_fixed_binary_and_reads_back_exact_version(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_HOST=127.0.0.1\nSHELLMCP_PORT=25900\n')
@@ -76,7 +108,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             before={'component':'shellmcp-go','status':'ready','git_commit':'0'*40,'build_version':122}
             class ServiceRunner:
                 def run(self,argv,timeout=None):
-                    value={'User':'root','EnvironmentFiles':str(env),
+                    value={'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
                         'ExecStart':'{ path=/opt/gptadmin/bin/shellmcp ; argv[]=/opt/gptadmin/bin/shellmcp ; ignore_errors=no ; }'}[argv[4]]
                     return SimpleNamespace(returncode=0,stdout=value,stderr='')
             def fake_systemctl(runner,*args,check=True):
@@ -103,7 +135,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             after={'component':'shellmcp-go','status':'ready','git_commit':'1'*40,'build_version':123}
             class ServiceRunner:
                 def run(self,argv,timeout=None):
-                    value={'User':'root','EnvironmentFiles':str(env),
+                    value={'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
                         'ExecStart':'{ path='+str(legacy)+' ; argv[]='+str(legacy)+' ; ignore_errors=no ; }'}[argv[4]]
                     return SimpleNamespace(returncode=0,stdout=value,stderr='')
             calls=[]
@@ -134,7 +166,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             archive=package(root)
             class ServiceRunner:
                 def run(self,argv,timeout=None):
-                    value={'User':'root','EnvironmentFiles':str(env),
+                    value={'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
                         'ExecStart':'{ path='+str(legacy)+' ; argv[]='+str(legacy)+' ; ignore_errors=no ; }'}[argv[4]]
                     return SimpleNamespace(returncode=0,stdout=value,stderr='')
             calls=[]
@@ -178,7 +210,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             after={'component':'shellmcp-go','status':'ready','git_commit':'2'*40,'build_version':122}
             class ServiceRunner:
                 def run(self,argv,timeout=None):
-                    value={'User':'root','EnvironmentFiles':str(env),
+                    value={'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
                         'ExecStart':'{ path='+str(layout.shellmcp_current_link()/'bin/shellmcp')+
                         ' ; argv[]='+str(layout.shellmcp_current_link()/'bin/shellmcp')+' ; ignore_errors=no ; }'}[argv[4]]
                     return SimpleNamespace(returncode=0,stdout=value,stderr='')
