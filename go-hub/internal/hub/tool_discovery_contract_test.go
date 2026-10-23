@@ -104,7 +104,9 @@ func TestToolCatalogDescriptionsSeparateMCPCatalogFromFileSearch(t *testing.T) {
 	if firstString(search, "name") != "search" || firstString(search, "title") != "Search MCP tools" ||
 		!strings.Contains(searchDescription, "mcp tool") || !strings.Contains(searchDescription, "schema") ||
 		!strings.Contains(searchDescription, "setting") || !strings.Contains(searchDescription, "grepmesh") ||
-		!strings.Contains(searchDescription, "local rg") || !strings.Contains(searchDescription, "cross-host") {
+		!strings.Contains(searchDescription, "local rg") || !strings.Contains(searchDescription, "cross-host") ||
+		!strings.Contains(searchDescription, "find_paths") || !strings.Contains(searchDescription, "read_text") ||
+		strings.Contains(searchDescription, "search_text") {
 		t.Fatalf("search must retain its public name and distinguish MCP catalog search from file search: %v", search)
 	}
 
@@ -124,7 +126,9 @@ func TestToolCatalogDescriptionsSeparateMCPCatalogFromFileSearch(t *testing.T) {
 	execDescription := strings.ToLower(firstString(exec, "description"))
 	if firstString(exec, "name") != "exec" || firstString(exec, "title") != "Compose MCP calls" || !strings.Contains(execDescription, "javascript") ||
 		!strings.Contains(execDescription, "search") || !strings.Contains(execDescription, "grepmesh") ||
-		!strings.Contains(execDescription, "local rg") || !strings.Contains(execDescription, "cross-host") {
+		!strings.Contains(execDescription, "local rg") || !strings.Contains(execDescription, "cross-host") ||
+		!strings.Contains(execDescription, "find_paths") || !strings.Contains(execDescription, "read_text") ||
+		strings.Contains(execDescription, "search_text") {
 		t.Fatalf("exec must describe bounded JavaScript MCP composition and direct file search elsewhere: %v", exec)
 	}
 }
