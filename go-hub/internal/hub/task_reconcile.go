@@ -58,6 +58,11 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 						s.addTaskCancelControlLocked(j)
 					}
 				}
+			} else if j := s.shellJobs[id]; j != nil && j.Revision > 0 && taskTerminal(j.Status) {
+				// A per-ID SQLite read is authoritative for persisted receipts. A
+				// terminal cache entry missing from it was pruned or acknowledged
+				// elsewhere and must not be served from this Hub's stale memory.
+				delete(s.shellJobs, id)
 			}
 			if p, ok := state.Relay[id]; ok {
 				j := s.relayJobs[id]
@@ -71,6 +76,10 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 				if j.Method == "task/group" {
 					pending = append(pending, taskGroupChildIDs(j)...)
 				}
+			} else if j := s.relayJobs[id]; j != nil && j.Revision > 0 && taskTerminal(j.Status) {
+				// See the Shell branch above: don't let a secondary Hub resurrect
+				// a durable receipt after its owning Hub acknowledged it.
+				delete(s.relayJobs, id)
 			}
 			if err := s.recoverOrphanedTaskLocked(id); err != nil {
 				return err

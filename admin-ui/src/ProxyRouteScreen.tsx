@@ -118,7 +118,7 @@ export default function ProxyRouteScreen({ load, save, action }: ProxyRouteScree
         {probe ? <dl className="proxy-route-details">
           <div><dt>Прямой выход VUSA</dt><dd>{probe.direct_exit_ip ?? "Не получен"}</dd></div>
           <div><dt>Выход через прокси</dt><dd>{probe.proxy_exit_ip ?? "Не получен"}</dd></div>
-          <div><dt>Проверка соединения с node-44</dt><dd>{probe.server44_path_reason || (probe.server44_path_verified === true ? "Есть подтверждение установленного соединения." : probe.server44_path_verified === false ? "Нет подтверждения установленного соединения." : "Данных для подтверждения нет.")}</dd></div>
+          <div className="proxy-route-diagnostic"><dt>Проверка соединения с node-44</dt><dd>{probe.server44_path_reason || (probe.server44_path_verified === true ? "Есть подтверждение установленного соединения." : probe.server44_path_verified === false ? "Нет подтверждения установленного соединения." : "Данных для подтверждения нет.")}</dd></div>
           <div><dt>Итог проверки</dt><dd>{probe.state}</dd></div>
         </dl> : <div className="compact-empty"><strong>Нет данных проверки</strong><span>Нажмите «Проверить маршрут», чтобы получить текущие адреса и проверить фактический путь через node-44.</span></div>}
       </section>

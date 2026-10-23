@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -168,6 +169,47 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		}
 	}
 	return nil
+}
+
+// deleteTaskRecordLocked durably consumes one completed receipt before the
+// HTTP acknowledgement is returned. Revision binding prevents a stale Hub
+// from deleting a newer task record, and the quorum tombstone keeps replicas
+// from resurrecting the acknowledged row.
+func (s *Server) deleteTaskRecordLocked(kind, id string, revision int64) error {
+	if (kind != "shell" && kind != "relay") || id == "" {
+		return errors.New("invalid task receipt deletion key")
+	}
+	if s.taskDatabasePath() == "" {
+		return nil
+	}
+	return s.withTaskDatabase(func(tx *taskTransaction) error {
+		var currentRevision int64
+		err := tx.tx.QueryRow(`SELECT revision FROM task_records WHERE kind=? AND key=?`, kind, id).Scan(&currentRevision)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing %s/%s receipt", errTaskConflict, kind, id)
+		}
+		if err != nil {
+			return err
+		}
+		if currentRevision != revision {
+			return fmt.Errorf("%w: changed %s/%s receipt", errTaskConflict, kind, id)
+		}
+		if err := tx.captureQuorumRow("task_records/"+kind, id, nil, true); err != nil {
+			return err
+		}
+		result, err := tx.tx.Exec(`DELETE FROM task_records WHERE kind=? AND key=? AND revision=?`, kind, id, revision)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return fmt.Errorf("%w: changed %s/%s receipt", errTaskConflict, kind, id)
+		}
+		return nil
+	})
 }
 
 func persistableTaskParams(params map[string]any) map[string]any {

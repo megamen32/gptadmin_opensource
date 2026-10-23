@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func taskReceiptTestProfile(version int64) AccessProfile {
@@ -208,20 +209,174 @@ func TestLegacyPersistedTaskWithoutCallerRemainsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := "legacy-receipt-without-caller"
+	relayID := "legacy-relay-receipt-without-caller"
 	now := nowFloat()
 	writer.mu.Lock()
 	writer.shellJobs[id] = &shellJob{ID: id, Server: "node-44", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-result"}}
-	if err := writer.saveTaskStateLocked(id); err != nil {
+	writer.relayJobs[relayID] = &relayJob{ID: relayID, AgentID: "file:node-44", Method: "tools/call", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-relay-result"}}
+	if err := writer.saveTaskStateLocked(id, relayID); err != nil {
 		writer.mu.Unlock()
 		t.Fatal(err)
 	}
 	writer.mu.Unlock()
 
-	reader := rehydrateCompletedReceiptFixture(t, dir, profile, id)
+	reader := rehydrateCompletedReceiptFixture(t, dir, profile, id, relayID)
 	defer reader.Close()
 	ownerReq := taskReceiptTestRequest(http.MethodGet, "/mcp", "receipt-owner", "receipt-token", profile)
 	_, rpcErr := reader.mcpTaskGetForRequest(ownerReq, id, "")
 	if rpcErr == nil || reader.shellJobs[id] == nil || reader.shellJobs[id].Caller != nil {
 		t.Fatalf("legacy receipt without caller must remain present and fail closed: err=%v job=%#v", rpcErr, reader.shellJobs[id])
+	}
+	_, rpcErr = reader.mcpTaskGetForRequest(ownerReq, relayID, "")
+	if rpcErr == nil || reader.relayJobs[relayID] == nil || reader.relayJobs[relayID].Caller != nil {
+		t.Fatalf("legacy relay receipt without caller must remain present and fail closed: err=%v job=%#v", rpcErr, reader.relayJobs[relayID])
+	}
+}
+
+func TestMCPRelayJobAckDurablyConsumesRehydratedReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		idFor    func(shellID, relayID string) string
+		kind     string
+		ackPath  func(id string) string
+		readPath func(id string) string
+	}{
+		{
+			name:    "shell job alias",
+			idFor:   func(shellID, _ string) string { return shellID },
+			kind:    "shell",
+			ackPath: func(id string) string { return "/mcp-relay/job/" + id + "?ack=true" },
+			readPath: func(id string) string {
+				return "/mcp-relay/get_mcp_job/" + id
+			},
+		},
+		{
+			name:    "relay job alias",
+			idFor:   func(_, relayID string) string { return relayID },
+			kind:    "relay",
+			ackPath: func(id string) string { return "/mcp-relay/get_mcp_job/" + id + "?ack=1" },
+			readPath: func(id string) string {
+				return "/mcp-relay/job/" + id
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writer, shellID, relayID, profile := saveCompletedReceiptFixture(t, dir)
+			defer writer.Close()
+			id := tc.idFor(shellID, relayID)
+			newHTTPServer := func() *Server {
+				s := New(Config{
+					ConfigDir: dir, OAuthClientSecret: "receipt-test-secret",
+					PublicOrigin: "https://hub.example", MCPResource: "https://hub.example",
+				})
+				if got, ok := s.accessProfiles[profile.ID]; !ok || got.Version != profile.Version {
+					_ = s.Close()
+					t.Fatalf("test profile was not loaded: %#v", got)
+				}
+				return s
+			}
+			server := newHTTPServer()
+			defer server.Close()
+			sibling := newHTTPServer()
+			defer sibling.Close()
+			ownerToken, err := server.signJWT(map[string]any{
+				"sub": "receipt-owner", "client_id": "receipt-owner", "jti": "receipt-token",
+				"profile_id": profile.ID, "scope": "gptadmin.read gptadmin.exec",
+				"iss": "https://hub.example", "aud": "https://hub.example", "resource": "https://hub.example",
+				"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			foreignToken, err := server.signJWT(map[string]any{
+				"sub": "receipt-foreign", "client_id": "receipt-foreign", "jti": "foreign-token",
+				"profile_id": profile.ID, "scope": "gptadmin.read gptadmin.exec",
+				"iss": "https://hub.example", "aud": "https://hub.example", "resource": "https://hub.example",
+				"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "kid": defaultJWTKeyID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(s *Server, token, path string) *httptest.ResponseRecorder {
+				t.Helper()
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				w := httptest.NewRecorder()
+				s.Handler().ServeHTTP(w, req)
+				return w
+			}
+
+			if got := call(server, ownerToken, tc.readPath(id)); got.Code != http.StatusOK {
+				t.Fatalf("rehydrated owner receipt unavailable before ack: status=%d body=%s", got.Code, got.Body.String())
+			}
+			if got := call(sibling, ownerToken, tc.readPath(id)); got.Code != http.StatusOK {
+				t.Fatalf("sibling Hub could not warm its independent task cache: status=%d body=%s", got.Code, got.Body.String())
+			}
+			foreignAck := call(server, foreignToken, tc.ackPath(id))
+			cacheHasReceipt := server.shellJobs[id] != nil
+			if tc.kind == "relay" {
+				cacheHasReceipt = server.relayJobs[id] != nil
+			}
+			if foreignAck.Code != http.StatusNotFound || !cacheHasReceipt {
+				t.Fatalf("foreign acknowledgement was not denied without removing the cache receipt: status=%d body=%s present=%v", foreignAck.Code, foreignAck.Body.String(), cacheHasReceipt)
+			}
+			beforeOwnerAck, err := server.readTaskRecords(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (tc.kind == "shell" && beforeOwnerAck.Shell[id].ID == "") || (tc.kind == "relay" && beforeOwnerAck.Relay[id].ID == "") {
+				t.Fatal("foreign acknowledgement removed the durable task record")
+			}
+			staleProfile := profile
+			staleProfile.Version++
+			if err := saveAccessProfilesState(server.accessProfilesStatePath(), map[string]AccessProfile{profile.ID: staleProfile}); err != nil {
+				t.Fatal(err)
+			}
+			staleAck := call(server, ownerToken, tc.ackPath(id))
+			if staleAck.Code != http.StatusNotFound {
+				t.Fatalf("stale-profile acknowledgement was not denied: status=%d body=%s", staleAck.Code, staleAck.Body.String())
+			}
+			stillPresent, err := server.readTaskRecords(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (tc.kind == "shell" && stillPresent.Shell[id].ID == "") || (tc.kind == "relay" && stillPresent.Relay[id].ID == "") {
+				t.Fatal("stale-profile acknowledgement removed the durable task record")
+			}
+			if err := saveAccessProfilesState(server.accessProfilesStatePath(), map[string]AccessProfile{profile.ID: profile}); err != nil {
+				t.Fatal(err)
+			}
+
+			ownerAck := call(server, ownerToken, tc.ackPath(id))
+			if ownerAck.Code != http.StatusOK {
+				t.Fatalf("owner acknowledgement failed: status=%d body=%s", ownerAck.Code, ownerAck.Body.String())
+			}
+			if siblingRead := call(sibling, ownerToken, tc.readPath(id)); siblingRead.Code != http.StatusNotFound {
+				t.Fatalf("sibling Hub served a receipt after its durable acknowledgement: status=%d body=%s", siblingRead.Code, siblingRead.Body.String())
+			}
+			siblingCacheHasReceipt := sibling.shellJobs[id] != nil
+			if tc.kind == "relay" {
+				siblingCacheHasReceipt = sibling.relayJobs[id] != nil
+			}
+			if siblingCacheHasReceipt {
+				t.Fatal("sibling Hub retained an acknowledged terminal receipt in memory")
+			}
+			if err := server.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reloaded := newHTTPServer()
+			defer reloaded.Close()
+			if afterAck := call(reloaded, ownerToken, tc.readPath(id)); afterAck.Code != http.StatusNotFound {
+				t.Fatalf("acknowledged receipt reappeared after SQLite reload: status=%d body=%s", afterAck.Code, afterAck.Body.String())
+			}
+			afterOwnerAck, err := reloaded.readTaskRecords(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (tc.kind == "shell" && afterOwnerAck.Shell[id].ID != "") || (tc.kind == "relay" && afterOwnerAck.Relay[id].ID != "") {
+				t.Fatal("owner acknowledgement left the durable task record present")
+			}
+		})
 	}
 }

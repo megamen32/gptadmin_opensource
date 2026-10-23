@@ -45,6 +45,14 @@ it("shows live probe addresses, preserves unknown path verification, and exposes
   expect(load).toHaveBeenCalledTimes(1);
 });
 
+it("renders long proxy diagnostics in the dedicated readable row", async () => {
+  const diagnostic = "Could not verify the established node-44 socket: timed out waiting for node-44 socket readback Direct VUSA request failed: VUSA readback failed: 185.240.120.152 Proxy request failed: VUSA readback failed: 212.192.31.128";
+  render(<ProxyRouteScreen load={vi.fn().mockResolvedValue(snapshot({ server44_path_verified: null, server44_path_reason: diagnostic }))} save={vi.fn()} action={vi.fn()} />);
+
+  expect(await screen.findByText(diagnostic)).toBeInTheDocument();
+  expect(screen.getByText(diagnostic).closest(".proxy-route-diagnostic")).toBeInTheDocument();
+});
+
 it("saves the selected desired state separately from lifecycle actions", async () => {
   const save = vi.fn().mockResolvedValue(snapshot({ state: "not_run" }));
   const action = vi.fn();

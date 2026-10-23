@@ -5556,6 +5556,11 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		}
 		resp := relayJobResponse(relay)
 		if ack && (relay.Status == "completed" || relay.Status == "failed") {
+			if err := s.deleteTaskRecordLocked("relay", jobID, relay.Revision); err != nil {
+				s.mu.Unlock()
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+				return
+			}
 			delete(s.relayJobs, jobID)
 		}
 		s.mu.Unlock()
@@ -5576,6 +5581,11 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		resp := shellJobResponse(shell)
 		acknowledge := ack && (shell.Status == "completed" || shell.Status == "failed")
 		if acknowledge {
+			if err := s.deleteTaskRecordLocked("shell", jobID, shell.Revision); err != nil {
+				s.mu.Unlock()
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
+				return
+			}
 			delete(s.shellJobs, jobID)
 		}
 		s.mu.Unlock()

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -326,6 +328,20 @@ func (c *proxyRouteController) hasEstablished44Socket(ctx context.Context) (bool
 	if pid == "" || pid == "0" {
 		return false, errors.New("proxy tunnel service has no running main process")
 	}
+	if c == proxyRouteDefaultController {
+		ok, err := established44SocketForPID(ctx, "/proc", pid)
+		if err != nil {
+			return false, err
+		}
+		currentPID, err := c.command(ctx, "/usr/bin/systemctl", "show", "--property=MainPID", "--value", proxyRouteUnit)
+		if err != nil {
+			return false, fmt.Errorf("systemd service PID recheck failed: %w", err)
+		}
+		if strings.TrimSpace(string(currentPID)) != pid {
+			return false, errors.New("proxy service MainPID changed during socket readback")
+		}
+		return ok, nil
+	}
 	out, err := c.command(ctx, "/usr/bin/ss", "-Htnp", "state", "established")
 	if err != nil {
 		return false, err
@@ -340,6 +356,154 @@ func (c *proxyRouteController) hasEstablished44Socket(ctx context.Context) (bool
 		}
 	}
 	return false, nil
+}
+
+const (
+	proxyRouteProcTCPMaxBytes = 16 << 20
+	proxyRouteProcFDLimit     = 4096
+)
+
+// established44SocketForPID proves the exact connected socket belongs to the
+// service MainPID. Any incomplete /proc read is an error, never a negative proof.
+func established44SocketForPID(ctx context.Context, procRoot, pid string) (bool, error) {
+	if pid == "" || pid == "0" || strings.ContainsAny(pid, "/\\") {
+		return false, errors.New("invalid proxy service PID")
+	}
+	proc := filepath.Join(procRoot, pid)
+	startBefore, err := readProcStartTime(proc)
+	if err != nil {
+		return false, fmt.Errorf("proxy service PID readback failed: %w", err)
+	}
+	tcpPath := filepath.Join(procRoot, "net", "tcp")
+	file, err := os.Open(tcpPath)
+	if err != nil {
+		return false, fmt.Errorf("TCP socket table readback failed: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, proxyRouteProcTCPMaxBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(data) > proxyRouteProcTCPMaxBytes {
+		return false, errors.New("TCP socket table readback incomplete")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	inodes := make(map[string]struct{})
+	for i, line := range strings.Split(string(data), "\n") {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			return false, errors.New("TCP socket table contains a short row")
+		}
+		if fields[3] != "01" || !procTCPAddressMatches(fields[2], proxyRouteExitAddress) {
+			continue
+		}
+		inode := fields[9]
+		if inode == "0" || len(inodes) >= 256 {
+			return false, errors.New("TCP socket table has too many matching rows")
+		}
+		inodes[inode] = struct{}{}
+	}
+	if len(inodes) == 0 {
+		return false, nil
+	}
+	fds, err := os.ReadDir(filepath.Join(proc, "fd"))
+	if err != nil {
+		return false, fmt.Errorf("proxy service file descriptors readback failed: %w", err)
+	}
+	if len(fds) > proxyRouteProcFDLimit {
+		return false, errors.New("proxy service has too many file descriptors to verify safely")
+	}
+	for _, fd := range fds {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		target, err := os.Readlink(filepath.Join(proc, "fd", fd.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			return false, errors.New("proxy service file descriptor changed during readback")
+		}
+		if err != nil {
+			return false, fmt.Errorf("proxy service file descriptor readback failed: %w", err)
+		}
+		if strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
+			if _, ok := inodes[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")]; ok {
+				startAfter, err := readProcStartTime(proc)
+				if err != nil || startAfter != startBefore {
+					return false, errors.New("proxy service PID changed during socket readback")
+				}
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+		}
+	}
+	startAfter, err := readProcStartTime(proc)
+	if err != nil || startAfter != startBefore {
+		return false, errors.New("proxy service PID changed during socket readback")
+	}
+	return false, nil
+}
+
+func procTCPAddressMatches(value, target string) bool {
+	parts := strings.Split(target, ":")
+	procParts := strings.Split(value, ":")
+	if len(parts) != 2 || len(procParts) != 2 {
+		return false
+	}
+	port, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	address := net.ParseIP(parts[0]).To4()
+	if address == nil {
+		return false
+	}
+	decoded, err := hex.DecodeString(procParts[0])
+	procPort, portErr := strconv.ParseUint(procParts[1], 16, 16)
+	if err != nil || portErr != nil || len(decoded) != 4 {
+		return false
+	}
+	for i, b := range address {
+		if decoded[3-i] != b {
+			return false
+		}
+	}
+	return procPort == uint64(port)
+}
+
+func readProcStartTime(proc string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(proc, "stat"))
+	if err != nil {
+		return "", err
+	}
+	close := strings.LastIndexByte(string(data), ')')
+	if close < 0 {
+		return "", errors.New("malformed process stat")
+	}
+	fields := strings.Fields(string(data)[close+1:])
+	if len(fields) <= 19 {
+		return "", errors.New("short process stat")
+	}
+	return fields[19], nil
+}
+
+func observeProxyRoutePathBefore(ctx context.Context, deadline time.Time, observe func(context.Context) (bool, error)) (bool, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false, errors.New("timed out waiting for node-44 socket readback")
+	}
+	if remaining > 2*time.Second {
+		remaining = 2 * time.Second
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+	ok, err := observe(checkCtx)
+	if !time.Now().Before(deadline) {
+		return false, errors.New("timed out waiting for node-44 socket readback")
+	}
+	return ok, err
 }
 
 func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
@@ -374,20 +538,24 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 		requestDone <- ipResult{proxied: true, ip: ip, err: err}
 	}()
 
-	deadline := time.NewTimer(proxyRoutePathReadbackTimeout)
+	pathDeadline := time.Now().Add(proxyRoutePathReadbackTimeout)
+	deadline := time.NewTimer(time.Until(pathDeadline))
 	defer deadline.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	var pathConfirmed bool
 	var pathReadbackErr error
+	pathReadbackDone := false
 	var directErr, proxyErr error
 	var gotDirect, gotProxy bool
-	if ok, err := c.hasEstablished44Socket(probeCtx); err != nil {
+	if ok, err := observeProxyRoutePathBefore(probeCtx, pathDeadline, c.hasEstablished44Socket); err != nil {
 		pathReadbackErr = err
+		pathReadbackDone = !time.Now().Before(pathDeadline)
 	} else if ok {
 		pathConfirmed = true
 	}
-	for !gotDirect || !gotProxy || (!pathConfirmed && pathReadbackErr == nil && !gotProxy) {
+probeLoop:
+	for !gotDirect || !gotProxy || (!pathConfirmed && !pathReadbackDone && !gotProxy) {
 		select {
 		case request := <-requestDone:
 			if request.proxied {
@@ -403,19 +571,22 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 			if !pathConfirmed && pathReadbackErr == nil {
 				pathReadbackErr = probeCtx.Err()
 			}
+			break probeLoop
 		case <-deadline.C:
+			pathReadbackDone = true
 			if !pathConfirmed && pathReadbackErr == nil {
 				pathReadbackErr = errors.New("timed out waiting for node-44 socket readback")
 			}
 		case <-ticker.C:
-			if gotProxy || pathConfirmed || pathReadbackErr != nil {
+			if gotProxy || pathConfirmed || pathReadbackDone {
 				continue
 			}
-			checkCtx, checkCancel := context.WithTimeout(probeCtx, 2*time.Second)
-			ok, err := c.hasEstablished44Socket(checkCtx)
-			checkCancel()
+			ok, err := observeProxyRoutePathBefore(probeCtx, pathDeadline, c.hasEstablished44Socket)
 			if err != nil {
-				pathReadbackErr = err
+				if pathReadbackErr == nil {
+					pathReadbackErr = err
+				}
+				pathReadbackDone = !time.Now().Before(pathDeadline)
 			} else if ok {
 				pathConfirmed = true
 			}
@@ -434,6 +605,11 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 
 	if directErr != nil {
 		appendProxyRouteReason(&result, "Direct VUSA request failed: "+directErr.Error())
+	}
+	if err := probeCtx.Err(); err != nil {
+		result.State = "unknown"
+		appendProxyRouteReason(&result, "Probe exceeded its overall deadline: "+err.Error())
+		return result
 	}
 	if proxyErr != nil {
 		result.State = "fail"

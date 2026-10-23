@@ -578,3 +578,31 @@ input, select, textarea { border-radius:8px; }
   outline: 3px solid #7c641b;
   outline-offset: -3px;
 }
+
+/* Keep the proxy diagnostic readable when the saved explanation is long. */
+.proxy-route-diagnostic {
+  display: grid;
+  grid-template-columns: minmax(11rem, 12rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 16px;
+  min-width: 0;
+}
+
+.proxy-route-diagnostic dt,
+.proxy-route-diagnostic dd {
+  min-width: 0;
+}
+
+.proxy-route-diagnostic dd {
+  display: block;
+  text-align: left;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .proxy-route-diagnostic {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}
