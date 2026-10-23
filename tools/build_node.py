@@ -17,6 +17,31 @@ PAYLOAD = ('cli.py', 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_p
            'scripts/gptadmin_node_autoupdate.py')
 
 
+def build_admin_ui() -> dict[str, Path]:
+    """Build the served React UI and return its package-relative files."""
+    ui_root = ROOT / 'admin-ui'
+    env = dict(os.environ)
+    if env.get('GPTADMIN_ADMIN_UI_DEPS_READY') != '1':
+        subprocess.run(['npm', 'ci', '--prefer-offline', '--no-audit', '--no-fund'],
+                       cwd=ui_root, env=env, check=True)
+    subprocess.run(['npm', 'run', 'build', '--', '--base=/admin/'],
+                   cwd=ui_root, env=env, check=True)
+    dist = ui_root / 'dist'
+    index = dist / 'index.html'
+    if not index.is_file() or '/admin/assets/' not in index.read_text():
+        raise RuntimeError('admin-ui build is missing index.html or the /admin/ asset base')
+    files = {}
+    for path in sorted(dist.rglob('*')):
+        if path.is_symlink():
+            raise RuntimeError(f'admin-ui build contains a symlink: {path.relative_to(dist)}')
+        if path.is_file():
+            name = (Path('public/admin') / path.relative_to(dist)).as_posix()
+            files[name] = path
+    if 'public/admin/index.html' not in files or len(files) < 2:
+        raise RuntimeError('admin-ui build has no index or asset files')
+    return files
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open('rb') as stream:
@@ -45,6 +70,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
                        cwd=ROOT / 'go-hub', env=env, check=True)
         files = {'bin/gptadmin-node': binary}
         files.update({name: ROOT / name for name in PAYLOAD})
+        files.update(build_admin_ui())
         manifest = {
             'schema': SCHEMA, 'git_commit': commit, 'build_version': version,
             'platform': 'linux', 'arch': arch, 'source_dirty': dirty,

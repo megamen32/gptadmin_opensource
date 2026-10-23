@@ -10,6 +10,7 @@ Exit codes: 0 ok, 2 usage, 3 preflight, 4 runtime.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -1177,6 +1178,177 @@ def cmd_status(args, layout: Layout, runner: Runner) -> None:
     }, sort_keys=True))
 
 
+def verify_ui_payload(version_dir: Path) -> tuple[Path, dict]:
+    """Verify the current version's packaged admin UI against its manifest."""
+    manifest_path = version_dir / 'manifest.json'
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        raise PreflightError('current Node manifest is unavailable or invalid') from None
+    if manifest.get('schema') != PACKAGE_SCHEMA or not re.fullmatch(
+            r'[0-9a-f]{40}', str(manifest.get('git_commit', ''))):
+        raise PreflightError('current Node manifest is not a supported clean release')
+    if manifest.get('source_dirty') is not False:
+        raise PreflightError('admin UI publication requires a clean source package')
+    files = manifest.get('files')
+    if not isinstance(files, dict):
+        raise PreflightError('current Node manifest has no file map')
+    ui_files = {name: meta for name, meta in files.items() if name.startswith('public/admin/')}
+    if 'public/admin/index.html' not in ui_files or len(ui_files) < 2:
+        raise PreflightError('current Node package does not contain the complete admin UI')
+    source = version_dir / 'public' / 'admin'
+    if source.is_symlink() or not source.is_dir():
+        raise PreflightError('current Node package admin UI directory is missing or unsafe')
+    actual_files = set()
+    for path in source.rglob('*'):
+        if path.is_symlink():
+            raise PreflightError('current Node package admin UI contains a symlink')
+        if path.is_file():
+            actual_files.add((Path('public/admin') / path.relative_to(source)).as_posix())
+    if actual_files != set(ui_files):
+        raise PreflightError('current Node package admin UI file set does not match its manifest')
+    for name, meta in ui_files.items():
+        if not isinstance(meta, dict) or not isinstance(meta.get('size'), int) or not re.fullmatch(
+                r'[0-9a-f]{64}', str(meta.get('sha256', ''))):
+            raise PreflightError('admin UI manifest has invalid file metadata')
+        path = Path(name)
+        if path.is_absolute() or '..' in path.parts or path.parts[:2] != ('public', 'admin'):
+            raise PreflightError('admin UI manifest contains an unsafe path')
+        target = version_dir / path
+        if target.is_symlink() or not target.is_file():
+            raise PreflightError(f'admin UI package file is missing or unsafe: {path.name}')
+        try:
+            size = target.stat().st_size
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            raise PreflightError(f'cannot read admin UI package file: {path.name}') from None
+        if size != meta.get('size') or digest != meta.get('sha256'):
+            raise PreflightError(f'admin UI package file fails manifest verification: {path.name}')
+    return source, manifest
+
+
+def publish_admin_ui(source: Path, public_root: Path, commit: str) -> dict:
+    """Atomically publish verified static assets while preserving the old UI."""
+    public_root = Path(public_root)
+    if not public_root.is_dir() or public_root.is_symlink():
+        raise PreflightError('configured public directory is missing or unsafe')
+    destination = public_root / 'admin'
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        raise PreflightError('existing admin UI destination is not a regular directory')
+    index_hash = hashlib.sha256((source / 'index.html').read_bytes()).hexdigest()
+    staging = public_root / f'.admin-ui-staging-{commit}-{os.getpid()}'
+    if staging.exists():
+        raise PreflightError('admin UI staging path already exists')
+    switched = False
+    previous = None
+    try:
+        shutil.copytree(source, staging)
+        if destination.is_dir():
+            retain_admin_ui_assets(destination / 'assets', staging / 'assets')
+        for root, dirs, files in os.walk(staging):
+            os.chmod(root, 0o755)
+            for directory in dirs:
+                os.chmod(Path(root) / directory, 0o755)
+            for filename in files:
+                path = Path(root) / filename
+                if path.is_symlink() or not path.is_file():
+                    raise PreflightError('admin UI source contains an unsafe entry')
+                os.chmod(path, 0o644)
+        if destination.exists():
+            rename_exchange(staging, destination)
+            switched = True
+            previous = staging
+        else:
+            os.replace(staging, destination)
+            switched = True
+    except Exception:
+        if staging.exists() and not switched:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {'path': str(destination), 'previous': str(previous) if previous is not None else None,
+            'git_commit': commit, 'index_sha256': index_hash}
+
+
+def retain_admin_ui_assets(previous_assets: Path, candidate_assets: Path) -> None:
+    """Keep old fingerprinted URLs resolvable after an index/asset tree exchange."""
+    if not previous_assets.exists():
+        return
+    if previous_assets.is_symlink() or not previous_assets.is_dir():
+        raise PreflightError('existing admin UI assets directory is unsafe')
+    if candidate_assets.is_symlink() or not candidate_assets.is_dir():
+        raise PreflightError('candidate admin UI assets directory is unsafe')
+    for source in sorted(previous_assets.rglob('*')):
+        if source.is_symlink():
+            raise PreflightError('existing admin UI assets contain an unsafe entry')
+        if not source.is_file():
+            continue
+        relative = source.relative_to(previous_assets)
+        target = candidate_assets / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            try:
+                same = hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(target.read_bytes()).digest()
+            except OSError:
+                raise PreflightError(f'cannot compare retained admin UI asset: {relative.as_posix()}') from None
+            if not same:
+                raise PreflightError(f'admin UI asset name has conflicting contents: {relative.as_posix()}')
+            continue
+        try:
+            shutil.copyfile(source, target)
+        except OSError:
+            raise PreflightError(f'cannot retain previous admin UI asset: {relative.as_posix()}') from None
+
+
+def restore_admin_ui(receipt: dict, commit: str) -> None:
+    """Exchange the previous static directory back without removing /admin."""
+    destination = Path(receipt['path'])
+    previous = Path(receipt['previous']) if receipt.get('previous') else None
+    if previous is not None:
+        rename_exchange(previous, destination)
+        return
+    empty = destination.with_name(f'.admin-ui-empty-{commit}-{os.getpid()}')
+    if empty.exists():
+        raise PreflightError('admin UI rollback placeholder already exists')
+    empty.mkdir(mode=0o755)
+    try:
+        rename_exchange(empty, destination)
+    except Exception:
+        empty.rmdir()
+        raise
+
+
+def rename_exchange(left: Path, right: Path) -> None:
+    """Linux atomic path exchange. Fail closed when RENAME_EXCHANGE is absent."""
+    if not sys.platform.startswith('linux'):
+        raise PreflightError('atomic admin UI replacement requires Linux renameat2')
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError:
+        raise PreflightError('atomic admin UI replacement requires renameat2') from None
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(left), -100, os.fsencode(right), 2)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), f'{left} <-> {right}')
+
+
+def cmd_ui_publish(args, layout: Layout, runner: Runner) -> None:
+    require_root()
+    name = resolve_instance_name(args.name, layout)
+    if name != 'primary':
+        raise UsageError('admin UI publication is supported only for the primary node')
+    current = current_target(layout)
+    if current is None:
+        raise PreflightError('no current Node package is installed')
+    source, manifest = verify_ui_payload(current)
+    env = read_installed_env(layout, name)
+    public_root = Path(env.get('GPTADMIN_PUBLIC_DIR') or (Path(env.get('GPTADMIN_ROOT') or '.') / 'public'))
+    receipt = publish_admin_ui(source, public_root, manifest['git_commit'])
+    receipt['asset_count'] = sum(1 for _ in source.rglob('*') if _.is_file())
+    print(json.dumps({'ok': True, 'command': 'ui-publish', **receipt}, sort_keys=True))
+
+
 def cmd_update(args, layout: Layout, runner: Runner) -> None:
     with UpdateBudget(getattr(args, 'operation_deadline_secs', None)) as budget:
         return update_with_budget(args, layout, runner, budget)
@@ -1207,6 +1379,9 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     manifest = verify_and_extract(Path(args.package), arch, staging)
     verify_elf_binary(staging / 'bin' / 'gptadmin-node')
     new_commit = manifest['git_commit']
+    has_admin_ui = any(name.startswith('public/admin/') for name in manifest.get('files', {}))
+    if has_admin_ui:
+        verify_ui_payload(staging)
 
     unit = layout.unit_instance(name)
     env_path = layout.env_file(name)
@@ -1231,6 +1406,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
 
     final = None
     env_updated = False
+    ui_receipt = None
     try:
         final = next_version_dir(versions_root, new_commit)
         os.rename(staging, final)
@@ -1242,11 +1418,17 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
         switch_current(layout, final)
         systemctl(runner, 'restart', unit)
         wait_healthy(origin, new_commit)
-    except (RuntimeFailure, OSError) as error:
+        if name == 'primary' and has_admin_ui:
+            ui_source, ui_manifest = verify_ui_payload(final)
+            public_root = Path(env.get('GPTADMIN_PUBLIC_DIR') or (Path(env.get('GPTADMIN_ROOT') or '.') / 'public'))
+            ui_receipt = publish_admin_ui(ui_source, public_root, ui_manifest['git_commit'])
+    except (RuntimeFailure, PreflightError, OSError) as error:
         budget.cleanup()
         # ANY failure after the switch rolls back to the previous version dir.
         rollback_note = ''
         try:
+            if ui_receipt is not None:
+                restore_admin_ui(ui_receipt, new_commit)
             if env_updated and previous_env_text is not None:
                 atomic_write(env_path, previous_env_text, 0o600)
             switch_current(layout, current)
@@ -1254,7 +1436,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
             wait_healthy(origin, previous_manifest.get('git_commit') or '')
             if not drain_cancel(origin, token):
                 raise RuntimeFailure('rollback drain cancel unverified')
-        except (RuntimeFailure, OSError) as rollback_error:
+        except (RuntimeFailure, PreflightError, OSError) as rollback_error:
             rollback_note = f' ROLLBACK ALSO FAILED: {rollback_error}'
         raise RuntimeFailure(
             f'update to {final.name if final else new_commit} failed ({error});{rollback_note} '
@@ -1266,7 +1448,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
         'ok': True, 'command': 'update', 'name': name, 'unit': unit,
         'version_dir': final.name, 'previous_dir': current.name,
         'git_commit': new_commit, 'build_version': manifest.get('build_version'),
-        'node_public_url': requested_node_url,
+        'node_public_url': requested_node_url, 'admin_ui': ui_receipt,
     }, sort_keys=True))
 
 
@@ -1615,6 +1797,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser('status', help='report versions, service, health and membership as JSON')
     status.add_argument('--name', default=None, metavar='NAME')
     status.set_defaults(func=cmd_status)
+
+    ui_publish = sub.add_parser('ui-publish', help='publish the current package UI atomically; no Hub restart')
+    ui_publish.add_argument('--name', default='primary', metavar='NAME')
+    ui_publish.set_defaults(func=cmd_ui_publish)
 
     update = sub.add_parser('update', help='drain, switch to a new package, verify; auto-rollback on failure')
     update.add_argument('--package', required=True, metavar='TAR.GZ')

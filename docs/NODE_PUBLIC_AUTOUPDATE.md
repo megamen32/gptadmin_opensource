@@ -32,6 +32,26 @@ version pointer. It does not restart the service while enabling. A package chang
 uses the same native drain, ready-to-stop, switch, restart, health and rollback path
 as ordinary `gptadmin-node@` instances.
 
+### Publish the admin UI from the same Node package
+
+`tools/build.sh node` builds `admin-ui/dist` from the same source SHA and includes
+every static file under `public/admin/` in the Node package manifest. The updated
+manager publishes these manifest-verified files to `GPTADMIN_PUBLIC_DIR` as part
+of an ordinary primary `node update`, after the new Hub passes health checks. If
+the currently installed manager predates this hook, first install the package,
+then run its new bounded publisher once:
+
+```sh
+sudo /usr/bin/python3 /opt/gptadmin-node/current/cli.py node ui-publish --name primary
+```
+
+Both paths require a clean source build and check every UI file against its
+manifest digest before changing the served tree. They atomically swap the static
+directory and retain the previous UI beside it for rollback. A first-time
+`ui-publish` does not edit environment files, change the unit, or restart the Hub.
+Verify the exact `index.html` and asset files through the real `/admin/` browser
+after publication.
+
 The updater uses the GitHub Releases API when available. On an explicit API rate
 limit response it uses the public Releases Atom feed for ordering, verifies the
 immutable lightweight tag through unauthenticated `git ls-remote`, downloads only

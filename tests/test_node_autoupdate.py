@@ -13,6 +13,7 @@ from contextlib import ExitStack
 from unittest.mock import patch
 from scripts import gptadmin_node_autoupdate as update
 from scripts import gptadmin_node_manage as manager
+from tools import build_node as node_builder
 from test_node_release_publisher import package
 
 TAG='node-v123-'+'1'*12
@@ -27,6 +28,160 @@ def index(**changes):
 
 
 class NodeAutoupdateTests(unittest.TestCase):
+    def test_node_builder_packages_the_built_admin_ui_under_public_admin(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);ui=root/'admin-ui';dist=ui/'dist';(dist/'assets').mkdir(parents=True)
+            (dist/'index.html').write_text('<script src="/admin/assets/app.js"></script>')
+            (dist/'assets/app.js').write_text('ui-bundle')
+            with patch.object(node_builder,'ROOT',root), \
+                 patch.dict('os.environ',{'GPTADMIN_ADMIN_UI_DEPS_READY':'1'}), \
+                 patch.object(node_builder.subprocess,'run') as run:
+                run.side_effect=lambda *a,**k: None
+                result=node_builder.build_admin_ui()
+            self.assertEqual(set(result),{'public/admin/index.html','public/admin/assets/app.js'})
+            self.assertEqual(result['public/admin/assets/app.js'].read_text(),'ui-bundle')
+            run.assert_called_once_with(['npm','run','build','--','--base=/admin/'],cwd=ui,
+                                        env=unittest.mock.ANY,check=True)
+
+    def test_primary_ui_publication_verifies_package_and_preserves_the_previous_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);layout=manager.Layout(opt_root=root/'opt')
+            commit='a'*40;version=layout.versions_root()/f'{commit}-1'
+            source=version/'public/admin';(source/'assets').mkdir(parents=True)
+            (source/'index.html').write_text('new-index')
+            (source/'assets/app.js').write_text('new-app')
+            manifest={'schema':manager.PACKAGE_SCHEMA,'git_commit':commit,'source_dirty':False,
+                      'files':{}}
+            for name in ('public/admin/index.html','public/admin/assets/app.js'):
+                data=(version/name).read_bytes()
+                manifest['files'][name]={'sha256':hashlib.sha256(data).hexdigest(),'size':len(data)}
+            (version/'manifest.json').write_text(json.dumps(manifest))
+            public=root/'public';(public/'admin').mkdir(parents=True)
+            (public/'admin/index.html').write_text('old-index')
+            old_assets=public/'admin/assets';old_assets.mkdir()
+            (old_assets/'index-oldhash123.js').write_text('old-js')
+            (old_assets/'index-oldhash123.css').write_text('old-css')
+            args=SimpleNamespace(name='primary')
+            output=io.StringIO()
+            with patch.object(manager,'require_root'), \
+                 patch.object(manager,'resolve_instance_name',return_value='primary'), \
+                 patch.object(manager,'current_target',return_value=version), \
+                 patch.object(manager,'read_installed_env',return_value={'GPTADMIN_PUBLIC_DIR':str(public)}), \
+                 patch.object(manager.sys,'stdout',output), \
+                 patch.object(manager.os,'replace',side_effect=AssertionError('must use atomic exchange')), \
+                 patch.object(manager.os,'rename',side_effect=AssertionError('must use atomic exchange')):
+                manager.cmd_ui_publish(args,layout,manager.Runner())
+            receipt=json.loads(output.getvalue())
+            self.assertTrue(receipt['ok'])
+            self.assertEqual(receipt['git_commit'],commit)
+            self.assertEqual((public/'admin/index.html').read_text(),'new-index')
+            self.assertEqual((public/Path(receipt['previous']).name/'index.html').read_text(),'old-index')
+            self.assertEqual((public/'admin/assets/app.js').read_text(),'new-app')
+            self.assertEqual((public/'admin/assets/index-oldhash123.js').read_text(),'old-js')
+            self.assertEqual((public/'admin/assets/index-oldhash123.css').read_text(),'old-css')
+            manager.restore_admin_ui(receipt,commit)
+            self.assertEqual((public/'admin/index.html').read_text(),'old-index')
+            self.assertEqual((public/Path(receipt['previous']).name/'index.html').read_text(),'new-index')
+
+
+    def test_admin_ui_asset_urls_survive_multiple_exchanges(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);public=root/'public';served=public/'admin'
+            (served/'assets').mkdir(parents=True)
+            (served/'index.html').write_text('old-index')
+            (served/'assets/index-oldhash123.js').write_text('old-js')
+            first=root/'first';(first/'assets').mkdir(parents=True)
+            (first/'index.html').write_text('first-index')
+            (first/'assets/index-firsthash123.js').write_text('first-js')
+            manager.publish_admin_ui(first,public,'a'*40)
+            second=root/'second';(second/'assets').mkdir(parents=True)
+            (second/'index.html').write_text('second-index')
+            (second/'assets/index-secondhash.js').write_text('second-js')
+            manager.publish_admin_ui(second,public,'b'*40)
+            self.assertEqual((served/'index.html').read_text(),'second-index')
+            self.assertEqual((served/'assets/index-oldhash123.js').read_text(),'old-js')
+            self.assertEqual((served/'assets/index-firsthash123.js').read_text(),'first-js')
+            self.assertEqual((served/'assets/index-secondhash.js').read_text(),'second-js')
+
+    def test_primary_ui_publication_refuses_non_atomic_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);source=root/'candidate';source.mkdir()
+            (source/'index.html').write_text('new-index')
+            public=root/'public';(public/'admin').mkdir(parents=True)
+            (public/'admin/index.html').write_text('old-index')
+            with patch.object(manager,'rename_exchange',side_effect=OSError('unsupported')):
+                with self.assertRaisesRegex(OSError,'unsupported'):
+                    manager.publish_admin_ui(source,public,'c'*40)
+            self.assertEqual((public/'admin/index.html').read_text(),'old-index')
+            self.assertEqual(sorted(p.name for p in public.iterdir()),['admin'])
+
+    def test_admin_ui_publication_refuses_conflicting_asset_fingerprints(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);public=root/'public';served=public/'admin'
+            (served/'assets').mkdir(parents=True)
+            (served/'assets/index-collision.js').write_text('old-bytes')
+            candidate=root/'candidate';(candidate/'assets').mkdir(parents=True)
+            (candidate/'index.html').write_text('candidate-index')
+            (candidate/'assets/index-collision.js').write_text('different-bytes')
+            with self.assertRaisesRegex(manager.PreflightError,'conflicting contents'):
+                manager.publish_admin_ui(candidate,public,'e'*40)
+            self.assertEqual((served/'assets/index-collision.js').read_text(),'old-bytes')
+            self.assertEqual((served/'index.html').exists(),False)
+
+    def test_primary_ui_publication_fails_closed_on_manifest_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            version=Path(d)/'version';source=version/'public/admin';source.mkdir(parents=True)
+            (source/'index.html').write_text('tampered')
+            (source/'assets.js').write_text('asset')
+            manifest={'schema':manager.PACKAGE_SCHEMA,'git_commit':'b'*40,'source_dirty':False,
+                      'files':{'public/admin/index.html':{'sha256':'0'*64,'size':1},
+                               'public/admin/assets.js':{'sha256':'0'*64,'size':1}}}
+            (version/'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(manager.PreflightError,'manifest verification'):
+                manager.verify_ui_payload(version)
+
+    def test_primary_update_publishes_ui_from_the_same_manifest_after_health(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            root=Path(d);layout=manager.Layout(opt_root=root/'opt')
+            old=layout.versions_root()/('a'*40+'-1')
+            old.mkdir(parents=True);manager.switch_current(layout,old)
+            public=root/'public';(public/'admin').mkdir(parents=True)
+            (public/'admin/index.html').write_text('old-ui')
+            new_commit='b'*40
+            def extract(package_path,arch,target):
+                source=target/'public/admin';source.mkdir(parents=True)
+                (source/'index.html').write_text('candidate-ui')
+                (source/'assets.js').write_text('candidate-assets')
+                data={name:(target/name).read_bytes() for name in
+                      ('public/admin/index.html','public/admin/assets.js')}
+                manifest={'schema':manager.PACKAGE_SCHEMA,'git_commit':new_commit,
+                          'build_version':1033,'source_dirty':False,'platform':'linux','arch':arch,
+                          'files':{name:{'sha256':hashlib.sha256(payload).hexdigest(),'size':len(payload)}
+                                   for name,payload in data.items()}}
+                (target/'manifest.json').write_text(json.dumps(manifest))
+                (target/'bin').mkdir();(target/'bin/gptadmin-node').write_bytes(b'ELF')
+                return manifest
+            for name,value in [('require_root',None),('resolve_instance_name','primary'),
+                ('read_installed_env',{'GPTADMIN_PUBLIC_DIR':str(public)}),('read_admin_token','unit-only'),
+                ('origin_from_env','http://unit.invalid'),('host_arch','amd64'),('check_disk_floor',None),
+                ('verify_elf_binary',None),('manifest_summary',{'git_commit':'a'*40}),
+                ('drain_begin',True),('drain_wait_ready',{'ready_to_stop':True}),('wait_healthy',None),
+                ('drain_cancel',True)]:
+                stack.enter_context(patch.object(manager,name,return_value=value))
+            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(patch.object(manager,'systemctl'))
+            budget=SimpleNamespace(cleanup=unittest.mock.Mock())
+            args=SimpleNamespace(name='primary',package='candidate.tar.gz',wait_secs=20,
+                                 require_drain=True,node_public_url=None)
+            output=io.StringIO()
+            with patch.object(manager.sys,'stdout',output):
+                manager.update_with_budget(args,layout,manager.Runner(),budget)
+            receipt=json.loads(output.getvalue())
+            self.assertEqual(receipt['git_commit'],new_commit)
+            self.assertEqual(receipt['admin_ui']['git_commit'],new_commit)
+            self.assertEqual((public/'admin/index.html').read_text(),'candidate-ui')
+            self.assertEqual((public/Path(receipt['admin_ui']['previous']).name/'index.html').read_text(),'old-ui')
+
     def test_public_node_url_is_separate_https_origin_for_install_and_update(self):
         public_origin='https://app.example.test'
         node_url='https://node-44.example.test'
