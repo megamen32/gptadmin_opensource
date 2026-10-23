@@ -29,6 +29,7 @@ type persistedRelayTask struct {
 	RequestKey   string         `json:"request_key,omitempty"`
 	Revision     int64          `json:"-"`
 	OwnerID      string         `json:"owner_id,omitempty"`
+	Caller       *taskCaller    `json:"caller,omitempty"`
 	ID           string         `json:"id"`
 	AgentID      string         `json:"agent_id,omitempty"`
 	TraceID      string         `json:"trace_id,omitempty"`
@@ -45,23 +46,24 @@ type persistedRelayTask struct {
 }
 
 type persistedShellTask struct {
-	Timeout      int     `json:"timeout,omitempty"`
-	RequestKey   string  `json:"request_key,omitempty"`
-	Revision     int64   `json:"-"`
-	OwnerID      string  `json:"owner_id,omitempty"`
-	ID           string  `json:"id"`
-	Server       string  `json:"server,omitempty"`
-	TraceID      string  `json:"trace_id,omitempty"`
-	TraceParent  string  `json:"traceparent,omitempty"`
-	ToolName     string  `json:"tool_name,omitempty"`
-	CreatedAt    float64 `json:"created_at"`
-	StartedAt    float64 `json:"started_at,omitempty"`
-	DoneAt       float64 `json:"completed_at,omitempty"`
-	Status       string  `json:"status"`
-	Result       any     `json:"result,omitempty"`
-	Error        any     `json:"error,omitempty"`
-	ApprovalID   string  `json:"approval_id,omitempty"`
-	ParentTaskID string  `json:"parent_task_id,omitempty"`
+	Timeout      int         `json:"timeout,omitempty"`
+	RequestKey   string      `json:"request_key,omitempty"`
+	Revision     int64       `json:"-"`
+	OwnerID      string      `json:"owner_id,omitempty"`
+	Caller       *taskCaller `json:"caller,omitempty"`
+	ID           string      `json:"id"`
+	Server       string      `json:"server,omitempty"`
+	TraceID      string      `json:"trace_id,omitempty"`
+	TraceParent  string      `json:"traceparent,omitempty"`
+	ToolName     string      `json:"tool_name,omitempty"`
+	CreatedAt    float64     `json:"created_at"`
+	StartedAt    float64     `json:"started_at,omitempty"`
+	DoneAt       float64     `json:"completed_at,omitempty"`
+	Status       string      `json:"status"`
+	Result       any         `json:"result,omitempty"`
+	Error        any         `json:"error,omitempty"`
+	ApprovalID   string      `json:"approval_id,omitempty"`
+	ParentTaskID string      `json:"parent_task_id,omitempty"`
 }
 
 func (s *Server) taskStatePath() string {
@@ -119,7 +121,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if j.DoneAt > 0 && j.DoneAt < cutoff {
 			continue
 		}
-		state.Relay[id] = persistedRelayTask{ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: persistableTaskParams(j.Params), CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: j.Result, Error: j.Error, ParentTaskID: j.ParentTaskID}
+		state.Relay[id] = persistedRelayTask{ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: persistableTaskParams(j.Params), CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: j.Result, Error: j.Error, ParentTaskID: j.ParentTaskID}
 	}
 	for id, j := range shell {
 		if j == nil {
@@ -128,7 +130,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if j.DoneAt > 0 && j.DoneAt < cutoff {
 			continue
 		}
-		state.Shell[id] = persistedShellTask{Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: persistableShellResult(j), Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
+		state.Shell[id] = persistedShellTask{Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: persistableShellResult(j), Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
 	}
 	nowTime := time.Now()
 	for key, entry := range s.idempotency {
@@ -261,7 +263,7 @@ func (s *Server) loadTaskState() error {
 			done = now
 			recoveredIDs = append(recoveredIDs, id)
 		}
-		s.relayJobs[id] = &relayJob{ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ParentTaskID: p.ParentTaskID}
+		s.relayJobs[id] = &relayJob{ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ParentTaskID: p.ParentTaskID}
 	}
 	for id, p := range state.Shell {
 		alive := aliveOwners[p.OwnerID]
@@ -279,7 +281,7 @@ func (s *Server) loadTaskState() error {
 			done = now
 			recoveredIDs = append(recoveredIDs, id)
 		}
-		s.shellJobs[id] = &shellJob{Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
+		s.shellJobs[id] = &shellJob{Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
 		if status == "cancelled" && p.StartedAt > 0 && p.Server != "" {
 			s.shellControls[p.Server] = append(s.shellControls[p.Server], shellControl{TaskID: p.ID})
 		}

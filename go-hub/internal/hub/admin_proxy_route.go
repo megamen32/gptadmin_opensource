@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	proxyRouteProfilePath = "/var/lib/gptadmin/proxy-route/profile.json"
-	proxyRouteProbePath   = "/var/lib/gptadmin/proxy-route/last-probe.json"
-	proxyRouteUnit        = "gptadmin-proxy-route-relay02.service"
-	proxyRoutePort        = 24836
-	proxyRouteExitAddress = "203.0.113.10:3128"
-	proxyRouteProbeURL    = "https://api.ipify.org"
+	proxyRouteProfilePath         = "/var/lib/gptadmin/proxy-route/profile.json"
+	proxyRouteProbePath           = "/var/lib/gptadmin/proxy-route/last-probe.json"
+	proxyRouteUnit                = "gptadmin-proxy-route-relay02.service"
+	proxyRoutePort                = 24836
+	proxyRouteExitAddress         = "203.0.113.10:3128"
+	proxyRouteProbeURL            = "https://api.ipify.org"
+	proxyRoutePathReadbackTimeout = 11 * time.Second
 )
 
 type proxyRouteProfile struct {
@@ -373,7 +374,7 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 		requestDone <- ipResult{proxied: true, ip: ip, err: err}
 	}()
 
-	deadline := time.NewTimer(8 * time.Second)
+	deadline := time.NewTimer(proxyRoutePathReadbackTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()

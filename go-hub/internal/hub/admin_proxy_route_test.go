@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -505,6 +506,70 @@ func TestProxyRouteProbePreservesDirectReadFailureReason(t *testing.T) {
 				t.Fatalf("direct read failure reason was lost or misclassified: state=%s reason=%q", probe.State, reason)
 			}
 		})
+	}
+}
+
+func TestProxyRouteProbeWaitsForEstablishedSocketAfterSSHSetup(t *testing.T) {
+	dir := t.TempDir()
+	controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), nil)
+	profile := defaultProxyRouteProfile()
+	profile.DesiredState = "enabled"
+	if err := controller.saveProfile(profile); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	const sshSetupDelay = 9 * time.Second
+	const httpRequestDelay = 1 * time.Second
+	const targetPID = "4321"
+	controller.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "/usr/bin/systemctl" && strings.Contains(joined, "MainPID"):
+			return []byte(targetPID + "\n"), nil
+		case name == "/usr/bin/ss":
+			if time.Since(started) < sshSetupDelay {
+				return nil, nil
+			}
+			return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+		case name == "/usr/sbin/runuser" && strings.Contains(joined, "--proxy http://127.0.0.1:24836"):
+			timer := time.NewTimer(sshSetupDelay + httpRequestDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				return []byte("212.192.31.128"), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		case name == "/usr/sbin/runuser":
+			timer := time.NewTimer(sshSetupDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				return []byte("185.240.120.152"), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		default:
+			return nil, errors.New("unexpected command")
+		}
+	}
+
+	probe := controller.probe(context.Background())
+	if probe.State != "pass" || probe.DirectExitIP == nil || *probe.DirectExitIP != "185.240.120.152" || probe.ProxyExitIP == nil || *probe.ProxyExitIP != "212.192.31.128" || probe.Server44PathVerified == nil || !*probe.Server44PathVerified {
+		direct, proxied, path, reason := "<nil>", "<nil>", "<nil>", "<nil>"
+		if probe.DirectExitIP != nil {
+			direct = *probe.DirectExitIP
+		}
+		if probe.ProxyExitIP != nil {
+			proxied = *probe.ProxyExitIP
+		}
+		if probe.Server44PathVerified != nil {
+			path = fmt.Sprint(*probe.Server44PathVerified)
+		}
+		if probe.Server44PathReason != nil {
+			reason = *probe.Server44PathReason
+		}
+		t.Fatalf("probe did not preserve both IPs and the delayed MainPID-bound node-44 proof: state=%q direct=%s proxy=%s path=%s reason=%s", probe.State, direct, proxied, path, reason)
 	}
 }
 

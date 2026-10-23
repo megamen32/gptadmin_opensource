@@ -873,7 +873,7 @@ function webhookActionLabel(kind: WebhookRouteSummary["kind"]): string {
 function formatWebhookTime(value?: string): string {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "medium" });
 }
 
 const emptyWebhookRoute = (): WebhookRouteDraft => ({
@@ -1166,14 +1166,14 @@ function WebhooksScreen() {
     }
   }
 
-  async function inspectJob(): Promise<void> {
-    const id = jobId.trim();
-    if (!id || checkingJob) return;
+  async function inspectJob(id: string = jobId): Promise<void> {
+    const jobKey = id.trim();
+    if (!jobKey || checkingJob) return;
     setCheckingJob(true);
     setJob(null);
     setJobMessage(null);
     try {
-      setJob(await webhookRequest<WebhookJob>(`/admin/api/webhook-jobs/${encodeURIComponent(id)}`));
+      setJob(await webhookRequest<WebhookJob>(`/admin/api/webhook-jobs/${encodeURIComponent(jobKey)}`));
       void loadJobOverview();
     } catch (error) {
       setJobMessage(error instanceof Error ? error.message : "Не удалось получить задание.");
@@ -1274,7 +1274,37 @@ function WebhooksScreen() {
 
           <section className="card job-inspector" aria-labelledby="job-inspector-title">
             <div><p className="section-kicker">ИСТОРИЯ</p><h3 id="job-inspector-title">Последние запуски</h3><p className="muted">Здесь видно, срабатывают ли автоматизации на практике. Для подробностей можно открыть запуск по его ID.</p></div>
-            {recentJobs.length > 0 ? <div className="automation-recent-jobs">{recentJobs.slice(0, 8).map((item) => <button type="button" className="automation-job-row" key={item.job_id} onClick={() => { setJobId(item.job_id); setJob(null); }}><span className={`automation-run-state state-${item.status}`}>{webhookStatusLabel(item.status)}</span><span><strong>{item.route_id}</strong><small>{formatWebhookTime(item.created_at)}{item.error ? ` · ${item.error}` : ""}</small></span></button>)}</div> : <div className="route-empty"><strong>Запусков пока нет</strong><span>Когда внешний сервис вызовет автоматизацию, результат появится здесь.</span></div>}
+            {recentJobs.length > 0 ? (
+              <div className="automation-recent-jobs">
+                {recentJobs.slice(0, 8).map((item) => (
+                  <button
+                    type="button"
+                    className="automation-job-row"
+                    key={item.job_id}
+                    onClick={() => {
+                      setJobId(item.job_id);
+                      void inspectJob(item.job_id);
+                    }}
+                  >
+                    <span className={`automation-run-state state-${item.status}`}>
+                      {webhookStatusLabel(item.status)}
+                    </span>
+                    <span className="automation-job-content">
+                      <span className="automation-job-heading">
+                        <strong>{item.route_id}</strong>
+                        <time dateTime={item.created_at}>{formatWebhookTime(item.created_at)}</time>
+                      </span>
+                      {item.error && <small className="automation-job-error">{item.error}</small>}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="route-empty">
+                <strong>Запусков пока нет</strong>
+                <span>Когда внешний сервис вызовет автоматизацию, результат появится здесь.</span>
+              </div>
+            )}
             <details className="automation-job-lookup"><summary>Открыть запуск по ID</summary><form className="job-search" onSubmit={(event) => { event.preventDefault(); void inspectJob(); }}><label>ID запуска<input value={jobId} onChange={(event) => setJobId(event.target.value)} /></label><button className="button secondary" type="submit" disabled={!jobId.trim() || checkingJob}>{checkingJob ? "Проверяем…" : "Открыть"}</button></form></details>
             {jobMessage && <div className="state-panel state-error compact" role="alert"><strong>Не удалось получить задание</strong><span>{jobMessage}</span><button className="button secondary" type="button" onClick={() => void inspectJob()}>Повторить</button></div>}
             {job && <div className="job-result" role="status"><dl><div><dt>ID</dt><dd>{job.job_id}</dd></div><div><dt>Маршрут</dt><dd>{job.route_id}</dd></div><div><dt>Состояние</dt><dd>{webhookStatusLabel(job.status)}</dd></div>{job.created_at && <div><dt>Создано</dt><dd>{formatUpdated(job.created_at)}</dd></div>}{job.started_at && <div><dt>Запущено</dt><dd>{formatUpdated(job.started_at)}</dd></div>}{job.completed_at && <div><dt>Завершено</dt><dd>{formatUpdated(job.completed_at)}</dd></div>}{job.callback_status && <div><dt>Callback</dt><dd>{job.callback_status}</dd></div>}{job.error && <div><dt>Ошибка</dt><dd>{job.error}</dd></div>}</dl>{resultEntries.length > 0 && <div className="safe-result"><strong>Результат</strong><dl>{resultEntries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></div>}</div>}

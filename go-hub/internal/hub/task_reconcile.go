@@ -40,6 +40,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 					j.ID = p.ID
 					j.Revision = p.Revision
 					j.OwnerID = p.OwnerID
+					j.Caller = p.Caller
 					j.Server = p.Server
 					j.TraceID = p.TraceID
 					j.TraceParent = p.TraceParent
@@ -65,7 +66,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 						j = &relayJob{CachedAt: nowFloat()}
 						s.relayJobs[id] = j
 					}
-					*j = relayJob{CachedAt: nowFloat(), ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
+					*j = relayJob{CachedAt: nowFloat(), ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
 				}
 				if j.Method == "task/group" {
 					pending = append(pending, taskGroupChildIDs(j)...)

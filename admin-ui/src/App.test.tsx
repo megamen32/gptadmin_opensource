@@ -936,4 +936,50 @@ it("selects the stable OAuth connection from a link and edits no refresh record"
   await userEvent.selectOptions(screen.getByLabelText("Роль выбранного подключения"), "admin");
   await userEvent.click(screen.getByRole("button", { name: "Сохранить роль" }));
   expect(fetchMock).toHaveBeenCalledWith(`/admin/api/client-roles/${id}`, expect.objectContaining({ method: "PUT" }));
+
+
+
+});
+
+it("opens a recent webhook job directly and shows its full details", async () => {
+  window.history.replaceState(null, "", "#webhooks");
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = String(input);
+    if (path === "/webhook-routes") return webhookResponse({ routes: [] });
+    if (path === "/admin/api/webhook-jobs") return webhookResponse({
+      jobs: [{
+        job_id: "job-readability-1",
+        route_id: "notify-health-diagnosis",
+        status: "failed",
+        created_at: "2026-10-23T12:00:05Z",
+        error: "webhook shell action exited with code 1",
+      }],
+      latest_by_route: {},
+    });
+    if (path === "/admin/api/webhook-jobs/job-readability-1") return webhookResponse({
+      job_id: "job-readability-1",
+      route_id: "notify-health-diagnosis",
+      status: "failed",
+      created_at: "2026-10-23T12:00:05Z",
+      error: "webhook shell action exited with code 1",
+    });
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  render(<App />);
+  const recentJob = await screen.findByRole("button", {
+    name: /Ошибка notify-health-diagnosis/,
+  });
+  expect(recentJob.querySelector("time")).toHaveAttribute("datetime", "2026-10-23T12:00:05Z");
+  expect(recentJob).toHaveTextContent(/\d{2}:\d{2}:\d{2}/);
+  expect(recentJob).toHaveTextContent("webhook shell action exited with code 1");
+  await userEvent.click(recentJob);
+
+  expect(await screen.findByText("job-readability-1")).toBeInTheDocument();
+  const jobResult = screen.getByText("job-readability-1").closest(".job-result");
+  expect(jobResult).toHaveTextContent("webhook shell action exited with code 1");
+  expect(fetchMock).toHaveBeenCalledWith(
+    "/admin/api/webhook-jobs/job-readability-1",
+    expect.objectContaining({ credentials: "same-origin" }),
+  );
 });

@@ -721,19 +721,47 @@ func outputRows(value any) []any {
 func compactFacadeTools(r *http.Request, full bool) []map[string]any {
 	tools := appsSDKToolsForRequest(r)
 	if requestAccessMode(r) == accessModeReadonly {
-		// A read-only identity gets the read primitives, the search facade and
-		// the read-only executor. The search facade is published for it as
-		// well: a client that may only read still has to find the tools it is
-		// allowed to read.
-		return withReadOnlyExecTool(r, withSearchFacadeTool(r, withoutExecuteFacade(r, tools)))
+		return withProfileFilteredNativeFacades(r, withoutExecuteFacade(r, tools))
 	}
 	if full {
-		return withReadOnlyExecTool(r, withoutExecuteFacade(r, tools))
+		tools = withoutExecuteFacade(r, tools)
+		if _, bound := AccessProfileFromRequest(r); bound {
+			return withProfileFilteredNativeFacades(r, tools)
+		}
+		return withReadOnlyExecTool(r, tools)
 	}
 	if profile, ok := AccessProfileFromRequest(r); ok && !containsString(profile.AllowedTools, "*") {
-		return withReadOnlyExecTool(r, withoutExecuteFacade(r, tools))
+		return withProfileFilteredNativeFacades(r, withoutExecuteFacade(r, tools))
 	}
 	return nativeShortCatalogTools(r, tools)
+}
+
+// withProfileFilteredNativeFacades adds the native short-catalog facades that
+// remain callable for this request. For bound profiles these definitions are
+// filtered by exact profile membership; they are separate from appsSDKTools,
+// so filtering only that catalog can hide an allowed search/exec tool.
+func withProfileFilteredNativeFacades(r *http.Request, tools []map[string]any) []map[string]any {
+	if _, bound := AccessProfileFromRequest(r); bound {
+		if profileAllowsTool(r, "search") {
+			tools = withSearchFacadeTool(r, tools)
+		}
+		if requestAccessMode(r) != accessModeReadonly && profileAllowsTool(r, "exec") {
+			hasExec := false
+			for _, tool := range tools {
+				if firstString(tool, "name") == "exec" {
+					hasExec = true
+					break
+				}
+			}
+			if !hasExec {
+				tools = append(tools, codeModeCatalogTool("exec"))
+			}
+		}
+	} else if requestAccessMode(r) == accessModeReadonly {
+		// An unbound read-only identity keeps the existing read-only catalog.
+		tools = withSearchFacadeTool(r, tools)
+	}
+	return withReadOnlyExecTool(r, tools)
 }
 
 func (s *Server) writeTokenSchema(w http.ResponseWriter, r *http.Request, args map[string]any, raw any) {
