@@ -54,17 +54,53 @@ export default function ProxyRouteScreen({ load, save, action }: ProxyRouteScree
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  const refreshAfterMutation = async (mutationState: ProxyRouteState, pendingNotice: string): Promise<boolean> => {
+    setState(mutationState);
+    setDesiredState(mutationState.profile.desired_state);
+    setNotice(pendingNotice);
+    try {
+      const current = await load();
+      setState(current);
+      setDesiredState(current.profile.desired_state);
+      return true;
+    } catch {
+      setError("Операция выполнена, но актуальное состояние маршрута не удалось загрузить. Состояние слушателя не подтверждено.");
+      return false;
+    }
+  };
+
+  const recoverAfterRejectedMutation = async () => {
+    setNotice("Ответ операции не получен. Уточняем актуальное состояние маршрута…");
+    try {
+      const current = await load();
+      setState(current);
+      setDesiredState(current.profile.desired_state);
+      setError("Не удалось подтвердить ответ операции. Показано актуальное состояние маршрута; исход операции остаётся неопределённым.");
+      setNotice("Показано актуальное состояние маршрута. Исход операции остаётся неподтверждённым.");
+    } catch {
+      if (state) {
+        setState({
+          ...state,
+          runtime: { ...state.runtime, service_state: "unknown", listener_state: "unknown" },
+        });
+      }
+      setError("Не удалось получить ответ операции и актуальное состояние. Выполнена ли операция, неизвестно; сервис и слушатель не подтверждены.");
+      setNotice("Последние сохранённые данные проверки ниже относятся к прошлому результату; исход операции не подтверждён.");
+    }
+  };
+
   const runAction = async (operation: ProxyRouteAction) => {
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
       const next = await action(operation);
-      setState(next);
-      setDesiredState(next.profile.desired_state);
-      setNotice(operation === "probe" ? "Проверка выполнена. Показаны только результаты этой проверки." : "Состояние маршрута обновлено.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Операция с маршрутом прокси не выполнена.");
+      const pendingNotice = operation === "probe" ? "Проверка выполнена. Уточняем состояние маршрута…" : "Операция выполнена. Уточняем состояние маршрута…";
+      if (await refreshAfterMutation(next, pendingNotice)) {
+        setNotice(operation === "probe" ? "Проверка выполнена. Показаны её результаты и актуальное состояние маршрута." : "Состояние маршрута обновлено.");
+      }
+    } catch {
+      await recoverAfterRejectedMutation();
     } finally {
       setBusy(false);
     }
@@ -77,11 +113,11 @@ export default function ProxyRouteScreen({ load, save, action }: ProxyRouteScree
     setNotice(null);
     try {
       const next = await save({ ...state.profile, desired_state: desiredState });
-      setState(next);
-      setDesiredState(next.profile.desired_state);
-      setNotice("Желаемое состояние сохранено. Чтобы применить его, используйте действие включения или отключения.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Не удалось сохранить настройку прокси.");
+      if (await refreshAfterMutation(next, "Настройка сохранена. Уточняем состояние маршрута…")) {
+        setNotice("Желаемое состояние сохранено. Чтобы применить его, используйте действие включения или отключения.");
+      }
+    } catch {
+      await recoverAfterRejectedMutation();
     } finally {
       setBusy(false);
     }
