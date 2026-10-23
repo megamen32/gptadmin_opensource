@@ -91,6 +91,73 @@ class NodeAutoupdateTests(unittest.TestCase):
             self.assertFalse(layout.shellmcp_current_link().exists())
             self.assertFalse(layout.shellmcp_service_dropin.exists())
 
+    def test_shellmcp_update_bootstraps_legacy_service_without_version_endpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_HOST=0.0.0.0\nSHELL_PORT=25900\n')
+            legacy=root/'legacy/shellmcp';legacy.parent.mkdir();legacy.write_bytes(b'legacy shellmcp')
+            legacy.chmod(0o755)
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            archive=package(root)
+            after={'component':'shellmcp-go','status':'ready','git_commit':'1'*40,'build_version':123}
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    value={'User':'root','EnvironmentFiles':str(env),
+                        'ExecStart':'{ path='+str(legacy)+' ; argv[]='+str(legacy)+' ; ignore_errors=no ; }'}[argv[4]]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            calls=[]
+            def fake_systemctl(runner,*args,check=True):
+                calls.append(args)
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            refused=urllib.error.URLError(ConnectionRefusedError(111,'Connection refused'))
+            with patch.object(manager,'SHELLMCP_LEGACY_BINARY',legacy), \
+                 patch.object(manager,'require_root'),patch.object(manager,'check_disk_floor'), \
+                 patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=[refused]), \
+                 patch.object(manager,'wait_shellmcp_version',return_value=after):
+                manager.cmd_shellmcp_update(SimpleNamespace(package=str(archive)),layout,ServiceRunner())
+            self.assertEqual(layout.shellmcp_current_link().resolve().name,'1'*40+'-1')
+            self.assertTrue(layout.shellmcp_service_dropin.is_file())
+            self.assertEqual(calls,[('is-active',manager.SHELLMCP_SERVICE),('daemon-reload',),
+                                    ('restart',manager.SHELLMCP_SERVICE)])
+
+    def test_shellmcp_legacy_bootstrap_failure_restores_unmanaged_binary_and_unit(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            legacy=root/'legacy/shellmcp';legacy.parent.mkdir();legacy.write_bytes(b'legacy shellmcp')
+            legacy.chmod(0o755)
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            archive=package(root)
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    value={'User':'root','EnvironmentFiles':str(env),
+                        'ExecStart':'{ path='+str(legacy)+' ; argv[]='+str(legacy)+' ; ignore_errors=no ; }'}[argv[4]]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            calls=[]
+            def fake_systemctl(runner,*args,check=True):
+                calls.append(args)
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            refused=urllib.error.URLError(ConnectionRefusedError(111,'Connection refused'))
+            with patch.object(manager,'SHELLMCP_LEGACY_BINARY',legacy), \
+                 patch.object(manager,'require_root'),patch.object(manager,'check_disk_floor'), \
+                 patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=[refused]), \
+                 patch.object(manager,'wait_shellmcp_version',side_effect=manager.RuntimeFailure('wrong commit')):
+                with self.assertRaisesRegex(manager.RuntimeFailure,'legacy service restored'):
+                    manager.cmd_shellmcp_update(SimpleNamespace(package=str(archive)),layout,ServiceRunner())
+            self.assertFalse(layout.shellmcp_current_link().exists())
+            self.assertFalse(layout.shellmcp_service_dropin.exists())
+            self.assertEqual(legacy.read_bytes(),b'legacy shellmcp')
+            self.assertEqual(calls,[('is-active',manager.SHELLMCP_SERVICE),('daemon-reload',),
+                                    ('restart',manager.SHELLMCP_SERVICE),('daemon-reload',),
+                                    ('restart',manager.SHELLMCP_SERVICE),
+                                    ('is-active',manager.SHELLMCP_SERVICE)])
+
     def test_shellmcp_explicit_rollback_uses_only_manifest_verified_version_dirs(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')

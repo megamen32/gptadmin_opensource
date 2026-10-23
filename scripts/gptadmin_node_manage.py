@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -1344,6 +1345,28 @@ def shellmcp_live_version(layout: Layout) -> dict:
     return payload
 
 
+def shellmcp_connection_refused(error: BaseException) -> bool:
+    reason = getattr(error, 'reason', None)
+    return isinstance(reason, OSError) and reason.errno == errno.ECONNREFUSED
+
+
+def shellmcp_legacy_binary_digest() -> str:
+    binary = SHELLMCP_LEGACY_BINARY
+    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise PreflightError('legacy ShellMCP binary is not a regular executable')
+    return digest_file(binary)
+
+
+def verify_shellmcp_legacy_restore(layout: Layout, runner: Runner, expected_digest: str) -> dict:
+    managed, contract = verify_shellmcp_service_contract(layout, runner)
+    link = layout.shellmcp_current_link()
+    if managed or link.exists() or link.is_symlink():
+        raise RuntimeFailure('legacy ShellMCP package state was not restored')
+    if shellmcp_legacy_binary_digest() != expected_digest:
+        raise RuntimeFailure('legacy ShellMCP executable changed during package rollback')
+    return contract
+
+
 def shellmcp_systemctl_property(runner: Runner, unit: str, key: str) -> str:
     try:
         result = runner.run(['systemctl', 'show', unit, '-p', key, '--value'], timeout=10)
@@ -1484,8 +1507,22 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
     require_root()
     check_disk_floor(layout.shellmcp_opt_root, 'ShellMCP install root')
     managed, contract = verify_shellmcp_service_contract(layout, runner)
-    before = shellmcp_live_version(layout)
     previous_target = shellmcp_current_target(layout)
+    legacy_digest = None
+    current_link = layout.shellmcp_current_link()
+    if (not managed and previous_target is None and not current_link.exists()
+            and not current_link.is_symlink() and contract['exec_start'] == str(SHELLMCP_LEGACY_BINARY)):
+        try:
+            legacy_digest = shellmcp_legacy_binary_digest()
+        except PreflightError:
+            legacy_digest = None
+    try:
+        before = shellmcp_live_version(layout)
+    except (OSError, urllib.error.URLError, RuntimeFailure) as error:
+        if legacy_digest is not None and shellmcp_connection_refused(error):
+            before = None
+        else:
+            raise PreflightError(f'cannot verify current ShellMCP service before update: {error}') from None
     if managed:
         if previous_target is None or previous_target.parent != layout.shellmcp_versions_root():
             raise PreflightError('managed ShellMCP service has no package-owned current version')
@@ -1548,16 +1585,22 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
                 atomic_write(dropin, previous_dropin.decode('utf-8'), 0o644)
             systemctl(runner, 'daemon-reload')
             systemctl(runner, 'restart', SHELLMCP_SERVICE)
-            restored = shellmcp_live_version(layout)
-            if (restored.get('git_commit') != before.get('git_commit')
-                    or restored.get('build_version') != before.get('build_version')):
-                raise RuntimeFailure('rollback readback differs from the pre-update ShellMCP version')
+            if before is None:
+                verify_shellmcp_legacy_restore(layout, runner, legacy_digest)
+            else:
+                restored = shellmcp_live_version(layout)
+                if (restored.get('git_commit') != before.get('git_commit')
+                        or restored.get('build_version') != before.get('build_version')):
+                    raise RuntimeFailure('rollback readback differs from the pre-update ShellMCP version')
         except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as restore:
             rollback_error = str(restore)
-        detail = f' ShellMCP rollback failed: {rollback_error}' if rollback_error else ' previous version restored and read back'
+        detail = (f' ShellMCP rollback failed: {rollback_error}' if rollback_error else
+                  ' legacy service restored and binary/unit verified' if before is None else
+                  ' previous version restored and read back')
         raise RuntimeFailure(f'ShellMCP update failed ({error});{detail}') from None
     print(json.dumps({'ok': True, 'command': 'shellmcp update',
                       'previous': before, 'version': version,
+                      'bootstrapped_from_legacy': before is None,
                       'version_dir': final.name, 'service': contract}, sort_keys=True))
 
 
