@@ -6046,7 +6046,7 @@ func hubTools() []map[string]any {
 	tools := []map[string]any{
 		{"name": "discover", "description": "List registered targets; query and status filter the compact list", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}}},
 		searchToolDefinition(),
-		{"name": "schema", "description": "Read exact target/tool schema or compact tool summaries", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}},
+		{"name": "schema", "description": "Read the exact input schema for one named target tool, or compact target tool summaries. Use search for MCP tool catalog discovery.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}},
 		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{
 			"name":         "resource_receipt",
@@ -6133,7 +6133,7 @@ func controlTools(target string) []map[string]any {
 }
 
 func searchToolDefinition() map[string]any {
-	return map[string]any{"name": "search", "title": "Search tools", "description": "Search caller-visible tool names, descriptions and control settings. Returns schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
+	return map[string]any{"name": "search", "title": "Search MCP tools", "description": "Search caller-visible MCP tool names, descriptions, schemas and control settings; this searches the tool catalog. When a project path is known, use local rg for file or content search; use GrepMesh search_text or find_paths for unknown locations or cross-host search. Returns matching schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
 }
 
 func fileTools() []map[string]any {
@@ -9210,7 +9210,9 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	case "server/discover":
 		result = mcpDiscoverResult("gptadmin-go-hub", BuildVersion)
 		if s.cfg.InstructionContextRequired {
-			mapValue(result)["instructions"] = instructionBootstrapHint
+			discovery := mapValue(result)
+			discovery["instructions"] = s.startupInstructionsTextForRequest(r)
+			discovery["cacheScope"] = "private"
 		}
 	case "initialize":
 		// Legacy compatibility shim; MCP 2026-07-28 itself is stateless.

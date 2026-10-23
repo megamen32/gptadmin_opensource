@@ -84,7 +84,7 @@ func codeModeCatalogTool(name string) map[string]any {
 		}
 	}
 	return map[string]any{
-		"name": "exec", "title": "Think in Code", "description": "Run short JavaScript in the isolated sandbox. Use search then await mcp.call(target, tool, args); intermediate data stays inside the VM and only your return value is sent.",
+		"name": "exec", "title": "Compose MCP calls", "description": "Run short, bounded JavaScript to inspect returned data and compose MCP calls with mcp.call(target, tool, args); intermediate data stays in the sandbox. Use search for the MCP tool catalog and schema for exact inputs. When a project path is known, use local rg for file or content search; use GrepMesh search_text or find_paths for unknown locations or cross-host search.",
 		"inputSchema": codeModeInputSchema(), "outputSchema": codeModeOutputSchema(),
 		"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}, "securitySchemes": execSecurity, "_meta": execMeta,
 	}

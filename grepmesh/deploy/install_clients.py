@@ -11,15 +11,33 @@ from pathlib import Path
 
 import yaml
 
+from install_gptadmin import BEGIN_MARKER, END_MARKER, INSTRUCTION, replace_instruction_section
 
-INSTRUCTION = (
+CLIENT_LEGACY_INSTRUCTION = (
     "ИСПОЛЬЗУЙ МЕНЯ ДЛЯ ПОИСКА. Use the `grepmesh` MCP before shell "
     "`find`, `grep`, `rg`, or repository-wide scanning when files may be "
     "local or on another mesh host. Start with `search_text` or "
     "`find_paths`, then use `read_text` for the exact file. Use shell search "
     "only when GrepMesh is unavailable or cannot express the query."
 )
-SECTION = f"\n\n## GrepMesh search routing\n\n{INSTRUCTION}\n"
+PROMPT_SECTION = f"{BEGIN_MARKER}\n{INSTRUCTION}\n{END_MARKER}"
+
+
+def replace_prompt_section(current: str) -> str:
+    """Replace the legacy bare prompt or one marked block, preserving peers."""
+    if CLIENT_LEGACY_INSTRUCTION in current:
+        if current.count(CLIENT_LEGACY_INSTRUCTION) != 1:
+            raise ValueError("duplicate legacy GrepMesh prompt instructions")
+        current = current.replace(CLIENT_LEGACY_INSTRUCTION, PROMPT_SECTION, 1)
+    elif BEGIN_MARKER not in current and END_MARKER not in current:
+        return current.rstrip() + ("\n\n" if current.strip() else "") + PROMPT_SECTION + "\n"
+
+    begin_count, end_count = current.count(BEGIN_MARKER), current.count(END_MARKER)
+    if (begin_count, end_count) != (1, 1):
+        raise ValueError("malformed or duplicate GrepMesh prompt markers")
+    start = current.index(BEGIN_MARKER)
+    end = current.index(END_MARKER, start) + len(END_MARKER)
+    return current[:start] + PROMPT_SECTION + current[end:]
 
 
 def backup(path: Path, stamp: str) -> None:
@@ -71,8 +89,9 @@ def install_hermes(home: Path, stamp: str) -> bool:
     }
     agent = data.setdefault("agent", {})
     current = agent.get("system_prompt") or ""
-    if INSTRUCTION not in current:
-        agent["system_prompt"] = (current.rstrip() + "\n\n" + INSTRUCTION).strip()
+    updated = replace_prompt_section(current)
+    if updated != current:
+        agent["system_prompt"] = updated
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return True
 
@@ -81,9 +100,10 @@ def install_instruction(path: Path, stamp: str) -> bool:
     if not path.exists():
         return False
     text = path.read_text(encoding="utf-8")
-    if INSTRUCTION not in text:
+    updated = replace_instruction_section(text)
+    if updated != text:
         backup(path, stamp)
-        path.write_text(text.rstrip() + SECTION, encoding="utf-8")
+        path.write_text(updated, encoding="utf-8")
     return True
 
 
