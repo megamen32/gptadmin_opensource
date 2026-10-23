@@ -10,6 +10,7 @@ from unittest.mock import patch
 from tools import publish_node_release as release
 
 SOURCE = '1' * 40
+MIRROR = '2' * 40
 
 
 def package(root, arch='amd64', **changes):
@@ -138,15 +139,21 @@ class NodeReleaseTests(unittest.TestCase):
     def test_release_is_draft_until_all_server_digests_match_and_never_latest(self):
         with tempfile.TemporaryDirectory() as d:
             packages=[package(d,a) for a in ('amd64','arm64')]
-            files=[f for p in packages for f in (p,p.with_name(p.name+'.sha256'))]
-            tag='node-v123-'+SOURCE[:12];assets=[];calls=[]
+            tag='node-v123-'+SOURCE[:12];assets=[];calls=[];state={'tag':False}
             def gh(*args):
                 calls.append(args);endpoint=args[1]
+                if endpoint.endswith('/git/ref/heads/main'):
+                    return json.dumps({'ref':'refs/heads/main','object':{'type':'commit','sha':MIRROR}}).encode()
+                if endpoint.endswith('/git/commits/'+MIRROR):
+                    return json.dumps({'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+SOURCE}).encode()
                 if '/git/matching-refs/' in endpoint:
-                    return json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':SOURCE}}]).encode()
+                    return json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':MIRROR}}] if state['tag'] else []).encode()
+                if endpoint.endswith('/git/refs'):
+                    self.assertIn('sha='+MIRROR,args);state['tag']=True;return b'{}'
                 if 'per_page=' in endpoint:return b'[]'
                 if endpoint.endswith('/releases'):
                     self.assertIn('draft=true',args);self.assertIn('make_latest=false',args)
+                    self.assertIn('target_commitish='+MIRROR,args)
                     return json.dumps({'id':1,'tag_name':tag,'draft':True,'assets':[]}).encode()
                 if endpoint.startswith('https://uploads.github.com/'):
                     p=Path(args[args.index('--input')+1]);asset={'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)}
@@ -159,11 +166,55 @@ class NodeReleaseTests(unittest.TestCase):
             with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)
             self.assertIn('PATCH',calls[-1]);self.assertEqual(len(assets),4)
 
+    def test_release_tag_uses_public_mirror_commit_bound_to_exact_source(self):
+        import contextlib
+        with tempfile.TemporaryDirectory() as d:
+            package(d);package(d,'arm64')
+            tag='node-v123-'+SOURCE[:12];state={'tag':False,'assets':[]}
+            def gh(*args):
+                endpoint=args[1]
+                if endpoint.endswith('/git/ref/heads/main'):
+                    return json.dumps({'ref':'refs/heads/main','object':{'type':'commit','sha':MIRROR}}).encode()
+                if endpoint.endswith('/git/commits/'+MIRROR):
+                    return json.dumps({'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+SOURCE}).encode()
+                if '/git/matching-refs/' in endpoint:
+                    return json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':MIRROR}}] if state['tag'] else []).encode()
+                if endpoint.endswith('/git/refs'):
+                    self.assertIn('sha='+MIRROR,args)
+                    state['tag']=True
+                    return b'{}'
+                if 'per_page=' in endpoint:return b'[]'
+                if endpoint.endswith('/releases'):
+                    self.assertIn('target_commitish='+MIRROR,args)
+                    self.assertIn('Source: '+SOURCE,args[-1])
+                    return json.dumps({'id':1,'tag_name':tag,'draft':True,'assets':[]}).encode()
+                if endpoint.startswith('https://uploads.github.com/'):
+                    p=Path(args[args.index('--input')+1])
+                    asset={'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)}
+                    state['assets'].append(asset)
+                    return json.dumps(asset).encode()
+                if endpoint.endswith('/releases/1'):
+                    self.assertIn('make_latest=false',args)
+                    return json.dumps({'id':1,'tag_name':tag,'draft':False,'assets':state['assets']}).encode()
+                raise AssertionError(endpoint)
+            with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):
+                release.publish(d,SOURCE,release.REPOSITORY)
+            self.assertTrue(state['tag'])
+
+    def test_public_mirror_commit_must_name_the_exact_source_once(self):
+        ref={'ref':'refs/heads/main','object':{'type':'commit','sha':MIRROR}}
+        wrong={'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+'3'*40}
+        with patch.object(release,'gh',side_effect=[json.dumps(ref).encode(),json.dumps(wrong).encode()]):
+            with self.assertRaises(ValueError):release.public_mirror_commit(release.REPOSITORY,SOURCE)
+
     def test_bad_existing_asset_is_not_overwritten_or_published(self):
         with tempfile.TemporaryDirectory() as d:
             package(d);package(d,'arm64');tag='node-v123-'+SOURCE[:12]
             existing={'id':1,'tag_name':tag,'draft':True,'assets':[{'name':'gptadmin-node-linux-amd64.tar.gz','size':1,'digest':'sha256:'+'0'*64}]}
-            replies=[json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':SOURCE}}]).encode(),json.dumps([existing]).encode(),json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':SOURCE}}]).encode()]
+            replies=[json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':MIRROR}}]).encode(),
+                     json.dumps({'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+SOURCE}).encode(),
+                     json.dumps([existing]).encode(),
+                     json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':MIRROR}}]).encode()]
             with patch.object(release,'gh',side_effect=replies) as gh:
                 with self.assertRaises(ValueError):release.publish(d,SOURCE,release.REPOSITORY)
                 self.assertTrue(all(c.args[0]=='api' for c in gh.call_args_list))
@@ -171,10 +222,12 @@ class NodeReleaseTests(unittest.TestCase):
     def test_foreign_existing_tag_never_creates_or_publishes_a_release(self):
         with tempfile.TemporaryDirectory() as d:
             package(d);package(d,'arm64');tag='node-v123-'+SOURCE[:12]
-            refs=[{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':'2'*40}}]
-            with patch.object(release,'gh',return_value=json.dumps(refs).encode()) as gh:
+            foreign='3'*40
+            refs=[{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':foreign}}]
+            replies=[json.dumps(refs).encode(),json.dumps({'sha':foreign,'message':'ci: publish sanitized source\n\nSource-Commit: '+'4'*40}).encode()]
+            with patch.object(release,'gh',side_effect=replies) as gh:
                 with self.assertRaises(ValueError):release.publish(d,SOURCE,release.REPOSITORY)
-                self.assertEqual(gh.call_count,1)
+                self.assertEqual(gh.call_count,2)
 
     def test_annotated_tag_is_bounded_and_must_resolve_to_exact_commit(self):
         tag='node-v123-'+SOURCE[:12];refs=[{'ref':'refs/tags/'+tag,'object':{'type':'tag','sha':'2'*40}}]
@@ -192,11 +245,16 @@ class NodeReleaseTests(unittest.TestCase):
             def gh(*args):
                 calls.append(args);endpoint=args[1]
                 if '/releases/tags/' in endpoint:raise RuntimeError('real draft endpoint404')
-                if '/git/matching-refs/' in endpoint:return json.dumps([{'ref':'refs/tags/'+tag,'object':{'sha':SOURCE,'type':'commit'}}] if state['tag'] else []).encode()
+                if endpoint.endswith('/git/ref/heads/main'):
+                    return json.dumps({'ref':'refs/heads/main','object':{'type':'commit','sha':MIRROR}}).encode()
+                if endpoint.endswith('/git/commits/'+MIRROR):
+                    return json.dumps({'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+SOURCE}).encode()
+                if '/git/matching-refs/' in endpoint:return json.dumps([{'ref':'refs/tags/'+tag,'object':{'sha':MIRROR,'type':'commit'}}] if state['tag'] else []).encode()
                 if endpoint.endswith('/git/refs'):
-                    self.assertIn('sha='+SOURCE,args);state['tag']=True;return b'{}'
+                    self.assertIn('sha='+MIRROR,args);state['tag']=True;return b'{}'
                 if 'per_page=' in endpoint:return b'[]'  # remains stale after create
                 if endpoint.endswith('/releases'):
+                    self.assertIn('target_commitish='+MIRROR,args)
                     return json.dumps({'id':41,'tag_name':tag,'draft':True,'assets':[]}).encode()
                 if endpoint.startswith('https://uploads.github.com/'):
                     p=Path(args[args.index('--input')+1]);asset={'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)}

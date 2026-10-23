@@ -98,11 +98,11 @@ def asset_matches(asset, path):
             and asset.get('digest') == 'sha256:' + digest(path))
 
 
-def verify_tag(repository, tag, source, allow_missing=False):
+def tag_commit(repository, tag, allow_missing=False):
     refs = json.loads(gh('api', 'repos/' + repository + '/git/matching-refs/tags/' + tag))
     exact = [r for r in refs if r.get('ref') == 'refs/tags/' + tag]
     if not exact and allow_missing:
-        return False
+        return None
     if len(exact) != 1:
         raise ValueError('Node release tag is missing or ambiguous')
     obj = exact[0]['object']
@@ -111,13 +111,42 @@ def verify_tag(repository, tag, source, allow_missing=False):
         if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
             raise ValueError('invalid Node tag object')
         if obj.get('type') == 'commit':
-            if sha != source:
-                raise ValueError('Node release tag differs from accepted source; never rewrite')
-            return True
+            return sha
         if obj.get('type') != 'tag':
             raise ValueError('Node release tag does not resolve to a commit')
         obj = json.loads(gh('api', 'repos/' + repository + '/git/tags/' + sha))['object']
     raise ValueError('unbounded annotated Node tag chain')
+
+
+def verify_tag(repository, tag, commit, allow_missing=False):
+    actual = tag_commit(repository, tag, allow_missing=allow_missing)
+    if actual is None:
+        return False
+    if actual != commit:
+        raise ValueError('Node release tag differs from accepted public mirror; never rewrite')
+    return True
+
+
+def public_mirror_commit(repository, source, commit=None):
+    """Resolve a sanitized public mirror commit and verify its exact source trailer."""
+    if commit is None:
+        ref = json.loads(gh('api', 'repos/' + repository + '/git/ref/heads/main'))
+        if ref.get('ref') != 'refs/heads/main':
+            raise ValueError('public source mirror main ref is missing or ambiguous')
+        obj = ref.get('object') or {}
+        commit = obj.get('sha')
+        if obj.get('type') != 'commit':
+            raise ValueError('public source mirror main is not a commit')
+    if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit):
+        raise ValueError('invalid public source mirror commit')
+    response = json.loads(gh('api', 'repos/' + repository + '/git/commits/' + commit))
+    if response.get('sha') != commit or not isinstance(response.get('message'), str):
+        raise ValueError('public source mirror commit response identity differs')
+    lines = [line.strip() for line in response['message'].splitlines() if line.strip()]
+    trailers = [line for line in lines if line.startswith('Source-Commit:')]
+    if not lines or lines[-1] != 'Source-Commit: ' + source or trailers != ['Source-Commit: ' + source]:
+        raise ValueError('public mirror does not identify the exact accepted source commit')
+    return commit
 
 
 def publish(directory, source, repository):
@@ -133,12 +162,16 @@ def publish(directory, source, repository):
     version = manifests[0]['build_version']
     tag = 'node-v' + str(version) + '-' + source[:12]
     assets = [p for path in packages for p in (path, path.with_name(path.name + '.sha256'))]
-    if not verify_tag(repository, tag, source, allow_missing=True):
+    mirror_commit = tag_commit(repository, tag, allow_missing=True)
+    if mirror_commit is None:
+        mirror_commit = public_mirror_commit(repository, source)
         # Draft releases do not create their tag until publication. Create
-        # the immutable lightweight ref explicitly so it can be verified first.
+        # the immutable lightweight ref on the verified sanitized mirror commit.
         gh('api', 'repos/' + repository + '/git/refs', '--method', 'POST',
-           '-f', 'ref=refs/tags/' + tag, '-f', 'sha=' + source)
-        verify_tag(repository, tag, source)
+           '-f', 'ref=refs/tags/' + tag, '-f', 'sha=' + mirror_commit)
+        verify_tag(repository, tag, mirror_commit)
+    else:
+        public_mirror_commit(repository, source, mirror_commit)
     # Listing distinguishes an absent release from API/auth failure. Never
     # interpret failed authentication as permission to create another release.
     releases = json.loads(gh('api', 'repos/' + repository + '/releases?per_page=100'))
@@ -147,14 +180,15 @@ def publish(directory, source, repository):
         # Use the mutation's authoritative response. The releases list may
         # still be cached before this newly created draft (real CI failure).
         release = json.loads(gh('api', 'repos/' + repository + '/releases',
-            '--method', 'POST', '-f', 'tag_name=' + tag, '-f', 'target_commitish=' + source,
+            '--method', 'POST', '-f', 'tag_name=' + tag, '-f', 'target_commitish=' + mirror_commit,
             '-F', 'draft=true', '-f', 'make_latest=false',
             '-f', 'name=GPTAdmin Node ' + str(version),
             '-f', 'body=Manifest-verified Linux amd64/arm64 Node binaries. Source: ' + source
+            + '. Public mirror commit: ' + mirror_commit
             + '. Separate Node channel; the full-platform latest release is preserved.'))
     if (type(release.get('id')) is not int or release.get('tag_name') != tag):
         raise ValueError('Node release response identity differs')
-    verify_tag(repository, tag, source)
+    verify_tag(repository, tag, mirror_commit)
     present = {a['name']: a for a in release.get('assets', [])}
     if set(present) - {p.name for p in assets}:
         raise ValueError('unexpected asset in immutable Node release')
@@ -173,7 +207,7 @@ def publish(directory, source, repository):
             present[path.name] = uploaded
     if set(present) != {p.name for p in assets} or not all(asset_matches(present[p.name], p) for p in assets):
         raise ValueError('uploaded Node release digests differ')
-    verify_tag(repository, tag, source)
+    verify_tag(repository, tag, mirror_commit)
     if release.get('draft'):
         final = json.loads(gh('api', 'repos/' + repository + '/releases/' + str(release['id']),
             '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=false'))
@@ -182,7 +216,8 @@ def publish(directory, source, repository):
         final_assets = {a['name']: a for a in final.get('assets', [])}
         if set(final_assets) != set(present) or not all(asset_matches(final_assets[p.name], p) for p in assets):
             raise ValueError('published Node asset closure not confirmed; never rewrite')
-    print(json.dumps({'published': True, 'tag': tag, 'source': source, 'assets': [p.name for p in assets],
+    print(json.dumps({'published': True, 'tag': tag, 'source': source, 'public_mirror_commit': mirror_commit,
+                      'assets': [p.name for p in assets],
                       'legacy_latest_preserved': True}))
 
 
