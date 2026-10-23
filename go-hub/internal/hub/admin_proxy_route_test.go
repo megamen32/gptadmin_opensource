@@ -211,6 +211,55 @@ func TestProxyRouteProfileAtomicPrivatePersistenceAndAllowlist(t *testing.T) {
 	}
 }
 
+func TestProxyRouteListenerStateParsesSSNetIDColumn(t *testing.T) {
+	controller := newProxyRouteController("", "", func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "/usr/sbin/runuser" {
+			return nil, errors.New("unexpected command")
+		}
+		return []byte("tcp LISTEN 0 128 127.0.0.1:24836 0.0.0.0:*\n"), nil
+	})
+	if got := controller.listenerState(context.Background()); got != "listening" {
+		t.Fatalf("listenerState() = %q for real ss -Hln row, want listening", got)
+	}
+}
+
+func TestProxyRouteListenerParserRequiresListeningStateAndExactLocalAddress(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		row  string
+		want string
+	}{
+		{name: "legacy row without netid", row: "LISTEN 0 128 127.0.0.1:24836 0.0.0.0:*", want: "listening"},
+		{name: "empty result", row: "", want: "closed"},
+		{name: "wrong local port", row: "tcp LISTEN 0 128 127.0.0.1:24837 0.0.0.0:*", want: "unknown"},
+		{name: "wildcard IPv4 bind", row: "tcp LISTEN 0 128 0.0.0.0:24836 0.0.0.0:*", want: "unknown"},
+		{name: "wildcard IPv6 bind", row: "tcp LISTEN 0 128 [::]:24836 [::]:*", want: "unknown"},
+		{name: "not listening", row: "tcp ESTAB 0 0 127.0.0.1:24836 192.0.2.1:443", want: "unknown"},
+		{name: "incomplete row", row: "tcp LISTEN 0 128", want: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseProxyRouteListenerState(test.row); got != test.want {
+				t.Fatalf("parseProxyRouteListenerState(%q) = %q, want %q", test.row, got, test.want)
+			}
+		})
+	}
+}
+
+func TestProxyRouteLiveStatusCandidate(t *testing.T) {
+	if os.Getenv("GPTADMIN_PROXY_ROUTE_LIVE_STATUS_CANDIDATE") != "1" {
+		t.Skip("set GPTADMIN_PROXY_ROUTE_LIVE_STATUS_CANDIDATE=1 for read-only live status")
+	}
+	started := time.Now()
+	state, err := defaultProxyRouteController().status(context.Background())
+	t.Logf("status duration=%s desired=%s service=%s listener=%s", time.Since(started), state.Profile.DesiredState, state.Runtime.ServiceState, state.Runtime.ListenerState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Runtime.ListenerState != "listening" {
+		t.Fatalf("live VUSA listener readback = %q, want listening", state.Runtime.ListenerState)
+	}
+}
+
 func TestProxyRoutePUTRequiresFrozenProfileEnvelopeAndRejectsUnknownFields(t *testing.T) {
 	profile := defaultProxyRouteProfile()
 	profile.DesiredState = "enabled"

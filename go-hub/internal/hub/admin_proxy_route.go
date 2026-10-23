@@ -235,13 +235,37 @@ func (c *proxyRouteController) listenerState(ctx context.Context) string {
 	if err != nil {
 		return "unknown"
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return parseProxyRouteListenerState(string(out))
+}
+
+func parseProxyRouteListenerState(output string) string {
+	if strings.TrimSpace(output) == "" {
+		return "closed"
+	}
+	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 4 && fields[3] == "127.0.0.1:24836" {
-			return "listening"
+		if len(fields) == 0 {
+			continue
+		}
+		stateIndex := -1
+		for i, field := range fields {
+			if field == "LISTEN" {
+				stateIndex = i
+				break
+			}
+		}
+		if stateIndex < 0 {
+			return "unknown"
+		}
+		localAddressIndex := stateIndex + 3
+		if localAddressIndex >= len(fields) {
+			return "unknown"
+		}
+		if fields[localAddressIndex] != "127.0.0.1:24836" {
+			return "unknown"
 		}
 	}
-	return "closed"
+	return "listening"
 }
 
 func readProxyRouteProbe(path string) *proxyRouteProbe {

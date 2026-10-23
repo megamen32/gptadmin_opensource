@@ -170,10 +170,35 @@ def resolve_tag(tag, deadline):
         sha = obj.get('sha')
         if not isinstance(sha,str) or not re.fullmatch('[0-9a-f]{40}',sha):
             raise ValueError('invalid accepted Node tag')
-        if obj.get('type') == 'commit':return sha
+        if obj.get('type') == 'commit':
+            match = re.fullmatch(r'node-v[1-9][0-9]*-([0-9a-f]{12})', tag)
+            if not match:
+                raise ValueError('invalid accepted Node tag')
+            return source_from_public_mirror(sha, match[1], deadline)
         if obj.get('type') != 'tag':raise ValueError('Node tag does not refer to a commit')
         obj=json.loads(get('https://api.github.com/repos/'+REPOSITORY+'/git/tags/'+sha,65536,deadline))['object']
     raise ValueError('unbounded Node tag chain')
+
+
+def source_from_public_mirror(mirror_commit, prefix, deadline):
+    patch_url = 'https://github.com/' + REPOSITORY + '/commit/' + mirror_commit + '.patch'
+    patch = get(patch_url, 256 * 1024, deadline)
+    header, separator, _ = patch.partition(b'\n---\n')
+    if not separator:
+        raise ValueError('public Node commit patch has no bounded message boundary')
+    try:
+        message_lines = header.decode('utf-8', 'strict').splitlines()
+    except UnicodeDecodeError:
+        raise ValueError('public Node commit message is not valid UTF-8') from None
+    nonempty = [line.strip() for line in message_lines if line.strip()]
+    commit_header = re.fullmatch(r'From ([0-9a-f]{40}) .+', message_lines[0]) if message_lines else None
+    source_lines = [line for line in nonempty if line.startswith('Source-Commit:')]
+    source_match = (re.fullmatch(r'Source-Commit: ([0-9a-f]{40})', source_lines[0])
+                    if len(source_lines) == 1 else None)
+    if (not commit_header or commit_header[1] != mirror_commit or not source_match
+            or nonempty[-1] != source_lines[0] or not source_match[1].startswith(prefix)):
+        raise ValueError('public Node mirror Source-Commit trailer does not bind the release tag')
+    return source_match[1]
 
 
 def latest_public_tag(deadline):
@@ -209,7 +234,8 @@ def latest_public_tag(deadline):
                GIT_TERMINAL_PROMPT='0', GIT_ALLOW_PROTOCOL='https')
     try:
         refs = subprocess.run(['git', '-c', 'credential.helper=', '-c', 'protocol.version=2',
-                               'ls-remote', '--refs', GIT_REPOSITORY, 'refs/tags/' + tag],
+                               'ls-remote', GIT_REPOSITORY, 'refs/tags/' + tag,
+                               'refs/tags/' + tag + '^{}'],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                               timeout=min(20, remaining), check=False)
     except (subprocess.TimeoutExpired, OSError):
@@ -220,12 +246,18 @@ def latest_public_tag(deadline):
         lines = refs.stdout.decode('ascii', 'strict').splitlines()
     except UnicodeDecodeError:
         raise ValueError('public Node release tag response is invalid') from None
-    if len(lines) != 1:
-        raise ValueError('public Node release tag is missing or ambiguous')
-    ref = re.fullmatch(r'([0-9a-f]{40})\trefs/tags/' + re.escape(tag), lines[0])
-    if not ref or not ref[1].startswith(prefix):
-        raise ValueError('public Node release tag does not bind its source prefix')
-    return tag, ref[1], version
+    refs_by_name = {}
+    for line in lines:
+        ref = re.fullmatch(r'([0-9a-f]{40})\t(refs/tags/' + re.escape(tag) + r'(?:\^\{\})?)', line)
+        if not ref or ref[2] in refs_by_name:
+            raise ValueError('public Node release tag refs are invalid or ambiguous')
+        refs_by_name[ref[2]] = ref[1]
+    base_ref = 'refs/tags/' + tag
+    peeled_ref = base_ref + '^{}'
+    if base_ref not in refs_by_name or len(refs_by_name) not in (1, 2):
+        raise ValueError('public Node release tag refs are missing or ambiguous')
+    mirror_commit = refs_by_name.get(peeled_ref, refs_by_name[base_ref])
+    return tag, source_from_public_mirror(mirror_commit, prefix, deadline), version
 
 
 def checksum_from_asset(raw, filename):

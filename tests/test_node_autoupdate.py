@@ -730,8 +730,21 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_tag_resolution_is_exact_commit_not_only_short_prefix(self):
         expected='1'*12+'2'*28
-        with patch.object(update,'get',return_value=json.dumps({'object':{'sha':expected,'type':'commit'}}).encode()):
+        mirror='4'*40
+        api=json.dumps({'object':{'sha':mirror,'type':'commit'}}).encode()
+        patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror\n\n'
+                     f'Source-Commit: {expected}\n---\n').encode()
+        with patch.object(update,'get',side_effect=[api,patch_bytes]):
             self.assertEqual(update.resolve_tag(TAG,time.monotonic()+5),expected)
+
+    def test_tag_resolution_rejects_public_mirror_without_matching_provenance(self):
+        mirror='2'*12+'4'*28
+        api=json.dumps({'object':{'sha':mirror,'type':'commit'}}).encode()
+        patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror\n\n'
+                     f'Source-Commit: {"5"*40}\n---\n').encode()
+        with patch.object(update,'get',side_effect=[api,patch_bytes]):
+            with self.assertRaisesRegex(ValueError,'Source-Commit'):
+                update.resolve_tag(TAG,time.monotonic()+5)
 
     def test_rate_limited_api_falls_back_to_immutable_public_feed_tag_and_checksum(self):
         from io import BytesIO
@@ -748,26 +761,106 @@ class NodeAutoupdateTests(unittest.TestCase):
         self.assertIsNone(asset['size'])
         self.assertTrue(get.call_args_list[1].args[0].endswith('/gptadmin-node-linux-amd64.tar.gz.sha256'))
 
-    def test_public_feed_selects_latest_node_tag_and_binds_exact_git_ref(self):
+    def test_public_feed_binds_sanitized_tag_to_exact_source_commit_trailer(self):
         latest='node-v124-'+'2'*12
         source='2'*12+'3'*28
+        mirror='4'*40
         ns='http://www.w3.org/2005/Atom'
         feed=f'''<feed xmlns="{ns}">
           <entry><id>tag:github.com,2008:Repository/1/node-v123-{'1'*12}</id><updated>2026-10-01T00:00:00Z</updated></entry>
           <entry><id>tag:github.com,2008:Repository/1/{latest}</id><updated>2026-10-02T00:00:00Z</updated></entry>
         </feed>'''.encode()
-        result=SimpleNamespace(returncode=0,stdout=f'{source}\trefs/tags/{latest}\n'.encode(),stderr=b'')
-        with patch.object(update,'get',return_value=feed),patch.object(update.subprocess,'run',return_value=result) as run:
+        patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\n'
+            'From: mirror bot <bot@example.invalid>\n'
+            'Date: Thu, 22 Oct 2026 12:00:00 +0000\n'
+            'Subject: [PATCH] sanitized source snapshot\n\n'
+            f'Source-Commit: {source}\n---\n').encode()
+        result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
+        with patch.object(update,'get',side_effect=[feed,patch_bytes]) as get, \
+             patch.object(update.subprocess,'run',return_value=result) as run:
             self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,source,124))
         self.assertEqual(run.call_args.args[0][0:3],['git','-c','credential.helper='])
+        self.assertTrue(get.call_args_list[1].args[0].endswith('/commit/'+mirror+'.patch'))
 
-    def test_public_feed_refuses_unbound_tag_and_xml_entity_declarations(self):
+    def test_public_feed_uses_exact_peeled_commit_for_annotated_tag(self):
+        latest='node-v124-'+'2'*12
+        source='2'*12+'3'*28
+        tag_object='5'*40
+        peeled='4'*40
+        ns='http://www.w3.org/2005/Atom'
+        feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
+             '<updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
+        patch_bytes=(f'From {peeled} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror\n\n'
+                     f'Source-Commit: {source}\n---\n').encode()
+        refs=SimpleNamespace(returncode=0,stdout=(f'{tag_object}\trefs/tags/{latest}\n'
+             f'{peeled}\trefs/tags/{latest}^{{}}\n').encode(),stderr=b'')
+        with patch.object(update,'get',side_effect=[feed,patch_bytes]) as get, \
+             patch.object(update.subprocess,'run',return_value=refs) as run:
+            self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,source,124))
+        self.assertEqual(run.call_args.args[0][-2:],['refs/tags/'+latest,'refs/tags/'+latest+'^{}'])
+        self.assertTrue(get.call_args_list[1].args[0].endswith('/commit/'+peeled+'.patch'))
+
+    def test_public_feed_rejects_missing_base_and_ambiguous_peeled_refs(self):
         latest='node-v124-'+'2'*12
         ns='http://www.w3.org/2005/Atom'
+        feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
+             '<updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
+        bad_refs=[
+            f'{"4"*40}\trefs/tags/{latest}^{{}}\n',
+            f'{"4"*40}\trefs/tags/{latest}\n{"5"*40}\trefs/tags/{latest}^{{}}\n'
+            f'{"6"*40}\trefs/tags/{latest}^{{}}\n',
+            f'{"4"*40}\trefs/tags/{latest}\n{"5"*40}\trefs/tags/unexpected\n',
+        ]
+        for text in bad_refs:
+            refs=SimpleNamespace(returncode=0,stdout=text.encode(),stderr=b'')
+            with self.subTest(text=text), patch.object(update,'get',return_value=feed), \
+                 patch.object(update.subprocess,'run',return_value=refs):
+                with self.assertRaisesRegex(ValueError,'refs|invalid|ambiguous|missing'):
+                    update.latest_public_tag(time.monotonic()+30)
+
+    def test_public_feed_refuses_missing_duplicate_or_mismatched_source_trailers(self):
+        latest='node-v124-'+'2'*12
+        source='2'*12+'3'*28
+        mirror='2'*12+'4'*28
+        ns='http://www.w3.org/2005/Atom'
+        feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
+             '<updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
+        prefix=f'From {mirror} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror snapshot\n\n'
+        cases={
+            'missing':prefix+'No provenance trailer\n---\n',
+            'duplicate':prefix+f'Source-Commit: {source}\nSource-Commit: {source}\n---\n',
+            'mismatched':prefix+f'Source-Commit: {"5"*40}\n---\n',
+        }
+        result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
+        for label,patch_bytes in cases.items():
+            with self.subTest(label=label), \
+                 patch.object(update,'get',side_effect=[feed,patch_bytes.encode()]), \
+                 patch.object(update.subprocess,'run',return_value=result):
+                with self.assertRaisesRegex(ValueError,'source|trailer|provenance'):
+                    update.latest_public_tag(time.monotonic()+30)
+
+    def test_public_feed_refuses_ambiguous_tag_ref_mapping(self):
+        latest='node-v124-'+'2'*12
+        ns='http://www.w3.org/2005/Atom'
+        feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
+             '<updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
+        refs=SimpleNamespace(returncode=0,stdout=(f'{"3"*40}\trefs/tags/{latest}\n'
+            f'{"4"*40}\trefs/tags/{latest}\n').encode(),stderr=b'')
+        with patch.object(update,'get',return_value=feed),patch.object(update.subprocess,'run',return_value=refs):
+            with self.assertRaisesRegex(ValueError,'ambiguous'):
+                update.latest_public_tag(time.monotonic()+30)
+
+    def test_public_feed_refuses_invalid_source_provenance_and_xml_entity_declarations(self):
+        latest='node-v124-'+'2'*12
+        mirror='4'*40
+        ns='http://www.w3.org/2005/Atom'
         feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id><updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
-        result=SimpleNamespace(returncode=0,stdout=f"{'3'*40}\trefs/tags/{latest}\n".encode(),stderr=b'')
-        with patch.object(update,'get',return_value=feed),patch.object(update.subprocess,'run',return_value=result):
-            with self.assertRaisesRegex(ValueError,'source prefix'):
+        patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\n'
+            'Subject: [PATCH] mirror snapshot\n\n'
+            f'Source-Commit: {"3"*40}\n---\n').encode()
+        result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
+        with patch.object(update,'get',side_effect=[feed,patch_bytes]),patch.object(update.subprocess,'run',return_value=result):
+            with self.assertRaisesRegex(ValueError,'source|trailer|provenance'):
                 update.latest_public_tag(time.monotonic()+30)
         with patch.object(update,'get',return_value=b'<!DOCTYPE feed [<!ENTITY x "boom">]><feed/>'):
             with self.assertRaisesRegex(ValueError,'forbidden declaration'):
