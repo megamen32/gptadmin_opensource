@@ -214,6 +214,7 @@ class Layout:
                  shellmcp_opt_root=Path('/opt/gptadmin-shellmcp'),
                  shellmcp_service_dropin=Path('/etc/systemd/system/gptadmin-shellmcp-go.service.d') / SHELLMCP_PROXY_SERVICE_DROPIN_NAME,
                  shellmcp_env_file=SHELLMCP_ENV_FILE,
+                 shellmcp_proc_root=Path('/proc'),
                  proxy_route_unit_path=Path('/etc/systemd/system') / PROXY_ROUTE_SERVICE,
                  proxy_route_state_file=Path('/var/lib/gptadmin-node/proxy-route-relay02-package.json')):
         self.opt_root = Path(opt_root)
@@ -223,6 +224,7 @@ class Layout:
         self.shellmcp_opt_root = Path(shellmcp_opt_root)
         self.shellmcp_service_dropin = Path(shellmcp_service_dropin)
         self.shellmcp_env_file = Path(shellmcp_env_file)
+        self.shellmcp_proc_root = Path(shellmcp_proc_root)
         self.proxy_route_unit_path = Path(proxy_route_unit_path)
         self.proxy_route_state_file = Path(proxy_route_state_file)
 
@@ -1318,7 +1320,18 @@ def shellmcp_dropin_text(layout: Layout) -> str:
             str(layout.shellmcp_current_link() / 'bin' / 'shellmcp') + '\n')
 
 
-def shellmcp_version_url(layout: Layout) -> str:
+def shellmcp_queue_mode(layout: Layout) -> bool:
+    """Queue transports intentionally have no local HTTP listener."""
+    env = parse_env_file(layout.shellmcp_env_file) if layout.shellmcp_env_file.is_file() else {}
+    mode = env.get('SHELLMCP_MODE') or env.get('SHELL_MODE') or ''
+    default_queue = '0' if mode == 'webhook' else '1'
+    value = env.get('SHELLMCP_QUEUE', env.get('SHELL_QUEUE', default_queue))
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def shellmcp_version_url(layout: Layout) -> str | None:
+    if shellmcp_queue_mode(layout):
+        return None
     env = parse_env_file(layout.shellmcp_env_file) if layout.shellmcp_env_file.is_file() else {}
     host = env.get('SHELL_HOST') or env.get('SHELLMCP_HOST') or '127.0.0.1'
     port_text = env.get('SHELL_PORT') or env.get('SHELLMCP_PORT') or env.get('PORT') or '25900'
@@ -1338,7 +1351,10 @@ def shellmcp_version_url(layout: Layout) -> str:
 
 
 def shellmcp_live_version(layout: Layout) -> dict:
-    status, payload = http_json('GET', shellmcp_version_url(layout), timeout=HTTP_CALL_TIMEOUT_SECS)
+    url = shellmcp_version_url(layout)
+    if url is None:
+        raise PreflightError('queue-mode ShellMCP requires external Hub heartbeat readback')
+    status, payload = http_json('GET', url, timeout=HTTP_CALL_TIMEOUT_SECS)
     if status != 200 or not isinstance(payload, dict) or payload.get('component') != 'shellmcp-go' \
             or payload.get('status') != 'ready':
         raise RuntimeFailure(f'ShellMCP version readback failed (HTTP {status})')
@@ -1350,8 +1366,8 @@ def shellmcp_connection_refused(error: BaseException) -> bool:
     return isinstance(reason, OSError) and reason.errno == errno.ECONNREFUSED
 
 
-def shellmcp_legacy_binary_digest() -> str:
-    binary = SHELLMCP_LEGACY_BINARY
+def shellmcp_legacy_binary_digest(binary: Path | None = None) -> str:
+    binary = Path(binary) if binary is not None else SHELLMCP_LEGACY_BINARY
     if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
         raise PreflightError('legacy ShellMCP binary is not a regular executable')
     return digest_file(binary)
@@ -1364,6 +1380,8 @@ def verify_shellmcp_legacy_restore(layout: Layout, runner: Runner, expected_dige
         raise RuntimeFailure('legacy ShellMCP package state was not restored')
     if shellmcp_legacy_binary_digest() != expected_digest:
         raise RuntimeFailure('legacy ShellMCP executable changed during package rollback')
+    if shellmcp_queue_mode(layout):
+        shellmcp_process_snapshot(layout, runner, SHELLMCP_LEGACY_BINARY, expected_digest)
     return contract
 
 
@@ -1494,9 +1512,71 @@ def digest_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def shellmcp_process_snapshot(layout: Layout, runner: Runner, expected_binary: Path,
+                              expected_sha256: str) -> dict:
+    """Prove the active service PID executes the exact package-owned binary."""
+    active = systemctl(runner, 'is-active', SHELLMCP_SERVICE, check=False)
+    if active.returncode or active.stdout.strip() != 'active':
+        raise RuntimeFailure('ShellMCP service is not active')
+    first_pid_text = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'MainPID')
+    if not first_pid_text.isdigit() or int(first_pid_text) <= 0:
+        raise RuntimeFailure('ShellMCP service has no active MainPID')
+    pid = int(first_pid_text)
+    process_exe = layout.shellmcp_proc_root / str(pid) / 'exe'
+    try:
+        link_target = os.readlink(process_exe)
+        if link_target.endswith(' (deleted)'):
+            raise RuntimeFailure('ShellMCP process executable is deleted')
+        actual_path = process_exe.resolve(strict=True)
+        expected_path = Path(expected_binary).resolve(strict=True)
+        actual_sha256 = digest_file(process_exe)
+    except OSError:
+        raise RuntimeFailure('cannot read the active ShellMCP process executable') from None
+    if actual_path != expected_path or actual_sha256 != expected_sha256:
+        raise RuntimeFailure('active ShellMCP process differs from the verified package binary')
+    second_pid_text = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'MainPID')
+    if second_pid_text != first_pid_text:
+        raise RuntimeFailure('ShellMCP MainPID changed during package readback')
+    active_after = systemctl(runner, 'is-active', SHELLMCP_SERVICE, check=False)
+    if active_after.returncode or active_after.stdout.strip() != 'active':
+        raise RuntimeFailure('ShellMCP service stopped during package readback')
+    return {'pid': pid, 'sha256': actual_sha256}
+
+
+def wait_shellmcp_process(layout: Layout, runner: Runner, expected_binary: Path,
+                          expected_sha256: str) -> dict:
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECS
+    while time.monotonic() < deadline:
+        try:
+            verify_shellmcp_service_contract(layout, runner)
+            return shellmcp_process_snapshot(layout, runner, expected_binary, expected_sha256)
+        except (RuntimeFailure, PreflightError, OSError):
+            time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+    raise RuntimeFailure('ShellMCP queue-mode process did not match the verified package before the deadline')
+
+
 def cmd_shellmcp_status(args, layout: Layout, runner: Runner) -> None:
     managed, contract = verify_shellmcp_service_contract(layout, runner)
     target = shellmcp_current_target(layout)
+    if shellmcp_queue_mode(layout):
+        package = None
+        if managed:
+            if target is None or target.parent != layout.shellmcp_versions_root():
+                raise PreflightError('managed ShellMCP service has no package-owned current version')
+            package = shellmcp_version_manifest(target)
+            expected_binary = target / 'bin' / 'shellmcp'
+            expected_sha256 = package['sha256']
+        else:
+            if target is not None or layout.shellmcp_current_link().exists() or layout.shellmcp_current_link().is_symlink():
+                raise PreflightError('unmanaged ShellMCP service has conflicting package state')
+            expected_binary = Path(contract['exec_start'])
+            expected_sha256 = shellmcp_legacy_binary_digest(expected_binary)
+        process = shellmcp_process_snapshot(layout, runner, expected_binary, expected_sha256)
+        print(json.dumps({'ok': True, 'command': 'shellmcp status', 'managed': managed,
+                          'current': target.name if target else None, 'package': package, 'service': contract,
+                          'version': None, 'runtime_status': 'pending_external_hub_heartbeat',
+                          'hub_heartbeat_required': True, 'process': process}, sort_keys=True))
+        return
     version = shellmcp_live_version(layout)
     package = None
     if managed:
@@ -1524,28 +1604,44 @@ def cmd_shellmcp_rollback(args, layout: Layout, runner: Runner) -> None:
     previous = shellmcp_version_manifest(current)
     target = select_rollback_dir(layout.shellmcp_versions_root(), current, args.to)
     target_manifest = shellmcp_version_manifest(target)
-    try:
-        live_before = shellmcp_live_version(layout)
-    except (OSError, urllib.error.URLError, RuntimeFailure) as error:
-        raise PreflightError(f'cannot verify current ShellMCP service before rollback: {error}') from None
+    queue_mode = shellmcp_queue_mode(layout)
+    if queue_mode:
+        live_before = None
+        shellmcp_process_snapshot(layout, runner, current / 'bin' / 'shellmcp', previous['sha256'])
+    else:
+        try:
+            live_before = shellmcp_live_version(layout)
+        except (OSError, urllib.error.URLError, RuntimeFailure) as error:
+            raise PreflightError(f'cannot verify current ShellMCP service before rollback: {error}') from None
     try:
         atomic_symlink(target, layout.shellmcp_current_link())
         systemctl(runner, 'restart', SHELLMCP_SERVICE)
-        live = wait_shellmcp_version(layout, target_manifest['git_commit'], target_manifest['build_version'])
+        if queue_mode:
+            live = None
+            process = wait_shellmcp_process(layout, runner, target / 'bin' / 'shellmcp', target_manifest['sha256'])
+        else:
+            live = wait_shellmcp_version(layout, target_manifest['git_commit'], target_manifest['build_version'])
     except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as error:
         try:
             atomic_symlink(current, layout.shellmcp_current_link())
             systemctl(runner, 'restart', SHELLMCP_SERVICE)
-            restored = shellmcp_live_version(layout)
-            if (restored.get('git_commit') != live_before.get('git_commit')
-                    or restored.get('build_version') != live_before.get('build_version')):
-                raise RuntimeFailure('rollback recovery readback differs from the pre-rollback ShellMCP version')
+            if queue_mode:
+                wait_shellmcp_process(layout, runner, current / 'bin' / 'shellmcp', previous['sha256'])
+            else:
+                restored = shellmcp_live_version(layout)
+                if (restored.get('git_commit') != live_before.get('git_commit')
+                        or restored.get('build_version') != live_before.get('build_version')):
+                    raise RuntimeFailure('rollback recovery readback differs from the pre-rollback ShellMCP version')
         except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as restore:
             raise RuntimeFailure(f'ShellMCP rollback failed ({error}); service recovery failed ({restore})') from None
         raise RuntimeFailure(f'ShellMCP rollback failed ({error}); current version restored and read back') from None
-    print(json.dumps({'ok': True, 'command': 'shellmcp rollback',
-                      'version_dir': target.name, 'previous_dir': current.name,
-                      'previous_version': previous, 'version': live, 'service': contract}, sort_keys=True))
+    result = {'ok': True, 'command': 'shellmcp rollback', 'version_dir': target.name,
+              'previous_dir': current.name, 'previous_version': previous,
+              'version': live, 'service': contract}
+    if queue_mode:
+        result.update({'runtime_status': 'pending_external_hub_heartbeat',
+                       'hub_heartbeat_required': True, 'process': process})
+    print(json.dumps(result, sort_keys=True))
 
 
 def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
@@ -1553,6 +1649,7 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
     check_disk_floor(layout.shellmcp_opt_root, 'ShellMCP install root')
     managed, contract = verify_shellmcp_service_contract(layout, runner)
     previous_target = shellmcp_current_target(layout)
+    queue_mode = shellmcp_queue_mode(layout)
     legacy_digest = None
     current_link = layout.shellmcp_current_link()
     if (not managed and previous_target is None and not current_link.exists()
@@ -1561,20 +1658,33 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
             legacy_digest = shellmcp_legacy_binary_digest()
         except PreflightError:
             legacy_digest = None
-    try:
-        before = shellmcp_live_version(layout)
-    except (OSError, urllib.error.URLError, RuntimeFailure) as error:
-        if legacy_digest is not None and shellmcp_connection_refused(error):
-            before = None
+    previous_manifest = None
+    if queue_mode:
+        before = None
+        if managed:
+            if previous_target is None or previous_target.parent != layout.shellmcp_versions_root():
+                raise PreflightError('managed ShellMCP service has no package-owned current version')
+            previous_manifest = shellmcp_version_manifest(previous_target)
+            shellmcp_process_snapshot(layout, runner, previous_target / 'bin' / 'shellmcp', previous_manifest['sha256'])
+        elif legacy_digest is not None:
+            shellmcp_process_snapshot(layout, runner, Path(contract['exec_start']), legacy_digest)
         else:
-            raise PreflightError(f'cannot verify current ShellMCP service before update: {error}') from None
-    if managed:
-        if previous_target is None or previous_target.parent != layout.shellmcp_versions_root():
-            raise PreflightError('managed ShellMCP service has no package-owned current version')
-        previous_manifest = shellmcp_version_manifest(previous_target)
-        if (before.get('git_commit') != previous_manifest['git_commit']
-                or before.get('build_version') != previous_manifest['build_version']):
-            raise PreflightError('ShellMCP live version differs from its current package; refusing update')
+            raise PreflightError('queue-mode ShellMCP legacy process cannot be matched to its binary')
+    else:
+        try:
+            before = shellmcp_live_version(layout)
+        except (OSError, urllib.error.URLError, RuntimeFailure) as error:
+            if legacy_digest is not None and shellmcp_connection_refused(error):
+                before = None
+            else:
+                raise PreflightError(f'cannot verify current ShellMCP service before update: {error}') from None
+        if managed:
+            if previous_target is None or previous_target.parent != layout.shellmcp_versions_root():
+                raise PreflightError('managed ShellMCP service has no package-owned current version')
+            previous_manifest = shellmcp_version_manifest(previous_target)
+            if (before.get('git_commit') != previous_manifest['git_commit']
+                    or before.get('build_version') != previous_manifest['build_version']):
+                raise PreflightError('ShellMCP live version differs from its current package; refusing update')
     versions_root = layout.shellmcp_versions_root()
     staging = versions_root / f'.staging-{os.getpid()}'
     if staging.is_symlink():
@@ -1616,7 +1726,11 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
         atomic_write(dropin, shellmcp_dropin_text(layout), 0o644)
         systemctl(runner, 'daemon-reload')
         systemctl(runner, 'restart', SHELLMCP_SERVICE)
-        version = wait_shellmcp_version(layout, manifest['git_commit'], manifest['build_version'])
+        if queue_mode:
+            version = None
+            process = wait_shellmcp_process(layout, runner, final / 'bin' / 'shellmcp', manifest['files'][SHELLMCP_PACKAGE_FILE]['sha256'])
+        else:
+            version = wait_shellmcp_version(layout, manifest['git_commit'], manifest['build_version'])
     except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as error:
         rollback_error = None
         try:
@@ -1630,7 +1744,9 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
                 atomic_write(dropin, previous_dropin.decode('utf-8'), 0o644)
             systemctl(runner, 'daemon-reload')
             systemctl(runner, 'restart', SHELLMCP_SERVICE)
-            if before is None:
+            if queue_mode and previous_target is not None and previous_manifest is not None:
+                wait_shellmcp_process(layout, runner, previous_target / 'bin' / 'shellmcp', previous_manifest['sha256'])
+            elif before is None:
                 verify_shellmcp_legacy_restore(layout, runner, legacy_digest)
             else:
                 restored = shellmcp_live_version(layout)
@@ -1639,14 +1755,18 @@ def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
                     raise RuntimeFailure('rollback readback differs from the pre-update ShellMCP version')
         except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as restore:
             rollback_error = str(restore)
+        restored_legacy = before is None and previous_target is None
         detail = (f' ShellMCP rollback failed: {rollback_error}' if rollback_error else
-                  ' legacy service restored and binary/unit verified' if before is None else
+                  ' legacy service restored and binary/unit verified' if restored_legacy else
                   ' previous version restored and read back')
         raise RuntimeFailure(f'ShellMCP update failed ({error});{detail}') from None
-    print(json.dumps({'ok': True, 'command': 'shellmcp update',
-                      'previous': before, 'version': version,
-                      'bootstrapped_from_legacy': before is None,
-                      'version_dir': final.name, 'service': contract}, sort_keys=True))
+    result = {'ok': True, 'command': 'shellmcp update', 'previous': before, 'version': version,
+              'bootstrapped_from_legacy': previous_target is None,
+              'version_dir': final.name, 'service': contract}
+    if queue_mode:
+        result.update({'runtime_status': 'pending_external_hub_heartbeat',
+                       'hub_heartbeat_required': True, 'process': process})
+    print(json.dumps(result, sort_keys=True))
 
 
 def cmd_proxy_route_status(args, layout: Layout, runner: Runner) -> None:

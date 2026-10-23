@@ -284,6 +284,14 @@ func unknownProxyRouteProbe(reason string) *proxyRouteProbe {
 }
 
 func (c *proxyRouteController) status(ctx context.Context) (proxyRouteState, error) {
+	return c.readStatus(ctx, true)
+}
+
+func (c *proxyRouteController) mutationStatus(ctx context.Context) (proxyRouteState, error) {
+	return c.readStatus(ctx, false)
+}
+
+func (c *proxyRouteController) readStatus(ctx context.Context, readListener bool) (proxyRouteState, error) {
 	profile, saved, err := c.readProfile()
 	if err != nil {
 		return proxyRouteState{}, err
@@ -292,7 +300,10 @@ func (c *proxyRouteController) status(ctx context.Context) (proxyRouteState, err
 	state.Profile = profile
 	state.Runtime.ProfileSaved = saved
 	state.Runtime.ServiceState = c.serviceState(ctx)
-	state.Runtime.ListenerState = c.listenerState(ctx)
+	state.Runtime.ListenerState = "unknown"
+	if readListener {
+		state.Runtime.ListenerState = c.listenerState(ctx)
+	}
 	state.Runtime.LastProbe = readProxyRouteProbe(c.probePath)
 	return state, nil
 }
@@ -339,26 +350,27 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 		result.Server44PathReason = strPtr("Saved route profile could not be read: " + err.Error())
 		return result
 	}
-	direct, directErr := c.sshVUSA(probeCtx, "curl", "--silent", "--show-error", "--fail", "--max-time", "6", proxyRouteProbeURL)
-	if directErr == nil {
-		result.DirectExitIP, directErr = parseProxyRouteIP(direct)
+	type ipResult struct {
+		proxied bool
+		ip      *string
+		err     error
 	}
-	if directErr != nil {
-		appendProxyRouteReason(&result, "Direct VUSA request failed: "+directErr.Error())
-	}
-
-	type proxyResult struct {
-		ip  *string
-		err error
-	}
-	proxyDone := make(chan proxyResult, 1)
+	requestDone := make(chan ipResult, 2)
 	go func() {
-		proxyOut, err := c.sshVUSA(probeCtx, "curl", "--silent", "--show-error", "--fail", "--max-time", "7", "--proxy", "http://127.0.0.1:24836", proxyRouteProbeURL)
+		out, err := c.sshVUSA(probeCtx, "curl", "--silent", "--show-error", "--fail", "--max-time", "6", proxyRouteProbeURL)
 		var ip *string
 		if err == nil {
-			ip, err = parseProxyRouteIP(proxyOut)
+			ip, err = parseProxyRouteIP(out)
 		}
-		proxyDone <- proxyResult{ip: ip, err: err}
+		requestDone <- ipResult{ip: ip, err: err}
+	}()
+	go func() {
+		out, err := c.sshVUSA(probeCtx, "curl", "--silent", "--show-error", "--fail", "--max-time", "7", "--proxy", "http://127.0.0.1:24836", proxyRouteProbeURL)
+		var ip *string
+		if err == nil {
+			ip, err = parseProxyRouteIP(out)
+		}
+		requestDone <- ipResult{proxied: true, ip: ip, err: err}
 	}()
 
 	deadline := time.NewTimer(8 * time.Second)
@@ -367,30 +379,44 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 	defer ticker.Stop()
 	var pathConfirmed bool
 	var pathReadbackErr error
+	var directErr, proxyErr error
+	var gotDirect, gotProxy bool
 	if ok, err := c.hasEstablished44Socket(probeCtx); err != nil {
 		pathReadbackErr = err
 	} else if ok {
 		pathConfirmed = true
 	}
-	for !pathConfirmed && pathReadbackErr == nil {
+	for !gotDirect || !gotProxy || (!pathConfirmed && pathReadbackErr == nil && !gotProxy) {
 		select {
+		case request := <-requestDone:
+			if request.proxied {
+				gotProxy = true
+				result.ProxyExitIP = request.ip
+				proxyErr = request.err
+			} else {
+				gotDirect = true
+				result.DirectExitIP = request.ip
+				directErr = request.err
+			}
 		case <-probeCtx.Done():
-			pathReadbackErr = probeCtx.Err()
-			break
+			if !pathConfirmed && pathReadbackErr == nil {
+				pathReadbackErr = probeCtx.Err()
+			}
 		case <-deadline.C:
-			pathReadbackErr = errors.New("timed out waiting for node-44 socket readback")
-			break
+			if !pathConfirmed && pathReadbackErr == nil {
+				pathReadbackErr = errors.New("timed out waiting for node-44 socket readback")
+			}
 		case <-ticker.C:
-			checkCtx, checkCancel := context.WithTimeout(probeCtx, 800*time.Millisecond)
+			if gotProxy || pathConfirmed || pathReadbackErr != nil {
+				continue
+			}
+			checkCtx, checkCancel := context.WithTimeout(probeCtx, 2*time.Second)
 			ok, err := c.hasEstablished44Socket(checkCtx)
 			checkCancel()
 			if err != nil {
 				pathReadbackErr = err
-				break
-			}
-			if ok {
+			} else if ok {
 				pathConfirmed = true
-				break
 			}
 		}
 	}
@@ -405,11 +431,12 @@ func (c *proxyRouteController) probe(ctx context.Context) proxyRouteProbe {
 		appendProxyRouteReason(&result, "No established TCP connection to 203.0.113.10:3128 was observed during the VUSA proxy request.")
 	}
 
-	proxy := <-proxyDone
-	result.ProxyExitIP = proxy.ip
-	if proxy.err != nil {
+	if directErr != nil {
+		appendProxyRouteReason(&result, "Direct VUSA request failed: "+directErr.Error())
+	}
+	if proxyErr != nil {
 		result.State = "fail"
-		appendProxyRouteReason(&result, "Proxy request failed: "+proxy.err.Error())
+		appendProxyRouteReason(&result, "Proxy request failed: "+proxyErr.Error())
 		return result
 	}
 	if directErr != nil {
@@ -552,7 +579,7 @@ func (s *Server) adminProxyRouteWithController(w http.ResponseWriter, r *http.Re
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
-		state, err := controller.status(ctx)
+		state, err := controller.mutationStatus(ctx)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 			return
@@ -596,7 +623,7 @@ func (s *Server) adminProxyRouteWithController(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
 		return
 	}
-	state, err := controller.status(ctx)
+	state, err := controller.mutationStatus(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return

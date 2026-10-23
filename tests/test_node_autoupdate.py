@@ -28,6 +28,182 @@ def index(**changes):
 
 
 class NodeAutoupdateTests(unittest.TestCase):
+    def test_shellmcp_queue_transport_has_no_local_version_endpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            env=Path(d)/'go-shellmcp.env'
+            env.write_text('SHELL_HOST=0.0.0.0\nSHELL_PORT=25900\nSHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            layout=manager.Layout(shellmcp_env_file=env)
+            self.assertIsNone(manager.shellmcp_version_url(layout))
+
+    def test_shellmcp_queue_process_readback_requires_stable_manifest_verified_executable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); env=root/'go-shellmcp.env'; env.write_text('SHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            binary=root/'versions'/'a'
+            binary.parent.mkdir(); binary.write_bytes(b'verified-shellmcp')
+            proc=root/'proc'; (proc/'221').mkdir(parents=True); (proc/'221'/'exe').symlink_to(binary)
+            layout=manager.Layout(shellmcp_env_file=env,shellmcp_proc_root=proc)
+            class ServiceRunner:
+                def __init__(self,pids): self.pids=iter(pids)
+                def run(self,argv,timeout=None):
+                    return SimpleNamespace(returncode=0,stdout=next(self.pids),stderr='')
+            with patch.object(manager,'systemctl',return_value=SimpleNamespace(returncode=0,stdout='active',stderr='')):
+                proof=manager.shellmcp_process_snapshot(layout,ServiceRunner(['221','221']),binary,hashlib.sha256(binary.read_bytes()).hexdigest())
+                self.assertEqual(proof['pid'],221)
+                with self.assertRaises(manager.RuntimeFailure):
+                    manager.shellmcp_process_snapshot(layout,ServiceRunner(['221','221']),binary,'0'*64)
+                duplicate=root/'other-copy'; duplicate.write_bytes(binary.read_bytes())
+                with self.assertRaises(manager.RuntimeFailure):
+                    manager.shellmcp_process_snapshot(layout,ServiceRunner(['221','221']),duplicate,hashlib.sha256(duplicate.read_bytes()).hexdigest())
+                with self.assertRaises(manager.RuntimeFailure):
+                    manager.shellmcp_process_snapshot(layout,ServiceRunner(['221','222']),binary,hashlib.sha256(binary.read_bytes()).hexdigest())
+
+    def test_shellmcp_queue_status_reports_process_only_and_requires_external_heartbeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            legacy=root/'legacy/shellmcp';legacy.parent.mkdir();legacy.write_bytes(b'legacy-shellmcp');legacy.chmod(0o755)
+            proc=root/'proc';(proc/'221').mkdir(parents=True);(proc/'221'/'exe').symlink_to(legacy)
+            layout=manager.Layout(shellmcp_env_file=env,shellmcp_service_dropin=root/'dropin.conf',shellmcp_proc_root=proc)
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    key=argv[4]
+                    value={'MainPID':'221','User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
+                           'ExecStart':'{ path='+str(legacy)+' ; argv[]='+str(legacy)+' ; ignore_errors=no ; }'}[key]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            with patch.object(manager,'SHELLMCP_LEGACY_BINARY',legacy), \
+                 patch.object(manager,'systemctl',return_value=SimpleNamespace(returncode=0,stdout='active',stderr='')), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=AssertionError('queue mode has no local HTTP version')):
+                with patch('builtins.print') as output:
+                    manager.cmd_shellmcp_status(SimpleNamespace(),layout,ServiceRunner())
+            result=json.loads(output.call_args.args[0])
+            self.assertIsNone(result['version'])
+            self.assertTrue(result['hub_heartbeat_required'])
+            self.assertEqual(result['runtime_status'],'pending_external_hub_heartbeat')
+
+    def test_shellmcp_queue_update_verifies_process_and_marks_hub_readback_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); env=root/'go-shellmcp.env'
+            env.write_text('SHELL_HOST=0.0.0.0\nSHELL_PORT=25900\nSHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            legacy=root/'legacy/shellmcp'; legacy.parent.mkdir(); legacy.write_bytes(b'legacy-shellmcp'); legacy.chmod(0o755)
+            package_path=package(root)
+            proc=root/'proc'; current_pid=[221]
+            (proc/'221').mkdir(parents=True); (proc/'221'/'exe').symlink_to(legacy)
+            layout=manager.Layout(shellmcp_opt_root=root/'shellmcp',shellmcp_service_dropin=root/'systemd/dropin.conf',
+                                  shellmcp_env_file=env,shellmcp_proc_root=proc)
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    key=argv[4]
+                    if key=='MainPID': value=str(current_pid[0])
+                    elif key=='User': value='root'
+                    elif key=='EnvironmentFiles': value=f'{env} (ignore_errors=no)'
+                    elif key=='ExecStart':
+                        expected=(str(layout.shellmcp_current_link()/'bin'/'shellmcp')
+                                  if layout.shellmcp_service_dropin.is_file() else str(legacy))
+                        value='{ path='+expected+' ; argv[]='+expected+' ; ignore_errors=no ; }'
+                    else: raise AssertionError(key)
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            system_calls=[]
+            def fake_systemctl(runner,*args,check=True):
+                system_calls.append(args)
+                if args[:1]==('restart',):
+                    old=proc/str(current_pid[0])/'exe'; old.unlink()
+                    current_pid[0]=222
+                    (proc/'222').mkdir(); (proc/'222'/'exe').symlink_to(layout.shellmcp_current_link()/'bin'/'shellmcp')
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            with patch.object(manager,'SHELLMCP_LEGACY_BINARY',legacy), patch.object(manager,'require_root'), \
+                 patch.object(manager,'check_disk_floor'), patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=AssertionError('queue mode must not require /version')):
+                with patch('builtins.print') as output:
+                    manager.cmd_shellmcp_update(SimpleNamespace(package=str(package_path)),layout,ServiceRunner())
+            receipt=json.loads(output.call_args.args[0])
+            self.assertTrue(receipt['hub_heartbeat_required'])
+            self.assertEqual(receipt['runtime_status'],'pending_external_hub_heartbeat')
+            self.assertEqual(receipt['process']['sha256'],manager.shellmcp_version_manifest(layout.shellmcp_current_link().resolve())['sha256'])
+            self.assertEqual([call for call in system_calls if call[:1]!=('is-active',)],
+                             [('daemon-reload',),('restart',manager.SHELLMCP_SERVICE)])
+            self.assertEqual(sum(call==('is-active',manager.SHELLMCP_SERVICE) for call in system_calls),6)
+
+    def test_shellmcp_queue_update_failure_restores_verified_previous_package(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            layout=manager.Layout(shellmcp_opt_root=root/'shellmcp',shellmcp_service_dropin=root/'dropin.conf',
+                                  shellmcp_env_file=env,shellmcp_proc_root=root/'proc')
+            previous=layout.shellmcp_versions_root()/('0'*40+'-1');binary=previous/'bin/shellmcp'
+            binary.parent.mkdir(parents=True);binary.write_bytes(b'\x7fELFprevious');binary.chmod(0o755)
+            previous_sha=hashlib.sha256(binary.read_bytes()).hexdigest()
+            (previous/'manifest.json').write_text(json.dumps({'schema':manager.PACKAGE_SCHEMA,'git_commit':'0'*40,
+                'build_version':122,'sha256':previous_sha,'size':binary.stat().st_size}))
+            manager.atomic_symlink(previous,layout.shellmcp_current_link())
+            layout.shellmcp_service_dropin.write_text(manager.shellmcp_dropin_text(layout))
+            package_path=package(root);proc=layout.shellmcp_proc_root;pid=[221]
+            (proc/'221').mkdir(parents=True);(proc/'221'/'exe').symlink_to(binary)
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    key=argv[4]
+                    value={'MainPID':str(pid[0]),'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
+                           'ExecStart':'{ path='+str(layout.shellmcp_current_link()/'bin'/'shellmcp')+
+                           ' ; argv[]='+str(layout.shellmcp_current_link()/'bin'/'shellmcp')+' ; ignore_errors=no ; }'}[key]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            restarts=[]
+            def fake_systemctl(runner,*args,check=True):
+                if args[:1]==('restart',):
+                    restarts.append(args);old=proc/str(pid[0])/'exe';old.unlink();pid[0]+=1
+                    (proc/str(pid[0])).mkdir();(proc/str(pid[0])/'exe').symlink_to(layout.shellmcp_current_link()/'bin'/'shellmcp')
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            with patch.object(manager,'require_root'),patch.object(manager,'check_disk_floor'), \
+                 patch.object(manager,'host_arch',return_value='amd64'),patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'wait_shellmcp_process',side_effect=[manager.RuntimeFailure('process mismatch'),
+                       {'pid':222,'sha256':previous_sha}]), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=AssertionError('queue mode has no local HTTP version')):
+                with self.assertRaisesRegex(manager.RuntimeFailure,'previous version restored and read back'):
+                    manager.cmd_shellmcp_update(SimpleNamespace(package=str(package_path)),layout,ServiceRunner())
+            self.assertEqual(layout.shellmcp_current_link().resolve(),previous)
+            self.assertEqual(layout.shellmcp_service_dropin.read_text(),manager.shellmcp_dropin_text(layout))
+            self.assertEqual(len(restarts),2)
+
+    def test_shellmcp_queue_rollback_verifies_previous_and_target_process_manifests(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_MODE=long_poll\nSHELLMCP_QUEUE=1\n')
+            layout=manager.Layout(shellmcp_opt_root=root/'shellmcp',shellmcp_service_dropin=root/'dropin.conf',
+                                  shellmcp_env_file=env,shellmcp_proc_root=root/'proc')
+            versions=[]
+            for commit,build in (('1'*40,123),('2'*40,122)):
+                version=layout.shellmcp_versions_root()/f'{commit}-1';binary=version/'bin/shellmcp'
+                binary.parent.mkdir(parents=True,exist_ok=True);binary.write_bytes(b'\x7fELF'+commit.encode());binary.chmod(0o755)
+                meta={'schema':manager.PACKAGE_SCHEMA,'git_commit':commit,'build_version':build,
+                      'sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'size':binary.stat().st_size}
+                (version/'manifest.json').write_text(json.dumps(meta));versions.append(version)
+            manager.atomic_symlink(versions[0],layout.shellmcp_current_link())
+            layout.shellmcp_service_dropin.write_text(manager.shellmcp_dropin_text(layout))
+            pid=[221];proc=layout.shellmcp_proc_root
+            (proc/'221').mkdir(parents=True);(proc/'221'/'exe').symlink_to(versions[0]/'bin/shellmcp')
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    key=argv[4]
+                    value={'MainPID':str(pid[0]),'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
+                           'ExecStart':'{ path='+str(layout.shellmcp_current_link()/'bin'/'shellmcp')+
+                           ' ; argv[]='+str(layout.shellmcp_current_link()/'bin'/'shellmcp')+' ; ignore_errors=no ; }'}[key]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            calls=[]
+            def fake_systemctl(runner,*args,check=True):
+                calls.append(args)
+                if args[:1]==('restart',):
+                    old=proc/str(pid[0])/'exe';old.unlink();pid[0]+=1
+                    (proc/str(pid[0])).mkdir();(proc/str(pid[0])/'exe').symlink_to(layout.shellmcp_current_link()/'bin'/'shellmcp')
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            with patch.object(manager,'require_root'),patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=AssertionError('queue mode has no local HTTP version')):
+                with patch('builtins.print') as output:
+                    manager.cmd_shellmcp_rollback(SimpleNamespace(to=versions[1].name),layout,ServiceRunner())
+            result=json.loads(output.call_args.args[0])
+            self.assertEqual(layout.shellmcp_current_link().resolve(),versions[1])
+            self.assertTrue(result['hub_heartbeat_required'])
+            self.assertEqual(result['runtime_status'],'pending_external_hub_heartbeat')
+            self.assertEqual(result['process']['sha256'],manager.shellmcp_version_manifest(versions[1])['sha256'])
+            self.assertEqual([call for call in calls if call[:1]!=('is-active',)],
+                             [('restart',manager.SHELLMCP_SERVICE)])
+            self.assertEqual(sum(call==('is-active',manager.SHELLMCP_SERVICE) for call in calls),6)
+
     def test_package_component_manager_commands_are_narrow_and_non_activating(self):
         parsed=manager.build_parser().parse_args(['proxy-route','install','--package','node.tar.gz'])
         self.assertIs(parsed.func,manager.cmd_proxy_route_install)
@@ -70,7 +246,7 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_shellmcp_update_switches_fixed_binary_and_reads_back_exact_version(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_HOST=127.0.0.1\nSHELLMCP_PORT=25900\n')
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_HOST=127.0.0.1\nSHELLMCP_PORT=25900\nSHELLMCP_QUEUE=0\n')
             layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
                 shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
                 shellmcp_env_file=env)
@@ -100,7 +276,7 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_shellmcp_update_failure_restores_legacy_execstart_and_verifies_old_version(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\nSHELLMCP_QUEUE=0\n')
             layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
                 shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
                 shellmcp_env_file=env)
@@ -125,7 +301,7 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_shellmcp_update_bootstraps_legacy_service_without_version_endpoint(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_HOST=0.0.0.0\nSHELL_PORT=25900\n')
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_HOST=0.0.0.0\nSHELL_PORT=25900\nSHELLMCP_QUEUE=0\n')
             legacy=root/'legacy/shellmcp';legacy.parent.mkdir();legacy.write_bytes(b'legacy shellmcp')
             legacy.chmod(0o755)
             layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
@@ -157,7 +333,7 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_shellmcp_legacy_bootstrap_failure_restores_unmanaged_binary_and_unit(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\nSHELLMCP_QUEUE=0\n')
             legacy=root/'legacy/shellmcp';legacy.parent.mkdir();legacy.write_bytes(b'legacy shellmcp')
             legacy.chmod(0o755)
             layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
@@ -192,7 +368,7 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_shellmcp_explicit_rollback_uses_only_manifest_verified_version_dirs(self):
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\nSHELLMCP_QUEUE=0\n')
             layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
                 shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
                 shellmcp_env_file=env)

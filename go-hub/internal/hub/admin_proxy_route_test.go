@@ -204,6 +204,59 @@ func TestProxyRoutePUTPersistsWithoutStartingService(t *testing.T) {
 	}
 }
 
+func TestProxyRouteMutationResponseDoesNotDependOnListenerSSHReadback(t *testing.T) {
+	for _, operation := range []string{"save", "enable"} {
+		t.Run(operation, func(t *testing.T) {
+			dir := t.TempDir()
+			var listenerReads int
+			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				joined := strings.Join(args, " ")
+				if name == "/usr/bin/systemctl" && strings.Contains(joined, "ActiveState") {
+					return []byte("active\n"), nil
+				}
+				if name == "/usr/sbin/runuser" {
+					listenerReads++
+					return nil, errors.New("listener readback is unavailable")
+				}
+				if name == "/usr/bin/systemctl" {
+					return nil, nil
+				}
+				return nil, errors.New("unexpected command")
+			}
+			controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), runner)
+			profile := defaultProxyRouteProfile()
+			profile.DesiredState = "enabled"
+			body, err := json.Marshal(map[string]any{"profile": profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			method, path, requestBody := http.MethodPut, "/admin/api/proxy-route", body
+			if operation == "enable" {
+				if err := controller.saveProfile(profile); err != nil {
+					t.Fatal(err)
+				}
+				method, path, requestBody = http.MethodPost, "/admin/api/proxy-route/enable", []byte("{}")
+			}
+			req := httptest.NewRequest(method, path, bytes.NewReader(requestBody))
+			response := httptest.NewRecorder()
+			(&Server{}).adminProxyRouteWithController(response, req, controller)
+			if response.Code != http.StatusOK {
+				t.Fatalf("mutation status=%d body=%s", response.Code, response.Body.String())
+			}
+			if listenerReads != 0 {
+				t.Fatalf("mutation response made %d optional remote listener readbacks", listenerReads)
+			}
+			var state proxyRouteState
+			if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+				t.Fatal(err)
+			}
+			if state.Runtime.ListenerState != "unknown" || !state.Runtime.ProfileSaved || state.Runtime.ServiceState != "active" {
+				t.Fatalf("mutation response did not report saved state with honest unknown listener state: %#v", state)
+			}
+		})
+	}
+}
+
 func TestProxyRouteActionAcceptsOnlyAnEmptyObject(t *testing.T) {
 	for _, body := range []string{"{}", ""} {
 		req := httptest.NewRequest("POST", "/admin/api/proxy-route/probe", strings.NewReader(body))
@@ -305,6 +358,153 @@ func TestProxyRouteProbeRequiresIndependentEstablishedServer44Socket(t *testing.
 	}
 	if probe.DirectExitIP == nil || *probe.DirectExitIP != "185.240.120.152" || probe.ProxyExitIP == nil || *probe.ProxyExitIP != "212.192.31.128" {
 		t.Fatalf("probe did not preserve live egress measurements: %#v", probe)
+	}
+}
+
+func TestProxyRouteProbeStartsDirectAndProxyReadsConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), nil)
+	if err := controller.saveProfile(defaultProxyRouteProfile()); err != nil {
+		t.Fatal(err)
+	}
+	directStarted := make(chan struct{})
+	proxyStarted := make(chan struct{})
+	controller.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if name == "/usr/bin/systemctl" && strings.Contains(joined, "MainPID") {
+			return []byte("4321\n"), nil
+		}
+		if name == "/usr/sbin/runuser" {
+			if strings.Contains(joined, "--proxy http://127.0.0.1:24836") {
+				close(proxyStarted)
+				return []byte("212.192.31.128"), nil
+			}
+			close(directStarted)
+			select {
+			case <-proxyStarted:
+				return []byte("185.240.120.152"), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if name == "/usr/bin/ss" {
+			return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+		}
+		return nil, errors.New("unexpected probe command")
+	}
+
+	probeDone := make(chan proxyRouteProbe, 1)
+	probeCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { probeDone <- controller.probe(probeCtx) }()
+	select {
+	case <-directStarted:
+	case <-time.After(time.Second):
+		t.Fatal("direct request did not start")
+	}
+	select {
+	case <-proxyStarted:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("proxy request did not start while the direct request was in flight")
+	}
+	select {
+	case probe := <-probeDone:
+		if probe.State != "pass" || probe.DirectExitIP == nil || probe.ProxyExitIP == nil {
+			t.Fatalf("concurrent probe did not retain both egress results: %#v", probe)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe did not finish after both requests returned")
+	}
+}
+
+func TestProxyRouteProbePreservesLaterSocketReadbackFailure(t *testing.T) {
+	dir := t.TempDir()
+	controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), nil)
+	if err := controller.saveProfile(defaultProxyRouteProfile()); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	ssChecks := 0
+	pollStarted := make(chan struct{})
+	var pollOnce sync.Once
+	controller.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if name == "/usr/bin/systemctl" && strings.Contains(joined, "MainPID") {
+			return []byte("4321\n"), nil
+		}
+		if name == "/usr/bin/ss" {
+			mu.Lock()
+			ssChecks++
+			current := ssChecks
+			mu.Unlock()
+			if current == 1 {
+				return nil, nil
+			}
+			pollOnce.Do(func() { close(pollStarted) })
+			return nil, errors.New("later socket readback failed")
+		}
+		if name == "/usr/sbin/runuser" {
+			<-pollStarted
+			if strings.Contains(joined, "--proxy http://127.0.0.1:24836") {
+				return []byte("212.192.31.128"), nil
+			}
+			return []byte("185.240.120.152"), nil
+		}
+		return nil, errors.New("unexpected probe command")
+	}
+
+	probe := controller.probe(context.Background())
+	if probe.State != "unknown" || probe.Server44PathVerified != nil || probe.Server44PathReason == nil ||
+		!strings.Contains(*probe.Server44PathReason, "Could not verify") ||
+		!strings.Contains(*probe.Server44PathReason, "later socket readback failed") {
+		t.Fatalf("later socket readback error was lost or treated as no socket: %#v", probe)
+	}
+}
+
+func TestProxyRouteProbePreservesDirectReadFailureReason(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		directBody string
+		directErr  error
+		wantReason string
+	}{
+		{name: "curl failure", directBody: "direct VUSA transport failed", directErr: errors.New("remote curl failed"), wantReason: "direct VUSA transport failed"},
+		{name: "invalid IP", directBody: "not-an-ip", wantReason: "probe returned an invalid IP address"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), nil)
+			if err := controller.saveProfile(defaultProxyRouteProfile()); err != nil {
+				t.Fatal(err)
+			}
+			controller.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				joined := strings.Join(args, " ")
+				if name == "/usr/bin/systemctl" && strings.Contains(joined, "MainPID") {
+					return []byte("4321\n"), nil
+				}
+				if name == "/usr/bin/ss" {
+					return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+				}
+				if name == "/usr/sbin/runuser" {
+					if strings.Contains(joined, "--proxy http://127.0.0.1:24836") {
+						return []byte("212.192.31.128"), nil
+					}
+					return []byte(test.directBody), test.directErr
+				}
+				return nil, errors.New("unexpected probe command")
+			}
+
+			probe := controller.probe(context.Background())
+			if probe.State != "unknown" || probe.Server44PathReason == nil ||
+				!strings.Contains(*probe.Server44PathReason, "Direct VUSA request failed:") ||
+				!strings.Contains(*probe.Server44PathReason, test.wantReason) {
+				var reason string
+				if probe.Server44PathReason != nil {
+					reason = *probe.Server44PathReason
+				}
+				t.Fatalf("direct read failure reason was lost or misclassified: state=%s reason=%q", probe.State, reason)
+			}
+		})
 	}
 }
 
