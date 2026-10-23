@@ -10,8 +10,13 @@ import tarfile
 import time
 
 REPOSITORY = 'megamen32/gptadmin_opensource'
-FILES = {'bin/gptadmin-node', 'cli.py', 'scripts/gptadmin_node_manage.py',
-         'scripts/gptadmin_node_probe.py', 'scripts/gptadmin_node_autoupdate.py'}
+FILES = {'bin/gptadmin-node', 'bin/shellmcp',
+         'systemd/gptadmin-proxy-route-relay02.service', 'cli.py',
+         'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
+         'scripts/gptadmin_node_autoupdate.py'}
+UI_INDEX = 'public/admin/index.html'
+UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
+MAX_MEMBERS = 64
 MAX_PACKAGE = 128 * 1024**2
 MAX_PAYLOAD = 256 * 1024**2
 DEADLINE = None
@@ -25,6 +30,10 @@ def digest(path):
     return h.hexdigest()
 
 
+def is_package_file(name):
+    return name in FILES or name == UI_INDEX or bool(UI_ASSET_RE.fullmatch(name))
+
+
 def verify_package(path, arch, source):
     path = Path(path)
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PACKAGE:
@@ -35,20 +44,30 @@ def verify_package(path, arch, source):
         for member in archive:
             size += member.size
             if (not member.isfile() or member.name in members
-                    or member.name not in FILES | {'manifest.json'}
-                    or size > MAX_PAYLOAD or len(members) >= 6):
+                    or (member.name != 'manifest.json' and not is_package_file(member.name))
+                    or size > MAX_PAYLOAD or len(members) >= MAX_MEMBERS):
                 raise ValueError('invalid Node archive closure')
             members[member.name] = member
-        if set(members) != FILES | {'manifest.json'} or members['manifest.json'].size > 65536:
+        listed_members = set(members) - {'manifest.json'}
+        ui_members = listed_members - FILES
+        if (not FILES <= listed_members or UI_INDEX not in ui_members
+                or len(ui_members) < 2
+                or any(not UI_ASSET_RE.fullmatch(name) for name in ui_members - {UI_INDEX})
+                or members.get('manifest.json') is None
+                or members['manifest.json'].size > 65536):
             raise ValueError('incomplete Node archive closure')
         manifest = json.load(archive.extractfile(members['manifest.json']))
         if (manifest.get('schema') != 'gptadmin.node-package/v1'
                 or manifest.get('platform') != 'linux' or manifest.get('arch') != arch
                 or manifest.get('git_commit') != source or manifest.get('source_dirty') is not False
-                or set(manifest.get('files', {})) != FILES
+                or set(manifest.get('files', {})) != listed_members
                 or type(manifest.get('build_version')) is not int or manifest['build_version'] < 1):
             raise ValueError('Node manifest does not bind accepted source')
-        for name in FILES:
+        index_bytes = archive.extractfile(members[UI_INDEX]).read()
+        for name in ui_members - {UI_INDEX}:
+            if name.rsplit('/', 1)[-1].encode() not in index_bytes:
+                raise ValueError('Node UI archive contains an unreferenced asset')
+        for name in listed_members:
             h = hashlib.sha256()
             with archive.extractfile(members[name]) as stream:
                 for block in iter(lambda: stream.read(1024**2), b''):

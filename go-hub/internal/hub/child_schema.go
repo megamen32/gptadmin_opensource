@@ -30,11 +30,12 @@ func (s *Server) dispatchChildSchemaLocked(r *http.Request, child Agent, receipt
 	change := s.beginTaskMutationLocked(receipt.ID)
 	copy := *receipt
 	copy.Method, copy.OwnerID, copy.Status = childSchemaMethod, owner, "queued"
+	copy.Caller = taskCallerFromRequest(r)
 	copy.StartedAt, copy.DoneAt, copy.Result, copy.Error = 0, 0, nil, nil
 	copy.Params = map[string]any{"parent_server_id": parent, "child_ref": ref}
 	s.relayJobs[copy.ID] = &copy
 	s.shellJobs[copy.ID] = &shellJob{
-		ID: copy.ID, OwnerID: owner, Server: strings.TrimPrefix(parent, "shell:"),
+		ID: copy.ID, OwnerID: owner, Caller: taskCallerFromRequest(r), Server: strings.TrimPrefix(parent, "shell:"),
 		ToolName: "mcp_tools", Arguments: childConnectionArguments(r, child, map[string]any{"ref": ref}),
 		CreatedAt: copy.CreatedAt, Status: "queued", TraceID: copy.TraceID, TraceParent: copy.TraceParent,
 	}
@@ -71,6 +72,11 @@ func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[strin
 	receipt := s.relayJobs[id]
 	if receipt == nil || (receipt.Method != "tools/list" && receipt.Method != childSchemaMethod) {
 		return nil, false
+	}
+	if r != nil {
+		if claims, _ := r.Context().Value(authClaimsContextKey{}).(map[string]any); len(claims) > 0 && !sameTaskCaller(taskCallerFromRequest(r), receipt.Caller) {
+			return nil, false
+		}
 	}
 	child, exists := s.exposedAgentByIDLocked(receipt.AgentID)
 	if !exists || !isChildMCPAgent(child) {
@@ -146,7 +152,7 @@ func (s *Server) childSchemaForRequest(r *http.Request, child Agent) map[string]
 	}
 	s.mu.Lock()
 	id := newID()
-	receipt := &relayJob{ID: id, AgentID: child.AgentID, CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
+	receipt := &relayJob{ID: id, AgentID: child.AgentID, Caller: taskCallerFromRequest(r), CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
 	if err := s.dispatchChildSchemaLocked(r, child, receipt); err != nil {
 		s.mu.Unlock()
 		return taskPersistenceFailure(err)

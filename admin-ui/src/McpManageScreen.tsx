@@ -3,13 +3,50 @@ import { serverStatusLabel } from "./ui/format";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
 
 type Server = { server_id?: string; status?: string; meta?: Record<string, unknown> };
-type ManagedMcp = { name?: string; server_id?: string; command?: string; url?: string; args?: unknown[]; env?: Record<string, unknown>; enabled?: boolean; stdio_format?: string };
+type ManagedMcp = { name?: string; server_id?: string; ref?: string; kind?: string; registry_category?: string; parent_server_id?: string; transport?: string; status?: string; health?: Record<string, unknown>; command?: string; url?: string; args?: unknown[]; env?: Record<string, unknown>; enabled?: boolean; stdio_format?: string };
 
-type ManageResponse = { ok?: boolean; response?: { note?: string; servers?: unknown }; servers?: unknown; note?: string; detail?: unknown };
+type ManageResponse = { ok?: boolean; response?: { note?: string; servers?: unknown; agent?: unknown; status?: unknown }; servers?: unknown; note?: string; detail?: unknown };
 type ListState = "idle" | "loading" | "loaded" | "unavailable";
 
 class HttpResponseError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
+}
+
+function inventoryStatusLabel(row: ManagedMcp): string {
+  if (row.enabled === false || row.status === "disabled") return "Выключен";
+  switch (row.status) {
+    case "online": return "В сети";
+    case "offline": return "Не в сети";
+    case "stale": return "Устарел";
+    case "failed": return "Ошибка";
+    case "configured": return "Настроен";
+    case "awaiting_approval": return "Ожидает подтверждения";
+    default: return row.status ? serverStatusLabel(row.status) : "Статус неизвестен";
+  }
+}
+
+function inventoryCategoryLabel(category?: string): string {
+  switch (category) {
+    case "hub_core": return "Hub";
+    case "hub_virtual_mcp": return "Virtual MCP Hub";
+    case "registered_host": return "Зарегистрированный сервер";
+    case "registered_runtime_child": return "Дочерний MCP из runtime-реестра";
+    case "node_child_config": return "Конфигурация дочернего MCP узла";
+    default: return category || "MCP";
+  }
+}
+
+function statusFromResponse(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const response = (value as ManageResponse).response;
+  const health = response?.status;
+  if (!health || typeof health !== "object" || Array.isArray(health)) return null;
+  const status = health as Record<string, unknown>;
+  const protocol = status.protocol && typeof status.protocol === "object" ? status.protocol as Record<string, unknown> : {};
+  const process = status.process && typeof status.process === "object" ? status.process as Record<string, unknown> : {};
+  if (protocol.state === "failed" || process.state === "exited") return "failed";
+  if (protocol.state === "ready" || process.state === "running") return "online";
+  return "configured";
 }
 
 type Draft = { name: string; serverId: string; url: string; command: string; args: string; env: string; runAs: string; backend: string; stdio: string; install: boolean; force: boolean; disabled: boolean };
@@ -38,7 +75,6 @@ export default function McpManageScreen() {
   const [rows, setRows] = useState<ManagedMcp[]>([]);
   const [listState, setListState] = useState<ListState>("idle");
   const [retention, setRetention] = useState(30);
-  const [keepService, setKeepService] = useState(false);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [result, setResult] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -55,7 +91,7 @@ export default function McpManageScreen() {
       if (!overviewResponse.ok || !settingsResponse.ok) throw new Error(`Hub вернул HTTP ${!overviewResponse.ok ? overviewResponse.status : settingsResponse.status}`);
       const overview = await overviewResponse.json() as { servers?: Server[] };
       const settings = await settingsResponse.json() as { settings?: { stale_mcp_retention_days?: number } };
-      const shellHosts = (overview.servers ?? []).filter((server) => String(server.server_id || "").startsWith("shell:") || server.meta?.transport_layer === "mcp_tunnel");
+      const shellHosts = (overview.servers ?? []).filter((server) => String(server.server_id || "").startsWith("shell:"));
       setHosts([{ server_id: "hub", status: "local" }, ...shellHosts]);
       if (typeof settings.settings?.stale_mcp_retention_days === "number") setRetention(settings.settings.stale_mcp_retention_days);
       setError(null);
@@ -96,6 +132,11 @@ export default function McpManageScreen() {
         setRows([]); setListState("unavailable");
         setError(caught instanceof Error ? caught.message : "Список MCP недоступен");
       }
+    }
+    if (payload.action === "status") {
+      const ref = String(payload.ref ?? payload.name ?? "");
+      const status = statusFromResponse(data);
+      if (ref && status) setRows((current) => current.map((row) => (row.ref === ref || row.server_id === ref) ? { ...row, status } : row));
     }
     if (refreshList && payload.action !== "list") {
       try {
@@ -153,11 +194,11 @@ export default function McpManageScreen() {
     <section className="card mcp-retention-card"><div><p className="section-kicker">ОЧИСТКА</p><h2>Автоматическая очистка старых MCP</h2><p className="muted-help">Серверные агенты не удаляются.</p></div><div className="inline-setting"><input type="number" min={1} max={3650} value={retention} onChange={(event) => setRetention(Number(event.target.value) || 30)} /><span>дней</span><button className="button secondary" type="button" disabled={busy} onClick={() => void saveRetention()}>Сохранить</button></div></section>
     <section className="mcp-native-layout">
       <article className="card mcp-list-card">
-        <div className="card-heading"><div><p className="section-kicker">СЕРВИСЫ</p><h2>Установленные MCP</h2></div><div className="mcp-list-actions"><select value={host} onChange={(event) => { setHost(event.target.value); setRows([]); setListState("idle"); setListNotice(null); }}>{hosts.map((item) => <option key={item.server_id} value={item.server_id}>{item.server_id} ({serverStatusLabel(item.status)})</option>)}</select><button className="button secondary" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "list" })}>Список</button><button className="button secondary" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "status", ...(draft.backend ? { backend: draft.backend } : {}) })}>Статус</button></div></div>
-        <label className="keep-service-line"><input type="checkbox" checked={keepService} onChange={(event) => setKeepService(event.target.checked)} /> При удалении сохранить описание системного сервиса</label>
-        {rows.length === 0 ? <div className="compact-empty"><strong>{listState === "loaded" ? "Список MCP пуст" : listState === "unavailable" ? "Список недоступен" : "Список не загружен"}</strong><span>{listState === "loaded" ? "Узел сообщил, что установленных сервисов нет." : listState === "unavailable" ? "Ответ Hub не содержит перечня сервисов; пустой список не подтверждён." : "Нажмите «Список» для выбранного узла."}</span></div> : <div className="mcp-service-list">{rows.map((row) => <article className="mcp-service-row" key={row.name || row.server_id}><div><strong>{row.name || "Без имени"}</strong><small>{row.server_id || row.command || row.url || "—"}</small><div className="pill-wrap"><span className={`small-pill ${row.enabled === false ? "is-disabled" : ""}`}>{row.enabled === false ? "Выключен" : "Работает"}</span>{row.stdio_format && <span className="small-pill">{row.stdio_format}</span>}</div></div><div className="row-actions"><button className="text-button" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "status", name: row.name, ...(draft.backend ? { backend: draft.backend } : {}) })}>Состояние</button><button className="text-button" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "install", name: row.name, ...(draft.backend ? { backend: draft.backend } : {}) }, true)}>Установить</button><button className="text-button danger-text" type="button" disabled={busy || mutationUnknown} onClick={() => { if (window.confirm(`Удалить MCP ${row.name} на ${host}?`)) void runManage({ target: host, action: "remove", name: row.name, keep_service: keepService, ...(draft.backend ? { backend: draft.backend } : {}) }, true); }}>Удалить</button></div></article>)}</div>}
+        <div className="card-heading"><div><p className="section-kicker">СЕРВИСЫ</p><h2>{host === "hub" ? "MCP в реестре Hub" : "Дочерние MCP на узле"}</h2></div><div className="mcp-list-actions"><select value={host} onChange={(event) => { setHost(event.target.value); setRows([]); setListState("idle"); setListNotice(null); }}>{hosts.map((item) => <option key={item.server_id} value={item.server_id}>{item.server_id} ({serverStatusLabel(item.status)})</option>)}</select><button className="button secondary" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "list" })}>{listState === "loading" ? "Загружаю…" : "Обновить список"}</button></div></div>
+        <p className="muted-help">{host === "hub" ? "Показывает Hub core, virtual MCP definitions, зарегистрированные серверы и child MCP из последнего heartbeat. Для свежих конфигураций выберите ShellMCP узел. Парные control/file маршруты скрыты." : "Показывает конфигурации из supervisor выбранного ShellMCP узла. «Настроен» не означает, что лениво запускаемый процесс сейчас работает."}</p>
+        {rows.length === 0 ? <div className="compact-empty"><strong>{listState === "loaded" ? "Список MCP пуст" : listState === "unavailable" ? "Список недоступен" : "Список не загружен"}</strong><span>{listState === "loaded" ? (host === "hub" ? "В реестре Hub нет MCP-серверов." : "Выбранный узел сообщил, что дочерних MCP-конфигураций нет.") : listState === "unavailable" ? "Источник не вернул подтверждённый список; пустым он не считается." : "Нажмите «Обновить список» для выбранного источника."}</span></div> : <div className="mcp-service-list">{rows.map((row) => <article className="mcp-service-row" key={row.server_id || row.ref || row.name}><div><strong>{row.name || "Без имени"}</strong><small>{row.server_id || row.command || row.url || "—"}</small><div className="pill-wrap"><span className="small-pill">{inventoryCategoryLabel(row.registry_category)}</span><span className={`small-pill ${row.enabled === false ? "is-disabled" : ""}`}>{inventoryStatusLabel(row)}</span>{row.transport && <span className="small-pill">{row.transport}</span>}</div></div>{host !== "hub" && <div className="row-actions"><button className="text-button" type="button" disabled={busy || mutationUnknown} onClick={() => void runManage({ target: host, action: "status", ref: row.ref || row.server_id })}>Обновить состояние</button></div>}</article>)}</div>}
       </article>
-      <article className="card mcp-add-card"><div className="card-heading"><div><p className="section-kicker">ДОБАВЛЕНИЕ</p><h2>Добавить MCP</h2></div></div><div className="mcp-form-grid">
+      {host !== "hub" && <article className="card mcp-add-card"><div className="card-heading"><div><p className="section-kicker">ДОБАВЛЕНИЕ</p><h2>Добавить MCP</h2></div></div><div className="mcp-form-grid">
         <label><span>Имя</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="my-mcp" /></label>
         <label><span>ID сервера</span><input value={draft.serverId} onChange={(event) => setDraft({ ...draft, serverId: event.target.value })} placeholder="опционально" /></label>
         <label className="span2"><span>Удалённый адрес</span><input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://.../mcp" /></label>
@@ -168,7 +209,7 @@ export default function McpManageScreen() {
         <label><span>Система запуска</span><select value={draft.backend} onChange={(event) => setDraft({ ...draft, backend: event.target.value })}><option value="">auto</option><option value="systemd">systemd</option><option value="launchd">launchd</option><option value="windows-task">windows-task</option></select></label>
         <label><span>Формат обмена</span><select value={draft.stdio} onChange={(event) => setDraft({ ...draft, stdio: event.target.value })}><option value="">auto</option><option value="ndjson">ndjson</option><option value="jsonl">jsonl</option><option value="framed">framed</option><option value="content-length">content-length</option></select></label>
         <div className="mcp-checks"><label><input type="checkbox" checked={draft.install} onChange={(event) => setDraft({ ...draft, install: event.target.checked })} /> Установить сразу</label><label><input type="checkbox" checked={draft.force} onChange={(event) => setDraft({ ...draft, force: event.target.checked })} /> Принудительно</label><label><input type="checkbox" checked={draft.disabled} onChange={(event) => setDraft({ ...draft, disabled: event.target.checked })} /> Создать выключенным</label></div>
-      </div><button className="button primary full-button" type="button" disabled={busy || mutationUnknown} onClick={() => void add()}>Добавить MCP</button></article>
+      </div><button className="button primary full-button" type="button" disabled={busy || mutationUnknown} onClick={() => void add()}>Добавить MCP</button></article>}
     </section>
     {result !== null && <details className="card operation-result"><summary>Технический ответ системы</summary><pre className="raw-native-box">{JSON.stringify(result, null, 2)}</pre></details>}
   </div>;

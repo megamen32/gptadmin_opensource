@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getLatestJobForServer } from "./api";
 import { formatTimestamp, friendlyActionName, friendlyServerName, jobStatusLabel, timestampTitle } from "./ui/format";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
 
@@ -21,7 +22,15 @@ type Overview = { jobs?: { recent?: Job[]; queued?: Job[]; background?: Job[]; c
 function jobInput(job: Job): string { return job.command || job.arguments_preview || "Входные данные не сохранены"; }
 function jobPreview(job: Job): string { return job.error_preview || job.result_preview || ""; }
 
+function jobViewTarget(): { serverId: string | null; jobId: string | null } {
+  const separator = window.location.hash.indexOf("?");
+  if (separator < 0) return { serverId: null, jobId: null };
+  const query = new URLSearchParams(window.location.hash.slice(separator + 1));
+  return { serverId: query.get("server_id"), jobId: query.get("job_id") };
+}
+
 export default function JobsScreen() {
+  const [deepLink] = useState(jobViewTarget);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState("");
@@ -35,17 +44,25 @@ export default function JobsScreen() {
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
-      const response = await fetch("/admin/api/overview?limit=160", { credentials: "same-origin", signal, headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`Hub вернул HTTP ${response.status}`);
-      const data = await response.json() as Overview;
-      const recent = Array.isArray(data.jobs?.recent) ? data.jobs!.recent! : [];
-      setJobs(recent);
-      setTotal(typeof data.jobs?.count === "number" ? data.jobs.count : recent.length);
+      if (deepLink.serverId) {
+        const latest = await getLatestJobForServer(deepLink.serverId, signal);
+        const recent: Job[] = latest ? [latest] : [];
+        setJobs(recent);
+        setTotal(recent.length);
+        if (latest && latest.job_id === deepLink.jobId) setSelected(latest);
+      } else {
+        const response = await fetch("/admin/api/overview?limit=160", { credentials: "same-origin", signal, headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error(`Hub вернул HTTP ${response.status}`);
+        const data = await response.json() as Overview;
+        const recent = Array.isArray(data.jobs?.recent) ? data.jobs!.recent! : [];
+        setJobs(recent);
+        setTotal(typeof data.jobs?.count === "number" ? data.jobs.count : recent.length);
+      }
       setError(null);
     } catch (caught) {
       if ((caught as DOMException).name !== "AbortError") setError(caught instanceof Error ? caught.message : "Не удалось загрузить задачи");
     } finally { if (!signal?.aborted) setLoading(false); }
-  }, []);
+  }, [deepLink.serverId]);
 
   useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort(); }, [load]);
 
@@ -56,7 +73,7 @@ export default function JobsScreen() {
     return JSON.stringify(job).toLowerCase().includes(filter.trim().toLowerCase());
   }), [jobs, filter, status]);
 
-  const open = async (job: Job) => {
+  const open = useCallback(async (job: Job) => {
     setSelected(job); setDetail(null); setDetailLoading(true); setError(null);
     try {
       if (!job.job_id) throw new Error("У задачи нет job_id");
@@ -65,10 +82,27 @@ export default function JobsScreen() {
       let data: unknown = text;
       try { data = text ? JSON.parse(text) : {}; } catch { /* keep text */ }
       if (!response.ok) throw new Error(`Hub вернул HTTP ${response.status}`);
+      if (typeof data === "object" && data !== null) {
+        const record = data as Record<string, unknown>;
+        setSelected((current) => current?.job_id !== job.job_id ? current : {
+          ...current,
+          ...(typeof record.status === "string" ? { status: record.status } : {}),
+          ...(typeof record.server_id === "string" ? { server_id: record.server_id } : {}),
+          ...(typeof record.task_id === "string" ? { task_id: record.task_id } : {}),
+          ...(typeof record.tool_name === "string" ? { tool_name: record.tool_name } : {}),
+          ...(typeof record.created_at === "string" || typeof record.created_at === "number" ? { created_at: record.created_at } : {}),
+        });
+      }
       setDetail(data);
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Не удалось получить задачу"); }
     finally { setDetailLoading(false); }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (deepLink.serverId && deepLink.jobId) {
+      void open({ job_id: deepLink.jobId, server_id: deepLink.serverId, status: "unknown" });
+    }
+  }, [deepLink.serverId, deepLink.jobId, open]);
 
   const loadMore = async () => {
     setLoading(true); setError(null);
@@ -86,6 +120,7 @@ export default function JobsScreen() {
   return <div className="page-shell native-operation-page">
     <PageHeader eyebrow="ЗАДАЧИ" title="Задачи" description="Очередь, история и полный результат выполнения в одном экране." actions={<><StatusBadge state={error ? "error" : "ready"}>{loading ? "Обновляем…" : `${jobs.length} / ${total}`}</StatusBadge><button className="button secondary" type="button" onClick={() => void load()} disabled={loading}>Обновить</button></>} />
     <ErrorNotice message={error} />
+    {deepLink.serverId && <p className="muted-help">История точного узла: <code>{deepLink.serverId}</code>. Результат задачи загружается из сохранённой истории Hub.</p>}
     <section className={`job-native-layout ${selected ? "has-detail" : ""}`}>
       <article className="card job-native-list">
         <div className="list-toolbar"><input className="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Фильтр задач" /><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Все статусы</option><option value="running">Выполняются</option><option value="queued">В очереди</option><option value="completed">Готовы</option><option value="failed">С ошибкой</option></select></div>

@@ -12,11 +12,20 @@ function response(body: object) {
 
 it("uses native React MCP and failover screens without the legacy runtime", async () => {
   window.history.replaceState(null, "", "#mcpmanage");
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const mcpCalls: Array<{ target: string; action: string }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const path = String(input);
     if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: "shell:fixture", status: "online", meta: {} }] });
     if (path === "/admin/api/settings") return response({ settings: { stale_mcp_retention_days: 30 } });
-    if (path === "/admin/api/mcp/manage") return response({ servers: [{ name: "fixture-mcp", command: "python3", args: ["example.py"], env: { MODE: "test" }, enabled: true }] });
+    if (path === "/admin/api/mcp/manage" && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as { target: string; action: string };
+      mcpCalls.push(payload);
+      return response({ ok: true, target: payload.target, action: payload.action, response: { complete: true, servers: [
+        { server_id: "hub", name: "GPTAdmin Hub", kind: "hub", status: "online", registry_category: "hub_core", enabled: true },
+        { server_id: "webhooks", name: "Webhooks", kind: "virtual_mcp", status: "disabled", registry_category: "hub_virtual_mcp", enabled: false },
+        { server_id: "mcp:shell:fixture:filesystem", name: "Filesystem", kind: "child_mcp", status: "online", registry_category: "registered_runtime_child", enabled: true },
+      ] } });
+    }
     if (path === "/admin/api/failover") return response({ config: { enabled: false, primary_public_url: "https://saved.example", fail_count_base: 3, nodes: [] }, state: { role: "primary" } });
     throw new Error(`Unexpected request ${path}`);
   });
@@ -25,9 +34,11 @@ it("uses native React MCP and failover screens without the legacy runtime", asyn
   expect(await screen.findByRole("heading", { name: "Сервисы MCP" })).toBeInTheDocument();
   expect(document.querySelector("#view-mcpmanage")).toBeNull();
   expect(document.querySelector(".operations-console")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Список" }));
-  expect(await screen.findByText("fixture-mcp")).toBeInTheDocument();
-  expect(screen.getAllByText(/python3/).length).toBeGreaterThan(0);
+  await userEvent.click(screen.getByRole("button", { name: "Обновить список" }));
+  expect(await screen.findByText("GPTAdmin Hub")).toBeInTheDocument();
+  expect(screen.getByText("Virtual MCP Hub")).toBeInTheDocument();
+  expect(screen.getByText("Дочерний MCP из runtime-реестра")).toBeInTheDocument();
+  expect(mcpCalls).toEqual([{ target: "hub", action: "list" }]);
 
   await userEvent.click(screen.getByRole("link", { name: "Резервирование" }));
   expect(await screen.findByRole("heading", { name: "Резервирование" })).toBeInTheDocument();

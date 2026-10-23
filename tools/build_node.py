@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 'gptadmin.node-package/v1'
 PAYLOAD = ('cli.py', 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
            'scripts/gptadmin_node_autoupdate.py')
+SHELLMCP_MAIN = './cmd/shellmcp-go'
+SHELLMCP_SOURCE = 'go-shellmcp'
+PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-relay02.service'
+PROXY_ROUTE_UNIT_PACKAGE_PATH = 'systemd/gptadmin-proxy-route-relay02.service'
 
 
 def build_admin_ui() -> dict[str, Path]:
@@ -57,6 +61,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
         stage = Path(td)
         binary = stage / 'bin' / 'gptadmin-node'
         binary.parent.mkdir()
+        shellmcp_binary = stage / 'bin' / 'shellmcp'
         gotmp = stage / 'go-tmp'
         gotmp.mkdir()
         flags = '-s -w'
@@ -68,7 +73,23 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
         subprocess.run(['go', 'build', '-trimpath', '-ldflags', flags,
                         '-o', str(binary), './cmd/gptadmin-node'],
                        cwd=ROOT / 'go-hub', env=env, check=True)
-        files = {'bin/gptadmin-node': binary}
+        subprocess.run(['go', 'build', '-trimpath', '-ldflags', flags,
+                        '-o', str(shellmcp_binary), SHELLMCP_MAIN],
+                       cwd=ROOT / SHELLMCP_SOURCE, env=env, check=True)
+        proxy_unit = ROOT / PROXY_ROUTE_UNIT_SOURCE
+        if proxy_unit.is_symlink() or not proxy_unit.is_file():
+            raise RuntimeError(f'proxy route systemd unit is missing or unsafe: {PROXY_ROUTE_UNIT_SOURCE}')
+        if proxy_unit.stat().st_size > 256 * 1024:
+            raise RuntimeError('proxy route systemd unit exceeds its package size limit')
+        unit_text = proxy_unit.read_text()
+        if '[Unit]' not in unit_text or '[Service]' not in unit_text or \
+                not any(line.strip() == 'User=admin' for line in unit_text.splitlines()):
+            raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
+        files = {
+            'bin/gptadmin-node': binary,
+            'bin/shellmcp': shellmcp_binary,
+            PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit,
+        }
         files.update({name: ROOT / name for name in PAYLOAD})
         files.update(build_admin_ui())
         manifest = {
@@ -87,7 +108,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
                 info = tar.gettarinfo(str(path), arcname=name)
                 info.uid = info.gid = 0
                 info.uname = info.gname = ''
-                info.mode = 0o755 if name == 'bin/gptadmin-node' else 0o644
+                info.mode = 0o755 if name in ('bin/gptadmin-node', 'bin/shellmcp') else 0o644
                 with path.open('rb') as stream:
                     tar.addfile(info, stream)
         # Output is constrained to the project .tmp tree, on the same filesystem

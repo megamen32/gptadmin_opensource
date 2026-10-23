@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"database/sql"
 	"encoding/json"
+	"strings"
 )
 
 func adminPreview(value any) string {
@@ -138,4 +140,104 @@ func (s *Server) adminJobsDataLocked(page ...int) map[string]any {
 		}
 	}
 	return map[string]any{"count": count, "status_counts": counts, "queued": queued, "background": background, "recent": recent, "offset": offset, "recent_limit": limit, "recent_truncated": end < count}
+}
+
+// adminJobsForServerLocked filters on the exact ShellMCP queue identity before
+// ordering and applying the requested page. It never searches rendered labels
+// or decodes unrelated task results.
+func (s *Server) adminJobsForServerLocked(serverID string, offset, limit int) map[string]any {
+	name := strings.TrimPrefix(serverID, "shell:")
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
+	state := persistedTaskState{Shell: map[string]persistedShellTask{}, Relay: map[string]persistedRelayTask{}}
+	counts := map[string]int{}
+	count := 0
+	var err error
+	if s.cfg.ConfigDir != "" {
+		err = s.withTaskReadDatabase(func(tx *sql.Tx) error {
+			rows, err := tx.Query(`SELECT status,n FROM task_status_counts WHERE kind='shell' AND server=? AND n>0`, name)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var status string
+				var n int
+				if err := rows.Scan(&status, &n); err != nil {
+					return err
+				}
+				counts[status] = n
+				count += n
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			return map[string]any{"error": "task history unavailable"}
+		}
+		if offset > count {
+			offset = count
+		}
+		state, err = s.taskMetadataPage("kind='shell' AND json_extract(payload,'$.server')=?", []any{name}, offset, limit)
+		if err != nil {
+			return map[string]any{"error": "task history unavailable"}
+		}
+	} else {
+		all, err := s.taskInventoryLocked()
+		if err != nil {
+			return map[string]any{"error": "task history unavailable"}
+		}
+		for id, job := range all.Shell {
+			if job.Server != name {
+				continue
+			}
+			state.Shell[id] = job
+			counts[job.Status]++
+			count++
+		}
+		if offset > count {
+			offset = count
+		}
+		items := taskInventoryItems(state)
+		end := min(offset+limit, count)
+		filtered := persistedTaskState{Shell: map[string]persistedShellTask{}, Relay: map[string]persistedRelayTask{}}
+		for _, item := range items[offset:end] {
+			id := firstString(item, "job_id")
+			filtered.Shell[id] = state.Shell[id]
+		}
+		state = filtered
+	}
+	recent := taskInventoryItems(state)
+	ids := make([]string, 0, len(recent))
+	for _, item := range recent {
+		ids = append(ids, firstString(item, "job_id"))
+	}
+	full := persistedTaskState{Shell: map[string]persistedShellTask{}, Relay: map[string]persistedRelayTask{}}
+	if s.cfg.ConfigDir != "" && len(ids) > 0 {
+		var err error
+		full, err = s.readTaskRecords(ids...)
+		if err != nil {
+			return map[string]any{"error": "task history unavailable"}
+		}
+	} else {
+		full = state
+	}
+	for _, item := range recent {
+		id := firstString(item, "job_id")
+		if job, ok := full.Shell[id]; ok {
+			item["result_preview"] = adminPreview(job.Result)
+			item["error_preview"] = adminPreview(job.Error)
+		}
+		if job := s.shellJobs[id]; job != nil {
+			item["command"] = adminPreview(redactSecretValues(job.Cmd, job.SecretValues))
+			item["arguments_preview"] = adminPreview(redactSecretValues(job.Arguments, job.SecretValues))
+			item["result_preview"] = adminPreview(redactSecretValues(job.Result, job.SecretValues))
+			item["error_preview"] = adminPreview(redactSecretValues(job.Error, job.SecretValues))
+		}
+	}
+	end := offset + len(recent)
+	return map[string]any{"count": count, "status_counts": counts, "queued": []map[string]any{}, "background": []map[string]any{}, "recent": recent, "offset": offset, "recent_limit": limit, "recent_truncated": end < count}
 }

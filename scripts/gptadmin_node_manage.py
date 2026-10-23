@@ -34,7 +34,24 @@ from datetime import datetime, timezone
 
 PACKAGE_SCHEMA = 'gptadmin.node-package/v1'
 IDENTITY_SCHEMA = 'gptadmin.node-identity/v1'
-REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node',)
+SHELLMCP_PACKAGE_FILE = 'bin/shellmcp'
+PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-relay02.service'
+REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, PROXY_ROUTE_PACKAGE_FILE)
+FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
+    'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
+    'scripts/gptadmin_node_autoupdate.py'))
+ADMIN_UI_INDEX = 'public/admin/index.html'
+ADMIN_UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
+SHELLMCP_SERVICE = 'gptadmin-shellmcp-go.service'
+SHELLMCP_LEGACY_BINARY = Path('/opt/gptadmin/bin/shellmcp')
+SHELLMCP_ENV_FILE = Path('/etc/gptadmin/go-shellmcp.env')
+SHELLMCP_PROXY_SERVICE_DROPIN_NAME = '80-gptadmin-node-package.conf'
+SHELLMCP_PROXY_SERVICE_DROPIN_TEXT = '''[Service]
+ExecStart=
+ExecStart=/opt/gptadmin-shellmcp/current/bin/shellmcp
+'''
+PROXY_ROUTE_SERVICE = 'gptadmin-proxy-route-relay02.service'
+PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=admin'
 DISK_FLOOR_BYTES = 500 * 1024 * 1024
 HEALTH_TIMEOUT_SECS = 30.0
 DRAIN_POLL_INTERVAL_SECS = 2.0
@@ -192,17 +209,33 @@ class Layout:
     def __init__(self, opt_root=Path('/opt/gptadmin-node'),
                  state_root=Path('/var/lib/gptadmin-node'),
                  config_root=Path('/etc/gptadmin-node'),
-                 unit_path=Path('/etc/systemd/system/gptadmin-node@.service')):
+                 unit_path=Path('/etc/systemd/system/gptadmin-node@.service'),
+                 shellmcp_opt_root=Path('/opt/gptadmin-shellmcp'),
+                 shellmcp_service_dropin=Path('/etc/systemd/system/gptadmin-shellmcp-go.service.d') / SHELLMCP_PROXY_SERVICE_DROPIN_NAME,
+                 shellmcp_env_file=SHELLMCP_ENV_FILE,
+                 proxy_route_unit_path=Path('/etc/systemd/system') / PROXY_ROUTE_SERVICE,
+                 proxy_route_state_file=Path('/var/lib/gptadmin-node/proxy-route-relay02-package.json')):
         self.opt_root = Path(opt_root)
         self.state_root = Path(state_root)
         self.config_root = Path(config_root)
         self.unit_path = Path(unit_path)
+        self.shellmcp_opt_root = Path(shellmcp_opt_root)
+        self.shellmcp_service_dropin = Path(shellmcp_service_dropin)
+        self.shellmcp_env_file = Path(shellmcp_env_file)
+        self.proxy_route_unit_path = Path(proxy_route_unit_path)
+        self.proxy_route_state_file = Path(proxy_route_state_file)
 
     def versions_root(self) -> Path:
         return self.opt_root / 'versions'
 
     def current_link(self) -> Path:
         return self.opt_root / 'current'
+
+    def shellmcp_versions_root(self) -> Path:
+        return self.shellmcp_opt_root / 'versions'
+
+    def shellmcp_current_link(self) -> Path:
+        return self.shellmcp_opt_root / 'current'
 
     def state(self, name: str) -> Path:
         return self.state_root / name
@@ -398,12 +431,28 @@ def verify_manifest_schema(manifest, expected_arch: str) -> dict:
         raise PreflightError(f'package platform {manifest.get("platform")!r} is not linux')
     if manifest.get('arch') != expected_arch:
         raise PreflightError(f'package arch {manifest.get("arch")!r} does not match this host ({expected_arch!r})')
+    if not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('git_commit', ''))):
+        raise PreflightError('manifest git_commit is not a full lowercase commit id')
+    if manifest.get('source_dirty') is not False:
+        raise PreflightError('refusing a package without a clean exact source manifest')
+    build_version = manifest.get('build_version')
+    if not isinstance(build_version, int) or isinstance(build_version, bool) or build_version < 1:
+        raise PreflightError('manifest build_version is not a positive integer')
     files = manifest.get('files')
     if not isinstance(files, dict) or not files:
         raise PreflightError('manifest lists no files')
     for required in REQUIRED_PACKAGE_FILES:
         if required not in files:
             raise PreflightError(f'manifest does not ship {required}')
+    names = set(files)
+    if any(not isinstance(name, str) for name in names):
+        raise PreflightError('manifest package path is not a string')
+    ui_names = names - FIXED_PACKAGE_FILES
+    if (not FIXED_PACKAGE_FILES <= names or ADMIN_UI_INDEX not in ui_names
+            or len(ui_names) < 2
+            or any(name != ADMIN_UI_INDEX and not ADMIN_UI_ASSET_RE.fullmatch(name)
+                   for name in ui_names)):
+        raise PreflightError('manifest package closure is missing required components or contains an unapproved path')
     for name, meta in files.items():
         if not isinstance(meta, dict):
             raise PreflightError(f'manifest entry for {name} is not an object')
@@ -445,6 +494,8 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
             raise PreflightError(f'manifest.json is not valid JSON: {type(error).__name__}') from None
         verify_manifest_schema(manifest, expected_arch)
         listed = manifest['files']
+        if set(members) != set(listed) | {'manifest.json'}:
+            raise PreflightError('node archive members do not exactly match the manifest closure')
         for name, meta in sorted(listed.items()):
             member = members.get(name)
             if member is None or not member.isfile():
@@ -460,7 +511,24 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
                     size += len(block)
             if digest.hexdigest() != meta['sha256'] or size != meta['size']:
                 raise PreflightError(f'package file {name} fails manifest digest/size verification')
+        index = tar.extractfile(members[ADMIN_UI_INDEX]).read()
+        for name in listed:
+            if name in FIXED_PACKAGE_FILES or name == ADMIN_UI_INDEX:
+                continue
+            if name.rsplit('/', 1)[-1].encode() not in index:
+                raise PreflightError('package contains an unreferenced admin UI asset')
+        if members[PROXY_ROUTE_PACKAGE_FILE].size > 256 * 1024:
+            raise PreflightError('proxy route unit exceeds its package size limit')
+        try:
+            unit_text = tar.extractfile(members[PROXY_ROUTE_PACKAGE_FILE]).read().decode('utf-8', 'strict')
+        except UnicodeDecodeError:
+            raise PreflightError('proxy route unit is not UTF-8 text') from None
+        if '[Unit]' not in unit_text or '[Service]' not in unit_text or not re.search(
+                r'(?m)^User=admin\s*$', unit_text):
+            raise PreflightError('proxy route unit does not match the fixed admin service contract')
         # Everything verified; materialize exactly the manifest tree.
+        if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+            raise PreflightError('package extraction destination is not a regular directory')
         dest.mkdir(parents=True, exist_ok=True)
         (dest / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
         for name in listed:
@@ -468,7 +536,7 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             with tar.extractfile(members[name]) as source, open(target, 'wb') as out:
                 shutil.copyfileobj(source, out)
-            os.chmod(target, 0o755 if name == 'bin/gptadmin-node' else 0o644)
+            os.chmod(target, 0o755 if name in ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE) else 0o644)
     return manifest
 
 
@@ -1227,6 +1295,352 @@ def verify_ui_payload(version_dir: Path) -> tuple[Path, dict]:
     return source, manifest
 
 
+def shellmcp_current_target(layout: Layout) -> Path | None:
+    link = layout.shellmcp_current_link()
+    if not link.is_symlink() and not link.exists():
+        return None
+    resolved = Path(os.path.realpath(link))
+    return resolved if resolved.is_dir() else None
+
+
+def atomic_symlink(target: Path, link: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    tmp = link.with_name(f'{link.name}.new-{os.getpid()}')
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    os.symlink(str(Path(os.path.realpath(target))), tmp)
+    os.replace(tmp, link)
+
+
+def shellmcp_dropin_text(layout: Layout) -> str:
+    return ('[Service]\nExecStart=\nExecStart=' +
+            str(layout.shellmcp_current_link() / 'bin' / 'shellmcp') + '\n')
+
+
+def shellmcp_version_url(layout: Layout) -> str:
+    env = parse_env_file(layout.shellmcp_env_file) if layout.shellmcp_env_file.is_file() else {}
+    host = env.get('SHELL_HOST') or env.get('SHELLMCP_HOST') or '127.0.0.1'
+    port_text = env.get('SHELL_PORT') or env.get('SHELLMCP_PORT') or env.get('PORT') or '25900'
+    if host in ('0.0.0.0', '::', ''):
+        host = '127.0.0.1'
+    if not re.fullmatch(r'[A-Za-z0-9.:-]{1,255}', host):
+        raise PreflightError('ShellMCP environment has an invalid local listen address')
+    try:
+        port = int(port_text)
+    except (ValueError, TypeError):
+        raise PreflightError('ShellMCP environment has an invalid local port') from None
+    if not 1 <= port <= 65535:
+        raise PreflightError('ShellMCP environment has an invalid local port')
+    if ':' in host and not host.startswith('['):
+        host = '[' + host + ']'
+    return f'http://{host}:{port}/version'
+
+
+def shellmcp_live_version(layout: Layout) -> dict:
+    status, payload = http_json('GET', shellmcp_version_url(layout), timeout=HTTP_CALL_TIMEOUT_SECS)
+    if status != 200 or not isinstance(payload, dict) or payload.get('component') != 'shellmcp-go' \
+            or payload.get('status') != 'ready':
+        raise RuntimeFailure(f'ShellMCP version readback failed (HTTP {status})')
+    return payload
+
+
+def shellmcp_systemctl_property(runner: Runner, unit: str, key: str) -> str:
+    try:
+        result = runner.run(['systemctl', 'show', unit, '-p', key, '--value'], timeout=10)
+    except subprocess.TimeoutExpired:
+        raise RuntimeFailure(f'systemd readback timed out for {unit} {key}') from None
+    if result.returncode:
+        raise PreflightError(f'cannot read active systemd property {key} for {unit}')
+    return result.stdout.strip()
+
+
+def verify_shellmcp_service_contract(layout: Layout, runner: Runner) -> tuple[bool, dict]:
+    """Require the known active service and preserve its env/user/argument contract."""
+    active = systemctl(runner, 'is-active', SHELLMCP_SERVICE, check=False)
+    if active.returncode or active.stdout.strip() != 'active':
+        raise PreflightError(f'{SHELLMCP_SERVICE} must already be active')
+    user = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'User')
+    env_files = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'EnvironmentFiles')
+    exec_start = shellmcp_systemctl_property(runner, SHELLMCP_SERVICE, 'ExecStart')
+    if user != 'root' or str(layout.shellmcp_env_file) not in env_files:
+        raise PreflightError('active ShellMCP unit user or EnvironmentFile differs from the supported contract')
+    dropin = layout.shellmcp_service_dropin
+    if (dropin.exists() or dropin.is_symlink()) and (dropin.is_symlink() or not dropin.is_file()):
+        raise PreflightError('ShellMCP package drop-in is not a regular file')
+    managed = dropin.is_file()
+    if managed and dropin.read_text() != shellmcp_dropin_text(layout):
+        raise PreflightError('ShellMCP package drop-in exists with unexpected contents')
+    expected = (str(layout.shellmcp_current_link() / 'bin' / 'shellmcp') if managed
+                else str(SHELLMCP_LEGACY_BINARY))
+    if not re.search(r'\{ path=' + re.escape(expected) + r' ; argv\[\]=' + re.escape(expected) + r' ;', exec_start):
+        raise PreflightError('active ShellMCP ExecStart differs from the supported no-argument binary contract')
+    return managed, {'active': active.stdout.strip(), 'user': user,
+                     'environment_file': str(layout.shellmcp_env_file), 'exec_start': expected}
+
+
+def wait_shellmcp_version(layout: Layout, commit: str, build_version: int) -> dict:
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECS
+    last_error = 'no readback yet'
+    while time.monotonic() < deadline:
+        try:
+            version = shellmcp_live_version(layout)
+            if version.get('git_commit') == commit and version.get('build_version') == build_version:
+                return version
+            last_error = 'running service reports a different package version'
+        except (OSError, urllib.error.URLError, RuntimeFailure) as error:
+            last_error = str(error)
+        time.sleep(0.5)
+    raise RuntimeFailure(f'ShellMCP did not report the expected package version: {last_error}')
+
+
+def shellmcp_version_manifest(version_dir: Path) -> dict:
+    try:
+        if version_dir.is_symlink() or not version_dir.is_dir():
+            raise ValueError('unsafe ShellMCP version directory')
+        manifest = json.loads((version_dir / 'manifest.json').read_text())
+        if not isinstance(manifest, dict):
+            raise ValueError('ShellMCP manifest is not an object')
+        binary = version_dir / 'bin' / 'shellmcp'
+        expected_sha = manifest.get('sha256')
+        expected_size = manifest.get('size')
+        if (manifest.get('schema') != PACKAGE_SCHEMA
+                or not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('git_commit', '')))
+                or type(manifest.get('build_version')) is not int or manifest['build_version'] < 1
+                or not isinstance(expected_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_sha)
+                or type(expected_size) is not int or expected_size < 1
+                or not binary.is_file() or binary.is_symlink()
+                or binary.stat().st_size != expected_size
+                or digest_file(binary) != expected_sha):
+            raise ValueError('invalid ShellMCP version binding')
+    except (OSError, ValueError, TypeError):
+        raise PreflightError(f'ShellMCP version directory is not manifest-verified: {version_dir.name}') from None
+    verify_elf_binary(binary)
+    return manifest
+
+
+def digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def cmd_shellmcp_status(args, layout: Layout, runner: Runner) -> None:
+    managed, contract = verify_shellmcp_service_contract(layout, runner)
+    target = shellmcp_current_target(layout)
+    version = shellmcp_live_version(layout)
+    package = None
+    if managed:
+        if target is None or target.parent != layout.shellmcp_versions_root():
+            raise PreflightError('managed ShellMCP service has no package-owned current version')
+        package = shellmcp_version_manifest(target)
+        if (version.get('git_commit') != package['git_commit']
+                or version.get('build_version') != package['build_version']):
+            raise RuntimeFailure('ShellMCP live version differs from its manifest-verified current package')
+    print(json.dumps({'ok': True, 'command': 'shellmcp status', 'managed': managed,
+                      'current': target.name if target else None, 'package': package, 'service': contract,
+                      'version': version}, sort_keys=True))
+
+
+def cmd_shellmcp_rollback(args, layout: Layout, runner: Runner) -> None:
+    require_root()
+    managed, contract = verify_shellmcp_service_contract(layout, runner)
+    if not managed:
+        raise PreflightError('ShellMCP package rollback requires a Node package managed installation')
+    current = shellmcp_current_target(layout)
+    if current is None:
+        raise PreflightError('no current ShellMCP package is installed')
+    if current.parent != layout.shellmcp_versions_root():
+        raise PreflightError('ShellMCP current link does not point inside its version store')
+    previous = shellmcp_version_manifest(current)
+    target = select_rollback_dir(layout.shellmcp_versions_root(), current, args.to)
+    target_manifest = shellmcp_version_manifest(target)
+    try:
+        live_before = shellmcp_live_version(layout)
+    except (OSError, urllib.error.URLError, RuntimeFailure) as error:
+        raise PreflightError(f'cannot verify current ShellMCP service before rollback: {error}') from None
+    try:
+        atomic_symlink(target, layout.shellmcp_current_link())
+        systemctl(runner, 'restart', SHELLMCP_SERVICE)
+        live = wait_shellmcp_version(layout, target_manifest['git_commit'], target_manifest['build_version'])
+    except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as error:
+        try:
+            atomic_symlink(current, layout.shellmcp_current_link())
+            systemctl(runner, 'restart', SHELLMCP_SERVICE)
+            restored = shellmcp_live_version(layout)
+            if (restored.get('git_commit') != live_before.get('git_commit')
+                    or restored.get('build_version') != live_before.get('build_version')):
+                raise RuntimeFailure('rollback recovery readback differs from the pre-rollback ShellMCP version')
+        except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as restore:
+            raise RuntimeFailure(f'ShellMCP rollback failed ({error}); service recovery failed ({restore})') from None
+        raise RuntimeFailure(f'ShellMCP rollback failed ({error}); current version restored and read back') from None
+    print(json.dumps({'ok': True, 'command': 'shellmcp rollback',
+                      'version_dir': target.name, 'previous_dir': current.name,
+                      'previous_version': previous, 'version': live, 'service': contract}, sort_keys=True))
+
+
+def cmd_shellmcp_update(args, layout: Layout, runner: Runner) -> None:
+    require_root()
+    check_disk_floor(layout.shellmcp_opt_root, 'ShellMCP install root')
+    managed, contract = verify_shellmcp_service_contract(layout, runner)
+    before = shellmcp_live_version(layout)
+    previous_target = shellmcp_current_target(layout)
+    if managed:
+        if previous_target is None or previous_target.parent != layout.shellmcp_versions_root():
+            raise PreflightError('managed ShellMCP service has no package-owned current version')
+        previous_manifest = shellmcp_version_manifest(previous_target)
+        if (before.get('git_commit') != previous_manifest['git_commit']
+                or before.get('build_version') != previous_manifest['build_version']):
+            raise PreflightError('ShellMCP live version differs from its current package; refusing update')
+    versions_root = layout.shellmcp_versions_root()
+    staging = versions_root / f'.staging-{os.getpid()}'
+    if staging.is_symlink():
+        staging.unlink()
+    else:
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, mode=0o700)
+    final = None
+    try:
+        manifest = verify_and_extract(Path(args.package), host_arch(), staging)
+        binary = staging / SHELLMCP_PACKAGE_FILE
+        verify_elf_binary(binary)
+        final = next_version_dir(versions_root, manifest['git_commit'])
+        final.mkdir(parents=True)
+        (final / 'bin').mkdir()
+        shutil.copyfile(binary, final / 'bin' / 'shellmcp')
+        os.chmod(final / 'bin' / 'shellmcp', 0o755)
+        (final / 'manifest.json').write_text(json.dumps({
+            'schema': PACKAGE_SCHEMA, 'git_commit': manifest['git_commit'],
+            'build_version': manifest['build_version'], 'source_dirty': False,
+            'sha256': manifest['files'][SHELLMCP_PACKAGE_FILE]['sha256'],
+            'size': manifest['files'][SHELLMCP_PACKAGE_FILE]['size'],
+        }, sort_keys=True, indent=2) + '\n')
+        shellmcp_version_manifest(final)
+    except (RuntimeFailure, PreflightError, OSError):
+        if final is not None:
+            shutil.rmtree(final, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    current_link = layout.shellmcp_current_link()
+    dropin = layout.shellmcp_service_dropin
+    previous_dropin = dropin.read_bytes() if dropin.is_file() else None
+    if previous_dropin is not None and not managed:
+        raise PreflightError('refusing an unmanaged ShellMCP service drop-in')
+    try:
+        atomic_symlink(final, current_link)
+        atomic_write(dropin, shellmcp_dropin_text(layout), 0o644)
+        systemctl(runner, 'daemon-reload')
+        systemctl(runner, 'restart', SHELLMCP_SERVICE)
+        version = wait_shellmcp_version(layout, manifest['git_commit'], manifest['build_version'])
+    except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as error:
+        rollback_error = None
+        try:
+            if previous_target is None:
+                current_link.unlink(missing_ok=True)
+            else:
+                atomic_symlink(previous_target, current_link)
+            if previous_dropin is None:
+                dropin.unlink(missing_ok=True)
+            else:
+                atomic_write(dropin, previous_dropin.decode('utf-8'), 0o644)
+            systemctl(runner, 'daemon-reload')
+            systemctl(runner, 'restart', SHELLMCP_SERVICE)
+            restored = shellmcp_live_version(layout)
+            if (restored.get('git_commit') != before.get('git_commit')
+                    or restored.get('build_version') != before.get('build_version')):
+                raise RuntimeFailure('rollback readback differs from the pre-update ShellMCP version')
+        except (RuntimeFailure, PreflightError, OSError, urllib.error.URLError) as restore:
+            rollback_error = str(restore)
+        detail = f' ShellMCP rollback failed: {rollback_error}' if rollback_error else ' previous version restored and read back'
+        raise RuntimeFailure(f'ShellMCP update failed ({error});{detail}') from None
+    print(json.dumps({'ok': True, 'command': 'shellmcp update',
+                      'previous': before, 'version': version,
+                      'version_dir': final.name, 'service': contract}, sort_keys=True))
+
+
+def cmd_proxy_route_status(args, layout: Layout, runner: Runner) -> None:
+    path = layout.proxy_route_unit_path
+    state = None
+    if layout.proxy_route_state_file.is_file():
+        try:
+            state = json.loads(layout.proxy_route_state_file.read_text())
+        except (OSError, ValueError):
+            raise RuntimeFailure('proxy route package ownership state is unreadable') from None
+    active = systemctl(runner, 'is-active', PROXY_ROUTE_SERVICE, check=False)
+    enabled = systemctl(runner, 'is-enabled', PROXY_ROUTE_SERVICE, check=False)
+    print(json.dumps({'ok': True, 'command': 'proxy-route status',
+                      'installed': path.is_file() and not path.is_symlink(),
+                      'managed': isinstance(state, dict) and state.get('schema') == 'gptadmin.proxy-route-package/v1',
+                      'active': active.stdout.strip() if active.returncode == 0 else 'inactive',
+                      'enabled': enabled.stdout.strip() if enabled.returncode == 0 else 'disabled',
+                      'path': str(path)}, sort_keys=True))
+
+
+def cmd_proxy_route_install(args, layout: Layout, runner: Runner) -> None:
+    require_root()
+    hub = systemctl(runner, 'is-active', PRIMARY_SERVICE, check=False)
+    if hub.returncode or hub.stdout.strip() != 'active':
+        raise PreflightError('fixed proxy route unit may only be installed on the active Hub host')
+    staging = layout.opt_root / f'.proxy-route-staging-{os.getpid()}'
+    if staging.is_symlink():
+        staging.unlink()
+    else:
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, mode=0o700)
+    try:
+        manifest = verify_and_extract(Path(args.package), host_arch(), staging)
+    except (RuntimeFailure, PreflightError, OSError):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    source = staging / PROXY_ROUTE_PACKAGE_FILE
+    unit_text = source.read_text()
+    target = layout.proxy_route_unit_path
+    state_path = layout.proxy_route_state_file
+    new_digest = manifest['files'][PROXY_ROUTE_PACKAGE_FILE]['sha256']
+    old_text = target.read_text() if target.is_file() and not target.is_symlink() else None
+    old_state = None
+    if state_path.is_file():
+        try:
+            old_state = json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            raise PreflightError('proxy route package ownership state is unreadable; refusing overwrite') from None
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or old_text is None:
+            raise PreflightError('existing proxy route unit is not a regular file; refusing overwrite')
+        if old_text != unit_text and not (isinstance(old_state, dict)
+                and old_state.get('schema') == 'gptadmin.proxy-route-package/v1'
+                and old_state.get('sha256') == hashlib.sha256(old_text.encode()).hexdigest()):
+            raise PreflightError('existing proxy route unit is not owned by the Node package manager')
+    try:
+        atomic_write(target, unit_text, 0o644)
+        atomic_write(state_path, json.dumps({'schema': 'gptadmin.proxy-route-package/v1',
+                    'git_commit': manifest['git_commit'], 'sha256': new_digest}, sort_keys=True) + '\n', 0o600)
+        systemctl(runner, 'daemon-reload')
+        loaded = runner.run(['systemctl', 'show', PROXY_ROUTE_SERVICE,
+                             '-p', 'FragmentPath', '--value'], timeout=10)
+        if loaded.returncode or Path(loaded.stdout.strip()).resolve() != target.resolve():
+            raise RuntimeFailure('systemd did not read back the installed fixed proxy unit path')
+    except (RuntimeFailure, OSError) as error:
+        if old_text is None:
+            target.unlink(missing_ok=True)
+        else:
+            atomic_write(target, old_text, 0o644)
+        if old_state is None:
+            state_path.unlink(missing_ok=True)
+        else:
+            atomic_write(state_path, json.dumps(old_state, sort_keys=True) + '\n', 0o600)
+        systemctl(runner, 'daemon-reload', check=False)
+        raise RuntimeFailure(f'proxy route unit install rolled back ({error})') from None
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    print(json.dumps({'ok': True, 'command': 'proxy-route install', 'installed': True,
+                      'enabled_or_started': False, 'path': str(target),
+                      'git_commit': manifest['git_commit'], 'sha256': new_digest}, sort_keys=True))
+
+
 def publish_admin_ui(source: Path, public_root: Path, commit: str) -> dict:
     """Atomically publish verified static assets while preserving the old UI."""
     public_root = Path(public_root)
@@ -1814,6 +2228,25 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument('--operation-deadline-secs', type=float, default=None,
                         help='catchable update deadline (1..50s), plus 80s rollback reserve')
     update.set_defaults(func=cmd_update)
+
+    shellmcp = sub.add_parser('shellmcp', help='manage the standalone Go ShellMCP component')
+    shellmcp_sub = shellmcp.add_subparsers(dest='shellmcp_action', metavar='ACTION', required=True)
+    shellmcp_status = shellmcp_sub.add_parser('status', help='read active ShellMCP service and version')
+    shellmcp_status.set_defaults(func=cmd_shellmcp_status)
+    shellmcp_update = shellmcp_sub.add_parser('update', help='install a verified ShellMCP binary and rollback on failed readback')
+    shellmcp_update.add_argument('--package', required=True, metavar='TAR.GZ')
+    shellmcp_update.set_defaults(func=cmd_shellmcp_update)
+    shellmcp_rollback = shellmcp_sub.add_parser('rollback', help='switch to a previous verified ShellMCP version')
+    shellmcp_rollback.add_argument('--to', default=None, metavar='VERSION-DIR')
+    shellmcp_rollback.set_defaults(func=cmd_shellmcp_rollback)
+
+    proxy_route = sub.add_parser('proxy-route', help='install or inspect the fixed VUSA tunnel unit')
+    proxy_sub = proxy_route.add_subparsers(dest='proxy_route_action', metavar='ACTION', required=True)
+    proxy_status = proxy_sub.add_parser('status', help='read fixed proxy unit installation/activation state')
+    proxy_status.set_defaults(func=cmd_proxy_route_status)
+    proxy_install = proxy_sub.add_parser('install', help='install the fixed unit from a verified Node package; never starts it')
+    proxy_install.add_argument('--package', required=True, metavar='TAR.GZ')
+    proxy_install.set_defaults(func=cmd_proxy_route_install)
 
     rollback = sub.add_parser('rollback', help='switch to the previous (or named) version and restart')
     rollback.add_argument('--name', default=None, metavar='NAME')

@@ -52,6 +52,8 @@ type AccessProfile struct {
 	AllowedTargets   []string         `json:"allowed_targets"`
 	AllowedTools     []string         `json:"allowed_tools"`
 	ToolRules        []AccessToolRule `json:"tool_rules,omitempty"`
+	ReadRoots        *[]string        `json:"read_roots,omitempty"`
+	WriteRoots       *[]string        `json:"write_roots,omitempty"`
 	WorkspaceRefs    []WorkspaceRef   `json:"workspace_refs"`
 	Version          int64            `json:"version"`
 	UpdatedAt        time.Time        `json:"updated_at"`
@@ -78,6 +80,8 @@ type accessProfileRequest struct {
 	AllowedTargets   []string         `json:"allowed_targets"`
 	AllowedTools     []string         `json:"allowed_tools"`
 	ToolRules        []AccessToolRule `json:"tool_rules,omitempty"`
+	ReadRoots        *[]string        `json:"read_roots,omitempty"`
+	WriteRoots       *[]string        `json:"write_roots,omitempty"`
 	WorkspaceRefs    []WorkspaceRef   `json:"workspace_refs"`
 }
 
@@ -116,10 +120,24 @@ func cloneAccessProfile(profile AccessProfile) AccessProfile {
 	profile.AllowedTools = append([]string(nil), profile.AllowedTools...)
 	profile.WorkspaceRefs = append([]WorkspaceRef(nil), profile.WorkspaceRefs...)
 	profile.ToolRules = append([]AccessToolRule(nil), profile.ToolRules...)
+	profile.ReadRoots = cloneStringSlicePointer(profile.ReadRoots)
+	profile.WriteRoots = cloneStringSlicePointer(profile.WriteRoots)
 	for i := range profile.ToolRules {
 		profile.ToolRules[i].Actions = append([]string(nil), profile.ToolRules[i].Actions...)
 	}
 	return profile
+}
+
+func cloneStringSlicePointer(values *[]string) *[]string {
+	if values == nil {
+		return nil
+	}
+	cloned := append([]string{}, (*values)...)
+	return &cloned
+}
+
+func filesystemACLActive(profile AccessProfile) bool {
+	return profile.ReadRoots != nil || profile.WriteRoots != nil
 }
 
 func normalizeAccessToolRules(rules []AccessToolRule) ([]AccessToolRule, error) {
@@ -498,6 +516,14 @@ func normalizeAccessProfile(profile AccessProfile) (AccessProfile, error) {
 	if err != nil {
 		return AccessProfile{}, err
 	}
+	readRoots, err := normalizeFilesystemRoots(profile.ReadRoots, "read_roots")
+	if err != nil {
+		return AccessProfile{}, err
+	}
+	writeRoots, err := normalizeFilesystemRoots(profile.WriteRoots, "write_roots")
+	if err != nil {
+		return AccessProfile{}, err
+	}
 	workspaceRefs, err := normalizeWorkspaceRefs(profile.WorkspaceRefs)
 	if err != nil {
 		return AccessProfile{}, err
@@ -510,7 +536,36 @@ func normalizeAccessProfile(profile AccessProfile) (AccessProfile, error) {
 	profile.AllowedTools = allowedTools
 	profile.WorkspaceRefs = workspaceRefs
 	profile.ToolRules = toolRules
+	profile.ReadRoots = readRoots
+	profile.WriteRoots = writeRoots
 	return profile, nil
+}
+
+func normalizeFilesystemRoots(roots *[]string, field string) (*[]string, error) {
+	if roots == nil {
+		return nil, nil
+	}
+	if len(*roots) > accessProfileMaxListItems {
+		return nil, fmt.Errorf("%s has too many entries", field)
+	}
+	if len(*roots) == 0 {
+		empty := []string{}
+		return &empty, nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, len(*roots))
+	for i, root := range *roots {
+		value, err := normalizeAccessProfileString(root, field, true)
+		if err != nil {
+			return nil, err
+		}
+		if seen[value] {
+			return nil, fmt.Errorf("%s contains a duplicate root", field)
+		}
+		seen[value] = true
+		out[i] = value
+	}
+	return &out, nil
 }
 
 func validateAccessProfile(profile AccessProfile) error {
@@ -614,6 +669,8 @@ func (s *Server) adminAccessProfile(w http.ResponseWriter, r *http.Request) {
 			AllowedTargets:   req.AllowedTargets,
 			AllowedTools:     req.AllowedTools,
 			ToolRules:        req.ToolRules,
+			ReadRoots:        req.ReadRoots,
+			WriteRoots:       req.WriteRoots,
 			WorkspaceRefs:    req.WorkspaceRefs,
 			Version:          1,
 			UpdatedAt:        time.Now().UTC(),

@@ -28,9 +28,106 @@ export type AccessProfile = {
   access_mode: AccessMode;
   allowed_targets: string[];
   allowed_tools: string[];
+  read_roots?: string[];
+  write_roots?: string[];
   external_workspace_refs: ExternalWorkspaceRef[];
   version: number;
   updated_at: string | null;
+};
+
+export type ResourceState = "available" | "partial" | "unavailable";
+
+export type ResourceComponent = {
+  status: ResourceState;
+  error?: string;
+};
+
+export type CpuResource = ResourceComponent & {
+  cores?: number;
+  utilization_percent?: number;
+  sample_interval_ms?: number;
+};
+
+export type MemoryResource = ResourceComponent & {
+  total_bytes?: number;
+  available_bytes?: number;
+  used_bytes?: number;
+};
+
+export type RootFilesystemResource = ResourceComponent & {
+  mount?: string;
+  total_bytes?: number;
+  used_bytes?: number;
+  free_bytes?: number;
+};
+
+export type ServerResourceSummary = {
+  server_id: string;
+  status: ResourceState;
+  sampled_at: string | null;
+  node_status?: string;
+  last_seen?: string | number | null;
+  error?: string;
+  cpu: CpuResource;
+  memory: MemoryResource;
+  root_filesystem: RootFilesystemResource;
+};
+
+export type PendingResourceSample = {
+  server_id: string;
+  status: "pending";
+  job_id: string;
+};
+
+export type ResourceSampleResult = ServerResourceSummary | PendingResourceSample;
+
+export type HistoricalJobSummary = {
+  job_id: string;
+  task_id?: string;
+  server_id: string;
+  server?: string;
+  status?: string;
+  tool_name?: string;
+  command?: string;
+  arguments_preview?: string;
+  result_preview?: string;
+  error_preview?: string;
+  created_at?: number | string;
+};
+
+export type ProxyRouteAction = "enable" | "disable" | "reconcile" | "probe";
+
+export type ProxyRouteProfile = {
+  schema: "gptadmin.proxy-route/v1";
+  id: "relay02-server44-de-http";
+  consumer: "relay02";
+  exit: "node-44-de-http";
+  listener: { bind_address: "127.0.0.1"; port: 24836 };
+  ssh_identity_ref: "ssh-config:relay02";
+  desired_state: "enabled" | "disabled";
+};
+
+export type ProxyRouteState = {
+  profile: ProxyRouteProfile;
+  runtime: {
+    profile_saved: boolean;
+    service_state: "active" | "inactive" | "failed" | "unknown";
+    listener_state: "listening" | "closed" | "unknown";
+    last_probe: {
+      state: string;
+      checked_at: string | null;
+      direct_exit_ip: string | null;
+      proxy_exit_ip: string | null;
+      server44_path_verified: boolean | null;
+      server44_path_reason?: string | null;
+    } | null;
+  };
+};
+
+export type ProxyRouteScreenProps = {
+  load: () => Promise<ProxyRouteState>;
+  save: (profile: ProxyRouteProfile) => Promise<ProxyRouteState>;
+  action: (action: ProxyRouteAction) => Promise<ProxyRouteState>;
 };
 
 export type ClientInventoryItem = {
@@ -141,6 +238,203 @@ function parseStringList(value: unknown, field: string): string[] {
   return value;
 }
 
+function parseOptionalStringList(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ApiError(502, `Сервер вернул некорректное поле ${field}.`);
+  }
+  return value;
+}
+
+function parseResourceState(value: unknown, field: string): ResourceState {
+  if (value !== "available" && value !== "partial" && value !== "unavailable") {
+    throw new ApiError(502, `Сервер вернул некорректное поле ${field}.`);
+  }
+  return value;
+}
+
+function optionalNumber(value: Record<string, unknown>, field: string): number | undefined {
+  const item = value[field];
+  if (item === undefined) return undefined;
+  if (typeof item !== "number" || !Number.isFinite(item)) {
+    throw new ApiError(502, `Сервер вернул некорректное поле ${field}.`);
+  }
+  return item;
+}
+
+function parseResourceComponent(value: unknown, name: string): Record<string, unknown> & ResourceComponent {
+  const record = asRecord(value, `Сервер вернул некорректный блок ${name}.`);
+  const status = parseResourceState(record.status, `${name}.status`);
+  if (record.error !== undefined && typeof record.error !== "string") {
+    throw new ApiError(502, `Сервер вернул некорректное поле ${name}.error.`);
+  }
+  return { ...record, status, ...(typeof record.error === "string" ? { error: record.error } : {}) };
+}
+
+function findResourcePayload(body: unknown, expectedServerId: string): ResourceSampleResult {
+  const queue: unknown[] = [body];
+  const seen = new Set<object>();
+  for (let depth = 0; queue.length && depth < 20; depth += 1) {
+    const current = queue.shift();
+    if (typeof current !== "object" || current === null || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (["pending", "queued", "queued_offline", "running", "dispatching"].includes(String(record.status)) && typeof record.job_id === "string" && record.job_id) {
+      const serverId = typeof record.server_id === "string" ? record.server_id : expectedServerId;
+      if (serverId !== expectedServerId) throw new ApiError(502, "Hub вернул задачу метрик для другого узла.");
+      return { server_id: serverId, status: "pending", job_id: record.job_id };
+    }
+    if (record.cpu !== undefined && record.memory !== undefined && record.root_filesystem !== undefined) {
+      const serverId = typeof record.server_id === "string" ? record.server_id : expectedServerId;
+      if (serverId !== expectedServerId) throw new ApiError(502, "Hub вернул метрики для другого узла.");
+      if (record.sampled_at !== null && typeof record.sampled_at !== "string") {
+        throw new ApiError(502, "Сервер вернул некорректное время измерения ресурсов.");
+      }
+      if (record.node_status !== undefined && typeof record.node_status !== "string") {
+        throw new ApiError(502, "Сервер вернул некорректный статус узла.");
+      }
+      if (record.last_seen !== undefined && record.last_seen !== null && typeof record.last_seen !== "string" && typeof record.last_seen !== "number") {
+        throw new ApiError(502, "Сервер вернул некорректное время последнего ответа узла.");
+      }
+      if (record.error !== undefined && typeof record.error !== "string") {
+        throw new ApiError(502, "Сервер вернул некорректную ошибку измерения ресурсов.");
+      }
+      const cpu = parseResourceComponent(record.cpu, "cpu");
+      const memory = parseResourceComponent(record.memory, "memory");
+      const rootFilesystem = parseResourceComponent(record.root_filesystem, "root_filesystem");
+      return {
+        server_id: serverId,
+        status: parseResourceState(record.status, "status"),
+        sampled_at: record.sampled_at as string | null,
+        ...(typeof record.node_status === "string" ? { node_status: record.node_status } : {}),
+        ...(typeof record.last_seen === "string" || typeof record.last_seen === "number" ? { last_seen: record.last_seen } : {}),
+        ...(typeof record.error === "string" ? { error: record.error } : {}),
+        cpu: {
+          status: cpu.status,
+          ...(typeof cpu.error === "string" ? { error: cpu.error } : {}),
+          ...(optionalNumber(cpu, "cores") !== undefined ? { cores: optionalNumber(cpu, "cores") } : {}),
+          ...(optionalNumber(cpu, "utilization_percent") !== undefined ? { utilization_percent: optionalNumber(cpu, "utilization_percent") } : {}),
+          ...(optionalNumber(cpu, "sample_interval_ms") !== undefined ? { sample_interval_ms: optionalNumber(cpu, "sample_interval_ms") } : {}),
+        },
+        memory: {
+          status: memory.status,
+          ...(typeof memory.error === "string" ? { error: memory.error } : {}),
+          ...(optionalNumber(memory, "total_bytes") !== undefined ? { total_bytes: optionalNumber(memory, "total_bytes") } : {}),
+          ...(optionalNumber(memory, "available_bytes") !== undefined ? { available_bytes: optionalNumber(memory, "available_bytes") } : {}),
+          ...(optionalNumber(memory, "used_bytes") !== undefined ? { used_bytes: optionalNumber(memory, "used_bytes") } : {}),
+        },
+        root_filesystem: {
+          status: rootFilesystem.status,
+          ...(typeof rootFilesystem.error === "string" ? { error: rootFilesystem.error } : {}),
+          ...(typeof rootFilesystem.mount === "string" ? { mount: rootFilesystem.mount } : {}),
+          ...(optionalNumber(rootFilesystem, "total_bytes") !== undefined ? { total_bytes: optionalNumber(rootFilesystem, "total_bytes") } : {}),
+          ...(optionalNumber(rootFilesystem, "used_bytes") !== undefined ? { used_bytes: optionalNumber(rootFilesystem, "used_bytes") } : {}),
+          ...(optionalNumber(rootFilesystem, "free_bytes") !== undefined ? { free_bytes: optionalNumber(rootFilesystem, "free_bytes") } : {}),
+        },
+      };
+    }
+    for (const key of ["structuredContent", "response", "result", "data"]) {
+      if (record[key] !== undefined) queue.push(record[key]);
+    }
+    if (Array.isArray(record.content)) {
+      for (const item of record.content) {
+        if (typeof item === "object" && item !== null && typeof (item as Record<string, unknown>).text === "string") {
+          try { queue.push(JSON.parse((item as { text: string }).text)); } catch { /* Non-JSON MCP text is not a resource summary. */ }
+        }
+      }
+    }
+  }
+  throw new ApiError(502, "Hub не вернул данные измерения ресурсов.");
+}
+
+function parseHistoricalJobs(body: unknown, expectedServerId: string): HistoricalJobSummary | null {
+  const value = asRecord(body, "Сервер вернул некорректную историю задач.");
+  if (!Array.isArray(value.recent)) throw new ApiError(502, "Сервер вернул неполную историю задач.");
+  if (value.recent.length === 0) return null;
+  const job = asRecord(value.recent[0], "Сервер вернул некорректную задачу.");
+  if (typeof job.job_id !== "string" || typeof job.server_id !== "string" || job.server_id !== expectedServerId) {
+    throw new ApiError(502, "Hub вернул последнюю задачу для другого узла.");
+  }
+  return {
+    job_id: job.job_id,
+    server_id: job.server_id,
+    ...(typeof job.task_id === "string" ? { task_id: job.task_id } : {}),
+    ...(typeof job.server === "string" ? { server: job.server } : {}),
+    ...(typeof job.status === "string" ? { status: job.status } : {}),
+    ...(typeof job.tool_name === "string" ? { tool_name: job.tool_name } : {}),
+    ...(typeof job.command === "string" ? { command: job.command } : {}),
+    ...(typeof job.arguments_preview === "string" ? { arguments_preview: job.arguments_preview } : {}),
+    ...(typeof job.result_preview === "string" ? { result_preview: job.result_preview } : {}),
+    ...(typeof job.error_preview === "string" ? { error_preview: job.error_preview } : {}),
+    ...(typeof job.created_at === "string" || typeof job.created_at === "number" ? { created_at: job.created_at } : {}),
+  };
+}
+
+function parseProxyRouteState(body: unknown): ProxyRouteState {
+  const value = asRecord(body, "Hub вернул некорректное состояние proxy-маршрута.");
+  const profile = asRecord(value.profile, "Hub вернул некорректный профиль proxy-маршрута.");
+  const listener = asRecord(profile.listener, "Hub вернул некорректный listener proxy-маршрута.");
+  if (
+    profile.schema !== "gptadmin.proxy-route/v1" ||
+    profile.id !== "relay02-server44-de-http" ||
+    profile.consumer !== "relay02" ||
+    profile.exit !== "node-44-de-http" ||
+    listener.bind_address !== "127.0.0.1" ||
+    listener.port !== 24836 ||
+    profile.ssh_identity_ref !== "ssh-config:relay02" ||
+    (profile.desired_state !== "enabled" && profile.desired_state !== "disabled")
+  ) {
+    throw new ApiError(502, "Hub вернул proxy profile вне разрешённой конфигурации.");
+  }
+  const runtime = asRecord(value.runtime, "Hub вернул неполное состояние proxy-маршрута.");
+  if (
+    typeof runtime.profile_saved !== "boolean" ||
+    !["active", "inactive", "failed", "unknown"].includes(String(runtime.service_state)) ||
+    !["listening", "closed", "unknown"].includes(String(runtime.listener_state))
+  ) {
+    throw new ApiError(502, "Hub вернул некорректный статус proxy-маршрута.");
+  }
+  let lastProbe: ProxyRouteState["runtime"]["last_probe"] = null;
+  if (runtime.last_probe !== null && runtime.last_probe !== undefined) {
+    const probe = asRecord(runtime.last_probe, "Hub вернул некорректный результат proxy-проверки.");
+    if (
+      typeof probe.state !== "string" ||
+      (probe.checked_at !== null && typeof probe.checked_at !== "string") ||
+      (probe.direct_exit_ip !== null && typeof probe.direct_exit_ip !== "string") ||
+      (probe.proxy_exit_ip !== null && typeof probe.proxy_exit_ip !== "string") ||
+      (probe.server44_path_verified !== null && typeof probe.server44_path_verified !== "boolean") ||
+      (probe.server44_path_reason !== undefined && probe.server44_path_reason !== null && typeof probe.server44_path_reason !== "string")
+    ) {
+      throw new ApiError(502, "Hub вернул некорректные поля proxy-проверки.");
+    }
+    lastProbe = {
+      state: probe.state,
+      checked_at: probe.checked_at as string | null,
+      direct_exit_ip: probe.direct_exit_ip as string | null,
+      proxy_exit_ip: probe.proxy_exit_ip as string | null,
+      server44_path_verified: probe.server44_path_verified as boolean | null,
+      ...(probe.server44_path_reason === undefined ? {} : { server44_path_reason: probe.server44_path_reason as string | null }),
+    };
+  }
+  return {
+    profile: {
+      schema: "gptadmin.proxy-route/v1",
+      id: "relay02-server44-de-http",
+      consumer: "relay02",
+      exit: "node-44-de-http",
+      listener: { bind_address: "127.0.0.1", port: 24836 },
+      ssh_identity_ref: "ssh-config:relay02",
+      desired_state: profile.desired_state,
+    },
+    runtime: {
+      profile_saved: runtime.profile_saved,
+      service_state: runtime.service_state as ProxyRouteState["runtime"]["service_state"],
+      listener_state: runtime.listener_state as ProxyRouteState["runtime"]["listener_state"],
+      last_probe: lastProbe,
+    },
+  };
+}
+
 function parseExternalWorkspaceRefs(value: unknown): ExternalWorkspaceRef[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -181,6 +475,8 @@ function parseAccessProfile(body: unknown): AccessProfile {
     approval_mode: typeof value.approval_mode === "string" ? value.approval_mode : value.access_mode === "readonly" ? "read_only" : "bounded_autonomous",
     allowed_targets: parseStringList(value.allowed_targets, "allowed_targets"),
     allowed_tools: parseStringList(value.allowed_tools, "allowed_tools"),
+    ...(value.read_roots === undefined ? {} : { read_roots: parseOptionalStringList(value.read_roots, "read_roots")! }),
+    ...(value.write_roots === undefined ? {} : { write_roots: parseOptionalStringList(value.write_roots, "write_roots")! }),
     external_workspace_refs: parseExternalWorkspaceRefs(value.workspace_refs ?? value.external_workspace_refs),
     version: typeof value.version === "number" ? value.version : 0,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
@@ -405,6 +701,8 @@ export async function putAccessProfile(profile: AccessProfile, etag: string): Pr
       access_mode: profile.access_mode,
       allowed_targets: profile.allowed_targets,
       allowed_tools: profile.allowed_tools,
+      ...(profile.read_roots === undefined ? {} : { read_roots: profile.read_roots }),
+      ...(profile.write_roots === undefined ? {} : { write_roots: profile.write_roots }),
       workspace_refs: profile.external_workspace_refs.filter((ref) => ref.machine_id.trim() || ref.workspace_path.trim() || ref.shell_target.trim()),
       instruction_set_id: profile.instruction_set_id ?? "default",
       approval_mode: profile.approval_mode ?? (profile.access_mode === "readonly" ? "read_only" : "bounded_autonomous"),
@@ -461,6 +759,50 @@ export async function rotateOAuth(): Promise<OAuthRotationResponse> {
 export async function getVirtualMCPs(): Promise<VirtualMCP[]> {
   const response = await request("/admin/api/virtual-mcps");
   return parseVirtualMCPs(await responseJSON(response));
+}
+
+export async function sampleServerResources(serverId: string, signal?: AbortSignal): Promise<ResourceSampleResult> {
+  const response = await request("/admin/api/servers/resources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ server_id: serverId }),
+    signal,
+  });
+  return findResourcePayload(await responseJSON(response), serverId);
+}
+
+export async function readServerResourceJob(jobId: string, serverId: string, signal?: AbortSignal): Promise<ResourceSampleResult> {
+  const response = await request(`/mcp-relay/job/${encodeURIComponent(jobId)}?detail=full`, { signal });
+  return findResourcePayload(await responseJSON(response), serverId);
+}
+
+export async function getLatestJobForServer(serverId: string, signal?: AbortSignal): Promise<HistoricalJobSummary | null> {
+  const query = new URLSearchParams({ server_id: serverId, limit: "1" });
+  const response = await request(`/admin/api/jobs?${query.toString()}`, { signal });
+  return parseHistoricalJobs(await responseJSON(response), serverId);
+}
+
+export async function loadProxyRoute(): Promise<ProxyRouteState> {
+  const response = await request("/admin/api/proxy-route");
+  return parseProxyRouteState(await responseJSON(response));
+}
+
+export async function saveProxyRoute(profile: ProxyRouteProfile): Promise<ProxyRouteState> {
+  const response = await request("/admin/api/proxy-route", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile }),
+  });
+  return parseProxyRouteState(await responseJSON(response));
+}
+
+export async function actOnProxyRoute(action: ProxyRouteAction): Promise<ProxyRouteState> {
+  const response = await request(`/admin/api/proxy-route/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return parseProxyRouteState(await responseJSON(response));
 }
 
 export async function setVirtualMCP(id: VirtualMCP["id"], enabled: boolean): Promise<VirtualMCP> {

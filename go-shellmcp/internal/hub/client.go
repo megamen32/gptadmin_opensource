@@ -126,35 +126,36 @@ func configuredRootCAs() *x509.CertPool {
 }
 
 type Beat struct {
-	Name                string           `json:"name"`
-	ServerID            string           `json:"server_id"`
-	PublicKey           string           `json:"public_key"`
-	Fingerprint         string           `json:"fingerprint"`
-	BaseURL             string           `json:"base_url"`
-	Cores               int              `json:"cores"`
-	MemMB               int64            `json:"mem_mb"`
-	Time                int64            `json:"time"`
-	Mode                string           `json:"mode"`
-	TransportRole       string           `json:"transport_role"`
-	Backend             string           `json:"backend"`
-	OS                  string           `json:"os"`
-	BuildVersion        int              `json:"build_version"`
-	GitCommit           string           `json:"git_commit"`
-	DefaultUser         string           `json:"default_user,omitempty"`
-	DefaultHome         string           `json:"default_home,omitempty"`
-	DefaultCwd          string           `json:"default_cwd,omitempty"`
-	MCPAgents           []map[string]any `json:"mcp_agents,omitempty"`
-	SpoolBytes          int64            `json:"spool_bytes,omitempty"`
-	StorageBytes        int64            `json:"storage_bytes,omitempty"`
-	OutboxDepth         int              `json:"outbox_depth,omitempty"`
-	OutboxRetryAttempts int              `json:"outbox_retry_attempts,omitempty"`
-	QueuePollCount      int64            `json:"queue_poll_count,omitempty"`
-	QueuePollErrors     int64            `json:"queue_poll_errors,omitempty"`
-	QueuePollLatencyMS  int64            `json:"queue_poll_latency_ms,omitempty"`
-	OutboxRetryFailures int64            `json:"outbox_retry_failures,omitempty"`
-	OutboxDelivered     int64            `json:"outbox_delivered,omitempty"`
-	SelfRepairDesired   int              `json:"self_repair_desired,omitempty"`
-	SelfRepairState     string           `json:"self_repair_state,omitempty"`
+	Name                 string           `json:"name"`
+	ServerID             string           `json:"server_id"`
+	PublicKey            string           `json:"public_key"`
+	Fingerprint          string           `json:"fingerprint"`
+	BaseURL              string           `json:"base_url"`
+	Cores                int              `json:"cores"`
+	MemMB                int64            `json:"mem_mb"`
+	Time                 int64            `json:"time"`
+	Mode                 string           `json:"mode"`
+	TransportRole        string           `json:"transport_role"`
+	Backend              string           `json:"backend"`
+	OS                   string           `json:"os"`
+	BuildVersion         int              `json:"build_version"`
+	FilesystemACLVersion int              `json:"filesystem_acl_version,omitempty"`
+	GitCommit            string           `json:"git_commit"`
+	DefaultUser          string           `json:"default_user,omitempty"`
+	DefaultHome          string           `json:"default_home,omitempty"`
+	DefaultCwd           string           `json:"default_cwd,omitempty"`
+	MCPAgents            []map[string]any `json:"mcp_agents,omitempty"`
+	SpoolBytes           int64            `json:"spool_bytes,omitempty"`
+	StorageBytes         int64            `json:"storage_bytes,omitempty"`
+	OutboxDepth          int              `json:"outbox_depth,omitempty"`
+	OutboxRetryAttempts  int              `json:"outbox_retry_attempts,omitempty"`
+	QueuePollCount       int64            `json:"queue_poll_count,omitempty"`
+	QueuePollErrors      int64            `json:"queue_poll_errors,omitempty"`
+	QueuePollLatencyMS   int64            `json:"queue_poll_latency_ms,omitempty"`
+	OutboxRetryFailures  int64            `json:"outbox_retry_failures,omitempty"`
+	OutboxDelivered      int64            `json:"outbox_delivered,omitempty"`
+	SelfRepairDesired    int              `json:"self_repair_desired,omitempty"`
+	SelfRepairState      string           `json:"self_repair_state,omitempty"`
 }
 
 type QueueJob struct {
@@ -168,6 +169,28 @@ type QueueJob struct {
 	Timeout         int               `json:"timeout,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	RuntimeSettings map[string]any    `json:"runtime_settings,omitempty"`
+	FilesystemACL   *FilesystemACL    `json:"filesystem_acl,omitempty"`
+}
+
+// FilesystemACL is trusted only when received in an authenticated Hub queue
+// response. MCP clients must never be able to supply this value in tool args.
+type FilesystemACL struct {
+	Version         int       `json:"version"`
+	ProfileID       string    `json:"profile_id"`
+	ProfileVersion  int64     `json:"profile_version"`
+	RootsDigest     string    `json:"roots_digest"`
+	JobID           string    `json:"job_id"`
+	Target          string    `json:"target"`
+	Tool            string    `json:"tool"`
+	ArgumentsSHA256 string    `json:"args_sha256"`
+	ReadRoots       *[]string `json:"read_roots,omitempty"`
+	WriteRoots      *[]string `json:"write_roots,omitempty"`
+}
+
+type FilesystemACLCheck struct {
+	ID              string `json:"id"`
+	ToolName        string `json:"tool_name"`
+	ArgumentsSHA256 string `json:"args_sha256"`
 }
 
 type TaskResult struct {
@@ -220,6 +243,9 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	}
 	if beat.BuildVersion > 0 {
 		q.Set("build_version", fmt.Sprintf("%d", beat.BuildVersion))
+	}
+	if beat.FilesystemACLVersion > 0 {
+		q.Set("filesystem_acl_version", fmt.Sprintf("%d", beat.FilesystemACLVersion))
 	}
 	if beat.GitCommit != "" {
 		q.Set("git_commit", beat.GitCommit)
@@ -287,6 +313,25 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	return job, job.ID != "" && (job.Cmd != "" || job.ToolName != ""), nil
 }
 
+func (c *Client) CheckFilesystemACL(ctx context.Context, name string, check FilesystemACLCheck) (FilesystemACL, error) {
+	path := "/queue/" + url.PathEscape(name) + "/acl-check"
+	response, body, err := c.doJSON(ctx, http.MethodPost, path, check)
+	if err != nil {
+		return FilesystemACL{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return FilesystemACL{}, fmt.Errorf("filesystem ACL check HTTP %d", response.StatusCode)
+	}
+	var result struct {
+		Policy FilesystemACL `json:"filesystem_acl"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return FilesystemACL{}, err
+	}
+	return result.Policy, nil
+}
+
 type HTTPError struct {
 	StatusCode int
 	Body       string
@@ -313,7 +358,7 @@ func NewBeat(id *security.Identity, baseURL, mode string, build int) Beat {
 	if id != nil && id.Name != "" {
 		name = id.Name
 	}
-	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, GitCommit: "go-shellmcp"}
+	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, FilesystemACLVersion: 1, GitCommit: "go-shellmcp"}
 	if id != nil {
 		b.ServerID = id.ServerID
 		b.PublicKey = id.PublicKey

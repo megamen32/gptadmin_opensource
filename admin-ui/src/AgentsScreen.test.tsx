@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AgentsScreen from "./AgentsScreen";
 
@@ -92,4 +92,70 @@ it("shows a missing last response as never answered instead of the Unix epoch", 
 
   expect(screen.getAllByText("Ещё не отвечал")).toHaveLength(2);
   expect(screen.queryByText(/01\.01\.1970/)).toBeNull();
+});
+
+it("shows stale-node resources as unavailable and links to that exact node's saved latest task", async () => {
+  const serverId = "shell:admin-node-100";
+  const task = { job_id: "historical-task-7", server_id: serverId, status: "failed", tool_name: "system_inspect", created_at: 1780000000 };
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: serverId, name: "Shell: admin-node-100", status: "stale", last_seen: 1780000000 }] });
+    if (path === "/admin/api/servers/resources") return response({
+      server_id: serverId,
+      status: "unavailable",
+      sampled_at: null,
+      node_status: "stale",
+      last_seen: 1780000000,
+      error: "node_not_online",
+      cpu: { status: "unavailable", error: "node_not_online" },
+      memory: { status: "unavailable", error: "node_not_online" },
+      root_filesystem: { status: "unavailable", error: "node_not_online" },
+    });
+    if (path === `/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1`) return response({ count: 1, recent: [task] });
+    if (path === "/admin/api/agents/connect-info") return response({ detail: "not needed" });
+    throw new Error(`Unexpected request ${path} ${init?.method ?? "GET"}`);
+  });
+  render(<AgentsScreen />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /Сервер 100/ }));
+  const taskLink = await screen.findByRole("link", { name: /Открыть последнюю задачу/ });
+
+  expect(screen.getByText(/Метрики недоступны/)).toBeInTheDocument();
+  expect(screen.getByText(/снимок не выполнялся/)).toBeInTheDocument();
+  expect(screen.getAllByText("Недоступно: node_not_online")).toHaveLength(3);
+  expect(screen.queryByText(/ГиБ|%/)).toBeNull();
+  expect(taskLink).toHaveAttribute("href", "#jobs?server_id=shell%3Aadmin-node-100&job_id=historical-task-7");
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/servers/resources", expect.objectContaining({
+    method: "POST",
+    body: JSON.stringify({ server_id: serverId }),
+  }));
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1", expect.anything());
+});
+
+it("polls an admitted resource job by its existing id and renders measured values", async () => {
+  const serverId = "shell:host-a";
+  const summary = {
+    status: "available",
+    sampled_at: "2026-10-23T00:00:01Z",
+    cpu: { status: "available", cores: 8, utilization_percent: 12.5, sample_interval_ms: 250 },
+    memory: { status: "available", total_bytes: 16 * 1024 ** 3, available_bytes: 6 * 1024 ** 3, used_bytes: 10 * 1024 ** 3 },
+    root_filesystem: { status: "available", mount: "/", total_bytes: 100 * 1024 ** 3, used_bytes: 40 * 1024 ** 3, free_bytes: 60 * 1024 ** 3 },
+  };
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: serverId, name: "Shell: host-a", status: "online" }] });
+    if (path === "/admin/api/servers/resources") return response({ server_id: serverId, status: "pending", job_id: "resource-job-1" });
+    if (path === "/mcp-relay/job/resource-job-1?detail=full") return response({ server_id: serverId, status: "completed", response: { structuredContent: { result: summary } } });
+    if (path === "/admin/api/agents/connect-info") return response({ detail: "not needed" });
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<AgentsScreen />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /Shell: host-a/ }));
+
+  expect(await screen.findByText(/12,5 % · 8 ядер/)).toBeInTheDocument();
+  expect(screen.getByText(/10 ГиБ из 16 ГиБ/)).toBeInTheDocument();
+  expect(screen.getByText(/40 ГиБ из 100 ГиБ/)).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => input === "/admin/api/servers/resources")).toHaveLength(1));
+  expect(fetchMock).toHaveBeenCalledWith("/mcp-relay/job/resource-job-1?detail=full", expect.anything());
 });

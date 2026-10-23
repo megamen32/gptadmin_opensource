@@ -56,6 +56,57 @@ the resolved value, and readonly profiles cannot access these operations.
 Custom GPT imports use `/actions/openapi.yaml` or `/server/{slug}/actions/openapi.yaml`;
 relay calls go through `/mcp-relay/*`. `CTL_TOKEN` is legacy/admin only.
 
+## Current fleet and access endpoints (source contract)
+
+These current Hub routes require an authorized admin request (`CTL_TOKEN`, an
+admin session, or an eligible existing MCP bearer, according to the route's
+auth middleware). The resource-sample and proxy-route mutation handlers also
+require same-origin checks when called with a browser admin session.
+The contracts below describe the current source; installation and live runtime
+acceptance are separate checks.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/admin/api/overview` | Hub overview, including the current server inventory and recent jobs. |
+| `GET` | `/admin/api/clients` | Safe connection/client inventory; use this instead of any endpoint that reveals a saved token value. |
+| `GET` | `/admin/api/access-profiles` | List access profiles. |
+| `GET` | `/admin/api/access-profiles/{id}` | Get one profile and its `ETag`. |
+| `PUT` | `/admin/api/access-profiles/{id}` | Create with `If-Match: *`, or replace with the current `ETag` in `If-Match`; stale versions fail. |
+| `POST` | `/admin/api/mcp/issue-token` | Issue an MCP bearer token from `client_id`, optional `profile_id`, `role`, `ttl_days`, and `access_mode`. `access_mode` is `full` or `readonly` (default `full`); `ttl_days: 0` selects the server default. The response includes the secret `access_token` once. |
+| `POST` | `/admin/api/servers/resources` | Request a live resource sample from one exact `shell:<id>` target. |
+| `GET` | `/admin/api/jobs?server_id=shell:<id>&limit=1` | Fetch newest task history for exactly that shell node; filtering happens before ordering and limit. It works while the node is offline. |
+| `GET` / `PUT` | `/admin/api/proxy-route` | Read or save the fixed VUSA-to-node-44 proxy-route profile. |
+| `POST` | `/admin/api/proxy-route/{enable,disable,reconcile,probe}` | Operate or probe that fixed route. |
+
+The overview inventory can include the Hub (`hub`), real child MCPs
+(`real_mcp`), remote ShellMCP nodes (`virtual_shell`), internal virtual MCPs
+(`virtual_mcp`), and paired file/control surfaces (`virtual_file`,
+`virtual_control`). Paired surfaces refer back to a backing node; they are not
+additional hosts.
+
+The resource request body is `{"server_id":"shell:<exact-id>"}`. A completed
+sample returns `sampled_at` (UTC RFC3339), overall `status` (`available`,
+`partial`, or `unavailable`), and `cpu`, `memory`, and `root_filesystem`
+components with their own status. CPU is a short measured utilization interval,
+not load average. Memory includes total, used and available bytes; the root
+filesystem includes total, used and free-to-user bytes. A slow request may
+return `status: "pending"` and a `job_id`. Offline, unknown, malformed, or
+failed request envelopes return `unavailable` with a reason and
+`sampled_at: null`. A completed sample records its real sample time even when
+all components are unavailable. A component error is not represented as zero;
+unsupported or failed individual probes remain unavailable in a `partial`
+sample.
+
+The jobs endpoint returns actual recorded task metadata and result/error
+preview for that target. It reports history stored by the Hub; reading it does
+not claim that the node answered recently or is currently online.
+
+The proxy-route profile is source-constrained to the VUSA consumer, the
+node-44 DE HTTP exit, loopback listener `127.0.0.1:24836`, and the existing
+`ssh-config:relay02` identity reference. `GET` reports saved profile and runtime
+service/listener/probe state separately. The default desired state is disabled;
+the API contract does not imply that the route is enabled or live.
+
 See [Configuration → Auth model](./CONFIGURATION.md#auth-model).
 
 ---

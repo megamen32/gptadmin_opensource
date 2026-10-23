@@ -9,6 +9,7 @@ import AuditScreen from "./AuditScreen";
 import OverviewScreen from "./OverviewScreen";
 import AccessOperations from "./AccessOperations";
 import McpManageScreen from "./McpManageScreen";
+import ProxyRouteScreen from "./ProxyRouteScreen";
 import FailoverScreen from "./FailoverScreen";
 import SecurityScreen from "./SecurityScreen";
 import { useEffect, useRef, useState } from "react";
@@ -29,6 +30,9 @@ import {
   runRegistryCleanup,
   setAgentCleanupPolicy,
   getAgentTombstones,
+  loadProxyRoute,
+  saveProxyRoute,
+  actOnProxyRoute,
   getHubDiagnose,
   startHubHandover,
   INSTRUCTION_LIMIT,
@@ -56,7 +60,7 @@ import {
 } from "./api";
 import "./styles.css";
 
-type View = "overview" | "audit" | "raw" | "tools" | "resources" | "agents" | "jobs" | "mcpmanage" | "failover" | "security" | "operations" | "instructions" | "profiles" | "clients" | "webhooks" | "auth" | "capabilities";
+type View = "overview" | "audit" | "raw" | "tools" | "resources" | "agents" | "jobs" | "mcpmanage" | "failover" | "proxyroute" | "security" | "operations" | "instructions" | "profiles" | "clients" | "webhooks" | "auth" | "capabilities";
 type LoadState = "loading" | "ready" | "empty" | "error" | "stale";
 
 type NavigationSection = {
@@ -70,7 +74,7 @@ type ContextLink = { id: View; label: string };
 
 const primaryNavigation: NavigationSection[] = [
   { id: "overview", label: "Обзор", target: "overview", views: ["overview"] },
-  { id: "infrastructure", label: "Серверы", target: "agents", views: ["agents", "mcpmanage", "resources", "failover"] },
+  { id: "infrastructure", label: "Серверы", target: "agents", views: ["agents", "mcpmanage", "resources", "failover", "proxyroute"] },
   { id: "access", label: "Доступ", target: "clients", views: ["clients", "profiles", "auth"] },
   { id: "automation", label: "Автоматизация", target: "webhooks", views: ["webhooks"] },
   { id: "jobs", label: "Задачи", target: "jobs", views: ["jobs", "tools"] },
@@ -83,6 +87,7 @@ const contextualNavigation: Partial<Record<string, ContextLink[]>> = {
     { id: "mcpmanage", label: "Сервисы MCP" },
     { id: "resources", label: "Ресурсы MCP" },
     { id: "failover", label: "Резервирование" },
+    { id: "proxyroute", label: "Proxy-маршрут" },
   ],
   access: [
     { id: "clients", label: "Клиенты" },
@@ -113,14 +118,14 @@ const settingsSection: NavigationSection = {
 };
 
 
-const advancedViews = new Set<View>(["mcpmanage", "resources", "failover", "tools", "raw", "capabilities", "security"]);
+const advancedViews = new Set<View>(["mcpmanage", "resources", "failover", "proxyroute", "tools", "raw", "capabilities", "security"]);
 
 function isAdvancedView(view: View): boolean {
   return advancedViews.has(view);
 }
 
 const allViews: readonly View[] = [
-  "overview", "agents", "jobs", "operations", "mcpmanage", "tools", "resources",
+  "overview", "agents", "jobs", "operations", "mcpmanage", "tools", "resources", "proxyroute",
   "instructions", "profiles", "clients", "webhooks", "auth", "capabilities",
   "failover", "security", "audit", "raw",
 ];
@@ -174,6 +179,24 @@ function listValue(values: string[]): string {
 
 function parseList(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function parseRootList(value: string): string[] {
+  return value.split("\n").map((item) => item.trim()).filter(Boolean);
+}
+
+function setFolderAclEnabled(profile: AccessProfile, enabled: boolean): AccessProfile {
+  if (enabled) {
+    return {
+      ...profile,
+      read_roots: profile.read_roots ?? [],
+      write_roots: profile.write_roots ?? [],
+    };
+  }
+  const next = { ...profile };
+  delete next.read_roots;
+  delete next.write_roots;
+  return next;
 }
 
 function updateWorkspace(
@@ -359,6 +382,7 @@ function ProfileForm({
         </div>
         <p className="field-help">Звёздочка (*) разрешает все цели или инструменты. Пустой список не разрешает ничего.</p><label>Разрешённые цели<textarea className="short-textarea" value={listValue(draft.allowed_targets)} onChange={(event) => onChange({ ...draft, allowed_targets: parseList(event.target.value) })} placeholder="hub, shell:machine-a" /></label>
         <label>Разрешённые инструменты<textarea className="short-textarea" value={listValue(draft.allowed_tools)} onChange={(event) => onChange({ ...draft, allowed_tools: parseList(event.target.value) })} placeholder="discover, system_inspect" /></label>
+        <fieldset className="workspace-fieldset"><legend>Доступ к папкам</legend><label><input aria-label="Ограничить доступ к папкам" type="checkbox" checked={draft.read_roots !== undefined || draft.write_roots !== undefined} onChange={(event) => onChange(setFolderAclEnabled(draft, event.target.checked))} /> Ограничить файловый доступ</label><p className="field-help">Без ограничения действуют прежние права профиля. При включении укажите отдельные корни чтения и записи; пустой список запрещает эту операцию.</p>{(draft.read_roots !== undefined || draft.write_roots !== undefined) && <><label>Папки для чтения<textarea aria-label="Папки для чтения" className="short-textarea" rows={4} value={draft.read_roots?.join("\n") ?? ""} onChange={(event) => onChange({ ...draft, read_roots: parseRootList(event.target.value) })} placeholder="/srv/shared/read" /></label><label>Папки для записи<textarea aria-label="Папки для записи" className="short-textarea" rows={4} value={draft.write_roots?.join("\n") ?? ""} onChange={(event) => onChange({ ...draft, write_roots: parseRootList(event.target.value) })} placeholder="/srv/shared/write" /></label></>}</fieldset>
         <fieldset className="workspace-fieldset"><legend>Внешние рабочие пространства</legend><p className="field-help">Ссылки сохраняются как метаданные. Содержимое workspace не копируется в Hub.</p>{draft.external_workspace_refs.map((workspace, index) => <div className="workspace-ref" key={`${index}-${workspace.machine_id}`}><div className="workspace-ref-heading"><strong>Рабочее пространство {index + 1}</strong>{draft.external_workspace_refs.length > 1 && <button className="text-button danger-text" type="button" onClick={() => onRemoveWorkspace(index)}>Удалить</button>}</div><div className="form-grid workspace-grid"><label>Machine ID<input aria-label={`Рабочее пространство ${index + 1}: machine id`} value={workspace.machine_id} required onChange={(event) => onChange({ ...draft, external_workspace_refs: updateWorkspace(draft.external_workspace_refs, index, "machine_id", event.target.value) })} /></label><label>Путь<input aria-label={`Рабочее пространство ${index + 1}: путь`} value={workspace.workspace_path} required onChange={(event) => onChange({ ...draft, external_workspace_refs: updateWorkspace(draft.external_workspace_refs, index, "workspace_path", event.target.value) })} /></label><label>Startup document<input aria-label={`Рабочее пространство ${index + 1}: startup document`} value={workspace.startup_document} onChange={(event) => onChange({ ...draft, external_workspace_refs: updateWorkspace(draft.external_workspace_refs, index, "startup_document", event.target.value) })} /></label><label>Shell target (обязательно)<input aria-label={`Рабочее пространство ${index + 1}: shell target`} value={workspace.shell_target} required onChange={(event) => onChange({ ...draft, external_workspace_refs: updateWorkspace(draft.external_workspace_refs, index, "shell_target", event.target.value) })} /></label></div></div>)}<button className="button secondary add-workspace" type="button" onClick={onAddWorkspace}>Добавить рабочее пространство</button></fieldset>
         <div className="action-row profile-actions"><div className="publish-status" aria-live="polite">{message && <span role={message === "Профиль сохранён" ? undefined : "alert"} className={message === "Профиль сохранён" ? "success-text" : "warning-text"}>{message}</span>}</div><div className="button-row">{creating && <button className="button secondary" type="button" onClick={onCancel}>Отмена</button>}<button className="button primary" type="submit" disabled={!canSave}>{creating ? "Создать профиль" : "Сохранить профиль"}</button></div></div>
       </form>}
@@ -1494,7 +1518,7 @@ export default function App() {
       </aside>
       <main className="main-content">
         {contextLinks.length > 1 && <nav className="context-nav" aria-label={`${activeSection?.label ?? "Раздел"}: подразделы`}>{contextLinks.map((item) => <a key={item.id} href={`#${item.id}`} className={view === item.id ? "active" : ""} aria-current={view === item.id ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.id); }}>{item.label}</a>)}</nav>}
-        {view === "overview" ? <OverviewScreen /> : view === "audit" ? <AuditScreen /> : view === "raw" ? <RawScreen /> : view === "tools" ? <ToolsScreen /> : view === "resources" ? <ResourcesScreen /> : view === "agents" ? <AgentsScreen /> : view === "jobs" ? <JobsScreen /> : view === "mcpmanage" ? <McpManageScreen /> : view === "failover" ? <FailoverScreen /> : view === "security" ? <SecurityScreen /> : view === "operations" ? <AccessOperations /> : view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen token={issuedToken} setToken={setIssuedToken} /> : view === "webhooks" ? <WebhooksScreen /> : view === "capabilities" ? <CapabilitiesScreen /> : <AuthScreen token={issuedToken} />}
+        {view === "overview" ? <OverviewScreen /> : view === "audit" ? <AuditScreen /> : view === "raw" ? <RawScreen /> : view === "tools" ? <ToolsScreen /> : view === "resources" ? <ResourcesScreen /> : view === "agents" ? <AgentsScreen /> : view === "jobs" ? <JobsScreen /> : view === "mcpmanage" ? <McpManageScreen /> : view === "failover" ? <FailoverScreen /> : view === "proxyroute" ? <ProxyRouteScreen load={loadProxyRoute} save={saveProxyRoute} action={actOnProxyRoute} /> : view === "security" ? <SecurityScreen /> : view === "operations" ? <AccessOperations /> : view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen token={issuedToken} setToken={setIssuedToken} /> : view === "webhooks" ? <WebhooksScreen /> : view === "capabilities" ? <CapabilitiesScreen /> : <AuthScreen token={issuedToken} />}
       </main>
     </div>
   );

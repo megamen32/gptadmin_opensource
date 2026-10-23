@@ -15,6 +15,16 @@ SOURCE = '1' * 40
 def package(root, arch='amd64', **changes):
     path = Path(root) / ('gptadmin-node-linux-' + arch + '.tar.gz')
     blobs = {name: b'local-logic-fixture' for name in release.FILES}
+    blobs['bin/gptadmin-node'] = b'\x7fELF-node-fixture'
+    blobs['bin/shellmcp'] = b'\x7fELF-shellmcp-fixture'
+    blobs['systemd/gptadmin-proxy-route-relay02.service'] = (
+        b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
+    ui_asset = 'public/admin/assets/index-a1b2c3.js'
+    ui_css = 'public/admin/assets/index-d4e5f6.css'
+    blobs[ui_asset] = b'js-fixture'
+    blobs[ui_css] = b'css-fixture'
+    blobs[release.UI_INDEX] = (f'<script src="/admin/assets/{ui_asset.rsplit("/", 1)[-1]}"></script>'
+                               f'<link href="/admin/assets/{ui_css.rsplit("/", 1)[-1]}" rel="stylesheet">').encode()
     manifest = {'schema': 'gptadmin.node-package/v1', 'platform': 'linux', 'arch': arch,
                 'git_commit': SOURCE, 'build_version': 123, 'source_dirty': False,
                 'files': {name: {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
@@ -59,6 +69,24 @@ class NodeReleaseTests(unittest.TestCase):
             for arch in ('amd64', 'arm64'):
                 self.assertEqual(release.verify_package(package(d, arch), arch, SOURCE)['build_version'],123)
 
+    def test_release_requires_both_new_fixed_components_in_archive_and_manifest(self):
+        for missing in ('bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as d:
+                path=package(d)
+                with tarfile.open(path,'r:gz') as archive:
+                    rows=[(member,archive.extractfile(member).read()) for member in archive
+                          if member.name != missing]
+                manifest=json.loads(next(raw for member,raw in rows if member.name=='manifest.json'))
+                manifest['files'].pop(missing)
+                rows=[(member,raw) for member,raw in rows if member.name!='manifest.json']
+                manifest_raw=json.dumps(manifest).encode()
+                info=tarfile.TarInfo('manifest.json');info.size=len(manifest_raw)
+                rows.append((info,manifest_raw))
+                with tarfile.open(path,'w:gz') as archive:
+                    for info,raw in rows:archive.addfile(info,io.BytesIO(raw))
+                checksum(path)
+                with self.assertRaises(ValueError):release.verify_package(path,'amd64',SOURCE)
+
     def test_dirty_foreign_source_wrong_arch_and_bad_version_are_rejected(self):
         cases=[{'source_dirty':True},{'source_dirty':None},{'git_commit':'2'*40},
                {'arch':'arm64'},{'build_version':True},{'build_version':0}]
@@ -76,6 +104,20 @@ class NodeReleaseTests(unittest.TestCase):
                 with tarfile.open(p,'w:gz') as archive:
                     for i,raw in rows:archive.addfile(i,io.BytesIO(raw))
                     i=tarfile.TarInfo(name);i.type=kind;i.linkname='bin/gptadmin-node';archive.addfile(i,io.BytesIO(b''))
+                checksum(p)
+                with self.assertRaises(ValueError):release.verify_package(p,'amd64',SOURCE)
+
+    def test_ui_manifest_closure_rejects_unreferenced_assets_and_non_asset_extras(self):
+        for extra in ('public/admin/extra.txt', 'public/admin/assets/unreferenced-123456.js'):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                p=package(d)
+                with tarfile.open(p,'r:gz') as archive:
+                    rows=[(m,archive.extractfile(m).read()) for m in archive]
+                with tarfile.open(p,'w:gz') as archive:
+                    for info,raw in rows:
+                        archive.addfile(info,io.BytesIO(raw))
+                    info=tarfile.TarInfo(extra);raw=b'extra';info.size=len(raw)
+                    archive.addfile(info,io.BytesIO(raw))
                 checksum(p)
                 with self.assertRaises(ValueError):release.verify_package(p,'amd64',SOURCE)
 

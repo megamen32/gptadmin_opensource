@@ -175,25 +175,29 @@ func (t *taskTransaction) linkRequestTask(key, id string) error {
 	return t.captureTaskRequest(key)
 }
 
-func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation func() (map[string]any, int)) (map[string]any, int) {
+func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation func() (map[string]any, int), requests ...*http.Request) (map[string]any, int) {
 	decision, err := s.reserveDurableTaskRequest(key, fingerprint)
 	if err != nil {
 		return taskPersistenceFailure(err), http.StatusServiceUnavailable
 	}
 	if decision.replay {
 		if id := firstString(decision.response, "task_id", "job_id"); id != "" && decision.status == http.StatusOK {
+			var caller *taskCaller
+			var filesystemACL *filesystemACLPolicy
 			s.mu.Lock()
 			err := s.refreshTaskRecordsLocked(id)
 			if err == nil {
 				taskFound := false
 				if job := s.shellJobs[id]; job != nil {
 					taskFound = true
+					caller, filesystemACL = job.Caller, job.FilesystemACL
 					if job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled" {
 						decision.response = shellJobResponse(job)
 					}
 				}
 				if job := s.relayJobs[id]; job != nil {
 					taskFound = true
+					caller = job.Caller
 					if job.Status == "completed" || job.Status == "failed" || job.Status == "cancelled" {
 						decision.response = relayJobResponse(job)
 					}
@@ -209,6 +213,9 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 			s.mu.Unlock()
 			if err != nil {
 				return taskPersistenceFailure(err), http.StatusServiceUnavailable
+			}
+			if len(requests) > 0 && s.authorizeTaskReceipt(requests[0], caller, filesystemACL) != nil {
+				return map[string]any{"status": "failed", "error": "task receipt is not available under the current client profile"}, http.StatusForbidden
 			}
 		}
 		return decision.response, decision.status

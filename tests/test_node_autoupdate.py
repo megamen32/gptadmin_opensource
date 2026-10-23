@@ -28,6 +28,166 @@ def index(**changes):
 
 
 class NodeAutoupdateTests(unittest.TestCase):
+    def test_package_component_manager_commands_are_narrow_and_non_activating(self):
+        parsed=manager.build_parser().parse_args(['proxy-route','install','--package','node.tar.gz'])
+        self.assertIs(parsed.func,manager.cmd_proxy_route_install)
+        parsed=manager.build_parser().parse_args(['shellmcp','update','--package','node.tar.gz'])
+        self.assertIs(parsed.func,manager.cmd_shellmcp_update)
+        parsed=manager.build_parser().parse_args(['shellmcp','rollback','--to','abc'])
+        self.assertIs(parsed.func,manager.cmd_shellmcp_rollback)
+
+    def test_shellmcp_update_switches_fixed_binary_and_reads_back_exact_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELLMCP_HOST=127.0.0.1\nSHELLMCP_PORT=25900\n')
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            archive=package(root)
+            before={'component':'shellmcp-go','status':'ready','git_commit':'0'*40,'build_version':122}
+            after={'component':'shellmcp-go','status':'ready','git_commit':'1'*40,'build_version':123}
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    prop=argv[4]
+                    value={'User':'root','EnvironmentFiles':f'{env} (ignore_errors=no)',
+                        'ExecStart':'{ path=/opt/gptadmin/bin/shellmcp ; argv[]=/opt/gptadmin/bin/shellmcp ; ignore_errors=no ; }'}[prop]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            system_calls=[]
+            def fake_systemctl(runner,*args,check=True):
+                system_calls.append(args)
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            original_env=hashlib.sha256(env.read_bytes()).hexdigest()
+            with patch.object(manager,'require_root'),patch.object(manager,'check_disk_floor'), \
+                 patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=[before,after]):
+                manager.cmd_shellmcp_update(SimpleNamespace(package=str(archive)),layout,ServiceRunner())
+            self.assertEqual(layout.shellmcp_current_link().resolve().name,'1'*40+'-1')
+            self.assertEqual(layout.shellmcp_service_dropin.read_text(),manager.shellmcp_dropin_text(layout))
+            self.assertEqual(hashlib.sha256(env.read_bytes()).hexdigest(),original_env)
+            self.assertEqual(system_calls,[('is-active',manager.SHELLMCP_SERVICE),('daemon-reload',),('restart',manager.SHELLMCP_SERVICE)])
+
+    def test_shellmcp_update_failure_restores_legacy_execstart_and_verifies_old_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            archive=package(root)
+            before={'component':'shellmcp-go','status':'ready','git_commit':'0'*40,'build_version':122}
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    value={'User':'root','EnvironmentFiles':str(env),
+                        'ExecStart':'{ path=/opt/gptadmin/bin/shellmcp ; argv[]=/opt/gptadmin/bin/shellmcp ; ignore_errors=no ; }'}[argv[4]]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            def fake_systemctl(runner,*args,check=True):
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            with patch.object(manager,'require_root'),patch.object(manager,'check_disk_floor'), \
+                 patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',return_value=before), \
+                 patch.object(manager,'wait_shellmcp_version',side_effect=manager.RuntimeFailure('wrong commit')):
+                with self.assertRaisesRegex(manager.RuntimeFailure,'previous version restored and read back'):
+                    manager.cmd_shellmcp_update(SimpleNamespace(package=str(archive)),layout,ServiceRunner())
+            self.assertFalse(layout.shellmcp_current_link().exists())
+            self.assertFalse(layout.shellmcp_service_dropin.exists())
+
+    def test_shellmcp_explicit_rollback_uses_only_manifest_verified_version_dirs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);env=root/'go-shellmcp.env';env.write_text('SHELL_PORT=25900\n')
+            layout=manager.Layout(opt_root=root/'node',shellmcp_opt_root=root/'shellmcp',
+                shellmcp_service_dropin=root/'systemd/gptadmin-shellmcp-go.service.d/80-node.conf',
+                shellmcp_env_file=env)
+            versions=[]
+            for commit,build in (('1'*40,123),('2'*40,122)):
+                version=layout.shellmcp_versions_root()/f'{commit}-1';binary=version/'bin/shellmcp'
+                binary.parent.mkdir(parents=True,exist_ok=True);binary.write_bytes(b'\x7fELF'+commit.encode());binary.chmod(0o755)
+                meta={'schema':manager.PACKAGE_SCHEMA,'git_commit':commit,'build_version':build,
+                      'sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'size':binary.stat().st_size}
+                (version/'manifest.json').write_text(json.dumps(meta));versions.append(version)
+            manager.atomic_symlink(versions[0],layout.shellmcp_current_link())
+            layout.shellmcp_service_dropin.parent.mkdir(parents=True)
+            layout.shellmcp_service_dropin.write_text(manager.shellmcp_dropin_text(layout))
+            before={'component':'shellmcp-go','status':'ready','git_commit':'1'*40,'build_version':123}
+            after={'component':'shellmcp-go','status':'ready','git_commit':'2'*40,'build_version':122}
+            class ServiceRunner:
+                def run(self,argv,timeout=None):
+                    value={'User':'root','EnvironmentFiles':str(env),
+                        'ExecStart':'{ path='+str(layout.shellmcp_current_link()/'bin/shellmcp')+
+                        ' ; argv[]='+str(layout.shellmcp_current_link()/'bin/shellmcp')+' ; ignore_errors=no ; }'}[argv[4]]
+                    return SimpleNamespace(returncode=0,stdout=value,stderr='')
+            def fake_systemctl(runner,*args,check=True):
+                return SimpleNamespace(returncode=0,stdout='active' if args[:1]==('is-active',) else '',stderr='')
+            with patch.object(manager,'require_root'),patch.object(manager,'systemctl',side_effect=fake_systemctl), \
+                 patch.object(manager,'shellmcp_live_version',side_effect=[before,after]):
+                manager.cmd_shellmcp_rollback(SimpleNamespace(to=versions[1].name),layout,ServiceRunner())
+            self.assertEqual(layout.shellmcp_current_link().resolve(),versions[1])
+
+    def test_proxy_route_installer_installs_fixed_unit_but_never_starts_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);layout=manager.Layout(opt_root=root/'node',
+                proxy_route_unit_path=root/'etc/systemd/gptadmin-proxy-route-relay02.service',
+                proxy_route_state_file=root/'var/lib/gptadmin-node/proxy-route.json')
+            archive=package(root);calls=[]
+            class SystemdRunner:
+                def run(self,argv,timeout=None):
+                    if argv[1:3]==['show',manager.PROXY_ROUTE_SERVICE]:
+                        return SimpleNamespace(returncode=0,stdout=str(layout.proxy_route_unit_path),stderr='')
+                    raise AssertionError(argv)
+            def fake_systemctl(runner,*args,check=True):
+                calls.append(args)
+                return SimpleNamespace(returncode=0,stdout='active' if args==('is-active',manager.PRIMARY_SERVICE) else '',stderr='')
+            with patch.object(manager,'require_root'),patch.object(manager,'host_arch',return_value='amd64'), \
+                 patch.object(manager,'systemctl',side_effect=fake_systemctl):
+                manager.cmd_proxy_route_install(SimpleNamespace(package=str(archive)),layout,SystemdRunner())
+            self.assertIn('User=admin',layout.proxy_route_unit_path.read_text())
+            self.assertEqual(calls,[('is-active',manager.PRIMARY_SERVICE),('daemon-reload',)])
+            state=json.loads(layout.proxy_route_state_file.read_text())
+            self.assertEqual(state['schema'],'gptadmin.proxy-route-package/v1')
+
+    def test_node_builder_bundles_same_commit_shellmcp_and_fixed_proxy_unit(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            for name in node_builder.PAYLOAD:
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(name)
+            unit=root/node_builder.PROXY_ROUTE_UNIT_SOURCE
+            unit.parent.mkdir(parents=True,exist_ok=True)
+            unit.write_text('[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
+            ui=root/'public/admin';ui.mkdir(parents=True)
+            (ui/'index.html').write_text('<script src="/admin/assets/a.js"></script>')
+            (ui/'assets').mkdir();(ui/'assets/a.js').write_text('ui')
+
+            def fake_go_build(argv, **kwargs):
+                binary=Path(argv[argv.index('-o')+1])
+                binary.write_bytes(b'\x7fELF'+argv[-1].encode())
+                return SimpleNamespace(returncode=0,stdout='',stderr='')
+
+            with patch.object(node_builder,'ROOT',root), \
+                 patch.object(node_builder,'build_admin_ui',return_value={
+                     'public/admin/index.html':ui/'index.html',
+                     'public/admin/assets/a.js':ui/'assets/a.js'}), \
+                 patch.object(node_builder.subprocess,'run',side_effect=fake_go_build) as go_build:
+                result=node_builder.build('amd64',root/'.tmp/packages','a'*40,1033,False)
+
+            self.assertEqual(go_build.call_count,2)
+            calls=[c.kwargs['cwd'] for c in go_build.call_args_list]
+            self.assertEqual(calls,[root/'go-hub',root/'go-shellmcp'])
+            archive=Path(result['path'])
+            with tarfile.open(archive,'r:gz') as package:
+                manifest=json.load(package.extractfile('manifest.json'))
+                expected={'bin/gptadmin-node','bin/shellmcp',
+                          node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH,
+                          'public/admin/index.html','public/admin/assets/a.js',*node_builder.PAYLOAD}
+                self.assertEqual(set(manifest['files']),expected)
+                self.assertEqual(manifest['git_commit'],'a'*40)
+                self.assertFalse(manifest['source_dirty'])
+                for name in expected:
+                    body=package.extractfile(name).read()
+                    meta=manifest['files'][name]
+                    self.assertEqual(meta,{'sha256':hashlib.sha256(body).hexdigest(),'size':len(body)})
+                self.assertEqual(package.getmember('bin/gptadmin-node').mode,0o755)
+                self.assertEqual(package.getmember('bin/shellmcp').mode,0o755)
+                self.assertEqual(package.getmember(node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH).mode,0o644)
+
     def test_node_builder_packages_the_built_admin_ui_under_public_admin(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);ui=root/'admin-ui';dist=ui/'dist';(dist/'assets').mkdir(parents=True)

@@ -145,6 +145,11 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 	if !profileAllowsTarget(r, target) || !profileAllowsTool(r, toolName) {
 		return errors.New("access profile denies this target or tool")
 	}
+	if target == "hub" && toolName == webhookJobGetTool {
+		if profile, bound := AccessProfileFromRequest(r); bound && filesystemACLActive(profile) {
+			return errors.New("filesystem-scoped profiles cannot read webhook job history")
+		}
+	}
 	if err := authorizeToolRulePresence(r, target, toolName); err != nil {
 		return err
 	}
@@ -171,6 +176,9 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 		}
 	}
 	if target == "control:hub" && isReadOnlyTool("hub", toolName) {
+		return nil
+	}
+	if strings.HasPrefix(target, "shell:") && toolName == "system_resource_summary" {
 		return nil
 	}
 	if target == "webhooks" && (toolName == webhookRoutesListTool || toolName == webhookJobGetTool) {
@@ -315,8 +323,51 @@ func authorizeToolAction(r *http.Request, target, tool string, args map[string]a
 	if err := authorizeReadOnlyIdentityAction(r, target, tool, args); err != nil {
 		return err
 	}
+	if err := authorizeFilesystemProfileAction(r, target, tool, args); err != nil {
+		return err
+	}
 	if readOnlyExecRequest(r) && !readOnlyExecToolAllowed(r, target, tool, args) {
 		return errors.New("read-only execution refuses this target/tool/action")
+	}
+	return nil
+}
+
+// authorizeFilesystemProfileAction is a fail-closed ceiling for profiles that
+// declare either filesystem root list. Hub facades may route nested calls, but
+// every nested operation must pass this same gate. Only the typed, root-scoped
+// file tools and host resource summary are safe on a filesystem-bound profile.
+func authorizeFilesystemProfileAction(r *http.Request, target, tool string, args map[string]any) error {
+	profile, bound := AccessProfileFromRequest(r)
+	if !bound || !filesystemACLActive(profile) {
+		return nil
+	}
+	if target == "hub" && isFacadeTool(target, tool) {
+		return nil
+	}
+	if target == "hub" && tool == "system_resource_summary" {
+		return nil
+	}
+	if !strings.HasPrefix(target, "file:") && !strings.HasPrefix(target, "shell:") {
+		return errors.New("filesystem-bound profile cannot call this target")
+	}
+	if tool == "system_resource_summary" {
+		return nil
+	}
+	if tool != "system_inspect" && tool != "file_editor" {
+		return errors.New("filesystem-bound profile cannot call this tool")
+	}
+	if strings.HasPrefix(target, "shell:") && tool != "system_inspect" && tool != "file_editor" {
+		return errors.New("filesystem-bound profile cannot call this shell tool")
+	}
+	read := tool == "system_inspect" || (tool == "file_editor" && firstString(args, "action") == "view")
+	if read && profile.ReadRoots == nil {
+		return errors.New("filesystem-bound profile has no read roots")
+	}
+	if !read && profile.WriteRoots == nil {
+		return errors.New("filesystem-bound profile has no write roots")
+	}
+	if tool == "file_editor" && (firstString(args, "action") == "str_replace" || firstString(args, "action") == "batch_edit") && profile.ReadRoots == nil {
+		return errors.New("file_editor edit requires both read and write roots")
 	}
 	return nil
 }
@@ -533,8 +584,8 @@ func readOnlyExecToolAllowed(r *http.Request, target, tool string, args map[stri
 	case strings.HasPrefix(target, "control:"):
 		return readOnlyControlToolAllowed(tool, args)
 	case strings.HasPrefix(target, "shell:"):
-		// A shell host exposes shell_exec (write) and system_inspect (read).
-		return tool == "system_inspect"
+		// system_resource_summary returns typed host metrics and accepts no path.
+		return tool == "system_inspect" || tool == "system_resource_summary"
 	}
 	// Any other target is an external MCP server. External servers are not
 	// read-only by default: an administrator must name the exact target/tool
@@ -560,6 +611,16 @@ func authorizeFacadeCall(r *http.Request, name string, args map[string]any) erro
 	}
 	if name == "execute" || name == "call_mcp_tool" || name == "callMcpTool" {
 		return authorizeExecuteFacade(r, args)
+	}
+	if name == webhookJobGetTool {
+		if profile, bound := AccessProfileFromRequest(r); bound && filesystemACLActive(profile) {
+			return errors.New("filesystem-scoped profiles cannot read webhook job history")
+		}
+	}
+	if name == webhookRouteCreateTool || name == webhookRouteReplaceTool || name == webhookRouteDeleteTool {
+		if profile, bound := AccessProfileFromRequest(r); bound && filesystemACLActive(profile) {
+			return errors.New("filesystem-scoped profiles cannot manage webhook routes")
+		}
 	}
 	if !profileAllowsTool(r, name) {
 		return errors.New("access profile denies this facade")
@@ -675,8 +736,34 @@ func toolsForRequest(r *http.Request, target string, tools []map[string]any) []m
 	return filtered
 }
 
-func mcpClientHTTPPathAllowed(path string) bool {
-	return strings.HasPrefix(path, "/mcp-relay/") ||
-		path == "/webhook-routes" || strings.HasPrefix(path, "/webhook-routes/") ||
-		strings.HasPrefix(path, "/admin/api/webhook-jobs/")
+func mcpClientHTTPPathAllowed(path, method string) bool {
+	switch method {
+	case http.MethodGet:
+		switch path {
+		case "/webhook-routes", "/mcp-relay/servers", "/mcp-relay/list_mcp_servers", "/mcp-relay/agents", "/mcp-relay/list_mcp_agents":
+			return true
+		}
+		for _, prefix := range []string{"/mcp-relay/job/", "/mcp-relay/get_mcp_job/", "/admin/api/webhook-jobs/"} {
+			if onePathSegmentAfter(path, prefix) {
+				return true
+			}
+		}
+		return false
+	case http.MethodPut, http.MethodDelete:
+		return onePathSegmentAfter(path, "/webhook-routes/")
+	case http.MethodPost:
+		switch path {
+		case "/mcp-relay/call", "/mcp-relay/call_mcp_tool", "/mcp-relay/shell_exec", "/mcp-relay/tools", "/mcp-relay/list_mcp_tools", "/mcp-relay/expand", "/webhook-routes":
+			return true
+		}
+	}
+	return false
+}
+
+func onePathSegmentAfter(path, prefix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	id := strings.Trim(strings.TrimPrefix(path, prefix), "/")
+	return id != "" && !strings.Contains(id, "/")
 }

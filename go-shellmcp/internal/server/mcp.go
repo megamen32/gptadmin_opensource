@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
 	inspecthost "github.com/megamen32/gptadmin/go-shellmcp/internal/inspect"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/redact"
@@ -167,7 +168,7 @@ func (s *Server) handleMCPRequest(ctx context.Context, req mcpRequest) (any, boo
 	case "notifications/initialized", "notifications/cancelled":
 		return nil, false
 	case "tools/list":
-		return mcpResponse(id, mcpCacheable(map[string]any{"tools": s.mcpTools()}, 30000, "private")), !isNotification
+		return mcpResponse(id, mcpCacheable(map[string]any{"tools": s.mcpToolsForContext(ctx)}, 30000, "private")), !isNotification
 	case "tools/call":
 		var params toolCallParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -179,8 +180,14 @@ func (s *Server) handleMCPRequest(ctx context.Context, req mcpRequest) (any, boo
 		}
 		return mcpResponse(id, result), !isNotification
 	case "resources/list":
+		if err := requireNoFilesystemACL(ctx, "resources/list"); err != nil {
+			return mcpError(id, -32003, err.Error()), !isNotification
+		}
 		return mcpResponse(id, mcpCacheable(map[string]any{"resources": s.mcpResources()}, 30000, "private")), !isNotification
 	case "resources/read":
+		if err := requireNoFilesystemACL(ctx, "resources/read"); err != nil {
+			return mcpError(id, -32003, err.Error()), !isNotification
+		}
 		var params resourceReadParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return mcpError(id, -32602, err.Error()), !isNotification
@@ -193,6 +200,22 @@ func (s *Server) handleMCPRequest(ctx context.Context, req mcpRequest) (any, boo
 	default:
 		return mcpError(id, -32601, "method not found: "+req.Method), !isNotification
 	}
+}
+
+func (s *Server) mcpToolsForContext(ctx context.Context) []map[string]any {
+	if _, active := filesystemACLFromContext(ctx); !active {
+		return s.mcpTools()
+	}
+	allowed := map[string]bool{"system_inspect": true, "file_editor": true, "system_resource_summary": true}
+	tools := s.mcpTools()
+	filtered := make([]map[string]any, 0, len(allowed))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if allowed[name] {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
 }
 
 func mcpResponse(id any, result any) map[string]any {
@@ -380,20 +403,41 @@ func (s *Server) mcpTools() []map[string]any {
 			"description": "Return OS, CPU, memory, hostname and ShellMCP capability/transport metadata for this host.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		},
+		{
+			"name":        "system_resource_summary",
+			"description": "Sample current CPU utilization, memory availability, and root filesystem capacity on this host. Returns a timestamp and per-component availability; accepts no paths or other inputs.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+		},
 	}
 }
 
 func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
 	switch name {
 	case "mcp_manage":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpManage(args)
 	case "mcp_tools":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpChildTools(ctx, args)
 	case "mcp_call":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpChildCall(ctx, args)
 	case "mcp_request":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpChildRequest(ctx, args)
 	case "mcp_connection_close":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		ref, _ := args["ref"].(string)
 		scope, err := childConnectionScope(args)
 		if err != nil {
@@ -415,14 +459,25 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 		}
 		return mcpText("Child MCP connection closed", map[string]any{"ref": ref, "closed": true}), nil
 	case "shell_exec":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpShellExec(ctx, args)
 	case "system_inspect":
-		return s.mcpSystemInspect(args)
+		policy, _ := filesystemScopeFromContext(ctx)
+		return s.mcpSystemInspectWithACL(args, policy)
 	case "file_editor":
-		return s.mcpFileEditor(args)
+		policy, _ := filesystemScopeFromContext(ctx)
+		return s.mcpFileEditorWithACL(args, policy)
 	case "file_checkpoint":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpFileCheckpoint(args)
 	case "file_backup":
+		if err := requireNoFilesystemACL(ctx, name); err != nil {
+			return nil, err
+		}
 		return s.mcpFileBackup(args)
 	case "tasks":
 		return s.mcpTasks(args)
@@ -433,12 +488,19 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 			"capability_registry": s.mcpCapabilityRegistry(),
 		}
 		return mcpText(fmt.Sprintf("system info for %s", info.Host), payload), nil
+	case "system_resource_summary":
+		summary := system.ResourceSummaryNow(ctx)
+		return mcpText(fmt.Sprintf("resource sample for %s", s.cfg.Name), summary), nil
 	default:
 		return nil, fmt.Errorf("unknown tool %s", name)
 	}
 }
 
 func (s *Server) mcpSystemInspect(args map[string]any) (map[string]any, error) {
+	return s.mcpSystemInspectWithACL(args, nil)
+}
+
+func (s *Server) mcpSystemInspectWithACL(args map[string]any, acl *fsacl.Policy) (map[string]any, error) {
 	var req inspecthost.Request
 	b, err := json.Marshal(args)
 	if err != nil {
@@ -448,6 +510,7 @@ func (s *Server) mcpSystemInspect(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	req.AllowedRoots = append([]string(nil), s.cfg.InspectRoots...)
+	req.FilesystemACL = acl
 	result, err := inspecthost.Run(req)
 	if err != nil {
 		return nil, err

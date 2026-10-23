@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/redact"
 )
 
@@ -23,11 +24,12 @@ const (
 
 // Request describes one typed read-only inspection operation.
 type Request struct {
-	Action       string   `json:"action"`
-	Path         string   `json:"path,omitempty"`
-	MaxBytes     int64    `json:"max_bytes,omitempty"`
-	Offset       int64    `json:"offset,omitempty"`
-	AllowedRoots []string `json:"-"`
+	Action        string        `json:"action"`
+	Path          string        `json:"path,omitempty"`
+	MaxBytes      int64         `json:"max_bytes,omitempty"`
+	Offset        int64         `json:"offset,omitempty"`
+	AllowedRoots  []string      `json:"-"`
+	FilesystemACL *fsacl.Policy `json:"-"`
 }
 
 // Entry is bounded file metadata returned by list_directory.
@@ -78,11 +80,15 @@ func readFile(req Request) (Result, error) {
 	if req.Offset < 0 {
 		return Result{}, errors.New("read_file offset must be >= 0")
 	}
-	resolved, err := resolveAllowedPath(req.Path, req.AllowedRoots)
+	root, relative, err := openReadPath(req)
 	if err != nil {
 		return Result{}, err
 	}
-	f, err := os.Open(resolved)
+	defer root.Close()
+	if err := fsacl.RejectSymlinkComponents(root, relative); err != nil {
+		return Result{}, err
+	}
+	f, err := root.Open(relative)
 	if err != nil {
 		return Result{}, err
 	}
@@ -114,11 +120,20 @@ func listDirectory(req Request) (Result, error) {
 	if req.Path == "" {
 		return Result{}, errors.New("list_directory requires path")
 	}
-	resolved, err := resolveAllowedPath(req.Path, req.AllowedRoots)
+	root, relative, err := openReadPath(req)
 	if err != nil {
 		return Result{}, err
 	}
-	items, err := os.ReadDir(resolved)
+	defer root.Close()
+	if err := fsacl.RejectSymlinkComponents(root, relative); err != nil {
+		return Result{}, err
+	}
+	directory, err := root.Open(relative)
+	if err != nil {
+		return Result{}, err
+	}
+	defer directory.Close()
+	items, err := directory.ReadDir(-1)
 	if err != nil {
 		return Result{}, err
 	}
@@ -129,7 +144,7 @@ func listDirectory(req Request) (Result, error) {
 	}
 	entries := make([]Entry, 0, len(items))
 	for _, item := range items {
-		info, infoErr := item.Info()
+		info, infoErr := root.Lstat(filepath.Join(relative, item.Name()))
 		if infoErr != nil {
 			return Result{}, infoErr
 		}
@@ -142,6 +157,28 @@ func listDirectory(req Request) (Result, error) {
 		entries = append(entries, Entry{Name: redact.Secrets(item.Name()), Type: kind, Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime()})
 	}
 	return Result{Action: req.Action, Path: redact.Secrets(filepath.Clean(req.Path)), Entries: entries, Truncated: truncated}, nil
+}
+
+func openReadPath(req Request) (*os.Root, string, error) {
+	var root *os.Root
+	var relative string
+	var err error
+	if req.FilesystemACL != nil && req.FilesystemACL.Active() {
+		root, relative, err = req.FilesystemACL.Open(req.Path, false)
+	} else {
+		roots := append([]string(nil), req.AllowedRoots...)
+		root, relative, err = (fsacl.Policy{ReadRoots: &roots}).Open(req.Path, false)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	for _, part := range strings.FieldsFunc(strings.ToLower(filepath.Clean(req.Path)), func(r rune) bool { return r == '/' || r == '\\' }) {
+		if deniedCredentialDirectories[part] {
+			_ = root.Close()
+			return nil, "", fmt.Errorf("read-only inspection denies credential directory %q", part)
+		}
+	}
+	return root, relative, nil
 }
 
 var deniedCredentialDirectories = map[string]bool{

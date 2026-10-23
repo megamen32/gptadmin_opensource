@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
 )
 
 const maxEditableFileBytes = 8 << 20
@@ -45,6 +49,10 @@ type resolvedEditOperation struct {
 }
 
 func (s *Server) mcpFileEditor(args map[string]any) (map[string]any, error) {
+	return s.mcpFileEditorWithACL(args, nil)
+}
+
+func (s *Server) mcpFileEditorWithACL(args map[string]any, acl *fsacl.Policy) (map[string]any, error) {
 	var req fileEditorArgs
 	b, _ := json.Marshal(args)
 	if err := json.Unmarshal(b, &req); err != nil {
@@ -58,18 +66,42 @@ func (s *Server) mcpFileEditor(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	var root *os.Root
+	if acl != nil && acl.Active() {
+		readOnly := req.Action == "view"
+		if req.Action != "view" && req.Action != "create" && req.Action != "delete" && req.Action != "str_replace" && req.Action != "batch_edit" {
+			return nil, fmt.Errorf("unknown file_editor action %q", req.Action)
+		}
+		if req.Action == "str_replace" || req.Action == "batch_edit" {
+			readRoot, _, readErr := acl.Open(path, false)
+			if readErr != nil {
+				return nil, readErr
+			}
+			_ = readRoot.Close()
+		}
+		var relative string
+		root, relative, err = acl.Open(path, !readOnly)
+		if err != nil {
+			return nil, err
+		}
+		defer root.Close()
+		if err := fsacl.RejectSymlinkComponents(root, relative); err != nil {
+			return nil, err
+		}
+		path = relative
+	}
 
 	switch req.Action {
 	case "view":
-		return s.fileEditorViewMode(path, req.StartLine, req.EndLine, req.MaxBytes, req.Raw)
+		return s.fileEditorViewModeAt(path, req.StartLine, req.EndLine, req.MaxBytes, req.Raw, root)
 	case "create":
-		return s.fileEditorCreate(path, req.Content)
+		return s.fileEditorCreateAt(path, req.Content, root)
 	case "str_replace":
-		return s.fileEditorReplace(path, req.OldText, req.NewText, req.ReplaceAll)
+		return s.fileEditorReplaceAt(path, req.OldText, req.NewText, req.ReplaceAll, root)
 	case "batch_edit":
-		return s.fileEditorBatch(path, req.Operations)
+		return s.fileEditorBatchAt(path, req.Operations, root)
 	case "delete":
-		return s.fileEditorDelete(path)
+		return s.fileEditorDeleteAt(path, root)
 	default:
 		return nil, fmt.Errorf("unknown file_editor action %q", req.Action)
 	}
@@ -80,7 +112,11 @@ func (s *Server) fileEditorView(path string, startLine, endLine, maxBytes int) (
 }
 
 func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes int, rawView bool) (map[string]any, error) {
-	raw, _, err := readEditableFile(path)
+	return s.fileEditorViewModeAt(path, startLine, endLine, maxBytes, rawView, nil)
+}
+
+func (s *Server) fileEditorViewModeAt(path string, startLine, endLine, maxBytes int, rawView bool, root *os.Root) (map[string]any, error) {
+	raw, _, err := readEditableFileAt(path, root)
 	if err != nil {
 		return nil, err
 	}
@@ -167,15 +203,19 @@ func (s *Server) fileEditorViewMode(path string, startLine, endLine, maxBytes in
 }
 
 func (s *Server) fileEditorCreate(path, content string) (map[string]any, error) {
-	if _, err := os.Lstat(path); err == nil {
+	return s.fileEditorCreateAt(path, content, nil)
+}
+
+func (s *Server) fileEditorCreateAt(path, content string, root *os.Root) (map[string]any, error) {
+	if _, err := lstatAt(root, path); err == nil {
 		return nil, fmt.Errorf("file already exists: %s; use str_replace or batch_edit", path)
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := mkdirAllAt(root, filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	if err := atomicWriteFile(path, []byte(content), 0o644); err != nil {
+	if err := atomicWriteFileAt(path, []byte(content), 0o644, root); err != nil {
 		return nil, err
 	}
 	view := renderFreshLines(content, 1, logicalLineCount(content))
@@ -185,24 +225,32 @@ func (s *Server) fileEditorCreate(path, content string) (map[string]any, error) 
 }
 
 func (s *Server) fileEditorDelete(path string) (map[string]any, error) {
-	info, err := os.Lstat(path)
+	return s.fileEditorDeleteAt(path, nil)
+}
+
+func (s *Server) fileEditorDeleteAt(path string, root *os.Root) (map[string]any, error) {
+	info, err := lstatAt(root, path)
 	if err != nil {
 		return nil, err
 	}
 	if info.IsDir() {
 		return nil, fmt.Errorf("file_editor delete refuses directories: %s", path)
 	}
-	if err := os.Remove(path); err != nil {
+	if err := removeAt(root, path); err != nil {
 		return nil, err
 	}
 	return mcpText("file deleted: "+path, map[string]any{"ok": true, "action": "delete", "path": path}), nil
 }
 
 func (s *Server) fileEditorReplace(path, oldText, newText string, replaceAll bool) (map[string]any, error) {
+	return s.fileEditorReplaceAt(path, oldText, newText, replaceAll, nil)
+}
+
+func (s *Server) fileEditorReplaceAt(path, oldText, newText string, replaceAll bool, root *os.Root) (map[string]any, error) {
 	if oldText == "" {
 		return nil, errors.New("str_replace requires non-empty old_text")
 	}
-	raw, mode, err := readEditableFile(path)
+	raw, mode, err := readEditableFileAt(path, root)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +286,7 @@ func (s *Server) fileEditorReplace(path, oldText, newText string, replaceAll boo
 	if usesCRLF {
 		after = strings.ReplaceAll(after, "\n", "\r\n")
 	}
-	if err := atomicWriteFile(path, []byte(after), mode); err != nil {
+	if err := atomicWriteFileAt(path, []byte(after), mode, root); err != nil {
 		return nil, err
 	}
 
@@ -254,13 +302,17 @@ func (s *Server) fileEditorReplace(path, oldText, newText string, replaceAll boo
 }
 
 func (s *Server) fileEditorBatch(path string, ops []fileEditOperation) (map[string]any, error) {
+	return s.fileEditorBatchAt(path, ops, nil)
+}
+
+func (s *Server) fileEditorBatchAt(path string, ops []fileEditOperation, root *os.Root) (map[string]any, error) {
 	if len(ops) == 0 {
 		return nil, errors.New("batch_edit requires operations")
 	}
 	if len(ops) > 50 {
 		return nil, errors.New("batch_edit supports at most 50 operations")
 	}
-	raw, mode, err := readEditableFile(path)
+	raw, mode, err := readEditableFileAt(path, root)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +365,7 @@ func (s *Server) fileEditorBatch(path string, ops []fileEditOperation) (map[stri
 	if usesCRLF {
 		toWrite = strings.ReplaceAll(toWrite, "\n", "\r\n")
 	}
-	if err := atomicWriteFile(path, []byte(toWrite), mode); err != nil {
+	if err := atomicWriteFileAt(path, []byte(toWrite), mode, root); err != nil {
 		return nil, err
 	}
 	diff := renderLineDiff(content, afterLF)
@@ -323,7 +375,11 @@ func (s *Server) fileEditorBatch(path string, ops []fileEditOperation) (map[stri
 }
 
 func readEditableFile(path string) ([]byte, os.FileMode, error) {
-	info, err := os.Lstat(path)
+	return readEditableFileAt(path, nil)
+}
+
+func readEditableFileAt(path string, root *os.Root) ([]byte, os.FileMode, error) {
+	info, err := lstatAt(root, path)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -336,7 +392,12 @@ func readEditableFile(path string) ([]byte, os.FileMode, error) {
 	if info.Size() > maxEditableFileBytes {
 		return nil, 0, fmt.Errorf("file exceeds editor limit of %d bytes", maxEditableFileBytes)
 	}
-	b, err := os.ReadFile(path)
+	var b []byte
+	if root == nil {
+		b, err = os.ReadFile(path)
+	} else {
+		b, err = root.ReadFile(path)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -347,6 +408,49 @@ func readEditableFile(path string) ([]byte, os.FileMode, error) {
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	return atomicWriteFileAt(path, data, mode, nil)
+}
+
+func atomicWriteFileAt(path string, data []byte, mode os.FileMode, root *os.Root) error {
+	if root != nil {
+		if mode == 0 {
+			mode = 0o644
+		}
+		dir := filepath.Dir(path)
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		var random [12]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return err
+		}
+		temp := filepath.Join(dir, ".gptadmin-edit-"+hex.EncodeToString(random[:]))
+		f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
+			return err
+		}
+		ok := false
+		defer func() {
+			_ = f.Close()
+			if !ok {
+				_ = root.Remove(temp)
+			}
+		}()
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := root.Rename(temp, path); err != nil {
+			return err
+		}
+		ok = true
+		return nil
+	}
 	dir := filepath.Dir(path)
 	ownership := ownershipForWrite(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -387,6 +491,27 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	}
 	ok = true
 	return nil
+}
+
+func lstatAt(root *os.Root, path string) (os.FileInfo, error) {
+	if root == nil {
+		return os.Lstat(path)
+	}
+	return root.Lstat(path)
+}
+
+func mkdirAllAt(root *os.Root, path string, mode os.FileMode) error {
+	if root == nil {
+		return os.MkdirAll(path, mode)
+	}
+	return root.MkdirAll(path, mode)
+}
+
+func removeAt(root *os.Root, path string) error {
+	if root == nil {
+		return os.Remove(path)
+	}
+	return root.Remove(path)
 }
 
 func normalizeLF(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }

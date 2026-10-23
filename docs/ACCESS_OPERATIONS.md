@@ -39,6 +39,39 @@ approval/budget gate for that profile. Existing profiles and defaults are not
 silently broadened or reset. The UI exposes these choices and displays their
 meaning instead of concealing behavior in missing fields.
 
+Filesystem roots are optional, independently enforced fields on each profile:
+`read_roots` limits file reads and `write_roots` limits file changes. The Hub
+preserves the difference between an omitted field and an explicit empty array.
+If both fields are omitted, the profile uses the legacy filesystem behavior.
+If either field is present, filesystem ACL enforcement is active: an omitted
+other field means deny that operation, and `[]` explicitly denies every path
+for that direction. A write root does not imply a read root. Read/modify
+operations such as `file_editor` replace or batch-edit also require the path to
+be inside `read_roots` because they inspect the original content.
+
+The roots are absolute paths on the selected ShellMCP host. The executor
+requires canonical roots and checks the resolved target against the applicable
+read or write roots. The Hub binds each queued ACL envelope to the authenticated
+profile ID and version, exact `shell:` or `file:` target, tool, arguments and
+root digest; the node accepts it only from its authenticated Hub queue and
+revalidates the profile before execution. These policy fields are not accepted
+from MCP tool arguments. Scoped ACL calls require an approved ShellMCP executor
+that advertises `filesystem_acl_version: 1`; otherwise the Hub denies the call.
+
+With either root field configured, execution is deliberately narrow. The
+filesystem-bound callback exposes only `system_inspect`, `file_editor`, and
+`system_resource_summary`; shell execution, child-MCP calls, code mode, MCP
+`resources/list` and `resources/read`, `file_backup`, and `file_checkpoint` are
+denied. This also prevents backup or checkpoint actions from becoming alternate
+paths around the root policy. The existing `access_mode` still applies
+independently: `readonly` cannot write even when `write_roots` contains paths,
+while `full` remains subject to the configured roots and the profile's other
+target/tool/approval rules.
+
+The Hub performs these checks only when the request is bound to that profile's
+authenticated bearer. It does not trust root values supplied as tool arguments
+or by an unrelated caller.
+
 A new connection can be issued with `profile_id` in its original persisted
 record. It does not pass through a temporary unbound state. A delayed profile
 list response cannot erase a new profile draft the operator has begun editing.

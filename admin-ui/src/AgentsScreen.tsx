@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getLatestJobForServer, readServerResourceJob, sampleServerResources, type ResourceComponent, type ResourceSampleResult } from "./api";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
 import { formatServerLastSeen, formatTimestamp, friendlyServerName, hasServerLastSeen, serverRowQualifier, serverStatusLabel } from "./ui/format";
 
@@ -75,6 +76,54 @@ function textValue(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+function waitForResourceJob(jobId: string, serverId: string, signal: AbortSignal): Promise<ResourceSampleResult> {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    const poll = async () => {
+      if (signal.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      if (attempts >= 8) {
+        resolve({ server_id: serverId, status: "pending", job_id: jobId });
+        return;
+      }
+      attempts += 1;
+      try {
+        await new Promise<void>((done, fail) => {
+          const timer = window.setTimeout(done, 400);
+          signal.addEventListener("abort", () => { window.clearTimeout(timer); fail(new DOMException("Aborted", "AbortError")); }, { once: true });
+        });
+        const next = await readServerResourceJob(jobId, serverId, signal);
+        if (next.status === "pending") void poll();
+        else resolve(next);
+      } catch (error) { reject(error); }
+    };
+    void poll();
+  });
+}
+
+function componentSummary(component: ResourceComponent): string {
+  if (component.status === "unavailable") return component.error ? `Недоступно: ${component.error}` : "Недоступно";
+  return component.status === "partial" ? "Частичные данные" : "Данные получены";
+}
+
+function formatResourceBytes(value: number | undefined): string {
+  if (value === undefined) return "Нет данных";
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(value / (1024 ** 3))} ГиБ`;
+}
+
+function resourceStateLabel(state: ResourceSampleResult["status"]): string {
+  if (state === "available") return "Измерено";
+  if (state === "partial") return "Измерено частично";
+  if (state === "pending") return "Измерение выполняется";
+  return "Метрики недоступны";
+}
+
+function resourceComponentValue(component: ResourceComponent, value: string): string {
+  return component.status === "unavailable" ? componentSummary(component) : value;
+}
+
 export default function AgentsScreen() {
   const [servers, setServers] = useState<Server[]>([]);
   const [filter, setFilter] = useState("");
@@ -82,6 +131,13 @@ export default function AgentsScreen() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [resources, setResources] = useState<ResourceSampleResult | null>(null);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [latestJob, setLatestJob] = useState<Awaited<ReturnType<typeof getLatestJobForServer>>>(null);
+  const [latestJobLoading, setLatestJobLoading] = useState(false);
+  const [latestJobError, setLatestJobError] = useState<string | null>(null);
+  const resourceRequest = useRef<AbortController | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -112,6 +168,62 @@ export default function AgentsScreen() {
     return `${displayName} ${qualifier} ${JSON.stringify(server)}`.toLowerCase().includes(filter.trim().toLowerCase());
   }), [servers, filter, status]);
   const selected = servers.find((server) => server.server_id === selectedId) ?? null;
+  const selectedShellId = selected?.server_id?.startsWith("shell:") ? selected.server_id : null;
+
+  const loadResources = useCallback(async (serverId: string, resumeJobId?: string) => {
+    resourceRequest.current?.abort();
+    const controller = new AbortController();
+    resourceRequest.current = controller;
+    setResources(null);
+    setResourcesError(null);
+    setResourcesLoading(true);
+    try {
+      let result: ResourceSampleResult;
+      if (resumeJobId) {
+        result = await waitForResourceJob(resumeJobId, serverId, controller.signal);
+      } else {
+        result = await sampleServerResources(serverId, controller.signal);
+        if (result.status === "pending") result = await waitForResourceJob(result.job_id, serverId, controller.signal);
+      }
+      if (!controller.signal.aborted) setResources(result);
+    } catch (caught) {
+      if (!controller.signal.aborted && (caught as DOMException).name !== "AbortError") {
+        setResourcesError(caught instanceof Error ? caught.message : "Не удалось получить метрики узла.");
+      }
+    } finally {
+      if (!controller.signal.aborted) setResourcesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedShellId) {
+      resourceRequest.current?.abort();
+      setResources(null);
+      setResourcesError(null);
+      setResourcesLoading(false);
+      return;
+    }
+    void loadResources(selectedShellId);
+    return () => resourceRequest.current?.abort();
+  }, [selectedShellId, loadResources]);
+
+  useEffect(() => {
+    if (!selectedShellId || (selected?.status !== "offline" && selected?.status !== "stale")) {
+      setLatestJob(null);
+      setLatestJobError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLatestJob(null);
+    setLatestJobError(null);
+    setLatestJobLoading(true);
+    void getLatestJobForServer(selectedShellId, controller.signal).then((job) => {
+      if (!controller.signal.aborted) setLatestJob(job);
+    }).catch((caught) => {
+      if (!controller.signal.aborted) setLatestJobError(caught instanceof Error ? caught.message : "Не удалось загрузить историю задач.");
+    }).finally(() => { if (!controller.signal.aborted) setLatestJobLoading(false); });
+    return () => controller.abort();
+  }, [selectedShellId, selected?.status]);
 
   return <div className="page-shell native-operation-page">
     <PageHeader eyebrow="СЕРВЕРЫ" title="Серверы" description="Какие серверы работают, какие недоступны и когда они отвечали в последний раз." actions={<><StatusBadge state={error ? "error" : "ready"}>{loading ? "Обновляем…" : `${filtered.length} узлов`}</StatusBadge><button className="button secondary" type="button" onClick={() => void load()} disabled={loading}>Обновить</button></>} />
@@ -130,6 +242,13 @@ export default function AgentsScreen() {
       {selected && <aside className="card agent-detail-pane">
         <div className="card-heading"><div><p className="section-kicker">ПОДРОБНОСТИ</p><h2>{friendlyServerName(selected.server_id, selected.name)}</h2></div><button className="text-button" type="button" onClick={() => setSelectedId(null)}>Закрыть</button></div>
         <dl className="detail-facts"><div><dt>Технический ID</dt><dd>{selected.server_id || "—"}</dd></div><div><dt>Состояние</dt><dd>{serverStatusLabel(selected.status)}</dd></div><div><dt>Тип узла</dt><dd>{serverRowQualifier(selected.server_id, selected.name, selected.kind, selected.meta) || selected.kind || "—"}</dd></div><div><dt>Тип подключения</dt><dd>{selected.kind || "—"}</dd></div><div><dt>Последний ответ</dt><dd title={hasServerLastSeen(selected.last_seen) ? formatTimestamp(selected.last_seen) : undefined}>{formatServerLastSeen(selected.status, selected.last_seen)}</dd></div></dl>
+        {selectedShellId && <section className="detail-section" aria-label="Метрики узла"><div className="card-heading"><div><h3>Ресурсы узла</h3><p className="muted-help">Один снимок для точного узла {selectedShellId}.</p></div><button className="button secondary" type="button" disabled={resourcesLoading} onClick={() => void loadResources(selectedShellId, resources?.status === "pending" ? resources.job_id : undefined)}>{resourcesLoading ? "Получаем…" : resources?.status === "pending" ? "Проверить результат" : "Обновить метрики"}</button></div>
+          {resourcesLoading && <p role="status">Запрашиваем актуальные метрики…</p>}
+          {resourcesError && <p className="warning-text" role="alert">{resourcesError}</p>}
+          {resources && resources.status !== "pending" && <><p className="muted-help" role="status">{resourceStateLabel(resources.status)} · измерено: {resources.sampled_at ? formatTimestamp(resources.sampled_at) : "снимок не выполнялся"}{resources.node_status ? ` · состояние узла: ${serverStatusLabel(resources.node_status)}` : ""}{resources.error ? ` · ${resources.error}` : ""}</p><dl className="detail-facts resource-facts"><div><dt>CPU</dt><dd>{resourceComponentValue(resources.cpu, resources.cpu.utilization_percent === undefined ? componentSummary(resources.cpu) : `${resources.cpu.utilization_percent.toLocaleString("ru-RU")} % · ${resources.cpu.cores ?? "?"} ядер`)}{resources.cpu.status !== "unavailable" && resources.cpu.sample_interval_ms !== undefined ? ` · замер ${resources.cpu.sample_interval_ms} мс` : ""}</dd></div><div><dt>Память</dt><dd>{resourceComponentValue(resources.memory, resources.memory.used_bytes === undefined ? componentSummary(resources.memory) : `${formatResourceBytes(resources.memory.used_bytes)} из ${formatResourceBytes(resources.memory.total_bytes)} · свободно ${formatResourceBytes(resources.memory.available_bytes)}`)}</dd></div><div><dt>Корневой диск</dt><dd>{resourceComponentValue(resources.root_filesystem, resources.root_filesystem.used_bytes === undefined ? componentSummary(resources.root_filesystem) : `${resources.root_filesystem.mount || "/"}: занято ${formatResourceBytes(resources.root_filesystem.used_bytes)} из ${formatResourceBytes(resources.root_filesystem.total_bytes)} · свободно ${formatResourceBytes(resources.root_filesystem.free_bytes)}`)}</dd></div></dl></>}
+          {resources?.status === "pending" && <p role="status">Замер выполняется. Результат будет прочитан по уже созданной задаче без повторного запуска.</p>}
+        </section>}
+        {selectedShellId && (selected.status === "offline" || selected.status === "stale") && <section className="detail-section" aria-label="Последняя задача узла"><h3>Последняя задача узла</h3>{latestJobLoading && <p role="status">Ищем задачу в сохранённой истории…</p>}{latestJobError && <p className="warning-text" role="alert">{latestJobError}</p>}{!latestJobLoading && !latestJobError && !latestJob && <p className="muted-help">Для этого узла сохранённых задач нет.</p>}{latestJob && <p><a className="button secondary" href={`#jobs?server_id=${encodeURIComponent(latestJob.server_id)}&job_id=${encodeURIComponent(latestJob.job_id)}`}>Открыть последнюю задачу: {latestJob.tool_name || latestJob.job_id}</a><small className="muted-help">История загружена отдельно от недоступного узла.</small></p>}</section>}
         <details className="detail-section technical-details"><summary>Технические возможности</summary><div className="pill-wrap">{selected.capabilities?.length ? selected.capabilities.map((cap) => <span className="small-pill" key={cap}>{cap}</span>) : <span className="muted-help">Не переданы</span>}</div></details>
         <details className="detail-section technical-details"><summary>Метаданные</summary>{Object.keys(selected.meta ?? {}).length ? <dl className="meta-grid">{Object.entries(selected.meta ?? {}).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{textValue(value)}</dd></div>)}</dl> : <p className="muted-help">Нет метаданных.</p>}</details>
       </aside>}

@@ -4,6 +4,10 @@ import {
   deleteClientBinding,
   getAccessProfile,
   getAccessProfiles,
+  getLatestJobForServer,
+  loadProxyRoute,
+  saveProxyRoute,
+  actOnProxyRoute,
   getClients,
   getStoredMcpToken,
   setClientRole,
@@ -12,6 +16,8 @@ import {
   putClientBinding,
   rotateMcpToken,
   rotateOAuth,
+  sampleServerResources,
+  readServerResourceJob,
   type AccessProfile,
 } from "./api";
 
@@ -32,6 +38,19 @@ const profile: AccessProfile = {
   version: 2,
   updated_at: "2026-07-17T08:00:00Z",
 };
+
+const proxyRoute = {
+  profile: {
+    schema: "gptadmin.proxy-route/v1",
+    id: "relay02-server44-de-http",
+    consumer: "relay02",
+    exit: "node-44-de-http",
+    listener: { bind_address: "127.0.0.1", port: 24836 },
+    ssh_identity_ref: "ssh-config:relay02",
+    desired_state: "disabled",
+  },
+  runtime: { profile_saved: false, service_state: "inactive", listener_state: "closed", last_probe: null },
+} as const;
 
 function jsonResponse(value: unknown, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -81,6 +100,131 @@ describe("admin API contracts", () => {
       }),
       headers: { Accept: "application/json", "Content-Type": "application/json", "If-Match": '"2"' },
     }));
+  });
+
+  it("preserves an explicit empty root list and keeps an omitted ACL side absent", async () => {
+    const readOnlyAcl: AccessProfile = { ...profile, read_roots: [] };
+    const responseProfile = { ...readOnlyAcl, version: 3 };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(readOnlyAcl, { ETag: '"2"' }))
+      .mockResolvedValueOnce(jsonResponse(responseProfile, { ETag: '"3"' }));
+
+    const loaded = await getAccessProfile("ops");
+    expect(loaded.value).toEqual(readOnlyAcl);
+    expect(Object.hasOwn(loaded.value, "read_roots")).toBe(true);
+    expect(Object.hasOwn(loaded.value, "write_roots")).toBe(false);
+    await expect(putAccessProfile(loaded.value, loaded.etag)).resolves.toEqual({ value: responseProfile, etag: '"3"' });
+
+    const putBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as Record<string, unknown>;
+    expect(putBody.read_roots).toEqual([]);
+    expect(putBody).not.toHaveProperty("write_roots");
+  });
+
+  it("samples one exact shell node and validates the resource summary envelope", async () => {
+    const summary = {
+      server_id: "shell:host-a",
+      status: "available",
+      sampled_at: "2026-10-23T00:00:00Z",
+      cpu: { status: "available", cores: 8, utilization_percent: 12.5, sample_interval_ms: 250 },
+      memory: { status: "available", total_bytes: 1000, available_bytes: 400, used_bytes: 600 },
+      root_filesystem: { status: "available", mount: "/", total_bytes: 5000, used_bytes: 2000, free_bytes: 3000 },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(summary));
+
+    await expect(sampleServerResources("shell:host-a")).resolves.toEqual(summary);
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/servers/resources", expect.objectContaining({
+      method: "POST",
+      credentials: "same-origin",
+      body: JSON.stringify({ server_id: "shell:host-a" }),
+    }));
+  });
+
+  it("reads a pending sample through its existing job id without creating a second sample", async () => {
+    const pending = { server_id: "shell:host-a", status: "pending", job_id: "resource-job" };
+    const summary = {
+      status: "partial",
+      sampled_at: "2026-10-23T00:00:01Z",
+      cpu: { status: "available", cores: 4, utilization_percent: 5, sample_interval_ms: 250 },
+      memory: { status: "unavailable", error: "unsupported" },
+      root_filesystem: { status: "available", mount: "/", total_bytes: 100, used_bytes: 40, free_bytes: 60 },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(pending)).mockResolvedValueOnce(jsonResponse({
+      server_id: "shell:host-a", status: "running", job_id: "resource-job",
+    })).mockResolvedValueOnce(jsonResponse({
+      server_id: "shell:host-a",
+      status: "completed",
+      response: { structuredContent: { server: "host-a", result: summary } },
+    }));
+
+    await expect(sampleServerResources("shell:host-a")).resolves.toEqual(pending);
+    await expect(readServerResourceJob("resource-job", "shell:host-a")).resolves.toEqual(pending);
+    await expect(readServerResourceJob("resource-job", "shell:host-a")).resolves.toMatchObject(summary);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/mcp-relay/job/resource-job?detail=full", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/mcp-relay/job/resource-job?detail=full", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock.mock.calls.filter(([input]) => input === "/admin/api/servers/resources")).toHaveLength(1);
+  });
+
+  it("finds the latest historical task by exact shell server_id", async () => {
+    const latest = { job_id: "job-9", server_id: "shell:host-a", status: "failed", tool_name: "system_inspect" };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ count: 1, recent: [latest] }));
+
+    await expect(getLatestJobForServer("shell:host-a")).resolves.toEqual(latest);
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Ahost-a&limit=1", expect.objectContaining({ credentials: "same-origin" }));
+  });
+
+  it("loads, saves and invokes only the fixed persistent proxy-route contract", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(proxyRoute))
+      .mockResolvedValueOnce(jsonResponse({ ...proxyRoute, profile: { ...proxyRoute.profile, desired_state: "enabled" }, runtime: { ...proxyRoute.runtime, profile_saved: true } }))
+      .mockResolvedValueOnce(jsonResponse({ ...proxyRoute, runtime: { ...proxyRoute.runtime, profile_saved: true, service_state: "active", listener_state: "listening" } }));
+
+    await expect(loadProxyRoute()).resolves.toEqual(proxyRoute);
+    await expect(saveProxyRoute({ ...proxyRoute.profile, desired_state: "enabled" })).resolves.toMatchObject({ profile: { desired_state: "enabled" }, runtime: { profile_saved: true } });
+    await expect(actOnProxyRoute("enable")).resolves.toMatchObject({ runtime: { profile_saved: true, service_state: "active", listener_state: "listening" } });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/admin/api/proxy-route", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/admin/api/proxy-route", expect.objectContaining({
+      method: "PUT",
+      body: JSON.stringify({ profile: { ...proxyRoute.profile, desired_state: "enabled" } }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/admin/api/proxy-route/enable", expect.objectContaining({ method: "POST", body: "{}" }));
+  });
+
+  it("rejects a proxy profile outside the fixed route", async () => {
+    const invalid = { ...proxyRoute, profile: { ...proxyRoute.profile, listener: { bind_address: "0.0.0.0", port: 24836 } } };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(invalid));
+    await expect(loadProxyRoute()).rejects.toThrow("proxy profile вне разрешённой конфигурации");
+  });
+
+  it("preserves unknown proxy verification and its reason without coercing it to false", async () => {
+    const state = {
+      ...proxyRoute,
+      runtime: {
+        profile_saved: true,
+        service_state: "unknown",
+        listener_state: "unknown",
+        last_probe: {
+          state: "unknown",
+          checked_at: null,
+          direct_exit_ip: null,
+          proxy_exit_ip: null,
+          server44_path_verified: null,
+          server44_path_reason: "ssh_readback_unavailable",
+        },
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(state));
+
+    await expect(loadProxyRoute()).resolves.toEqual(state);
+  });
+
+  it("requires the backend to report whether the route profile is persisted", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({
+      ...proxyRoute,
+      runtime: { service_state: "inactive", listener_state: "closed", last_probe: null },
+    }));
+
+    await expect(loadProxyRoute()).rejects.toThrow("некорректный статус proxy-маршрута");
   });
 
   it("restores only a matching weak profile version ETag before If-Match", async () => {

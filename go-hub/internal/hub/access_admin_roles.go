@@ -40,7 +40,7 @@ func (s *Server) requestHasAdminRole(r *http.Request) bool {
 	return role == "admin" || role == "owner"
 }
 func (s *Server) clientHTTPPathAllowed(r *http.Request) bool {
-	if mcpClientHTTPPathAllowed(r.URL.Path) {
+	if mcpClientHTTPPathAllowed(r.URL.Path, r.Method) {
 		return true
 	}
 	if !s.requestHasAdminRole(r) {

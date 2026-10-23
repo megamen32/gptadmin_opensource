@@ -134,6 +134,36 @@ describe("Profiles / Instructions", () => {
     expect(screen.getByRole("button", { name: "Для администратора" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("link", { name: "CloudOS (дополнительно)" })).toHaveAttribute("href", "/cloudos/");
   });
+
+  it("opens the proxy route from the App router and loads its persisted/runtime state", async () => {
+    window.history.replaceState(null, "", "#proxyroute");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input) !== "/admin/api/proxy-route") throw new Error(`Unexpected request ${String(input)}`);
+      return new Response(JSON.stringify({
+        profile: {
+          schema: "gptadmin.proxy-route/v1",
+          id: "relay02-server44-de-http",
+          consumer: "relay02",
+          exit: "node-44-de-http",
+          listener: { bind_address: "127.0.0.1", port: 24836 },
+          ssh_identity_ref: "ssh-config:relay02",
+          desired_state: "disabled",
+        },
+        runtime: {
+          profile_saved: true,
+          service_state: "inactive",
+          listener_state: "closed",
+          last_probe: { state: "unknown", checked_at: null, direct_exit_ip: null, proxy_exit_ip: null, server44_path_verified: null, server44_path_reason: "ssh_readback_unavailable" },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Прокси через сервер 44" })).toBeInTheDocument();
+    expect(await screen.findByText("Сохранён")).toBeInTheDocument();
+    expect(await screen.findByText("ssh_readback_unavailable")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/admin/api/proxy-route", expect.objectContaining({ credentials: "same-origin" }));
+  });
 });
 
 const profileFixture = {
@@ -154,6 +184,7 @@ const profileFixture = {
 
 type ProfileFetchOptions = {
   profiles?: unknown[];
+  profile?: unknown;
   putStatus?: number;
   putErrorDetail?: string;
   failList?: boolean;
@@ -179,7 +210,7 @@ function mockProfileFetch(options: ProfileFetchOptions = {}) {
       });
     }
     if (path === "/admin/api/access-profiles/ops" && !init?.method) {
-      return new Response(JSON.stringify(profileFixture), {
+      return new Response(JSON.stringify(options.profile ?? profileFixture), {
         status: 200,
         headers: { "Content-Type": "application/json", ETag: '"7"' },
       });
@@ -218,7 +249,50 @@ describe("Profiles", () => {
 
     expect(await screen.findByText("Профиль сохранён")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/admin/api/access-profiles/ops", expect.objectContaining({ method: "PUT" }));
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody).not.toHaveProperty("read_roots");
+    expect(putBody).not.toHaveProperty("write_roots");
     expect(screen.getByLabelText("Название профиля")).toHaveValue("Операционный профиль v2");
+  });
+
+  it("preserves an active one-sided folder ACL when another profile field changes", async () => {
+    const profileWithAcl = { ...profileFixture, read_roots: ["/srv/shared/read"] };
+    const fetchMock = mockProfileFetch({ profile: profileWithAcl, profiles: [profileWithAcl] });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+
+    expect(await screen.findByLabelText("Ограничить доступ к папкам")).toBeChecked();
+    expect(screen.getByLabelText("Папки для чтения")).toHaveValue("/srv/shared/read");
+    expect(screen.getByLabelText("Папки для записи")).toHaveValue("");
+    await userEvent.clear(screen.getByLabelText("Название профиля"));
+    await userEvent.type(screen.getByLabelText("Название профиля"), "Обновлённый ACL");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    await screen.findByText("Профиль сохранён");
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody.read_roots).toEqual(["/srv/shared/read"]);
+    expect(putBody).not.toHaveProperty("write_roots");
+  });
+
+  it("omits both root lists when folder restriction is explicitly disabled", async () => {
+    const profileWithAcl = { ...profileFixture, read_roots: ["/srv/read"], write_roots: ["/srv/write"] };
+    const fetchMock = mockProfileFetch({ profile: profileWithAcl, profiles: [profileWithAcl] });
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Текст инструкций" });
+    await userEvent.click(screen.getByRole("link", { name: "Доступ" }));
+    await userEvent.click(screen.getByRole("link", { name: "Профили" }));
+    await screen.findByLabelText("Папки для чтения");
+    await userEvent.click(screen.getByLabelText("Ограничить доступ к папкам"));
+    await userEvent.clear(screen.getByLabelText("Название профиля"));
+    await userEvent.type(screen.getByLabelText("Название профиля"), "Без файлового ограничения");
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить профиль" }));
+
+    await screen.findByText("Профиль сохранён");
+    const putBody = JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")?.[1]?.body)) as Record<string, unknown>;
+    expect(putBody).not.toHaveProperty("read_roots");
+    expect(putBody).not.toHaveProperty("write_roots");
   });
 
   it("creates a profile and supports workspace refs", async () => {

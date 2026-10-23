@@ -424,6 +424,7 @@ type relayJob struct {
 	RequestKey   string         `json:"request_key,omitempty"`
 	Revision     int64          `json:"-"`
 	OwnerID      string         `json:"owner_id,omitempty"`
+	Caller       *taskCaller    `json:"caller,omitempty"`
 	ID           string         `json:"id"`
 	AgentID      string         `json:"agent_id,omitempty"`
 	TraceID      string         `json:"trace_id,omitempty"`
@@ -444,31 +445,33 @@ type shellControl struct {
 }
 
 type shellJob struct {
-	CachedAt          float64        `json:"-"`
-	RequestKey        string         `json:"request_key,omitempty"`
-	Revision          int64          `json:"-"`
-	OwnerID           string         `json:"owner_id,omitempty"`
-	ID                string         `json:"id"`
-	Server            string         `json:"server,omitempty"`
-	TraceID           string         `json:"trace_id,omitempty"`
-	TraceParent       string         `json:"traceparent,omitempty"`
-	ToolName          string         `json:"tool_name,omitempty"`
-	Arguments         map[string]any `json:"arguments,omitempty"`
-	Cmd               string         `json:"cmd,omitempty"`
-	Cwd               string         `json:"cwd,omitempty"`
-	Timeout           int            `json:"timeout,omitempty"`
-	Env               map[string]any `json:"env,omitempty"`
-	SecretValues      []string       `json:"-"`
-	CreatedAt         float64        `json:"created_at"`
-	StartedAt         float64        `json:"started_at,omitempty"`
-	DoneAt            float64        `json:"completed_at,omitempty"`
-	Status            string         `json:"status"`
-	Result            any            `json:"result,omitempty"`
-	Error             any            `json:"error,omitempty"`
-	ApprovalID        string         `json:"approval_id,omitempty"`
-	ApprovalActor     string         `json:"-"`
-	ApprovalProfileID string         `json:"-"`
-	ParentTaskID      string         `json:"parent_task_id,omitempty"`
+	CachedAt          float64              `json:"-"`
+	RequestKey        string               `json:"request_key,omitempty"`
+	Revision          int64                `json:"-"`
+	OwnerID           string               `json:"owner_id,omitempty"`
+	Caller            *taskCaller          `json:"caller,omitempty"`
+	ID                string               `json:"id"`
+	Server            string               `json:"server,omitempty"`
+	TraceID           string               `json:"trace_id,omitempty"`
+	TraceParent       string               `json:"traceparent,omitempty"`
+	ToolName          string               `json:"tool_name,omitempty"`
+	Arguments         map[string]any       `json:"arguments,omitempty"`
+	Cmd               string               `json:"cmd,omitempty"`
+	Cwd               string               `json:"cwd,omitempty"`
+	Timeout           int                  `json:"timeout,omitempty"`
+	Env               map[string]any       `json:"env,omitempty"`
+	SecretValues      []string             `json:"-"`
+	CreatedAt         float64              `json:"created_at"`
+	StartedAt         float64              `json:"started_at,omitempty"`
+	DoneAt            float64              `json:"completed_at,omitempty"`
+	Status            string               `json:"status"`
+	Result            any                  `json:"result,omitempty"`
+	Error             any                  `json:"error,omitempty"`
+	ApprovalID        string               `json:"approval_id,omitempty"`
+	ApprovalActor     string               `json:"-"`
+	ApprovalProfileID string               `json:"-"`
+	FilesystemACL     *filesystemACLPolicy `json:"filesystem_acl,omitempty"`
+	ParentTaskID      string               `json:"parent_task_id,omitempty"`
 }
 
 type auditEvent struct {
@@ -541,13 +544,15 @@ type authRateWindow struct {
 }
 
 type idempotencyEntry struct {
-	Key         string
-	Fingerprint string
-	CreatedAt   time.Time
-	Done        chan struct{}
-	JobID       string
-	Response    map[string]any
-	Status      int
+	Key           string
+	Fingerprint   string
+	CreatedAt     time.Time
+	Done          chan struct{}
+	JobID         string
+	Caller        *taskCaller
+	FilesystemACL *filesystemACLPolicy
+	Response      map[string]any
+	Status        int
 }
 
 type Server struct {
@@ -1743,7 +1748,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/proxy-control/v1/revoke", s.requireCtl(s.networkProxyRevokeHTTP))
 	mux.HandleFunc("/proxy-agent/offers", s.networkProxyOfferPullHTTP)
 	mux.HandleFunc("/proxy-agent/public-key", s.networkProxyOfferPublicKeyHTTP)
-	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.adminMCPManage))
+	mux.HandleFunc("/admin/api/proxy-route", s.requireCtl(s.adminProxyRoute))
+	mux.HandleFunc("/admin/api/proxy-route/", s.requireCtl(s.adminProxyRoute))
+	mux.HandleFunc("/admin/api/mcp/manage", s.requireCtl(s.handleAdminMCPManage))
 	mux.HandleFunc("/admin/api/settings", s.requireCtl(s.adminSettings))
 	mux.HandleFunc("/admin/api/settings/history", s.requireCtl(s.adminSettingsHistory))
 	mux.HandleFunc("/admin/api/settings/rollback", s.requireCtl(s.adminSettingsRollback))
@@ -1780,6 +1787,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/clients/revoke-all", s.requireCtl(s.adminClientsRevokeAll))
 	mux.HandleFunc("/admin/api/clients/", s.requireCtl(s.trackAccessOperation(s.adminClientDelete)))
 	mux.HandleFunc("/admin/api/overview", s.requireCtl(s.adminOverview))
+	mux.HandleFunc("/admin/api/servers/resources", s.requireCtl(s.adminServerResources))
 	mux.HandleFunc("/admin/api/instruction-sets/default", s.requireCtl(s.adminDefaultInstructionSet))
 	mux.HandleFunc("/admin/api/instruction-sets", s.requireCtl(s.adminInstructionSets))
 	mux.HandleFunc("/admin/api/instruction-sets/", s.requireCtl(s.adminInstructionSet))
@@ -3660,7 +3668,58 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 		s.shellQueueResult(w, r, name)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "acl-check" && r.Method == http.MethodPost {
+		s.shellQueueFilesystemACLCheck(w, r, name)
+		return
+	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "not found"})
+}
+
+func (s *Server) shellQueueFilesystemACLCheck(w http.ResponseWriter, r *http.Request, name string) {
+	if err := s.refreshAccessState(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "filesystem ACL state unavailable"})
+		return
+	}
+	var check struct {
+		ID              string `json:"id"`
+		ToolName        string `json:"tool_name"`
+		ArgumentsSHA256 string `json:"args_sha256"`
+	}
+	if err := readJSON(r, &check); err != nil || check.ID == "" || check.ToolName == "" || check.ArgumentsSHA256 == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid filesystem ACL check"})
+		return
+	}
+	s.mu.Lock()
+	if err := s.refreshTaskRecordsLocked(check.ID); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable"})
+		return
+	}
+	job := s.shellJobs[check.ID]
+	if job == nil || job.Server != canonicalShellQueueName(name) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "filesystem ACL job belongs to another executor"})
+		return
+	}
+	localToken := s.localExecutorTokens["shell:"+job.Server]
+	if (localToken != "" && !tokenMatches(r, localToken)) || (localToken == "" && !s.touchShellPollLocked(name, r)) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "executor credential does not own filesystem ACL job"})
+		return
+	}
+	if job.Status != "running" || job.FilesystemACL == nil || job.ToolName != check.ToolName {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "filesystem ACL job is not active"})
+		return
+	}
+	if err := s.validateFilesystemACLJobLocked(job, check.ArgumentsSHA256); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+		return
+	}
+	policy := cloneFilesystemACLPolicy(job.FilesystemACL)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"filesystem_acl": policy})
 }
 
 func (s *Server) shellQueuePollMaxLocked() time.Duration {
@@ -3755,6 +3814,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 					return nil, false, nil
 				}
 				payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+				if job.FilesystemACL != nil {
+					payload["filesystem_acl"] = job.FilesystemACL
+				}
 				encoded, err := json.Marshal(payload)
 				return encoded, true, err
 			})
@@ -3831,7 +3893,7 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 			meta[key] = v
 		}
 	}
-	for _, key := range []string{"cores", "mem_mb", "build_version", "spool_bytes", "storage_bytes", "outbox_depth", "outbox_retry_attempts", "queue_poll_count", "queue_poll_errors", "queue_poll_latency_ms", "outbox_retry_failures", "outbox_delivered", "self_repair_desired"} {
+	for _, key := range []string{"cores", "mem_mb", "build_version", "filesystem_acl_version", "spool_bytes", "storage_bytes", "outbox_depth", "outbox_retry_attempts", "queue_poll_count", "queue_poll_errors", "queue_poll_latency_ms", "outbox_retry_failures", "outbox_delivered", "self_repair_desired"} {
 		if v := intFromString(r.URL.Query().Get(key)); v > 0 {
 			meta[key] = v
 		}
@@ -4914,6 +4976,19 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		return response, http.StatusTooManyRequests
 	}
 	args = callArgs
+	filesystemACL, err := filesystemACLForRequest(r, target, toolName, args)
+	if err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+	}
+	if filesystemACL != nil {
+		server := strings.TrimPrefix(strings.TrimPrefix(target, "file:"), "shell:")
+		s.mu.Lock()
+		capable := s.filesystemACLExecutorCapableLocked(server)
+		s.mu.Unlock()
+		if !capable {
+			return map[string]any{"status": "failed", "error": "filesystem ACL requires an approved executor with filesystem_acl_version 1"}, http.StatusForbidden
+		}
+	}
 	secretValues := []string(nil)
 	if toolName == "shell_exec" {
 		resolvedArgs, resolvedSecrets, err := s.resolveSecretEnvForRequest(r, target, args)
@@ -4966,14 +5041,13 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		}
 		if strings.HasPrefix(target, "shell:") {
 			args = s.shellConnectionArguments(r, target, toolName, args)
-			return s.callShellToolWithTraceParentAndSecrets(target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+			return s.callShellToolWithFilesystemACLForRequest(r, target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, filesystemACL, durableRequestKey), http.StatusOK
 		}
 		if strings.HasPrefix(target, "file:") {
 			if !fileToolAllowed(toolName) {
 				return map[string]any{"server_id": target, "status": "failed", "error": "tool is not exposed by file target"}, http.StatusBadRequest
 			}
-			backing := "shell:" + strings.TrimPrefix(target, "file:")
-			resp := s.callShellToolWithTraceParentAndSecrets(backing, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey)
+			resp := s.callShellToolWithFilesystemACLForRequest(r, target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, filesystemACL, durableRequestKey)
 			resp["server_id"] = target
 			return resp, http.StatusOK
 		}
@@ -4987,7 +5061,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 				"ref": ref, "name": toolName, "arguments": args,
 			}), background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
 		}
-		jobID := s.enqueueRelayWithTraceParent(target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
+		jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
 		if failure := s.relayEnqueueFailure(jobID); failure != nil {
 			return failure, http.StatusServiceUnavailable
 		}
@@ -5039,7 +5113,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 			}
 			s.auditToolDecision(r, target, toolName, args, "allow", "", response, status)
 			return response, status
-		})
+		}, r)
 	}
 
 	s.mu.Lock()
@@ -5076,13 +5150,17 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		case <-done:
 			s.mu.Lock()
 			response, status := cloneMap(entry.Response), entry.Status
+			caller, receiptACL := entry.Caller, entry.FilesystemACL
 			s.mu.Unlock()
+			if err := s.authorizeTaskReceipt(r, caller, receiptACL); err != nil {
+				return map[string]any{"status": "failed", "error": "task receipt is not available under the current client profile"}, http.StatusForbidden
+			}
 			return response, status
 		case <-time.After(timeout):
 			return map[string]any{"status": "running", "idempotency_key": key, "message": "the original MCP call is still running"}, http.StatusAccepted
 		}
 	}
-	entry := &idempotencyEntry{Fingerprint: fingerprint, CreatedAt: now, Done: make(chan struct{})}
+	entry := &idempotencyEntry{Fingerprint: fingerprint, CreatedAt: now, Done: make(chan struct{}), Caller: taskCallerFromRequest(r), FilesystemACL: cloneFilesystemACLPolicy(filesystemACL)}
 	s.idempotency[entryKey] = entry
 	s.mu.Unlock()
 
@@ -5220,7 +5298,10 @@ func isReadOnlyTool(target, toolName string) bool {
 			return false
 		}
 	}
-	return strings.HasPrefix(target, "shell:") && toolName == "system_inspect"
+	if strings.HasPrefix(target, "shell:") {
+		return toolName == "system_inspect" || toolName == "system_resource_summary"
+	}
+	return false
 }
 
 func (s *Server) actorForRequest(r *http.Request) string {
@@ -5446,31 +5527,62 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
 		return
 	}
-	if j := s.relayJobs[jobID]; j != nil {
-		resp := relayJobResponse(j)
-		if ack && (j.Status == "completed" || j.Status == "failed") {
+	relay := s.relayJobs[jobID]
+	shell := s.shellJobs[jobID]
+	var relayCaller, shellCaller *taskCaller
+	var shellACL *filesystemACLPolicy
+	if relay != nil && relay.Caller != nil {
+		caller := *relay.Caller
+		relayCaller = &caller
+	}
+	if shell != nil {
+		if shell.Caller != nil {
+			caller := *shell.Caller
+			shellCaller = &caller
+		}
+		shellACL = cloneFilesystemACLPolicy(shell.FilesystemACL)
+	}
+	s.mu.Unlock()
+	if relay != nil {
+		if err := s.authorizeTaskReceipt(r, relayCaller, nil); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+			return
+		}
+		s.mu.Lock()
+		if s.relayJobs[jobID] != relay {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+			return
+		}
+		resp := relayJobResponse(relay)
+		if ack && (relay.Status == "completed" || relay.Status == "failed") {
 			delete(s.relayJobs, jobID)
 		}
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, s.formatToolOutput(resp, "", outputDetail))
 		return
 	}
-	if j := s.shellJobs[jobID]; j != nil {
-		resp := shellJobResponse(j)
-		acknowledge := ack && (j.Status == "completed" || j.Status == "failed")
+	if shell != nil {
+		if err := s.authorizeTaskReceipt(r, shellCaller, shellACL); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+			return
+		}
+		s.mu.Lock()
+		if s.shellJobs[jobID] != shell {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
+			return
+		}
+		resp := shellJobResponse(shell)
+		acknowledge := ack && (shell.Status == "completed" || shell.Status == "failed")
+		if acknowledge {
+			delete(s.shellJobs, jobID)
+		}
 		s.mu.Unlock()
 		result := s.presentTokenOutput(r, "job", map[string]any{"id": jobID, "detail": outputDetail}, resp)
-		if acknowledge {
-			s.mu.Lock()
-			if s.shellJobs[jobID] == j {
-				delete(s.shellJobs, jobID)
-			}
-			s.mu.Unlock()
-		}
 		writeJSON(w, http.StatusOK, result)
 		return
 	}
-	s.mu.Unlock()
 	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
 }
 
@@ -5483,9 +5595,13 @@ func (s *Server) enqueueRelayWithTrace(agentID, method string, params map[string
 }
 
 func (s *Server) enqueueRelayWithTraceParent(agentID, method string, params map[string]any, traceID, traceParent string, requestKeys ...string) string {
+	return s.enqueueRelayWithTraceParentForRequest(nil, agentID, method, params, traceID, traceParent, requestKeys...)
+}
+
+func (s *Server) enqueueRelayWithTraceParentForRequest(r *http.Request, agentID, method string, params map[string]any, traceID, traceParent string, requestKeys ...string) string {
 	id := newID()
 	s.mu.Lock()
-	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
+	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
 	if len(requestKeys) > 0 {
 		s.relayJobs[id].RequestKey = requestKeys[0]
 	}
@@ -5830,11 +5946,27 @@ func (s *Server) callShellToolWithTraceParent(target, toolName string, args map[
 }
 
 func (s *Server) callShellToolWithTraceParentAndSecrets(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, requestKeys ...string) map[string]any {
+	return s.callShellToolWithFilesystemACL(target, toolName, args, background, timeout, traceID, traceParent, secretValues, nil, requestKeys...)
+}
+
+func (s *Server) callShellToolWithFilesystemACL(target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, filesystemACL *filesystemACLPolicy, requestKeys ...string) map[string]any {
+	return s.callShellToolWithFilesystemACLForRequest(nil, target, toolName, args, background, timeout, traceID, traceParent, secretValues, filesystemACL, requestKeys...)
+}
+
+func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, filesystemACL *filesystemACLPolicy, requestKeys ...string) map[string]any {
 	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
+	if strings.HasPrefix(target, "file:") {
+		server = canonicalShellQueueName(strings.TrimPrefix(target, "file:"))
+	}
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
 	}
-	job := &shellJob{ID: newID(), Server: server, TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), CreatedAt: nowFloat(), Status: "queued"}
+	job := &shellJob{ID: newID(), Server: server, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
+	if job.FilesystemACL != nil {
+		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
+		job.FilesystemACL.JobID = job.ID
+		job.FilesystemACL.ArgumentsSHA256, _ = filesystemACLArgumentsDigest(job.Arguments)
+	}
 	if toolName == "shell_exec" {
 		job.Cmd = firstString(args, "cmd", "command")
 		if job.Cmd == "" {
@@ -6202,20 +6334,6 @@ func (s *Server) adminHandover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
-}
-
-func (s *Server) adminMCPManage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
-		return
-	}
-	var req map[string]any
-	_ = readJSON(r, &req)
-	action := firstString(req, "action")
-	if action == "" {
-		action = "list"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target": firstString(req, "target"), "action": action, "response": map[string]any{"note": "go hub MCP manage is read-only/placeholder; use shell:mcp_tools for mutation until full parity", "servers": len(s.agents)}})
 }
 
 func (s *Server) adminClientsRevokeAll(w http.ResponseWriter, r *http.Request) {
@@ -6659,7 +6777,17 @@ func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
-	jobs := s.adminJobsDataLocked(offset, limit)
+	serverID := strings.TrimSpace(r.URL.Query().Get("server_id"))
+	var jobs map[string]any
+	if serverID == "" {
+		jobs = s.adminJobsDataLocked(offset, limit)
+	} else if strings.HasPrefix(serverID, "shell:") && strings.TrimSpace(strings.TrimPrefix(serverID, "shell:")) != "" {
+		jobs = s.adminJobsForServerLocked(serverID, offset, limit)
+	} else {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "server_id must be an exact shell:<name> target"})
+		return
+	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, jobs)
 }
@@ -9263,7 +9391,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if !mcpTasksOptedIn(params) {
 			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
 		} else {
-			result, rpcErr = s.mcpTaskGet(firstString(params, "taskId"), "")
+			result, rpcErr = s.mcpTaskGetForRequest(r, firstString(params, "taskId"), "")
 		}
 	case "tasks/cancel":
 		if !mcpTasksOptedIn(params) {
@@ -9371,14 +9499,23 @@ func (s *Server) taskOutputResourceRead(r *http.Request, uri, owner string) map[
 		s.mu.Unlock()
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task resource not found"}}}
 	}
+	caller, acl := job.Caller, job.FilesystemACL
 	result := mapValue(job.Result)
 	path := firstString(result, stream+"_path")
 	server := job.Server
 	s.mu.Unlock()
+	if err := s.authorizeTaskReceipt(r, caller, acl); err != nil {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task resource not found"}}}
+	}
 	if path == "" {
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task output was not spilled"}}}
 	}
-	read := s.callShellToolWithTraceParent("shell:"+server, "system_inspect", map[string]any{"action": "read_file", "path": path, "max_bytes": limit, "offset": offset}, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+	readArgs := map[string]any{"action": "read_file", "path": path, "max_bytes": limit, "offset": offset}
+	filesystemACL, err := filesystemACLForRequest(r, "shell:"+server, "system_inspect", readArgs)
+	if err != nil {
+		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "text/plain", "text": "task resource not found"}}}
+	}
+	read := s.callShellToolWithFilesystemACLForRequest(r, "shell:"+server, "system_inspect", readArgs, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r), nil, filesystemACL)
 	if firstString(read, "status") == "failed" || truthy(read["background"]) {
 		b, _ := json.Marshal(read)
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
@@ -9463,6 +9600,7 @@ func (s *Server) createApprovalShellTask(r *http.Request, target, toolName strin
 	job := &shellJob{
 		ID:            newID(),
 		Server:        server,
+		Caller:        taskCallerFromRequest(r),
 		TraceID:       requestTraceID(r),
 		TraceParent:   requestTraceParent(r),
 		ToolName:      toolName,
@@ -9675,32 +9813,55 @@ func detailedRelayTaskBase(j *relayJob) map[string]any {
 }
 
 func (s *Server) mcpTaskGet(taskID, owner string) (any, any) {
+	return s.mcpTaskGetForRequest(nil, taskID, owner)
+}
+
+func (s *Server) mcpTaskGetForRequest(r *http.Request, taskID, owner string) (any, any) {
 	if taskID == "" {
 		return nil, map[string]any{"code": -32602, "message": "taskId is required"}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.refreshTaskRecordsLocked(taskID); err != nil {
+		s.mu.Unlock()
 		return nil, taskPersistenceRPCError(err)
 	}
 	if j := s.shellJobs[taskID]; j != nil {
 		if owner != "" && owner != "shell:"+j.Server && owner != "hub" {
+			s.mu.Unlock()
 			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
 		}
-		return s.detailedShellTask(j), nil
+		result, caller, acl := s.detailedShellTask(j), j.Caller, j.FilesystemACL
+		s.mu.Unlock()
+		if err := s.authorizeTaskReceipt(r, caller, acl); err != nil {
+			return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+		}
+		return result, nil
 	}
 	if j := s.relayJobs[taskID]; j != nil {
 		if j.Method == "task/group" {
 			if owner != "" && owner != "hub" {
+				s.mu.Unlock()
 				return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
 			}
-			return s.detailedTaskGroup(j), nil
+			result, caller := s.detailedTaskGroup(j), j.Caller
+			s.mu.Unlock()
+			if err := s.authorizeTaskReceipt(r, caller, nil); err != nil {
+				return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+			}
+			return result, nil
 		}
 		if owner != "" && owner != j.AgentID && owner != "hub" {
+			s.mu.Unlock()
 			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
 		}
-		return s.detailedRelayTask(j), nil
+		result, caller := s.detailedRelayTask(j), j.Caller
+		s.mu.Unlock()
+		if err := s.authorizeTaskReceipt(r, caller, nil); err != nil {
+			return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+		}
+		return result, nil
 	}
+	s.mu.Unlock()
 	return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
 }
 
@@ -9941,24 +10102,8 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 		if err := validateToolOutputDetail(args["detail"]); err != nil {
 			return map[string]any{"status": "failed", "error": err.Error()}
 		}
-		jobID := firstString(args, "id", "job_id")
-		s.mu.Lock()
-		if err := s.refreshTaskRecordsLocked(jobID); err != nil {
-			s.mu.Unlock()
-			return taskPersistenceFailure(err)
-		}
-		if j := s.relayJobs[jobID]; j != nil {
-			resp := relayJobResponse(j)
-			s.mu.Unlock()
-			return s.formatToolOutput(resp, "", args["detail"])
-		}
-		if j := s.shellJobs[jobID]; j != nil {
-			resp := shellJobResponse(j)
-			s.mu.Unlock()
-			return s.formatToolOutput(resp, j.ToolName, args["detail"])
-		}
-		s.mu.Unlock()
-		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}
+		result, _ := s.taskReceiptForRequest(nil, firstString(args, "id", "job_id"), args["detail"])
+		return result
 	default:
 		return map[string]any{"error": "unknown tool", "tool": name}
 	}
@@ -10044,6 +10189,13 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 	if name == "fleetExec" || name == "fleet_exec" {
 		response, _ := s.fleetExecForRequest(r, args, false)
 		return response
+	}
+	if name == "job" || name == "get_mcp_job" || name == "getMcpJob" {
+		if err := validateToolOutputDetail(args["detail"]); err != nil {
+			return map[string]any{"status": "failed", "error": err.Error()}
+		}
+		result, _ := s.taskReceiptForRequest(r, firstString(args, "id", "job_id"), args["detail"])
+		return result
 	}
 	result := s.appsSDKCall(name, args)
 	if requestAccessMode(r) != accessModeReadonly || (name != "schema" && name != "list_mcp_tools" && name != "listMcpTools") {

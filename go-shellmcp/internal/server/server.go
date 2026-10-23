@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1244,7 +1245,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 				continue
 			}
 			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				go s.runCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments)
+				go s.runCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
 			} else {
 				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 				s.applyDefaults(&req)
@@ -1262,14 +1263,45 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	return shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
 }
 
-func (s *Server) runCallbackTool(jobID, traceID, traceParent, name string, args map[string]any) {
+func (s *Server) runCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
 	runCtx, finish, ok := s.beginCallback(jobID)
 	if !ok {
 		return
 	}
 	defer finish()
 	traceID = normalizeTraceID(traceID)
-	result, err := s.callMCPTool(runCtx, name, args)
+	var result map[string]any
+	var err error
+	if queueACL != nil {
+		if queueACL.Version != 1 || queueACL.JobID != jobID || queueACL.Tool != name || !filesystemACLTargetsExecutor(queueACL.Target, s.cfg.Name) || queueACL.ProfileID == "" || queueACL.ProfileVersion < 1 {
+			err = errors.New("invalid filesystem ACL queue binding")
+		} else {
+			encoded, encodeErr := json.Marshal(args)
+			if encodeErr != nil {
+				err = encodeErr
+			} else {
+				digest := sha256.Sum256(encoded)
+				argsDigest := hex.EncodeToString(digest[:])
+				if argsDigest != queueACL.ArgumentsSHA256 {
+					err = errors.New("filesystem ACL arguments do not match queue job")
+				} else if s.hub == nil {
+					err = errors.New("filesystem ACL verifier is unavailable")
+				} else {
+					var current hub.FilesystemACL
+					current, err = s.hub.CheckFilesystemACL(runCtx, s.cfg.Name, hub.FilesystemACLCheck{ID: jobID, ToolName: name, ArgumentsSHA256: argsDigest})
+					if err == nil && !sameFilesystemACL(queueACL, &current) {
+						err = errors.New("filesystem ACL policy changed before operation start")
+					}
+					if err == nil {
+						runCtx = withFilesystemACL(runCtx, &current)
+					}
+				}
+			}
+		}
+	}
+	if err == nil {
+		result, err = s.callMCPTool(runCtx, name, args)
+	}
 	payload := hub.TaskResult{ID: jobID, TraceID: traceID, TraceParent: traceParent, Result: result}
 	if err != nil {
 		payload.Result = map[string]any{"error": err.Error()}
