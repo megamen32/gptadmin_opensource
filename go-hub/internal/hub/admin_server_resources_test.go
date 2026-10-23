@@ -114,6 +114,88 @@ func TestAdminServerResourcesRejectsCrossOriginCookiePost(t *testing.T) {
 	}
 }
 
+func TestAdminServerResourcesAcceptsSameOriginCookiePostThroughIngressAlias(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := New(Config{AdminPassword: "fixture-password", CtlToken: "fixture-owner", PublicOrigin: "https://hub.example", Now: func() time.Time { return now }})
+	defer s.Close()
+	s.agents["shell:node"] = &Agent{AgentID: "shell:node", Kind: "virtual_shell", Status: "online", LastSeen: float64(now.Unix())}
+
+	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
+	req := httptest.NewRequest(http.MethodPost, ingressOrigin+"/admin/api/servers/resources", strings.NewReader(`{"server_id":"shell:node"}`))
+	req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(now.Add(time.Hour))})
+	// The canonical VUSA ingress preserves the external Host and sets the
+	// forwarded scheme. Browser fetch omits Origin here, so Referer is the
+	// same-origin fallback used by the handler.
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Referer", ingressOrigin+"/admin/")
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, req)
+	if response.Code == http.StatusForbidden && strings.Contains(response.Body.String(), "same-origin") {
+		t.Fatalf("same-origin ingress alias rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("same-origin ingress alias did not pass origin guard: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminServerResourcesRejectsCrossOriginCookiePostThroughIngressAlias(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := New(Config{AdminPassword: "fixture-password", CtlToken: "fixture-owner", PublicOrigin: "https://hub.example", Now: func() time.Time { return now }})
+	defer s.Close()
+	s.agents["shell:node"] = &Agent{AgentID: "shell:node", Kind: "virtual_shell", Status: "online", LastSeen: float64(now.Unix())}
+
+	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
+	req := httptest.NewRequest(http.MethodPost, ingressOrigin+"/admin/api/servers/resources", strings.NewReader(`{"server_id":"shell:node"}`))
+	req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(now.Add(time.Hour))})
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "same-origin") {
+		t.Fatalf("foreign-origin ingress alias status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(s.shellJobs) != 0 {
+		t.Fatalf("foreign-origin cookie POST submitted a metrics task: %#v", s.shellJobs)
+	}
+}
+
+func TestAdminRequestOriginUsesAdmittedHostAndRejectsUntrustedForwardedHost(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://ingress.example/admin/api/servers/resources", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	if got := adminRequestOrigin(req); got != "https://ingress.example" {
+		t.Fatalf("request origin=%q; wanted admitted Host, ignoring X-Forwarded-Host", got)
+	}
+	req.Header.Add("X-Forwarded-Proto", "http")
+	if got := adminRequestOrigin(req); got != "" {
+		t.Fatalf("conflicting repeated forwarded proto accepted: %q", got)
+	}
+	req.Header.Del("X-Forwarded-Proto")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Add("X-Forwarded-Proto", "https")
+	if got := adminRequestOrigin(req); got != "" {
+		t.Fatalf("duplicate identical forwarded proto accepted: %q", got)
+	}
+	req.Header.Del("X-Forwarded-Proto")
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	req.Header.Set("Origin", "https://attacker.example")
+	if sameOriginAdminMutation(req, adminRequestOrigin(req)) {
+		t.Fatal("foreign origin matched when X-Forwarded-Host was supplied")
+	}
+
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
+	if sameOriginAdminMutation(req, adminRequestOrigin(req)) {
+		t.Fatal("request without Origin or Referer did not fail closed")
+	}
+	req.Header.Set("Referer", "https://ingress.example/admin/")
+	req.Header.Set("X-Forwarded-Proto", "https,http")
+	if got := adminRequestOrigin(req); got != "" {
+		t.Fatalf("malformed forwarded proto accepted: %q", got)
+	}
+}
+
 func TestValidResourceSummaryRejectsMalformedAvailableComponents(t *testing.T) {
 	valid := map[string]any{
 		"sampled_at": "2026-10-23T00:00:00Z", "status": "available",

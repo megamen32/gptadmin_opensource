@@ -94,6 +94,68 @@ func TestProxyRouteCookieMutationRequiresSameOrigin(t *testing.T) {
 	}
 }
 
+func TestProxyRouteCookieMutationUsesIngressOriginAndFailsClosed(t *testing.T) {
+	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		origin     string
+		referer    string
+		forwarded  []string
+		wantStatus int
+	}{
+		{name: "same-origin referer fallback", referer: ingressOrigin + "/admin/", forwarded: []string{"https"}, wantStatus: http.StatusBadRequest},
+		{name: "same-origin POST to unknown action", method: http.MethodPost, path: "/admin/api/proxy-route/not-a-real-action", referer: ingressOrigin + "/admin/", forwarded: []string{"https"}, wantStatus: http.StatusNotFound},
+		{name: "foreign-origin POST", method: http.MethodPost, path: "/admin/api/proxy-route/not-a-real-action", origin: "https://attacker.example", forwarded: []string{"https"}, wantStatus: http.StatusForbidden},
+		{name: "foreign origin", origin: "https://attacker.example", forwarded: []string{"https"}, wantStatus: http.StatusForbidden},
+		{name: "missing origin and referer", forwarded: []string{"https"}, wantStatus: http.StatusForbidden},
+		{name: "conflicting forwarded schemes", referer: ingressOrigin + "/admin/", forwarded: []string{"https", "http"}, wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			controller := newProxyRouteController(filepath.Join(dir, "profile.json"), filepath.Join(dir, "probe.json"), nil)
+			s := &Server{}
+			s.cfg.AdminPassword = "test-only-session-key"
+			s.cfg.PublicOrigin = "https://admin.example.test"
+
+			method := test.method
+			if method == "" {
+				method = http.MethodPut
+			}
+			requestPath := test.path
+			if requestPath == "" {
+				requestPath = "/admin/api/proxy-route"
+			}
+			body := `{"profile":{}}`
+			if method == http.MethodPost {
+				body = `{}`
+			}
+			req := httptest.NewRequest(method, "http://your-subdomain.t.became.bezrabotnyi.com"+requestPath, strings.NewReader(body))
+			req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(time.Now().Add(time.Hour))})
+			req.Header.Set("X-Forwarded-Proto", test.forwarded[0])
+			if len(test.forwarded) > 1 {
+				req.Header.Add("X-Forwarded-Proto", test.forwarded[1])
+			}
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if test.referer != "" {
+				req.Header.Set("Referer", test.referer)
+			}
+			response := httptest.NewRecorder()
+			s.adminProxyRouteWithController(response, req, controller)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s; want %d", response.Code, response.Body.String(), test.wantStatus)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "profile.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("request saved a profile: stat error=%v", err)
+			}
+		})
+	}
+}
+
 func TestProxyRoutePUTPersistsWithoutStartingService(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex

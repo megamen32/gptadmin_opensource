@@ -534,7 +534,7 @@ func (s *Server) adminProxyRouteWithController(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if r.Method == http.MethodPut && r.URL.Path == "/admin/api/proxy-route" {
-		if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, s.origin(r)) {
+		if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, adminRequestOrigin(r)) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "same-origin admin request required"})
 			return
 		}
@@ -569,7 +569,7 @@ func (s *Server) adminProxyRouteWithController(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, s.origin(r)) {
+	if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, adminRequestOrigin(r)) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "same-origin admin request required"})
 		return
 	}

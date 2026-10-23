@@ -17,7 +17,7 @@ func (s *Server) adminServerResources(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, s.origin(r)) {
+	if cookieAdminSessionPresent(r, s) && !sameOriginAdminMutation(r, adminRequestOrigin(r)) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "same-origin admin request required"})
 		return
 	}
@@ -94,6 +94,42 @@ func sameOriginAdminMutation(r *http.Request, expected string) bool {
 	}
 	actualURL, err := url.Parse(strings.TrimRight(actual, "/"))
 	return err == nil && strings.EqualFold(expectedURL.Scheme, actualURL.Scheme) && strings.EqualFold(expectedURL.Host, actualURL.Host)
+}
+
+// adminRequestOrigin derives the browser-facing origin from the admitted
+// request authority. The supported ingress preserves Host and sets a single
+// X-Forwarded-Proto value; X-Forwarded-Host is intentionally not trusted.
+func adminRequestOrigin(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	} else {
+		forwardedProtos := r.Header.Values("X-Forwarded-Proto")
+		if len(forwardedProtos) > 1 {
+			return ""
+		}
+		if len(forwardedProtos) == 1 {
+			switch strings.ToLower(strings.TrimSpace(forwardedProtos[0])) {
+			case "https":
+				scheme = "https"
+			case "http":
+			default:
+				return ""
+			}
+		}
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" || strings.ContainsAny(host, "/?#@") {
+		return ""
+	}
+	parsed, err := url.Parse(scheme + "://" + host)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return ""
+	}
+	return scheme + "://" + parsed.Host
 }
 
 func unavailableResourceSummary(serverID, nodeStatus string, lastSeen float64, reason string) map[string]any {
