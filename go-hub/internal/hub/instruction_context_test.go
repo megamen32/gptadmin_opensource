@@ -269,3 +269,20 @@ func TestInstructionContextRejectsDifferentSigningAuthority(t *testing.T) {
 		t.Fatalf("local signing authority could not validate its own receipt: %v", failure)
 	}
 }
+
+func TestCodeModeInstructionRefusalMatchesPublishedSchema(t *testing.T) {
+	s, r, _ := instructionFixture(t)
+	blocked := mapValue(s.appsSDKCallForRequest(r, "exec", map[string]any{"code": "return {answer:42};"}))
+	if blocked["status"] != "failed" {
+		t.Fatalf("refusal without a failed status: %v", blocked)
+	}
+	if calls, ok := blocked["calls"]; !ok || calls != 0 {
+		t.Fatalf("refusal does not satisfy the published code-mode schema: %v", blocked)
+	}
+	if firstString(mapValue(blocked["error"]), "code") != "instructions_required" {
+		t.Fatalf("refusal lost its actionable error code: %v", blocked)
+	}
+	if firstString(blocked, "context") == "" {
+		t.Fatalf("refusal did not carry the context to repeat the call with: %v", blocked)
+	}
+}

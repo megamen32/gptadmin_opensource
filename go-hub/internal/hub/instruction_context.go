@@ -235,7 +235,40 @@ func (s *Server) requireFacadeInstructionContext(r *http.Request, name string, a
 	} else if name == "exec" || name == "ro" {
 		target, tool = "hub", name
 	}
-	return s.requireInstructionContext(r, target, tool)
+	failure := s.requireInstructionContext(r, target, tool)
+	if failure == nil {
+		return nil
+	}
+	if name == codeModeTool || name == "ro" {
+		return codeModeInstructionFailure(failure)
+	}
+	return failure
+}
+
+// codeModeInstructionFailure keeps an instructions_required refusal inside the
+// published codeModeOutputSchema. The code-mode tools require "status" and
+// "calls", so a refusal without "calls" is not schema-valid: the client then
+// rejects the whole answer with a generic schema error and the caller never
+// sees the actionable receipt that carries the context to repeat the call with.
+func codeModeInstructionFailure(failure map[string]any) map[string]any {
+	out := cloneMap(failure)
+	out["status"] = "failed"
+	out["calls"] = 0
+	detail := cloneMap(mapValue(out["error"]))
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	if detail["code"] == nil {
+		detail["code"] = "instructions_required"
+	}
+	if detail["message"] == nil {
+		detail["message"] = "Read the attached profile instructions, then repeat this unexecuted call with context."
+	}
+	if detail["calls_completed"] == nil {
+		detail["calls_completed"] = 0
+	}
+	out["error"] = detail
+	return out
 }
 func (s *Server) bindInstructionContext(ref, token string) {
 	if ref == "" {
