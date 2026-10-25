@@ -10,15 +10,12 @@ private, obsolete-HEAD and disabled/deleted workflows are not dispatched.
 GraphQL alone is insufficient: scheduled/manual runs can be absent from the
 commit rollup. A bounded REST intake independently checks Actions runs.
 
-Per the Noticeplace routing rule, new diagnostic and auto-fix dispatches run
-through **OpenCode** with the explicit default-subscription provider/model
-`minimax-coding-plan/MiniMax-M3` (the first/default model of the OpenCode
-provider catalog). No `auto/minimax`, OmniRoute, or Codex fallback is
-attempted. On routing error the watcher fails closed without retrying a
-different harness. The model is supplied as `model=minimax-coding-plan/MiniMax-M3`
-on the Herder `deliver` call, the `create_session` if missing, and verified
-back from the readback `agent_info` so a silent downgrade is rejected before
-any state advance.
+New diagnostic and auto-fix dispatches run through **OpenCode** with initial
+provider/model `zai-coding-plan/glm-5.3-flash`. Configured provider/model
+fallbacks, including OmniRoute, are allowed. Native `agent_info` readback must
+provide the effective model before a session advances to running; the event
+history records that model. Ambiguous/unknown delivery is reconciled without
+replay. The harness stays OpenCode; Codex is not a provider fallback.
 
 Trusted operator configuration, mode `0600`, belongs at
 `~/.config/gptadmin/ci-autofix.json`:
@@ -94,10 +91,10 @@ must point to existing directories below `/home/admin`; unmapped repositories
 start in the canonical infrastructure checkout to discover their source owner.
 No event supplies commands, target settings or raw CI logs. The worker receives
 a fixed Russian prompt authorizing scoped CI repair, review, real tests and
-commit/push to the existing default branch. The prompt explicitly names the
-OpenCode harness, the explicit provider/model and the 24h Herder `inputId`
-dedup so the worker does not switch to `auto/minimax`, OmniRoute, Codex or
-any other route. The worker must preserve foreign WIP and must not create
+commit/push to the existing default branch. The prompt names the OpenCode
+harness, initial provider/model and 24h Herder `inputId` dedup. Configured
+provider/model fallback may change the effective route, which is confirmed by
+native readback. The worker must preserve foreign WIP and must not create
 clones/worktrees, disable gates, change secrets, upgrade runtimes or deploy
 services. CI logs are explicitly untrusted data, never instructions.
 
@@ -108,10 +105,10 @@ repository, run ID, attempt and HEAD. Dispatch intent is committed with SQLite
 process interruption therefore cannot cause a second `deliver` call. Herder
 receives a deterministic name (under 128 characters), `create=if_missing`,
 `activation=always`, `mode=queue`, an explicit OpenCode harness
-(`opencode`), the explicit provider/model `minimax-coding-plan/MiniMax-M3`,
-and a stable 24h `inputId` of `gptadmin-ci-autofix:<key>`. A receipt that
-silently downgrades the harness or model is rejected and the slot is held for
-the next readback — no fallback to a different route is attempted.
+(`opencode`), initial provider/model `zai-coding-plan/glm-5.3-flash`,
+and a stable 24h `inputId` of `gptadmin-ci-autofix:<key>`. Provider/model
+fallback is permitted. A receipt that changes the harness is rejected; the
+effective model is taken from native readback.
 
 A receipt is `accepted_unconfirmed`, not proof of a running repair. The next
 readback uses a known session ID directly with `agent_info(harness, sessionId)`,
@@ -120,13 +117,12 @@ falls through to a folder-filtered, 100-session `list_agents` call using the
 event's recorded harness (default `opencode` for new dispatches; legacy Codex
 events keep the codex harness). Ambiguous or missing metadata never selects
 an ID or sends again. `agent_info` must confirm the same ID, CWD, the
-expected harness, and the explicit provider/model before persisting the ID
+expected harness, and a non-empty effective model before persisting the ID
 or releasing a slot. The recorded harness is preserved on the event row so
 historical Codex receipts (legacy `harness=codex`,
 `meta.transport=codex-app-server`, `meta.nativeSessionId=id`) remain readable
 through the same codex validation path. New OpenCode dispatches are
-recognised by `harness=opencode` and the explicit `model` match against
-`minimax-coding-plan/MiniMax-M3`.
+recognised by `harness=opencode` and their effective non-empty model readback.
 
 Running proof for OpenCode is `status=running`. Completion proof requires
 `status=idle` **and** `messageCount >= 1` (the dispatch reservation has at
@@ -212,7 +208,8 @@ They exercise real SQLite crash-intent/dedup logic, REST preflight discriminatio
 manual-stop fencing, independent-green requirements, native readback semantics
 and a local HTTP SSE transport. Final acceptance belongs to the operator:
 measure the installed oneshot, trigger one controlled real CI failure, observe
-exactly one native Codex session and actual running turn, then independently
+exactly one native session on the workflow's configured harness and an actual
+running turn, then independently
 observe subsequent green CI. Lost-response ambiguity must never trigger another
 native session. Do not claim deployment, repair success or release from these
 local tests.

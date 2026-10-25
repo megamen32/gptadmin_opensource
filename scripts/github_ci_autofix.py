@@ -22,12 +22,11 @@ HERDER = "http://127.0.0.1:18787/mcp"
 OWNER = "megamen32"
 FALLBACK = "/home/admin/ServersAdministartion"
 NATIVE_INDEX = Path.home() / ".codex/state_5.sqlite"
-# Per Noticeplace routing rule, new diagnostic / auto-fix dispatches must run
-# through OpenCode with the explicit default-subscription provider/model.
-# No auto/minimax, OmniRoute, or Codex fallback; on routing error the watcher
-# fails closed without retrying a different harness.
+# Use a cost-conscious initial route. Configured provider/model fallbacks,
+# including OmniRoute, are permitted; native readback records what actually ran.
+# The harness remains OpenCode and ambiguous dispatches are never replayed.
 HARNESS = "opencode"
-PROVIDER_MODEL = "minimax-coding-plan/MiniMax-M3"
+PROVIDER_MODEL = "zai-coding-plan/glm-5.3-flash"
 # 24h Herder dedup keeps a repeated dispatch from opening a second native
 # session for the same durable event identity.
 DEDUP_NAMESPACE = "gptadmin-ci-autofix"
@@ -508,10 +507,10 @@ def prompt(row):
     return f"""Автоматический ремонт публичного CI. Пользователь разрешил исправить конкретный сбой.
 Репозиторий: {row['repo']}; default branch: {row['branch']}; проверенный HEAD: {row['head']}.
 GitHub Actions: {row['url']} (run {row['run']}, attempt {row['attempt']}).
-Ты запущен через OpenCode с явной моделью {PROVIDER_MODEL} (default subscription route);
-никакого auto/minimax, OmniRoute или Codex fallback не предусмотрено. Маршрут фиксирован
-через inputId `{DEDUP_NAMESPACE}:<key>` в Herder (24-часовая дедупликация) и сразу
-переходит в fail-closed при отказе. Не переключайся на другую модель/провайдера.
+Ты запущен через OpenCode; исходный маршрут — {PROVIDER_MODEL}. Настроенные
+автоматические provider/model fallbacks, включая OmniRoute, разрешены; фактический
+маршрут сверяется по native readback. Дедупликация Herder `inputId`
+`{DEDUP_NAMESPACE}:<key>` действует 24 часа. Не повторяй принятую или UNKNOWN заявку.
 Исправлять вперёд на default-ветке; никогда не переписывать существующие release tags.
 Сначала найди канонический исходник через AGENTS.md, инфраструктурный inventory и GrepMesh.
 Текущий cwd — доверенная точка входа. Не создавай новый clone/worktree без разрешения.
@@ -603,15 +602,11 @@ def dispatch(db, cfg, call=mcp, api=gh, notifier=None):
                                  "inputId": DEDUP_NAMESPACE + ":" + row["key"]})
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError("No affirmative delivery receipt")
-        # Fail closed: the Herder must confirm the explicit opencode route. A
-        # missing or different harness/model in the receipt means the delivery
-        # was silently downgraded and is not the required route.
+        # Keep the harness fixed, while provider/model routing may fall back.
+        # The eventual native readback records the effective model.
         receipt_harness = str(result.get("harness") or "")
-        receipt_model = str(result.get("model") or "")
         if receipt_harness and receipt_harness != HARNESS:
             raise RuntimeError("Delivery harness is not the required OpenCode route")
-        if receipt_model and receipt_model != PROVIDER_MODEL:
-            raise RuntimeError("Delivery model is not the required explicit provider/model")
         session_id = result.get("sessionId") or (result.get("session") or {}).get("id")
         if session_id:
             db.execute("UPDATE events SET session_id=? WHERE key=?", (session_id, row["key"]))
@@ -663,16 +658,15 @@ def session_matches(row, call):
             and item.get("cwd") == row["cwd"] and item.get("harness") == target_harness]
 
 
-def _opencode_match(item, session_id, cwd, required_model):
+def _opencode_match(item, session_id, cwd):
     """OpenCode session: session id is the native id; transport is SSE."""
     if item.get("id") != session_id or item.get("cwd") != cwd:
         return False
     if item.get("harness") != HARNESS:
         return False
-    # The model field is reported as `provider/model`; match the exact full
-    # identifier that was requested so a fallback or auto-routed session is
-    # rejected before any state advance.
-    return str(item.get("model") or "") == required_model
+    # Configured provider/model fallbacks are allowed. Require an effective
+    # native model readback so the actual route is known before state advance.
+    return bool(str(item.get("model") or "").strip())
 
 
 def _codex_match(item, session_id, cwd):
@@ -701,8 +695,8 @@ def reconcile(db, call=mcp):
             item = info[0]
             meta = item.get("meta") or {}
             if expected_harness == HARNESS:
-                if not _opencode_match(item, matches[0]["id"], row["cwd"], PROVIDER_MODEL):
-                    raise ValueError("OpenCode session identity/model mismatch")
+                if not _opencode_match(item, matches[0]["id"], row["cwd"]):
+                    raise ValueError("OpenCode session identity/effective-model readback missing")
             else:
                 if not _codex_match(item, matches[0]["id"], row["cwd"]):
                     raise ValueError("Native session identity/transport mismatch")
@@ -731,7 +725,7 @@ def reconcile(db, call=mcp):
                 if status == "stopped":
                     change(db, row, "stopped", "OpenCode-сессия остановлена; автоматического возобновления не будет", native)
                 elif status == "running":
-                    change(db, row, "running", "Фактический native-ход OpenCode подтверждён", native)
+                    change(db, row, "running", f"Фактический native-ход OpenCode подтверждён; effective model: {item.get('model')}", native)
                 elif turn_completed and (row["state"] == "running" or row["native_id"]):
                     change(db, row, "awaiting_ci", "OpenCode завершил ход; ожидается независимый последующий CI", native)
                 elif status == "needs_input":

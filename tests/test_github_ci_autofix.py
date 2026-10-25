@@ -93,7 +93,7 @@ class WatcherTests(unittest.TestCase):
         # the exact provider/model and the 24h dedup inputId; a missing
         # or different value is the silent downgrade we are guarding against.
         self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], "minimax-coding-plan/MiniMax-M3")
+        self.assertEqual(calls[0]["model"], "zai-coding-plan/glm-5.3-flash")
         self.assertEqual(calls[0]["inputId"], "gptadmin-ci-autofix:" + self.item["key"])
         self.assertEqual(calls[0]["create"], "if_missing")
         self.assertEqual(calls[0]["activation"], "always")
@@ -740,14 +740,14 @@ class WatcherTests(unittest.TestCase):
             thread.join()
             server.server_close()
 
-    def test_opencode_dispatch_records_harness_and_explicit_model(self):
+    def test_opencode_dispatch_records_harness_and_initial_model(self):
         calls = []
         def call(name, args):
             calls.append(args)
             return {"ok": True, "harness": ci.HARNESS, "model": ci.PROVIDER_MODEL, "sessionId": "native-id"}
         ci.dispatch(self.db, {}, call, self.api)
         self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], "minimax-coding-plan/MiniMax-M3")
+        self.assertEqual(calls[0]["model"], "zai-coding-plan/glm-5.3-flash")
         self.assertEqual(calls[0]["inputId"], "gptadmin-ci-autofix:" + self.item["key"])
         self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "opencode")
 
@@ -755,20 +755,18 @@ class WatcherTests(unittest.TestCase):
         def call(name, args):
             return {"ok": True, "harness": "codex", "model": ci.PROVIDER_MODEL, "sessionId": "native-id"}
         ci.dispatch(self.db, {}, call, self.api)
-        # A silently downgraded harness keeps the dispatch reservation open
-        # and refuses to persist a session id; the next reconcile is the only
-        # thing that may advance the slot, with no fallback to codex.
+        # The harness is fixed; provider/model fallback is a separate choice.
         self.assertEqual(self.state()["state"], "dispatching")
         self.assertIsNone(self.state()["session_id"])
 
-    def test_opencode_dispatch_fails_closed_on_model_mismatch(self):
+    def test_opencode_dispatch_allows_omniroute_model_fallback(self):
         def call(name, args):
             return {"ok": True, "harness": "opencode", "model": "omniroute/free-stack", "sessionId": "native-id"}
         ci.dispatch(self.db, {}, call, self.api)
-        self.assertEqual(self.state()["state"], "dispatching")
-        self.assertIsNone(self.state()["session_id"])
+        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
+        self.assertEqual(self.state()["session_id"], "native-id")
 
-    def test_opencode_dispatch_rejects_other_model_in_readback(self):
+    def test_opencode_readback_accepts_and_records_effective_fallback_model(self):
         # The Herder may omit harness/model on a successful delivery; absence
         # is not a fail-closed signal. The authoritative readback (agent_info)
         # is what confirms the explicit OpenCode route.
@@ -776,15 +774,11 @@ class WatcherTests(unittest.TestCase):
             return {"ok": True, "sessionId": "native-id"}
         ci.dispatch(self.db, {}, call, self.api)
         self.assertEqual(self.state()["state"], "accepted_unconfirmed")
-        # A readback that does not match the explicit provider/model is
-        # rejected and the slot stays reserved; the session_id from the
-        # receipt alone is not enough to advance state.
-        bad = self.native("running")
-        bad["model"] = "omniroute/free-stack"
-        ci.reconcile(self.db, lambda *_: {"session": bad})
-        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
-        ci.reconcile(self.db, self.readback(self.native("running")))
+        effective = self.native("running")
+        effective["model"] = "omniroute/free-stack"
+        ci.reconcile(self.db, self.readback(effective))
         self.assertEqual(self.state()["state"], "running")
+        self.assertIn("omniroute/free-stack", self.state()["reason"])
 
     def test_opencode_completion_requires_running_then_message_count(self):
         ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
