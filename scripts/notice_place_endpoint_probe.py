@@ -1,35 +1,46 @@
 #!/usr/bin/env python3
-"""Installed readback of the Notice Place MCP point of every AI client.
+"""Endpoint probe for the canonical Notice Place MCP point of every AI client.
 
-For each client the readback takes the registration exactly as the harness uses
-it (same URL, same headers, same command) and performs a real MCP handshake:
-`initialize` plus `tools/list`. Only `initialize` and `tools/list` are sent -
-nothing is notified, asked or changed.
+For each client the probe takes the registration exactly as the harness uses it
+(the same URL and the same headers) and performs a real Streamable HTTP MCP
+handshake: `initialize`, the `initialized` notification and `tools/list`. The
+session id returned by the server is carried into the follow-up request, so the
+probe follows the same session semantics a real client uses.
 
-Output is credential-redacted: server names, transports, tool counts and
-config paths only. No bearer value, hash or fragment is printed.
+Only `initialize` and `tools/list` are sent: nothing is notified, asked or
+changed. Output is credential-redacted - server names, transports, tool counts
+and config paths only. No bearer value, hash or fragment is printed.
+
+This is an endpoint probe, not a harness readback: it proves that the
+configured registration answers with its tool list. The effective tool list of a
+harness itself is proven by that harness (for example `hermes mcp test
+<server>` or a session that calls the tool).
+
+Only HTTP registrations are probed. A stdio registration is reported as
+NOT-PROBED: the canonical point is the shared HTTP endpoint, so a stdio entry
+means the environment still points at a per-client process.
 
 Usage:
-    python3 scripts/notice_place_readback.py            # human readable
-    python3 scripts/notice_place_readback.py --json     # machine readable
+    .venv/bin/python scripts/notice_place_endpoint_probe.py
+    .venv/bin/python scripts/notice_place_endpoint_probe.py --json
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import datetime
 import json
 import os
 from pathlib import Path
 import sys
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import httpx
 
 URL_MARK = 'notify.bezrabotnyi.com'
 URL_PATH = '/mcp'
 COMMANDS = ('ask-human-mcp', 'notify_mcp.py')
+PROTOCOL_VERSION = '2024-11-05'
+SESSION_HEADER = 'mcp-session-id'
 PLUGIN_ROOTS = {
     'opencode': ('.config/opencode/plugins/noticeplace', 'opencode.json', ('mcp',), None),
     'codex': ('.codex/plugins/cache/noticeplace-local/noticeplace', 'mcp.codex.json', ('mcpServers',),
@@ -162,62 +173,120 @@ def collect() -> list[tuple[str, str, str, dict]]:
     return found
 
 
-async def tools_of(spec) -> dict:
-    """Real initialize + tools/list against the registration as configured."""
+def parse_payload(text: str) -> dict:
+    """Read a Streamable HTTP response body: plain JSON or an SSE frame."""
+    text = (text or '').strip()
+    if not text:
+        return {}
+    if text.startswith('{') or text.startswith('['):
+        try:
+            return json.loads(text)
+        except Exception:
+            return {}
+    chunks = [line[5:].strip() for line in text.splitlines() if line.startswith('data:')]
+    for chunk in reversed(chunks):
+        try:
+            return json.loads(chunk)
+        except Exception:
+            continue
+    return {}
+
+
+def probe_registration(url: str, headers: dict, timeout: float = 20.0) -> dict:
+    """Real Streamable HTTP session: initialize, initialized, tools/list."""
+    request_headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+    }
+    request_headers.update(headers)
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        init = client.post(url, headers=request_headers, json={
+            'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+            'params': {'protocolVersion': PROTOCOL_VERSION, 'capabilities': {},
+                       'clientInfo': {'name': 'gptadmin-notice-place-probe', 'version': '1'}},
+        })
+        init.raise_for_status()
+        session_id = init.headers.get(SESSION_HEADER)
+        body = parse_payload(init.text)
+        if 'error' in body:
+            raise RuntimeError('initialize returned an rpc error')
+        info = (body.get('result') or {}).get('serverInfo') or {}
+        if session_id:
+            request_headers[SESSION_HEADER] = session_id
+        try:
+            client.post(url, headers=request_headers, json={
+                'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        except Exception:
+            pass
+        listed = client.post(url, headers=request_headers, json={
+            'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
+        listed.raise_for_status()
+        payload = parse_payload(listed.text)
+        if 'error' in payload:
+            raise RuntimeError('tools/list returned an rpc error')
+        tools = (payload.get('result') or {}).get('tools') or []
+        return {'transport': 'streamable-http', 'server': info.get('name'), 'version': info.get('version'),
+                'tool_count': len(tools), 'tools': sorted(str(tool.get('name')) for tool in tools),
+                'session_id': bool(session_id)}
+
+
+def probe_entry(spec: dict) -> dict:
+    """Probe one registration; a stdio registration is reported, not probed."""
     command = spec.get('command')
     parts = [command] if isinstance(command, str) else list(command or []) if isinstance(command, list) else []
     if parts:
-        env = dict(os.environ)
-        for key, value in (spec.get('env') or spec.get('environment') or {}).items():
-            env[str(key)] = str(value)
-        params = StdioServerParameters(command=str(parts[0]), args=[str(p) for p in parts[1:]], env=env)
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                info = await session.initialize()
-                tools = await session.list_tools()
-        return {'transport': 'stdio', 'server': info.serverInfo.name, 'version': info.serverInfo.version,
-                'tool_count': len(tools.tools), 'tools': sorted(t.name for t in tools.tools)}
+        return {'transport': 'stdio', 'probed': False,
+                'error': 'stdio registration is not probed: the canonical point is the shared HTTP endpoint'}
     url = str(spec.get('url') or spec.get('target') or '').strip()
+    if not url:
+        return {'transport': 'none', 'probed': False, 'error': 'no url and no command'}
     headers = {str(k): str(v) for k, v in (spec.get('headers') or spec.get('http_headers') or {}).items()}
-    from mcp.client.streamable_http import streamablehttp_client
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            info = await session.initialize()
-            tools = await session.list_tools()
-    return {'transport': 'streamable-http', 'server': info.serverInfo.name, 'version': info.serverInfo.version,
-            'tool_count': len(tools.tools), 'tools': sorted(t.name for t in tools.tools)}
+    result = probe_registration(url, headers)
+    result['probed'] = True
+    return result
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--json', action='store_true')
-    args = parser.parse_args()
+def run() -> list[dict]:
+    """Probe every Notice Place registration of this host."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     rows = []
     for client, path, name, spec in collect():
         row = {'client': client, 'config': path, 'server_name': name,
                'enabled': spec.get('enabled', True) is not False}
-        if row['enabled']:
+        if not row['enabled']:
+            row['live'] = False
+            row['probed'] = False
+            row['error'] = 'disabled'
+        else:
             try:
-                row.update(await tools_of(spec))
-                row['live'] = True
+                row.update(probe_entry(spec))
+                row['live'] = bool(row.get('probed'))
             except Exception as exc:
                 row['live'] = False
+                row['probed'] = False
                 row['error'] = type(exc).__name__
-        else:
-            row['live'] = False
         rows.append(row)
+    return [{'readback_utc': stamp, 'host': os.uname().nodename, 'rows': rows}]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args()
+    report = run()[0]
     if args.json:
-        print(json.dumps({'readback_utc': stamp, 'host': os.uname().nodename, 'rows': rows},
-                         ensure_ascii=False, indent=2))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return
-    print(f'host={os.uname().nodename} readback_utc={stamp}')
-    for row in rows:
-        state = 'live' if row.get('live') else 'off'
-        detail = f"tools={row.get('tool_count')} transport={row.get('transport')} server={row.get('server')}" \
-            if row.get('live') else row.get('error', 'disabled')
-        print(f"  {row['client']:14s} {row['server_name']:12s} {state:5s} {detail}  <- {row['config']}")
+    print(f"host={report['host']} probe_utc={report['readback_utc']}")
+    for row in report['rows']:
+        if row.get('live'):
+            detail = (f"tools={row.get('tool_count')} transport={row.get('transport')} "
+                      f"server={row.get('server')} session={row.get('session_id')}")
+        else:
+            detail = row.get('error', 'not probed')
+        print(f"  {row['client']:14s} {row['server_name']:12s} {'live' if row.get('live') else 'off':5s} {detail}"
+              f"  <- {row['config']}")
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()

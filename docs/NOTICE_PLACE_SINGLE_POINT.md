@@ -61,45 +61,68 @@ python3 scripts/notice_place_readback.py          # установленный r
 * Учётные данные никогда не печатаются: в выводе только имена, флаги, счётчики
   и имена ключей конфигурации.
 
-## Проверенные среды (установленный readback)
+## Проверенные среды
 
-Readback (`scripts/notice_place_readback.py`) берёт регистрацию ровно так, как
-её использует клиент (тот же URL и те же заголовки) и выполняет настоящее
-MCP-рукопожатие: `initialize` + `tools/list`. Отправляются только эти два
-метода — ничего не уведомляется, не спрашивается и не меняется.
+Два разных уровня доказательства, и они не смешиваются:
 
-Замер: 2026-10-25T22:34Z (UTC).
+* **эффективный набор инструментов harness** — среда сама показывает свой
+  список (вызов инструмента в живой сессии, `hermes mcp test`);
+* **проба точки** — регистрация, взятая ровно как её использует клиент,
+  отвечает настоящим `initialize` + `tools/list` (Streamable HTTP, с
+  переносом session id).
 
-| Хост | Клиент | Живая точка | Инструментов | Транспорт | Конфиг |
-|---|---|---|---|---|---|
-| admin-node-100 | opencode | `noticeplace` | 18 | streamable-http | `~/.config/opencode/opencode.json` |
-| admin-node-100 | hermes | `noticeplace` | 18 | streamable-http | `~/.hermes/config.yaml` |
-| admin-node-100 | zcode | `noticeplace` | 18 | streamable-http | `~/.zcode/cli/config.json` |
-| admin-node-100 | fast-agent | `noticeplace` | 18 | streamable-http | `~/.fast-agent/fast-agent.yaml` |
-| admin-node-100 | codex | `noticeplace` | 18 | streamable-http | `~/.codex/config.toml` |
-| node-44 | opencode | `noticeplace` | 18 | streamable-http | `~/.config/opencode/opencode.json` |
-| node-44 | hermes | `noticeplace` | 18 | streamable-http | `~/.hermes/config.yaml` |
-| node-44 | codex | `noticeplace` | 18 | streamable-http | `~/.codex/config.toml` |
-| MacBook-Pro-User.local | opencode | `noticeplace` | 18 | streamable-http | `~/.config/opencode/opencode.json` |
-| MacBook-Pro-User.local | hermes | `noticeplace` | 18 | streamable-http | `~/.hermes/config.yaml` |
-| MacBook-Pro-User.local | zcode | `noticeplace` | 18 | streamable-http | `~/.zcode/cli/config.json` |
-| MacBook-Pro-User.local | fast-agent | `noticeplace` | 18 | streamable-http | `~/.fast-agent/fast-agent.yaml` |
-| MacBook-Pro-User.local | codex | `noticeplace` | 18 | streamable-http | `~/.codex/config.toml` |
+Проба точки не доказывает список инструментов harness. Поддерживаемая
+команда:
+
+```bash
+.venv/bin/python scripts/notice_place_endpoint_probe.py
+```
+
+Проба использует `httpx` (уже в зависимостях проекта) и не требует `mcp`.
+stdio-регистрация в ней не опрашивается, а помечается как `NOT-PROBED`:
+каноническая точка — общий HTTP-эндпойнт.
+
+### Уровень harness (эффективные инструменты среды)
+
+| Среда | Доказательство | Итог |
+|---|---|---|
+| OpenCode, admin-node-100 | живая сессия: в каталоге 451 инструмент, пространство Notice Place ровно одно — `noticeplace`, 18 инструментов; отдельная чистая сессия вызвала `noticeplace_instructions` и получила ответ | 18 инструментов, одна точка |
+| Hermes, admin-node-100 | `hermes mcp test noticeplace` → `Connected`, `Tools discovered: 18`, заголовок авторизации показан как `***` | 18 инструментов, одна точка |
+
+### Уровень конфигурации + пробы точки
+
+Все перечисленные регистрации отвечают по HTTP `https://notify.bezrabotnyi.com/mcp`
+и возвращают 18 инструментов; алиасы отключены.
+
+| Хост | Клиент | Состояние | Живая точка | Инструментов |
+|---|---|---|---|---|
+| admin-node-100 | opencode | активные сессии | `noticeplace` | 18 |
+| admin-node-100 | codex | активные сессии | `noticeplace` | 18 |
+| admin-node-100 | hermes | настроен, harness-проверен | `noticeplace` | 18 |
+| admin-node-100 | zcode | настроен | `noticeplace` | 18 |
+| admin-node-100 | fast-agent | настроен | `noticeplace` | 18 |
+| node-44 | opencode | настроен | `noticeplace` | 18 |
+| node-44 | hermes | настроен | `noticeplace` | 18 |
+| node-44 | codex | настроен | `noticeplace` | 18 |
+| MacBook-Pro-User.local | opencode | настроен | `noticeplace` | 18 |
+| MacBook-Pro-User.local | hermes | настроен | `noticeplace` | 18 |
+| MacBook-Pro-User.local | zcode | настроен | `noticeplace` | 18 |
+| MacBook-Pro-User.local | fast-agent | настроен | `noticeplace` | 18 |
+| MacBook-Pro-User.local | codex | настроен | `noticeplace` | 18 |
+
+Список активных сессий Agent Herder на 22:58Z (список частичный): 6 сессий
+OpenCode и 10 сессий Codex на admin-node-100. Codex-сессии не
+запускались — их эффективный набор инструментов не проверен.
 
 Отключённые алиасы (остаются в файлах, обратимы): `AskHuman` в opencode,
 codex, hermes, zcode на всех трёх хостах; `notify` в opencode на
 admin-node-100. Ни одного локального stdio-процесса Notice Place на
-хостах не осталось: MCP-поверхность установленного плагина пуста, регистрация
-ведётся только конфигом клиента.
+хостах не осталось: MCP-поверхность установленного плагина отключена,
+регистрация ведётся только конфигом клиента.
 
-Новая сессия OpenCode (`opencode run`, отдельная сессия) перечисляет
-пространства MCP: `AskSecret, UserIO, agent-capabilities, agent-herder,
-agent-resume, agentmemory, gptadmin, grepmesh, noticeplace, opencode,
-telegrammain` — точка Notice Place ровно одна, переподключение не требовалось.
-
-`hermes mcp list` показывает `AskHuman … disabled` и `noticeplace … enabled`.
-`codex mcp list` показывает `AskHuman … disabled`; конфиг Codex остаётся
-валидным TOML.
+Перезапуск службы не нужен: служба Notice Place не менялась. Новые сессии
+подхватывают конфиг сами; уже открытые сессии держат ранее согласованный
+набор инструментов до переподключения.
 
 ## Что осталось за пределами проверенного
 
@@ -112,25 +135,39 @@ telegrammain` — точка Notice Place ровно одна, переподк�
   конфиг клиента (или в переменную окружения клиента) — после этого
   `gptadmin notice-place install` на этом хосте создаёт каноническую точку.
 * **node-44: zcode, fast-agent — не установлены.** `~/.zcode/cli/config.json`
-  и `~/.fast-agent/fast-agent.yaml` на хосте отсутствуют, среды не выбраны и
-  не затронуты.
-* **Пакет плагина noticeplace (репозиторий noticeplace) — UNKNOWN.** Его
-  проекции `mcp.json`, `mcp.codex.json`, `opencode.json`, `fast-agent.yaml`
-  объявляют локальный stdio-процесс. Установленные копии на хостах приведены к
-  HTTP-контракту (MCP-поверхность отключена), но следующая публикация пакета
-  вернёт stdio-проекцию.
-  Следующий шаг: проекции пакета должны объявлять
-  `https://notify.bezrabotnyi.com/mcp` (для Codex/ZCode — с
-  `bearer_token_env_var`, без токена в пакете). До этого изменения
-  `gptadmin notice-place install --refresh-plugin` после публикации снова
-  очистит MCP-поверхность установленной копии.
+  и `~/.fast-agent/fast-agent.yaml` на хосте отсутствуют.
+* **ZCode и Fast-Agent — эффективный набор инструментов harness не проверен.**
+  У ZCode список MCP доступен только в TUI (`/mcp list`), у Fast-Agent
+  `fast-agent auth mcp list` ничего не печатает. Следующий шаг: одна сессия
+  каждой среды, которая вызывает `noticeplace_instructions` — как это сделано
+  для OpenCode.
+* **Codex — эффективный набор инструментов harness не проверен.** Codex-сессия
+  не запускалась по условию листа; проверены только конфиг и проекция.
+  Следующий шаг: одна сессия Codex, которая вызывает `noticeplace_instructions`.
+* **Пакет плагина noticeplace (репозиторий noticeplace) — обновлён.** Проекции
+  версии 0.1.0 (`mcp.json`, `mcp.codex.json`) теперь объявляют общий
+  Streamable HTTP-эндпойнт с `bearer_token_env_var` и без секрета;
+  `opencode.json` и `fast-agent.yaml` оставляют регистрацию клиентскому
+  конфигу, потому что эти harness не умеют брать bearer из окружения.
+  Версия 0.1.0 — самостоятельный bundle со своим бинарником и своим
+  validator-контрактом, он не менялся. Копия пакета в реестре
+  agent-harness-fleet устарела (там прежний stdio) — следующий шаг: владелец
+  реестра синхронизирует копию с пакетом-источником; `install --refresh-plugin`
+  читает пакет из репозитория-владельца и приводит установленные копии к нему.
 * **Установщик ask-human в agent-harness-fleet — UNKNOWN.**
   (`plugins/ask-human/scripts/setup_mcp.py`) дописывает в
   `~/.codex/config.toml` блок `[mcp_servers."AskHuman"]`. Он запускается
   вручную и не входит в автоматический путь обновления, но при следующем
   запуске вернёт алиас.
-  Следующий шаг: называть сервер `noticeplace` либо не запускать этот
-  установщик там, где каноническая точка уже есть.
+  Минимальная правка для владельца: заменить имя сервера на `noticeplace` и
+  URL на `https://notify.bezrabotnyi.com/mcp` — тогда установщик станет тем же
+  каноническим писателем, а не источником второго имени.
 * **Установленный CLI на MacBook-Pro-User.local** собран до этой правки, так
   что команда `notice-place` появится там только после обновления CLI; правка
   применялась тем же кодом.
+* **GPTAdmin-hub: дочерний ShellMCP-регистр `Notify`**
+  (`mcp:shell:admin-node-100:Notify`) всё ещё поднимает локальный
+  stdio-сервер — это путь ретрансляции GPTAdmin, а не регистрация клиента; на
+  него ссылается живой webhook-маршрут (`docs/WEBHOOKS.md`). Следующий шаг
+  (вне текущего листа, чтобы не сломать путь инцидентов): перевести регистр
+  на HTTP через `mcp_manage` и проверить маршрут.

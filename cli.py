@@ -7311,11 +7311,15 @@ def _notice_place_install_codex(client: str, apply: bool, plugin_spec, report: d
 
 
 def _notice_place_package_sources() -> list[Path]:
-    """Canonical published Notice Place plugin packages, newest first."""
+    """Canonical published Notice Place plugin packages, newest first.
+
+    The package owner is the noticeplace repository; the published releases and
+    the fleet registry copy follow it.
+    """
     sources: list[Path] = []
-    registry = USER_HOME / 'agents-projects' / 'agent-harness-fleet' / 'registry' / 'packages' / 'noticeplace'
-    if registry.is_dir():
-        for version in sorted(registry.glob('*'), reverse=True):
+    owner = USER_HOME / 'agents-projects' / 'noticeplace' / 'noticeplace-plugin' / 'packages' / 'noticeplace'
+    if owner.is_dir():
+        for version in sorted(owner.glob('*'), reverse=True):
             if (version / 'plugin.json').is_file():
                 sources.append(version)
     releases = Path('/opt/noticeplace-releases')
@@ -7327,6 +7331,11 @@ def _notice_place_package_sources() -> list[Path]:
             for version in sorted(candidate.glob('*'), reverse=True):
                 if (version / 'plugin.json').is_file():
                     sources.append(version)
+    registry = USER_HOME / 'agents-projects' / 'agent-harness-fleet' / 'registry' / 'packages' / 'noticeplace'
+    if registry.is_dir():
+        for version in sorted(registry.glob('*'), reverse=True):
+            if (version / 'plugin.json').is_file():
+                sources.append(version)
     return sources
 
 
@@ -7378,6 +7387,10 @@ def _notice_place_refresh_plugin(apply: bool) -> dict:
         result['status'] = 'no canonical package found'
         return result
     source = sources[0]
+    by_version: dict[str, Path] = {}
+    for path in sources:
+        # the first source of a version wins, so the package owner is preferred
+        by_version.setdefault(path.name, path)
     targets = {
         'opencode': USER_HOME / '.config' / 'opencode' / 'plugins' / 'noticeplace',
         'codex': USER_HOME / '.codex' / 'plugins' / 'cache' / 'noticeplace-local' / 'noticeplace',
@@ -7389,8 +7402,11 @@ def _notice_place_refresh_plugin(apply: bool) -> dict:
         for version in sorted(root.glob('*')):
             if not version.is_dir():
                 continue
+            # an installed version is refreshed from the package of the same
+            # version, so a self-contained bundle stays as it is
+            origin_root = by_version.get(version.name) or source
             for name in NOTICE_PLACE_PROJECTION_FILES:
-                origin = source / name
+                origin = origin_root / name
                 target = version / name
                 if not origin.is_file() or not target.is_file():
                     continue
@@ -7404,7 +7420,6 @@ def _notice_place_refresh_plugin(apply: bool) -> dict:
                     backup = target.with_name(target.name + '.bak.noticeplace.' + time.strftime('%Y%m%d%H%M%S'))
                     shutil.copy2(target, backup)
                     shutil.copy2(origin, target)
-                    _notice_place_empty_projection(target)
                     result['updated'].append(str(target))
                 except Exception:
                     continue
