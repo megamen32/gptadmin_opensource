@@ -6432,29 +6432,13 @@ def _notice_place_credential(servers: dict) -> str | None:
 def _notice_place_entry(dialect: str, credential: str | None = None) -> dict | None:
     """The one canonical Notice Place registration, per client dialect.
 
-    The Notice Place tool contract is the same everywhere: the same server, the
-    same tools and the same state. Only the transport is host-dependent — a
-    host that runs the Notice Place release speaks to it locally with the
-    credential-free contract of the published package, any other host reaches
-    the same backend through the published HTTPS endpoint with the credential
-    that the host already holds.
+    The contract is the published Streamable HTTP endpoint of the single
+    running Notice Place MCP. Every client reaches that one server, so no
+    client starts its own MCP process and no client gets a second backend.
+    The bearer is the credential the client already holds for this endpoint -
+    it is moved inside the same config file, never rotated and never stored
+    somewhere new. Without such a credential there is no canonical entry.
     """
-    if _notice_place_local_server():
-        if dialect == 'opencode':
-            return {
-                'type': 'local',
-                'command': [NOTICE_PLACE_MCP_COMMAND],
-                'enabled': True,
-                'environment': dict(NOTICE_PLACE_MCP_ENV),
-            }
-        entry = {
-            'command': NOTICE_PLACE_MCP_COMMAND,
-            'env': dict(NOTICE_PLACE_MCP_ENV),
-            'enabled': True,
-        }
-        if dialect in {'zcode', 'fast-agent'}:
-            entry['args'] = []
-        return entry
     if not credential:
         return None
     if dialect == 'opencode':
@@ -6597,6 +6581,210 @@ def _notice_place_servers(config: dict, container: tuple[str, ...]) -> dict:
         servers = {}
         node[container[-1]] = servers
     return servers
+
+
+def _notice_place_probe(spec, timeout: int = 25) -> dict:
+    """Prove that a Notice Place registration answers with its tool list.
+
+    Only `initialize` and `tools/list` are sent: nothing is notified, asked or
+    changed. The result carries the server identity and the tool count, never
+    a credential.
+    """
+    result: dict = {'ok': False, 'server': None, 'version': None, 'tool_count': None, 'error': None}
+    command = spec.get('command')
+    parts = [command] if isinstance(command, str) else list(command or []) if isinstance(command, list) else []
+    if parts:
+        env = dict(os.environ)
+        for key, value in (spec.get('env') or spec.get('environment') or {}).items():
+            env[str(key)] = str(value)
+        requests = [
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+             'params': {'protocolVersion': '2024-11-05', 'capabilities': {},
+                        'clientInfo': {'name': 'gptadmin', 'version': '1'}}},
+            {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}},
+        ]
+        try:
+            process = subprocess.Popen(
+                [str(part) for part in parts], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=env, text=True, bufsize=1)
+        except Exception as exc:
+            result['error'] = type(exc).__name__
+            return result
+        try:
+            for request in requests:
+                process.stdin.write(json.dumps(request) + '\n')
+                process.stdin.flush()
+                line = process.stdout.readline()
+                if not line:
+                    result['error'] = 'no response'
+                    return result
+                payload = json.loads(line)
+                if 'error' in payload:
+                    result['error'] = 'rpc error'
+                    return result
+                body = payload.get('result') or {}
+                if request['method'] == 'initialize':
+                    info = body.get('serverInfo') or {}
+                    result['server'] = info.get('name')
+                    result['version'] = info.get('version')
+                else:
+                    result['tool_count'] = len(body.get('tools') or [])
+                    result['ok'] = True
+            return result
+        except Exception as exc:
+            result['error'] = type(exc).__name__
+            return result
+        finally:
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+    url = str(spec.get('url') or spec.get('target') or '').strip()
+    if not url:
+        result['error'] = 'no command and no url'
+        return result
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
+    for key, value in (spec.get('headers') or spec.get('http_headers') or {}).items():
+        headers[str(key)] = str(value)
+    requests = [
+        {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+         'params': {'protocolVersion': '2024-11-05', 'capabilities': {},
+                    'clientInfo': {'name': 'gptadmin', 'version': '1'}}},
+        {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}},
+    ]
+    try:
+        for request in requests:
+            body = json.dumps(request).encode('utf-8')
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, data=body, headers=headers), timeout=timeout) as response:
+                raw = response.read()
+            text = raw.decode('utf-8', 'replace').strip()
+            if text.startswith('event:') or text.startswith('data:'):
+                chunks = [line[5:].strip() for line in text.splitlines() if line.startswith('data:')]
+                text = chunks[-1] if chunks else '{}'
+            payload = json.loads(text)
+            if 'error' in payload:
+                result['error'] = 'rpc error'
+                return result
+            data = payload.get('result') or {}
+            if request['method'] == 'initialize':
+                info = data.get('serverInfo') or {}
+                result['server'] = info.get('name')
+                result['version'] = info.get('version')
+            else:
+                result['tool_count'] = len(data.get('tools') or [])
+                result['ok'] = True
+        return result
+    except Exception as exc:
+        result['error'] = type(exc).__name__
+        return result
+
+
+def _notice_place_probe_result(spec) -> dict:
+    """Probe with a readable failure reason."""
+    result = _notice_place_probe(spec)
+    if not result.get('ok') and result.get('error') in {None, ''}:
+        result['error'] = 'no tool list'
+    return result
+
+
+def _notice_place_plugin_mcp_files(client: str) -> list[tuple[Path, str]]:
+    """Installed plugin manifests that can declare a Notice Place MCP server."""
+    roots = {
+        'opencode': USER_HOME / '.config' / 'opencode' / 'plugins' / 'noticeplace',
+        'codex': USER_HOME / '.codex' / 'plugins' / 'cache' / 'noticeplace-local' / 'noticeplace',
+        'zcode': USER_HOME / '.zcode' / 'cli' / 'plugins' / 'cache' / 'noticeplace-local' / 'noticeplace',
+    }
+    root = roots.get(client)
+    if root is None or not root.is_dir():
+        return []
+    files: list[tuple[Path, str]] = []
+    for version in sorted(root.glob('*')):
+        if not version.is_dir():
+            continue
+        for name in ('.codex-plugin/plugin.json', '.zcode-plugin/plugin.json'):
+            manifest = version / name
+            if manifest.is_file():
+                files.append((manifest, 'mcpServers'))
+        projection = version / 'opencode.json'
+        if projection.is_file():
+            files.append((projection, 'mcp'))
+    return files
+
+
+def _notice_place_plugin_mcp_active(client: str) -> bool:
+    """True when the installed plugin still declares a Notice Place MCP server."""
+    for path, key in _notice_place_plugin_mcp_files(client):
+        data, status = _load_client_config(path)
+        if status not in {'ok', 'comments'} or not isinstance(data, dict):
+            continue
+        declared = data.get(key)
+        if isinstance(declared, str) and declared.strip():
+            return True
+        if isinstance(declared, dict) and declared:
+            return True
+    return False
+
+
+def _notice_place_disable_plugin_mcp(client: str, apply: bool) -> list[str]:
+    """Disable only the MCP surface of the Notice Place plugin.
+
+    The plugin keeps its skill - the contract an agent reads - and stops
+    registering a second Notice Place server of its own. The client config
+    stays the single writer of the canonical HTTP point.
+    """
+    changed: list[str] = []
+    for path, key in _notice_place_plugin_mcp_files(client):
+        data, status = _load_client_config(path)
+        if status not in {'ok', 'comments'} or not isinstance(data, dict):
+            continue
+        declared = data.get(key)
+        active = (isinstance(declared, str) and declared.strip()) or (isinstance(declared, dict) and declared)
+        if not active:
+            continue
+        if not apply:
+            changed.append(str(path))
+            continue
+        backup = path.with_name(path.name + '.bak.noticeplace.' + time.strftime('%Y%m%d%H%M%S'))
+        shutil.copy2(path, backup)
+        data.pop(key, None)
+        result = _write_client_config(path, _render_client_config(data, 'json'))
+        if result == 'ok':
+            changed.append(str(path))
+    return changed
+
+
+def _notice_place_host_credential() -> str | None:
+    """The Notice Place bearer another client of this host already carries.
+
+    The Notice Place MCP is one server for the whole fleet, so its bearer is
+    one shared credential. It is read locally and never printed, never rotated
+    and never written to a new store: it only moves inside the client configs
+    that already belong to this host.
+    """
+    for client in NOTICE_PLACE_CLIENTS:
+        if client == 'codex':
+            entries = _notice_place_codex_scan()['entries']
+            credential = _notice_place_credential(entries)
+            if credential:
+                return credential
+            continue
+        for path, container, _style, _dialect in _notice_place_client_targets(client):
+            data, status = _load_client_config(path)
+            if status not in {'ok', 'comments'} or not isinstance(data, dict):
+                continue
+            credential = _notice_place_credential(_notice_place_servers(data, container))
+            if credential:
+                return credential
+    return None
 
 
 def _notice_place_client_targets(client: str) -> list[tuple[Path, tuple[str, ...], str, str]]:
@@ -6778,16 +6966,35 @@ def _notice_place_codex_set_enabled(text: str, names: list[str], enabled: bool) 
     return ''.join(output), touched
 
 
+def _notice_place_codex_remove_table(text: str, name: str) -> str:
+    """Remove one Codex MCP table together with its sub-tables."""
+    lines = text.splitlines(keepends=True)
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith('[') and stripped.endswith(']') and not stripped.startswith('[['):
+            header = stripped[1:-1].strip()
+            rest = header[len('mcp_servers.'):] if header.startswith('mcp_servers.') else ''
+            owner = rest.split('.')[0].strip('"') if rest else ''
+            if owner == name:
+                index += 1
+                while index < len(lines):
+                    following = lines[index].strip()
+                    if following.startswith('[') and following.endswith(']'):
+                        break
+                    index += 1
+                while output and output[-1].strip() == '':
+                    output.pop()
+                output.append('\n')
+                continue
+        output.append(lines[index])
+        index += 1
+    return ''.join(output)
+
+
 def _notice_place_codex_canonical_block(credential: str | None = None) -> str:
-    if _notice_place_local_server():
-        env_lines = '\n'.join(f'{key} = "{value}"' for key, value in sorted(NOTICE_PLACE_MCP_ENV.items()))
-        return (
-            f'[mcp_servers.{NOTICE_PLACE_MCP_NAME}]\n'
-            f'command = "{NOTICE_PLACE_MCP_COMMAND}"\n'
-            f'args = []\n'
-            f'enabled = true\n'
-            f'\n[mcp_servers.{NOTICE_PLACE_MCP_NAME}.env]\n{env_lines}\n'
-        )
+    """The canonical Codex registration of the single Notice Place HTTP MCP."""
     if not credential:
         return ''
     return (
@@ -6869,11 +7076,11 @@ def _notice_place_status(client: str) -> dict:
 def _notice_place_install_client(client: str, apply: bool) -> dict:
     """Make one environment expose exactly one canonical Notice Place point.
 
-    Non-destructive by construction: an alias of the same backend is disabled in
-    place instead of deleted, the canonical entry is renamed/normalized in
-    place, and every write keeps a timestamped backup of the whole file. The
-    canonical entry is written into at most one file of a client, so a merged
-    client config never carries two definitions of the same name.
+    The order is fixed: the canonical point is created and proven with a real
+    `initialize` + `tools/list` handshake, and only a proven canonical point
+    allows an alias of the same backend to be switched off. Nothing is deleted:
+    an alias stays in the file with `enabled: false` and can be switched back on.
+    Every write keeps a timestamped backup of the whole file.
     """
     report: dict = {
         'client': client,
@@ -6883,55 +7090,33 @@ def _notice_place_install_client(client: str, apply: bool) -> dict:
         'disabled': [],
         'files': [],
         'status': 'ok',
+        'canonical_proof': None,
+        'plugin_mcp_disabled': [],
     }
     plugin_spec = _notice_place_plugin_spec(client)
-    client_owns_canonical = client not in {'codex', 'zcode'}
+    client_owns_canonical = True
+    if _notice_place_plugin_mcp_active(client):
+        # The plugin would register a second Notice Place server of its own.
+        # Only its MCP surface is switched off, the skill stays - and it is
+        # switched off only when the client config can hold the canonical point.
+        client_canonical = False
+        client_credential = None
+        for path, container, _style, _dialect in _notice_place_client_targets(client):
+            data, status = _load_client_config(path)
+            if status not in {'ok', 'comments'} or not isinstance(data, dict):
+                continue
+            servers = _notice_place_servers(data, container)
+            if any(str(name).lower() == NOTICE_PLACE_MCP_NAME for name in servers):
+                client_canonical = True
+            client_credential = client_credential or _notice_place_credential(servers)
+        client_credential = client_credential or _notice_place_host_credential()
+        if client_canonical or client_credential:
+            report['plugin_mcp_disabled'] = _notice_place_disable_plugin_mcp(client, apply)
+            plugin_spec = None
     if client == 'codex':
-        path = USER_HOME / '.codex' / 'config.toml'
-        report['files'] = [str(path)]
-        if not path.is_file():
-            report['status'] = 'missing'
-            return report
-        text = path.read_text(encoding='utf-8')
-        scan = _notice_place_codex_scan()
-        aliases = []
-        live_aliases = []
-        for name, spec in scan['entries'].items():
-            if _notice_place_backend(spec) is None:
-                continue
-            if name.lower() == NOTICE_PLACE_MCP_NAME:
-                continue
-            aliases.append(name)
-            if str(spec.get('enabled', 'true')).lower() not in {'false', '0'}:
-                live_aliases.append(name)
-        updated = text
-        canonical_present = NOTICE_PLACE_MCP_NAME in _notice_place_codex_scan()['entries']
-        credential = _notice_place_credential(scan['entries'])
-        can_create = bool(_notice_place_codex_canonical_block(credential)) or bool(plugin_spec)
-        if not canonical_present and not can_create:
-            report['status'] = 'no canonical Notice Place point available; the alias stays live'
-            return report
-        if aliases:
-            # every alias table is normalised, so a duplicated key left by an
-            # earlier run collapses instead of breaking the whole Codex config
-            updated, touched = _notice_place_codex_set_enabled(updated, aliases, False)
-            report['disabled'].extend(name for name in touched if name in live_aliases)
-        if not canonical_present and not plugin_spec:
-            block = _notice_place_codex_canonical_block(credential)
-            if block:
-                updated = updated.rstrip('\n') + '\n\n' + block
-                report['added'].append(NOTICE_PLACE_MCP_NAME)
-        if updated != text:
-            if not apply:
-                report['status'] = 'dry-run'
-                return report
-            result = _write_client_config(path, updated)
-            if result != 'ok':
-                report['status'] = result
-                return report
-        return report
+        return _notice_place_install_codex(client, apply, plugin_spec, report)
     targets = _notice_place_client_targets(client)
-    loaded: list[tuple[Path, tuple[str, ...], str, str, dict, str]] = []
+    loaded: list[tuple[Path, tuple[str, ...], str, str, dict]] = []
     canonical_seen = False
     for path, container, style, dialect in targets:
         report['files'].append(str(path))
@@ -6944,35 +7129,27 @@ def _notice_place_install_client(client: str, apply: bool) -> dict:
         if not isinstance(data, dict):
             report['status'] = f'error: {path} is not a config object'
             continue
-        loaded.append((path, container, style, dialect, data, status))
+        loaded.append((path, container, style, dialect, data))
         servers = _notice_place_servers(data, container)
         if any(str(name).lower() == NOTICE_PLACE_MCP_NAME for name in servers):
             canonical_seen = True
     if not canonical_seen and plugin_spec and not client_owns_canonical:
         canonical_seen = True
+
+    # Phase 1: one canonical entry, in at most one file of the client.
     canonical_written = False
     changed_files: list[tuple[Path, str, dict]] = []
-    for path, container, style, dialect, data, _status in loaded:
+    canonical_spec = None
+    # the credential may live in any file of the client, so it is collected
+    # across the whole client before the canonical entry is written
+    client_credential = None
+    for _path, _container, _style, _dialect, data in loaded:
+        client_credential = client_credential or _notice_place_credential(_notice_place_servers(data, _container))
+    client_credential = client_credential or _notice_place_host_credential()
+    for path, container, style, dialect, data in loaded:
         servers = _notice_place_servers(data, container)
-        credential = _notice_place_credential(servers)
+        credential = _notice_place_credential(servers) or client_credential
         expected = _notice_place_entry(dialect, credential)
-        canonical_present = any(str(name).lower() == NOTICE_PLACE_MCP_NAME for name in servers)
-        if not canonical_present and expected is None and not canonical_seen:
-            # without a canonical point the alias must stay live, so the
-            # environment never loses its Notice Place capability
-            report['status'] = 'no canonical Notice Place point available; the alias stays live'
-            continue
-        changed = False
-        for name in list(servers.keys()):
-            spec = servers[name]
-            if _notice_place_backend(spec) is None:
-                continue
-            if str(name).lower() == NOTICE_PLACE_MCP_NAME:
-                continue
-            if spec.get('enabled', True) is not False:
-                spec['enabled'] = False
-                report['disabled'].append(name)
-                changed = True
         canonical = servers.get(NOTICE_PLACE_MCP_NAME)
         if canonical is None:
             for name in list(servers.keys()):
@@ -6980,31 +7157,156 @@ def _notice_place_install_client(client: str, apply: bool) -> dict:
                     servers[NOTICE_PLACE_MCP_NAME] = servers.pop(name)
                     report['renamed'].append(name)
                     canonical = servers[NOTICE_PLACE_MCP_NAME]
-                    changed = True
                     break
         if canonical is None:
-            if not (canonical_seen or canonical_written):
-                if expected is None:
-                    report['status'] = 'no canonical Notice Place point available; the alias stays live'
-                    continue
-                servers[NOTICE_PLACE_MCP_NAME] = expected
-                report['added'].append(NOTICE_PLACE_MCP_NAME)
-                canonical_written = True
-                changed = True
+            if canonical_seen or canonical_written:
+                continue
+            if expected is None:
+                report['status'] = 'no canonical Notice Place point available; the alias stays live'
+                continue
+            servers[NOTICE_PLACE_MCP_NAME] = expected
+            report['added'].append(NOTICE_PLACE_MCP_NAME)
+            canonical_written = True
         elif expected is not None and canonical != expected and client_owns_canonical:
             servers[NOTICE_PLACE_MCP_NAME] = expected
             report['normalized'].append(NOTICE_PLACE_MCP_NAME)
-            changed = True
-        if changed:
+        if canonical_spec is None and NOTICE_PLACE_MCP_NAME in servers:
+            canonical_spec = servers[NOTICE_PLACE_MCP_NAME]
+        if report['added'] or report['renamed'] or report['normalized']:
             changed_files.append((path, style, data))
-    if changed_files:
-        if not apply:
-            report['status'] = 'dry-run'
-            return report
+    if canonical_spec is None and plugin_spec:
+        canonical_spec = plugin_spec
+    if changed_files and apply:
         for path, style, data in changed_files:
             result = _write_client_config(path, _render_client_config(data, style))
             if result != 'ok':
                 report['status'] = result
+                return report
+
+    # Phase 2: prove the canonical point before an alias is switched off.
+    aliases: list[tuple[Path, tuple[str, ...], str, dict, str]] = []
+    for path, container, style, dialect, data in loaded:
+        servers = _notice_place_servers(data, container)
+        for name, spec in servers.items():
+            if _notice_place_backend(spec) is None:
+                continue
+            if str(name).lower() == NOTICE_PLACE_MCP_NAME:
+                continue
+            if spec.get('enabled', True) is False:
+                continue
+            aliases.append((path, container, style, data, name))
+    if not aliases:
+        return report
+    if canonical_spec is None:
+        report['status'] = 'no canonical Notice Place point available; the alias stays live'
+        return report
+    proof = _notice_place_probe_result(canonical_spec)
+    report['canonical_proof'] = proof
+    if not proof.get('ok'):
+        report['status'] = f"canonical Notice Place point not proven ({proof.get('error')}); the alias stays live"
+        return report
+    touched: set[Path] = set()
+    for path, container, style, data, name in aliases:
+        servers = _notice_place_servers(data, container)
+        spec = servers.get(name)
+        if not isinstance(spec, dict):
+            continue
+        spec['enabled'] = False
+        report['disabled'].append(name)
+        touched.add(path)
+    if touched:
+        for path, container, style, dialect, data in loaded:
+            if path not in touched:
+                continue
+            if not apply:
+                report['status'] = 'dry-run'
+                continue
+            result = _write_client_config(path, _render_client_config(data, style))
+            if result != 'ok':
+                report['status'] = result
+    if not apply and report['status'] == 'ok' and (report['added'] or report['renamed']
+                                                    or report['normalized'] or report['disabled']):
+        report['status'] = 'dry-run'
+    return report
+
+
+def _notice_place_install_codex(client: str, apply: bool, plugin_spec, report: dict) -> dict:
+    """Codex keeps its own TOML table shape; the same order applies."""
+    path = USER_HOME / '.codex' / 'config.toml'
+    report['files'] = [str(path)]
+    if not path.is_file():
+        report['status'] = 'missing'
+        return report
+    text = path.read_text(encoding='utf-8')
+    scan = _notice_place_codex_scan()
+    aliases = []
+    live_aliases = []
+    for name, spec in scan['entries'].items():
+        if _notice_place_backend(spec) is None:
+            continue
+        if name.lower() == NOTICE_PLACE_MCP_NAME:
+            continue
+        aliases.append(name)
+        if str(spec.get('enabled', 'true')).lower() not in {'false', '0'}:
+            live_aliases.append(name)
+    updated = text
+    canonical_present = NOTICE_PLACE_MCP_NAME in scan['entries']
+    credential = _notice_place_credential(scan['entries']) or _notice_place_host_credential()
+    canonical_spec = scan['entries'].get(NOTICE_PLACE_MCP_NAME)
+    if canonical_present:
+        # the canonical point must be the shared HTTP endpoint, not a local
+        # per-client MCP process: replace the table with the HTTP form
+        block = _notice_place_codex_canonical_block(credential)
+        current = canonical_spec or {}
+        if block and (current.get('url') != NOTICE_PLACE_MCP_URL):
+            updated = _notice_place_codex_remove_table(updated, NOTICE_PLACE_MCP_NAME)
+            updated = updated.rstrip('\n') + '\n\n' + block
+            report['normalized'].append(NOTICE_PLACE_MCP_NAME)
+            canonical_spec = {'url': NOTICE_PLACE_MCP_URL, 'headers': {'Authorization': credential}}
+    if not canonical_present:
+        if plugin_spec:
+            canonical_spec = plugin_spec
+        else:
+            block = _notice_place_codex_canonical_block(credential)
+            if block:
+                updated = updated.rstrip('\n') + '\n\n' + block
+                report['added'].append(NOTICE_PLACE_MCP_NAME)
+                if _notice_place_local_server():
+                    canonical_spec = {'command': NOTICE_PLACE_MCP_COMMAND, 'env': dict(NOTICE_PLACE_MCP_ENV)}
+                else:
+                    canonical_spec = {'url': NOTICE_PLACE_MCP_URL, 'headers': {'Authorization': credential}}
+            else:
+                report['status'] = 'no canonical Notice Place point available; the alias stays live'
+                return report
+    if updated != text:
+        if apply:
+            result = _write_client_config(path, updated)
+            if result != 'ok':
+                report['status'] = result
+                return report
+            scan = _notice_place_codex_scan()
+            canonical_spec = scan['entries'].get(NOTICE_PLACE_MCP_NAME) or canonical_spec
+    if not live_aliases:
+        if not apply and report['status'] == 'ok' and report['added']:
+            report['status'] = 'dry-run'
+        return report
+    if canonical_spec is None:
+        report['status'] = 'no canonical Notice Place point available; the alias stays live'
+        return report
+    proof = _notice_place_probe_result(canonical_spec)
+    report['canonical_proof'] = proof
+    if not proof.get('ok'):
+        report['status'] = f"canonical Notice Place point not proven ({proof.get('error')}); the alias stays live"
+        return report
+    updated, touched = _notice_place_codex_set_enabled(updated, live_aliases, False)
+    report['disabled'].extend(name for name in touched if name in live_aliases)
+    if updated != text:
+        if not apply:
+            report['status'] = 'dry-run'
+            return report
+        result = _write_client_config(path, updated)
+        if result != 'ok':
+            report['status'] = result
     return report
 
 
@@ -7028,8 +7330,48 @@ def _notice_place_package_sources() -> list[Path]:
     return sources
 
 
+def _notice_place_empty_projection(path: Path) -> str:
+    """Write a Notice Place projection that registers no server of its own.
+
+    The client config is the single writer of the canonical HTTP point, so the
+    installed plugin keeps its skill and stops carrying a Notice Place server.
+    A stale local stdio process is never left behind, and a later publish
+    cannot add a second registration either.
+    """
+    try:
+        text = path.read_text(encoding='utf-8')
+    except Exception:
+        return 'ok'
+    if path.suffix in {'.yaml', '.yml'}:
+        try:
+            import yaml
+            data = yaml.safe_load(text)
+        except Exception:
+            return 'ok'
+        if not isinstance(data, dict):
+            return 'ok'
+        data.setdefault('mcp', {})
+        if isinstance(data['mcp'], dict):
+            data['mcp']['servers'] = {}
+        return _write_client_config(path, _render_client_config(data, 'yaml'))
+    data, status = _load_client_config(path)
+    if status not in {'ok', 'comments'} or not isinstance(data, dict):
+        return 'ok'
+    if 'mcpServers' in data:
+        data['mcpServers'] = {}
+    if isinstance(data.get('mcp'), dict):
+        data['mcp'] = {}
+    return _write_client_config(path, _render_client_config(data, 'json'))
+
+
 def _notice_place_refresh_plugin(apply: bool) -> dict:
-    """Converge installed plugin copies onto the canonical credential-free package."""
+    """Converge installed plugin copies onto the canonical package.
+
+    The published package still carries a local stdio projection; the installed
+    copies must not keep a second Notice Place server or a per-client process.
+    The MCP surface of the installed plugin is therefore emptied, and its skill
+    stays.
+    """
     result: dict = {'client': 'plugin', 'updated': [], 'checked': 0, 'status': 'ok'}
     sources = _notice_place_package_sources()
     if not sources:
@@ -7053,14 +7395,16 @@ def _notice_place_refresh_plugin(apply: bool) -> dict:
                 if not origin.is_file() or not target.is_file():
                     continue
                 result['checked'] += 1
-                if origin.read_bytes() == target.read_bytes():
+                if origin.read_bytes() == target.read_bytes() and 'ask-human-mcp' not in target.read_text():
                     continue
                 if not apply:
                     result['updated'].append(str(target))
                     continue
                 try:
-                    shutil.copy2(target, target.with_name(target.name + '.bak.noticeplace.' + time.strftime('%Y%m%d%H%M%S')))
+                    backup = target.with_name(target.name + '.bak.noticeplace.' + time.strftime('%Y%m%d%H%M%S'))
+                    shutil.copy2(target, backup)
                     shutil.copy2(origin, target)
+                    _notice_place_empty_projection(target)
                     result['updated'].append(str(target))
                 except Exception:
                     continue

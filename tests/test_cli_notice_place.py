@@ -40,6 +40,10 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self._original_local = cli._notice_place_local_server
         cli._notice_place_local_server = lambda: True
         self.addCleanup(lambda: setattr(cli, '_notice_place_local_server', self._original_local))
+        self._original_probe = cli._notice_place_probe_result
+        self.addCleanup(lambda: setattr(cli, '_notice_place_probe_result', self._original_probe))
+        cli._notice_place_probe_result = lambda spec: {
+            'ok': True, 'server': 'notice-place-test', 'version': '1', 'tool_count': 18, 'error': None}
 
     # ---------- read-only status ----------
 
@@ -71,11 +75,13 @@ class NoticePlaceInstallTests(unittest.TestCase):
 
     def test_dry_run_writes_nothing_and_reports_the_plan(self):
         config = self._home / '.config' / 'opencode' / 'opencode.json'
-        _write_json(config, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp'}}})
+        _write_json(config, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
+                                                  'headers': {'Authorization': 'Bearer unit-only'}}}})
         before = config.read_bytes()
         report = cli._notice_place_install_client('opencode', False)
         self.assertEqual('dry-run', report['status'])
         self.assertEqual(['AskHuman'], report['disabled'])
+        self.assertEqual(['noticeplace'], report['added'])
         self.assertEqual(before, config.read_bytes())
         self.assertEqual([], list(config.parent.glob('*.bak.*')))
 
@@ -103,19 +109,18 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertIn('AskHuman', result['mcp'])
         self.assertFalse(result['mcp']['AskHuman']['enabled'])
         self.assertEqual('https://notify.bezrabotnyi.com/mcp', result['mcp']['AskHuman']['url'])
-        # the canonical point is the one credential-free Notice Place contract
+        # the canonical point is the single shared Notice Place HTTP endpoint
         canonical = result['mcp']['noticeplace']
-        self.assertEqual('local', canonical['type'])
-        self.assertEqual(['/opt/noticeplace/bin/ask-human-mcp'], canonical['command'])
-        self.assertEqual({'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'},
-                         canonical['environment'])
-        self.assertNotIn('headers', canonical)
+        self.assertEqual('remote', canonical['type'])
+        self.assertEqual('https://notify.bezrabotnyi.com/mcp', canonical['url'])
+        self.assertEqual('Bearer unit-only', canonical['headers']['Authorization'])
+        self.assertNotIn('command', canonical)
         # unrelated servers and native permissions are untouched
         self.assertEqual(original['mcp']['peer'], result['mcp']['peer'])
         self.assertEqual(original['mcp']['UserIO'], result['mcp']['UserIO'])
         self.assertEqual(original['permission'], result['permission'])
         self.assertEqual(original['$schema'], result['$schema'])
-        self.assertEqual(1, len(list(config.parent.glob('*.bak.noticeplace.*'))))
+        self.assertEqual(2, len(list(config.parent.glob('*.bak.noticeplace.*'))))
 
     def test_opencode_jsonc_with_comments_is_never_rewritten(self):
         config = self._home / '.config' / 'opencode' / 'opencode.jsonc'
@@ -130,15 +135,20 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertEqual([], list(config.parent.glob('*.bak.*')))
 
     def test_jsonc_without_comments_is_supported(self):
-        config = self._home / '.config' / 'opencode' / 'opencode.jsonc'
-        _write_json(config, {'mcp': {'notify': {'type': 'local',
+        first = self._home / '.config' / 'opencode' / 'opencode.json'
+        second = self._home / '.config' / 'opencode' / 'opencode.jsonc'
+        _write_json(first, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
+                                                  'headers': {'Authorization': 'Bearer unit-only'}}}})
+        _write_json(second, {'mcp': {'notify': {'type': 'local',
                                                  'command': ['/opt/noticeplace/bin/ask-human-mcp'],
                                                  'enabled': True}}})
         report = cli._notice_place_install_client('opencode', True)
-        self.assertEqual(['notify'], report['disabled'])
-        result = json.loads(config.read_text())
+        self.assertEqual(['AskHuman', 'notify'], report['disabled'])
+        result = json.loads(second.read_text())
         self.assertFalse(result['mcp']['notify']['enabled'])
-        self.assertIn('noticeplace', result['mcp'])
+        self.assertNotIn('noticeplace', result['mcp'])
+        canonical = json.loads(first.read_text())['mcp']['noticeplace']
+        self.assertEqual('https://notify.bezrabotnyi.com/mcp', canonical['url'])
 
     # ---------- apply: hermes ----------
 
@@ -163,15 +173,19 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertEqual('https://peer.example/mcp', result['mcp_servers']['peer']['url'])
         self.assertEqual('original/model', result['model'])
 
-    def test_hermes_without_a_notice_place_entry_gets_the_canonical_one(self):
+    def test_hermes_gets_the_canonical_http_point(self):
         config = self._home / '.hermes' / 'config.yaml'
-        _write_yaml(config, {'mcp_servers': {'peer': {'url': 'https://peer.example/mcp'}}})
+        _write_yaml(config, {'mcp_servers': {
+            'peer': {'url': 'https://peer.example/mcp'},
+            'AskHuman': {'url': 'https://notify.bezrabotnyi.com/mcp',
+                         'headers': {'Authorization': 'Bearer unit-only'}}}})
         report = cli._notice_place_install_client('hermes', True)
         self.assertEqual(['noticeplace'], report['added'])
         result = yaml.safe_load(config.read_text())
-        self.assertEqual('/opt/noticeplace/bin/ask-human-mcp', result['mcp_servers']['noticeplace']['command'])
-        self.assertEqual({'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'},
-                         result['mcp_servers']['noticeplace']['env'])
+        canonical = result['mcp_servers']['noticeplace']
+        self.assertEqual('https://notify.bezrabotnyi.com/mcp', canonical['url'])
+        self.assertEqual('Bearer unit-only', canonical['headers']['Authorization'])
+        self.assertFalse(result['mcp_servers']['AskHuman']['enabled'])
 
     # ---------- apply: codex ----------
 
@@ -224,7 +238,8 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertIn('approval_policy = "never"', result)
         self.assertIn('sandbox_mode = "danger-full-access"', result)
         self.assertIn('[hooks.state]', result)
-        self.assertEqual(1, len(list(config.parent.glob('*.bak.noticeplace.*'))))
+        # two phases: the canonical point, then the proven alias switch-off
+        self.assertEqual(2, len(list(config.parent.glob('*.bak.noticeplace.*'))))
 
     def test_codex_keeps_the_plugin_provided_canonical_point(self):
         config = self._home / '.codex' / 'config.toml'
@@ -278,7 +293,9 @@ class NoticePlaceInstallTests(unittest.TestCase):
     def test_canonical_entry_is_written_into_at_most_one_file(self):
         first = self._home / '.config' / 'opencode' / 'opencode.json'
         second = self._home / '.config' / 'opencode' / 'opencode.jsonc'
-        _write_json(first, {'mcp': {'peer': {'type': 'remote', 'url': 'https://peer.example/mcp'}}})
+        _write_json(first, {'mcp': {'peer': {'type': 'remote', 'url': 'https://peer.example/mcp'},
+                                     'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
+                                                  'headers': {'Authorization': 'Bearer unit-only'}}}})
         _write_json(second, {'mcp': {'peer2': {'type': 'remote', 'url': 'https://peer2.example/mcp'}}})
         report = cli._notice_place_install_client('opencode', True)
         self.assertEqual(['noticeplace'], report['added'])
@@ -312,20 +329,55 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertIsNone(cli._notice_place_backend({'command': '/home/admin/.local/bin/agent-herder'}))
         self.assertIsNone(cli._notice_place_backend(None))
 
-    def test_host_without_the_notice_place_release_reuses_the_credential_it_already_has(self):
+    def test_host_without_the_notice_place_release_keeps_the_alias_until_the_point_is_proven(self):
         cli._notice_place_local_server = lambda: False
+        cli._notice_place_probe_result = lambda spec: {
+            'ok': False, 'server': None, 'version': None, 'tool_count': None, 'error': 'HTTPError'}
+        config = self._home / '.config' / 'opencode' / 'opencode.json'
+        _write_json(config, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
+                                                  'headers': {'Authorization': 'Bearer unit-only'}}}})
+        report = cli._notice_place_install_client('opencode', True)
+        # the canonical point is created, but it cannot be proven with a fake
+        # credential, so the alias keeps serving Notice Place
+        self.assertEqual(['noticeplace'], report['added'])
+        self.assertEqual([], report['disabled'])
+        self.assertIn('not proven', report['status'])
+        self.assertFalse(report['canonical_proof']['ok'])
+        result = json.loads(config.read_text())
+        self.assertTrue(result['mcp']['AskHuman'].get('enabled', True))
+        # the credential is moved inside the same file, never invented
+        self.assertEqual('Bearer unit-only', result['mcp']['noticeplace']['headers']['Authorization'])
+
+    def test_alias_is_disabled_only_after_the_canonical_point_is_proven(self):
+        cli._notice_place_local_server = lambda: False
+        cli._notice_place_probe_result = lambda spec: {
+            'ok': True, 'server': 'notice-place-test', 'version': '1', 'tool_count': 18, 'error': None}
+        config = self._home / '.config' / 'opencode' / 'opencode.json'
+        _write_json(config, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
+                                                  'headers': {'Authorization': 'Bearer unit-only'}}}})
+        report = cli._notice_place_install_client('opencode', True)
+        self.assertTrue(report['canonical_proof']['ok'])
+        self.assertEqual(18, report['canonical_proof']['tool_count'])
+        self.assertEqual(['AskHuman'], report['disabled'])
+        result = json.loads(config.read_text())
+        self.assertFalse(result['mcp']['AskHuman']['enabled'])
+        self.assertEqual('https://notify.bezrabotnyi.com/mcp', result['mcp']['noticeplace']['url'])
+        # the credential is moved inside the same file, never invented
+        self.assertEqual('Bearer unit-only', result['mcp']['noticeplace']['headers']['Authorization'])
+
+    def test_an_unproven_canonical_point_keeps_the_alias_live(self):
+        cli._notice_place_local_server = lambda: False
+        cli._notice_place_probe_result = lambda spec: {
+            'ok': False, 'server': None, 'version': None, 'tool_count': None, 'error': 'HTTPError'}
         config = self._home / '.config' / 'opencode' / 'opencode.json'
         _write_json(config, {'mcp': {'AskHuman': {'type': 'remote', 'url': 'https://notify.bezrabotnyi.com/mcp',
                                                   'headers': {'Authorization': 'Bearer unit-only'}}}})
         report = cli._notice_place_install_client('opencode', True)
         self.assertEqual(['noticeplace'], report['added'])
+        self.assertEqual([], report['disabled'])
+        self.assertIn('not proven', report['status'])
         result = json.loads(config.read_text())
-        canonical = result['mcp']['noticeplace']
-        self.assertEqual('remote', canonical['type'])
-        self.assertEqual('https://notify.bezrabotnyi.com/mcp', canonical['url'])
-        # the credential is moved inside the same file, never invented
-        self.assertEqual('Bearer unit-only', canonical['headers']['Authorization'])
-        self.assertFalse(result['mcp']['AskHuman']['enabled'])
+        self.assertTrue(result['mcp']['AskHuman'].get('enabled', True))
 
     def test_host_without_release_or_credential_is_left_untouched(self):
         cli._notice_place_local_server = lambda: False
