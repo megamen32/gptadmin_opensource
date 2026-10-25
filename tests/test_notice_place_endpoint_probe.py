@@ -78,6 +78,7 @@ class EndpointProbeTests(unittest.TestCase):
         _Server.require_session = True
         self.server = http.server.HTTPServer(('127.0.0.1', 0), _Server)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.url = f'http://127.0.0.1:{self.server.server_address[1]}/mcp'
 

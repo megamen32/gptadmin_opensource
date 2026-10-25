@@ -27,7 +27,7 @@ gptadmin notice-place install --dry-run           # план изменений,
 gptadmin notice-place install                     # применить
 gptadmin notice-place install --refresh-plugin    # свести копии плагина к каноническому пакету
 
-python3 scripts/notice_place_readback.py          # установленный readback: реальный initialize/tools/list
+.venv/bin/python scripts/notice_place_endpoint_probe.py   # проба точки: реальный initialize/tools/list
 ```
 
 `--client` (повторяемый): `opencode`, `codex`, `hermes`, `zcode`, `fast-agent`.
@@ -166,8 +166,24 @@ admin-node-100. Ни одного локального stdio-процесса No
   что команда `notice-place` появится там только после обновления CLI; правка
   применялась тем же кодом.
 * **GPTAdmin-hub: дочерний ShellMCP-регистр `Notify`**
-  (`mcp:shell:admin-node-100:Notify`) всё ещё поднимает локальный
-  stdio-сервер — это путь ретрансляции GPTAdmin, а не регистрация клиента; на
-  него ссылается живой webhook-маршрут (`docs/WEBHOOKS.md`). Следующий шаг
-  (вне текущего листа, чтобы не сломать путь инцидентов): перевести регистр
-  на HTTP через `mcp_manage` и проверить маршрут.
+  (`mcp:shell:admin-node-100:Notify`) поднимает локальный stdio-сервер.
+  Проверено по фактическому каталогу: инструменты этой точки **не входят** в
+  список, видимый агенту (поиск по каталогу для `noticeplace` не даёт ни
+  одного результата; `send_message` и `ask_human` отвечают только инструменты
+  AgentHerder и Touchpoint). Доступ к ней есть только по явному имени цели.
+  Живые webhook-маршруты (`agent-deliver-v1`, `notify-health-diagnosis`,
+  `notify-health-remediation`, `agent-wake-v1`, `qa23-forwarder-ready-20261023`)
+  идут через этот регистр, поэтому его перенос требует действий на пути
+  инцидентов. Блокер: процесс-родитель (`gptadmin-hub.service`) не имеет в
+  окружении `NOTIFY_MCP_TOKEN`, а ссылка `${NOTIFY_MCP_TOKEN}` в заголовке
+  разрешается только на момент запроса — без переменной в окружении точка не
+  пройдёт аутентификацию.
+  Подготовленный набор шагов (не выполнялся): добавить в unit
+  `gptadmin-hub.service` строку
+  `EnvironmentFile=/etc/notification-center.env` (существующее защищённое
+  хранилище, значение не копируется), перезапустить hub, затем
+  `mcp_manage` upsert регист `Notify` на
+  `https://notify.bezrabotnyi.com/mcp` с заголовком
+  `Authorization: Bearer ${NOTIFY_MCP_TOKEN}`. Canary: `tools/list` ребёнка
+  через hub (18 инструментов) плюс вызов read-only инструмента той же цели.
+  Решение о перезапуске hub (16 живых сессий) — за владельцем.
