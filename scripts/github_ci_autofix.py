@@ -582,8 +582,78 @@ def project_launch(url, payload):
         return error.code, json.loads(error.read().decode())
 
 
+def _launch_payload(row):
+    """The project-launch request of one event, fully derived from the row.
+
+    The API resolves the route (harness and model) from the operator's
+    projectRoutes; the watcher states only the project identity, the work
+    order and a stable operation id. The canonical project is the working
+    directory: the API lookup matches routes and aliases on it. The payload
+    is byte-identical on every call for one event, so a recovery POST is the
+    same operation, never a second one.
+    """
+    return {"project": row["cwd"], "cwd": row["cwd"], "name": row["name"],
+            "message": prompt(row), "mode": "queue",
+            "operation_id": DEDUP_NAMESPACE + ":" + row["key"]}
+
+
+def _apply_launch_receipt(db, row, status, result):
+    """Map one project-launch receipt onto the event row, without replay."""
+    if not isinstance(result, dict):
+        raise RuntimeError("No project-launch receipt")
+    outcome = str(result.get("outcome") or "")
+    harness = str(result.get("selectedHarness") or result.get("harness") or "")
+    if harness:
+        db.execute("UPDATE events SET harness=? WHERE key=?", (harness, row["key"]))
+    session_id = result.get("sessionId")
+    if session_id:
+        db.execute("UPDATE events SET session_id=? WHERE key=?", (session_id, row["key"]))
+    db.commit()
+    if status == 200 and outcome == "accepted":
+        change(db, row, "accepted_unconfirmed",
+               f"Заявка {harness or 'native'} принята; запуск ещё не подтверждён")
+    elif status == 200 and outcome in ("admission_unknown", "in_flight", "human_hold", ""):
+        # The durable attempt reservation exists without a confirmed
+        # native admission. The attempt log owns the identity; a resend
+        # is forbidden and the readback reconciles the reservation.
+        change(db, row, "dispatching",
+               f"Запуск не подтверждён ({outcome or 'unknown'}); требуется чтение native-сессии")
+    else:
+        # no_harness (409) and every other definitive refusal of the
+        # routing itself: the decision is durable, so a human decides
+        # what is next — never a resend.
+        change(db, row, "needs_human",
+               f"Маршрут отказал ({outcome or status}): {result.get('routingReason') or result.get('error') or 'без причины'}")
+
+
+def _recover_launch_receipt(db, launch, row):
+    """Collect the durable receipt of an already-committed operation.
+
+    A transport timeout leaves the intent committed while the API may hold
+    an accepted, unknown or in-flight attempt. One recovery POST with the
+    same deterministic operation id asks the attempt log for that receipt:
+    it returns the existing record without a second executor and only a
+    definite pre-admission refusal advances the route on the API side. A
+    recovery failure changes nothing; the next tick asks again.
+    """
+    try:
+        status, result = launch(PROJECT_LAUNCH_API, _launch_payload(row))
+    except Exception:
+        return  # Transport still lost: the identity is unchanged, retry next tick.
+    try:
+        _apply_launch_receipt(db, row, status, result)
+    except Exception:
+        change(db, row, "dispatching", "Ответ отправки неизвестен; требуется чтение native-сессии")
+
+
 def dispatch(db, cfg, launch=project_launch, api=gh, notifier=None):
-    if db.execute("SELECT 1 FROM events WHERE state IN (" + ",".join("?" for _ in BUSY) + ") LIMIT 1", BUSY).fetchone():
+    busy = db.execute("SELECT * FROM events WHERE state IN (" + ",".join("?" for _ in BUSY) + ") ORDER BY updated LIMIT 1", BUSY).fetchone()
+    if busy is not None:
+        # A row whose launch receipt never arrived can only ask the attempt
+        # log for it: the same operation id returns the existing record and
+        # never opens a second executor. Everything else waits on reconcile.
+        if busy["state"] == "dispatching" and (busy["harness"] == "routed" or not busy["session_id"]):
+            _recover_launch_receipt(db, launch, busy)
         return
     row = db.execute("SELECT * FROM events WHERE state='queued' ORDER BY seen,key LIMIT 1").fetchone()
     if row is None:
@@ -611,48 +681,23 @@ def dispatch(db, cfg, launch=project_launch, api=gh, notifier=None):
         row = db.execute("SELECT * FROM events WHERE key=?", (row["key"],)).fetchone()
         if not row["incident_id"]:
             return  # Failure incident must exist before starting the repair.
-    # The API resolves the route (harness and model) from the operator's
-    # projectRoutes; the watcher states only the project identity, the work
-    # order and a stable operation id. The canonical project is the working
-    # directory: the API lookup matches routes and aliases on it.
-    payload = {"project": row["cwd"], "cwd": row["cwd"], "name": row["name"],
-               "message": prompt(row), "mode": "queue",
-               "operation_id": DEDUP_NAMESPACE + ":" + row["key"]}
     # Commit BEFORE the network boundary. Any ambiguous response can only be reconciled, never resent.
     # The harness marker `routed` separates new-style rows from the legacy
     # codex receipts (NULL) while the API receipt has not named a harness yet.
+    payload = _launch_payload(row)
     change(db, row, "dispatching")
     db.execute("UPDATE events SET harness='routed' WHERE key=?", (row["key"],))
     db.commit()
     try:
         status, result = launch(PROJECT_LAUNCH_API, payload)
-        if not isinstance(result, dict):
-            raise RuntimeError("No project-launch receipt")
-        outcome = str(result.get("outcome") or "")
-        harness = str(result.get("selectedHarness") or result.get("harness") or "")
-        if harness:
-            db.execute("UPDATE events SET harness=? WHERE key=?", (harness, row["key"]))
-        session_id = result.get("sessionId")
-        if session_id:
-            db.execute("UPDATE events SET session_id=? WHERE key=?", (session_id, row["key"]))
-        db.commit()
-        if status == 200 and outcome == "accepted":
-            change(db, row, "accepted_unconfirmed",
-                   f"Заявка {harness or 'native'} принята; запуск ещё не подтверждён")
-        elif status == 200 and outcome in ("admission_unknown", "in_flight", "human_hold", ""):
-            # The durable attempt reservation exists without a confirmed
-            # native admission. The attempt log owns the identity; a resend
-            # is forbidden and the readback reconciles the reservation.
-            change(db, row, "dispatching",
-                   f"Запуск не подтверждён ({outcome or 'unknown'}); требуется чтение native-сессии")
-        else:
-            # no_harness (409) and every other definitive refusal of the
-            # routing itself: the decision is durable, so a human decides
-            # what is next — never a resend.
-            change(db, row, "needs_human",
-                   f"Маршрут отказал ({outcome or status}): {result.get('routingReason') or result.get('error') or 'без причины'}")
     except Exception:
-        # Keep the exact deterministic identity. Do NOT retry after a timeout/crash.
+        # Keep the exact deterministic identity. Do NOT retry after a timeout/crash;
+        # a later tick recovers the receipt through the same operation id.
+        change(db, row, "dispatching", "Ответ отправки неизвестен; требуется чтение native-сессии")
+        return
+    try:
+        _apply_launch_receipt(db, row, status, result)
+    except Exception:
         change(db, row, "dispatching", "Ответ отправки неизвестен; требуется чтение native-сессии")
 
 

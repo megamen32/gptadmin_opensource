@@ -86,7 +86,6 @@ class WatcherTests(unittest.TestCase):
             raise TimeoutError()
         ci.dispatch(self.db, {}, lost, self.api)
         ci.dispatch(self.db, {}, lost, self.api)
-        self.assertEqual(len(calls), 1)
         self.assertEqual(self.state()["state"], "dispatching")
         self.assertEqual(calls[0]["name"], self.item["name"])
         # The watcher states the project identity, the work order and the
@@ -97,6 +96,11 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(calls[0]["mode"], "queue")
         self.assertNotIn("harness", calls[0])
         self.assertNotIn("model", calls[0])
+        # The second tick asks the attempt log for the lost receipt through
+        # the SAME deterministic operation: the payload is identical, so no
+        # second operation or executor can exist.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
 
     def test_ack_is_not_running_native_proof_is_required(self):
         ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
@@ -759,21 +763,89 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.state()["state"], "running")
         self.assertIn("omniroute/minimax-combo-m3.1", self.state()["reason"])
 
-    def test_unknown_admission_holds_without_resend(self):
-        # admission_unknown and in_flight are durable reservations, not
-        # refusals: the watcher keeps the slot, records the selected harness
-        # for the readback and never sends again.
+    def test_unknown_admission_stays_without_replay_and_receipt_recovers(self):
+        # admission_unknown is a durable reservation, not a refusal: the
+        # watcher keeps the slot, records the selected harness and asks the
+        # attempt log again with the same operation id. A replayed accepted
+        # receipt then proceeds without any second executor.
         calls = []
         def launch(url, payload):
             calls.append(payload)
-            return 200, {"outcome": "admission_unknown", "selectedHarness": "opencode",
-                         "routingReason": "Запуск не подтверждён."}
+            if len(calls) == 1:
+                return 200, {"outcome": "admission_unknown", "selectedHarness": "opencode",
+                             "routingReason": "Запуск не подтверждён."}
+            return 200, {"outcome": "accepted", "selectedHarness": "opencode",
+                         "model": "omniroute/minimax-combo-m3.1", "sessionId": "native-id"}
         ci.dispatch(self.db, {}, launch, self.api)
         self.assertEqual(self.state()["state"], "dispatching")
         self.assertIsNone(self.state()["session_id"])
         self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "opencode")
+        # The same operation asks for its receipt; UNKNOWN itself is never replayed.
         ci.dispatch(self.db, {}, launch, self.api)
-        self.assertEqual(len(calls), 1)  # Only the queued row is dispatched; dispatching is never resent.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["operation_id"], calls[1]["operation_id"])
+        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
+        self.assertEqual(self.state()["session_id"], "native-id")
+
+    def test_lost_transport_receipt_recovered_to_native_readback(self):
+        # First transport answer lost: the receipt is recovered through the
+        # same deterministic operation and the repair continues to the
+        # native readback without a second executor.
+        calls = []
+        def launch(url, payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                raise TimeoutError()
+            return 200, {"outcome": "accepted", "selectedHarness": "zcode",
+                         "model": "account:zai/GLM-5.3", "sessionId": "native-id"}
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(self.state()["state"], "dispatching")
+        self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "routed")
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])  # One operation, never two.
+        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
+        self.assertEqual(self.state()["session_id"], "native-id")
+        self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "zcode")
+        session = self.native("running")
+        session["harness"] = "zcode"
+        session["model"] = "account:zai/GLM-5.3"
+        def call(name, args):
+            self.assertEqual(args["harness"], "zcode")
+            return {"sessions": [session]} if name == "list_agents" else {"session": session}
+        ci.reconcile(self.db, call)
+        self.assertEqual(self.state()["state"], "running")
+
+    def test_recovery_in_flight_names_harness_and_keeps_hold(self):
+        # While the attempt is genuinely in flight the attempt log reports it
+        # without touching a harness; the selected harness is preserved for
+        # the readback and the slot stays held.
+        calls = []
+        def launch(url, payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                raise TimeoutError()
+            return 200, {"outcome": "in_flight", "selectedHarness": "zcode",
+                         "model": "account:zai/GLM-5.3"}
+        ci.dispatch(self.db, {}, launch, self.api)
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["operation_id"], calls[1]["operation_id"])
+        self.assertEqual(self.state()["state"], "dispatching")
+        self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "zcode")
+        self.assertIsNone(self.state()["session_id"])
+
+    def test_repeated_recovery_failure_never_loses_identity(self):
+        calls = []
+        def launch(url, payload):
+            calls.append(payload)
+            raise TimeoutError()
+        for _ in range(3):
+            ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(p == calls[0] for p in calls))
+        self.assertEqual(self.state()["state"], "dispatching")
+        self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "routed")
 
     def test_in_flight_receipt_keeps_reservation_and_names_harness(self):
         ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "in_flight", "selectedHarness": "zcode",

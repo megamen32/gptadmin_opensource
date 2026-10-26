@@ -40,6 +40,17 @@ Receipt mapping, all durable and replay-free:
   committed with SQLite `FULL` synchronization before the outbound request,
   so a lost reply can never cause a second launch call.
 
+A lost or unknown receipt is recovered through the same operation, never
+around it. On every tick a `dispatching` row whose receipt never arrived
+(marker `harness='routed'` or no session id) repeats the identical
+project-launch POST with the same `operation_id`; the attempt log answers
+with the existing record — `accepted`, `admission_unknown`, `in_flight` or
+`human_hold` — without a second executor, and only a definite
+pre-admission refusal advances the route on the API side. The recovered
+harness is never lost: it is recorded as soon as any receipt names it, and
+the readback then proceeds by harness, session id and effective model. A
+recovery that fails again changes nothing and is retried next tick.
+
 While the receipt has not named a harness, the event row carries the marker
 `harness='routed'`; native `agent_info` readback must still provide the
 effective model before a session advances to running, and the event history
