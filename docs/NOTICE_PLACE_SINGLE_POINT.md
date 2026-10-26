@@ -174,25 +174,32 @@ admin-node-100. Ни одного локального stdio-процесса No
 * **Установленный CLI на MacBook-Pro-User.local** собран до этой правки, так
   что команда `notice-place` появится там только после обновления CLI; правка
   применялась тем же кодом.
-* **GPTAdmin-hub: дочерний ShellMCP-регистр `Notify`**
-  (`mcp:shell:admin-node-100:Notify`) поднимает локальный stdio-сервер.
-  Проверено по фактическому каталогу: инструменты этой точки **не входят** в
-  список, видимый агенту (поиск по каталогу для `noticeplace` не даёт ни
-  одного результата; `send_message` и `ask_human` отвечают только инструменты
-  AgentHerder и Touchpoint). Доступ к ней есть только по явному имени цели.
-  Живые webhook-маршруты (`agent-deliver-v1`, `notify-health-diagnosis`,
-  `notify-health-remediation`, `agent-wake-v1`, `qa23-forwarder-ready-20261023`)
-  идут через этот регистр, поэтому его перенос требует действий на пути
-  инцидентов. Блокер: процесс-родитель (`gptadmin-hub.service`) не имеет в
-  окружении `NOTIFY_MCP_TOKEN`, а ссылка `${NOTIFY_MCP_TOKEN}` в заголовке
-  разрешается только на момент запроса — без переменной в окружении точка не
-  пройдёт аутентификацию.
-  Подготовленный набор шагов (не выполнялся): добавить в unit
-  `gptadmin-hub.service` строку
-  `EnvironmentFile=/etc/notification-center.env` (существующее защищённое
-  хранилище, значение не копируется), перезапустить hub, затем
-  `mcp_manage` upsert регист `Notify` на
-  `https://notify.bezrabotnyi.com/mcp` с заголовком
-  `Authorization: Bearer ${NOTIFY_MCP_TOKEN}`. Canary: `tools/list` ребёнка
-  через hub (18 инструментов) плюс вызов read-only инструмента той же цели.
-  Решение о перезапуске hub (16 живых сессий) — за владельцем.
+* **GPTAdmin-hub: дочерний ShellMCP-регистр `Notify` — граница сужена 26.10.**
+  Регистр (`mcp:shell:admin-node-100:Notify`, stdio
+  `/usr/bin/python3 /opt/noticeplace/mcp/notify_mcp.py`) поднимает локальный
+  stdio-сервер. По фактическому каталогу его инструменты **не входят** в
+  список, видимый агенту (поиск по каталогу для `noticeplace` не даёт
+  результатов), но доступ по явному имени цели открывал полную поверхность:
+  живой `schema` этой цели возвращал 18 инструментов — `ask_human`, весь
+  `noticeplace_*`, `send_message`, `call`, `run_and_notify`,
+  `attach_pid`/`attach_query` и job-инструменты.
+  Трассировка границы (`/etc/gptadmin/webhooks.json`, root): все 5 живых
+  webhook-маршрутов — `kind: "shell"` (`agent_deliver.py`, `agent_wake.py`,
+  `notify-agent-job`) и идут мимо MCP-ребёнка напрямую в
+  notification_center; пример `kind: "mcp"` с этим таргетом в
+  `docs/WEBHOOKS.md` — только документация, живых таких маршрутов нет.
+  Реализовано минимальное решение штатным механизмом `tool_allowlist`
+  child-регистра (go-shellmcp фильтрует и `tools/list`, и `mcp_call`):
+  видимая поверхность цели сужена до read-only `noticeplace_instructions`;
+  `ask_human` и остальные инструменты отклоняются
+  (`is not allowed by tool_allowlist`); реестр не удалялся; unit/env/рестарты
+  hub не трогались — upsert закрывает только соединение ребёнка,
+  переподключение ленивое. Канонический HTTP-пойнт продолжает отдавать
+  полный набор, поэтому агенты теряют только дубль. Живые проверки после
+  изменения: `schema` цели → 1 инструмент; `mcp_call ask_human` → отказ;
+  `noticeplace_instructions` → отвечает; все 5 маршрутов на месте.
+  Владелец-скрипт с бэкапом и обратимым путём (`--rollback`):
+  `scripts/notify_mcp_allowlist.py`. Подготовленный параллельной проверкой
+  план полного перевода регистра на HTTP (EnvironmentFile с
+  `NOTIFY_MCP_TOKEN` + рестарт hub, 16 живых сессий — решение владельца)
+  остаётся опциональным будущим шагом и этим изменением не требуется.
