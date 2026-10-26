@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded GitHub Actions discovery and crash-safe native OpenCode dispatch."""
+"""Bounded GitHub Actions discovery and crash-safe policy-routed native dispatch."""
 from __future__ import annotations
 
 import argparse
@@ -24,8 +24,16 @@ FALLBACK = "/home/admin/ServersAdministartion"
 NATIVE_INDEX = Path.home() / ".codex/state_5.sqlite"
 # Use a cost-conscious initial route. Configured provider/model fallbacks,
 # including OmniRoute, are permitted; native readback records what actually ran.
-# The harness remains OpenCode and ambiguous dispatches are never replayed.
-HARNESS = "opencode"
+# The dispatch route is the operator's own Agent Herder launch policy: the
+# projectRoutes entry that contains the event cwd chooses the harness and the
+# per-harness model; a project without a route uses the policy's global
+# default target. The constants below are only the fall-back when the policy
+# file is absent, so a host without the policy keeps the historical route.
+# An existing but unreadable or unsupported policy document holds the
+# dispatch: operator intent is never routed around.
+LAUNCH_POLICY = (Path(os.environ.get("AGENT_HERDER_AUTOPILOT_STATE_DIR") or Path.home() / ".local/state/agent-herder/autopilot-live")
+                 / "automation-launch-policy.json")
+DEFAULT_HARNESS = "opencode"
 PROVIDER_MODEL = "zai-coding-plan/glm-5.3-flash"
 # 24h Herder dedup keeps a repeated dispatch from opening a second native
 # session for the same durable event identity.
@@ -502,12 +510,137 @@ def queue_notice(db, row, state, reason):
                (row["key"] + ":" + state, json.dumps(body, ensure_ascii=False)))
 
 
-def prompt(row):
+def _normalize_project_path(value):
+    """Mirror of Herder normalizeProjectPath: resolved segments, no escapes."""
+    if not isinstance(value, str):
+        return ""
+    absolute = value.startswith("/")
+    segments = []
+    for segment in value.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            segments.pop()
+            continue
+        segments.append(segment)
+    joined = "/".join(segments)
+    return f"/{joined}" if absolute else joined
+
+
+def _fold_project_key(value):
+    return _normalize_project_path(value).lower()
+
+
+def _better_candidate(current, candidate):
+    """Longer root wins; at equal length the smaller canonical root wins."""
+    if current is None:
+        return candidate
+    if len(candidate["root"]) != len(current["root"]):
+        return candidate if len(candidate["root"]) > len(current["root"]) else current
+    if candidate["root"] != current["root"]:
+        return candidate if candidate["root"] < current["root"] else current
+    return candidate if candidate["key"] < current["key"] else current
+
+
+def _model_matches_entry(model, entry):
+    rule = entry.strip().lower()
+    if not rule:
+        return False
+    candidate = model.strip().lower()
+    return candidate.startswith(rule[:-1]) if rule.endswith("*") else candidate == rule
+
+
+def _model_permitted_for_route(route, model):
+    """A denial always wins; an empty allow list means no restriction."""
+    if any(_model_matches_entry(model, entry) for entry in route.get("deniedModels") or []):
+        return False
+    allowed = route.get("allowedModels") or []
+    return not allowed or any(_model_matches_entry(model, entry) for entry in allowed)
+
+
+def _find_launch_route(routes, directory):
+    """Mirror of Herder findProjectModelRoute: exact, case, alias, containment."""
+    if not routes:
+        return None
+    entries = [{"route": route, "key": key, "root": _normalize_project_path(key)} for key, route in routes.items()]
+    key = _normalize_project_path(directory)
+    exact = next((entry for entry in entries if entry["root"] == key), None)
+    if exact:
+        return exact["route"]
+    folded = _fold_project_key(key)
+    by_case = None
+    for entry in entries:
+        if _fold_project_key(entry["root"]) == folded:
+            by_case = _better_candidate(by_case, entry)
+    if by_case:
+        return by_case["route"]
+    by_alias = None
+    for entry in entries:
+        if any(_fold_project_key(alias) == folded for alias in entry["route"].get("aliases") or []):
+            by_alias = _better_candidate(by_alias, entry)
+    if by_alias:
+        return by_alias["route"]
+    nested = None
+    for entry in entries:
+        if not entry["root"].startswith("/"):
+            continue
+        if key != entry["root"] and not key.startswith(entry["root"] + "/"):
+            continue
+        nested = _better_candidate(nested, entry)
+    return nested["route"] if nested else None
+
+
+def resolve_launch_route(policy, cwd):
+    """First choice of Herder resolveProjectLaunch/defaultTarget for one cwd.
+
+    Returns (harness, model) or None when the policy grants no permitted
+    harness. The route model wins over the global harness model; the
+    documented PROVIDER_MODEL applies only when the policy names neither.
+    A harness whose effective model the route denies is skipped, exactly
+    like a definite pre-admission refusal.
+    """
+    models = policy.get("models") or {}
+    route = _find_launch_route(policy.get("projectRoutes") or {}, cwd)
+    # A route with an empty harness list is unconfigured in Herder: the global
+    # default target applies, exactly like a project without a route.
+    if route and route.get("harnesses"):
+        for harness in route.get("harnesses") or []:
+            model = (route.get("models") or {}).get(harness) or models.get(harness) or PROVIDER_MODEL
+            if not _model_permitted_for_route(route, model):
+                continue
+            return harness, model
+        return None
+    allowed = policy.get("allowedHarnesses") or []
+    preferred = policy.get("preferredHarness")
+    harness = preferred if preferred in allowed else (allowed[0] if allowed else None)
+    if not harness:
+        return None
+    return harness, models.get(harness) or PROVIDER_MODEL
+
+
+def load_launch_policy(path=None):
+    """Herder's own durable launch policy document.
+
+    None means the file is absent (the host default route applies); a present
+    but unreadable or unsupported document raises, which holds the dispatch.
+    """
+    source = Path(path or LAUNCH_POLICY)
+    try:
+        raw = source.read_text()
+    except OSError:
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise ValueError("Unsupported launch policy document")
+    return value
+
+
+def prompt(row, harness, model):
     # All fields are normalized GitHub metadata; no workflow logs, commands or target supplied by events.
     return f"""Автоматический ремонт публичного CI. Пользователь разрешил исправить конкретный сбой.
 Репозиторий: {row['repo']}; default branch: {row['branch']}; проверенный HEAD: {row['head']}.
 GitHub Actions: {row['url']} (run {row['run']}, attempt {row['attempt']}).
-Ты запущен через OpenCode; исходный маршрут — {PROVIDER_MODEL}. Настроенные
+Исходный маршрут запуска — harness `{harness}`, модель `{model}`. Настроенные
 автоматические provider/model fallbacks, включая OmniRoute, разрешены; фактический
 маршрут сверяется по native readback. Дедупликация Herder `inputId`
 `{DEDUP_NAMESPACE}:<key>` действует 24 часа. Не повторяй принятую или UNKNOWN заявку.
@@ -585,32 +718,44 @@ def dispatch(db, cfg, call=mcp, api=gh, notifier=None):
         change(db, row, "suppressed_by_stop", "Остановка владельцем сохраняется для повторных запусков этого HEAD")
         return
     if not row["incident_id"]:
-        queue_notice(db, row, "failure", "Проверка активной ветки завершилась ошибкой; ремонт OpenCode ожидает запуска. Действие человека пока не требуется")
+        queue_notice(db, row, "failure", "Проверка активной ветки завершилась ошибкой; ремонт ожидает запуска. Действие человека пока не требуется")
         db.commit()
         (notifier or notices)(db, cfg)
         row = db.execute("SELECT * FROM events WHERE key=?", (row["key"],)).fetchone()
         if not row["incident_id"]:
             return  # Failure incident must exist before starting the repair.
+    try:
+        policy = load_launch_policy()
+    except (OSError, ValueError):
+        return  # An existing but unreadable/unsupported policy holds the dispatch.
+    if policy is None:
+        # No policy on this host: keep the documented historical default route.
+        harness, model = DEFAULT_HARNESS, PROVIDER_MODEL
+    else:
+        resolved = resolve_launch_route(policy, row["cwd"])
+        if resolved is None:
+            return  # No permitted harness for this project: durable hold, no dispatch.
+        harness, model = resolved
     # Commit BEFORE the network boundary. Any ambiguous response can only be reconciled, never resent.
     change(db, row, "dispatching")
-    db.execute("UPDATE events SET harness=? WHERE key=?", (HARNESS, row["key"]))
+    db.execute("UPDATE events SET harness=? WHERE key=?", (harness, row["key"]))
     db.commit()
     try:
-        result = call("deliver", {"harness": HARNESS, "name": row["name"], "cwd": row["cwd"],
-                                 "model": PROVIDER_MODEL, "message": prompt(row), "create": "if_missing",
+        result = call("deliver", {"harness": harness, "name": row["name"], "cwd": row["cwd"],
+                                 "model": model, "message": prompt(row, harness, model), "create": "if_missing",
                                  "activation": "always", "mode": "queue",
                                  "inputId": DEDUP_NAMESPACE + ":" + row["key"]})
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError("No affirmative delivery receipt")
-        # Keep the harness fixed, while provider/model routing may fall back.
+        # The route chooses the harness; provider/model routing may fall back.
         # The eventual native readback records the effective model.
         receipt_harness = str(result.get("harness") or "")
-        if receipt_harness and receipt_harness != HARNESS:
-            raise RuntimeError("Delivery harness is not the required OpenCode route")
+        if receipt_harness and receipt_harness != harness:
+            raise RuntimeError("Delivery harness is not the requested route")
         session_id = result.get("sessionId") or (result.get("session") or {}).get("id")
         if session_id:
             db.execute("UPDATE events SET session_id=? WHERE key=?", (session_id, row["key"]))
-        change(db, row, "accepted_unconfirmed", "Заявка OpenCode принята; запуск ещё не подтверждён")
+        change(db, row, "accepted_unconfirmed", f"Заявка {harness} принята; запуск ещё не подтверждён")
     except Exception:
         # Keep the exact deterministic identity. Do NOT retry deliver after a timeout/crash.
         change(db, row, "dispatching", "Ответ отправки неизвестен; требуется чтение native-сессии")
@@ -658,14 +803,18 @@ def session_matches(row, call):
             and item.get("cwd") == row["cwd"] and item.get("harness") == target_harness]
 
 
-def _opencode_match(item, session_id, cwd):
-    """OpenCode session: session id is the native id; transport is SSE."""
+def _native_readback_match(item, session_id, cwd, harness):
+    """Native session identity plus an effective model readback.
+
+    OpenCode reports the session id as the native id; ZCode and the other
+    non-codex harnesses expose the same supervisor surface (status, model,
+    messageCount). The effective model must be present so the actual route
+    is known before any state advance.
+    """
     if item.get("id") != session_id or item.get("cwd") != cwd:
         return False
-    if item.get("harness") != HARNESS:
+    if item.get("harness") != harness:
         return False
-    # Configured provider/model fallbacks are allowed. Require an effective
-    # native model readback so the actual route is known before state advance.
     return bool(str(item.get("model") or "").strip())
 
 
@@ -694,9 +843,9 @@ def reconcile(db, call=mcp):
                 raise ValueError("Ambiguous native session")
             item = info[0]
             meta = item.get("meta") or {}
-            if expected_harness == HARNESS:
-                if not _opencode_match(item, matches[0]["id"], row["cwd"]):
-                    raise ValueError("OpenCode session identity/effective-model readback missing")
+            if expected_harness != CODEX_HARNESS:
+                if not _native_readback_match(item, matches[0]["id"], row["cwd"], expected_harness):
+                    raise ValueError("Native session identity/effective-model readback missing")
             else:
                 if not _codex_match(item, matches[0]["id"], row["cwd"]):
                     raise ValueError("Native session identity/transport mismatch")
@@ -705,8 +854,8 @@ def reconcile(db, call=mcp):
             status = item.get("status")
             meta = item.get("meta") or {}
             native = meta.get("nativeSessionId") or item.get("id")
-            if expected_harness == HARNESS:
-                # OpenCode: session id is the native id; no separate transport field.
+            if expected_harness != CODEX_HARNESS:
+                # OpenCode/ZCode: session id is the native id; no separate transport field.
                 # A running turn is reported as status=running by the SSE event stream.
                 # A turn is complete only when status returns to idle AND the session
                 # shows at least one processed message; an idle session with
@@ -723,17 +872,17 @@ def reconcile(db, call=mcp):
                         change(db, row, "operator_stopped", "Остановка события сохранена; native-ход завершён", native)
                     continue
                 if status == "stopped":
-                    change(db, row, "stopped", "OpenCode-сессия остановлена; автоматического возобновления не будет", native)
+                    change(db, row, "stopped", f"{expected_harness}-сессия остановлена; автоматического возобновления не будет", native)
                 elif status == "running":
-                    change(db, row, "running", f"Фактический native-ход OpenCode подтверждён; effective model: {item.get('model')}", native)
+                    change(db, row, "running", f"Фактический native-ход {expected_harness} подтверждён; effective model: {item.get('model')}", native)
                 elif turn_completed and (row["state"] == "running" or row["native_id"]):
-                    change(db, row, "awaiting_ci", "OpenCode завершил ход; ожидается независимый последующий CI", native)
+                    change(db, row, "awaiting_ci", f"{expected_harness} завершил ход; ожидается независимый последующий CI", native)
                 elif status == "needs_input":
                     # Permission-pending turns keep the slot reserved (needs_human);
                     # a needs_input without permissionDetails only releases the slot.
                     change(db, row,
                            "needs_human" if item.get("needsPermission") or item.get("permissionDetails") else "human_wait",
-                           "OpenCode ожидает решения человека; автоматического ответа и возобновления не будет", native)
+                           f"{expected_harness} ожидает решения человека; автоматического ответа и возобновления не будет", native)
                 elif time.time() - row["updated"] > 180 and row["state"] != "running":
                     change(db, row, "needs_human", "Заявка не подтверждена активным native-ходом; проверьте Herder без повторной отправки")
             else:

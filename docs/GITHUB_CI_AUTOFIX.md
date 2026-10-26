@@ -1,4 +1,4 @@
-# GitHub CI → native OpenCode repair watcher
+# GitHub CI → policy-routed native repair watcher
 
 `scripts/github_ci_autofix.py` is a dependency-free oneshot. It finds previously
 unseen failed or timed-out Actions checks on the current default-branch HEAD of public,
@@ -10,12 +10,24 @@ private, obsolete-HEAD and disabled/deleted workflows are not dispatched.
 GraphQL alone is insufficient: scheduled/manual runs can be absent from the
 commit rollup. A bounded REST intake independently checks Actions runs.
 
-New diagnostic and auto-fix dispatches run through **OpenCode** with initial
-provider/model `zai-coding-plan/glm-5.3-flash`. Configured provider/model
-fallbacks, including OmniRoute, are allowed. Native `agent_info` readback must
-provide the effective model before a session advances to running; the event
-history records that model. Ambiguous/unknown delivery is reconciled without
-replay. The harness stays OpenCode; Codex is not a provider fallback.
+The launch route is the operator's own Agent Herder policy, not a watcher
+constant. The document is the one Agent Herder itself maintains
+(`~/.local/state/agent-herder/autopilot-live/automation-launch-policy.json`,
+honouring `AGENT_HERDER_AUTOPILOT_STATE_DIR`; no separate config or store).
+For every event the route resolves by cwd with the same containment rule
+Herder launches by: the `projectRoutes` entry that contains the directory
+chooses the ordered harnesses and the per-harness model; a project without a
+route uses the policy's global default target; a harness whose effective
+model the route denies is skipped like any definite pre-admission refusal.
+The documented fall-back `opencode` + `zai-coding-plan/glm-5.3-flash`
+applies only when the policy file is absent. A policy document that exists
+but is unreadable or unsupported holds the dispatch durably: operator intent
+is never routed around. Configured provider/model fallbacks, including
+OmniRoute, are allowed. Native `agent_info` readback must provide the
+effective model before a session advances to running; the event history
+records that model. Ambiguous/unknown delivery is reconciled without replay.
+OpenCode is not a requirement: whichever harness the project route names is
+dispatched and read back by the same native identity contract.
 
 Trusted operator configuration, mode `0600`, belongs at
 `~/.config/gptadmin/ci-autofix.json`:
@@ -91,8 +103,8 @@ must point to existing directories below `/home/admin`; unmapped repositories
 start in the canonical infrastructure checkout to discover their source owner.
 No event supplies commands, target settings or raw CI logs. The worker receives
 a fixed Russian prompt authorizing scoped CI repair, review, real tests and
-commit/push to the existing default branch. The prompt names the OpenCode
-harness, initial provider/model and 24h Herder `inputId` dedup. Configured
+commit/push to the existing default branch. The prompt names the routed
+harness, its model and 24h Herder `inputId` dedup. Configured
 provider/model fallback may change the effective route, which is confirmed by
 native readback. The worker must preserve foreign WIP and must not create
 clones/worktrees, disable gates, change secrets, upgrade runtimes or deploy
@@ -104,28 +116,29 @@ repository, run ID, attempt and HEAD. Dispatch intent is committed with SQLite
 `FULL` synchronization **before** the outbound request. A lost HTTP reply or
 process interruption therefore cannot cause a second `deliver` call. Herder
 receives a deterministic name (under 128 characters), `create=if_missing`,
-`activation=always`, `mode=queue`, an explicit OpenCode harness
-(`opencode`), initial provider/model `zai-coding-plan/glm-5.3-flash`,
-and a stable 24h `inputId` of `gptadmin-ci-autofix:<key>`. Provider/model
-fallback is permitted. A receipt that changes the harness is rejected; the
-effective model is taken from native readback.
+`activation=always`, `mode=queue`, the harness and model resolved from the
+launch policy for the event cwd, and a stable 24h `inputId` of
+`gptadmin-ci-autofix:<key>`. Provider/model fallback is permitted. A receipt
+that changes the harness is rejected; the effective model is taken from
+native readback.
 
 A receipt is `accepted_unconfirmed`, not proof of a running repair. The next
 readback uses a known session ID directly with `agent_info(harness, sessionId)`,
 without a preceding listing. After an unknown delivery reply, the watcher
 falls through to a folder-filtered, 100-session `list_agents` call using the
-event's recorded harness (default `opencode` for new dispatches; legacy Codex
-events keep the codex harness). Ambiguous or missing metadata never selects
-an ID or sends again. `agent_info` must confirm the same ID, CWD, the
+event's recorded harness (new dispatches record the routed harness; legacy
+Codex events keep the codex harness). Ambiguous or missing metadata never
+selects an ID or sends again. `agent_info` must confirm the same ID, CWD, the
 expected harness, and a non-empty effective model before persisting the ID
 or releasing a slot. The recorded harness is preserved on the event row so
 historical Codex receipts (legacy `harness=codex`,
 `meta.transport=codex-app-server`, `meta.nativeSessionId=id`) remain readable
-through the same codex validation path. New OpenCode dispatches are
-recognised by `harness=opencode` and their effective non-empty model readback.
+through the same codex validation path. Every non-codex dispatch (OpenCode,
+ZCode, and any harness a project route names) is recognised by its recorded
+harness and an effective non-empty model readback.
 
-Running proof for OpenCode is `status=running`. Completion proof requires
-`status=idle` **and** `messageCount >= 1` (the dispatch reservation has at
+Running proof for a non-codex harness is `status=running`. Completion proof
+requires `status=idle` **and** `messageCount >= 1` (the dispatch reservation has at
 least one processed turn); a first-poll false-idle while the session is still
 working must not advance the slot. Operator-stopped reservations stay
 `operator_stopping` until the slot releases through the same turn-completed
