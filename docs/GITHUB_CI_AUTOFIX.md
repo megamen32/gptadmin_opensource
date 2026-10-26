@@ -10,24 +10,41 @@ private, obsolete-HEAD and disabled/deleted workflows are not dispatched.
 GraphQL alone is insufficient: scheduled/manual runs can be absent from the
 commit rollup. A bounded REST intake independently checks Actions runs.
 
-The launch route is the operator's own Agent Herder policy, not a watcher
-constant. The document is the one Agent Herder itself maintains
-(`~/.local/state/agent-herder/autopilot-live/automation-launch-policy.json`,
-honouring `AGENT_HERDER_AUTOPILOT_STATE_DIR`; no separate config or store).
-For every event the route resolves by cwd with the same containment rule
-Herder launches by: the `projectRoutes` entry that contains the directory
-chooses the ordered harnesses and the per-harness model; a project without a
-route uses the policy's global default target; a harness whose effective
-model the route denies is skipped like any definite pre-admission refusal.
-The documented fall-back `opencode` + `zai-coding-plan/glm-5.3-flash`
-applies only when the policy file is absent. A policy document that exists
-but is unreadable or unsupported holds the dispatch durably: operator intent
-is never routed around. Configured provider/model fallbacks, including
-OmniRoute, are allowed. Native `agent_info` readback must provide the
-effective model before a session advances to running; the event history
-records that model. Ambiguous/unknown delivery is reconciled without replay.
-OpenCode is not a requirement: whichever harness the project route names is
-dispatched and read back by the same native identity contract.
+The launch route is not a watcher decision at all. Each dispatch is one
+`POST /api/automation/project-launch` to the same Herder web server, which
+owns the operator's launch policy and its durable attempt log: the API
+resolves the `projectRoutes` entry for the project, chooses the harness and
+the per-harness model, walks the ordered route only after a definite
+pre-admission failure, and never launches a second executor for an accepted,
+unknown or in-flight attempt. The watcher keeps no routing copy: it states
+the project identity (the canonical working directory), the work directory,
+the session name, the fixed Russian work order, `mode=queue` and a stable
+`operation_id` of `gptadmin-ci-autofix:<key>` — never a harness or model of
+its own. Configured provider/model fallbacks, including OmniRoute, remain a
+property of that route. OpenCode is not a requirement: whichever harness the
+route names is dispatched and read back by the same native identity contract.
+
+Receipt mapping, all durable and replay-free:
+
+* `outcome=accepted` → `accepted_unconfirmed`; the receipt's
+  `selectedHarness` is recorded on the event row and the `sessionId` is kept
+  for the direct readback.
+* `outcome=admission_unknown` / `in_flight` / `human_hold` → the row stays
+  `dispatching`: the attempt log owns the reservation, the readback
+  reconciles it, and a resend is forbidden.
+* `outcome=no_harness` (HTTP 409) and every other definitive refusal of the
+  routing itself → `needs_human` with the routing reason; a human decides
+  what is next, never a resend.
+* A transport failure (timeout, connection error) → the row stays
+  `dispatching` with the exact deterministic identity; dispatch intent is
+  committed with SQLite `FULL` synchronization before the outbound request,
+  so a lost reply can never cause a second launch call.
+
+While the receipt has not named a harness, the event row carries the marker
+`harness='routed'`; native `agent_info` readback must still provide the
+effective model before a session advances to running, and the event history
+records that model. Ambiguous or unknown metadata never selects an ID or
+sends again.
 
 Trusted operator configuration, mode `0600`, belongs at
 `~/.config/gptadmin/ci-autofix.json`:
@@ -103,35 +120,34 @@ must point to existing directories below `/home/admin`; unmapped repositories
 start in the canonical infrastructure checkout to discover their source owner.
 No event supplies commands, target settings or raw CI logs. The worker receives
 a fixed Russian prompt authorizing scoped CI repair, review, real tests and
-commit/push to the existing default branch. The prompt names the routed
-harness, its model and 24h Herder `inputId` dedup. Configured
-provider/model fallback may change the effective route, which is confirmed by
-native readback. The worker must preserve foreign WIP and must not create
-clones/worktrees, disable gates, change secrets, upgrade runtimes or deploy
-services. CI logs are explicitly untrusted data, never instructions.
+commit/push to the existing default branch. The prompt is route-neutral: it
+states that Agent Herder chooses the harness and model from the project
+routes and that the actual route is confirmed by native readback, alongside
+the 24h `operation_id` dedup. The worker must preserve foreign WIP and must
+not create clones/worktrees, disable gates, change secrets, upgrade runtimes
+or deploy services. CI logs are explicitly untrusted data, never instructions.
 
 The state directory defaults to `~/.local/state/gptadmin-ci-autofix`, mode `0700`,
 with durable SQLite records and a nonblocking flock. Event identity includes
 repository, run ID, attempt and HEAD. Dispatch intent is committed with SQLite
 `FULL` synchronization **before** the outbound request. A lost HTTP reply or
-process interruption therefore cannot cause a second `deliver` call. Herder
-receives a deterministic name (under 128 characters), `create=if_missing`,
-`activation=always`, `mode=queue`, the harness and model resolved from the
-launch policy for the event cwd, and a stable 24h `inputId` of
-`gptadmin-ci-autofix:<key>`. Provider/model fallback is permitted. A receipt
-that changes the harness is rejected; the effective model is taken from
-native readback.
+process interruption therefore cannot cause a second project-launch call; the
+API's own attempt log deduplicates the same `operation_id` per project for
+extra safety. While the receipt has not named a harness, the row carries the
+marker `harness='routed'`, which separates new-style rows from legacy Codex
+receipts (`harness` unset).
 
 A receipt is `accepted_unconfirmed`, not proof of a running repair. The next
 readback uses a known session ID directly with `agent_info(harness, sessionId)`,
-without a preceding listing. After an unknown delivery reply, the watcher
-falls through to a folder-filtered, 100-session `list_agents` call using the
-event's recorded harness (new dispatches record the routed harness; legacy
-Codex events keep the codex harness). Ambiguous or missing metadata never
-selects an ID or sends again. `agent_info` must confirm the same ID, CWD, the
-expected harness, and a non-empty effective model before persisting the ID
-or releasing a slot. The recorded harness is preserved on the event row so
-historical Codex receipts (legacy `harness=codex`,
+without a preceding listing. After an unknown reply, the watcher falls through
+to a folder-filtered, 100-session `list_agents` call using the event's
+recorded harness; a `routed` row names no harness yet, so no harness-filtered
+listing is possible and the readback asks `agent_info` for the known native
+ID across harnesses, adopting the one that answers. Ambiguous or missing
+metadata never selects an ID or sends again. `agent_info` must confirm the
+same ID, CWD, the harness, and a non-empty effective model before persisting
+the ID or releasing a slot. The recorded harness is preserved on the event
+row so historical Codex receipts (legacy `harness=codex`,
 `meta.transport=codex-app-server`, `meta.nativeSessionId=id`) remain readable
 through the same codex validation path. Every non-codex dispatch (OpenCode,
 ZCode, and any harness a project route names) is recognised by its recorded

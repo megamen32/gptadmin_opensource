@@ -22,9 +22,6 @@ class WatcherTests(unittest.TestCase):
         self.index_path = Path(self.temp.name) / "native-index.sqlite3"
         self.index_patch = patch.object(ci, "NATIVE_INDEX", self.index_path)
         self.index_patch.start()
-        # Hermetic policy: tests never read the host's live launch policy.
-        self.policy_patch = patch.object(ci, "LAUNCH_POLICY", self.index_path.parent / "absent-launch-policy.json")
-        self.policy_patch.start()
         self.db = ci.connect(Path(self.temp.name) / "state.sqlite3")
         run = {"databaseId": 10, "runAttempt": 1, "url": "https://github.com/megamen32/demo/actions/runs/10",
                "createdAt": "2026-10-08T10:00:00Z", "workflow": {"databaseId": 3}}
@@ -37,7 +34,6 @@ class WatcherTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.index_patch.stop()
-        self.policy_patch.stop()
         self.temp.cleanup()
 
     def state(self):
@@ -64,7 +60,7 @@ class WatcherTests(unittest.TestCase):
         # lastActivity later than createdAt. A permission-pending turn is
         # distinguished by needsPermission + permissionDetails.
         session = {"id": "native-id", "harness": "opencode", "title": self.item["name"], "cwd": ci.FALLBACK,
-                   "status": status, "model": ci.PROVIDER_MODEL,
+                   "status": status, "model": "zai-coding-plan/glm-5.3-flash",
                    "messageCount": 1 if completed else 0,
                    "lastActivity": "2026-10-09T00:00:05Z" if completed else "2026-10-09T00:00:00Z",
                    "needsPermission": bool(permission),
@@ -82,28 +78,28 @@ class WatcherTests(unittest.TestCase):
 
     def test_intent_is_durable_before_dispatch_and_timeout_never_resends(self):
         calls = []
-        def lost(name, args):
+        def lost(url, payload):
             other = ci.connect(Path(self.temp.name) / "state.sqlite3")
             self.assertEqual(other.execute("SELECT state FROM events").fetchone()[0], "dispatching")
             other.close()
-            calls.append(args)
+            calls.append(payload)
             raise TimeoutError()
         ci.dispatch(self.db, {}, lost, self.api)
         ci.dispatch(self.db, {}, lost, self.api)
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.state()["state"], "dispatching")
         self.assertEqual(calls[0]["name"], self.item["name"])
-        # The new routing must always carry the explicit OpenCode harness,
-        # the exact provider/model and the 24h dedup inputId; a missing
-        # or different value is the silent downgrade we are guarding against.
-        self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], "zai-coding-plan/glm-5.3-flash")
-        self.assertEqual(calls[0]["inputId"], "gptadmin-ci-autofix:" + self.item["key"])
-        self.assertEqual(calls[0]["create"], "if_missing")
-        self.assertEqual(calls[0]["activation"], "always")
+        # The watcher states the project identity, the work order and the
+        # stable operation id; it never names a harness or model itself.
+        self.assertEqual(calls[0]["project"], self.item["cwd"])
+        self.assertEqual(calls[0]["cwd"], self.item["cwd"])
+        self.assertEqual(calls[0]["operation_id"], "gptadmin-ci-autofix:" + self.item["key"])
+        self.assertEqual(calls[0]["mode"], "queue")
+        self.assertNotIn("harness", calls[0])
+        self.assertNotIn("model", calls[0])
 
     def test_ack_is_not_running_native_proof_is_required(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         self.assertEqual(self.state()["state"], "accepted_unconfirmed")
         # A freshly-idle session (just created, turn not started) must not
         # advance the slot. The dispatch ack alone is not running proof.
@@ -121,7 +117,7 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.state()["state"], "awaiting_ci")
 
     def test_known_id_never_calls_slow_listing_before_direct_info(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         calls = []
         def call(name, args):
             calls.append(name)
@@ -197,7 +193,7 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.state()["state"], "running")
 
     def test_manual_stop_is_terminal_and_is_not_overridden(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         ci.reconcile(self.db, self.readback(self.native("stopped")))
         self.assertEqual(self.state()["state"], "stopped")
         calls = []
@@ -309,7 +305,7 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT sent FROM notices").fetchone()[0], 1)
 
     def test_receipt_session_id_survives_changed_title(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         item = self.native("running")
         item["title"] = "automatic changed title"
         def call(name, args):
@@ -321,7 +317,7 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.state()["state"], "running")
 
     def test_human_wait_releases_slot_only_without_native_active_turn(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         # OpenCode reports a permission-pending turn via needsPermission/details;
         # that is the active-turn signal which must keep the slot reserved.
         ci.reconcile(self.db, self.readback(self.native("needs_input", permission="perm-1")))
@@ -347,7 +343,7 @@ class WatcherTests(unittest.TestCase):
         ci.dispatch(self.db, {}, lambda *_: self.fail("terminal stop"), self.api)
 
     def test_native_completion_before_first_poll_releases_slot(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         # Herder's agent_info can lag and report idle before we ever observed
         # running. The reservation must hold until a running turn was actually
         # confirmed; the second reconcile with a real running observation is
@@ -397,7 +393,7 @@ class WatcherTests(unittest.TestCase):
         ci.dispatch(self.db, {}, lambda *_: self.fail("unfinished workflow"), api)
         self.assertEqual(self.state()["state"], "queued")
         calls = []
-        ci.dispatch(self.db, {}, lambda *args: calls.append(args) or {"ok": True}, self.api)
+        ci.dispatch(self.db, {}, lambda url, payload: calls.append(payload) or (200, {"outcome": "accepted", "selectedHarness": "opencode", "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         self.assertEqual(len(calls), 1)
 
     def test_current_head_release_tag_is_actionable_but_old_tag_is_not(self):
@@ -744,118 +740,75 @@ class WatcherTests(unittest.TestCase):
             thread.join()
             server.server_close()
 
-    def policy_file(self, document):
-        path = self.index_path.parent / "launch-policy.json"
-        path.write_text(json.dumps(document))
-        return str(path)
-
-    def test_opencode_dispatch_records_harness_and_initial_model(self):
+    def test_accepted_receipt_records_route_and_session(self):
         calls = []
-        def call(name, args):
-            calls.append(args)
-            return {"ok": True, "harness": ci.DEFAULT_HARNESS, "model": ci.PROVIDER_MODEL, "sessionId": "native-id"}
-        ci.dispatch(self.db, {}, call, self.api)
-        self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], "zai-coding-plan/glm-5.3-flash")
-        self.assertEqual(calls[0]["inputId"], "gptadmin-ci-autofix:" + self.item["key"])
+        def launch(url, payload):
+            calls.append((url, payload))
+            return 200, {"outcome": "accepted", "selectedHarness": "opencode",
+                         "model": "omniroute/minimax-combo-m3.1", "sessionId": "native-id"}
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertTrue(calls[0][0].endswith("/api/automation/project-launch"))
         self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "opencode")
+        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
+        self.assertEqual(self.state()["session_id"], "native-id")
+        # The routed model is later confirmed by the native readback, which
+        # must accept the configured fallback and record it as effective.
+        effective = self.native("running")
+        effective["model"] = "omniroute/minimax-combo-m3.1"
+        ci.reconcile(self.db, self.readback(effective))
+        self.assertEqual(self.state()["state"], "running")
+        self.assertIn("omniroute/minimax-combo-m3.1", self.state()["reason"])
 
-    def test_missing_policy_keeps_documented_default_route(self):
-        # No launch policy on the host: the historical cost-conscious route
-        # applies, exactly like before project routing existed.
+    def test_unknown_admission_holds_without_resend(self):
+        # admission_unknown and in_flight are durable reservations, not
+        # refusals: the watcher keeps the slot, records the selected harness
+        # for the readback and never sends again.
         calls = []
-        ci.dispatch(self.db, {}, lambda n, a: calls.append(a) or {"ok": True, "sessionId": "x"}, self.api)
-        self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], ci.PROVIDER_MODEL)
+        def launch(url, payload):
+            calls.append(payload)
+            return 200, {"outcome": "admission_unknown", "selectedHarness": "opencode",
+                         "routingReason": "Запуск не подтверждён."}
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(self.state()["state"], "dispatching")
+        self.assertIsNone(self.state()["session_id"])
+        self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "opencode")
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(len(calls), 1)  # Only the queued row is dispatched; dispatching is never resent.
 
-    def test_policy_route_chooses_harness_and_model_for_project(self):
-        path = self.policy_file({"version": 1,
-            "allowedHarnesses": ["codex", "zcode", "opencode"], "preferredHarness": "codex",
-            "models": {"codex": "gpt-6.1-sol"},
-            "projectRoutes": {ci.FALLBACK: {"harnesses": ["zcode", "opencode"], "models": {"zcode": "account:zai/GLM-5.3"}}}})
-        calls = []
-        def call(name, args):
-            calls.append(args)
-            return {"ok": True, "harness": args["harness"], "model": args["model"], "sessionId": "native-id"}
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, call, self.api)
-        self.assertEqual(calls[0]["harness"], "zcode")
-        self.assertEqual(calls[0]["model"], "account:zai/GLM-5.3")
+    def test_in_flight_receipt_keeps_reservation_and_names_harness(self):
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "in_flight", "selectedHarness": "zcode",
+                                                   "model": "account:zai/GLM-5.3"}), self.api)
+        self.assertEqual(self.state()["state"], "dispatching")
         self.assertEqual(self.db.execute("SELECT harness FROM events").fetchone()[0], "zcode")
-        self.assertIn("`zcode`", calls[0]["message"])
 
-    def test_policy_route_subdirectory_inherits_containing_route(self):
-        nested = ci.FALLBACK + "/automation/noticeplace-console"
-        self.db.execute("UPDATE events SET cwd=? WHERE key=?", (nested, self.item["key"])); self.db.commit()
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["opencode"],
-            "models": {"opencode": "global/model"},
-            "projectRoutes": {ci.FALLBACK: {"harnesses": ["opencode"], "models": {"opencode": "route/model"}}}})
+    def test_no_harness_refusal_is_durable_needs_human(self):
+        # A 409 no_harness receipt is the routing's definitive answer: the
+        # event becomes needs_human and no resend can be provoked.
         calls = []
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, lambda n, a: calls.append(a) or {"ok": True, "sessionId": "x"}, self.api)
-        self.assertEqual(calls[0]["model"], "route/model")
-        self.assertEqual(calls[0]["cwd"], nested)
+        def launch(url, payload):
+            calls.append(payload)
+            return 409, {"outcome": "no_harness", "routingReason": "Для проекта нет маршрута.",
+                         "routingReasonCode": "no_route"}
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(self.state()["state"], "needs_human")
+        self.assertIn("нет маршрута", self.state()["reason"])
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(len(calls), 1)  # needs_human rows are never re-dispatched.
 
-    def test_policy_denied_model_skips_to_next_harness_or_holds(self):
-        # The route's only harness runs on a model the route denies: the deny
-        # wins and the dispatch holds durably without a delivery attempt.
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["opencode"],
-            "models": {"opencode": "omniroute/minimax-combo-m3.1"},
-            "projectRoutes": {ci.FALLBACK: {"harnesses": ["opencode"], "deniedModels": ["omniroute/minimax-*"]}}})
-        def fail(name, args):
-            self.fail("A fully denied route must not dispatch")
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, fail, self.api)
-        self.assertEqual(self.state()["state"], "queued")
-        # With a second harness whose model is permitted, the route moves on.
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["opencode", "zcode"],
-            "models": {"opencode": "omniroute/minimax-combo-m3.1", "zcode": "account:zai/GLM-5.3"},
-            "projectRoutes": {ci.FALLBACK: {"harnesses": ["opencode", "zcode"], "deniedModels": ["omniroute/minimax-*"]}}})
+    def test_transport_failure_stays_dispatching_without_resend(self):
         calls = []
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, lambda n, a: calls.append(a) or {"ok": True, "sessionId": "x"}, self.api)
-        self.assertEqual(calls[0]["harness"], "zcode")
-
-    def test_routeless_project_uses_policy_global_default(self):
-        # The preferred global harness applies when no route contains the cwd;
-        # the route's model choice still wins over the watcher constant.
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["zcode", "opencode"],
-            "preferredHarness": "zcode", "models": {"zcode": "account:zai/GLM-5.3"}})
-        calls = []
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, lambda n, a: calls.append(a) or {"ok": True, "sessionId": "x"}, self.api)
-        self.assertEqual(calls[0]["harness"], "zcode")
-        self.assertEqual(calls[0]["model"], "account:zai/GLM-5.3")
-
-    def test_route_with_empty_harness_list_falls_to_global_default(self):
-        # Herder treats a route with no harnesses as unconfigured: the global
-        # default target applies instead of a hold.
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["opencode"],
-            "preferredHarness": "opencode", "models": {"opencode": "global/model"},
-            "projectRoutes": {ci.FALLBACK: {"harnesses": []}}})
-        calls = []
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, lambda n, a: calls.append(a) or {"ok": True, "sessionId": "x"}, self.api)
-        self.assertEqual(calls[0]["harness"], "opencode")
-        self.assertEqual(calls[0]["model"], "global/model")
-
-    def test_invalid_policy_document_holds_dispatch(self):
-        # An operator-edited but unsupported document is never routed around.
-        path = self.index_path.parent / "broken-launch-policy.json"
-        path.write_text('{"version": 99}')
-        def fail(name, args):
-            self.fail("An invalid policy must hold the dispatch")
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, fail, self.api)
-        self.assertEqual(self.state()["state"], "queued")
+        def launch(url, payload):
+            calls.append(payload)
+            raise TimeoutError()
+        ci.dispatch(self.db, {}, launch, self.api)
+        self.assertEqual(self.state()["state"], "dispatching")
+        self.assertEqual(len(calls), 1)
 
     def test_noncodex_readback_accepts_routed_harness(self):
         # A route that dispatches a non-codex harness is reconciled by the
         # same native identity plus effective-model readback contract.
-        path = self.policy_file({"version": 1, "allowedHarnesses": ["zcode"],
-            "preferredHarness": "zcode", "models": {"zcode": "account:zai/GLM-5.3"}})
-        with patch.object(ci, "LAUNCH_POLICY", path):
-            ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "zcode",
+                                                   "model": "account:zai/GLM-5.3", "sessionId": "native-id"}), self.api)
         session = self.native("running")
         session["harness"] = "zcode"
         session["model"] = "account:zai/GLM-5.3"
@@ -866,37 +819,9 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.state()["state"], "running")
         self.assertIn("account:zai/GLM-5.3", self.state()["reason"])
 
-    def test_opencode_dispatch_fails_closed_on_harness_downgrade(self):
-        def call(name, args):
-            return {"ok": True, "harness": "codex", "model": ci.PROVIDER_MODEL, "sessionId": "native-id"}
-        ci.dispatch(self.db, {}, call, self.api)
-        # The harness is fixed; provider/model fallback is a separate choice.
-        self.assertEqual(self.state()["state"], "dispatching")
-        self.assertIsNone(self.state()["session_id"])
-
-    def test_opencode_dispatch_allows_omniroute_model_fallback(self):
-        def call(name, args):
-            return {"ok": True, "harness": "opencode", "model": "omniroute/free-stack", "sessionId": "native-id"}
-        ci.dispatch(self.db, {}, call, self.api)
-        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
-        self.assertEqual(self.state()["session_id"], "native-id")
-
-    def test_opencode_readback_accepts_and_records_effective_fallback_model(self):
-        # The Herder may omit harness/model on a successful delivery; absence
-        # is not a fail-closed signal. The authoritative readback (agent_info)
-        # is what confirms the explicit OpenCode route.
-        def call(name, args):
-            return {"ok": True, "sessionId": "native-id"}
-        ci.dispatch(self.db, {}, call, self.api)
-        self.assertEqual(self.state()["state"], "accepted_unconfirmed")
-        effective = self.native("running")
-        effective["model"] = "omniroute/free-stack"
-        ci.reconcile(self.db, self.readback(effective))
-        self.assertEqual(self.state()["state"], "running")
-        self.assertIn("omniroute/free-stack", self.state()["reason"])
-
     def test_opencode_completion_requires_running_then_message_count(self):
-        ci.dispatch(self.db, {}, lambda *_: {"ok": True, "sessionId": "native-id"}, self.api)
+        ci.dispatch(self.db, {}, lambda *_: (200, {"outcome": "accepted", "selectedHarness": "opencode",
+                                                   "model": "zai-coding-plan/glm-5.3-flash", "sessionId": "native-id"}), self.api)
         # First observation is a false idle (real session is still working);
         # the reservation must hold and not advance.
         ci.reconcile(self.db, self.readback(self.native("idle", completed=True)))
@@ -917,11 +842,11 @@ class WatcherTests(unittest.TestCase):
         self.db.execute("UPDATE events SET session_id='codex-native-id' WHERE key=?", (self.item["key"],))
         self.db.commit()
         # Pre-migration rows recorded no harness; reconcile must look them up
-        # through the codex harness, never the new opencode default. The
-        # codex running proof is activeTurnId + transport + nativeSessionId.
+        # through the codex harness, never the routed one. The codex running
+        # proof is activeTurnId + transport + nativeSessionId.
         def call(name, args):
             if name == "list_agents":
-                self.fail("Legacy codex receipts must use the codex harness, never opencode")
+                self.fail("Legacy codex receipts must use the codex harness, never the routed one")
             self.assertEqual(args["harness"], "codex")
             self.assertEqual(args["sessionId"], "codex-native-id")
             return {"session": self.native_codex("running", activeTurnId="turn-1")}
