@@ -62,17 +62,17 @@ class _Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.calls.append(request)
         if request["method"] == "tools/list":
-            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{"name": name} for name in ("ui", "discover", "schema", "execute", "job", "expand")]}})
+            self._send(200, {"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{"name": name} for name in ("discover", "schema", "search", "exec", "ro", "job", "expand")]}})
         else:
             name = request["params"]["name"]
             if name == "discover":
                 payload = {"servers": [{"server_id": "hub"}], "instructions": "Read-only local fixture.", "context": "fixture-context"}
             elif name == "schema":
-                payload = {"response": {"tools": [{"name": "demo", "inputSchema": {"type": "object"}}]}, "call_ref": "fixture-ref"}
+                payload = {"response": {"tools": [{"name": "demo", "inputSchema": {"type": "object"}}]}, }
             else:
-                payload = {"status": "ok", "capabilities": ["read_only_demo"]}
+                payload = {"result": {"status": "ok", "capabilities": ["read_only_demo"]}, "status": "completed"}
             result = {"structuredContent": payload}
-            if name == "execute" and self.failure:
+            if name == "exec" and self.failure:
                 payload.update({"status": "failed", "executed": False, "error": {"code": self.failure, "message": "test-bearer private-provider-text"}})
                 if self.failure == "tool_error":
                     result["isError"] = True
@@ -104,9 +104,9 @@ def test_live_runner_checks_public_and_authenticated_surfaces_without_echoing_be
     assert summary["stages"] == ["health", "version", "connection", "oauth", "openapi", "mcp"]
     assert "test-bearer" not in json.dumps(summary)
     calls = [call["params"] for call in _Handler.calls if call["method"] == "tools/call"]
-    assert [call["name"] for call in calls] == ["discover", "schema", "execute"]
+    assert [call["name"] for call in calls] == ["discover", "schema", "exec"]
     assert calls[1]["arguments"] == {"target": "hub", "tool": "demo", "detail": "full", "context": "fixture-context"}
-    assert calls[2]["arguments"] == {"ref": "fixture-ref", "args": {}}
+    assert calls[2]["arguments"]["context"] == "fixture-context"
 
 
 @pytest.mark.parametrize("failure", ["instructions_required", "tool_error"])
@@ -205,7 +205,7 @@ def test_live_runner_checks_actual_go_hub_process(disposable_real_hub: str) -> N
 
     summary = live_acceptance.run_acceptance(disposable_real_hub, "ctl", required_tools={"demo"})
     assert summary["status"] == "passed"
-    assert summary["tool_count"] == 6
+    assert summary["tool_count"] == 7
 
 
 def test_admin_password_login_persists_across_redirect_refresh_and_api(disposable_real_hub: str) -> None:

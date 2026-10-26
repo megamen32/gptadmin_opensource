@@ -125,7 +125,7 @@ def run_acceptance(base_url: str, bearer: str, required_tools: set[str] | None =
     if not isinstance(tools, list):
         raise LiveAcceptanceError("/mcp tools/list: tools array is missing")
     tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-    if not {"ui", "discover", "schema", "execute", "job", "expand"} <= tool_names:
+    if not {"discover", "schema", "search", "exec", "ro", "job", "expand"} <= tool_names:
         raise LiveAcceptanceError("/mcp tools/list: core catalog is incomplete")
 
     discovery = _call_tool(base_url, bearer, "discover", {})
@@ -134,23 +134,21 @@ def run_acceptance(base_url: str, bearer: str, required_tools: set[str] | None =
         raise LiveAcceptanceError("/mcp discover: instruction text/context is missing")
     if not any(isinstance(server, dict) and server.get("server_id") == "hub" for server in discovery.get("servers", [])):
         raise LiveAcceptanceError("/mcp discover: hub target is missing")
-    demo_ref = None
     for name in sorted({"demo"} | ((required_tools or set()) - tool_names)):
         selected = _call_tool(base_url, bearer, "schema", {
             "target": "hub", "tool": name, "detail": "full", "context": context,
         })
         definitions = selected.get("response", {}).get("tools", [])
         if (len(definitions) != 1 or definitions[0].get("name") != name
-                or not isinstance(definitions[0].get("inputSchema"), dict)
-                or not isinstance(selected.get("call_ref"), str) or not selected["call_ref"]):
-            raise LiveAcceptanceError("/mcp schema: exact authorized tool schema/reference is missing")
-        if name == "demo":
-            demo_ref = selected["call_ref"]
+                or not isinstance(definitions[0].get('inputSchema'), dict)):
+            raise LiveAcceptanceError("/mcp schema: exact authorized tool schema is missing")
 
-    called = _call_tool(base_url, bearer, "execute", {"ref": demo_ref, "args": {}})
-    demo = called.get("response", called)
+    called = _call_tool(base_url, bearer, "exec", {
+        "code": 'return await mcp.call("hub", "demo", {});', "context": context,
+    })
+    demo = called.get("result", called)
     if not isinstance(demo, dict) or demo.get("status") != "ok" or "read_only_demo" not in demo.get("capabilities", []):
-        raise LiveAcceptanceError("/mcp execute: safe demo result is missing")
+        raise LiveAcceptanceError("/mcp exec: safe demo result is missing")
     stages.append("mcp")
     return {"status": "passed", "stages": stages, "tool_count": len(tools)}
 

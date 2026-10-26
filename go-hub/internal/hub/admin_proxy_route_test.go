@@ -50,7 +50,7 @@ func TestProxyRouteProcObserverRequiresEstablishedExactPeerAndPIDInode(t *testin
 		t.Fatalf("exact established socket proof = %v, %v; want true", ok, err)
 	}
 	// Keep the same inode and PID but change the peer: it must not prove route.
-	wrongPeer := strings.Replace(tcp, remote, procTCPHex("203.0.113.10", 3128), 1)
+	wrongPeer := strings.Replace(tcp, remote, procTCPHex("198.51.100.7", 3128), 1)
 	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(wrongPeer), 0o600); err != nil {
 		t.Fatal(err)
 	}

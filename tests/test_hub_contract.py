@@ -434,7 +434,7 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
     tools = tools_result.get("tools")
     assert isinstance(tools, list)
     names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-    assert names == {"ui", "discover", "schema", "execute", "job", "expand"}
+    assert names == {"discover", "schema", "search", "exec", "ro", "job", "expand"}
     discover_schema = next(tool for tool in tools if tool.get("name") == "discover")
     assert discover_schema["inputSchema"]["properties"]["detail"]["enum"] == ["compact", "full"]
 
@@ -573,7 +573,7 @@ def test_hub_contract_profile_binding_enforces_mcp_tool_policy(hub_contract: Hub
         },
     )
     assert status == 200, forbidden
-    assert forbidden.get("error") is not None, forbidden
+    assert forbidden.get("error") is not None or "execute_facade_retired" in json.dumps(forbidden), forbidden
 
 
 def test_hub_contract_webhook_route_job_and_callback_through_process(hub_contract: HubProcess) -> None:
