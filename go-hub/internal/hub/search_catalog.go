@@ -173,6 +173,7 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		childCoverage[key] = intFromAny(childCoverage[key]) + intFromAny(rootCoverage[key])
 	}
 	childCoverage["missing"] = append(stringSlice(childCoverage["missing"]), stringSlice(rootCoverage["missing"])...)
+	childCoverage["unreachable"] = append(stringSlice(childCoverage["unreachable"]), stringSlice(rootCoverage["unreachable"])...)
 	if !truthy(childCoverage["complete"]) {
 		childCoverage["status"] = "incomplete"
 	}

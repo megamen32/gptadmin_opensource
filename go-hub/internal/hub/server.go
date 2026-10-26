@@ -124,6 +124,7 @@ type Config struct {
 	FailoverStateFile          string
 	FailoverReclaimCommandFile string
 	InstructionContextRequired bool
+	InstructionSessionReceipts bool
 	StartupInstructionsFile    string
 	StartupInstructions        string
 	InstructionSetsStateFile   string
@@ -207,6 +208,7 @@ func FromEnv() Config {
 		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
 		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
 		InstructionContextRequired: truthyString(env("GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED", "1")),
+		InstructionSessionReceipts: truthyString(env("GPTADMIN_INSTRUCTION_SESSION_RECEIPTS", "1")),
 		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
 		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
 		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
@@ -556,6 +558,9 @@ type idempotencyEntry struct {
 }
 
 type Server struct {
+	instructionReceiptMu sync.Mutex
+	instructionReceipts  map[string]instructionReceipt
+
 	operationMu sync.Mutex
 	operations  map[string]tokenOperation
 
@@ -6055,8 +6060,8 @@ func hubTools() []map[string]any {
 			"outputSchema": resourceReceiptOutputSchema(),
 			"annotations":  map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 		},
-		{"name": "pending", "description": "List pending approvals", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
-		{"name": "approve_pending_server", "description": "Approve one ShellMCP device awaiting enrollment", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
+		{"name": "pending", "description": "List devices waiting for approval (server_id, name, OS, fingerprint). Approve one with approve_pending_server.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "approve_pending_server", "description": "Approve a device waiting for enrollment; server_id is the exact shell:<name> from pending. Only on the user's explicit request.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
 		{"name": "fleetExec", "description": "Run one shell command across multiple ShellMCP targets; returns one parent task. Use approval_ids for per-target approvals.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "approval_ids": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"cmd"}, "additionalProperties": false}},
 		{"name": "status", "description": "Return Hub status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "settings_schema", "description": "Describe the unified typed Hub settings registry", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
@@ -6075,7 +6080,7 @@ func hubTools() []map[string]any {
 		{
 			"name":         "ro",
 			"title":        "Read only code",
-			"description":  "Run bounded read-only JavaScript. Shell commands, writes and persistent indexing are refused; the read-only ceiling still applies to every nested call.",
+			"description":  "Read-only JavaScript sandbox. Write an async code body that calls await mcp.call(target, tool, args) for reads such as list_directory, search, status or pending. Shell commands, writes and indexing are refused. Filter inside the code and return only what you need; output is size-limited. The read-only ceiling applies to every nested call.",
 			"inputSchema":  readonlyExecInputSchema(),
 			"outputSchema": codeModeOutputSchema(),
 			"annotations":  map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
@@ -6083,7 +6088,7 @@ func hubTools() []map[string]any {
 		{
 			"name":         "exec",
 			"title":        "Think in Code",
-			"description":  "Run short isolated JavaScript using search and await mcp.call(target, tool, args). Intermediate data stays in the sandbox; return only the chosen value. No filesystem, environment, process, network or timer access.",
+			"description":  "JavaScript sandbox for any tool call, including writes and shell: await mcp.call(target, tool, args), for example mcp.call('shell:<host>', 'shell_exec', {cmd}). Do loops, filtering and joins inside the code and return only the final value; that costs far fewer tokens than many separate calls. Find tools with search and exact arguments with schema. No filesystem, environment, network or timer access.",
 			"inputSchema":  codeModeInputSchema(),
 			"outputSchema": codeModeOutputSchema(),
 			"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
@@ -6133,7 +6138,7 @@ func controlTools(target string) []map[string]any {
 }
 
 func searchToolDefinition() map[string]any {
-	return map[string]any{"name": "search", "title": "Search MCP tools", "description": "Search caller-visible MCP tool names, descriptions, schemas and control settings; this searches the tool catalog. When a project path is known, use local rg for file or content search; use GrepMesh search or find_paths for unknown locations or cross-host search, then read_text for the exact result. Returns matching schemas and short JavaScript call hints; remote cold schemas are reported as incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
+	return map[string]any{"name": "search", "title": "Search MCP tools", "description": "Search caller-visible MCP tool names, descriptions, schemas and control settings; this searches the tool catalog. When a project path is known, use local rg for file or content search; use GrepMesh search or find_paths for unknown locations or cross-host search, then read_text for the exact result. Returns matching schemas and short JavaScript call hints. Covers the hub and the MCP servers nested on every online host. Nested catalogs load in the background: if coverage.status is incomplete, repeat the search in a few seconds. Hosts that are offline are listed in coverage.unreachable and do not make the result incomplete.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "target": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "required": []string{"query"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}}
 }
 
 func fileTools() []map[string]any {
@@ -7303,7 +7308,7 @@ func (s *Server) renderAdminLogin(w http.ResponseWriter, r *http.Request, errMsg
 </script>`
 		}
 	}
-page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
+	page := `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GPTAdmin Login</title><style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#1d2b64 0,#090d18 36%,#05070c 100%);color:#e5eefc;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(460px,calc(100vw - 32px));padding:30px;border:1px solid rgba(148,163,184,.24);border-radius:26px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.42);backdrop-filter:blur(16px)}h1{margin:0 0 8px;font-size:28px}.muted{margin:0 0 22px;color:#94a3b8;line-height:1.45}.hint{margin:0 0 18px;padding:12px 14px;border-radius:16px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);color:#cbd5e1;line-height:1.45}.hint code{color:#fff}.err{margin:0 0 14px;padding:10px 12px;border-radius:14px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#fecaca}label{display:block;margin-bottom:8px;color:#cbd5e1;font-size:14px}input,button{width:100%;padding:14px 15px;border-radius:16px;font-size:16px}input{border:1px solid #334155;background:#0b1220;color:#fff;outline:none}input:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16)}button{margin-top:14px;border:0;background:linear-gradient(135deg,#7c3aed,#06b6d4);color:white;font-weight:800;cursor:pointer}.foot{margin-top:16px;color:#64748b;font-size:12px;text-align:center}</style></head><body><main class="card"><h1>GPTAdmin</h1><p class="muted">Введите пароль администратора вашей установки. Если GPTAdmin устанавливали не вы, запросите пароль у администратора. При стандартной установке Linux/macOS пароль хранится в защищённом файле настроек, а Windows-установщик показывает его в конце установки. Пароля по умолчанию нет.</p><div class="hint"><a href="https://became.bezrabotnyi.com/#/docs/CONFIGURATION" target="_blank" rel="noopener">Где найти пароль и как задать его в настройках</a></div>` + errHTML + `<form id="login-form" method="post" action="/admin/login"><input type="hidden" name="next" value="` + html.EscapeString(next) + `"><label for="password">Пароль администратора</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required>` + mfaHTML + `<button type="submit">Войти</button></form><div class="foot">session cookie · 12h</div></main></body></html>`
 	_, _ = io.WriteString(w, page)
 }
@@ -9212,12 +9217,14 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.InstructionContextRequired {
 			discovery := mapValue(result)
 			discovery["instructions"] = s.startupInstructionsTextForRequest(r)
+			s.noteInstructionsDelivered(r)
 			discovery["cacheScope"] = "private"
 		}
 	case "initialize":
 		// Legacy compatibility shim; MCP 2026-07-28 itself is stateless.
 		protocol := connectionProtocol(firstString(params, "protocolVersion"))
 		w.Header().Set("MCP-Protocol-Version", protocol)
+		s.noteInstructionsDelivered(r)
 		result = map[string]any{"protocolVersion": protocol, "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-go-hub", "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusNoContent)
@@ -10399,7 +10406,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "discover",
 			"title":           "Discover",
-			"description":     "Read profile instructions and targets. query/status filter; context avoids repeated instructions.",
+			"description":     "List online hosts and MCP servers; stale/failed are counted (status= or detail=full lists them). pending_approvals names devices for approve_pending_server.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"detail": toolOutputDetailSchema(), "query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}}}, "required": []string{"servers"}, "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
@@ -10419,7 +10426,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "approve_pending_server",
 			"title":           "Approve ShellMCP device",
-			"description":     "Approve one ShellMCP device awaiting enrollment. Use the exact server_id returned by discover with detail=full or pending.",
+			"description":     "Approve a device waiting for enrollment. server_id: exact shell:<name> from pending_approvals or pending. Only on the user's explicit request.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string"}}, "required": []string{"server_id"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
@@ -10486,7 +10493,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "job",
 			"title":           "Job",
-			"description":     "Peer: owner_target=execute.target",
+			"description":     "Read the state/result of a long call that returned a job_id (owner_target = its target). Use it instead of repeating a call that may still be running.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "owner_target": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},

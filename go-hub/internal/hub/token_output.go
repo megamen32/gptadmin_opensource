@@ -630,16 +630,32 @@ func discoveryRowMatchesQuery(row map[string]any, query string) bool {
 	return prefix != "" && strings.Contains(query, strings.ToLower(prefix))
 }
 
+// compactDiscovery lists online targets in full. Without a query, a status
+// filter or detail=full, every other target collapses into a count per status,
+// because a fleet keeps hundreds of stale and failed rows that nobody acts on.
+// Devices waiting for approval are always named: that is the one actionable
+// state, and approve_pending_server needs their exact server_id.
 func compactDiscovery(raw, args map[string]any) map[string]any {
 	servers := make([]map[string]any, 0)
 	query := strings.ToLower(firstString(args, "query"))
 	status := firstString(args, "status")
+	collapse := status == "" && query == "" && !fullDetailRequested(args["detail"])
+	notListed := map[string]int{}
+	awaiting := make([]string, 0)
 	for _, row := range outputRows(raw["servers"]) {
 		server := mapValue(row)
-		if status != "" && firstString(server, "status") != status {
+		rowStatus := firstString(server, "status")
+		if rowStatus == "awaiting_approval" {
+			awaiting = append(awaiting, firstString(server, "server_id"))
+		}
+		if status != "" && rowStatus != status {
 			continue
 		}
 		if !discoveryRowMatchesQuery(server, query) {
+			continue
+		}
+		if collapse && rowStatus != "online" {
+			notListed[rowStatus]++
 			continue
 		}
 		entry := map[string]any{"server_id": server["server_id"], "status": server["status"]}
@@ -649,7 +665,16 @@ func compactDiscovery(raw, args map[string]any) map[string]any {
 		}
 		servers = append(servers, entry)
 	}
-	return map[string]any{"servers": servers}
+	out := map[string]any{"servers": servers}
+	if len(notListed) > 0 {
+		out["not_listed"] = notListed
+		out["hint"] = "Only online targets are listed. Use status=<stale|failed|awaiting_approval> or detail=full for the rest."
+	}
+	if len(awaiting) > 0 {
+		out["pending_approvals"] = awaiting
+		out["approve_with"] = "approve_pending_server {server_id}; list details with pending"
+	}
+	return out
 }
 func compactSchema(raw, args map[string]any) map[string]any {
 	response := mapValue(raw["response"])

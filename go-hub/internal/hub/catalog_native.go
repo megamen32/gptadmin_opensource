@@ -78,13 +78,13 @@ func codeModeCatalogTool(name string) map[string]any {
 	execMeta := map[string]any{"securitySchemes": execSecurity, "openai/toolInvocation/invoked": "Done."}
 	if name == "ro" {
 		return map[string]any{
-			"name": "ro", "title": "Read only code", "description": "Run bounded JavaScript with a hard read only execution ceiling. Shell commands, writes and persistent indexing are refused.",
+			"name": "ro", "title": "Read only code", "description": "Read-only JavaScript sandbox. Write an async code body that calls await mcp.call(target, tool, args) for reads such as list_directory, search, status or pending. Shell commands, writes and indexing are refused. Filter inside the code and return only what you need; output is size-limited.",
 			"inputSchema": readonlyExecInputSchema(), "outputSchema": codeModeOutputSchema(),
 			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}, "securitySchemes": readSecurity, "_meta": readMeta,
 		}
 	}
 	return map[string]any{
-		"name": "exec", "title": "Compose MCP calls", "description": "Run short, bounded JavaScript to inspect returned data and compose MCP calls with mcp.call(target, tool, args); intermediate data stays in the sandbox. Use search for the MCP tool catalog and schema for exact inputs. When a project path is known, use local rg for file or content search; use GrepMesh search or find_paths for unknown locations or cross-host search, then read_text for the exact result.",
+		"name": "exec", "title": "Compose MCP calls", "description": "JavaScript sandbox for any tool call, including writes and shell: await mcp.call(target, tool, args), for example mcp.call('shell:<host>', 'shell_exec', {cmd}). Do loops, filtering and joins inside the code and return only the final value; that costs far fewer tokens than many separate calls. Find tools with search and exact arguments with schema. No filesystem, environment, network or timer access. When a project path is known, use local rg for file or content search; use GrepMesh search or find_paths for unknown locations or cross-host search, then read_text for the exact result.",
 		"inputSchema": codeModeInputSchema(), "outputSchema": codeModeOutputSchema(),
 		"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}, "securitySchemes": execSecurity, "_meta": execMeta,
 	}

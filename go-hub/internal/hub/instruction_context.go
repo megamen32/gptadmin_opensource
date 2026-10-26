@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -157,7 +158,7 @@ func (s *Server) issueInstructionContext(r *http.Request, set InstructionSet) (s
 	mac.Write(data)
 	return "ic1_" + base64.RawURLEncoding.EncodeToString(append(data, mac.Sum(nil)...)), nil
 }
-func (s *Server) validInstructionContext(r *http.Request) bool {
+func (s *Server) validInstructionToken(r *http.Request) bool {
 	token := instructionToken(r)
 	if !strings.HasPrefix(token, "ic1_") || len(token) > 256 {
 		return false
@@ -189,6 +190,107 @@ func (s *Server) validInstructionContext(r *http.Request) bool {
 	digest := sha256.Sum256([]byte(set.ID + "\x00" + set.Content))
 	return hmac.Equal(digest[:], data[24:56])
 }
+
+// Delivery receipts remembered per connection (credential + owner + profile).
+// MCP 2026-07-28 is stateless: there is no session or initialize to hang a
+// receipt on, and the model should not have to echo a token in every call.
+// Any delivery of the current instruction document (server/discover, initialize,
+// a bootstrap tool or an instructions_required refusal) is recorded here. It is
+// valid only for the same credential and profile, only while the document
+// digest is unchanged, and expires after idle time.
+const instructionReceiptTTL = 2 * time.Hour
+const instructionReceiptLimit = 4096
+
+type instructionReceipt struct {
+	digest  [32]byte
+	expires time.Time
+}
+
+func instructionSetDigest(set InstructionSet) [32]byte {
+	return sha256.Sum256([]byte(set.ID + "\x00" + set.Content))
+}
+func instructionReceiptKey(r *http.Request) string {
+	origin := instructionCaller(r)
+	// Never share one receipt between unauthenticated callers.
+	if origin == nil || strings.TrimSpace(origin.Header.Get("Authorization")) == "" {
+		return ""
+	}
+	binding := instructionBinding(origin)
+	if len(binding) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(binding)
+}
+func (s *Server) rememberInstructionReceipt(r *http.Request, set InstructionSet) {
+	if !s.cfg.InstructionSessionReceipts {
+		return
+	}
+	key := instructionReceiptKey(r)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	s.instructionReceiptMu.Lock()
+	defer s.instructionReceiptMu.Unlock()
+	if s.instructionReceipts == nil {
+		s.instructionReceipts = map[string]instructionReceipt{}
+	}
+	if len(s.instructionReceipts) >= instructionReceiptLimit {
+		for k, v := range s.instructionReceipts {
+			if !v.expires.After(now) {
+				delete(s.instructionReceipts, k)
+			}
+		}
+		if len(s.instructionReceipts) >= instructionReceiptLimit {
+			s.instructionReceipts = map[string]instructionReceipt{}
+		}
+	}
+	s.instructionReceipts[key] = instructionReceipt{digest: instructionSetDigest(set), expires: now.Add(instructionReceiptTTL)}
+}
+
+// noteInstructionsDelivered records a delivery made through the protocol
+// channel (initialize / server/discover instructions), not through a tool.
+func (s *Server) noteInstructionsDelivered(r *http.Request) {
+	if !s.cfg.InstructionContextRequired || !s.cfg.InstructionSessionReceipts {
+		return
+	}
+	set, _, err := s.instructionDocument(r)
+	if err != nil {
+		return
+	}
+	s.rememberInstructionReceipt(r, set)
+}
+func (s *Server) hasInstructionReceipt(r *http.Request) bool {
+	if !s.cfg.InstructionSessionReceipts {
+		return false
+	}
+	key := instructionReceiptKey(r)
+	if key == "" {
+		return false
+	}
+	set, _, err := s.instructionDocument(r)
+	if err != nil {
+		return false
+	}
+	digest := instructionSetDigest(set)
+	now := time.Now()
+	s.instructionReceiptMu.Lock()
+	defer s.instructionReceiptMu.Unlock()
+	item, ok := s.instructionReceipts[key]
+	if !ok {
+		return false
+	}
+	if !item.expires.After(now) || item.digest != digest {
+		delete(s.instructionReceipts, key)
+		return false
+	}
+	item.expires = now.Add(instructionReceiptTTL)
+	s.instructionReceipts[key] = item
+	return true
+}
+func (s *Server) validInstructionContext(r *http.Request) bool {
+	return s.validInstructionToken(r) || s.hasInstructionReceipt(r)
+}
 func instructionExempt(target, tool string) bool {
 	if target != "hub" {
 		return false
@@ -208,6 +310,7 @@ func (s *Server) instructionFailure(r *http.Request) map[string]any {
 		if err == nil {
 			fail["context"] = token
 			fail["instructions"] = set.Content
+			s.rememberInstructionReceipt(r, set)
 			if profile != "" {
 				fail["profile"] = profile
 			}
@@ -321,6 +424,7 @@ func (s *Server) presentInstructionContext(r *http.Request, name string, args ma
 		}
 		out["context"] = token
 		out["instructions"] = set.Content
+		s.rememberInstructionReceipt(r, set)
 		if profile != "" {
 			out["profile"] = profile
 		}

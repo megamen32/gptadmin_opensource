@@ -17,11 +17,28 @@ import (
 const (
 	childSearchSchemaTTL        = 5 * time.Minute
 	childSearchColdLimit        = 4
+	childSearchWarmLimit        = 96
+	childSearchConcurrency      = 6
 	childSearchRefreshWait      = 4 * time.Second
 	childSearchToolLimit        = 200
 	childSearchSchemaLimit      = 16 << 10
 	childSearchDescriptionLimit = 2000
 )
+
+// Every refresh goes through the durable mcp_tools queue. A search starts a
+// refresh for every cold reachable child, but only this many run at once, so a
+// large fleet warms in the background instead of four children per call.
+var childSearchRefreshSlots = make(chan struct{}, childSearchConcurrency)
+
+// childSearchUnreachable reports a child that cannot answer tools/list now.
+// Such a child is listed as unreachable; it does not make coverage incomplete.
+func childSearchUnreachable(child Agent) bool {
+	switch strings.ToLower(strings.TrimSpace(child.Status)) {
+	case "failed", "stale", "offline", "awaiting_approval":
+		return true
+	}
+	return false
+}
 
 type childSearchSchemaEntry struct {
 	childID     string
@@ -323,7 +340,9 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		request = r.Clone(r.Context())
 	}
 	go func() {
+		childSearchRefreshSlots <- struct{}{}
 		response := s.childSchemaForRequest(request, child)
+		<-childSearchRefreshSlots
 		var tools []map[string]any
 		failure := ""
 		if firstString(response, "status") == "completed" {
@@ -396,6 +415,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 	visible := s.publicAgentsLocked(r)
 	s.mu.Unlock()
 	children := make([]Agent, 0)
+	unreachable := []string{}
 	for _, child := range visible {
 		if !isChildMCPAgent(child) || (targetFilter != "" && targetFilter != child.AgentID && targetFilter != exposedAgentSlug(child) && targetFilter != "child:"+exposedAgentSlug(child)) {
 			continue
@@ -403,8 +423,13 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		if !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
 			continue
 		}
+		if targetFilter == "" && childSearchUnreachable(child) {
+			unreachable = append(unreachable, child.AgentID)
+			continue
+		}
 		children = append(children, child)
 	}
+	coverage["unreachable"] = unreachable
 	cache := s.childSearchCache()
 	active := map[string]bool{}
 	for _, child := range children {
@@ -425,7 +450,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		entry := cache.entries[key]
 		fresh := entry != nil && entry.fingerprint == fingerprint && time.Since(entry.loadedAt) < childSearchSchemaTTL && entry.loadedAt.After(time.Time{})
 		cache.mu.Unlock()
-		if !fresh && len(refreshes) < childSearchColdLimit {
+		if !fresh && len(refreshes) < childSearchWarmLimit {
 			refreshes = append(refreshes, refresh{cache.startChildSearchRefresh(s, r, child, key, fingerprint)})
 		} else if !fresh {
 			coverage["complete"] = false
@@ -481,6 +506,9 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 	}
 	if !truthy(coverage["complete"]) {
 		coverage["status"] = "incomplete"
+		if intFromAny(coverage["pending"]) > 0 {
+			coverage["retry_hint"] = "children are still loading in the background; repeat the search in a few seconds"
+		}
 	}
 	return rows, coverage
 }
