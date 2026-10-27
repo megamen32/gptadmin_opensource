@@ -2005,6 +2005,12 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     if has_admin_ui:
         verify_ui_payload(staging)
 
+    # Existing primary installs also need lifecycle migration. Reload before
+    # drain/restart so stopping the old process cannot invoke legacy HA hooks.
+    if name == 'primary':
+        prepare_primary_dropin()
+        systemctl(runner, 'daemon-reload')
+
     unit = layout.unit_instance(name)
     env_path = layout.env_file(name)
     previous_env_text = env_path.read_text() if requested_node_url is not None else None
@@ -2292,8 +2298,18 @@ def prepare_primary_node(layout: Layout, runner: Runner) -> None:
             raise PreflightError('primary Node manager environment symlink points elsewhere')
     else:
         os.symlink(PRIMARY_ENV_FILE, env_alias)
-    dropin_text = '[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n'
-    if PRIMARY_DROPIN.exists() and PRIMARY_DROPIN.read_text() != dropin_text:
+    prepare_primary_dropin()
+
+
+def prepare_primary_dropin() -> None:
+    """Migrate only the known primary Node lifecycle override."""
+    legacy_dropin_text = '[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n'
+    # Unified Node owns its lifecycle; inherited legacy hooks operate a different
+    # binary and local standby. Clear them in the highest-priority Node drop-in.
+    dropin_text = ('[Unit]\nOnFailure=\n\n[Service]\n'
+                   'ExecStop=\nExecStopPost=\nExecStartPost=\n'
+                   'ExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n')
+    if PRIMARY_DROPIN.exists() and PRIMARY_DROPIN.read_text() not in (legacy_dropin_text, dropin_text):
         raise PreflightError('primary auto-update service drop-in already has different contents')
     atomic_write(PRIMARY_DROPIN, dropin_text, 0o644)
 

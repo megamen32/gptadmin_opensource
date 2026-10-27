@@ -5736,7 +5736,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 		return s.callAccessProfileTool(r, args)
 	}
 	if name == "handover_status" {
-		return map[string]any{"state": readHubHandoverState()}, http.StatusOK
+		return hubHandoverStatus(), http.StatusOK
 	}
 	if name == "handover_start" {
 		return s.startHubHandover(s.actorForRequest(r))
@@ -6074,7 +6074,7 @@ func hubTools() []map[string]any {
 		{"name": "agent_policy_get", "description": "Read cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}}, "required": []string{"agent_id"}, "additionalProperties": false}},
 		{"name": "agent_policy_set", "description": "Set cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}, "protected": map[string]any{"type": "boolean"}, "never_delete": map[string]any{"type": "boolean"}, "retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650}}, "required": []string{"agent_id"}, "additionalProperties": false}},
 		{"name": "agent_tombstones", "description": "List safe tombstones for auto/manually removed MCP agents", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
-		{"name": "handover_status", "description": "Read zero-downtime Hub handover state", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "handover_status", "description": "Read legacy local Hub handover state and current process executable/build/SHA. Returns read-only Node status/autoupdate status commands and separate HAOS promotion-controller inspection hints; does not run updates or coordinate HAOS.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "handover_start", "description": "Schedule zero-downtime primary Hub restart through standby and drain", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "diagnose", "description": "Return one bounded self-diagnostic snapshot for Hub, standby, agents, jobs, settings and cleanup", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{

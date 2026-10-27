@@ -1,0 +1,97 @@
+name: Sync HAOS Hub Standby App Source
+
+on:
+  workflow_run:
+    workflows: ['Public Product CI']
+    types: [completed]
+
+concurrency:
+  group: gptadmin-public-haos-addon-source
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, gptadmin-public, node-88]
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Checkout the exact source that passed public product CI
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Require that the tested source is still public main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_SHA"
+
+      - name: Check whether standby source changed
+        id: scope
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          import subprocess
+
+          paths = subprocess.check_output(
+              ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', os.environ['SOURCE_SHA']],
+              text=True,
+          ).splitlines()
+          relevant = (
+              '.github/workflows/publish-haos-addon.yml',
+              'deploy/server01/gptadmin_hub_standby/',
+              'go-hub/',
+              'scripts/export_haos_app_repository.sh',
+              'scripts/gptadmin_failover_watchdog.py',
+              'scripts/gptadmin_failover_proxy.py',
+              'scripts/gptadmin_frpc_processes.py',
+          )
+          changed = any(any(path == prefix or path.startswith(prefix) for prefix in relevant) for path in paths)
+          print(f'changed={str(changed).lower()}')
+          PY
+
+      - name: Export the sanitized HAOS app repository
+        if: steps.scope.outputs.changed == 'true'
+        id: app
+        run: |
+          set -euo pipefail
+          scripts/export_haos_app_repository.sh \
+            --output "$RUNNER_TEMP/gptadmin-haos-addons" \
+            --source-ref "$SOURCE_SHA"
+          version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app_version"])' "$RUNNER_TEMP/gptadmin-haos-addons/SOURCE.json")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/gptadmin-haos-addons.tar.gz" gptadmin-haos-addons
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.scope.outputs.changed == 'true'
+        with:
+          name: gptadmin-haos-addons-${{ steps.app.outputs.version }}-${{ github.event.workflow_run.head_sha }}
+          path: ${{ runner.temp }}/gptadmin-haos-addons.tar.gz
+
+      - name: Sync public app repository; its own workflow publishes the image
+        if: steps.scope.outputs.changed == 'true'
+        env:
+          APP_VERSION: ${{ steps.app.outputs.version }}
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/gptadmin-haos-addons-git"
+          git clone --branch main "git@github.com:megamen32/gptadmin-haos-addons.git" "$target"
+          rsync -a --delete --exclude='.git/' "$RUNNER_TEMP/gptadmin-haos-addons/" "$target/"
+          git -C "$target" config user.name github-actions[bot]
+          git -C "$target" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$target" add .
+          if ! git -C "$target" diff --cached --quiet; then
+            git -C "$target" commit -m "release: sync GPTAdmin Hub Standby $APP_VERSION"
+            git -C "$target" push origin main
+          fi

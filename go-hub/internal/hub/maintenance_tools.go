@@ -35,6 +35,41 @@ func readHubHandoverState() hubHandoverState {
 	return st
 }
 
+// hubHandoverStatus only observes this process and the legacy local state file.
+// In particular, it never invokes an updater or contacts the HAOS controller.
+func hubHandoverStatus() map[string]any {
+	executable, err := os.Executable()
+	runtimeInfo := map[string]any{
+		"executable":    executable,
+		"build_version": BuildVersion,
+		"git_commit":    GitCommit,
+	}
+	if err != nil {
+		runtimeInfo["executable_error"] = err.Error()
+	}
+	return map[string]any{
+		"state":       readHubHandoverState(),
+		"state_path":  "/run/gptadmin-handover.json",
+		"state_scope": "legacy_local_handover",
+		"runtime":     runtimeInfo,
+		"hints": map[string]any{
+			"local_handover": "Локальный файл описывает только старую передачу между Hub на этом хосте. idle при отсутствии файла не подтверждает готовность обновления или состояние HAOS.",
+			"node_update": map[string]any{
+				"note":                 "Для установленного versioned Node проверьте текущий пакет, службу и обновление командами ниже на хосте primary. Имя gptadmin-hub.service само по себе не означает старый Hub runtime.",
+				"read_only_commands":   []string{"sudo gptadmin node status --name primary", "sudo gptadmin node autoupdate status"},
+				"hold_path":            "/var/lib/gptadmin-node/autoupdate/hold.json",
+				"hold_note":            "При hold сначала установите исход предыдущего обновления и восстановления; не удаляйте hold и не повторяйте неизвестную операцию вслепую.",
+				"manual_update_action": "sudo gptadmin node autoupdate run",
+				"manual_update_note":   "Это действие запускает обновление и может перезапустить службу; handover_status его не выполняет.",
+			},
+			"haos_failover": map[string]any{
+				"note":    "HAOS standby использует отдельный promotion controller. Локальная передача и Node updater не координируют его и не подавляют promotion автоматически.",
+				"inspect": "Перед обслуживанием отдельно проверьте failover.maintenance_until в настройках HAOS add-on и состояние его контроллера; этот ответ не проверяет HAOS.",
+			},
+		},
+	}
+}
+
 func localHealth(url string) map[string]any {
 	c := http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Get(strings.TrimRight(url, "/") + "/healthz")

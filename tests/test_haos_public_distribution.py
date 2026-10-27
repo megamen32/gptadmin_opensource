@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from pathlib import Path
 import importlib
@@ -122,8 +124,22 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     assert (output / "repository.yaml").is_file()
     assert (output / "gptadmin_hub_standby/config.yaml").is_file()
     assert (output / "gptadmin_hub_standby/Dockerfile").is_file()
+    assert (output / ".github/workflows/publish-haos-image.yml").is_file()
+    image_workflow = (output / ".github/workflows/publish-haos-image.yml").read_text(encoding="utf-8")
+    assert "packages: write" in image_workflow
+    assert "github.token" in image_workflow
+    assert "SOURCE.json" in image_workflow
+    assert "secrets." not in image_workflow
+    assert "fetch --depth=1 origin \"$SOURCE_REF\"" in image_workflow
+    assert "public_standby_index.html" in image_workflow
+    assert "refusing to overwrite" in image_workflow
     assert not list(output.rglob("failover_state.json"))
     assert not list(output.rglob("frpc"))
+    source = json.loads((output / "SOURCE.json").read_text(encoding="utf-8"))
+    public_config = (root / "deploy/server01/gptadmin_hub_standby/public_config.yaml").read_text(encoding="utf-8")
+    version = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', public_config, re.MULTILINE)
+    assert version is not None
+    assert source["app_version"] == version.group(1)
     public_text = "\n".join(path.read_text(encoding="utf-8") for path in output.rglob("*") if path.is_file())
     assert "192.168.2." not in public_text
     assert "/etc/gptadmin" not in public_text

@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 try:
     from gptadmin_frpc_processes import config_paths, read_records, write_records, inspect, stop_records
 except ModuleNotFoundError:
@@ -34,6 +35,22 @@ DEFAULT_FRPC = "/etc/gptadmin/frpc-failover.toml"
 DEFAULT_FRPC_PID = "/var/lib/gptadmin/failover_frpc.pid"
 DEFAULT_RECLAIM_COMMAND = "/var/lib/gptadmin/failover_reclaim_command.json"
 DEFAULT_SERVICE = "gptadmin-failover-frpc.service"
+
+
+def maintenance_deadline(value: Any) -> float | None:
+    """Parse an optional finite deadline; a timezone is required."""
+    if value is None or value == "":
+        return None
+    message = "maintenance_until must be an ISO-8601 timestamp with a timezone"
+    if not isinstance(value, str):
+        raise ValueError(message)
+    try:
+        deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError(message)
+        return deadline.timestamp()
+    except (ValueError, OverflowError, OSError) as exc:
+        raise ValueError(message) from exc
 
 
 def load_json(path: str, default: Any) -> Any:
@@ -342,6 +359,17 @@ def check_once(args: argparse.Namespace) -> int:
         runtime["last_decision"] = "reclaimed_primary"
         save_json(args.runtime_state, runtime)
         print(json.dumps({"ok": True, "decision": "reclaimed_primary", "node_id": args.node_id, "nonce": reclaim.get("nonce"), "dry_run": args.dry_run}, sort_keys=True))
+        return 0
+
+    try:
+        maintenance_until = maintenance_deadline(cfg.get("maintenance_until"))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if maintenance_until is not None and runtime["last_check_at"] < maintenance_until:
+        runtime["fail_count"] = 0
+        runtime["last_decision"] = "maintenance"
+        save_json(args.runtime_state, runtime)
+        print(json.dumps({"ok": True, "decision": "maintenance", "node_id": args.node_id, "maintenance_until": cfg["maintenance_until"]}, sort_keys=True))
         return 0
 
     if not cfg.get("enabled") or not node.get("enabled", True):

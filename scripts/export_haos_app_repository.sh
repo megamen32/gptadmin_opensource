@@ -29,10 +29,12 @@ if [[ -e "$OUTPUT" && -n "$(find "$OUTPUT" -mindepth 1 -print -quit 2>/dev/null)
   exit 2
 fi
 mkdir -p "$OUTPUT/gptadmin_hub_standby"
+mkdir -p "$OUTPUT/.github/workflows"
 
 cp "$SRC/public_repository.yaml" "$OUTPUT/repository.yaml"
 cp "$SRC/public_README.md" "$OUTPUT/README.md"
 cp "$SRC/public_config.yaml" "$OUTPUT/gptadmin_hub_standby/config.yaml"
+cp "$SRC/public_publish_image_workflow.yml" "$OUTPUT/.github/workflows/publish-haos-image.yml"
 cp "$SRC/Dockerfile.public" "$OUTPUT/gptadmin_hub_standby/Dockerfile"
 cp "$SRC/run.sh" "$OUTPUT/gptadmin_hub_standby/run.sh"
 cp "$SRC/public_README.md" "$OUTPUT/gptadmin_hub_standby/README.md"
@@ -47,10 +49,23 @@ cp "$SRC/gptadmin_failover_runtime.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$ROOT/scripts/gptadmin_frpc_processes.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_failover_config.py" "$OUTPUT/gptadmin_hub_standby/"
 
+APP_VERSION=$(python3 - "$SRC/public_config.yaml" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', text, re.MULTILINE)
+if not match:
+    raise SystemExit("public HAOS app version is missing")
+print(match.group(1))
+PY
+)
+
 cat > "$OUTPUT/SOURCE.json" <<EOF
 {
   "source_ref": "$(printf '%s' "$SOURCE_REF" | sed 's/[\\"]//g')",
-  "app_version": "1.0.5",
+  "app_version": "$APP_VERSION",
   "architecture": "aarch64",
   "image": "ghcr.io/megamen32/gptadmin-opensource-haos-hub-standby"
 }

@@ -74,3 +74,23 @@ def test_node_release_publishes_only_the_exact_commit_after_all_public_gates():
     assert '--source "$SOURCE_SHA"' in workflow
     assert 'contents: write' in workflow
     assert 'cancel-in-progress: false' in workflow
+
+
+def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_actions():
+    workflow_path = ROOT / '.github/workflows/publish-haos-addon.yml'
+    workflow = workflow_path.read_text()
+    assert "workflows: ['Public Product CI']" in workflow
+    assert "workflow_run.head_branch == 'main'" in workflow
+    assert "workflow_run.head_sha" in workflow
+    assert 'gptadmin-public, node-88' in workflow
+    assert 'gptadmin-haos-addons.git' in workflow
+    assert 'scripts/export_haos_app_repository.sh' in workflow
+    assert 'secrets.' not in workflow
+    source_root = ROOT if (ROOT / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').is_file() else ROOT.parent.parent
+    addon_image = (source_root / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').read_text()
+    assert 'packages: write' in addon_image
+    assert 'github.token' in addon_image
+    assert 'SOURCE.json' in addon_image
+    assert 'docker buildx build' in addon_image
+    assert 'refusing to overwrite' in addon_image
+    assert 'secrets.' not in addon_image

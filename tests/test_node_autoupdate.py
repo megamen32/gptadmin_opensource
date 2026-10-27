@@ -604,6 +604,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 ('drain_cancel',True)]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
             stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(patch.object(manager,'PRIMARY_DROPIN',root/'primary.conf'))
             stack.enter_context(patch.object(manager,'systemctl'))
             budget=SimpleNamespace(cleanup=unittest.mock.Mock())
             args=SimpleNamespace(name='primary',package='candidate.tar.gz',wait_secs=20,
@@ -616,6 +617,56 @@ class NodeAutoupdateTests(unittest.TestCase):
             self.assertEqual(receipt['admin_ui']['git_commit'],new_commit)
             self.assertEqual((public/'admin/index.html').read_text(),'candidate-ui')
             self.assertEqual((public/Path(receipt['admin_ui']['previous']).name/'index.html').read_text(),'old-ui')
+
+    def test_primary_update_migrates_legacy_hooks_and_reloads_before_restart(self):
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+                root=Path(d);layout=manager.Layout(opt_root=root/'opt')
+                old=layout.versions_root()/('a'*40+'-1');old.mkdir(parents=True)
+                manager.switch_current(layout,old)
+                dropin=root/'primary.conf'
+                original=('[Service]\nExecStart=/foreign/runtime\n' if foreign else
+                          '[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n')
+                dropin.write_text(original)
+                calls=[]
+                def extract(package_path,arch,target):
+                    target.mkdir()
+                    return {'git_commit':'b'*40,'build_version':1037,'files':{}}
+                def service(runner,*args,**kwargs):
+                    self.assertIn('OnFailure=\n',dropin.read_text())
+                    for key in ('ExecStop','ExecStopPost','ExecStartPost'):
+                        self.assertIn(key+'=\n',dropin.read_text())
+                    if args[0]=='daemon-reload':
+                        self.assertEqual(layout.current_link().resolve(),old)
+                    else:
+                        self.assertEqual(calls,[('daemon-reload',)])
+                    calls.append(args)
+                for name,value in [('require_root',None),('resolve_instance_name','primary'),
+                    ('read_installed_env',{}),('read_admin_token','unit-only'),
+                    ('origin_from_env','http://unit.invalid'),('host_arch','amd64'),
+                    ('check_disk_floor',None),('verify_elf_binary',None),
+                    ('manifest_summary',{'git_commit':'a'*40}),
+                    ('drain_wait_ready',{'ready_to_stop':True}),('wait_healthy',None),
+                    ('drain_cancel',True)]:
+                    stack.enter_context(patch.object(manager,name,return_value=value))
+                stack.enter_context(patch.object(manager,'PRIMARY_DROPIN',dropin))
+                stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+                stack.enter_context(patch.object(manager,'systemctl',side_effect=service))
+                drain=stack.enter_context(patch.object(manager,'drain_begin',return_value=True))
+                args=SimpleNamespace(name='primary',package='candidate.tar.gz',wait_secs=20,
+                                     require_drain=True,node_public_url=None)
+                budget=SimpleNamespace(cleanup=unittest.mock.Mock())
+                if foreign:
+                    with self.assertRaisesRegex(manager.PreflightError,'different contents'):
+                        manager.update_with_budget(args,layout,manager.Runner(),budget)
+                    drain.assert_not_called()
+                    self.assertEqual(calls,[])
+                    self.assertEqual(dropin.read_text(),original)
+                    self.assertEqual(layout.current_link().resolve(),old)
+                else:
+                    with patch.object(manager.sys,'stdout',io.StringIO()):
+                        manager.update_with_budget(args,layout,manager.Runner(),budget)
+                    self.assertEqual(calls,[('daemon-reload',),('restart','gptadmin-hub.service')])
 
     def test_public_node_url_is_separate_https_origin_for_install_and_update(self):
         public_origin='https://app.example.test'
@@ -952,10 +1003,36 @@ class NodeAutoupdateTests(unittest.TestCase):
                  patch.object(manager,'host_arch',return_value='amd64'), \
                  patch.object(Path,'stat',stat_with_protected_systemd_files):
                 manager.prepare_primary_node(layout,manager.Runner())
+                expected_dropin = (
+                    '[Unit]\nOnFailure=\n\n[Service]\n'
+                    'ExecStop=\nExecStopPost=\nExecStartPost=\n'
+                    'ExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n'
+                )
+                self.assertEqual(dropin.read_text(), expected_dropin)
+                # Accept the exact drop-in previously written by this manager.
+                dropin.write_text('[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n')
+                with patch.object(manager,'current_target',return_value=layout.current_link().resolve()), \
+                     patch.object(manager,'validate_primary_current'):
+                    manager.prepare_primary_node(layout,manager.Runner())
+                self.assertEqual(dropin.read_text(), expected_dropin)
+                # Re-running the migration is safe, but foreign contents are not.
+                with patch.object(manager,'current_target',return_value=layout.current_link().resolve()), \
+                     patch.object(manager,'validate_primary_current'):
+                    manager.prepare_primary_node(layout,manager.Runner())
+                    dropin.write_text('[Service]\nExecStart=/foreign/runtime\n')
+                    with self.assertRaisesRegex(manager.PreflightError,'different contents'):
+                        manager.prepare_primary_node(layout,manager.Runner())
+                self.assertEqual(dropin.read_text(),'[Service]\nExecStart=/foreign/runtime\n')
             self.assertTrue(layout.current_link().is_symlink())
             version_dir=next(layout.versions_root().iterdir())
             manifest=json.loads((version_dir/'manifest.json').read_text())
             self.assertEqual(manifest['build_version'],1024)
+
+    def test_primary_adoption_leaves_legacy_lifecycle_untouched(self):
+        with patch.object(manager,'primary_unified_node',return_value=False), \
+             patch.object(manager,'atomic_write') as write:
+            manager.prepare_primary_node(manager.Layout(),manager.Runner())
+        write.assert_not_called()
 
     def test_existing_primary_current_must_match_live_version_and_manifest_digest(self):
         with tempfile.TemporaryDirectory() as d:

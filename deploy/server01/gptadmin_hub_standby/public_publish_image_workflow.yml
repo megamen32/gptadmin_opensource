@@ -1,0 +1,157 @@
+name: Publish HAOS Hub Standby Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-haos-image.yml'
+      - 'SOURCE.json'
+      - 'gptadmin_hub_standby/**'
+
+concurrency:
+  group: gptadmin-haos-standby-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  FRP_VERSION: '0.64.0'
+  IMAGE_NAME: ghcr.io/megamen32/gptadmin-opensource-haos-hub-standby
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=2'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout synced HAOS app repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Read and validate source identity
+        id: source
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          from pathlib import Path
+
+          source = json.loads(Path('SOURCE.json').read_text(encoding='utf-8'))
+          config = Path('gptadmin_hub_standby/config.yaml').read_text(encoding='utf-8')
+          version_match = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', config, re.MULTILINE)
+          if not version_match or version_match.group(1) != source.get('app_version'):
+              raise SystemExit('HAOS app version differs from SOURCE.json')
+          source_ref = source.get('source_ref', '')
+          if not re.fullmatch(r'[0-9a-f]{40}', source_ref):
+              raise SystemExit('SOURCE.json source_ref is not a full public commit')
+          if not re.fullmatch(r'\d+\.\d+\.\d+', source['app_version']):
+              raise SystemExit('HAOS app version must be numeric semver')
+          print(f'version={source["app_version"]}')
+          print(f'source_ref={source_ref}')
+          PY
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Reject an existing immutable app image version
+        env:
+          APP_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          result="$RUNNER_TEMP/existing-image-check.txt"
+          if docker buildx imagetools inspect "$IMAGE_NAME:$APP_VERSION" >"$result" 2>&1; then
+            echo "Image version $APP_VERSION already exists; refusing to overwrite it." >&2
+            exit 1
+          elif ! grep -Eqi 'not found|manifest unknown|404' "$result"; then
+            cat "$result" >&2
+            echo 'Could not prove that the immutable app image tag is absent.' >&2
+            exit 1
+          fi
+
+      - name: Fetch exact public GPTAdmin source
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          mkdir gptadmin-source
+          git -C gptadmin-source init -q
+          git -C gptadmin-source remote add origin https://github.com/megamen32/gptadmin_opensource.git
+          git -C gptadmin-source fetch --depth=1 origin "$SOURCE_REF"
+          git -C gptadmin-source checkout --detach FETCH_HEAD
+          test "$(git -C gptadmin-source rev-parse HEAD)" = "$SOURCE_REF"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: gptadmin-source/go-hub/go.mod
+          cache: false
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Assemble sanitized ARM64 image context
+        env:
+          APP_VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/gptadmin-haos-image"
+          mkdir -p "$context/public"
+          cp gptadmin_hub_standby/Dockerfile "$context/Dockerfile"
+          cp gptadmin_hub_standby/run.sh "$context/run.sh"
+          cp gptadmin_hub_standby/gptadmin_failover_watchdog.py \
+            gptadmin_hub_standby/gptadmin_failover_proxy.py \
+            gptadmin_hub_standby/gptadmin_failover_runtime.py \
+            gptadmin_hub_standby/gptadmin_failover_config.py \
+            gptadmin_hub_standby/gptadmin_frpc_processes.py "$context/"
+          cp gptadmin-source/deploy/server01/gptadmin_hub_standby/public_standby_index.html "$context/public/index.html"
+          (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
+            -o "$context/gptadmin_hub" ./cmd/gptadmin-hub)
+          archive="frp_${FRP_VERSION}_linux_arm64.tar.gz"
+          curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${archive}" -o "$RUNNER_TEMP/$archive"
+          curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_sha256_checksums.txt" -o "$RUNNER_TEMP/frp_checksums.txt"
+          (cd "$RUNNER_TEMP" && grep "  $archive$" frp_checksums.txt | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/frp_${FRP_VERSION}_linux_arm64/frpc" "$context/frpc"
+          chmod 0755 "$context/gptadmin_hub" "$context/frpc"
+          echo "$context" > "$RUNNER_TEMP/haos_image_context"
+
+      - name: Build and publish ARM64 image
+        env:
+          APP_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          context=$(cat "$RUNNER_TEMP/haos_image_context")
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg BUILD_VERSION="$APP_VERSION" \
+            --tag "$IMAGE_NAME:$APP_VERSION" \
+            --tag "$IMAGE_NAME:latest" \
+            --sbom=true \
+            --provenance=mode=max \
+            --metadata-file "$RUNNER_TEMP/haos-image-metadata.json" \
+            --push "$context"
+
+      - name: Verify published image digest
+        env:
+          APP_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/haos-image-metadata.json"
+          test -s "$metadata"
+          jq -e '."containerimage.digest" | strings | test("^sha256:[0-9a-f]{64}$")' "$metadata" >/dev/null
+          docker buildx imagetools inspect "$IMAGE_NAME:$APP_VERSION" \
+            --format '{{json .Manifest.Digest}}' | grep -Eq '^"sha256:[0-9a-f]{64}"$'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gptadmin-haos-image-${{ steps.source.outputs.version }}-${{ steps.source.outputs.source_ref }}
+          path: ${{ runner.temp }}/haos-image-metadata.json

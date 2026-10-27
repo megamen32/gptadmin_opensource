@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,23 @@ def _endpoints(failover: dict[str, Any]) -> list[str]:
     return [item.strip() for item in raw]
 
 
+def _maintenance_until(failover: dict[str, Any]) -> str:
+    value = failover.get("maintenance_until")
+    if value is None or value == "":
+        return ""
+    message = "failover.maintenance_until must be an ISO-8601 timestamp with a timezone"
+    if not isinstance(value, str):
+        raise ValueError(message)
+    try:
+        deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError(message)
+        deadline.timestamp()
+    except (ValueError, OverflowError, OSError) as exc:
+        raise ValueError(message) from exc
+    return value
+
+
 def build_failover_config(options: dict[str, Any]) -> dict[str, Any]:
     """Build watchdog policy and node metadata without copying credentials."""
 
@@ -48,6 +66,7 @@ def build_failover_config(options: dict[str, Any]) -> dict[str, Any]:
     local_port = int(failover.get("local_hub_port") or 9001)
     return {
         "enabled": True,
+        "maintenance_until": _maintenance_until(failover),
         "fail_count_base": int(failover.get("fail_count_base") or 3),
         "deterministic_rank_backoff": True,
         "primary_health_url": str(_required(failover, "primary_health_url")).rstrip("/"),

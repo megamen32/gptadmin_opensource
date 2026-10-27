@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.6
+
+- Add an expiring `failover.maintenance_until` window for planned maintenance.
+- Keep signed reclaim available during maintenance and resume promotion checks
+  automatically when the timestamp expires.
+
 ## 1.0.5
 
 - First public Home Assistant Apps repository package.

@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This installer writes the legacy Hub/standby lifecycle. Inspect the effective
+# service before any privileged command so it cannot replace a unified Node.
+if ! PRIMARY_EXEC_START="$(systemctl show gptadmin-hub.service -p ExecStart --value)"; then
+    echo 'Не удалось проверить ExecStart gptadmin-hub.service; установка остановлена до изменений.' >&2
+    exit 1
+fi
+case "$PRIMARY_EXEC_START" in
+    *'/opt/gptadmin/bin/gptadmin-node'*|*'/opt/gptadmin-node/current/bin/gptadmin-node'*)
+        echo 'Обнаружен unified Node: старый установщик Hub/standby неприменим. Используйте gptadmin_node_manage.py.' >&2
+        exit 1
+        ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHELLMCP_UNIT="$SCRIPT_DIR/systemd/shellmcp.service"
 HUB_UNIT="$SCRIPT_DIR/systemd/gptadmin-hub.service"

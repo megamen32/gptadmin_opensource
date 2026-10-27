@@ -1,5 +1,5 @@
 name: GPTAdmin Hub Standby
-version: "1.0.5"
+version: "1.0.6"
 slug: gptadmin_hub_standby
 description: "Independent GPTAdmin Hub standby with automatic Tunnel failover and reclaim"
 url: "https://github.com/megamen32/gptadmin-haos-addons"
@@ -29,6 +29,7 @@ options:
     subdomain:
     domain:
     public_confirm_timeout_sec: 3
+    maintenance_until: ""
 schema:
   hub_host: str
   hub_port: int
@@ -47,3 +48,4 @@ schema:
     subdomain: str
     domain: str
     public_confirm_timeout_sec: int
+    maintenance_until: str?

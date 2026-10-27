@@ -16,6 +16,15 @@ Configure the app before starting it:
 - `failover.endpoints`: FRP endpoint host/port list;
 - `failover.subdomain` and `failover.domain`: the public Tunnel route.
 
+For planned primary maintenance, set `failover.maintenance_until` to a finite
+ISO-8601 timestamp with a timezone, for example `2026-11-01T12:30:00+03:00`,
+and restart the app to apply the options. Until that time the watchdog clears
+its failure count and skips health checks and promotion. Signed primary reclaim
+still runs first; an already active fallback Tunnel is not stopped by maintenance
+alone. At expiry normal health checks resume with a fresh failure count. Leave
+the option empty to disable the window. Invalid values and timestamps without a
+timezone are rejected; there is no indefinite maintenance flag.
+
 The app generates internal Hub credentials and stores them in its persistent
 `/data` volume. They are not shown as Supervisor options and are not committed
 to the repository.

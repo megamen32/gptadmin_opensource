@@ -1,5 +1,9 @@
 # Failover and degraded recovery
 
+For read-only runtime, Node updater and independent HAOS controller inspection,
+see [handover_status operator guidance](HANDOVER_STATUS.md). Its local handover
+state does not report or coordinate HAOS promotion.
+
 GPTAdmin is designed so one dead machine does not have to mean a dead control plane. A fallback node can keep a standby hub reachable through the same public tunnel path, so the service keeps living in a degraded mode long enough to inspect logs, reach surviving servers, and repair the primary.
 
 This is not magic multi-master replication. Some fresh in-memory state can be stale or temporarily unavailable while the primary is down. The important part is that GPTAdmin stores the operational trail on disk: queued/background jobs, large stdout/stderr spill files, shellmcp spool files, outbox responses, registry snapshots, failover runtime state, and service logs. That means the system may lose a little immediacy, but recovery work is not blind and most job evidence is not gone forever.
