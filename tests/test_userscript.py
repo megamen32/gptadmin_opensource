@@ -71,6 +71,15 @@ def test_injected_prompt_describes_current_code_mode():
         assert required in content, f"missing current MCP usage instruction: {required}"
 
 
+def test_oauth_popup_opens_inside_user_gesture_before_async_work():
+    content = USERSCRIPT.read_text()
+    start = content.index("function beginOAuthFromClick()")
+    end = content.index("async function connectOAuth(popup)", start)
+    click_handler = content[start:end]
+    assert "window.open('about:blank', 'gptadmin-oauth'" in click_handler
+    assert "connectOAuth(popup)" in click_handler
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):

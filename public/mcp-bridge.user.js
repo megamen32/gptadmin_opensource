@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.5
+// @version      2.2.6
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -214,7 +214,18 @@
     });
   }
 
-  async function connectOAuth() {
+  function beginOAuthFromClick() {
+    // Open synchronously in the trusted click handler. Chrome blocks window.open
+    // after the crypto and network awaits needed to prepare the OAuth request.
+    const popup = window.open('about:blank', 'gptadmin-oauth', 'popup,width=560,height=720');
+    if (!popup) throw new Error('Allow the OAuth popup and try again');
+    connectOAuth(popup).catch(error => {
+      try { popup.close(); } catch {}
+      toast(`OAuth error: ${error.message}`, 5000);
+    });
+  }
+
+  async function connectOAuth(popup) {
     const callback = `${hubUrl()}/connect/callback`;
     const verifier = randomBase64Url(48);
     const state = randomBase64Url(24);
@@ -229,8 +240,7 @@
       resource: hubUrl(), scope: 'gptadmin.read gptadmin.exec', state,
       code_challenge: challenge, code_challenge_method: 'S256',
     });
-    const popup = window.open(`${hubUrl()}/oauth/authorize?${query}`, 'gptadmin-oauth', 'popup,width=560,height=720');
-    if (!popup) throw new Error('Allow the OAuth popup and try again');
+    popup.location.href = `${hubUrl()}/oauth/authorize?${query}`;
     toast('Complete authorization in the Hub popup');
   }
 
@@ -847,7 +857,8 @@
       toast('Settings saved');
     });
     panel.querySelector('#mcp-connect').addEventListener('click', () => {
-      connectOAuth().catch(error => toast(`OAuth error: ${error.message}`, 5000));
+      try { beginOAuthFromClick(); }
+      catch (error) { toast(`OAuth error: ${error.message}`, 5000); }
     });
   }
 
