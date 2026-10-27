@@ -124,7 +124,7 @@ def test_candidate_rejects_tool_errors_without_provider_payload(result):
 
 
 @pytest.mark.parametrize("native", [False, True])
-def test_systemd_client_fetches_context_before_single_dispatch(monkeypatch, native):
+def test_systemd_client_reuses_credential_receipt_without_context_header(monkeypatch, native):
     path = Path(__file__).parent / "e2e" / "systemd" / "runtime_acceptance.py"
     spec = importlib.util.spec_from_file_location("runtime_context_contract", path)
     module = importlib.util.module_from_spec(spec)
@@ -141,7 +141,7 @@ def test_systemd_client_fetches_context_before_single_dispatch(monkeypatch, nati
             assert request.full_url == module.BASE + "/mcp-relay/servers?detail=full"
             body = {"instructions": "Current runtime fixture instructions.", "context": "runtime-context"}
         else:
-            assert request.get_header("X-gptadmin-context") == "runtime-context"
+            assert request.get_header("X-gptadmin-context") is None
             assert json.loads(request.data) == payload
             body = {"returncode": 0, "stdout": "harmless"}
         return Response(json.dumps(body).encode())
