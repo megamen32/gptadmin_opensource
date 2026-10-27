@@ -45,23 +45,49 @@ jobs:
             echo 'current=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Skip commits outside the unified Node package
+      - name: Check for an unpublished Node version
         id: scope
         if: steps.current.outputs.current == 'true'
         env:
           SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+            echo "VERSION '$version' is not a plain integer" >&2
+            exit 1
+          fi
+          prefix="node-v${version}-"
+          release_tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')"
+          published=false
+          while IFS= read -r tag; do
+            if [[ "$tag" == "${prefix}"* ]]; then
+              published=true
+              break
+            fi
+          done <<< "$release_tags"
+
           paths="$(git diff-tree --no-commit-id --name-only -r "$SOURCE_SHA")"
-          changed=false
+          source_changed=false
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/publish-node-release.yml|VERSION|cli.py|go-hub/*|go-shellmcp/*|scripts/gptadmin_node_*.py|tools/build_node.py|tools/publish_node_release.py|tests/test_node_autoupdate.py|tests/test_node_release_publisher.py)
-                changed=true
+              VERSION|cli.py|go-hub/*|go-shellmcp/*|scripts/gptadmin_node_*.py|tools/build_node.py)
+                source_changed=true
                 break
                 ;;
             esac
           done <<< "$paths"
+
+          if [[ "$published" == 'true' && "$source_changed" == 'true' ]]; then
+            echo "Node package source changed after version $version was released; bump VERSION." >&2
+            exit 1
+          fi
+          changed=false
+          if [[ "$published" == 'false' || "$source_changed" == 'true' ]]; then
+            changed=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "published=$published" >> "$GITHUB_OUTPUT"
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go

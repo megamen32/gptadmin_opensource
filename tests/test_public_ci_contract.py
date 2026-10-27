@@ -71,6 +71,8 @@ def test_node_release_publishes_only_the_exact_commit_after_all_public_gates():
     assert 'ref: ${{ github.event.workflow_run.head_sha }}' in workflow
     assert 'Require that the tested source is still public main' in workflow
     assert 'git fetch --no-tags origin main' in workflow
+    assert 'Check for an unpublished Node version' in workflow
+    assert 'gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100"' in workflow
     assert '--source "$SOURCE_SHA"' in workflow
     assert 'contents: write' in workflow
     assert 'cancel-in-progress: false' in workflow
