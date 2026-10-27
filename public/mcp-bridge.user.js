@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.8
+// @version      2.2.9
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -557,6 +557,15 @@
       // Subtle highlight on the block
       block.style.outline = '1px solid rgba(137,180,250,.25)';
       block.style.borderRadius = '6px';
+    });
+
+    // Strategy 6: Z.ai — custom markdown code cards are divs, not <pre>/<code>.
+    // Their first child is the language label and the remaining text contains
+    // the serialized MCP JSON. Keep detection narrow so ordinary cards are skipped.
+    document.querySelectorAll('.markdown-prose > div.relative.my-2.flex.flex-col').forEach(block => {
+      const language = block.firstElementChild?.textContent.trim().toLowerCase();
+      if (language !== 'mcp') return;
+      tryInjectPlay(block, () => block.innerText);
     });
   }
 

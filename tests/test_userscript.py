@@ -74,6 +74,13 @@ def test_injected_prompt_describes_current_code_mode():
     assert "event.data.state !== oauthState()" in content
 
 
+def test_zai_custom_mcp_code_blocks_get_inline_execution():
+    content = USERSCRIPT.read_text()
+    assert "Strategy 6: Z.ai" in content
+    assert ".markdown-prose > div.relative.my-2.flex.flex-col" in content
+    assert "tryInjectPlay(block, () => block.innerText)" in content
+
+
 def test_oauth_popup_opens_inside_user_gesture_before_async_work():
     content = USERSCRIPT.read_text()
     start = content.index("function beginOAuthFromClick()")
