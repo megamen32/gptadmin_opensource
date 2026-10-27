@@ -8,6 +8,10 @@ the most common corruption without needing a JS runtime).
 import re
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+import server_for_installer
+
 USERSCRIPT = Path(__file__).resolve().parent.parent / "public" / "mcp-bridge.user.js"
 
 
@@ -65,3 +69,12 @@ def test_injected_prompt_describes_current_code_mode():
         "inline play button",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
+
+
+def test_install_urls_allow_cross_origin_tampermonkey_fetch():
+    client = TestClient(server_for_installer.app)
+    for path in ("/mcp-bridge.user.js", "/userscript.js"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert response.headers["content-disposition"] == "inline; filename=mcp-bridge.user.js"

@@ -240,6 +240,8 @@ def _mcp_bridge_userscript_response() -> Response:
         _read_mcp_bridge_userscript(),
         media_type="text/javascript",
         headers={
+            # Tampermonkey's install page fetches the userscript cross-origin.
+            "Access-Control-Allow-Origin": "*",
             "Content-Disposition": "inline; filename=mcp-bridge.user.js",
             "X-Content-Type-Options": "nosniff",
         },
