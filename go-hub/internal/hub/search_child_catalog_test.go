@@ -167,3 +167,38 @@ func TestChildSearchFingerprintIgnoresHeartbeatButTracksStableGeneration(t *test
 		t.Fatal("connection generation change did not invalidate the cached schema generation")
 	}
 }
+
+func TestSearchFailedChildRefreshIsReportedAsUnreachable(t *testing.T) {
+	s, child := childSchemaFixture(t, t.TempDir())
+	r := requestWithAuthClaims(httptest.NewRequest("POST", "/mcp", nil), map[string]any{
+		"sub": "search-failed-child", "client_id": "search-failed-child",
+		"scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull,
+	})
+	cache := s.childSearchCache()
+	key := childSearchCacheKey(r, child)
+	cache.mu.Lock()
+	cache.entries[key] = &childSearchSchemaEntry{
+		childID: child.AgentID, parentID: "shell:fixture",
+		fingerprint: childSearchFingerprint(s, child), loadedAt: time.Now(),
+		err: "upstream did not return a successful tools/list response",
+	}
+	cache.mu.Unlock()
+
+	result := s.searchToolsForRequest(r, map[string]any{"query": "fixture tool"})
+	coverage := mapValue(result["coverage"])
+	if !truthy(coverage["complete"]) || firstString(coverage, "status") != "complete" {
+		t.Fatalf("unreachable child made reachable search coverage incomplete: %#v", coverage)
+	}
+	if intFromAny(coverage["failed"]) != 1 || intFromAny(coverage["pending"]) != 0 {
+		t.Fatalf("failed child counts were not preserved: %#v", coverage)
+	}
+	if !containsString(stringSlice(coverage["unreachable"]), child.AgentID) {
+		t.Fatalf("failed child was omitted from coverage.unreachable: %#v", coverage)
+	}
+	if stringSlice(coverage["missing"]) != nil && len(stringSlice(coverage["missing"])) != 0 {
+		t.Fatalf("unreachable child was also reported as missing: %#v", coverage)
+	}
+	if _, ok := coverage["retry_hint"]; ok {
+		t.Fatalf("completed failed refresh got a retry hint despite no pending work: %#v", coverage)
+	}
+}

@@ -83,6 +83,7 @@ jobs:
                   ).splitlines()
           relevant = (
               'deploy/server01/gptadmin_hub_standby/',
+              'go-hub/',
               'scripts/export_haos_app_repository.sh',
               'scripts/gptadmin_failover_watchdog.py',
               'scripts/gptadmin_failover_proxy.py',

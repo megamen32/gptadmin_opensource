@@ -7546,6 +7546,9 @@ func cloneMap(m map[string]any) map[string]any {
 }
 
 func stringSlice(v any) []string {
+	if items, ok := v.([]string); ok {
+		return append([]string(nil), items...)
+	}
 	items, ok := v.([]any)
 	if !ok {
 		return nil

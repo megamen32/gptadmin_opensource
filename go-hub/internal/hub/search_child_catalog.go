@@ -490,9 +490,8 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 				rows = append(rows, catalogRuleMetadata(r, child.AgentID, firstString(tool, "name"), map[string]any{"target": child.AgentID, "name": firstString(tool, "name"), "title": firstString(tool, "title"), "description": firstString(tool, "description"), "inputSchema": mapValue(tool["inputSchema"]), "labels": child.Name + " " + exposedAgentSlug(child) + " child MCP"}))
 			}
 			if entry.err != "" {
-				coverage["complete"] = false
 				coverage["failed"] = intFromAny(coverage["failed"]) + 1
-				coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
+				coverage["unreachable"] = append(stringSlice(coverage["unreachable"]), child.AgentID)
 				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
 			}
 		} else {

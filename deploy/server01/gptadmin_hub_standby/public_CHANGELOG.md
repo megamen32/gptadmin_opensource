@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.8
+
+- Report failed nested MCP schema refreshes under `coverage.unreachable` while
+  keeping the reachable search coverage complete.
+
 ## 1.0.7
 
 - Publish the ARM64 image from the linked public add-on package so the public
