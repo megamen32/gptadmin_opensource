@@ -73,9 +73,10 @@ the same connection, to avoid duplicate tool catalogs.
 
 `discover`, selected `schema`, and search results return the current effective
 profile instructions and a `context` receipt. Pass the context when refreshing
-read-only search/discovery/schema results or when it is required by the current
-client contract. `exec` uses the authenticated caller context for each
-nested operation.
+read-only search/discovery/schema results only when requested. After the first
+delivery, GoHub reuses the receipt for the same authenticated credential, owner
+and profile, so later `exec` calls do not need the token or full instructions
+again.
 A missing or stale receipt produces `instructions_required` and `executed:false`
 before execution; read the returned text and make the intended call again. Never
 interpret an unrelated timeout as proof that an operation did not run.

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
+
 ### Fixed
 - The browser OAuth callback now delivers its PKCE-bound authorization code to
   the chat-site opener; the bridge still validates the Hub origin and OAuth state.

@@ -105,8 +105,8 @@ def test_live_runner_checks_public_and_authenticated_surfaces_without_echoing_be
     assert "test-bearer" not in json.dumps(summary)
     calls = [call["params"] for call in _Handler.calls if call["method"] == "tools/call"]
     assert [call["name"] for call in calls] == ["discover", "schema", "exec"]
-    assert calls[1]["arguments"] == {"target": "hub", "tool": "demo", "detail": "full", "context": "fixture-context"}
-    assert calls[2]["arguments"]["context"] == "fixture-context"
+    assert calls[1]["arguments"] == {"target": "hub", "tool": "demo", "detail": "full"}
+    assert calls[2]["arguments"] == {"code": 'return await mcp.call("hub", "demo", {});'}
 
 
 @pytest.mark.parametrize("failure", ["instructions_required", "tool_error"])

@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+func TestInstructionSessionReceiptsEnabledByDefault(t *testing.T) {
+	t.Setenv("GPTADMIN_INSTRUCTION_SESSION_RECEIPTS", "")
+	if !FromEnv().InstructionSessionReceipts {
+		t.Fatal("instruction session receipts must be enabled by default to avoid re-sending profile instructions")
+	}
+}
+
 func TestInstructionReceiptSuppressesRepeatAndTokenEcho(t *testing.T) {
 	s, r, _ := instructionFixture(t)
 	s.cfg.InstructionSessionReceipts = true

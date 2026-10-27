@@ -7,10 +7,12 @@ current context. The response contains the effective bound profile's full
 `instructions` and a `context` receipt. A selected schema returns one `call_ref`
 which carries that context into `execute({ref, args})`.
 
-For explicit routing, use `execute({target, tool, args, context})`. Reuse context
-with further discovery/schema calls to avoid repeating the same document. The
-profile comes from the authenticated connection, not a model-selected profile ID.
-There is no account-wide or profile-wide "read" flag.
+GoHub remembers that document was delivered to the same authenticated
+credential, owner and profile. After the first delivery, omit `context` from
+later calls; GoHub reuses its receipt without resending the document or token.
+The in-memory receipt is refreshed while used, expires after two idle hours, and
+is invalidated when the profile or instruction document changes. It is not an
+account-wide or profile-wide read flag.
 
 A missing, expired or outdated receipt rejects a new operation before submission:
 
@@ -24,8 +26,9 @@ A missing, expired or outdated receipt rejects a new operation before submission
 }
 ```
 
-Read that document and make the intended, unexecuted call with its context, or
-fetch a new exact schema. No extra acknowledge/initialization call is needed.
+Read that document and make the intended, unexecuted call again. Include the
+returned context only if the Hub still requests it, or fetch a new exact schema.
+No extra acknowledge/initialization call is needed.
 A timeout, dropped connection or failed tool is different: inspect the existing
 job/operation receipt before replaying it.
 
@@ -43,7 +46,8 @@ strict business schemas can carry it in MCP `params._meta["io.gptadmin/context"]
 or the `X-GPTAdmin-Context` HTTP header. Reserved outer control metadata is removed
 before downstream tool arguments; unrelated metadata/business fields remain.
 
-Receipts expire after 30 minutes. They bind the caller's bearer/profile and the
+Delivery receipts expire after two idle hours. They bind the caller's bearer,
+owner and profile, and the
 exact instruction-set ID and content digest. Rule edits, profile changes and
 credential changes therefore require fresh delivery. Schema references remain
 scoped to their existing caller/operation store; an expired reference must be

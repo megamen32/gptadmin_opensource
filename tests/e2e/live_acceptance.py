@@ -136,7 +136,7 @@ def run_acceptance(base_url: str, bearer: str, required_tools: set[str] | None =
         raise LiveAcceptanceError("/mcp discover: hub target is missing")
     for name in sorted({"demo"} | ((required_tools or set()) - tool_names)):
         selected = _call_tool(base_url, bearer, "schema", {
-            "target": "hub", "tool": name, "detail": "full", "context": context,
+            "target": "hub", "tool": name, "detail": "full",
         })
         definitions = selected.get("response", {}).get("tools", [])
         if (len(definitions) != 1 or definitions[0].get("name") != name
@@ -144,8 +144,10 @@ def run_acceptance(base_url: str, bearer: str, required_tools: set[str] | None =
             raise LiveAcceptanceError("/mcp schema: exact authorized tool schema is missing")
 
     called = _call_tool(base_url, bearer, "exec", {
-        "code": 'return await mcp.call("hub", "demo", {});', "context": context,
+        "code": 'return await mcp.call("hub", "demo", {});',
     })
+    if "instructions" in called or "context" in called:
+        raise LiveAcceptanceError("/mcp exec repeated profile instructions or receipt after discovery")
     demo = called.get("result", called)
     if not isinstance(demo, dict) or demo.get("status") != "ok" or "read_only_demo" not in demo.get("capabilities", []):
         raise LiveAcceptanceError("/mcp exec: safe demo result is missing")

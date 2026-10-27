@@ -9,8 +9,11 @@ Before ordinary GPTAdmin work, call `search` with a specific query and bounded
 filters supported by its schema. Read the returned `instructions` and use the
 result's argument schema plus short JavaScript example or scoped handle. The
 authenticated connection selects the profile; do not invent or substitute it.
-Keep the instruction text with its `context`. Run the operation through
-`exec({code})`, using `call(target, tool, args)` or the returned handle.
+Read the instruction text once and keep it available for the current work.
+GoHub reuses its short-lived delivery receipt for the same authenticated
+credential, owner and profile; omit `context` on later calls unless the Hub asks
+for a refresh. Run the operation through `exec({code})`, using
+`call(target, tool, args)` or the returned handle.
 Aggregate, filter, and count in JavaScript, then explicitly return only the
 selected result. Do not use direct public `execute`; it has been retired.
 

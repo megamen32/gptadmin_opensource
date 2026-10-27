@@ -65,7 +65,7 @@ def test_integration_control_contract_matches_current_hub_scope() -> None:
 
     document = (ROOT / "docs" / "INTEGRATION_CONTROL_CONTRACT.md").read_text(encoding="utf-8").lower()
     assert "current hub implementation" in document
-    assert "discover -> schema -> execute" in document
+    assert "discover -> schema -> exec" in document
     assert "schema version/digest" in document
     assert "no implementation is being claimed" not in document
 
@@ -73,7 +73,7 @@ def test_integration_control_contract_matches_current_hub_scope() -> None:
 def test_canonical_docs_include_executable_verification_snippets() -> None:
     """Supported contract pages must expose the command that verifies them."""
     required_snippets = {
-        "INTEGRATION_CONTROL_CONTRACT.md": "TestMCPIntegrationDiscoverSchemaExecuteConformance",
+        "INTEGRATION_CONTROL_CONTRACT.md": "TestMCPIntegrationDiscoverSchemaToolCallConformance",
         "CAPABILITY_CATALOG.md": "tests/test_mcp_catalog.py",
         "OBSERVABILITY.md": "TestOTLPExporter",
         "EXTENSION_SDK.md": "tests/fixtures/mcp-extension-example.json",

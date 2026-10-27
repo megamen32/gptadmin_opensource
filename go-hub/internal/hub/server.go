@@ -208,7 +208,7 @@ func FromEnv() Config {
 		FailoverStateFile:          env("GPTADMIN_FAILOVER_STATE_FILE", filepath.Join(cfgDir, "failover_state.json")),
 		FailoverReclaimCommandFile: env("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", filepath.Join(cfgDir, "failover_reclaim_command.json")),
 		InstructionContextRequired: truthyString(env("GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED", "1")),
-		InstructionSessionReceipts: truthyString(env("GPTADMIN_INSTRUCTION_SESSION_RECEIPTS", "0")),
+		InstructionSessionReceipts: truthyString(env("GPTADMIN_INSTRUCTION_SESSION_RECEIPTS", "1")),
 		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
 		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
 		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
