@@ -24,6 +24,14 @@ def test_candidate_gate_rejects_retired_native_mcp_catalog() -> None:
         ])
 
 
+def test_candidate_gate_reads_native_exec_result_envelope() -> None:
+    cli._require_candidate_demo({
+        "status": "completed",
+        "calls": 1,
+        "result": {"status": "ok", "capabilities": ["mcp", "read_only_demo"]},
+    })
+
+
 def test_mcp_catalog_is_attributed_and_machine_readable(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """Catalog output must expose provenance and risk before activation."""
 

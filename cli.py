@@ -5357,7 +5357,9 @@ def _candidate_mcp_content(result) -> dict:
 def _require_candidate_demo(result) -> None:
     if not isinstance(result, dict) or result.get('error') or result.get('executed') is False:
         raise RuntimeError('candidate gate: demo execution failed')
-    demo = result.get('response', result)
+    # The Actions/legacy path returns `response`; native code-mode `exec`
+    # wraps the mcp.call value under `result` alongside logs and call counts.
+    demo = result.get('response', result.get('result', result))
     if (not isinstance(demo, dict) or demo.get('status') != 'ok'
             or 'read_only_demo' not in demo.get('capabilities', [])):
         raise RuntimeError('candidate gate: safe demo result is missing')
