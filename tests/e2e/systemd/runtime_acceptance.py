@@ -16,6 +16,7 @@ from pathlib import Path
 ENV_FILE = Path(os.environ.get("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"))
 BASE = os.environ.get("GPTADMIN_ACCEPTANCE_BASE", "http://127.0.0.1:9001").rstrip("/")
 MARKER = os.environ.get("GPTADMIN_ACCEPTANCE_MARKER", "gptadmin-runtime-acceptance")
+_DISCOVERED_CALLERS: set[tuple[str, bytes]] = set()
 
 
 def read_env() -> dict[str, str]:
@@ -63,16 +64,18 @@ def request(method: str, path: str, bearer: str, payload=None, timeout=20):
         "Content-Type": "application/json",
         "Accept": "application/json, text/yaml, */*",
     }
-    # Fetch with this exact caller before dispatch. Direct native MCP uses the
-    # supported outer header so strict downstream business schemas stay intact.
+    # Deliver profile instructions once per exact caller/runtime. GoHub retains
+    # the credential-bound receipt, so subsequent calls need neither another
+    # discovery request nor a repeated X-GPTAdmin-Context header.
     if method == 'POST' and (path == '/mcp-relay/call' or (
             isinstance(payload, dict) and payload.get('method') == 'tools/call')):
-        discovery = request('GET', '/mcp-relay/servers?detail=full', bearer, timeout=timeout)
-        instructions, context = discovery.get('instructions'), discovery.get('context')
-        if (not isinstance(instructions, str) or not instructions.strip()
-                or not isinstance(context, str) or not context):
-            raise RuntimeError('runtime discovery omitted current instructions/context')
-        headers['X-GPTAdmin-Context'] = context
+        caller = (BASE, hashlib.sha256(bearer.encode()).digest())
+        if caller not in _DISCOVERED_CALLERS:
+            discovery = request('GET', '/mcp-relay/servers?detail=full', bearer, timeout=timeout)
+            instructions, context = discovery.get('instructions'), discovery.get('context')
+            if bool(instructions) != bool(context):
+                raise RuntimeError('runtime discovery returned an incomplete instruction delivery')
+            _DISCOVERED_CALLERS.add(caller)
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
         BASE + path,
