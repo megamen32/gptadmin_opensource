@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.9
+// @version      2.3.0
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -41,6 +41,9 @@
   function autoEnter()   { return GM_getValue('auto_enter', false); }
   function compactMode() { return GM_getValue('compact_prompt', true); }
   function toolbarPosition() { return GM_getValue('toolbar_position', 'top-center'); }
+  let bridgeInstructionContext = '';
+  let bridgeInstructionOwner = '';
+  let bridgeProfileInstructions = '';
 
   // ═══════════════════════════════════════════════════════════════
   //  SITE-SPECIFIC INPUT SELECTORS
@@ -283,7 +286,16 @@
   async function promptForTarget(target, compact) {
     const schema = await mcpCall('schema', { target });
     const tools = schema.response?.tools || schema.tools || [];
+    const owner = accessToken();
+    if (owner !== bridgeInstructionOwner) {
+      bridgeInstructionOwner = owner;
+      bridgeInstructionContext = '';
+      bridgeProfileInstructions = '';
+    }
+    bridgeInstructionContext = schema.context || schema.response?.context || bridgeInstructionContext;
+    bridgeProfileInstructions = schema.instructions || schema.response?.instructions || bridgeProfileInstructions;
     const lines = [`Tools for ${target}:`];
+    if (bridgeProfileInstructions) lines.push('Current profile instructions:', bridgeProfileInstructions);
     for (const tool of tools) lines.push(`  ${tool.name || 'tool'}(${compact ? 'args' : JSON.stringify(tool.inputSchema || {})})`);
     return lines.join('\n');
   }
@@ -291,7 +303,7 @@
   const MCP_USAGE_PROMPT = [
     'Use only the exact target IDs and tools listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}.',
     'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. Start all independent `mcp.call(target, tool, args)` calls together with `await Promise.all([...])`; do not wait for one result before starting another independent command or split them into separate tool-call rounds. Use sequential `await` only when a later call needs an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only the useful results. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
-    'Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
+    'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
   ].join('\n');
 
   // ═══════════════════════════════════════════════════════════════
@@ -352,14 +364,26 @@
     let resultStr, isError = false;
 
     try {
-      const result = await mcpCall('execute', {
-        target: cmd.target, tool: cmd.tool, args: cmd.args || {},
-        idempotency_key: `browser-extension-${Date.now()}`,
-      });
+      const context = bridgeInstructionOwner === token ? bridgeInstructionContext : '';
+      const args = { ...(cmd.args || {}) };
+      let result;
+      if (cmd.target === 'hub') {
+        if (context) args.context = context;
+        result = await mcpCall(cmd.tool, args);
+      } else {
+        result = await api('POST', '/mcp-relay/call', {
+          target: cmd.target,
+          tool: cmd.tool,
+          args,
+          ...(context ? { context } : {}),
+          idempotency_key: `browser-extension-${Date.now()}`,
+        });
+      }
 
-      if (result && result.error) {
+      if (result && (result.error || result.status === 'failed' || result.executed === false)) {
         isError = true;
-        resultStr = typeof result.error === 'string' ? result.error : JSON.stringify(result.error, null, 2);
+        const error = result.error || result;
+        resultStr = typeof error === 'string' ? error : JSON.stringify(error, null, 2);
       } else {
         const payload = result.result || result.response || result;
         resultStr = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);

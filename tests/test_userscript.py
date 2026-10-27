@@ -68,6 +68,8 @@ def test_injected_prompt_describes_current_code_mode():
         "not automatically parallel",
         "approval rules",
         "inline play button",
+        "same-profile instruction context",
+        "Current profile instructions:",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
     assert "event.origin !== new URL(hubUrl()).origin" in content
@@ -79,6 +81,17 @@ def test_zai_custom_mcp_code_blocks_get_inline_execution():
     assert "Strategy 6: Z.ai" in content
     assert ".markdown-prose > div.relative.my-2.flex.flex-col" in content
     assert "tryInjectPlay(block, () => block.innerText)" in content
+
+
+def test_mcp_execution_uses_current_facade_and_same_profile_context():
+    content = USERSCRIPT.read_text()
+    start = content.index("async function execMcp(cmd, inlineBtn)")
+    end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  INLINE PLAY BUTTONS", start)
+    execute = content[start:end]
+    assert "mcpCall(cmd.tool" in execute
+    assert "'/mcp-relay/call'" in execute
+    assert "bridgeInstructionContext" in execute
+    assert "mcpCall('execute'" not in execute
 
 
 def test_oauth_popup_opens_inside_user_gesture_before_async_work():
