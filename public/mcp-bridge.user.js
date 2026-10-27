@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.7
+// @version      2.2.8
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -17,6 +17,7 @@
 // @match        *://yandex.ru/*
 // @match        *://alice.yandex.ru/*
 // @match        *://chat.yandex.ru/*
+// @connect      mcp.bezrabotnyi.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -176,7 +177,7 @@
           if (isJson) { try { resolve(JSON.parse(r.responseText)); return; } catch {} }
           resolve(r.responseText);
         },
-        onerror: reject,
+        onerror(error) { reject(new Error(`Hub request failed: ${error?.error || error?.message || 'network or @connect permission denied'}`)); },
         ontimeout() { reject(new Error('bridge timeout')); },
       });
     });
@@ -208,7 +209,7 @@
           try { resolve(JSON.parse(r.responseText)); }
           catch { reject(new Error('Hub returned invalid OAuth data')); }
         },
-        onerror: reject,
+        onerror(error) { reject(new Error(`Hub OAuth request failed: ${error?.error || error?.message || 'network or @connect permission denied'}`)); },
         ontimeout() { reject(new Error('OAuth connection timeout')); },
       });
     });

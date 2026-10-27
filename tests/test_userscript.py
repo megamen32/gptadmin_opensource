@@ -53,6 +53,7 @@ def test_userscript_supported_sites():
         assert site in content, f"expected @match for {site} not found"
     assert "@downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js" in content
     assert "@updateURL    https://became.bezrabotnyi.com/mcp-bridge.user.js" in content
+    assert "// @connect      mcp.bezrabotnyi.com" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
