@@ -5497,6 +5497,9 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             )
             if not isinstance(initialized, dict) or not initialized.get('protocolVersion') or not initialized.get('serverInfo'):
                 raise RuntimeError('candidate gate: MCP initialize returned an invalid result')
+            initial_instructions = initialized.get('instructions')
+            if not isinstance(initial_instructions, str) or not initial_instructions.strip():
+                raise RuntimeError('candidate gate: MCP initialize omitted profile instructions')
             listed = _candidate_mcp_rpc(
                 local_base, 'tools/list', {}, token=token, host=client_host, request_id=2,
             )
@@ -5506,15 +5509,18 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
                 local_base, 'tools/call', {'name': 'discover', 'arguments': {}},
                 token=token, host=client_host, request_id=3,
             ))
-            _require_instruction_receipt(mcp_discovered)
+            if not any(str(server.get('server_id') or '') == 'hub'
+                       for server in _candidate_servers(mcp_discovered)):
+                raise RuntimeError('candidate gate: MCP discover omitted the hub target')
             mcp_searched = _candidate_mcp_content(_candidate_mcp_rpc(
                 local_base, 'tools/call', {'name': 'search', 'arguments': {'query': 'demo'}},
                 token=token, host=client_host, request_id=4,
             ))
-            mcp_context = _require_instruction_receipt(mcp_searched)
+            if mcp_searched.get('status') == 'failed':
+                raise RuntimeError('candidate gate: MCP search failed after instruction delivery')
             mcp_schema = _candidate_mcp_content(_candidate_mcp_rpc(
                 local_base, 'tools/call', {'name': 'schema', 'arguments': {
-                    'target': 'hub', 'tool': 'demo', 'detail': 'full', 'context': mcp_context,
+                    'target': 'hub', 'tool': 'demo', 'detail': 'full',
                 }}, token=token, host=client_host, request_id=5,
             ))
             definitions = _candidate_tools(mcp_schema)
@@ -5522,7 +5528,7 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
                 raise RuntimeError('candidate gate: exact MCP demo schema is missing')
             mcp_called = _candidate_mcp_rpc(
                 local_base, 'tools/call', {'name': 'exec', 'arguments': {
-                    'code': "return await mcp.call('hub','demo',{});", 'context': mcp_context,
+                    'code': "return await mcp.call('hub','demo',{});",
                 }}, token=token, host=client_host, request_id=6,
             )
             _require_candidate_demo(_candidate_mcp_content(mcp_called))
@@ -5531,7 +5537,6 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             # OpenAPI artifact rather than hard-coded relay paths.
             method, path = ops['discover']
             discovered = _candidate_http(local_base, method, path, host=client_host, token=token)
-            context = _require_instruction_receipt(discovered)
             servers = _candidate_servers(discovered)
             if not servers:
                 raise RuntimeError('candidate gate: discover returned no targets')
@@ -5548,7 +5553,7 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             smethod, spath = ops['schema']
             schema_payload = _candidate_http(
                 local_base, smethod, spath, host=client_host, token=token,
-                payload={'target': selected_target, 'tool': 'demo', 'detail': 'full', 'context': context}, timeout=8.0,
+                payload={'target': selected_target, 'tool': 'demo', 'detail': 'full'}, timeout=8.0,
             )
             tools = _candidate_tools(schema_payload)
             demo = next((item for item in tools if str(item.get('name') or '') == 'demo'), None)
@@ -5561,7 +5566,7 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             emethod, epath = ops['execute']
             result = _candidate_http(
                 local_base, emethod, epath, host=client_host, token=token,
-                payload={'target': selected_target, 'tool_name': 'demo', 'arguments': {}, 'context': context},
+                payload={'target': selected_target, 'tool_name': 'demo', 'arguments': {}},
                 timeout=12.0,
             )
             job_id = str(result.get('job_id') or '') if isinstance(result, dict) else ''
