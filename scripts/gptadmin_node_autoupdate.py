@@ -25,6 +25,10 @@ MANAGER = Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py')
 CONFIG = Path('/etc/gptadmin-node/autoupdate.json')
 STATE = Path('/var/lib/gptadmin-node/autoupdate')
 HELPER_INSTALL_DIR = Path('/usr/local/lib/gptadmin')
+MAX_MANAGED_NODES = 8
+RELEASE_SELECTION_BUDGET_SECS = 90
+NODE_UPDATE_BUDGET_SECS = 145
+UPDATE_FINALIZATION_MARGIN_SECS = 30
 
 
 def record(path, value):
@@ -124,7 +128,7 @@ def validate_config(config):
     if not isinstance(config, dict) or config.get('enabled') is not True:
         raise ValueError('Node automatic update is not explicitly enabled')
     names = config.get('names')
-    if (not isinstance(names, list) or not 1 <= len(names) <= 8 or len(set(names)) != len(names)
+    if (not isinstance(names, list) or not 1 <= len(names) <= MAX_MANAGED_NODES or len(set(names)) != len(names)
             or any(not isinstance(n, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', n) for n in names)):
         raise ValueError('explicit bounded managed Node names required')
     minimum = config.get('minimum_build_version', 0)
@@ -196,9 +200,14 @@ def source_from_public_mirror(mirror_commit, prefix, deadline):
     source_match = (re.fullmatch(r'Source-Commit: ([0-9a-f]{40})', source_lines[0])
                     if len(source_lines) == 1 else None)
     if (not commit_header or commit_header[1] != mirror_commit or not source_match
-            or nonempty[-1] != source_lines[0] or not source_match[1].startswith(prefix)):
+            or nonempty[-1] != source_lines[0]):
         raise ValueError('public Node mirror Source-Commit trailer does not bind the release tag')
-    return source_match[1]
+    # The public commit hash identifies the code in the release artifact. The
+    # Source-Commit trailer identifies its private source commit, whose hash is
+    # different because the sanitized public mirror rewrites commit history.
+    if not mirror_commit.startswith(prefix):
+        raise ValueError('public Node mirror commit does not match the release tag prefix')
+    return mirror_commit
 
 
 def latest_public_tag(deadline):
@@ -381,7 +390,8 @@ def main():
         live_versions = manager.active_node_versions(manager.DEFAULT_LAYOUT, names)
         if shutil.disk_usage(STATE).free < 512*1024**2:
             raise ValueError('Node updater disk reserve unavailable')
-        deadline = time.monotonic() + 165
+        deadline = time.monotonic() + RELEASE_SELECTION_BUDGET_SECS + \
+            NODE_UPDATE_BUDGET_SECS * len(names) + UPDATE_FINALIZATION_MARGIN_SECS
         arch = manager.host_arch()
         release, asset, source, used_fallback = select_release_with_fallback(arch,deadline)
         version = release.get('build_version')
@@ -420,7 +430,7 @@ def main():
                 if live_matches(manager,name,source):
                     results.append(name);continue
                 remaining=deadline-time.monotonic()
-                if remaining < 145:
+                if remaining < NODE_UPDATE_BUDGET_SECS:
                     receipt={'updated':bool(results),'complete':False,'source':source,
                              'verified_instances':results,'reason':'rollback_reserve_unavailable'}
                     record(STATE/'partial-update.json',receipt)
@@ -432,7 +442,8 @@ def main():
                     'verified_instances':results,'reason':'manager_in_progress','instance':name})
                 try:
                     result=subprocess.run(['python3',str(MANAGER),'update','--name',name,'--package',str(package),'--wait-secs','20','--require-drain','--operation-deadline-secs','50'],
-                                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=145)
+                                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                                          timeout=NODE_UPDATE_BUDGET_SECS)
                 except subprocess.TimeoutExpired:
                     receipt={'complete':False,'source':source,'verified_instances':results,
                              'reason':'manager_cleanup_unverified','instance':name}

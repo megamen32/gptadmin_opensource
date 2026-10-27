@@ -28,6 +28,14 @@ def index(**changes):
 
 
 class NodeAutoupdateTests(unittest.TestCase):
+    def test_update_budget_covers_selection_each_instance_and_rollback(self):
+        self.assertEqual(update.RELEASE_SELECTION_BUDGET_SECS,90)
+        self.assertEqual(update.NODE_UPDATE_BUDGET_SECS,145)
+        self.assertEqual(update.UPDATE_FINALIZATION_MARGIN_SECS,30)
+        self.assertEqual(update.RELEASE_SELECTION_BUDGET_SECS+
+                         update.NODE_UPDATE_BUDGET_SECS*update.MAX_MANAGED_NODES+
+                         update.UPDATE_FINALIZATION_MARGIN_SECS,1280)
+
     def test_shellmcp_queue_transport_has_no_local_version_endpoint(self):
         with tempfile.TemporaryDirectory() as d:
             env=Path(d)/'go-shellmcp.env'
@@ -711,6 +719,17 @@ class NodeAutoupdateTests(unittest.TestCase):
         unit=manager.AUTOUPDATE_SERVICE_TEXT
         self.assertIn('ProtectSystem=full',unit)
         self.assertIn('ReadWritePaths=/usr/local/lib/gptadmin',unit)
+        self.assertIn('TimeoutStartSec=1300',unit)
+
+    def test_manual_autoupdate_run_waits_for_the_bounded_service_deadline(self):
+        args=manager.build_parser().parse_args(['autoupdate','run'])
+        runner=manager.Runner()
+        with patch.object(manager,'require_root'), \
+             patch.object(manager,'AUTOUPDATE_CONFIG',Path('/does-not-exist')), \
+             patch.object(manager,'systemctl') as invoke:
+            manager.cmd_autoupdate(args,manager.Layout(),runner)
+        invoke.assert_called_once_with(runner,'start',manager.AUTOUPDATE_SERVICE,
+                                       timeout=manager.AUTOUPDATE_SERVICE_TIMEOUT_SECS+30)
 
     def test_intent_record_is_durable_protected_and_replaces_atomically(self):
         import os,stat
@@ -779,22 +798,22 @@ class NodeAutoupdateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):update.validate_config(value)
         self.assertEqual(update.validate_config({'enabled':True,'names':['one','two']}),['one','two'])
 
-    def test_tag_resolution_is_exact_commit_not_only_short_prefix(self):
-        expected='1'*12+'2'*28
-        mirror='4'*40
+    def test_tag_resolution_returns_public_mirror_commit_and_accepts_private_provenance(self):
+        mirror='1'*12+'4'*28
+        private_source='5'*40
         api=json.dumps({'object':{'sha':mirror,'type':'commit'}}).encode()
         patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror\n\n'
-                     f'Source-Commit: {expected}\n---\n').encode()
+                     f'Source-Commit: {private_source}\n---\n').encode()
         with patch.object(update,'get',side_effect=[api,patch_bytes]):
-            self.assertEqual(update.resolve_tag(TAG,time.monotonic()+5),expected)
+            self.assertEqual(update.resolve_tag(TAG,time.monotonic()+5),mirror)
 
-    def test_tag_resolution_rejects_public_mirror_without_matching_provenance(self):
+    def test_tag_resolution_rejects_public_mirror_with_a_different_tag_prefix(self):
         mirror='2'*12+'4'*28
         api=json.dumps({'object':{'sha':mirror,'type':'commit'}}).encode()
         patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] mirror\n\n'
                      f'Source-Commit: {"5"*40}\n---\n').encode()
         with patch.object(update,'get',side_effect=[api,patch_bytes]):
-            with self.assertRaisesRegex(ValueError,'Source-Commit'):
+            with self.assertRaisesRegex(ValueError,'release tag prefix'):
                 update.resolve_tag(TAG,time.monotonic()+5)
 
     def test_rate_limited_api_falls_back_to_immutable_public_feed_tag_and_checksum(self):
@@ -814,8 +833,8 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_public_feed_binds_sanitized_tag_to_exact_source_commit_trailer(self):
         latest='node-v124-'+'2'*12
-        source='2'*12+'3'*28
-        mirror='4'*40
+        private_source='5'*40
+        mirror='2'*12+'4'*28
         ns='http://www.w3.org/2005/Atom'
         feed=f'''<feed xmlns="{ns}">
           <entry><id>tag:github.com,2008:Repository/1/node-v123-{'1'*12}</id><updated>2026-10-01T00:00:00Z</updated></entry>
@@ -825,19 +844,19 @@ class NodeAutoupdateTests(unittest.TestCase):
             'From: mirror bot <bot@example.invalid>\n'
             'Date: Thu, 22 Oct 2026 12:00:00 +0000\n'
             'Subject: [PATCH] sanitized source snapshot\n\n'
-            f'Source-Commit: {source}\n---\n').encode()
+            f'Source-Commit: {private_source}\n---\n').encode()
         result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
         with patch.object(update,'get',side_effect=[feed,patch_bytes]) as get, \
              patch.object(update.subprocess,'run',return_value=result) as run:
-            self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,source,124))
+            self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,mirror,124))
         self.assertEqual(run.call_args.args[0][0:3],['git','-c','credential.helper='])
         self.assertTrue(get.call_args_list[1].args[0].endswith('/commit/'+mirror+'.patch'))
 
     def test_public_feed_uses_exact_peeled_commit_for_annotated_tag(self):
         latest='node-v124-'+'2'*12
-        source='2'*12+'3'*28
+        source='5'*40
         tag_object='5'*40
-        peeled='4'*40
+        peeled='2'*12+'4'*28
         ns='http://www.w3.org/2005/Atom'
         feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
              '<updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
@@ -847,7 +866,7 @@ class NodeAutoupdateTests(unittest.TestCase):
              f'{peeled}\trefs/tags/{latest}^{{}}\n').encode(),stderr=b'')
         with patch.object(update,'get',side_effect=[feed,patch_bytes]) as get, \
              patch.object(update.subprocess,'run',return_value=refs) as run:
-            self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,source,124))
+            self.assertEqual(update.latest_public_tag(time.monotonic()+30),(latest,peeled,124))
         self.assertEqual(run.call_args.args[0][-2:],['refs/tags/'+latest,'refs/tags/'+latest+'^{}'])
         self.assertTrue(get.call_args_list[1].args[0].endswith('/commit/'+peeled+'.patch'))
 
@@ -869,9 +888,9 @@ class NodeAutoupdateTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'refs|invalid|ambiguous|missing'):
                     update.latest_public_tag(time.monotonic()+30)
 
-    def test_public_feed_refuses_missing_duplicate_or_mismatched_source_trailers(self):
+    def test_public_feed_refuses_missing_duplicate_or_malformed_source_trailers(self):
         latest='node-v124-'+'2'*12
-        source='2'*12+'3'*28
+        source='5'*40
         mirror='2'*12+'4'*28
         ns='http://www.w3.org/2005/Atom'
         feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id>' \
@@ -880,7 +899,7 @@ class NodeAutoupdateTests(unittest.TestCase):
         cases={
             'missing':prefix+'No provenance trailer\n---\n',
             'duplicate':prefix+f'Source-Commit: {source}\nSource-Commit: {source}\n---\n',
-            'mismatched':prefix+f'Source-Commit: {"5"*40}\n---\n',
+            'malformed':prefix+'Source-Commit: not-a-full-commit\n---\n',
         }
         result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
         for label,patch_bytes in cases.items():
@@ -903,12 +922,12 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_public_feed_refuses_invalid_source_provenance_and_xml_entity_declarations(self):
         latest='node-v124-'+'2'*12
-        mirror='4'*40
+        mirror='2'*12+'4'*28
         ns='http://www.w3.org/2005/Atom'
         feed=f'<feed xmlns="{ns}"><entry><id>tag:github.com,2008:Repository/1/{latest}</id><updated>2026-10-02T00:00:00Z</updated></entry></feed>'.encode()
         patch_bytes=(f'From {mirror} Mon Sep 17 00:00:00 2001\n'
             'Subject: [PATCH] mirror snapshot\n\n'
-            f'Source-Commit: {"3"*40}\n---\n').encode()
+            'Source-Commit: invalid\n---\n').encode()
         result=SimpleNamespace(returncode=0,stdout=f'{mirror}\trefs/tags/{latest}\n'.encode(),stderr=b'')
         with patch.object(update,'get',side_effect=[feed,patch_bytes]),patch.object(update.subprocess,'run',return_value=result):
             with self.assertRaisesRegex(ValueError,'source|trailer|provenance'):

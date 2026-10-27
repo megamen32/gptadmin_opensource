@@ -72,9 +72,10 @@ AUTOUPDATE_MANAGER = Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py')
 AUTOUPDATE_PROBE = Path('/usr/local/lib/gptadmin/gptadmin_node_probe.py')
 AUTOUPDATE_SERVICE = 'gptadmin-node-autoupdate.service'
 AUTOUPDATE_TIMER = 'gptadmin-node-autoupdate.timer'
+AUTOUPDATE_SERVICE_TIMEOUT_SECS = 1300
 AUTOUPDATE_SERVICE_PATH = Path('/etc/systemd/system') / AUTOUPDATE_SERVICE
 AUTOUPDATE_TIMER_PATH = Path('/etc/systemd/system') / AUTOUPDATE_TIMER
-AUTOUPDATE_SERVICE_TEXT = '''[Unit]
+AUTOUPDATE_SERVICE_TEXT = f'''[Unit]
 Description=Verified public GPTAdmin Node package update
 After=network-online.target
 Wants=network-online.target
@@ -82,7 +83,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /usr/local/lib/gptadmin/gptadmin_node_autoupdate.py
-TimeoutStartSec=180
+TimeoutStartSec={AUTOUPDATE_SERVICE_TIMEOUT_SECS}
 MemoryHigh=256M
 MemoryMax=384M
 MemorySwapMax=0
@@ -282,9 +283,9 @@ class Runner:
         return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
 
 
-def systemctl(runner: Runner, *args: str, check: bool = True):
+def systemctl(runner: Runner, *args: str, check: bool = True, timeout: float = 45):
     try:
-        result = runner.run(['systemctl', *args], timeout=45)
+        result = runner.run(['systemctl', *args], timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RuntimeFailure('systemctl operation exceeded its finite deadline') from None
     if check and result.returncode != 0:
@@ -2347,7 +2348,8 @@ def cmd_autoupdate(args, layout: Layout, runner: Runner) -> None:
         print(json.dumps({'enabled': False, 'names': names}, sort_keys=True))
         return
     if action == 'run':
-        systemctl(runner, 'start', AUTOUPDATE_SERVICE)
+        systemctl(runner, 'start', AUTOUPDATE_SERVICE,
+                  timeout=AUTOUPDATE_SERVICE_TIMEOUT_SECS + 30)
         return
     if action != 'enable':
         raise UsageError('autoupdate action must be status, enable, disable or run')
