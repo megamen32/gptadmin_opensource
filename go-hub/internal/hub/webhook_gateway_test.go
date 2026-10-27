@@ -581,6 +581,26 @@ func TestWebhookGatewayProgressUpdateRequiresUsefulChangeAndRejectsTerminalJob(t
 	}
 }
 
+func TestRunWebhookJobDoesNotDispatchTerminalJob(t *testing.T) {
+	s := New(Config{})
+	const jobID = "job-terminal"
+	s.mu.Lock()
+	s.webhookJobs[jobID] = &webhookJob{ID: jobID, Status: "completed"}
+	s.mu.Unlock()
+
+	s.runWebhookJob(jobID, WebhookRoute{
+		ID:     "terminal",
+		Action: WebhookAction{Kind: "unsupported"},
+	}, map[string]any{"event": "should-not-run"})
+
+	s.mu.Lock()
+	got := cloneWebhookJob(s.webhookJobs[jobID])
+	s.mu.Unlock()
+	if got == nil || got.Status != "completed" || !got.StartedAt.IsZero() || !got.CompletedAt.IsZero() {
+		t.Fatalf("terminal webhook job changed: %#v", got)
+	}
+}
+
 func TestWebhookGatewayProgressRejectsMalformedAndOversizedPayloads(t *testing.T) {
 	s := New(Config{WebhookRoutes: []WebhookRoute{{
 		ID:     "status",

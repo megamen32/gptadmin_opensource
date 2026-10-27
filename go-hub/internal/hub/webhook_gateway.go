@@ -590,6 +590,10 @@ func (s *Server) runWebhookJob(jobID string, route WebhookRoute, event any) {
 		s.mu.Unlock()
 		return
 	}
+	if job.Status == "completed" || job.Status == "failed" {
+		s.mu.Unlock()
+		return
+	}
 	if correlationID, traceRefs := extractWebhookHealthMetadata(event); correlationID != "" || len(traceRefs) > 0 {
 		job.CorrelationID = correlationID
 		job.TraceRefs = append([]string(nil), traceRefs...)
