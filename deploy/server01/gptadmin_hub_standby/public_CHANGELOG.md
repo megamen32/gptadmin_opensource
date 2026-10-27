@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.9
+
+- Include the Go Hub guard that keeps terminal webhook jobs from returning to `running`.
+
 ## 1.0.8
 
 - Report failed nested MCP schema refreshes under `coverage.unreachable` while

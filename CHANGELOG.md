@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An asynchronous webhook dispatcher no longer starts a job after it has already
+  reached a terminal state, so late progress updates remain rejected.
 - Nodes in the `failed` state were invisible: the status filter offered no way to select
   them, the Overview attention panel truncated its list to six rows, and the summary tile
   counted only online and stale, so the numbers contradicted both each other and the node
