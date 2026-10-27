@@ -13,7 +13,7 @@
 | 1 | [OpenAI 操作](#1-openai-action-custom-gpt) | ChatGPT（Plus/团队/桌面）自定义 GPT | OAuth 连接 |
 | 2 | [MCP 远程](#2-mcp-remote-streamable-http) |克劳德桌面 / Codex / OpenCode / Mavis |不记名 JWT (OAuth) |
 | 3 | [OAuth 握手](#3-oauth-handshake) |提供 #1 和 #2 的身份验证流程 | PKCE S256 |
-| 4 | [浏览器扩展](#4-browser-extension) | DeepSeek / Qwen / Alice / 任何网络聊天 |集线器连接页面|
+| 4 | [浏览器扩展](#4-browser-extension) | DeepSeek / Z.ai / Qwen / Alice / 任何网页聊天 |集线器连接页面|
 
 所有四个都到达相同的中心和相同的工具。请参阅 [ADAPTERS.md](./ADAPTERS.md)（旧版三向概述）和 [GPTADMIN_INSTRUCTIONS.md]()（AI 代理的只读参考）。
 
@@ -255,9 +255,9 @@ ChatGPT 需要 `offline_access` 和 `refresh_token` 授予来维持
 
 ## 4. 浏览器扩展
 
-**何时使用。** 原生不支持 MCP 的免费网络聊天 AI — DeepSeek、Qwen、Tongyi、Yandex Alice、ChatGPT（免费套餐）。该扩展将“任何网络聊天”转换为 gptadmin 客户端：拦截 AI 发出的 ` ```mcp ` 代码块，将它们发布到您的集线器，将结果粘贴回来。
+**何时使用。** 不支持原生 MCP 的网页聊天 — DeepSeek、Z.ai、Qwen、Tongyi、Yandex Alice、ChatGPT（免费版）。Userscript 提供准确的 target/tool 与调用格式，也介绍用 Code Mode 组合多步调用并处理结果。
 
-**Artifact.** `apps/chatgpt-admin-app/` — Tampermonkey / Userscripts 用户脚本；已发布的版本镜像在 `public/mcp-bridge.user.js` 处。
+**Artifact.** `public/mcp-bridge.user.js` — Tampermonkey / Userscripts 用户脚本。
 
 ### 如何连接
 
@@ -265,7 +265,7 @@ ChatGPT 需要 `offline_access` 和 `refresh_token` 授予来维持
    - 桌面 Chrome / Edge / Brave → [Tampermonkey](https://www.tampermonkey.net/)。
    - iPhone / iPad → Safari + [Userscripts](https://apps.apple.com/app/userscripts/id1463298887) 应用程序；在 Safari → 扩展下启用。
    - Android → 来自 Google Play 的 Firefox + 来自 [tampermonkey.net](https://www.tampermonkey.net/) 的 Tampermonkey。
-2. **安装脚本** — 打开 `https://<your-hub>/mcp-bridge.user.js` （或从 `apps/chatgpt-admin-app/` 加载文件）。 Tampermonkey 选择 `@userscript` 元数据块 → **安装**。
+2. **安装脚本** — 打开 `https://<your-hub>/mcp-bridge.user.js`（或使用仓库中的 `public/mcp-bridge.user.js`）。Tampermonkey 识别 `@userscript` 元数据块后即可安装。
 3. **配置：** 按 <kbd>Alt</kbd>+<kbd>K</kbd> （或右下角的钥匙图标）：
    - **桥 URL** — `https://<your-hub>`（无尾部斜杠）。
    - **连接** — 选择集线器 URL 并从集线器完成配对
@@ -276,7 +276,7 @@ ChatGPT 需要 `offline_access` 和 `refresh_token` 授予来维持
 网络聊天 UI 中添加了两个按钮：
 
 - **MCP All** (`Alt+M`) — 将每个代理及其工具的紧凑描述插入聊天输入，并将相同的提示复制到剪贴板。
-- **MCP** — 打开一个面板来选择具有详细工具文档的特定代理。当 AI 使用 ` ```mcp ` 防护 JSON 块进行响应时，脚本会突出显示该块，将调用 POST 到 `<Bridge URL>/mcp-relay/call`，并用集线器的响应替换该块。
+- **MCP** — 打开面板并选择一个代理查看工具说明。AI 返回 ` ```mcp ` JSON 调用后，点击块旁边的运行按钮，脚本会 POST 到 `<Bridge URL>/mcp-relay/call` 并把 Hub 响应插入聊天。多步骤任务可通过 `hub.exec` 使用受限 JavaScript Code Mode。
 
 > 如果在使用自定义编辑器的网站上自动插入失败，则提示始终显示在剪贴板上 - <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd>。
 
@@ -286,11 +286,12 @@ ChatGPT 需要 `offline_access` 和 `refresh_token` 授予来维持
 |------|--------|
 | `chatgpt.com` |全力支持 |
 | `chat.deepseek.com` |全力支持 |
+| `chat.z.ai` |全力支持 |
 | `tongyi.aliyun.com` |全力支持 |
 | `qwenlm.github.io`、`chat.qwenlm.ai`、`chat.qwen.ai` |全力支持 |
 | `ya.ru`、`yandex.ru`、`alice.yandex.ru`、`chat.yandex.ru` |全力支持 |
 
-要添加新站点，请将 `@match` 行附加到 `apps/chatgpt-admin-app/public/userscript-header`（或已发布的 `mcp-bridge.user.js`）并重新安装。
+添加站点时，修改 `public/mcp-bridge.user.js` 中的 `@match`，验证输入选择器，发布更新文件并重新安装 userscript。
 
 ### 故障排除
 
@@ -308,11 +309,11 @@ ChatGPT 需要 `offline_access` 和 `refresh_token` 授予来维持
   页。不要从 Hub 主机中提取服务凭证；撤销和
   需要时从 **Security** 重新创建命名客户端连接。
 - **无法从 ChatGPT / Claude / 我的客户端访问集线器** — 必须是公共 HTTPS。本地主机和 LAN IP 适用于手动测试，但不适用于 ChatGPT 操作或远程 MCP 客户端。使用 Cloudflare 隧道（请参阅 [TUNNELS.md](./TUNNELS_DOCS.md)）或具有真实域的反向代理。
-- **MCP 连接，但每个工具都返回“未经授权”** — 在浏览器中打开 `https://<your-hub>/.well-known/oauth-authorization-server`；如果出现 404 错误，则表示您的集线器构建中未启用 OAuth 路由。重新检查 `apps/chatgpt-admin-app/` 是否已部署（或者 Go hub OAuth 处理程序是否已启用）。
+- **MCP 已连接，但工具都返回“未经授权”** — 打开 `https://<your-hub>/.well-known/oauth-authorization-server`；如果是 404，请检查 Go Hub 运行版本和 OAuth 配对是否完成。
 - **自定义 GPT 看不到该操作** — 验证架构 URL 是否公开：来自网络外部的 `curl -I https://<your-hub>/actions/openapi.yaml`。如果是 4xx/5xx，则隧道/DNS 未指向集线器。
 - **浏览器扩展不会注入** — 用户脚本管理器权限：Tampermonkey 仪表板 → 必须打开“允许用户脚本”； iOS Safari → 设置 → Safari → 扩展 → 用户脚本 → 允许； Android Firefox → 为当前站点启用了附加组件。
 - **OAuth 同意页面 500s** — `config/gptadmin.env` 中的 `PUBLIC_ORIGIN` 与客户端调用的 URL 不匹配。将其设置为客户端使用的**准确**源（方案+主机+端口）。
-- **由客户快速选择。** ChatGPT（Plus/团队/自定义 GPT）→ [§1](#1-openai-action-custom-gpt)。 Claude Desktop / Codex / OpenCode / Mavis → [§2](#2-mcp-remote-streamable-http)。免费网络聊天（DeepSeek / Qwen / Alice / ChatGPT 免费）→ [§4](#4-browser-extension)。仍然卡住 → [FAQ](./FAQ.md)、[SECURITY_DOCS.md](./SECURITY_DOCS.md) 或 `https://<your-hub>/admin` 每个部分的帮助面板。
+- **按客户端快速选择。** ChatGPT（Plus/团队/自定义 GPT）→ [§1](#1-openai-action-custom-gpt)。Claude Desktop / Codex / OpenCode / Mavis → [§2](#2-mcp-remote-streamable-http)。免费网页聊天（DeepSeek / Z.ai / Qwen / Alice / ChatGPT 免费版）→ [§4](#4-browser-extension)。仍有问题 → [FAQ](./FAQ.md)、[SECURITY_DOCS.md](./SECURITY_DOCS.md) 或 `https://<your-hub>/admin` 中的相关帮助面板。
 
 
 ## 安全 MCP 代理/中继

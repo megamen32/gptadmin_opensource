@@ -45,5 +45,19 @@ def test_userscript_balanced_braces():
 def test_userscript_supported_sites():
     """The userscript should @match at least the core supported sites."""
     content = USERSCRIPT.read_text()
-    for site in ["chatgpt.com", "deepseek.com", "qwen.ai"]:
+    for site in ["chatgpt.com", "deepseek.com", "chat.z.ai", "qwen.ai", "alice.yandex.ru"]:
         assert site in content, f"expected @match for {site} not found"
+
+
+def test_injected_prompt_describes_current_code_mode():
+    content = USERSCRIPT.read_text()
+    for required in [
+        "MCP_USAGE_PROMPT",
+        "fenced `mcp` JSON block",
+        "tool `exec`",
+        "args.code",
+        "await mcp.call(target, tool, args)",
+        "approval rules",
+        "inline play button",
+    ]:
+        assert required in content, f"missing current MCP usage instruction: {required}"

@@ -6,7 +6,7 @@
 |适配器|对于 |如何|
 |---------|-----|-----|
 | [MCP 客户端](#1-mcp-client) |克劳德桌面、Codex、OpenCode | MCP 远程 SSE 位于 `/mcp` |
-| [浏览器扩展](#2-browser-extension) | DeepSeek、Qwen、Alice、GigaChat、ChatGPT（免费）|用户脚本（Tampermonkey/Firefox）|
+| [浏览器扩展](#2-browser-extension) | DeepSeek、Z.ai、Qwen、Alice、ChatGPT（免费）|用户脚本（Tampermonkey/Firefox）|
 | [OpenAI 操作](#3-openai-action) | ChatGPT 自定义GPT，打开WebUI |生成 OpenAPI 架构；选择 Bearer 或 OAuth |
 
 ---
@@ -73,7 +73,7 @@ systemd 等）可用。
 
 ## 2. 浏览器扩展
 
-**适用于：** DeepSeek、Qwen、Yandex Alice、Sber GigaChat、ChatGPT（免费套餐）—
+**适用于：** DeepSeek、Z.ai、Qwen、Yandex Alice、ChatGPT（免费套餐）—
 任何免费的网络聊天。
 
 **协议：** 用户脚本（通过 Tampermonkey/Firefox 在浏览器中运行）。
@@ -87,11 +87,9 @@ systemd 等）可用。
   并将他们的工具放入聊天输入中。还将提示复制到剪贴板。
 - **MCP** — 打开一个面板来选择具有详细工具文档的特定代理。
 
-当 AI 使用包含 JSON 命令的 ` ```mcp ` 代码块进行响应时，
-自动执行脚本：
-1.高亮区块
-2. 将呼叫发送至您的中心
-3. 将结果插入回聊天中
+当 AI 返回带 JSON 调用的 `mcp` 代码块时，点击旁边的运行按钮：Hub
+会执行调用并把结果插入聊天。多步骤任务可使用提示词介绍的 Code Mode
+（`hub.exec`），在受限的 JavaScript 会话中组合工具调用并处理结果。
 
 ### 每个平台的设置
 
@@ -113,6 +111,7 @@ systemd 等）可用。
 |------|--------|
 |聊天gpt.com |全力支持 |
 |聊天.deepseek.com |全力支持 |
+|chat.z.ai |全力支持 |
 |聊天.qwen.ai |全力支持 |
 | ya.ru / chat.yandex.ru |全力支持 |
 
@@ -211,7 +210,7 @@ gptadmin auth-diagnose --token '<paste-token-here>'
 ## 我应该使用哪个适配器？
 
 - 本地使用**Claude Desktop / Codex / OpenCode**？ → **MCP 客户端**
-- 想要使用**免费网络聊天**（Qwen、Alice、GigaChat）？ → **浏览器扩展**
+- 想要使用**免费网络聊天**（DeepSeek、Z.ai、Qwen、Alice）？ → **浏览器扩展**
 - 使用 **ChatGPT with Plus** 并想要自定义 GPT？ → **OpenAI 行动**
 
 所有这三个都为您提供相同的功能 - 集线器并不关心哪个适配器

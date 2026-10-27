@@ -50,7 +50,7 @@ pick what fits your AI.
 | Adapter | Protocol | For | Endpoint |
 |---------|----------|-----|----------|
 | **MCP client** | MCP remote SSE | Claude Desktop, Codex, OpenCode | `/mcp` |
-| **Browser extension** | userscript (Tampermonkey/Firefox) | DeepSeek, Qwen, Alice, GigaChat, ChatGPT (free) | injects into web UI |
+| **Browser extension** | userscript (Tampermonkey/Firefox) | DeepSeek, Z.ai, Qwen, Alice, ChatGPT (free) | injects into web UI |
 | **OpenAI Action** | REST + OpenAPI | ChatGPT Custom GPT, Open WebUI | `/actions/openapi.yaml` or `/server/{slug}/actions/openapi.yaml` |
 
 See [Adapters](./ADAPTERS.md) for per-adapter setup.
@@ -78,7 +78,7 @@ When you ask the AI "restart nginx on node-01":
 - **Self-hosted**: your servers, your tokens, your data. Nothing leaves your
   infra.
 - **Any AI, even free ones**: the browser extension means you don't need a paid
-  API. Free web chats (Qwen, Alice, GigaChat) become GPT‑Админ clients.
+  API. Free web chats (DeepSeek, Z.ai, Qwen, Alice) become GPT‑Админ clients.
 
 ## See also
 

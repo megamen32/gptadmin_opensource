@@ -46,7 +46,7 @@ gptadmin connect-mcp
 Для других клиентов выберите адаптер:
 
 - **Claude Desktop/другие клиенты MCP** → [Настройка клиента MCP](./ADAPTERS.md#1-mcp-client)
-- **DeepSeek / Qwen / Alice / GigaChat** (бесплатные веб-чаты) → [Расширение для браузера](./ADAPTERS.md#2-browser-extension)
+- **DeepSeek / Z.ai / Qwen / Алиса** (бесплатные веб-чаты) → [Расширение для браузера](./ADAPTERS.md#2-browser-extension)
 - **Пользовательский GPT ChatGPT / Открытый веб-интерфейс** → [Действие OpenAI](./ADAPTERS.md#3-openai-action)
 
 ## 4. Запустите свою первую команду

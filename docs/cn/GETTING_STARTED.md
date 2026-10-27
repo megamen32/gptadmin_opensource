@@ -45,7 +45,7 @@ gptadmin connect-mcp
 对于其他客户端，请选择一个适配器：
 
 - **Claude Desktop/其他 MCP 客户端** → [MCP 客户端设置](./ADAPTERS.md#1-mcp-client)
-- **DeepSeek / Qwen / Alice / GigaChat**（免费网络聊天）→ [浏览器扩展](./ADAPTERS.md#2-browser-extension)
+- **DeepSeek / Z.ai / Qwen / Alice**（免费网页聊天）→ [浏览器扩展](./ADAPTERS.md#2-browser-extension)
 - **ChatGPT 自定义 GPT / 打开 WebUI** → [OpenAI Action](./ADAPTERS.md#3-openai-action)
 
 ## 4. 运行你的第一个命令
@@ -53,8 +53,8 @@ gptadmin connect-mcp
 用简单的语言询问你的人工智能：
 
 - «покажи статус nginx на node-01»
-- «поставь docker на vps-prod»
-- «почему openchamber отдаёт 503？ посмотри логи»
+- “在 vps-prod 上安装 Docker”
+- “OpenChamber 为什么返回 503？查看日志。”
 - «запусти Codex чтобы пофиксить баг в этом репо»
 
 AI呼叫hub，hub路由到agent，agent运行命令
@@ -89,7 +89,7 @@ sudo gptadmin urls --json  # machine-readable output
 可选附加功能：
 
 - [MCP 代理中继](./MCP_PROXY_RELAY.md)
-- [Webhooks](./WEBHOOKS.md)
+- [网络钩子](./WEBHOOKS.md)
 
 ## 故障排除
 

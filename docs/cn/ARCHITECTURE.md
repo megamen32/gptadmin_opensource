@@ -50,7 +50,7 @@ Go 实现 (`go-shellmcp/`) 是主要实现。 Python 客户端
 |适配器|协议|对于 |端点 |
 |--------|----------|-----|---------|
 | **MCP 客户端** | MCP 远程 SSE |克劳德桌面、Codex、OpenCode | `/mcp` |
-| **浏览器扩展** |用户脚本（Tampermonkey/Firefox）| DeepSeek、Qwen、Alice、GigaChat、ChatGPT（免费）|注入 Web UI |
+| **浏览器扩展** |用户脚本（Tampermonkey/Firefox）| DeepSeek、Z.ai、Qwen、Alice、ChatGPT（免费）|注入 Web UI |
 | **OpenAI 行动** |休息 + OpenAPI | ChatGPT 自定义GPT，打开WebUI | `/actions/openapi.yaml` 或 `/server/{slug}/actions/openapi.yaml` |
 
 请参阅 [Adapters](./ADAPTERS.md) 了解每个适配器的设置。
@@ -78,7 +78,7 @@ Go 实现 (`go-shellmcp/`) 是主要实现。 Python 客户端
 - **自托管**：您的服务器、您的代币、您的数据。没有什么可以离开你的
   下文。
 - **任何人工智能，甚至是免费的**：浏览器扩展意味着您不需要付费
-  API。免费网络聊天（Qwen、Alice、GigaChat）成为 GPT‑Админ 客户端。
+  API。免费网络聊天（DeepSeek、Z.ai、Qwen、Alice）成为 GPT‑Админ 客户端。
 
 ## 另请参阅
 

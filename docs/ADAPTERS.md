@@ -6,7 +6,7 @@ The hub exposes **three ways** for an AI to connect. Same hub, same capabilities
 | Adapter | For | How |
 |---------|-----|-----|
 | [MCP client](#1-mcp-client) | Claude Desktop, Codex, OpenCode | MCP remote SSE at `/mcp` |
-| [Browser extension](#2-browser-extension) | DeepSeek, Qwen, Alice, GigaChat, ChatGPT (free) | userscript (Tampermonkey/Firefox) |
+| [Browser extension](#2-browser-extension) | DeepSeek, Z.ai, Qwen, Alice, ChatGPT (free) | userscript (Tampermonkey/Firefox) |
 | [OpenAI Action](#3-openai-action) | ChatGPT Custom GPT, Open WebUI | generated OpenAPI schema; choose Bearer or OAuth |
 
 ---
@@ -75,7 +75,7 @@ specified in [Integration Control Contract](./INTEGRATION_CONTROL_CONTRACT.md#au
 
 ## 2. Browser extension
 
-**For:** DeepSeek, Qwen, Yandex Alice, Sber GigaChat, ChatGPT (free tier) —
+**For:** DeepSeek, Z.ai, Qwen, Yandex Alice, ChatGPT (free tier) —
 any free web chat.
 
 **Protocol:** userscript (runs in the browser via Tampermonkey/Firefox).
@@ -216,7 +216,7 @@ your hub is up, ChatGPT can call it as much as needed.
 ## Which adapter should I use?
 
 - Using **Claude Desktop / Codex / OpenCode** natively? → **MCP client**
-- Want to use **free web chats** (Qwen, Alice, GigaChat)? → **Browser extension**
+- Want to use **free web chats** (DeepSeek, Z.ai, Qwen, Alice)? → **Browser extension**
 - On **ChatGPT with Plus** and want a Custom GPT? → **OpenAI Action**
 
 All three give you the same capabilities — the hub doesn't care which adapter

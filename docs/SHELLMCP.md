@@ -17,8 +17,8 @@ hub, executes commands locally, and returns real output.
 |------|--------|----------|-------------|
 | Go (`go-shellmcp/`) | **Primary (only)** | `go-shellmcp/` | New deployments — faster, single binary |
 
-> **Примечание.** Legacy Python implementations (`client/shellmcp*.py`) удалены
-> из дерева исходников. Все инсталляции теперь используют Go-бинарь `shellmcp-go`.
+> **Note.** Legacy Python implementations (`client/shellmcp*.py`) have been
+> removed from the source tree. All installations now use the `shellmcp-go` binary.
 
 ## Install on a target machine
 

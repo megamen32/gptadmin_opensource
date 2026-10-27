@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.2
+// @version      2.2.3
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @match        *://chatgpt.com/*
 // @match        *://chat.deepseek.com/*
+// @match        *://chat.z.ai/*
 // @match        *://tongyi.aliyun.com/*
 // @match        *://qwenlm.github.io/*
 // @match        *://chat.qwenlm.ai/*
@@ -44,6 +45,7 @@
   const SITE_INPUTS = {
     'chat.qwen.ai':       ['textarea.message-input-textarea', 'textarea[placeholder]', '#prompt-textarea'],
     'chat.deepseek.com':  ['textarea[placeholder="Message DeepSeek"]', 'textarea.ds-scroll-area', 'textarea[placeholder]'],
+    'chat.z.ai':          ['textarea[placeholder]', '[contenteditable="true"]', 'textarea'],
     'chatgpt.com':        ['#prompt-textarea', 'textarea[placeholder]', '[contenteditable="true"]'],
     'ya.ru':              ['textarea[placeholder]', '[contenteditable="true"]', 'textarea'],
     'chat.yandex.ru':     ['textarea[placeholder]', '[contenteditable="true"]', 'textarea'],
@@ -264,6 +266,12 @@
     for (const tool of tools) lines.push(`  ${tool.name || 'tool'}(${compact ? 'args' : JSON.stringify(tool.inputSchema || {})})`);
     return lines.join('\n');
   }
+
+  const MCP_USAGE_PROMPT = [
+    'Use only the exact target IDs and tools listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}.',
+    'For multi-step work or processing several tool results, use GPTAdmin Code Mode: call target `hub`, tool `exec`, and put an async JavaScript body in `args.code`. Inside it use `await mcp.call(target, tool, args)` and return only the useful result. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
+    'Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
+  ].join('\n');
 
   // ═══════════════════════════════════════════════════════════════
   //  MCP JSON PARSING
@@ -963,7 +971,7 @@ async function injectAll() {
       const compact = compactMode();
       const discovered = await mcpCall('discover', {});
       const servers = discovered.servers || [];
-      const parts = ['GPTAdmin MCP targets:'];
+      const parts = [MCP_USAGE_PROMPT, 'GPTAdmin MCP targets:'];
       for (const server of servers) {
         const target = server.server_id || server.agent_id || server.name;
         if (target) parts.push(await promptForTarget(target, compact));
@@ -1049,7 +1057,7 @@ async function injectAll() {
     if (!requireOAuthConnection(`MCP ${agentId}`)) return;
     toast(`Loading ${agentId}...`);
     try {
-      const text = await promptForTarget(agentId, compactMode());
+      const text = `${MCP_USAGE_PROMPT}\n\n${await promptForTarget(agentId, compactMode())}`;
       await copyToClipboard(text);
       const inserted = setInputText(text);
       toast(`MCP ${agentId}` + (inserted ? ' — pasted + clipboard' : ' — clipboard only'));

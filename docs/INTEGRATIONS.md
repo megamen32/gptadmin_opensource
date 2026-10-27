@@ -15,7 +15,7 @@ Four ways to connect an AI client to your GPTAdmin hub.
 | 1 | [OpenAI Action](#1-openai-action-custom-gpt) | ChatGPT (Plus/Team/Desktop) Custom GPTs | OAuth connection |
 | 2 | [MCP remote](#2-mcp-remote-streamable-http) | Claude Desktop / Codex / OpenCode / Mavis | Bearer JWT (OAuth) |
 | 3 | [OAuth handshake](#3-oauth-handshake) | the auth flow that feeds #1 and #2 | PKCE S256 |
-| 4 | [Browser extension](#4-browser-extension) | DeepSeek / Qwen / Alice / any web chat | Hub connection page |
+| 4 | [Browser extension](#4-browser-extension) | DeepSeek / Z.ai / Qwen / Alice / any web chat | Hub connection page |
 
 All four reach the same hub and the same tools. See [ADAPTERS.md](./ADAPTERS.md) (older three-way overview) and [GPTADMIN_INSTRUCTIONS.md]() (read-only reference for AI agents).
 
@@ -257,9 +257,9 @@ The hub's `/oauth/authorize` page lists the requested scopes; the user types the
 
 ## 4. Browser extension
 
-**When to use.** Free web-chat AIs that don't speak MCP natively — DeepSeek, Qwen, Tongyi, Yandex Alice, ChatGPT (free tier). The extension turns "any web chat" into a gptadmin client: intercepts ` ```mcp ` code blocks the AI emits, POSTs them to your hub, pastes the result back.
+**When to use.** Web chats without native MCP — DeepSeek, Z.ai, Qwen, Tongyi, Yandex Alice, ChatGPT (free tier). The userscript inserts exact target/tool instructions, including Code Mode for composing multi-step MCP calls and processing their results.
 
-**Artifact.** `apps/chatgpt-admin-app/` — a Tampermonkey / Userscripts userscript; the published build is mirrored at `public/mcp-bridge.user.js`.
+**Artifact.** `public/mcp-bridge.user.js` — the Tampermonkey / Userscripts userscript.
 
 ### How to connect
 
@@ -267,7 +267,7 @@ The hub's `/oauth/authorize` page lists the requested scopes; the user types the
    - Desktop Chrome / Edge / Brave → [Tampermonkey](https://www.tampermonkey.net/).
    - iPhone / iPad → Safari + [Userscripts](https://apps.apple.com/app/userscripts/id1463298887) app; enable under Safari → Extensions.
    - Android → Firefox from Google Play + Tampermonkey from [tampermonkey.net](https://www.tampermonkey.net/).
-2. **Install the script** — open `https://<your-hub>/mcp-bridge.user.js` (or load the file from `apps/chatgpt-admin-app/`). Tampermonkey picks up the `@userscript` metadata block → **Install**.
+2. **Install the script** — open `https://<your-hub>/mcp-bridge.user.js` (or use the repository's `public/mcp-bridge.user.js`). Tampermonkey picks up the `@userscript` metadata block → **Install**.
 3. **Configure:** press <kbd>Alt</kbd>+<kbd>K</kbd> (or the key icon, bottom-right):
    - **Bridge URL** — `https://<your-hub>` (no trailing slash).
    - **Connection** — choose the Hub URL and complete pairing from the Hub
@@ -280,7 +280,7 @@ Two buttons added to the web-chat UI:
 - **MCP All** (`Alt+M`) — inserts a compact description of every agent and its tools into the chat input, and copies the same prompt to clipboard.
 - **MCP** — opens a panel to pick a specific agent with detailed tool docs.
 
-When the AI responds with a ` ```mcp ` fenced JSON block, the script highlights it, POSTs the call to `<Bridge URL>/mcp-relay/call`, and replaces the block with the hub's response.
+When the AI responds with a ` ```mcp ` fenced JSON block, click its play button to POST the call to `<Bridge URL>/mcp-relay/call`; the script inserts the Hub response into chat. For multi-step work, Code Mode runs bounded JavaScript through `hub.exec`, where `mcp.call(target, tool, args)` composes MCP calls and processes their results.
 
 > If auto-insert fails on a site with a custom editor, the prompt is always on the clipboard — <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd>.
 
@@ -290,11 +290,12 @@ When the AI responds with a ` ```mcp ` fenced JSON block, the script highlights 
 |------|--------|
 | `chatgpt.com` | Full support |
 | `chat.deepseek.com` | Full support |
+| `chat.z.ai` | Full support |
 | `tongyi.aliyun.com` | Full support |
 | `qwenlm.github.io`, `chat.qwenlm.ai`, `chat.qwen.ai` | Full support |
 | `ya.ru`, `yandex.ru`, `alice.yandex.ru`, `chat.yandex.ru` | Full support |
 
-To add a new site, append a `@match` line to `apps/chatgpt-admin-app/public/userscript-header` (or the published `mcp-bridge.user.js`) and reinstall.
+To add a new site, append an `@match` line to `public/mcp-bridge.user.js`, validate its input selectors, publish the updated file, and reinstall or update the userscript.
 
 ### Troubleshooting
 
@@ -312,11 +313,11 @@ To add a new site, append a `@match` line to `apps/chatgpt-admin-app/public/user
   page. Do not extract service credentials from the Hub host; revoke and
   recreate a named client connection from **Security** when needed.
 - **Hub isn't reachable from ChatGPT / Claude / my client** — must be public HTTPS. Localhost and LAN IPs work for manual testing but not for ChatGPT Actions or remote MCP clients. Use a Cloudflare Tunnel (see [TUNNELS.md](./TUNNELS_DOCS.md)) or a reverse proxy with a real domain.
-- **MCP connects but every tool returns "unauthorized"** — open `https://<your-hub>/.well-known/oauth-authorization-server` in a browser; if it 404s the OAuth routes aren't enabled in your hub build. Re-check `apps/chatgpt-admin-app/` is deployed (or that the Go hub OAuth handlers are enabled).
+- **MCP connects but every tool returns "unauthorized"** — open `https://<your-hub>/.well-known/oauth-authorization-server` in a browser; if it 404s the OAuth routes aren't enabled in your hub build. Verify the current Go Hub runtime and that the OAuth connection is complete.
 - **Custom GPT doesn't see the action** — verify the schema URL is public: `curl -I https://<your-hub>/actions/openapi.yaml` from outside your network. If 4xx/5xx, the tunnel / DNS isn't pointing at the hub.
 - **Browser extension doesn't inject** — userscript manager permissions: Tampermonkey Dashboard → "Allow user scripts" must be on; iOS Safari → Settings → Safari → Extensions → Userscripts → Allow; Android Firefox → add-on enabled for the current site.
 - **OAuth consent page 500s** — `PUBLIC_ORIGIN` in `config/gptadmin.env` doesn't match the URL the client is calling. Set it to the **exact** origin (scheme + host + port) the client uses.
-- **Quick pick by client.** ChatGPT (Plus/Team/Custom GPT) → [§1](#1-openai-action-custom-gpt). Claude Desktop / Codex / OpenCode / Mavis → [§2](#2-mcp-remote-streamable-http). Free web chat (DeepSeek / Qwen / Alice / ChatGPT free) → [§4](#4-browser-extension). Still stuck → [FAQ](./FAQ.md), [SECURITY_DOCS.md](./SECURITY_DOCS.md), or `https://<your-hub>/admin` per-section help panels.
+- **Quick pick by client.** ChatGPT (Plus/Team/Custom GPT) → [§1](#1-openai-action-custom-gpt). Claude Desktop / Codex / OpenCode / Mavis → [§2](#2-mcp-remote-streamable-http). Free web chat (DeepSeek / Z.ai / Qwen / Alice / ChatGPT free) → [§4](#4-browser-extension). Still stuck → [FAQ](./FAQ.md), [SECURITY_DOCS.md](./SECURITY_DOCS.md), or `https://<your-hub>/admin` per-section help panels.
 
 
 ## Secure MCP proxy/relay

@@ -51,7 +51,7 @@ gptadmin connect-mcp
 For other clients, pick an adapter:
 
 - **Claude Desktop / other MCP clients** → [MCP client setup](./ADAPTERS.md#1-mcp-client)
-- **DeepSeek / Qwen / Alice / GigaChat** (free web chats) → [Browser extension](./ADAPTERS.md#2-browser-extension)
+- **DeepSeek / Z.ai / Qwen / Alice** (free web chats) → [Browser extension](./ADAPTERS.md#2-browser-extension)
 - **ChatGPT Custom GPT / Open WebUI** → [OpenAI Action](./ADAPTERS.md#3-openai-action)
 
 ## 4. Run your first command
@@ -60,7 +60,7 @@ Ask your AI in plain language:
 
 - «покажи статус nginx на node-01»
 - «поставь docker на vps-prod»
-- «почему openchamber отдаёт 503? посмотри логи»
+- "Why is OpenChamber returning 503? Check the logs."
 - «запусти codex чтобы пофиксить баг в этом репо»
 
 The AI calls the hub, the hub routes to the agent, the agent runs the command
