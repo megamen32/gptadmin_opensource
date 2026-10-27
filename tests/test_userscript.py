@@ -56,7 +56,9 @@ def test_injected_prompt_describes_current_code_mode():
         "fenced `mcp` JSON block",
         "tool `exec`",
         "args.code",
-        "await mcp.call(target, tool, args)",
+        "mcp.call(target, tool, args)",
+        "await Promise.all([...])",
+        "not automatically parallel",
         "approval rules",
         "inline play button",
     ]:

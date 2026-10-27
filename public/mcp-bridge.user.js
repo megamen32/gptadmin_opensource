@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.3
+// @version      2.2.4
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @match        *://chatgpt.com/*
@@ -269,7 +269,7 @@
 
   const MCP_USAGE_PROMPT = [
     'Use only the exact target IDs and tools listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}.',
-    'For multi-step work or processing several tool results, use GPTAdmin Code Mode: call target `hub`, tool `exec`, and put an async JavaScript body in `args.code`. Inside it use `await mcp.call(target, tool, args)` and return only the useful result. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
+    'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. Start all independent `mcp.call(target, tool, args)` calls together with `await Promise.all([...])`; do not wait for one result before starting another independent command or split them into separate tool-call rounds. Use sequential `await` only when a later call needs an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only the useful results. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
     'Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
   ].join('\n');
 
