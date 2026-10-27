@@ -10,6 +10,20 @@ import pytest
 import cli
 
 
+def test_candidate_gate_accepts_current_native_mcp_catalog() -> None:
+    cli._require_candidate_mcp_catalog([
+        {"name": name}
+        for name in ("discover", "search", "schema", "exec", "ro", "job", "expand")
+    ])
+
+
+def test_candidate_gate_rejects_retired_native_mcp_catalog() -> None:
+    with pytest.raises(RuntimeError, match="MCP core catalog is incomplete: exec, ro, search"):
+        cli._require_candidate_mcp_catalog([
+            {"name": name} for name in ("ui", "discover", "schema", "execute", "job", "expand")
+        ])
+
+
 def test_mcp_catalog_is_attributed_and_machine_readable(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """Catalog output must expose provenance and risk before activation."""
 

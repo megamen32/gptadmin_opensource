@@ -5372,6 +5372,14 @@ def _candidate_tools(payload) -> list[dict]:
         tools = response.get('tools') if isinstance(response, dict) else []
     return [item for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
 
+def _require_candidate_mcp_catalog(tools) -> None:
+    """Fail closed unless the installed native MCP facade is the current catalog."""
+    names = {str(item.get('name') or '') for item in tools if isinstance(item, dict)} if isinstance(tools, list) else set()
+    required = {'discover', 'search', 'schema', 'exec', 'ro', 'job', 'expand'}
+    missing = sorted(required - names)
+    if missing:
+        raise RuntimeError('candidate gate: MCP core catalog is incomplete: ' + ', '.join(missing))
+
 
 def _candidate_servers(payload) -> list[dict]:
     if not isinstance(payload, dict):
@@ -5491,26 +5499,29 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
                 local_base, 'tools/list', {}, token=token, host=client_host, request_id=2,
             )
             mcp_tools = listed.get('tools') if isinstance(listed, dict) else None
-            if not isinstance(mcp_tools, list) or not {'ui', 'discover', 'schema', 'execute', 'job', 'expand'} <= {
-                item.get('name') for item in mcp_tools if isinstance(item, dict)
-            }:
-                raise RuntimeError('candidate gate: MCP core catalog is incomplete')
+            _require_candidate_mcp_catalog(mcp_tools)
             mcp_discovered = _candidate_mcp_content(_candidate_mcp_rpc(
                 local_base, 'tools/call', {'name': 'discover', 'arguments': {}},
                 token=token, host=client_host, request_id=3,
             ))
-            mcp_context = _require_instruction_receipt(mcp_discovered)
+            _require_instruction_receipt(mcp_discovered)
+            mcp_searched = _candidate_mcp_content(_candidate_mcp_rpc(
+                local_base, 'tools/call', {'name': 'search', 'arguments': {'query': 'demo'}},
+                token=token, host=client_host, request_id=4,
+            ))
+            mcp_context = _require_instruction_receipt(mcp_searched)
             mcp_schema = _candidate_mcp_content(_candidate_mcp_rpc(
                 local_base, 'tools/call', {'name': 'schema', 'arguments': {
                     'target': 'hub', 'tool': 'demo', 'detail': 'full', 'context': mcp_context,
-                }}, token=token, host=client_host, request_id=4,
+                }}, token=token, host=client_host, request_id=5,
             ))
             definitions = _candidate_tools(mcp_schema)
-            if len(definitions) != 1 or definitions[0].get('name') != 'demo' or not mcp_schema.get('call_ref'):
-                raise RuntimeError('candidate gate: exact MCP demo schema/reference is missing')
+            if len(definitions) != 1 or definitions[0].get('name') != 'demo':
+                raise RuntimeError('candidate gate: exact MCP demo schema is missing')
             mcp_called = _candidate_mcp_rpc(
-                local_base, 'tools/call', {'name': 'execute', 'arguments': {'ref': mcp_schema['call_ref'], 'args': {}}},
-                token=token, host=client_host, request_id=5,
+                local_base, 'tools/call', {'name': 'exec', 'arguments': {
+                    'code': "return await mcp.call('hub','demo',{});", 'context': mcp_context,
+                }}, token=token, host=client_host, request_id=6,
             )
             _require_candidate_demo(_candidate_mcp_content(mcp_called))
 
