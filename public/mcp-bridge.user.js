@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.4
+// @version      2.2.5
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
+// @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
+// @updateURL    https://became.bezrabotnyi.com/mcp-bridge.user.js
 // @match        *://chatgpt.com/*
 // @match        *://chat.deepseek.com/*
 // @match        *://chat.z.ai/*

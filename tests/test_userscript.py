@@ -47,6 +47,8 @@ def test_userscript_supported_sites():
     content = USERSCRIPT.read_text()
     for site in ["chatgpt.com", "deepseek.com", "chat.z.ai", "qwen.ai", "alice.yandex.ru"]:
         assert site in content, f"expected @match for {site} not found"
+    assert "@downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js" in content
+    assert "@updateURL    https://became.bezrabotnyi.com/mcp-bridge.user.js" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
