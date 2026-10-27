@@ -70,6 +70,8 @@ def test_injected_prompt_describes_current_code_mode():
         "inline play button",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
+    assert "event.origin !== new URL(hubUrl()).origin" in content
+    assert "event.data.state !== oauthState()" in content
 
 
 def test_oauth_popup_opens_inside_user_gesture_before_async_work():

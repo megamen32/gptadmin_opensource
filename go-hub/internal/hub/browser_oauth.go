@@ -8,7 +8,10 @@ import (
 
 // browserOAuthCallback hands an authorization code to the extension opener.
 // The Hub never places an access token in this browser page; the extension
-// exchanges the one-time code with PKCE over the OAuth token endpoint.
+// exchanges the one-time code with PKCE over the OAuth token endpoint. The
+// opener is a third-party chat origin, so this page cannot use the Hub origin
+// as postMessage's targetOrigin. The receiver validates this Hub's event.origin
+// and the unpredictable OAuth state before it exchanges the PKCE-bound code.
 func (s *Server) browserOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -27,17 +30,17 @@ func (s *Server) browserOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	var escapedMessage bytes.Buffer
 	json.HTMLEscape(&escapedMessage, messageJSON)
-	originJSON, err := json.Marshal(s.origin(r))
+	targetOriginJSON, err := json.Marshal("*")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to render OAuth origin"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "failed to render OAuth target origin"})
 		return
 	}
-	var escapedOrigin bytes.Buffer
-	json.HTMLEscape(&escapedOrigin, originJSON)
+	var escapedTargetOrigin bytes.Buffer
+	json.HTMLEscape(&escapedTargetOrigin, targetOriginJSON)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'")
-	page := `<!doctype html><html><head><meta charset="utf-8"><title>GPTAdmin connection</title></head><body><p>Connection completed. You may close this window.</p><script>(function(){const message=` + escapedMessage.String() + `;if(window.opener){window.opener.postMessage(message,` + escapedOrigin.String() + `);}})();</script></body></html>`
+	page := `<!doctype html><html><head><meta charset="utf-8"><title>GPTAdmin connection</title></head><body><p>Connection completed. You may close this window.</p><script>(function(){const message=` + escapedMessage.String() + `;if(window.opener){window.opener.postMessage(message,` + escapedTargetOrigin.String() + `);}})();</script></body></html>`
 	_, _ = w.Write([]byte(page))
 }

@@ -58,7 +58,7 @@ func TestBrowserExtensionOAuthUsesSameOriginCallbackWithoutCredentialCopy(t *tes
 	callback := httptest.NewRequest(http.MethodGet, "/connect/callback?code=opaque-code&state=browser-state", nil)
 	callbackRecord := httptest.NewRecorder()
 	s.Handler().ServeHTTP(callbackRecord, callback)
-	if callbackRecord.Code != http.StatusOK || !strings.Contains(callbackRecord.Body.String(), "postMessage") {
+	if callbackRecord.Code != http.StatusOK || !strings.Contains(callbackRecord.Body.String(), `postMessage(message,"*")`) {
 		t.Fatalf("browser callback did not render handoff page: status=%d body=%s", callbackRecord.Code, callbackRecord.Body.String())
 	}
 	if strings.Contains(callbackRecord.Body.String(), "access_token") {
