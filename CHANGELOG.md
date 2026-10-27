@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The browser OAuth callback now delivers its PKCE-bound authorization code to
+  the chat-site opener; the bridge still validates the Hub origin and OAuth state.
 - An asynchronous webhook dispatcher no longer starts a job after it has already
   reached a terminal state, so late progress updates remain rejected.
 - Nodes in the `failed` state were invisible: the status filter offered no way to select
