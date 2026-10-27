@@ -70,6 +70,9 @@ def test_injected_prompt_describes_current_code_mode():
         "inline play button",
         "same-profile instruction context",
         "Current profile instructions:",
+        "shell_exec",
+        '{cmd:"uptime"}',
+        "keyed by the exact target ID",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
     assert "event.origin !== new URL(hubUrl()).origin" in content
@@ -92,6 +95,12 @@ def test_mcp_execution_uses_current_facade_and_same_profile_context():
     assert "'/mcp-relay/call'" in execute
     assert "bridgeInstructionContext" in execute
     assert "mcpCall('execute'" not in execute
+
+
+def test_alice_accepts_json_labeled_blocks_only_when_they_are_mcp_calls():
+    content = USERSCRIPT.read_text()
+    assert "lang !== 'mcp' && lang !== 'json'" in content
+    assert "const cmd = extractMcpJson(textExtractor())" in content
 
 
 def test_oauth_popup_opens_inside_user_gesture_before_async_work():

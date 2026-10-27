@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.0
+// @version      2.3.1
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -303,6 +303,7 @@
   const MCP_USAGE_PROMPT = [
     'Use only the exact target IDs and tools listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}.',
     'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. Start all independent `mcp.call(target, tool, args)` calls together with `await Promise.all([...])`; do not wait for one result before starting another independent command or split them into separate tool-call rounds. Use sequential `await` only when a later call needs an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only the useful results. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
+    'For shell hosts, use the exact tool `shell_exec` and the argument shape `{cmd:"..."}`, for example `mcp.call("shell:node-44","shell_exec",{cmd:"uptime"})`. Preserve each result in an object keyed by the exact target ID; do not flatten different hosts into an anonymous array.',
     'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
   ].join('\n');
 
@@ -537,7 +538,7 @@
       const headerTitle = block.querySelector('.CodeBlock-HeaderTitle');
       if (!headerTitle) return;
       const lang = headerTitle.textContent.trim().toLowerCase();
-      if (lang !== 'mcp') return;
+      if (lang !== 'mcp' && lang !== 'json') return;
 
       const code = block.querySelector('code');
       if (!code) return;
