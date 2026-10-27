@@ -332,6 +332,13 @@ def test_connection_manifest_drives_safe_first_mcp_action(hub_contract: HubProce
 
 def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     """Verify selected-target REST relay behavior and the published Action schema."""
+    discovery = _structured_content(hub_contract.rpc(
+        "/mcp", "tools/call", {"name": "discover", "arguments": {}}, 40,
+    ))
+    assert isinstance(discovery.get("instructions"), str) and discovery["instructions"].strip()
+    context = discovery.get("context")
+    assert isinstance(context, str) and context
+
     status, servers_body, _ = hub_contract.request("GET", "/mcp-relay/servers")
     assert status == 200
     servers = servers_body.get("servers")
@@ -390,19 +397,15 @@ def test_hub_contract_relay_and_openapi(hub_contract: HubProcess) -> None:
     assert "schema_version" not in response_dump
     assert "schema_digest_sha256" not in response_dump
 
-    # The instruction gate precedes target validation. Supplying its receipt
-    # below must reach the target error without disabling the production gate.
-    status, blocked, _ = hub_contract.request(
+    # The instructions returned by discover seed the same-credential receipt
+    # cache. A later call omits context and still reaches target validation.
+    status, invalid_target, _ = hub_contract.request(
         "POST", "/mcp-relay/call", payload={"target": "default", "tool_name": "shell_exec"},
     )
-    assert status == 428, blocked
-    assert blocked.get("executed") is False
-    assert blocked.get("error", {}).get("code") == "instructions_required"
-    assert "job_id" not in blocked
+    assert status == 400, invalid_target
+    assert "Explicit MCP target is required" in invalid_target.get("detail", "")
+    assert "job_id" not in invalid_target
 
-    context = tools_body.get("context")
-    assert isinstance(context, str) and context
-    assert isinstance(tools_body.get("instructions"), str) and tools_body["instructions"].strip()
     for path, payload in (
         ("/mcp-relay/tools", {"target": "default"}),
         ("/mcp-relay/call", {"target": "default", "tool_name": "shell_exec"}),
@@ -429,6 +432,8 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
     initialized = hub_contract.rpc("/mcp", "initialize", {}, 1)
     assert initialized.get("protocolVersion")
     assert initialized.get("serverInfo", {}).get("name")
+    initial_instructions = initialized.get("instructions")
+    assert isinstance(initial_instructions, str) and initial_instructions.strip()
 
     tools_result = hub_contract.rpc("/mcp", "tools/list", {}, 2)
     tools = tools_result.get("tools")
@@ -445,11 +450,20 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
         3,
     )
     discovery = _structured_content(list_servers)
-    assert isinstance(discovery.get("instructions"), str) and discovery["instructions"].strip()
-    assert isinstance(discovery.get("context"), str) and discovery["context"]
+    assert "instructions" not in discovery
+    assert "context" not in discovery
     servers = discovery.get("servers")
     assert isinstance(servers, list)
     assert any(server.get("server_id") == "hub" for server in servers if isinstance(server, dict))
+
+    reused = _structured_content(hub_contract.rpc(
+        "/mcp", "tools/call", {
+            "name": "exec",
+            "arguments": {"code": 'return await mcp.call("hub", "demo", {});'},
+        }, 30,
+    ))
+    assert reused.get("status") == "completed", reused
+    assert "instructions" not in reused and "context" not in reused, reused
 
     detailed = hub_contract.rpc(
         "/mcp",
@@ -463,7 +477,7 @@ def test_hub_contract_global_mcp(hub_contract: HubProcess) -> None:
     selected = _structured_content(hub_contract.rpc(
         "/mcp", "tools/call", {
             "name": "schema",
-            "arguments": {"target": "hub", "tool": "demo", "detail": "full", "context": discovery["context"]},
+            "arguments": {"target": "hub", "tool": "demo", "detail": "full"},
         }, 32,
     ))
     definitions = selected.get("response", {}).get("tools")
