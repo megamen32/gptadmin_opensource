@@ -128,7 +128,7 @@ def verify_tag(repository, tag, commit, allow_missing=False):
 
 
 def public_mirror_commit(repository, source, commit=None):
-    """Resolve a sanitized public mirror commit and verify its exact source trailer."""
+    """Resolve the exact public commit tested in CI and validate its source trailer."""
     if commit is None:
         ref = json.loads(gh('api', 'repos/' + repository + '/git/ref/heads/main'))
         if ref.get('ref') != 'refs/heads/main':
@@ -139,13 +139,17 @@ def public_mirror_commit(repository, source, commit=None):
             raise ValueError('public source mirror main is not a commit')
     if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit):
         raise ValueError('invalid public source mirror commit')
+    if commit != source:
+        raise ValueError('public mirror commit differs from the exact tested source')
     response = json.loads(gh('api', 'repos/' + repository + '/git/commits/' + commit))
     if response.get('sha') != commit or not isinstance(response.get('message'), str):
         raise ValueError('public source mirror commit response identity differs')
     lines = [line.strip() for line in response['message'].splitlines() if line.strip()]
     trailers = [line for line in lines if line.startswith('Source-Commit:')]
-    if not lines or lines[-1] != 'Source-Commit: ' + source or trailers != ['Source-Commit: ' + source]:
-        raise ValueError('public mirror does not identify the exact accepted source commit')
+    source_trailer = trailers[0].partition(':')[2].strip() if len(trailers) == 1 else ''
+    if (not lines or not trailers or lines[-1] != trailers[0]
+            or not re.fullmatch('[0-9a-f]{40}', source_trailer)):
+        raise ValueError('public mirror has no unique, well-formed source trailer')
     return commit
 
 
