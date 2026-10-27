@@ -403,9 +403,11 @@ func boundedSearchChildTools(tools []map[string]any) []map[string]any {
 }
 
 // childSearchCatalogForRequest returns cached schemas for currently visible,
-// enabled child targets. On cold search it starts at most four relay refreshes
-// and waits for a short shared window. `coverage` reports failed and pending
-// refreshes; callers must not imply complete child coverage when it is false.
+// enabled child targets. On cold search it queues refreshes for up to
+// childSearchWarmLimit targets. At most childSearchConcurrency relay calls run
+// at once; the request waits for a short shared window while queued refreshes
+// continue in the background. `coverage` reports failed and pending refreshes;
+// callers must not imply complete child coverage when it is false.
 func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter string) (rows []map[string]any, coverage map[string]any) {
 	coverage = map[string]any{"complete": true, "status": "complete", "missing": []string{}, "pending": 0, "failed": 0, "failure_reasons": map[string]string{}}
 	if targetFilter != "" && !strings.HasPrefix(targetFilter, "child:") && !strings.HasPrefix(targetFilter, "mcp:") {
