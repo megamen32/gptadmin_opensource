@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.7
+
+- Publish the ARM64 image from the linked public add-on package so the public
+  repository workflow can update it with its scoped `GITHUB_TOKEN`.
+
 ## 1.0.6
 
 - Add an expiring `failover.maintenance_until` window for planned maintenance.

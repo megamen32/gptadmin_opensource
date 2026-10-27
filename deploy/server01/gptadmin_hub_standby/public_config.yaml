@@ -1,11 +1,11 @@
 name: GPTAdmin Hub Standby
-version: "1.0.6"
+version: "1.0.7"
 slug: gptadmin_hub_standby
 description: "Independent GPTAdmin Hub standby with automatic Tunnel failover and reclaim"
 url: "https://github.com/megamen32/gptadmin-haos-addons"
 arch:
   - aarch64
-image: ghcr.io/megamen32/gptadmin-opensource-haos-hub-standby
+image: ghcr.io/megamen32/gptadmin-haos-addons
 startup: services
 boot: auto
 init: false

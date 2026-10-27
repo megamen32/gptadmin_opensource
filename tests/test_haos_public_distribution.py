@@ -140,6 +140,9 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     version = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', public_config, re.MULTILINE)
     assert version is not None
     assert source["app_version"] == version.group(1)
+    image = re.search(r'^image:\s*(\S+)\s*$', public_config, re.MULTILINE)
+    assert image is not None
+    assert source["image"] == image.group(1)
     public_text = "\n".join(path.read_text(encoding="utf-8") for path in output.rglob("*") if path.is_file())
     assert "192.168.2." not in public_text
     assert "/etc/gptadmin" not in public_text

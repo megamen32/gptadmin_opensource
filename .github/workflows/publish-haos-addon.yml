@@ -43,21 +43,53 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import os
           import subprocess
+          import tempfile
+          from pathlib import Path
+          import json
 
-          paths = subprocess.check_output(
-              ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', os.environ['SOURCE_SHA']],
-              text=True,
-          ).splitlines()
+          source_sha = os.environ['SOURCE_SHA']
+          with tempfile.TemporaryDirectory(prefix='gptadmin-haos-source-') as temp_dir:
+              addon_repo = Path(temp_dir) / 'addons'
+              subprocess.run(
+                  ['git', 'clone', '--quiet', '--branch', 'main', '--single-branch',
+                   'git@github.com:megamen32/gptadmin-haos-addons.git', str(addon_repo)],
+                  check=True,
+              )
+              try:
+                  installed = json.loads((addon_repo / 'SOURCE.json').read_text())
+                  installed_sha = installed['source_ref']
+                  subprocess.run(
+                      ['git', 'cat-file', '-e', f'{installed_sha}^{{commit}}'],
+                      check=True,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+                  ancestor = subprocess.run(
+                      ['git', 'merge-base', '--is-ancestor', installed_sha, source_sha],
+                      check=False,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  ).returncode == 0
+              except (OSError, KeyError, ValueError, subprocess.CalledProcessError):
+                  installed_sha = ''
+                  ancestor = False
+
+              if not ancestor:
+                  changed = True
+              else:
+                  paths = subprocess.check_output(
+                      ['git', 'diff', '--name-only', installed_sha, source_sha],
+                      text=True,
+                  ).splitlines()
           relevant = (
-              '.github/workflows/publish-haos-addon.yml',
               'deploy/server01/gptadmin_hub_standby/',
-              'go-hub/',
               'scripts/export_haos_app_repository.sh',
               'scripts/gptadmin_failover_watchdog.py',
               'scripts/gptadmin_failover_proxy.py',
               'scripts/gptadmin_frpc_processes.py',
           )
-          changed = any(any(path == prefix or path.startswith(prefix) for prefix in relevant) for path in paths)
+          if ancestor:
+              changed = any(any(path == prefix or path.startswith(prefix) for prefix in relevant) for path in paths)
           print(f'changed={str(changed).lower()}')
           PY
 

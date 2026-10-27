@@ -18,7 +18,7 @@ permissions:
 
 env:
   FRP_VERSION: '0.64.0'
-  IMAGE_NAME: ghcr.io/megamen32/gptadmin-opensource-haos-hub-standby
+  IMAGE_NAME: ghcr.io/megamen32/gptadmin-haos-addons
   GOMAXPROCS: '2'
   GOFLAGS: '-p=2'
 

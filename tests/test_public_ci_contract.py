@@ -85,6 +85,10 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     assert 'gptadmin-public, node-88' in workflow
     assert 'gptadmin-haos-addons.git' in workflow
     assert 'scripts/export_haos_app_repository.sh' in workflow
+    assert "['git', 'clone', '--quiet', '--branch', 'main'" in workflow
+    assert "['git', 'merge-base', '--is-ancestor'" in workflow
+    assert "['git', 'diff', '--name-only', installed_sha, source_sha]" in workflow
+    assert "'.github/workflows/publish-haos-addon.yml'" not in workflow
     assert 'secrets.' not in workflow
     source_root = ROOT if (ROOT / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').is_file() else ROOT.parent.parent
     addon_image = (source_root / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').read_text()
@@ -94,3 +98,8 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     assert 'docker buildx build' in addon_image
     assert 'refusing to overwrite' in addon_image
     assert 'secrets.' not in addon_image
+    image_config = yaml.safe_load((source_root / 'deploy/server01/gptadmin_hub_standby/public_config.yaml').read_text())
+    image_workflow = yaml.safe_load(addon_image)
+    dockerfile = (source_root / 'deploy/server01/gptadmin_hub_standby/Dockerfile.public').read_text()
+    assert image_config['image'] == image_workflow['env']['IMAGE_NAME'] == 'ghcr.io/megamen32/gptadmin-haos-addons'
+    assert 'org.opencontainers.image.source="https://github.com/megamen32/gptadmin-haos-addons"' in dockerfile
