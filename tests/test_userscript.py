@@ -80,6 +80,16 @@ def test_oauth_popup_opens_inside_user_gesture_before_async_work():
     assert "connectOAuth(popup)" in click_handler
 
 
+def test_oauth_resumes_pending_registration_without_registering_again():
+    content = USERSCRIPT.read_text()
+    start = content.index("async function connectOAuth(popup)")
+    end = content.index("window.addEventListener('message'", start)
+    connect = content[start:end]
+    assert "const resumePending = Boolean(pendingClientId && pendingState && pendingVerifier)" in connect
+    assert "? { client_id: pendingClientId }" in connect
+    assert "if (!resumePending)" in connect
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.2.6
+// @version      2.2.7
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -227,14 +227,22 @@
 
   async function connectOAuth(popup) {
     const callback = `${hubUrl()}/connect/callback`;
-    const verifier = randomBase64Url(48);
-    const state = randomBase64Url(24);
+    const pendingClientId = oauthClientId();
+    const pendingState = oauthState();
+    const pendingVerifier = oauthVerifier();
+    const resumePending = Boolean(pendingClientId && pendingState && pendingVerifier);
+    const verifier = resumePending ? pendingVerifier : randomBase64Url(48);
+    const state = resumePending ? pendingState : randomBase64Url(24);
     const challenge = await pkceChallenge(verifier);
-    const registration = await api('POST', '/register', { redirect_uris: [callback] });
+    const registration = resumePending
+      ? { client_id: pendingClientId }
+      : await api('POST', '/register', { redirect_uris: [callback] });
     if (!registration.client_id) throw new Error(registration.error_description || 'Hub did not register this client');
-    GM_setValue('oauth_client_id', registration.client_id);
-    GM_setValue('oauth_state', state);
-    GM_setValue('oauth_verifier', verifier);
+    if (!resumePending) {
+      GM_setValue('oauth_client_id', registration.client_id);
+      GM_setValue('oauth_state', state);
+      GM_setValue('oauth_verifier', verifier);
+    }
     const query = new URLSearchParams({
       response_type: 'code', client_id: registration.client_id, redirect_uri: callback,
       resource: hubUrl(), scope: 'gptadmin.read gptadmin.exec', state,
