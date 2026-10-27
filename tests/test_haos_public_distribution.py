@@ -128,6 +128,7 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     image_workflow = (output / ".github/workflows/publish-haos-image.yml").read_text(encoding="utf-8")
     assert "packages: write" in image_workflow
     assert "github.token" in image_workflow
+    assert image_workflow.index("docker/login-action") < image_workflow.index("Reject an existing immutable app image version")
     assert "SOURCE.json" in image_workflow
     assert "secrets." not in image_workflow
     assert "fetch --depth=1 origin \"$SOURCE_REF\"" in image_workflow

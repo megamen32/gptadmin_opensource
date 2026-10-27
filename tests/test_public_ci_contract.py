@@ -94,6 +94,7 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     addon_image = (source_root / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').read_text()
     assert 'packages: write' in addon_image
     assert 'github.token' in addon_image
+    assert addon_image.index('docker/login-action') < addon_image.index('Reject an existing immutable app image version')
     assert 'SOURCE.json' in addon_image
     assert 'docker buildx build' in addon_image
     assert 'refusing to overwrite' in addon_image
