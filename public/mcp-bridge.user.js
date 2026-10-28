@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.4
+// @version      2.3.5
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -38,7 +38,7 @@
   function oauthClientId(){ return GM_getValue('oauth_client_id', ''); }
   function oauthState()   { return GM_getValue('oauth_state', ''); }
   function oauthVerifier(){ return GM_getValue('oauth_verifier', ''); }
-  function autoEnter()   { return GM_getValue('auto_enter', false); }
+  function autoEnter()   { return GM_getValue('auto_enter', true); }
   function compactMode() { return GM_getValue('compact_prompt', true); }
   function toolbarPosition() { return GM_getValue('toolbar_position', 'top-center'); }
   let bridgeInstructionContext = '';
@@ -67,6 +67,37 @@
     return null;
   }
 
+  function autoSubmitInserted(el) {
+    if (!autoEnter()) return;
+    setTimeout(() => {
+      const form = el.closest('form');
+      const formCandidates = [...(form?.querySelectorAll('button[type="submit"]') || [])];
+      const selectors = [
+        'button[data-testid*="send" i]',
+        'button[aria-label*="send" i]',
+        'button[aria-label*="отправить" i]',
+        'button[title*="send" i]',
+        'button[title*="отправить" i]',
+      ];
+      const candidates = [...formCandidates, ...selectors.flatMap(selector => document.querySelectorAll(selector))];
+      const sendButton = candidates.find(button =>
+        !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+        button.getClientRects().length > 0
+      );
+      if (sendButton) {
+        sendButton.click();
+        return;
+      }
+      if (form?.requestSubmit) {
+        form.requestSubmit();
+        return;
+      }
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    }, 200);
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  REACT-COMPATIBLE INPUT
   // ═══════════════════════════════════════════════════════════════
@@ -86,20 +117,7 @@
       el.dispatchEvent(new Event('change', { bubbles: true }));
       el.focus();
 
-      if (autoEnter()) {
-        setTimeout(() => {
-          // Try keyboard events
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-          // Also try clicking the send button
-          const form = el.closest('form');
-          if (form) {
-            const sendBtn = form.querySelector('button[type="submit"], button[aria-label*="end"], button[data-testid*="send"]');
-            if (sendBtn) sendBtn.click();
-          }
-        }, 200);
-      }
+      autoSubmitInserted(el);
       return true;
     }
 
@@ -107,6 +125,8 @@
       el.focus();
       document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, text);
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      autoSubmitInserted(el);
       return true;
     }
     return false;
@@ -875,7 +895,7 @@
 
       <label class="mcp-check">
         <input type="checkbox" id="mcp-cfg-autoenter" ${autoEnter() ? 'checked' : ''}>
-        <span>Auto-press <kbd style="background:#313244;padding:1px 5px;border-radius:3px;font-size:11px">Enter</kbd> after insert</span>
+        <span>Auto-send inserted prompts and MCP results</span>
       </label>
 
       <label class="mcp-check">
@@ -975,7 +995,7 @@
     const btnAll = document.createElement('button');
     btnAll.className = 'mcp-btn mcp-btn-all mcp-action mcp-secure';
     btnAll.innerHTML = '<span class="icon">📡</span> MCP All';
-    btnAll.title = 'Load instructions and tools for all targets; then send them to the chat';
+    btnAll.title = 'Load instructions and tools for all targets; auto-send the prompt when enabled';
     btnAll.setAttribute('aria-label', 'MCP All: load and send tool instructions');
     btnAll.addEventListener('click', injectAll);
 
@@ -983,7 +1003,7 @@
     const btnAgent = document.createElement('button');
     btnAgent.className = 'mcp-btn mcp-btn-agent mcp-action mcp-secure';
     btnAgent.innerHTML = '<span class="icon">🔌</span> MCP Tools';
-    btnAgent.title = 'Choose a target and load its tool instructions; then send them to the chat';
+    btnAgent.title = 'Choose a target and load its tool instructions; auto-send the prompt when enabled';
     btnAgent.setAttribute('aria-label', 'MCP Tools: choose a target and load instructions');
     btnAgent.addEventListener('click', toggleAgentDropdown);
 
@@ -1058,7 +1078,7 @@ async function injectAll() {
       await copyToClipboard(text);
       const inserted = setInputText(text);
       toast(inserted
-        ? 'MCP All — instructions are in the message box; send them to the chat'
+        ? autoEnter() ? 'MCP All — setup prompt auto-send is on' : 'MCP All — instructions are in the message box; send them to the chat'
         : 'MCP All — instructions copied; paste and send them to the chat');
     } catch (e) {
       toast('Error: ' + e.message, 4000);
@@ -1144,7 +1164,7 @@ async function injectAll() {
       await copyToClipboard(text);
       const inserted = setInputText(text);
       toast(inserted
-        ? `MCP ${agentId} — instructions are in the message box; send them to the chat`
+        ? autoEnter() ? `MCP ${agentId} — setup prompt auto-send is on` : `MCP ${agentId} — instructions are in the message box; send them to the chat`
         : `MCP ${agentId} — instructions copied; paste and send them to the chat`);
     } catch (e) {
       toast('Error: ' + e.message, 4000);

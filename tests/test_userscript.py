@@ -152,6 +152,24 @@ def test_agent_menu_is_labeled_as_mcp_tools():
     assert "<span class=\"icon\">🔌</span> MCP Tools" in content
 
 
+def test_inserted_prompts_and_results_auto_send_by_default():
+    content = USERSCRIPT.read_text()
+    assert "GM_getValue('auto_enter', true)" in content
+    start = content.index("function autoSubmitInserted(el)")
+    end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  REACT-COMPATIBLE INPUT", start)
+    auto_submit = content[start:end]
+    assert "form?.querySelectorAll('button[type=\"submit\"]')" in auto_submit
+    assert "button[data-testid*=\"send\" i]" in auto_submit
+    assert "button[aria-label*=\"отправить\" i]" in auto_submit
+    assert "form.requestSubmit()" in auto_submit
+    assert "el.dispatchEvent(new KeyboardEvent('keydown'" in auto_submit
+    input_start = content.index("function setInputText(text)")
+    input_end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  CLIPBOARD", input_start)
+    input_code = content[input_start:input_end]
+    assert "autoSubmitInserted(el)" in input_code
+    assert "Auto-send inserted prompts and MCP results" in content
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):
