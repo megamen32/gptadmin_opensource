@@ -122,6 +122,22 @@ def test_oauth_resumes_pending_registration_without_registering_again():
     assert "if (!resumePending)" in connect
 
 
+def test_mcp_all_starts_oauth_and_resumes_prompt_insertion():
+    content = USERSCRIPT.read_text()
+    start = content.index("async function injectAll()")
+    end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
+    inject_all = content[start:end]
+    assert "requireOAuthConnection('MCP All', () => injectAll())" in inject_all
+
+
+def test_mcp_tools_starts_oauth_and_resumes_agent_list():
+    content = USERSCRIPT.read_text()
+    start = content.index("function toggleAgentDropdown(e)")
+    end = content.index("async function injectAgent(agentId)", start)
+    menu = content[start:end]
+    assert "requireOAuthConnection('MCP agent list', () => openAgentDropdown(e.currentTarget))" in menu
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):

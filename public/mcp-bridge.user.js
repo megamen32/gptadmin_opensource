@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.1
+// @version      2.3.2
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -155,9 +155,20 @@
   // ═══════════════════════════════════════════════════════════════
   //  BRIDGE API (GM_xmlhttpRequest — no CORS issues)
   // ═══════════════════════════════════════════════════════════════
-  function requireOAuthConnection(action = 'MCP data') {
+  let oauthContinuation = null;
+
+  function requireOAuthConnection(action = 'MCP data', resumeAfterOAuth = null) {
     const token = accessToken();
     if (token) return token;
+    if (resumeAfterOAuth) {
+      oauthContinuation = resumeAfterOAuth;
+      try { beginOAuthFromClick(); }
+      catch (error) {
+        oauthContinuation = null;
+        toast(`Could not open Hub authorization: ${error.message}`, 5000);
+      }
+      return null;
+    }
     toast(`${action} is locked: connect this Hub from ⚙ settings`, 5000);
     openSettings();
     return null;
@@ -225,6 +236,7 @@
     if (!popup) throw new Error('Allow the OAuth popup and try again');
     connectOAuth(popup).catch(error => {
       try { popup.close(); } catch {}
+      oauthContinuation = null;
       toast(`OAuth error: ${error.message}`, 5000);
     });
   }
@@ -271,6 +283,9 @@
       GM_setValue('oauth_verifier', '');
       refreshToolbarVisibility();
       toast('Hub connection ready');
+      const resume = oauthContinuation;
+      oauthContinuation = null;
+      if (resume) await resume();
     } catch (error) { toast(`OAuth error: ${error.message}`, 5000); }
   });
 
@@ -1017,7 +1032,7 @@
   //  MCP ALL
   // ═══════════════════════════════════════════════════════════════
 async function injectAll() {
-    const token = requireOAuthConnection('MCP All');
+    const token = requireOAuthConnection('MCP All', () => injectAll());
     if (!token) return;
     const btn = document.querySelector('.mcp-btn-all');
     const orig = btn.innerHTML;
@@ -1035,7 +1050,9 @@ async function injectAll() {
       const text = parts.join('\n\n');
       await copyToClipboard(text);
       const inserted = setInputText(text);
-      toast('MCP All' + (inserted ? ' — pasted + clipboard' : ' — clipboard only'));
+      toast(inserted
+        ? 'MCP All — instructions are in the message box; send them to the chat'
+        : 'MCP All — instructions copied; paste and send them to the chat');
     } catch (e) {
       toast('Error: ' + e.message, 4000);
     }
@@ -1050,14 +1067,17 @@ async function injectAll() {
 
   function toggleAgentDropdown(e) {
     e.stopPropagation();
-    if (!requireOAuthConnection('MCP agent list')) return;
+    if (!requireOAuthConnection('MCP agent list', () => openAgentDropdown(e.currentTarget))) return;
+    openAgentDropdown(e.currentTarget);
+  }
+
+  function openAgentDropdown(btn) {
     const dropdown = document.querySelector('.mcp-dropdown');
     if (dropdown.classList.contains('open')) {
       dropdown.classList.remove('open');
       return;
     }
 
-    const btn = e.currentTarget;
     const rect = btn.getBoundingClientRect();
     const dropdownWidth = 280;
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
@@ -1116,7 +1136,9 @@ async function injectAll() {
       const text = `${MCP_USAGE_PROMPT}\n\n${await promptForTarget(agentId, compactMode())}`;
       await copyToClipboard(text);
       const inserted = setInputText(text);
-      toast(`MCP ${agentId}` + (inserted ? ' — pasted + clipboard' : ' — clipboard only'));
+      toast(inserted
+        ? `MCP ${agentId} — instructions are in the message box; send them to the chat`
+        : `MCP ${agentId} — instructions copied; paste and send them to the chat`);
     } catch (e) {
       toast('Error: ' + e.message, 4000);
     }
