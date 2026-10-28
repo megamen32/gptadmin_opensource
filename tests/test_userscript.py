@@ -1,11 +1,11 @@
 """Static smoke test for the MCP Bridge userscript.
 
 Validates that public/mcp-bridge.user.js exists, has a valid ==UserScript==
-header, and has balanced braces (a basic syntax sanity check that catches
-the most common corruption without needing a JS runtime).
+header, parses as JavaScript, and has balanced braces.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -28,6 +28,16 @@ def test_userscript_header_valid():
     assert re.search(r"// @match\s+\S+", content), "missing @match"
     # Must have at least one @grant
     assert re.search(r"// @grant\s+\S+", content), "missing @grant"
+
+
+def test_userscript_is_valid_javascript():
+    result = subprocess.run(
+        ["node", "--check", str(USERSCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_userscript_balanced_braces():
@@ -58,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.9" in content
+    assert "// @version      2.3.10" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -77,6 +87,7 @@ def test_injected_prompt_describes_current_code_mode():
         "Current profile instructions:",
         "shell_exec",
         '{cmd:"uptime"}',
+        "mcp.call(target, 'shell_exec', {cmd:'uptime'})",
         "keyed by the exact target ID",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
