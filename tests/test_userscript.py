@@ -58,7 +58,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.7" in content
+    assert "// @version      2.3.8" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -149,7 +149,23 @@ def test_mcp_all_loads_target_schemas_in_parallel_batches():
     end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
     inject_all = content[start:end]
     assert "MCP_ALL_SCHEMA_BATCH_SIZE = 8" in content
-    assert "Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE)" in inject_all
+    assert "Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(async server =>" in inject_all
+    assert "unavailableTargets.push(target)" in inject_all
+    assert "Continue with other targets" in inject_all
+
+
+def test_prompt_insertion_does_not_wait_indefinitely_for_clipboard():
+    content = USERSCRIPT.read_text()
+    start = content.index("async function copyToClipboard(text)")
+    end = content.index("async function readClipboard()", start)
+    clipboard = content[start:end]
+    assert "Promise.race([" in clipboard
+    assert "setTimeout(() => resolve(false), 1200)" in clipboard
+
+    start = content.index("async function injectAll()")
+    end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
+    inject_all = content[start:end]
+    assert inject_all.index("const inserted = setInputText(text)") < inject_all.index("await copyToClipboard(text)")
 
 
 def test_agent_menu_is_labeled_as_mcp_tools():

@@ -87,13 +87,23 @@ any free web chat.
 The userscript adds two buttons to the web chat UI:
 - **MCP All** (`Alt+M`) — inserts a compact description of all your MCP agents
   and their tools into the chat input. Also copies the prompt to clipboard.
-- **MCP** — opens a panel to pick a specific agent with detailed tool docs.
+- **MCP Tools** — opens a panel to pick one target and load its exact tool docs.
+
+In Chrome 138+, enable Tampermonkey's **Allow User Scripts** permission. On
+first use, **MCP All** opens the Hub's OAuth authorization page; after approval
+it loads that user's Hub instructions and tools into the chat. It is setup, not
+itself a tool call. If one target is unavailable, the other target instructions
+are still included.
 
 When the AI responds with a ` ```mcp ` code block containing a JSON command,
 the script automatically:
 1. Highlights the block
 2. Sends the call to your hub
 3. Inserts the result back into the chat
+
+For multiple independent commands, use one `hub.exec` Code Mode block with
+`await Promise.all([...])`; use sequential `await` only for calls that depend
+on earlier results. Separate `mcp` blocks require separate clicks.
 
 ### Setup per platform
 
@@ -105,11 +115,11 @@ the script automatically:
 
 ### Configuration
 
-Press `Alt+K` (or the key icon, bottom-right) and enter:
+Press `Alt+K` (or the key icon, bottom-right) and check:
 - **Bridge URL** — your configured Hub URL (`https://your-hub.example`); the
   managed deployment uses `https://mcp.bezrabotnyi.com`
-- Complete the one-time `/connect` pairing/OAuth flow; do not paste an internal
-  Hub or agent credential into the browser extension.
+- Choose **Connect with OAuth** and authorize in the Hub popup; do not paste an
+  internal Hub or agent credential into chat.
 
 ### Supported sites
 

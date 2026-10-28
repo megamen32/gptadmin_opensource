@@ -265,24 +265,23 @@ The hub's `/oauth/authorize` page lists the requested scopes; the user types the
 
 1. **Install a userscript manager:**
    - Desktop Chrome / Edge / Brave → [Tampermonkey](https://www.tampermonkey.net/).
+     In Chrome 138+, enable Tampermonkey's **Allow User Scripts** permission
+     on the extension details page.
    - iPhone / iPad → Safari + [Userscripts](https://apps.apple.com/app/userscripts/id1463298887) app; enable under Safari → Extensions.
    - Android → Firefox from Google Play + Tampermonkey from [tampermonkey.net](https://www.tampermonkey.net/).
-2. **Install the script** — open `https://<your-hub>/mcp-bridge.user.js` (or use the repository's `public/mcp-bridge.user.js`). Tampermonkey picks up the `@userscript` metadata block → **Install**.
-3. **Configure:** press <kbd>Alt</kbd>+<kbd>K</kbd> (or the key icon, bottom-right):
-   - **Bridge URL** — `https://<your-hub>` (no trailing slash).
-   - **Connection** — choose the Hub URL and complete pairing from the Hub
-     connection page.
+2. **Install the script** — open `https://<your-hub>/mcp-bridge.user.js` (or the public installer URL shown below). Tampermonkey reads the update metadata; choose **Install** or **Overwrite**.
+3. **Connect the Hub:** press <kbd>Alt</kbd>+<kbd>K</kbd> (or click the key icon at the bottom-right), check the Hub URL, then choose **Connect with OAuth**. Authorize in the Hub popup. The Bridge keeps the access token in Tampermonkey storage; never paste a Hub password or token into chat.
 
 ### How it works
 
-Two buttons added to the web-chat UI:
+The toolbar is placed at the bottom-right by default and offers two setup actions:
 
-- **MCP All** (`Alt+M`) — inserts a compact description of every agent and its tools into the chat input, and copies the same prompt to clipboard.
-- **MCP** — opens a panel to pick a specific agent with detailed tool docs.
+- **MCP All** (`Alt+M`) — loads the current Hub profile instructions and target tools, then inserts the setup prompt into the chat. The first use starts OAuth if needed and resumes after authorization. If one target is unavailable, the remaining target descriptions still load.
+- **MCP Tools** — selects one target and inserts only that target's current instructions and tool descriptions.
 
-When the AI responds with a ` ```mcp ` fenced JSON block, click its play button to POST the call to `<Bridge URL>/mcp-relay/call`; the script inserts the Hub response into chat. For multi-step work, Code Mode runs bounded JavaScript through `hub.exec`, where `mcp.call(target, tool, args)` composes MCP calls and processes their results.
+These setup buttons provide instructions; the model still needs to make the tool call. For a direct call, it returns a fenced `mcp` JSON block and the Bridge runs that command. For multiple independent commands, use one `hub.exec` Code Mode block and start them together with `await Promise.all([...])`; use sequential `await` only when a call depends on an earlier result. The Bridge inserts the result into the chat. Separate `mcp` blocks are separate clicks and do not run in parallel automatically.
 
-> If auto-insert fails on a site with a custom editor, the prompt is always on the clipboard — <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd>.
+Prompt insertion happens before the optional clipboard copy, so a slow clipboard permission cannot keep setup stuck in “Loading”.
 
 ### Supported sites (from `@match` directives)
 
@@ -299,11 +298,11 @@ To add a new site, append an `@match` line to `public/mcp-bridge.user.js`, valid
 
 ### Troubleshooting
 
-- **Buttons don't appear** — userscript manager not enabled for the site, or the script crashed (Tampermonkey dashboard → script → Errors).
-- **401 from the bridge** — complete pairing again, or verify that the Hub URL
-  is publicly reachable through its Tunnel.
+- **Buttons don't appear** — enable the userscript manager for the site, enable Chrome's **Allow User Scripts** permission, then check Tampermonkey → MCP Bridge → Errors.
+- **Bridge says Hub is not connected** — use **Connect with OAuth** in settings and finish authorization in the popup.
+- **One MCP target is unavailable** — MCP All marks that target and continues with the others; retry just that target from **MCP Tools**.
 - **No auto-insert** — the AI emitted the code without the ` ```mcp ` fence. Re-prompt it: *"respond with the call inside a fenced block tagged `mcp`."* Fallback: paste from clipboard.
-- **`GM_xmlhttpRequest` blocked** — Tampermonkey script settings: set **Run at** `document-idle`, ensure `@grant GM_xmlhttpRequest` is in the metadata block.
+- **`GM_xmlhttpRequest` blocked** — update to the current script version and confirm the metadata includes `@grant GM_xmlhttpRequest` and `@connect mcp.bezrabotnyi.com`.
 
 ---
 

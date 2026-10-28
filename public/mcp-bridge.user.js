@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.7
+// @version      2.3.8
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -136,14 +136,20 @@
   //  CLIPBOARD
   // ═══════════════════════════════════════════════════════════════
   async function copyToClipboard(text) {
-    try { await navigator.clipboard.writeText(text); return true; }
-    catch {
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); return true; } catch { return false; }
-      finally { ta.remove(); }
+    try {
+      const copied = await Promise.race([
+        navigator.clipboard.writeText(text).then(() => true, () => false),
+        new Promise(resolve => setTimeout(() => resolve(false), 1200)),
+      ]);
+      if (copied) return true;
     }
+    catch {
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta); ta.select();
+    try { return document.execCommand('copy'); } catch { return false; }
+    finally { ta.remove(); }
   }
 
   async function readClipboard() {
@@ -436,8 +442,8 @@
     const fullText = `${prefix}\n${bt}json\n${resultStr}\n${bt}`;
 
     // Copy to clipboard + insert into input
-    await copyToClipboard(fullText);
     const inserted = setInputText(fullText);
+    void copyToClipboard(fullText).catch(() => false);
 
     // Animate inline button
     if (inlineBtn) {
@@ -1068,19 +1074,29 @@ async function injectAll() {
       const discovered = await mcpCall('discover', {});
       const servers = discovered.servers || [];
       const parts = [MCP_USAGE_PROMPT, 'GPTAdmin MCP targets:'];
+      const unavailableTargets = [];
       for (let i = 0; i < servers.length; i += MCP_ALL_SCHEMA_BATCH_SIZE) {
-        const batch = await Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(server => {
+        const batch = await Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(async server => {
           const target = server.server_id || server.agent_id || server.name;
-          return target ? promptForTarget(target, compact) : '';
+          if (!target) return '';
+          try { return await promptForTarget(target, compact); }
+          catch {
+            unavailableTargets.push(target);
+            return `Tools for ${target}: schema unavailable. Continue with other targets; retry this target through MCP Tools if needed.`;
+          }
         }));
         parts.push(...batch.filter(Boolean));
       }
       const text = parts.join('\n\n');
-      await copyToClipboard(text);
       const inserted = setInputText(text);
-      toast(inserted
+      const copied = await copyToClipboard(text);
+      const resultMessage = inserted
         ? autoEnter() ? 'MCP All — setup prompt auto-send is on' : 'MCP All — instructions are in the message box; send them to the chat'
-        : 'MCP All — instructions copied; paste and send them to the chat');
+        : copied ? 'MCP All — instructions copied; paste and send them to the chat'
+          : 'MCP All — instructions loaded; open a chat and click MCP Tools';
+      toast(unavailableTargets.length
+        ? `${resultMessage}; ${unavailableTargets.length} target schemas unavailable`
+        : resultMessage);
     } catch (e) {
       toast('Error: ' + e.message, 4000);
     }
@@ -1162,11 +1178,12 @@ async function injectAll() {
     toast(`Loading ${agentId}...`);
     try {
       const text = `${MCP_USAGE_PROMPT}\n\n${await promptForTarget(agentId, compactMode())}`;
-      await copyToClipboard(text);
       const inserted = setInputText(text);
+      const copied = await copyToClipboard(text);
       toast(inserted
         ? autoEnter() ? `MCP ${agentId} — setup prompt auto-send is on` : `MCP ${agentId} — instructions are in the message box; send them to the chat`
-        : `MCP ${agentId} — instructions copied; paste and send them to the chat`);
+        : copied ? `MCP ${agentId} — instructions copied; paste and send them to the chat`
+          : `MCP ${agentId} — instructions loaded; open a chat and click MCP Tools`);
     } catch (e) {
       toast('Error: ' + e.message, 4000);
     }
