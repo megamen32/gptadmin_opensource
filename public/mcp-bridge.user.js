@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.8
+// @version      2.3.9
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -200,7 +200,7 @@
     return null;
   }
 
-  function api(method, path, body) {
+  function api(method, path, body, timeoutMs = 40000) {
     return new Promise((resolve, reject) => {
       const url = hubUrl() + path;
       const headers = { 'Content-Type': 'application/json' };
@@ -210,7 +210,7 @@
         method, url,
         headers,
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 40000,
+        timeout: timeoutMs,
         onload(r) {
           const ct = r.responseHeaders.match(/content-type:\s*([^\r\n]+)/i);
           const isJson = ct && /json/i.test(ct[1]);
@@ -319,7 +319,7 @@
     const response = await api('POST', '/mcp', {
       jsonrpc: '2.0', id: Date.now(), method: 'tools/call',
       params: { name, arguments: argumentsValue },
-    });
+    }, ['discover', 'schema'].includes(name) ? 15000 : 40000);
     if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
     return response.result?.structuredContent || response.result || response;
   }
@@ -342,13 +342,11 @@
   }
 
   const MCP_USAGE_PROMPT = [
-    'Use only the exact target IDs and tools listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}.',
-    'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. Start all independent `mcp.call(target, tool, args)` calls together with `await Promise.all([...])`; do not wait for one result before starting another independent command or split them into separate tool-call rounds. Use sequential `await` only when a later call needs an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only the useful results. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
+    'Use only the exact target IDs listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}. Use MCP Tools to load one target’s tool details; in Code Mode, use `mcp.schema` when a tool schema is needed.',
+    'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. If needed, load independent schemas together with `await Promise.all([...])`, then start all independent `mcp.call(target, tool, args)` calls together with another `await Promise.all([...])`. Do not wait for one independent command before starting another or split them into separate tool-call rounds. Use sequential `await` only when a later call depends on an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only useful results. For example, run uptime on several shell targets with one `Promise.all` of `mcp.call(target, 'shell_exec', {cmd:'uptime'})`. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.',
     'For shell hosts, use the exact tool `shell_exec` and the argument shape `{cmd:"..."}`, for example `mcp.call("shell:node-44","shell_exec",{cmd:"uptime"})`. Preserve each result in an object keyed by the exact target ID; do not flatten different hosts into an anonymous array.',
     'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
   ].join('\n');
-  const MCP_ALL_SCHEMA_BATCH_SIZE = 8;
-
   // ═══════════════════════════════════════════════════════════════
   //  MCP JSON PARSING
   // ═══════════════════════════════════════════════════════════════
@@ -1003,7 +1001,7 @@
     btnAll.className = 'mcp-btn mcp-btn-all mcp-action mcp-secure';
     btnAll.innerHTML = '<span class="icon">📡</span> MCP All';
     btnAll.title = 'Connect to GPTAdmin Hub, load its instructions and tools for all targets, and auto-send the setup prompt when enabled';
-    btnAll.setAttribute('aria-label', 'MCP All: connect to GPTAdmin Hub, load instructions and tools for all targets, and send the setup prompt');
+    btnAll.setAttribute('aria-label', 'MCP All: connect to GPTAdmin Hub, load this profile’s instructions and available targets, and send the setup prompt');
     btnAll.addEventListener('click', injectAll);
 
     // ── MCP (agent select) ──
@@ -1071,22 +1069,21 @@ async function injectAll() {
     btn.disabled = true;
     try {
       const compact = compactMode();
-      const discovered = await mcpCall('discover', {});
-      const servers = discovered.servers || [];
-      const parts = [MCP_USAGE_PROMPT, 'GPTAdmin MCP targets:'];
-      const unavailableTargets = [];
-      for (let i = 0; i < servers.length; i += MCP_ALL_SCHEMA_BATCH_SIZE) {
-        const batch = await Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(async server => {
-          const target = server.server_id || server.agent_id || server.name;
-          if (!target) return '';
-          try { return await promptForTarget(target, compact); }
-          catch {
-            unavailableTargets.push(target);
-            return `Tools for ${target}: schema unavailable. Continue with other targets; retry this target through MCP Tools if needed.`;
-          }
-        }));
-        parts.push(...batch.filter(Boolean));
-      }
+      const [hubPromptResult, discoveryResult] = await Promise.allSettled([
+        promptForTarget('hub', compact),
+        mcpCall('discover', {}),
+      ]);
+      const parts = [MCP_USAGE_PROMPT];
+      const warnings = [];
+      if (hubPromptResult.status === 'fulfilled') parts.push(hubPromptResult.value);
+      else warnings.push('Hub profile instructions unavailable');
+      const servers = discoveryResult.status === 'fulfilled'
+        ? discoveryResult.value.servers || []
+        : [];
+      const targets = servers.map(server => server.server_id || server.agent_id || server.name).filter(Boolean);
+      if (targets.length) parts.push(`GPTAdmin MCP targets:\n${targets.map(target => `  ${target}`).join('\n')}`);
+      else warnings.push('target list unavailable');
+      parts.push('Use MCP Tools to load detailed tools for a target.');
       const text = parts.join('\n\n');
       const inserted = setInputText(text);
       const copied = await copyToClipboard(text);
@@ -1094,11 +1091,11 @@ async function injectAll() {
         ? autoEnter() ? 'MCP All — setup prompt auto-send is on' : 'MCP All — instructions are in the message box; send them to the chat'
         : copied ? 'MCP All — instructions copied; paste and send them to the chat'
           : 'MCP All — instructions loaded; open a chat and click MCP Tools';
-      toast(unavailableTargets.length
-        ? `${resultMessage}; ${unavailableTargets.length} target schemas unavailable`
+      toast(warnings.length
+        ? `${resultMessage}; ${warnings.join('; ')}`
         : resultMessage);
     } catch (e) {
-      toast('Error: ' + e.message, 4000);
+      toast(`MCP ${agentId}: ${e.message}`, 5000);
     }
     btn.innerHTML = orig;
     btn.disabled = false;

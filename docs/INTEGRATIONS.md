@@ -276,7 +276,7 @@ The hub's `/oauth/authorize` page lists the requested scopes; the user types the
 
 The toolbar is placed at the bottom-right by default and offers two setup actions:
 
-- **MCP All** (`Alt+M`) — loads the current Hub profile instructions and target tools, then inserts the setup prompt into the chat. The first use starts OAuth if needed and resumes after authorization. If one target is unavailable, the remaining target descriptions still load.
+- **MCP All** (`Alt+M`) — loads this Hub profile's instructions and available target IDs, then inserts the setup prompt into the chat. The first use starts OAuth if needed and resumes after authorization. It does not wait for every target's schema.
 - **MCP Tools** — selects one target and inserts only that target's current instructions and tool descriptions.
 
 These setup buttons provide instructions; the model still needs to make the tool call. For a direct call, it returns a fenced `mcp` JSON block and the Bridge runs that command. For multiple independent commands, use one `hub.exec` Code Mode block and start them together with `await Promise.all([...])`; use sequential `await` only when a call depends on an earlier result. The Bridge inserts the result into the chat. Separate `mcp` blocks are separate clicks and do not run in parallel automatically.
@@ -300,7 +300,7 @@ To add a new site, append an `@match` line to `public/mcp-bridge.user.js`, valid
 
 - **Buttons don't appear** — enable the userscript manager for the site, enable Chrome's **Allow User Scripts** permission, then check Tampermonkey → MCP Bridge → Errors.
 - **Bridge says Hub is not connected** — use **Connect with OAuth** in settings and finish authorization in the popup.
-- **One MCP target is unavailable** — MCP All marks that target and continues with the others; retry just that target from **MCP Tools**.
+- **One MCP target is unavailable** — MCP All still loads the Hub prompt and target IDs; retry the target schema through **MCP Tools** or fetch it inside Code Mode.
 - **No auto-insert** — the AI emitted the code without the ` ```mcp ` fence. Re-prompt it: *"respond with the call inside a fenced block tagged `mcp`."* Fallback: paste from clipboard.
 - **`GM_xmlhttpRequest` blocked** — update to the current script version and confirm the metadata includes `@grant GM_xmlhttpRequest` and `@connect mcp.bezrabotnyi.com`.
 

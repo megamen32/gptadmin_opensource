@@ -58,7 +58,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.8" in content
+    assert "// @version      2.3.9" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -143,15 +143,29 @@ def test_mcp_tools_starts_oauth_and_resumes_agent_list():
     assert "requireOAuthConnection('MCP agent list', () => openAgentDropdown(e.currentTarget))" in menu
 
 
-def test_mcp_all_loads_target_schemas_in_parallel_batches():
+def test_mcp_all_loads_hub_context_and_target_names_in_parallel():
     content = USERSCRIPT.read_text()
     start = content.index("async function injectAll()")
     end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
     inject_all = content[start:end]
-    assert "MCP_ALL_SCHEMA_BATCH_SIZE = 8" in content
-    assert "Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(async server =>" in inject_all
-    assert "unavailableTargets.push(target)" in inject_all
-    assert "Continue with other targets" in inject_all
+    assert "Promise.allSettled([" in inject_all
+    assert "promptForTarget('hub', compact)" in inject_all
+    assert "mcpCall('discover', {})" in inject_all
+    assert "GPTAdmin MCP targets:" in inject_all
+    assert "promptForTarget(target, compact)" not in inject_all
+
+
+def test_code_mode_fetches_missing_schemas_and_runs_independent_commands_in_parallel():
+    content = USERSCRIPT.read_text()
+    assert "independent schemas together with `await Promise.all([...])`" in content
+    assert "another `await Promise.all([...])`" in content
+    assert "mcp.call(target, 'shell_exec', {cmd:'uptime'})" in content
+
+
+def test_schema_and_discovery_calls_have_bounded_setup_timeouts():
+    content = USERSCRIPT.read_text()
+    assert "function api(method, path, body, timeoutMs = 40000)" in content
+    assert "['discover', 'schema'].includes(name) ? 15000 : 40000" in content
 
 
 def test_prompt_insertion_does_not_wait_indefinitely_for_clipboard():

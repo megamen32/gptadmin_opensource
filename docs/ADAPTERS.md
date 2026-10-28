@@ -85,15 +85,14 @@ any free web chat.
 ### How it works
 
 The userscript adds two buttons to the web chat UI:
-- **MCP All** (`Alt+M`) — inserts a compact description of all your MCP agents
-  and their tools into the chat input. Also copies the prompt to clipboard.
+- **MCP All** (`Alt+M`) — inserts your Hub profile instructions and available
+  target IDs. It does not wait for every target's tool schema.
 - **MCP Tools** — opens a panel to pick one target and load its exact tool docs.
 
 In Chrome 138+, enable Tampermonkey's **Allow User Scripts** permission. On
 first use, **MCP All** opens the Hub's OAuth authorization page; after approval
-it loads that user's Hub instructions and tools into the chat. It is setup, not
-itself a tool call. If one target is unavailable, the other target instructions
-are still included.
+it loads that user's Hub instructions and target IDs into the chat. It is setup,
+not itself a tool call.
 
 When the AI responds with a ` ```mcp ` code block containing a JSON command,
 the script automatically:
