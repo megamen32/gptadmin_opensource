@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.13
+// @version      2.3.14
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -59,6 +59,7 @@
   };
 
   const SITE_SEND_BUTTONS = {
+    'chat.z.ai':         ['button.sendMessageButton'],
     'alice.yandex.ru': ['button[data-testid="oknyx"]', 'button[aria-label="Отправить"]'],
   };
 
