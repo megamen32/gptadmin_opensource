@@ -129,16 +129,16 @@ func newSecretStore(configDir, storeDir, keyFile, stateFile string, now func() t
 	if now == nil {
 		now = time.Now
 	}
-	if err := ensurePrivateDir(configDir); err != nil {
+	if err := ensureSecretParent(configDir, configDir); err != nil {
 		return nil, fmt.Errorf("create secret config directory: %w", err)
 	}
 	if err := ensurePrivateDir(storeDir); err != nil {
 		return nil, fmt.Errorf("create secret store directory: %w", err)
 	}
-	if err := ensurePrivateDir(filepath.Dir(keyFile)); err != nil {
+	if err := ensureSecretParent(filepath.Dir(keyFile), configDir); err != nil {
 		return nil, fmt.Errorf("create secret key directory: %w", err)
 	}
-	key, err := loadOrCreateSecretKey(keyFile)
+	key, err := loadOrCreateSecretKey(keyFile, configDir)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +323,7 @@ func (s *SecretStore) saveStateLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal secret state: %w", err)
 	}
-	return writeSecretFileAtomic(s.stateFile, append(data, '\n'))
+	return writeSecretFileAtomic(s.stateFile, append(data, '\n'), s.configDir)
 }
 
 func (s *SecretStore) quorumStateLocked() (quorumSecretIngressState, error) {
@@ -388,7 +388,7 @@ func (s *SecretStore) restoreQuorumAuthorityState(state quorumSecretIngressState
 	if err != nil {
 		return err
 	}
-	if err := writeSecretFileAtomic(s.stateFile, append(data, '\n')); err != nil {
+	if err := writeSecretFileAtomic(s.stateFile, append(data, '\n'), s.configDir); err != nil {
 		return err
 	}
 	for ref := range s.requests {
@@ -538,7 +538,7 @@ func validateSecretRecords(storeDir string, requests map[string]persistedSecretR
 	return nil
 }
 
-func loadOrCreateSecretKey(path string) ([]byte, error) {
+func loadOrCreateSecretKey(path string, sharedConfig ...string) ([]byte, error) {
 	key, err := os.ReadFile(path)
 	if err == nil {
 		if len(key) != secretKeySize {
@@ -564,7 +564,7 @@ func loadOrCreateSecretKey(path string) ([]byte, error) {
 		zeroBytes(key)
 		return nil, fmt.Errorf("create secret key: %w", err)
 	}
-	if err := writeSecretFileAtomic(path, key); err != nil {
+	if err := writeSecretFileAtomic(path, key, sharedConfig...); err != nil {
 		zeroBytes(key)
 		return nil, fmt.Errorf("persist secret key: %w", err)
 	}
@@ -578,9 +578,29 @@ func ensurePrivateDir(path string) error {
 	return os.Chmod(path, 0o700)
 }
 
-func writeSecretFileAtomic(path string, data []byte) error {
+// ensureSecretParent preserves only an existing shared config directory's
+// traverse mask. chmod(0700) would revoke named-user ACL traversal. Private
+// secret subdirectories remain 0700 and every secret file remains 0600.
+func ensureSecretParent(path string, sharedConfig ...string) error {
+	if len(sharedConfig) == 0 || filepath.Clean(path) != filepath.Clean(sharedConfig[0]) {
+		return ensurePrivateDir(path)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.MkdirAll(path, 0700)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("secret config parent is not a directory")
+	}
+	return os.Chmod(path, 0700|(info.Mode().Perm()&0010))
+}
+
+func writeSecretFileAtomic(path string, data []byte, sharedConfig ...string) error {
 	dir := filepath.Dir(path)
-	if err := ensurePrivateDir(dir); err != nil {
+	if err := ensureSecretParent(dir, sharedConfig...); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".secret-store-*")

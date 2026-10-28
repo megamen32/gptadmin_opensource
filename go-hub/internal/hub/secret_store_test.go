@@ -3,7 +3,9 @@ package hub
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,4 +173,51 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return b
+}
+
+func TestSecretStorePreservesSharedConfigTraverseACL(t *testing.T) {
+	if _, err := exec.LookPath("setfacl"); err != nil {
+		t.Skip("POSIX ACL tool unavailable")
+	}
+	root := t.TempDir()
+	config := filepath.Join(root, "config")
+	private := filepath.Join(root, "private")
+	if err := os.Mkdir(config, 0700); err != nil {
+		t.Fatal(err)
+	}
+	uid := strconv.Itoa(os.Getuid() + 1)
+	if out, err := exec.Command("setfacl", "-m", "u:"+uid+":--x,m::--x", config).CombinedOutput(); err != nil {
+		t.Fatalf("setfacl: %v %s", err, out)
+	}
+	before, err := exec.Command("getfacl", "-cpn", config).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(config, "secret-store.key")
+	store, err := NewSecretStore(config, private, key, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateRequest("owner", "key", "KEY", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSecretStore(config, private, key, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	after, err := exec.Command("getfacl", "-cpn", config).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("shared config ACL changed: before=%s after=%s", before, after)
+	}
+	for path, mode := range map[string]os.FileMode{private: 0700, key: 0600, store.stateFile: 0600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != mode {
+			t.Fatalf("%s mode %o want %o", path, info.Mode().Perm(), mode)
+		}
+	}
 }
