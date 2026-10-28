@@ -101,6 +101,12 @@ and an authenticated MCP operation through the external server; a promotion
 decision alone does not establish reachable failover. Do not configure an
 endpoint unless its FRPS actually runs there.
 
+The public add-on can read explicitly provisioned `*_mcp_bearer` entries
+from its protected `/data/config/internal-secrets.json`. These are existing
+client credentials, never generated defaults. Provision only the same client
+identity and policy as the primary and verify both successful authorized
+execution and rejection of an unknown bearer after restarting the add-on.
+
 ## Black-box regression coverage
 
 The Docker suite runs in CI and can be run locally without a deployed FRP

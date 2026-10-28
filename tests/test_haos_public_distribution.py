@@ -96,6 +96,13 @@ def test_public_app_source_is_not_the_instance_template() -> None:
     assert "gptadmin_failover_config.py" in (source / "run.sh").read_text()
 
 
+def test_existing_client_bearers_survive_internal_secret_initialization(tmp_path: Path) -> None:
+    path = tmp_path / "internal-secrets.json"
+    path.write_text(json.dumps({"codex_mcp_bearer": "provisioned-test-bearer"}))
+    assert ensure_internal_secrets(path)["codex_mcp_bearer"] == "provisioned-test-bearer"
+    assert json.loads(path.read_text())["codex_mcp_bearer"] == "provisioned-test-bearer"
+
+
 def test_standby_template_preserves_existing_client_bearer_inputs() -> None:
     source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
     template = (source / "config.yaml.template").read_text(encoding="utf-8")

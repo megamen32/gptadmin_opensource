@@ -40,6 +40,13 @@ export GPTADMIN_OPENCLAW_MCP_BEARER="$(jqr '.openclaw_mcp_bearer')"
 export GPTADMIN_VSCODE_MCP_BEARER="$(jqr '.vscode_mcp_bearer')"
 export GPTADMIN_ZED_MCP_BEARER="$(jqr '.zed_mcp_bearer')"
 export GPTADMIN_AVAILABILITY_MONITOR_MCP_BEARER="$(jqr '.availability_monitor_mcp_bearer')"
+for client in CODEX CLAUDE CUSTOM OPENCODE HERMES OPENCLAW VSCODE ZED AVAILABILITY_MONITOR; do
+  bearer_var="GPTADMIN_${client}_MCP_BEARER"
+  if [[ -z "${!bearer_var}" ]]; then
+    printf -v "$bearer_var" '%s' "$(internal "${client,,}_mcp_bearer")"
+    export "$bearer_var"
+  fi
+done
 export PUBLIC_ORIGIN="$(jqr '.public_origin')"
 export MCP_RESOURCE="$(jqr '.mcp_resource')"
 export HUB_PUBLIC_URL="$(jqr '.hub_public_url')"

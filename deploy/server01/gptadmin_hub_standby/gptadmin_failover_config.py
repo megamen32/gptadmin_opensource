@@ -129,6 +129,10 @@ def ensure_internal_secrets(path: Path) -> dict[str, str]:
         key: str(current.get(key) or secrets.token_urlsafe(32))
         for key in INTERNAL_SECRET_KEYS
     }
+    # Explicitly provisioned client credentials are optional; never mint them.
+    for key, value in current.items():
+        if key.endswith("_mcp_bearer") and isinstance(value, str) and value:
+            values[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
