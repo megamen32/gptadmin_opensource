@@ -138,6 +138,15 @@ def test_mcp_tools_starts_oauth_and_resumes_agent_list():
     assert "requireOAuthConnection('MCP agent list', () => openAgentDropdown(e.currentTarget))" in menu
 
 
+def test_mcp_all_loads_target_schemas_in_parallel_batches():
+    content = USERSCRIPT.read_text()
+    start = content.index("async function injectAll()")
+    end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
+    inject_all = content[start:end]
+    assert "MCP_ALL_SCHEMA_BATCH_SIZE = 8" in content
+    assert "Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE)" in inject_all
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):

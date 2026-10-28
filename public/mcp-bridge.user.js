@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.2
+// @version      2.3.3
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -321,6 +321,7 @@
     'For shell hosts, use the exact tool `shell_exec` and the argument shape `{cmd:"..."}`, for example `mcp.call("shell:node-44","shell_exec",{cmd:"uptime"})`. Preserve each result in an object keyed by the exact target ID; do not flatten different hosts into an anonymous array.',
     'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
   ].join('\n');
+  const MCP_ALL_SCHEMA_BATCH_SIZE = 8;
 
   // ═══════════════════════════════════════════════════════════════
   //  MCP JSON PARSING
@@ -1043,9 +1044,12 @@ async function injectAll() {
       const discovered = await mcpCall('discover', {});
       const servers = discovered.servers || [];
       const parts = [MCP_USAGE_PROMPT, 'GPTAdmin MCP targets:'];
-      for (const server of servers) {
-        const target = server.server_id || server.agent_id || server.name;
-        if (target) parts.push(await promptForTarget(target, compact));
+      for (let i = 0; i < servers.length; i += MCP_ALL_SCHEMA_BATCH_SIZE) {
+        const batch = await Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE).map(server => {
+          const target = server.server_id || server.agent_id || server.name;
+          return target ? promptForTarget(target, compact) : '';
+        }));
+        parts.push(...batch.filter(Boolean));
       }
       const text = parts.join('\n\n');
       await copyToClipboard(text);
