@@ -68,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.14" in content
+    assert "// @version      2.3.15" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -99,7 +99,8 @@ def test_injected_prompt_describes_current_code_mode():
         "never guess or invent a hostname/target alias",
         "report it as unavailable and do not call it",
         ".catch(error => ({error:String(error)}))",
-        "return Object.fromEntries(await Promise.all(targets.map(async target =>",
+        "const rows = await Promise.all(targets.map(async target =>",
+        "return rows.reduce((out, [target, result]) =>",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
     assert "event.origin !== new URL(hubUrl()).origin" in content
@@ -193,7 +194,8 @@ def test_code_mode_fetches_missing_schemas_and_runs_independent_commands_in_para
     content = USERSCRIPT.read_text()
     assert "independent schemas together with `await Promise.all([...])`" in content
     assert "another `await Promise.all([...])`" in content
-    assert "return Object.fromEntries(await Promise.all(targets.map(async target =>" in content
+    assert "const rows = await Promise.all(targets.map(async target =>" in content
+    assert "return rows.reduce((out, [target, result]) =>" in content
     assert "targets` only to exact IDs from the current target list" in content
 
 
