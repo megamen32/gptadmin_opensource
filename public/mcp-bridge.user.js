@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.11
+// @version      2.3.12
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -58,6 +58,10 @@
     'alice.yandex.ru':    ['textarea[placeholder]', '[contenteditable="true"]', 'textarea'],
   };
 
+  const SITE_SEND_BUTTONS = {
+    'alice.yandex.ru': ['button[data-testid="oknyx"]', 'button[aria-label="Отправить"]'],
+  };
+
   function findInput() {
     const host = location.hostname;
     const sels = SITE_INPUTS[host] || [];
@@ -67,41 +71,74 @@
     return null;
   }
 
-  function autoSubmitInserted(el) {
+  function readInputText(el) {
+    return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT'
+      ? el.value
+      : (el.innerText || el.textContent || '');
+  }
+
+  function autoSubmitInserted(el, expectedText, onResult) {
     if (!autoEnter()) return;
-    setTimeout(() => {
-      const form = el.closest('form');
-      const formCandidates = [...(form?.querySelectorAll('button[type="submit"]') || [])];
-      const selectors = [
-        'button[data-testid*="send" i]',
-        'button[aria-label*="send" i]',
-        'button[aria-label*="отправить" i]',
-        'button[title*="send" i]',
-        'button[title*="отправить" i]',
-      ];
-      const candidates = [...formCandidates, ...selectors.flatMap(selector => document.querySelectorAll(selector))];
-      const sendButton = candidates.find(button =>
-        !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
-        button.getClientRects().length > 0
-      );
+    let attempts = 0;
+    const selectors = [
+      ...(SITE_SEND_BUTTONS[location.hostname] || []),
+      'button[data-testid*="send" i]',
+      'button[aria-label*="send" i]',
+      'button[aria-label*="отправить" i]',
+      'button[title*="send" i]',
+      'button[title*="отправить" i]',
+    ];
+    const visibleAndEnabled = button =>
+      !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+      button.getClientRects().length > 0;
+    const finish = sent => {
+      if (typeof onResult === 'function') onResult(sent);
+    };
+    const submitWhenReady = () => {
+      // The host editor may debounce its state update after the input event.
+      // Never submit if the user edited the field while we were waiting.
+      if (readInputText(el) !== expectedText) {
+        finish(false);
+        return;
+      }
+      const sendButton = selectors
+        .flatMap(selector => [...document.querySelectorAll(selector)])
+        .find(visibleAndEnabled);
       if (sendButton) {
         sendButton.click();
+        setTimeout(() => finish(readInputText(el).trim() === ''), 400);
+        return;
+      }
+      const form = el.closest('form');
+      const submitButton = [...(form?.querySelectorAll('button[type="submit"]') || [])]
+        .find(visibleAndEnabled);
+      if (submitButton) {
+        submitButton.click();
+        setTimeout(() => finish(readInputText(el).trim() === ''), 400);
+        return;
+      }
+      attempts += 1;
+      if (attempts < 10) {
+        setTimeout(submitWhenReady, 180);
         return;
       }
       if (form?.requestSubmit) {
         form.requestSubmit();
+        setTimeout(() => finish(readInputText(el).trim() === ''), 400);
         return;
       }
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-    }, 200);
+      setTimeout(() => finish(readInputText(el).trim() === ''), 400);
+    };
+    setTimeout(submitWhenReady, 300);
   }
 
   // ═══════════════════════════════════════════════════════════════
   //  REACT-COMPATIBLE INPUT
   // ═══════════════════════════════════════════════════════════════
-  function setInputText(text) {
+  function setInputText(text, onAutoSubmitResult) {
     const el = findInput();
     if (!el) return false;
 
@@ -117,7 +154,7 @@
       el.dispatchEvent(new Event('change', { bubbles: true }));
       el.focus();
 
-      autoSubmitInserted(el);
+      autoSubmitInserted(el, text, onAutoSubmitResult);
       return true;
     }
 
@@ -126,7 +163,7 @@
       document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, text);
       el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      autoSubmitInserted(el);
+      autoSubmitInserted(el, text, onAutoSubmitResult);
       return true;
     }
     return false;
@@ -344,7 +381,8 @@
   const MCP_USAGE_PROMPT = [
     'Use only the exact target IDs listed below. You cannot run shell, SSH, or other server commands directly. For every requested MCP operation, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}; never claim a command ran or invent output. Use MCP Tools to load one target’s tool details; in Code Mode, use `mcp.schema` when a tool schema is needed.',
     'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. If needed, load independent schemas together with `await Promise.all([...])`, then start all independent `mcp.call(target, tool, args)` calls together with another `await Promise.all([...])`. Do not wait for one independent command before starting another or split them into separate tool-call rounds. Use sequential `await` only when a later call depends on an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only useful results.',
-    "For example, run uptime on several shell targets with one `Promise.all` of `mcp.call(target, 'shell_exec', {cmd:'uptime'})`. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.",
+    'If the user names multiple independent targets, make one distinct MCP call for every named target in the same `Promise.all`; do not choose only one target. Before returning, check that the Code Mode block contains one call per requested target and returns a result keyed by every exact target ID. A one-item `Promise.all` does not satisfy a request for several targets.',
+    "For example, if asked for uptime on node-44, node-88, and node-100, run all three exact-target `shell_exec` calls together in one `Promise.all`, each using `mcp.call(target, 'shell_exec', {cmd:'uptime'})`, then preserve all three results under their target IDs. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.",
     'For shell hosts, use the exact tool `shell_exec` and the argument shape `{cmd:"..."}`, for example `mcp.call("shell:node-44","shell_exec",{cmd:"uptime"})`. Preserve each result in an object keyed by the exact target ID; do not flatten different hosts into an anonymous array.',
     'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the actual Bridge result before reporting completion; if it has not arrived, say the operation is pending.'
   ].join('\n');
@@ -1086,15 +1124,20 @@ async function injectAll() {
       else warnings.push('target list unavailable');
       parts.push('Use MCP Tools to load detailed tools for a target.');
       const text = parts.join('\n\n');
-      const inserted = setInputText(text);
+      const inserted = setInputText(text, autoEnter() ? sent => {
+        const message = sent
+          ? 'MCP All — setup prompt sent to chat'
+          : 'MCP All — prompt is still in the message box; send it manually';
+        toast(warnings.length ? `${message}; ${warnings.join('; ')}` : message);
+      } : undefined);
       const copied = await copyToClipboard(text);
       const resultMessage = inserted
-        ? autoEnter() ? 'MCP All — setup prompt auto-send is on' : 'MCP All — instructions are in the message box; send them to the chat'
+        ? autoEnter() ? '' : 'MCP All — instructions are in the message box; send them to the chat'
         : copied ? 'MCP All — instructions copied; paste and send them to the chat'
           : 'MCP All — instructions loaded; open a chat and click MCP Tools';
-      toast(warnings.length
-        ? `${resultMessage}; ${warnings.join('; ')}`
-        : resultMessage);
+      if (resultMessage) {
+        toast(warnings.length ? `${resultMessage}; ${warnings.join('; ')}` : resultMessage);
+      }
     } catch (e) {
       toast(`MCP ${agentId}: ${e.message}`, 5000);
     }
@@ -1176,12 +1219,17 @@ async function injectAll() {
     toast(`Loading ${agentId}...`);
     try {
       const text = `${MCP_USAGE_PROMPT}\n\n${await promptForTarget(agentId, compactMode())}`;
-      const inserted = setInputText(text);
+      const inserted = setInputText(text, autoEnter() ? sent => {
+        toast(sent
+          ? `MCP ${agentId} — setup prompt sent to chat`
+          : `MCP ${agentId} — prompt is still in the message box; send it manually`);
+      } : undefined);
       const copied = await copyToClipboard(text);
-      toast(inserted
-        ? autoEnter() ? `MCP ${agentId} — setup prompt auto-send is on` : `MCP ${agentId} — instructions are in the message box; send them to the chat`
+      const resultMessage = inserted
+        ? autoEnter() ? '' : `MCP ${agentId} — instructions are in the message box; send them to the chat`
         : copied ? `MCP ${agentId} — instructions copied; paste and send them to the chat`
-          : `MCP ${agentId} — instructions loaded; open a chat and click MCP Tools`);
+          : `MCP ${agentId} — instructions loaded; open a chat and click MCP Tools`;
+      if (resultMessage) toast(resultMessage);
     } catch (e) {
       toast('Error: ' + e.message, 4000);
     }

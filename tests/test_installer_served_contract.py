@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://became.bezrabotnyi.com"
 
 SERVED_ARTIFACTS = {
+    "/mcp-bridge.user.js": ROOT / "public" / "mcp-bridge.user.js",
     "/install_win.ps1": ROOT / "deploy" / "install_win.ps1",
     "/install.sh": ROOT / "deploy" / "install.sh",
     "/install_shellmcp.sh": ROOT / "deploy" / "install_shellmcp.sh",

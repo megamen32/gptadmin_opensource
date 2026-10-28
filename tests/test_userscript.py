@@ -68,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.11" in content
+    assert "// @version      2.3.12" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -92,10 +92,24 @@ def test_injected_prompt_describes_current_code_mode():
         '{cmd:"uptime"}',
         "mcp.call(target, 'shell_exec', {cmd:'uptime'})",
         "keyed by the exact target ID",
+        "one distinct MCP call for every named target",
+        "one call per requested target",
+        "A one-item `Promise.all` does not satisfy",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
     assert "event.origin !== new URL(hubUrl()).origin" in content
     assert "event.data.state !== oauthState()" in content
+
+
+def test_auto_submit_waits_for_the_real_provider_send_button():
+    content = USERSCRIPT.read_text()
+    assert "'alice.yandex.ru': ['button[data-testid=\"oknyx\"]'" in content
+    assert "function autoSubmitInserted(el, expectedText, onResult)" in content
+    assert "readInputText(el) !== expectedText" in content
+    assert "setTimeout(submitWhenReady, 180)" in content
+    assert "MCP All — prompt is still in the message box; send it manually" in content
+    assert "MCP All — setup prompt sent to chat" in content
+    assert "autoSubmitInserted(el, text, onAutoSubmitResult)" in content
 
 
 def test_zai_custom_mcp_code_blocks_get_inline_execution():
@@ -193,7 +207,7 @@ def test_prompt_insertion_does_not_wait_indefinitely_for_clipboard():
     start = content.index("async function injectAll()")
     end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  AGENT SELECT", start)
     inject_all = content[start:end]
-    assert inject_all.index("const inserted = setInputText(text)") < inject_all.index("await copyToClipboard(text)")
+    assert inject_all.index("const inserted = setInputText(text, autoEnter() ? sent => {") < inject_all.index("await copyToClipboard(text)")
 
 
 def test_agent_menu_is_labeled_as_mcp_tools():
@@ -215,18 +229,21 @@ def test_toolbar_defaults_to_clickable_bottom_right_position():
 def test_inserted_prompts_and_results_auto_send_by_default():
     content = USERSCRIPT.read_text()
     assert "GM_getValue('auto_enter', true)" in content
-    start = content.index("function autoSubmitInserted(el)")
+    start = content.index("function autoSubmitInserted(el, expectedText, onResult)")
     end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  REACT-COMPATIBLE INPUT", start)
     auto_submit = content[start:end]
     assert "form?.querySelectorAll('button[type=\"submit\"]')" in auto_submit
+    assert "'alice.yandex.ru': ['button[data-testid=\"oknyx\"]'" in content
     assert "button[data-testid*=\"send\" i]" in auto_submit
     assert "button[aria-label*=\"отправить\" i]" in auto_submit
     assert "form.requestSubmit()" in auto_submit
     assert "el.dispatchEvent(new KeyboardEvent('keydown'" in auto_submit
-    input_start = content.index("function setInputText(text)")
+    assert "readInputText(el) !== expectedText" in auto_submit
+    assert "setTimeout(submitWhenReady, 180)" in auto_submit
+    input_start = content.index("function setInputText(text, onAutoSubmitResult)")
     input_end = content.index("// ═══════════════════════════════════════════════════════════════\n  //  CLIPBOARD", input_start)
     input_code = content[input_start:input_end]
-    assert "autoSubmitInserted(el)" in input_code
+    assert "autoSubmitInserted(el, text, onAutoSubmitResult)" in input_code
     assert "Auto-send inserted prompts and MCP results" in content
 
 
