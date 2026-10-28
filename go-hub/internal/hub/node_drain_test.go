@@ -270,3 +270,34 @@ func TestNodeDrainEndpointAuth(t *testing.T) {
 		t.Fatalf("missing action accepted: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
+	s := drainTestHub(t, nil)
+	s.mu.Lock()
+	s.relayJobs["catalog"] = &relayJob{ID: "catalog", AgentID: "control:host", Method: "tools/list", Status: "queued", CreatedAt: nowFloat()}
+	s.mu.Unlock()
+	s.EnableNodeDrain("catalog-only")
+	if st := s.NodeDrainStatus(); !st.ReadyToStop || st.Counters.UnfinishedExecutions != 0 {
+		t.Fatalf("read-only undispatched discovery blocks drain: %+v", st)
+	}
+	s.mu.Lock()
+	if s.relayJobs["catalog"].Status != "queued" {
+		t.Fatal("drain rewrote receipt")
+	}
+	s.mu.Unlock()
+	for _, j := range []*relayJob{
+		{ID: "call", Method: "tools/call", Status: "queued"},
+		{ID: "call", Method: "tools/call", Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "unknown"},
+		{ID: "call", Method: "tools/list", Status: "queued", StartedAt: nowFloat()},
+		{ID: "call", Method: "tools/list", Status: "queued", Result: map[string]any{"accepted": true}},
+	} {
+		s.mu.Lock()
+		s.relayJobs["call"] = j
+		s.mu.Unlock()
+		if st := s.NodeDrainStatus(); st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
+			t.Fatalf("unsafe record not blocking: job=%+v state=%+v", j, st)
+		}
+	}
+}
