@@ -425,9 +425,6 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 		}
 		return s.mcpChildTools(ctx, args)
 	case "mcp_call":
-		if err := requireNoFilesystemACL(ctx, name); err != nil {
-			return nil, err
-		}
 		return s.mcpChildCall(ctx, args)
 	case "mcp_request":
 		if err := requireNoFilesystemACL(ctx, name); err != nil {
@@ -865,6 +862,10 @@ func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[str
 	if !childToolAllowed(agent, name) {
 		return nil, fmt.Errorf("mcp child %q tool %q is not allowed by tool_allowlist", ref, name)
 	}
+	meta, err := filesystemACLMetaForChildCall(ctx, ref, name)
+	if err != nil {
+		return nil, err
+	}
 	scope, err := childConnectionScope(args)
 	if err != nil {
 		return nil, err
@@ -881,7 +882,7 @@ func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[str
 		return nil, err
 	}
 	defer cancel()
-	result, err := s.childMCP.CallToolScoped(callCtx, agent, name, arguments, scope)
+	result, err := s.childMCP.CallToolScopedWithMeta(callCtx, agent, name, arguments, meta, scope)
 	if err != nil {
 		return nil, err
 	}

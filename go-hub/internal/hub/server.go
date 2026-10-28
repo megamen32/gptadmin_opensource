@@ -5062,9 +5062,24 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		if isChild && isChildMCPAgent(child) {
 			parent := firstString(child.Meta, "parent_server_id")
 			ref := firstString(child.Meta, "child_ref")
-			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", childConnectionArguments(r, child, map[string]any{
+			childArgs := childConnectionArguments(r, child, map[string]any{
 				"ref": ref, "name": toolName, "arguments": args,
-			}), background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+			})
+			childACL, aclErr := filesystemACLForRequest(r, parent, "mcp_call", childArgs)
+			if aclErr != nil {
+				return map[string]any{"status": "failed", "error": aclErr.Error()}, http.StatusForbidden
+			}
+			if childACL != nil {
+				server := strings.TrimPrefix(parent, "shell:")
+				s.mu.Lock()
+				capable := s.filesystemACLExecutorCapableLocked(server)
+				s.mu.Unlock()
+				if !capable {
+					return map[string]any{"status": "failed", "error": "filesystem ACL requires an approved executor with filesystem_acl_version 1"}, http.StatusForbidden
+				}
+				return s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, childACL, durableRequestKey), http.StatusOK
+			}
+			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
 		}
 		jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
 		if failure := s.relayEnqueueFailure(jobID); failure != nil {

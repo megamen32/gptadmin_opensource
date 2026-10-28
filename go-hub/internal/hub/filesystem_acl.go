@@ -59,7 +59,14 @@ func filesystemACLForRequest(r *http.Request, target, tool string, args map[stri
 	if !ok || !filesystemACLActive(profile) {
 		return nil, nil
 	}
-	if tool != "file_editor" && tool != "system_inspect" {
+	if tool == "mcp_call" {
+		if !filesystemACLSearchCall(args) {
+			return nil, errors.New("filesystem-bound profile permits only GrepMesh search/read_text")
+		}
+		if profile.ReadRoots == nil || len(*profile.ReadRoots) == 0 {
+			return nil, errors.New("GrepMesh access requires non-empty read_roots")
+		}
+	} else if tool != "file_editor" && tool != "system_inspect" {
 		return nil, nil
 	}
 	digest, err := filesystemACLArgumentsDigest(args)
@@ -72,6 +79,15 @@ func filesystemACLForRequest(r *http.Request, target, tool string, args map[stri
 		ArgumentsSHA256: digest, ReadRoots: cloneStringSlicePointer(profile.ReadRoots),
 		WriteRoots: cloneStringSlicePointer(profile.WriteRoots),
 	}, nil
+}
+
+func filesystemACLSearchCall(args map[string]any) bool {
+	ref := strings.ToLower(strings.TrimSpace(firstString(args, "ref")))
+	name := strings.ToLower(strings.TrimSpace(firstString(args, "name")))
+	if ref != "grepmesh" || (name != "search" && name != "search_text" && name != "read_text") {
+		return false
+	}
+	return true
 }
 
 func (s *Server) filesystemACLExecutorCapableLocked(server string) bool {

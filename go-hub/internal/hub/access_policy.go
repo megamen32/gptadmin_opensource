@@ -341,6 +341,15 @@ func authorizeFilesystemProfileAction(r *http.Request, target, tool string, args
 	if !bound || !filesystemACLActive(profile) {
 		return nil
 	}
+	if filesystemScopedGrepMeshTarget(target) {
+		if tool != "search" && tool != "search_text" && tool != "read_text" {
+			return errors.New("filesystem-bound profile permits only GrepMesh search")
+		}
+		if profile.ReadRoots == nil || len(*profile.ReadRoots) == 0 {
+			return errors.New("filesystem-bound profile has no GrepMesh read roots")
+		}
+		return nil
+	}
 	if target == "hub" && isFacadeTool(target, tool) {
 		return nil
 	}
@@ -370,6 +379,14 @@ func authorizeFilesystemProfileAction(r *http.Request, target, tool string, args
 		return errors.New("file_editor edit requires both read and write roots")
 	}
 	return nil
+}
+
+func filesystemScopedGrepMeshTarget(target string) bool {
+	if !strings.HasPrefix(target, "mcp:") {
+		return false
+	}
+	separator := strings.LastIndexByte(target, ':')
+	return separator >= 0 && strings.EqualFold(strings.TrimSpace(target[separator+1:]), "grepmesh")
 }
 
 // authorizeReadOnlyIdentityAction is the access-mode ceiling of a read-only

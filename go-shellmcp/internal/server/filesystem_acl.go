@@ -59,3 +59,16 @@ func requireNoFilesystemACL(ctx context.Context, tool string) error {
 	}
 	return nil
 }
+
+func filesystemACLMetaForChildCall(ctx context.Context, ref, tool string) (map[string]any, error) {
+	acl, active := filesystemACLFromContext(ctx)
+	if !active {
+		return nil, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(ref), "grepmesh") ||
+		(tool != "search" && tool != "search_text" && tool != "read_text") ||
+		acl.ReadRoots == nil || len(*acl.ReadRoots) == 0 {
+		return nil, errors.New("filesystem-bound child call permits only GrepMesh reads within non-empty read_roots")
+	}
+	return map[string]any{"io.gptadmin/filesystem-acl": acl}, nil
+}

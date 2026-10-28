@@ -283,13 +283,21 @@ func (c *Client) ListToolsScoped(ctx context.Context, agent supervisor.Agent, sc
 }
 
 func (c *Client) CallToolScoped(ctx context.Context, agent supervisor.Agent, name string, arguments map[string]any, scope string) (map[string]any, error) {
+	return c.CallToolScopedWithMeta(ctx, agent, name, arguments, nil, scope)
+}
+
+func (c *Client) CallToolScopedWithMeta(ctx context.Context, agent supervisor.Agent, name string, arguments map[string]any, meta map[string]any, scope string) (map[string]any, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("mcp child: tool name is required")
 	}
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	return c.RequestScoped(ctx, agent, scope, "tools/call", map[string]any{"name": name, "arguments": arguments})
+	params := map[string]any{"name": name, "arguments": arguments}
+	if len(meta) > 0 {
+		params["_meta"] = meta
+	}
+	return c.RequestScoped(ctx, agent, scope, "tools/call", params)
 }
 
 func (c *Client) disposePartitions(parts []*scopedPartition) error {

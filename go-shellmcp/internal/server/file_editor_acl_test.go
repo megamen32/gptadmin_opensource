@@ -1,12 +1,36 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 )
+
+func TestFilesystemACLChildCallPassesOnlyHubVerifiedGrepMeshReadScope(t *testing.T) {
+	roots := []string{"/srv/docs"}
+	policy := &hub.FilesystemACL{
+		Version: 1, ProfileID: "reader", ProfileVersion: 3, RootsDigest: "roots",
+		JobID: "job", Target: "shell:100", Tool: "mcp_call", ArgumentsSHA256: "args",
+		ReadRoots: &roots,
+	}
+	ctx := withFilesystemACL(context.Background(), policy)
+	meta, err := filesystemACLMetaForChildCall(ctx, "GrepMesh", "search")
+	if err != nil || meta["io.gptadmin/filesystem-acl"] != policy {
+		t.Fatalf("verified ACL metadata=%v err=%v", meta, err)
+	}
+	for _, denied := range [][2]string{{"OtherMCP", "search"}, {"GrepMesh", "find_duplicates"}, {"GrepMesh", "delete"}} {
+		if _, err := filesystemACLMetaForChildCall(ctx, denied[0], denied[1]); err == nil {
+			t.Fatalf("filesystem ACL reached disallowed child operation %v", denied)
+		}
+	}
+	if meta, err := filesystemACLMetaForChildCall(context.Background(), "GrepMesh", "search"); err != nil || meta != nil {
+		t.Fatalf("unscoped call manufactured an ACL: meta=%v err=%v", meta, err)
+	}
+}
 
 func TestFileEditorFilesystemACLSeparatesReadAndWriteRights(t *testing.T) {
 	base := t.TempDir()

@@ -54,6 +54,10 @@ func TestFilesystemProfileAuthorizationFailsClosedAndKeepsSafeFacade(t *testing.
 		{"file:host", "file_checkpoint", map[string]any{"action": "restore"}, false},
 		{"file:host", "file_backup", map[string]any{"action": "restore"}, false},
 		{"child", "mcp_call", map[string]any{"name": "read"}, false},
+		{"mcp:shell:host:GrepMesh", "search", map[string]any{"query": "safe"}, true},
+		{"mcp:shell:host:GrepMesh", "read_text", map[string]any{"path": "/tmp/allowed/a"}, true},
+		{"mcp:shell:host:OtherMCP", "search", map[string]any{"query": "safe"}, false},
+		{"mcp:shell:host:GrepMesh", "find_duplicates", map[string]any{"roots": []any{"/tmp/allowed"}}, false},
 		{"child", "resources/read", map[string]any{"uri": "file:///tmp/allowed/a"}, false},
 		{"shell:host", "system_resource_summary", map[string]any{}, true},
 	}
@@ -64,6 +68,32 @@ func TestFilesystemProfileAuthorizationFailsClosedAndKeepsSafeFacade(t *testing.
 				t.Fatalf("allow=%v err=%v", tc.allow, err)
 			}
 		})
+	}
+}
+
+func TestGrepMeshReadCallCarriesTheExistingFilesystemACLQueueBinding(t *testing.T) {
+	read := []string{"/srv/docs"}
+	profile := AccessProfile{ID: "grepmesh-reader", AccessMode: accessModeReadonly, Version: 7, ReadRoots: &read}
+	request := requestWithAccessProfile(httptest.NewRequest("POST", "/mcp", nil), profile)
+	args := map[string]any{
+		"ref": "GrepMesh", "name": "search",
+		"arguments": map[string]any{"query": "fixture marker", "roots": []any{"docs"}},
+	}
+	policy, err := filesystemACLForRequest(request, "shell:node-100", "mcp_call", args)
+	if err != nil || policy == nil {
+		t.Fatalf("filesystem ACL policy=%#v err=%v", policy, err)
+	}
+	if policy.ProfileID != profile.ID || policy.ProfileVersion != profile.Version ||
+		policy.Tool != "mcp_call" || policy.ReadRoots == nil || len(*policy.ReadRoots) != 1 || (*policy.ReadRoots)[0] != read[0] {
+		t.Fatalf("existing queue ACL was not bound to the caller profile: %#v", policy)
+	}
+	for _, bad := range []map[string]any{
+		{"ref": "OtherMCP", "name": "search"},
+		{"ref": "GrepMesh", "name": "find_duplicates"},
+	} {
+		if _, err := filesystemACLForRequest(request, "shell:node-100", "mcp_call", bad); err == nil {
+			t.Fatalf("filesystem-bound child call was not denied: %#v", bad)
+		}
 	}
 }
 
