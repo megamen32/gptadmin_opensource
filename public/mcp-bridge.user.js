@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.3
+// @version      2.3.4
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -965,6 +965,7 @@
     btnMain.className = 'mcp-btn mcp-btn-main';
     btnMain.innerHTML = '<span class="icon">🧩</span> MCP <span class="chev">▾</span>';
     btnMain.title = 'Open MCP Bridge menu';
+    btnMain.setAttribute('aria-label', 'MCP Bridge menu');
     btnMain.addEventListener('click', (e) => {
       e.stopPropagation();
       toolbar.classList.toggle('mcp-open');
@@ -974,14 +975,16 @@
     const btnAll = document.createElement('button');
     btnAll.className = 'mcp-btn mcp-btn-all mcp-action mcp-secure';
     btnAll.innerHTML = '<span class="icon">📡</span> MCP All';
-    btnAll.title = 'Fetch MCP prompt for all agents (Alt+M)';
+    btnAll.title = 'Load instructions and tools for all targets; then send them to the chat';
+    btnAll.setAttribute('aria-label', 'MCP All: load and send tool instructions');
     btnAll.addEventListener('click', injectAll);
 
     // ── MCP (agent select) ──
     const btnAgent = document.createElement('button');
     btnAgent.className = 'mcp-btn mcp-btn-agent mcp-action mcp-secure';
-    btnAgent.innerHTML = '<span class="icon">🔌</span> MCP';
-    btnAgent.title = 'Select agent & fetch MCP prompt';
+    btnAgent.innerHTML = '<span class="icon">🔌</span> MCP Tools';
+    btnAgent.title = 'Choose a target and load its tool instructions; then send them to the chat';
+    btnAgent.setAttribute('aria-label', 'MCP Tools: choose a target and load instructions');
     btnAgent.addEventListener('click', toggleAgentDropdown);
 
     // ── Agent dropdown ──

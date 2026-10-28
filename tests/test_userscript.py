@@ -147,6 +147,11 @@ def test_mcp_all_loads_target_schemas_in_parallel_batches():
     assert "Promise.all(servers.slice(i, i + MCP_ALL_SCHEMA_BATCH_SIZE)" in inject_all
 
 
+def test_agent_menu_is_labeled_as_mcp_tools():
+    content = USERSCRIPT.read_text()
+    assert "<span class=\"icon\">🔌</span> MCP Tools" in content
+
+
 def test_install_urls_allow_cross_origin_tampermonkey_fetch():
     client = TestClient(server_for_installer.app)
     for path in ("/mcp-bridge.user.js", "/userscript.js"):
