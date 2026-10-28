@@ -68,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.12" in content
+    assert "// @version      2.3.13" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -89,12 +89,17 @@ def test_injected_prompt_describes_current_code_mode():
         "same-profile instruction context",
         "Current profile instructions:",
         "shell_exec",
-        '{cmd:"uptime"}',
-        "mcp.call(target, 'shell_exec', {cmd:'uptime'})",
+        'argument shape `{cmd:"..."}`',
         "keyed by the exact target ID",
-        "one distinct MCP call for every named target",
-        "one call per requested target",
+        "one distinct call for every available requested target",
         "A one-item `Promise.all` does not satisfy",
+        "must explicitly `return` its final value",
+        "bare `await` and `console.log(...)` alone produce no returned result",
+        "returned by `mcp.discover`",
+        "never guess or invent a hostname/target alias",
+        "report it as unavailable and do not call it",
+        ".catch(error => ({error:String(error)}))",
+        "return Object.fromEntries(await Promise.all(targets.map(async target =>",
     ]:
         assert required in content, f"missing current MCP usage instruction: {required}"
     assert "event.origin !== new URL(hubUrl()).origin" in content
@@ -187,7 +192,8 @@ def test_code_mode_fetches_missing_schemas_and_runs_independent_commands_in_para
     content = USERSCRIPT.read_text()
     assert "independent schemas together with `await Promise.all([...])`" in content
     assert "another `await Promise.all([...])`" in content
-    assert "mcp.call(target, 'shell_exec', {cmd:'uptime'})" in content
+    assert "return Object.fromEntries(await Promise.all(targets.map(async target =>" in content
+    assert "targets` only to exact IDs from the current target list" in content
 
 
 def test_schema_and_discovery_calls_have_bounded_setup_timeouts():
