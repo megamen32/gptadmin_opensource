@@ -107,6 +107,42 @@ client credentials, never generated defaults. Provision only the same client
 identity and policy as the primary and verify both successful authorized
 execution and rejection of an unknown bearer after restarting the add-on.
 
+### Preserve both client and executor identities
+
+Reachable TLS and a successful MCP initialize do not prove that the standby
+can execute a command. The standby needs three independent pieces of durable
+state, all inside its existing protected `/data/config` volume:
+
+- `internal-secrets.json`: existing client `codex_mcp_bearer` (or the
+  explicitly provisioned client equivalent) and the existing executor
+  `shellmcp_token`. Never rotate either to make an outage test pass.
+- `mcp_tokens_state.json`: the exact corresponding client principal record,
+  including its digest, role, profile, lifecycle and access mode. Copying a
+  token without its policy must not grant new permissions.
+- `registry_state.json`: the executor identity and its previous approval.
+  The same physical executor can authenticate yet remain `awaiting_approval`
+  on a fresh standby. Match its fingerprint, public key and server ID against
+  the already approved primary record before restoring only that approval
+  through `approve_pending_server`; do not approve other pending devices.
+
+Provision existing protected credentials without printing their values.
+Supervisor options remain the public instance configuration; do not add
+undeclared secret fields to that schema. Read the installed app version and
+the previous update receipt before attempting another update. After changing
+startup credentials, one supported Supervisor restart loads them; keep the
+data volume and inspect every outstanding task before starting a new canary.
+
+The HAOS ShellMCP normally polls its configured public Hub URL. With queue mode
+enabled it has no listener on port 25900; a configured `shell_url` does not
+establish direct connectivity. A valid failover check preserves the poller
+URL and follows its automatic connection through the real recovery ingress.
+Use the existing client bearer to run one harmless command, then read the
+canonical task until its real output and exit status are known. A queued task,
+HTTP 200 or an accepted request is insufficient. A client timeout is UNKNOWN:
+find the existing task rather than resubmitting it. If a restart closes a
+queued task as `hub_restarted_before_dispatch`, that terminal receipt proves
+it was not dispatched; retain it separately from a later deliberate canary.
+
 ## Black-box regression coverage
 
 The Docker suite runs in CI and can be run locally without a deployed FRP
