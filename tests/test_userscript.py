@@ -68,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.10" in content
+    assert "// @version      2.3.11" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -76,6 +76,9 @@ def test_injected_prompt_describes_current_code_mode():
     for required in [
         "MCP_USAGE_PROMPT",
         "fenced `mcp` JSON block",
+        "cannot run shell, SSH, or other server commands directly",
+        "never claim a command ran or invent output",
+        "Wait for the actual Bridge result before reporting completion",
         "tool `exec`",
         "args.code",
         "mcp.call(target, tool, args)",

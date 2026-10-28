@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.10
+// @version      2.3.11
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -342,11 +342,11 @@
   }
 
   const MCP_USAGE_PROMPT = [
-    'Use only the exact target IDs listed below. For a direct call, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}. Use MCP Tools to load one target’s tool details; in Code Mode, use `mcp.schema` when a tool schema is needed.',
+    'Use only the exact target IDs listed below. You cannot run shell, SSH, or other server commands directly. For every requested MCP operation, reply with one fenced `mcp` JSON block using {"target":"...","tool":"...","args":{...}}; never claim a command ran or invent output. Use MCP Tools to load one target’s tool details; in Code Mode, use `mcp.schema` when a tool schema is needed.',
     'For multi-step work or several independent commands, use ONE GPTAdmin Code Mode call: target `hub`, tool `exec`, with an async JavaScript body in `args.code`. If needed, load independent schemas together with `await Promise.all([...])`, then start all independent `mcp.call(target, tool, args)` calls together with another `await Promise.all([...])`. Do not wait for one independent command before starting another or split them into separate tool-call rounds. Use sequential `await` only when a later call depends on an earlier result. Separate displayed `mcp` blocks are separate clicks and are not automatically parallel. Return only useful results.',
     "For example, run uptime on several shell targets with one `Promise.all` of `mcp.call(target, 'shell_exec', {cmd:'uptime'})`. Use `hub.ro` for read-only code; `mcp.discover`, `mcp.search`, `mcp.schema`, `mcp.job`, and `mcp.expand` are available in Code Mode.",
     'For shell hosts, use the exact tool `shell_exec` and the argument shape `{cmd:"..."}`, for example `mcp.call("shell:node-44","shell_exec",{cmd:"uptime"})`. Preserve each result in an object keyed by the exact target ID; do not flatten different hosts into an anonymous array.',
-    'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the returned result before reporting completion.'
+    'Follow the current profile instructions included with the selected target. Code Mode still follows this connection’s access profile and approval rules; it has no direct filesystem, environment, or network access. The bridge attaches the current same-profile instruction context to the call. The bridge does not run a call until its inline play button is clicked or `Exec clipboard` is used. Wait for the actual Bridge result before reporting completion; if it has not arrived, say the operation is pending.'
   ].join('\n');
   // ═══════════════════════════════════════════════════════════════
   //  MCP JSON PARSING
