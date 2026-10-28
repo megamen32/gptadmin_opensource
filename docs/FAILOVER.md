@@ -92,6 +92,15 @@ threshold/confirmation, and accepts signed reclaim when the primary returns.
 The deployment source must provide a real Linux/ARM64 `frpc`; copying the
 primary x86-64 binary silently produces a non-working standby.
 
+If the home ISP blocks the independent FRP server, set `failover.proxy_url`
+to an HTTP CONNECT proxy running on HAOS (for example
+`http://203.0.113.10:3127`). The generated FRPC transport then reaches the
+external FRPS through that proxy while preserving FRP TLS. The proxy and its
+outbound route must survive loss of node-100. Confirm a real FRPS login
+and an authenticated MCP operation through the external server; a promotion
+decision alone does not establish reachable failover. Do not configure an
+endpoint unless its FRPS actually runs there.
+
 ## Black-box regression coverage
 
 The Docker suite runs in CI and can be run locally without a deployed FRP

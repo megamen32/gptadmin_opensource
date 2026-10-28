@@ -168,10 +168,10 @@ def build_frpc_config(bundle: dict[str, Any], local_port: int, node_id: str, end
         "",
         "[auth]",
         f"token = {json.dumps(token)}",
-        "",
-        "[transport.tls]",
-        "enable = true",
     ]
+    if frp.get("proxy_url"):
+        parts += ["", "[transport]", f"proxyURL = {json.dumps(frp['proxy_url'])}"]
+    parts += ["", "[transport.tls]", "enable = true"]
     if domain:
         parts.append(f"serverName = {json.dumps(domain)}")
     parts += [

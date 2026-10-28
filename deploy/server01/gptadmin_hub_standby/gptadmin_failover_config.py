@@ -95,6 +95,7 @@ def build_failover_state(options: dict[str, Any]) -> dict[str, Any]:
         "tunnel": {
             "frp": {
                 "endpoints": endpoints,
+                "proxy_url": str(failover.get("proxy_url") or ""),
                 "subdomain": str(_required(failover, "subdomain")),
                 "domain": str(_required(failover, "domain")),
                 "public_url": str(_required(failover, "primary_public_url")).rstrip("/"),

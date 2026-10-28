@@ -26,6 +26,7 @@ options:
     fail_count_base: 3
     local_hub_port: 9001
     endpoints: []
+    proxy_url: ""
     subdomain:
     domain:
     public_confirm_timeout_sec: 3
@@ -45,6 +46,7 @@ schema:
     local_hub_port: int
     endpoints:
       - str
+    proxy_url: str?
     subdomain: str
     domain: str
     public_confirm_timeout_sec: int

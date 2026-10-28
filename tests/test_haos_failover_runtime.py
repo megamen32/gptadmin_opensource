@@ -64,6 +64,17 @@ def test_reclaim_uses_existing_runtime_bridge_key_when_state_is_secret_safe(monk
     assert reclaim_secret({}) == "existing-bridge-key"
 
 
+def test_frpc_can_reach_backup_through_an_independent_http_proxy() -> None:
+    bundle = {"tunnel": {"frp": {
+        "token": "test-token", "subdomain": "fallback",
+        "endpoints": ["relay01=backup.example:27001"],
+        "proxy_url": "http://203.0.113.10:3127",
+    }}}
+    config = build_frpc_config(bundle, 9101, "shell:haos")
+    assert '[transport]\nproxyURL = "http://203.0.113.10:3127"' in config
+    assert '[transport.tls]\nenable = true' in config
+
+
 def test_runtime_does_not_capture_watchdog_pipes_while_frpc_is_detached() -> None:
     """Detached FRP children must not block the next watchdog tick on EOF."""
 
