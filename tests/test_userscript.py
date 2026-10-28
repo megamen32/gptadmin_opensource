@@ -58,7 +58,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.6" in content
+    assert "// @version      2.3.7" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -161,6 +161,11 @@ def test_first_use_mcp_actions_are_visible_before_hub_oauth():
     content = USERSCRIPT.read_text()
     assert "#mcp-toolbar:not(.mcp-open) .mcp-action { display: none; }" not in content
     assert "#mcp-toolbar.mcp-no-key .mcp-secure { display: none; }" not in content
+
+
+def test_toolbar_defaults_to_clickable_bottom_right_position():
+    content = USERSCRIPT.read_text()
+    assert "GM_getValue('toolbar_position', 'bottom-right')" in content
 
 
 def test_inserted_prompts_and_results_auto_send_by_default():

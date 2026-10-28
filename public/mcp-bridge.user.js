@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.6
+// @version      2.3.7
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -40,7 +40,7 @@
   function oauthVerifier(){ return GM_getValue('oauth_verifier', ''); }
   function autoEnter()   { return GM_getValue('auto_enter', true); }
   function compactMode() { return GM_getValue('compact_prompt', true); }
-  function toolbarPosition() { return GM_getValue('toolbar_position', 'top-center'); }
+  function toolbarPosition() { return GM_getValue('toolbar_position', 'bottom-right'); }
   let bridgeInstructionContext = '';
   let bridgeInstructionOwner = '';
   let bridgeProfileInstructions = '';
