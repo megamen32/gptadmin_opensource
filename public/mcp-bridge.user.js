@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MCP Bridge
 // @namespace    mcp-bridge
-// @version      2.3.5
+// @version      2.3.6
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
 // @author       admin
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
@@ -699,7 +699,7 @@
     /* ── floating toolbar ── */
     #mcp-toolbar {
       position: fixed; z-index: 2147483647;
-      display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+      display: flex; flex-direction: row; gap: 6px; align-items: center;
     }
     #mcp-toolbar.mcp-pos-top-center {
       top: 16px; left: 50%; right: auto; bottom: auto;
@@ -734,8 +734,9 @@
       cursor: pointer; white-space: nowrap; transition: background .15s, transform .1s, opacity .15s;
       box-shadow: 0 2px 8px rgba(0,0,0,.35); user-select: none;
     }
-    #mcp-toolbar:not(.mcp-open) .mcp-action { display: none; }
-    #mcp-toolbar.mcp-no-key .mcp-secure { display: none; }
+    #mcp-toolbar:not(.mcp-open) .mcp-btn-exec,
+    #mcp-toolbar:not(.mcp-open) .mcp-btn-gear,
+    #mcp-toolbar.mcp-no-key .mcp-btn-exec { display: none; }
     .mcp-btn-main { border-color: rgba(137,180,250,.4); background: #181825; }
     .mcp-btn-main .chev { color: #89b4fa; font-size: 10px; transition: transform .15s; }
     #mcp-toolbar.mcp-open .mcp-btn-main .chev { transform: rotate(180deg); }
@@ -980,12 +981,12 @@
     // ── Settings panel ──
     createSettingsPanel();
 
-    // ── Folded main button ──
+    // ── Bridge menu ──
     const btnMain = document.createElement('button');
     btnMain.className = 'mcp-btn mcp-btn-main';
-    btnMain.innerHTML = '<span class="icon">🧩</span> MCP <span class="chev">▾</span>';
-    btnMain.title = 'Open MCP Bridge menu';
-    btnMain.setAttribute('aria-label', 'MCP Bridge menu');
+    btnMain.innerHTML = '<span class="icon">🧩</span> GPTAdmin MCP <span class="chev">▾</span>';
+    btnMain.title = 'GPTAdmin MCP Bridge. Use MCP All to load Hub instructions or MCP Tools to choose a target.';
+    btnMain.setAttribute('aria-label', 'GPTAdmin MCP Bridge menu. Use MCP All to load Hub instructions or MCP Tools to choose a target.');
     btnMain.addEventListener('click', (e) => {
       e.stopPropagation();
       toolbar.classList.toggle('mcp-open');
@@ -995,16 +996,16 @@
     const btnAll = document.createElement('button');
     btnAll.className = 'mcp-btn mcp-btn-all mcp-action mcp-secure';
     btnAll.innerHTML = '<span class="icon">📡</span> MCP All';
-    btnAll.title = 'Load instructions and tools for all targets; auto-send the prompt when enabled';
-    btnAll.setAttribute('aria-label', 'MCP All: load and send tool instructions');
+    btnAll.title = 'Connect to GPTAdmin Hub, load its instructions and tools for all targets, and auto-send the setup prompt when enabled';
+    btnAll.setAttribute('aria-label', 'MCP All: connect to GPTAdmin Hub, load instructions and tools for all targets, and send the setup prompt');
     btnAll.addEventListener('click', injectAll);
 
     // ── MCP (agent select) ──
     const btnAgent = document.createElement('button');
     btnAgent.className = 'mcp-btn mcp-btn-agent mcp-action mcp-secure';
     btnAgent.innerHTML = '<span class="icon">🔌</span> MCP Tools';
-    btnAgent.title = 'Choose a target and load its tool instructions; auto-send the prompt when enabled';
-    btnAgent.setAttribute('aria-label', 'MCP Tools: choose a target and load instructions');
+    btnAgent.title = 'Connect to GPTAdmin Hub, choose one target, and auto-send its tool instructions when enabled';
+    btnAgent.setAttribute('aria-label', 'MCP Tools: connect to GPTAdmin Hub, choose one target, and load its tool instructions');
     btnAgent.addEventListener('click', toggleAgentDropdown);
 
     // ── Agent dropdown ──

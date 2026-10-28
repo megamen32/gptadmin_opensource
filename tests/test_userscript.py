@@ -56,6 +56,11 @@ def test_userscript_supported_sites():
     assert "// @connect      mcp.bezrabotnyi.com" in content
 
 
+def test_userscript_version_is_bumped_for_installable_update():
+    content = USERSCRIPT.read_text()
+    assert "// @version      2.3.6" in content
+
+
 def test_injected_prompt_describes_current_code_mode():
     content = USERSCRIPT.read_text()
     for required in [
@@ -150,6 +155,12 @@ def test_mcp_all_loads_target_schemas_in_parallel_batches():
 def test_agent_menu_is_labeled_as_mcp_tools():
     content = USERSCRIPT.read_text()
     assert "<span class=\"icon\">🔌</span> MCP Tools" in content
+
+
+def test_first_use_mcp_actions_are_visible_before_hub_oauth():
+    content = USERSCRIPT.read_text()
+    assert "#mcp-toolbar:not(.mcp-open) .mcp-action { display: none; }" not in content
+    assert "#mcp-toolbar.mcp-no-key .mcp-secure { display: none; }" not in content
 
 
 def test_inserted_prompts_and_results_auto_send_by_default():
