@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.16
+
+- Route child MCP calls and discovery to their owning Node without unsafe retries.
+
 ## 1.0.15
 
 - Reconcile named instructions with the writer and apply control snapshots fail-closed.

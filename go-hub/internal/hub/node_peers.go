@@ -205,6 +205,13 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	target = strings.TrimSpace(target)
 	s.mu.Lock()
 	local := s.localExecutors[target] != nil
+	if !local {
+		// A child MCP is owned by its embedded parent executor, even though its
+		// public target ID is distinct from the shell executor ID.
+		if child, ok := s.exposedAgentByIDLocked(target); ok && isChildMCPAgent(child) {
+			local = s.localExecutors[firstString(child.Meta, "parent_server_id")] != nil
+		}
+	}
 	route, routed := s.nodePeerRouteLocked(target)
 	approved := local || routed || s.nodeConns.get(target) != nil
 	if a := s.agents[target]; a != nil && truthy(a.Meta["approved"]) {
@@ -243,6 +250,13 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 		fail(http.StatusServiceUnavailable, "invalid node peer configuration", false)
 		return true
 	}
+	// A forwarded request may only execute at its actual local owner. Check
+	// this before the unapproved fallback to prevent an unknown child from
+	// entering a legacy queue or being routed a second time.
+	if r.Header.Get(nodePeerHopHeader) != "" && !local {
+		fail(http.StatusLoopDetected, "peer destination does not own the requested local executor", false)
+		return true
+	}
 	// Do not pick a newly appeared route after an unverified snapshot. Its
 	// next request can observe enrollment; this request performs no dispatch.
 	if !approved && (s.meshCore != nil || s.meshCoreErr != nil) {
@@ -257,10 +271,6 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	// A static route can never replace the process's pinned local executor.
 	if local {
 		return false
-	}
-	if r.Header.Get(nodePeerHopHeader) != "" {
-		fail(http.StatusLoopDetected, "peer destination does not own the requested local executor", false)
-		return true
 	}
 	if !routed && s.nodeConns.get(target) == nil {
 		return false

@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -8902,6 +8903,23 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 			return nil, map[string]any{"code": -32003, "message": "access profile denies this target"}
 		}
 		parent := firstString(agent.Meta, "parent_server_id")
+		// Managed personal sessions use their dedicated owner-session transport.
+		// For ordinary child discovery, ask the owning Node using the original
+		// bearer and the child target, so its policy is independently enforced.
+		if firstString(agent.Meta, "owner_profile_id") == "" {
+			payload, marshalErr := json.Marshal(map[string]any{"target": agent.AgentID})
+			if marshalErr != nil {
+				return nil, map[string]any{"code": -32602, "message": "invalid child target"}
+			}
+			peer := httptest.NewRecorder()
+			if s.forwardNodePeerRequest(peer, r, parent, payload, "/mcp-relay/tools") {
+				var reply map[string]any
+				if json.Unmarshal(peer.Body.Bytes(), &reply) != nil || peer.Code >= 400 || firstString(reply, "status") != "completed" {
+					return nil, map[string]any{"code": -32000, "message": "child schema owner unavailable", "data": reply}
+				}
+				return mapValue(reply["response"]), nil
+			}
+		}
 		args := childConnectionArguments(r, agent, map[string]any{"ref": firstString(agent.Meta, "child_ref")})
 		raw := s.callShellToolWithTraceParent(parent, "mcp_tools", args, false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
@@ -9005,11 +9023,27 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 	if isChildMCPAgent(agent) {
 		parent := firstString(agent.Meta, "parent_server_id")
 		ref := firstString(agent.Meta, "child_ref")
-		raw := s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
-			"ref":       ref,
-			"name":      name,
-			"arguments": args,
-		}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		// Route the original child target to its owning Node before falling back
+		// to the local legacy queue. The destination reauthorizes the same
+		// bearer against the child target and connection owner.
+		peerBody, marshalErr := json.Marshal(map[string]any{"target": agent.AgentID, "tool": name, "arguments": args})
+		if marshalErr != nil {
+			return nil, map[string]any{"code": -32602, "message": "invalid child arguments"}
+		}
+		peer := httptest.NewRecorder()
+		var raw map[string]any
+		if s.forwardNodePeerCall(peer, r, parent, peerBody) {
+			if json.Unmarshal(peer.Body.Bytes(), &raw) != nil || raw == nil {
+				return nil, map[string]any{"code": -32000, "message": "invalid node peer receipt"}
+			}
+			if peer.Code >= 400 {
+				raw["status"] = "failed"
+			}
+		} else {
+			raw = s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
+				"ref": ref, "name": name, "arguments": args,
+			}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+		}
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
 			return unwrapMCPUpstream(raw)
 		}

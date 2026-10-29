@@ -295,7 +295,10 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 		conn.pendingMu.Lock()
 		delete(conn.pending, frame.ID)
 		conn.pendingMu.Unlock()
-		return false
+		// A failed write can have reached the owner. Never fall back and replay.
+		s.writeNodePeerFailure(w, target, origin, endpoint, body, http.StatusBadGateway,
+			"node connection write was not confirmed; inspect the owner before retrying", !readingJob)
+		return true
 	}
 	timeout := s.cfg.DefaultTimeout
 	if timeout < 20*time.Second {
@@ -539,6 +542,9 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 				request.Header.Set(name, value)
 			}
 		}
+	}
+	if frame.Endpoint == "/mcp-relay/tools" || frame.Endpoint == "/mcp-relay/call" {
+		request.Header.Set(nodePeerHopHeader, "1")
 	}
 	if managed {
 		request.Header.Set(nodePeerHopHeader, "1")
