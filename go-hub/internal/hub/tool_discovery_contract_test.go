@@ -125,6 +125,7 @@ func TestToolCatalogDescriptionsSeparateMCPCatalogFromFileSearch(t *testing.T) {
 	exec := codeModeCatalogTool("exec")
 	execDescription := strings.ToLower(firstString(exec, "description"))
 	if firstString(exec, "name") != "exec" || firstString(exec, "title") != "Compose MCP calls" || !strings.Contains(execDescription, "javascript") ||
+		!strings.Contains(execDescription, "returns a promise") || !strings.Contains(execDescription, "promise.all") || !strings.Contains(execDescription, "concurrently") ||
 		!strings.Contains(execDescription, "search") || !strings.Contains(execDescription, "grepmesh") ||
 		!strings.Contains(execDescription, "local rg") || !strings.Contains(execDescription, "cross-host") ||
 		!strings.Contains(execDescription, "find_paths") || !strings.Contains(execDescription, "read_text") ||

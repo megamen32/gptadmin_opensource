@@ -29,13 +29,15 @@ import (
 // codeModeAPISource exposes the host bridge under one frozen `mcp` namespace.
 // qjs only supports global binding, so the functions are bound to hidden
 // globals first and then removed again.
-const codeModeAPISource = `const __callMCP = globalThis.__codeModeCall;
+const codeModeAPISource = `const __startMCP = globalThis.__codeModeStartCall;
+const __pollMCP = globalThis.__codeModePollCall;
+const __yieldMCP = globalThis.__codeModeYield;
 const __discoverMCP = globalThis.__codeModeDiscover;
 const __schemaMCP = globalThis.__codeModeSchema;
 const __searchMCP = globalThis.__codeModeSearch;
 const __facadeMCP = globalThis.__codeModeFacade;
 const __fileMCP = globalThis.__codeModeFile;
-const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } return __callMCP(v); };
+const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } const id=__startMCP(v); return (async()=>{ await Promise.resolve(); for(;;){ const state=__pollMCP(id); if(state.ready){ if(state.error) throw new Error(state.error); return state.value; } __yieldMCP(); await Promise.resolve(); } })(); };
 const search = (query, opts={}) => (typeof opts.source==='string' || opts.scope==='content') ? __contentMCP('search',query,opts) : __searchMCP(query,opts);
 const __contentMCP = globalThis.__codeModeContent;
 const __nativeJSONStringify = JSON.stringify.bind(JSON);
@@ -73,7 +75,9 @@ globalThis.__codeModeFileCall = (kind,target,path,opts={}) => __fileMCP(kind,tar
 delete globalThis.__codeModeDiscover;
 delete globalThis.__codeModeSchema;
 delete globalThis.__codeModeSearch;
-delete globalThis.__codeModeCall;
+delete globalThis.__codeModeStartCall;
+delete globalThis.__codeModePollCall;
+delete globalThis.__codeModeYield;
 delete globalThis.__codeModeFacade;
 delete globalThis.__codeModeFile;
 delete globalThis.__codeModeContent;
@@ -88,11 +92,17 @@ type codeModeBridge struct {
 	limits   codeModeLimits
 	readOnly bool
 
-	mu          sync.Mutex
-	callCount   int
-	logs        []any
-	logBytes    int
-	lastReceipt map[string]any
+	mu             sync.Mutex
+	pendingMu      sync.Mutex
+	pendingCalls   map[string]*codeModePendingCall
+	pendingStart   []string
+	pendingNext    uint64
+	pendingClosed  bool
+	pendingWorkers sync.WaitGroup
+	callCount      int
+	logs           []any
+	logBytes       int
+	lastReceipt    map[string]any
 	// origins records every target/tool this run read. A result derived from
 	// the run is bound to all of them, not only to the last call, so a right
 	// that is withdrawn from any of them also withdraws the derived result.
@@ -106,6 +116,13 @@ type codeModeBridge struct {
 	// whole run ends as failed. A script cannot acknowledge a failed or pending
 	// call and keep producing side effects.
 	fatal *codeModeFatal
+}
+
+type codeModePendingCall struct {
+	done  chan struct{}
+	args  map[string]any
+	value any
+	err   error
 }
 
 // codeModeFatal is the bounded receipt of the first non-completing call.
@@ -199,7 +216,9 @@ func (b *codeModeBridge) install(ctx *qjs.Context) error {
 	ctx.SetFunc("__codeModeDiscover", b.discover)
 	ctx.SetFunc("__codeModeSchema", b.schema)
 	ctx.SetFunc("__codeModeSearch", b.search)
-	ctx.SetFunc("__codeModeCall", b.call)
+	ctx.SetFunc("__codeModeStartCall", b.startCall)
+	ctx.SetFunc("__codeModePollCall", b.pollCall)
+	ctx.SetFunc("__codeModeYield", b.yieldCall)
 	ctx.SetFunc("__codeModeFacade", b.facade)
 	ctx.SetFunc("__codeModeFile", b.file)
 	ctx.SetFunc("__codeModeContent", b.content)
@@ -565,9 +584,155 @@ func (b *codeModeBridge) call(this *qjs.This) (*qjs.Value, error) {
 	return b.runCall(this, codeModeObjectArg(this, 0))
 }
 
+// startCall reserves an authorized nested call synchronously, then runs its
+// ordinary dispatch on a Go worker. JS polls the call ID from its own thread,
+// so no worker accesses a QuickJS value or context.
+func (b *codeModeBridge) startCall(this *qjs.This) (*qjs.Value, error) {
+	args := codeModeObjectArg(this, 0)
+	task := &codeModePendingCall{done: make(chan struct{}), args: args}
+	b.pendingMu.Lock()
+	if b.pendingClosed {
+		b.pendingMu.Unlock()
+		task.err = codeModeFailure("cancelled", "code_mode stopped before the nested call started")
+		close(task.done)
+	} else {
+		b.pendingNext++
+		id := fmt.Sprintf("%d", b.pendingNext)
+		if b.pendingCalls == nil {
+			b.pendingCalls = make(map[string]*codeModePendingCall)
+		}
+		b.pendingCalls[id] = task
+		if err := b.entry(); err != nil {
+			task.err = err
+			close(task.done)
+			b.pendingMu.Unlock()
+		} else {
+			b.pendingStart = append(b.pendingStart, id)
+			b.pendingMu.Unlock()
+		}
+		return this.Context().NewString(id), nil
+	}
+	// A closed bridge still returns a completed handle so JS rejects the
+	// Promise through the same polling path.
+	b.pendingMu.Lock()
+	b.pendingNext++
+	id := fmt.Sprintf("%d", b.pendingNext)
+	if b.pendingCalls == nil {
+		b.pendingCalls = make(map[string]*codeModePendingCall)
+	}
+	b.pendingCalls[id] = task
+	b.pendingMu.Unlock()
+	return this.Context().NewString(id), nil
+}
+
+func (b *codeModeBridge) pollCall(this *qjs.This) (*qjs.Value, error) {
+	id := codeModeStringArg(this, 0)
+	b.startQueuedCalls()
+	b.pendingMu.Lock()
+	task := b.pendingCalls[id]
+	if task == nil {
+		b.pendingMu.Unlock()
+		return b.jsonValue(this, map[string]any{"ready": true, "error": "unknown nested call id"}), nil
+	}
+	select {
+	case <-task.done:
+		delete(b.pendingCalls, id)
+		value, err := task.value, task.err
+		b.pendingMu.Unlock()
+		if err != nil {
+			return b.jsonValue(this, map[string]any{"ready": true, "error": err.Error()}), nil
+		}
+		return b.jsonValue(this, map[string]any{"ready": true, "value": value}), nil
+	default:
+		b.pendingMu.Unlock()
+		return b.jsonValue(this, map[string]any{"ready": false}), nil
+	}
+}
+
+// startQueuedCalls flushes all mcp.call() values created in the current JS
+// turn. The wrapper yields one microtask before its first poll, so Promise.all
+// has time to register every independent call before any dispatch can fail.
+func (b *codeModeBridge) startQueuedCalls() {
+	b.pendingMu.Lock()
+	ids := b.pendingStart
+	b.pendingStart = nil
+	rows := make([]struct {
+		id   string
+		task *codeModePendingCall
+		args map[string]any
+	}, 0, len(ids))
+	for _, id := range ids {
+		if task := b.pendingCalls[id]; task != nil {
+			rows = append(rows, struct {
+				id   string
+				task *codeModePendingCall
+				args map[string]any
+			}{id: id, task: task, args: task.args})
+			b.pendingWorkers.Add(1)
+		}
+	}
+	b.pendingMu.Unlock()
+	for _, row := range rows {
+		go func(task *codeModePendingCall, args map[string]any) {
+			defer b.pendingWorkers.Done()
+			value, err := b.runCallData(args, true)
+			if err != nil {
+				var modeErr *codeModeError
+				if errors.As(err, &modeErr) {
+					b.fail(modeErr.code, modeErr.detail, modeErr.receipt)
+				}
+			}
+			// The channel close publishes both fields to pollCall.
+			task.value, task.err = value, err
+			close(task.done)
+		}(row.task, row.args)
+	}
+}
+
+func (b *codeModeBridge) yieldCall(this *qjs.This) (*qjs.Value, error) {
+	// Yielding briefly lets Go dispatch workers run while QuickJS polls promises.
+	time.Sleep(time.Millisecond)
+	return this.Context().NewNull(), nil
+}
+
+func (b *codeModeBridge) stopAsync() bool {
+	b.pendingMu.Lock()
+	b.pendingClosed = true
+	queued := len(b.pendingStart)
+	b.pendingStart = nil
+	b.pendingMu.Unlock()
+	if queued > 0 {
+		b.fail("unawaited_calls", "Code Mode returned before awaiting all nested MCP calls; they were not started", map[string]any{"calls_not_started": queued})
+	}
+	done := make(chan struct{})
+	go func() { b.pendingWorkers.Wait(); close(done) }()
+	select {
+	case <-done:
+		b.pendingMu.Lock()
+		unobserved := len(b.pendingCalls)
+		b.pendingMu.Unlock()
+		if unobserved > 0 {
+			b.fail("unawaited_calls", "Code Mode returned before collecting nested MCP call results", map[string]any{"calls_unobserved": unobserved})
+		}
+		return true
+	case <-time.After(2 * time.Second):
+		return false
+	}
+}
+
 func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Value, error) {
-	if err := b.entry(); err != nil {
+	result, err := b.runCallData(args, false)
+	if err != nil {
 		return nil, err
+	}
+	return b.jsonValue(this, result), nil
+}
+
+func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, error) {
+	if !admitted {
+		if err := b.entry(); err != nil {
+			return nil, err
+		}
 	}
 	remaining, err := b.remaining()
 	if err != nil {
@@ -632,7 +797,7 @@ func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Valu
 			code = "forbidden"
 		}
 		b.fail(code, firstString(payload, "detail"), payload)
-		return b.jsonValue(this, payload), nil
+		return payload, nil
 	}
 	// The call succeeded, so its target/tool is a source of everything this
 	// run derives from it.
@@ -717,9 +882,9 @@ func (b *codeModeBridge) runCall(this *qjs.This, args map[string]any) (*qjs.Valu
 		if indexErr != nil {
 			return nil, b.fail("content_index_failed", indexErr.Error(), receipt)
 		}
-		return b.jsonValue(this, meta), nil
+		return meta, nil
 	}
-	return b.jsonValue(this, usable), nil
+	return usable, nil
 }
 
 func codeModeUsableValue(response map[string]any) any {

@@ -216,6 +216,13 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 	source := codeModeWrapperPrefix + code + codeModeWrapperSuffix
 	started := time.Now()
 	value, evalErr := evalCodeMode(rt, source)
+	// No script can call a bridge function after Eval returns. Cancel any
+	// unawaited nested work, then prevent its worker from resolving into a
+	// QuickJS context that is about to close.
+	cancel()
+	if !bridge.stopAsync() {
+		bridge.fail("nested_calls_pending", "nested MCP calls did not stop before the Code Mode runtime closed", bridge.lastReceiptSnapshot())
+	}
 	elapsed := time.Since(started)
 
 	// A nested call that did not complete stops the whole run, even if the script

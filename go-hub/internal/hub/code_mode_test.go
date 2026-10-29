@@ -654,6 +654,49 @@ func TestCodeModeCallsHubToolThroughDispatch(t *testing.T) {
 	}
 }
 
+func TestCodeModeCallReturnsPromiseAndPromiseAllReturnsBothResults(t *testing.T) {
+	s, r := codeModeFixture(t)
+	response, status := codeModeRun(t, s, r, map[string]any{"code": `
+		const first = mcp.call('hub','demo',{});
+		const second = mcp.call('hub','settings_schema',{});
+		const values = await Promise.all([first, second]);
+		return {first_has_catch: typeof first.catch === 'function', count: values.length, demo: values[0].status};
+	`})
+	if status != http.StatusOK || response["status"] != "completed" {
+		t.Fatalf("parallel nested calls failed: status=%d body=%v", status, response)
+	}
+	result := mapValue(response["result"])
+	if result["first_has_catch"] != true || intFromAny(result["count"]) != 2 || firstString(result, "demo") != "ok" {
+		t.Fatalf("mcp.call did not return two Promise results: %#v", response)
+	}
+	if intFromAny(response["calls"]) != 2 {
+		t.Fatalf("parallel run accounted for %v nested calls, want 2", response["calls"])
+	}
+}
+
+func TestCodeModePromiseAllQueuesEveryIndependentShellCall(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	s.mu.Lock()
+	s.agents["shell:fixture"] = &Agent{
+		AgentID: "shell:fixture", Name: "Fixture", Kind: "virtual_shell", Transport: "long_poll",
+		Status: "online", LastSeen: nowFloat(), Meta: map[string]any{"approved": true},
+	}
+	s.mu.Unlock()
+	_, _ = codeModeRun(t, s, r, map[string]any{"code": `
+		return await Promise.all([
+			mcp.call('shell:fixture','shell_exec',{cmd:'printf first'}),
+			mcp.call('shell:fixture','shell_exec',{cmd:'printf second'})
+		]);
+	`})
+	s.mu.Lock()
+	queued := len(s.shellJobs)
+	s.mu.Unlock()
+	if queued != 2 {
+		t.Fatalf("Promise.all dispatched %d shell jobs; want both independent calls queued", queued)
+	}
+}
+
 // mcp.discover returns target metadata without the hidden connection material.
 func TestCodeModeDiscoverHidesConnectionMeta(t *testing.T) {
 	s := New(Config{ConfigDir: t.TempDir(), CtlToken: "ctl", DefaultTimeout: time.Second})
