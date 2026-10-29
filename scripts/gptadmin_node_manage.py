@@ -96,6 +96,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 PrivateTmp=true
 ProtectHome=read-only
 ReadWritePaths=/usr/local/lib/gptadmin
+ReadWritePaths=-/etc/systemd/system/gptadmin-hub.service.d
 ProtectSystem=full
 '''
 AUTOUPDATE_TIMER_TEXT = '''[Unit]

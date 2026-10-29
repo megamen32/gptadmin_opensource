@@ -18,5 +18,6 @@ Environment=GOMAXPROCS=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 PrivateTmp=true
 ProtectHome=read-only
+ReadWritePaths=-/etc/systemd/system/gptadmin-hub.service.d
 ProtectSystem=full
 
