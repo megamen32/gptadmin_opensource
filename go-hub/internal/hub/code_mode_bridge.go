@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"time"
@@ -968,6 +969,31 @@ func codeModeOperationReceipt(response map[string]any, target, tool string, payl
 // dispatch mirrors the ordinary execute path for one nested call, in the same
 // order, so authorization can never be weaker than a direct call.
 func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string, callArgs, contract map[string]any, timeout time.Duration, idempotencyKey string) (map[string]any, int) {
+	if err := authorizeToolAction(callRequest, target, tool, callArgs); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
+	}
+	if failure := b.server.requireInstructionContext(callRequest, target, tool); failure != nil {
+		return failure, http.StatusPreconditionRequired
+	}
+	peerArgs := map[string]any{"target": target, "tool": tool, "arguments": callArgs}
+	for k, v := range contract {
+		peerArgs[k] = v
+	}
+	if idempotencyKey != "" {
+		peerArgs["idempotency_key"] = idempotencyKey
+	}
+	body, err := json.Marshal(peerArgs)
+	if err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusBadRequest
+	}
+	recorder := httptest.NewRecorder()
+	if b.server.forwardNodePeerCall(recorder, callRequest, target, body) {
+		var result map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+			return map[string]any{"status": "failed", "error": "invalid node peer response"}, http.StatusBadGateway
+		}
+		return result, recorder.Code
+	}
 	selected, status, detail := b.server.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
 		return map[string]any{"status": "failed", "error": detail}, status
