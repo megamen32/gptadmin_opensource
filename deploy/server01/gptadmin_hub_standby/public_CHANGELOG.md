@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.24
+
+- Report the failing FRP ownership check without exposing process arguments.
+
 ## 1.0.23
 
 - Allow explicitly configured legacy public origins for existing OAuth and managed bearer credentials.

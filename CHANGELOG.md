@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
 
 ### Fixed
+- FRP ownership failures now identify failed checks without disclosing process arguments; strict ownership enforcement is unchanged.
 - A drained Node package update can set an explicit HTTPS legacy-origin allowlist with automatic environment rollback on failure.
 - The HAOS app now passes an explicit legacy-origin allowlist into bearer issuer and resource validation for credentials issued before a public-origin migration.
 - Node drain closes executor poll admission and counts accepted polls until callbacks are reserved, avoiding a false idle report during task delivery.

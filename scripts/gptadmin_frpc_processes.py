@@ -42,10 +42,21 @@ def inspect(pid, binary, configs, expected_started=None):
             if executable != expected:
                 return None
             raise ValueError('recorded client generation changed')
-        if (root.stat().st_uid != os.getuid() or os.getpgid(pid) != pid
-                or executable != expected or len(args) != 3
-                or args[0] != str(binary).encode() or args[1] != b'-c' or args[2] not in allowed):
-            raise ValueError('recorded pid does not own this FRP client')
+        # Report only the failed checks, never command arguments or secrets.
+        # This leaves the strict fail-closed ownership test unchanged.
+        failures = []
+        if root.stat().st_uid != os.getuid():
+            failures.append('uid')
+        if os.getpgid(pid) != pid:
+            failures.append('process-group')
+        if executable != expected:
+            failures.append('executable')
+        if len(args) != 3:
+            failures.append('argument-count')
+        elif args[0] != str(binary).encode() or args[1] != b'-c' or args[2] not in allowed:
+            failures.append('argument-binding')
+        if failures:
+            raise ValueError('recorded pid does not own this FRP client: ' + ','.join(failures))
         return {'pid': pid, 'started': started, 'config': args[2].decode()}
     except (FileNotFoundError, ProcessLookupError):
         return None

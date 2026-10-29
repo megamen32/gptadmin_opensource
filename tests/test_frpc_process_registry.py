@@ -161,6 +161,18 @@ class FRPCRegistryTests(unittest.TestCase):
             with self.assertRaises(ValueError):runtime.main()
         proxy.terminate.assert_called_once();proxy.wait.assert_called_once_with(timeout=5)
 
+    def test_unowned_process_diagnostic_reports_checks_without_arguments(self):
+        import subprocess
+        child=subprocess.Popen(['/bin/sleep','30'],start_new_session=True)
+        try:
+            with self.assertRaises(ValueError) as denied:
+                owned.inspect(child.pid, '/bin/false', [Path('/private/config')])
+            self.assertIn('executable', str(denied.exception))
+            self.assertNotIn('/private/config', str(denied.exception))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
     def test_native_controller_fixture_keeps_exact_process_identity_and_reuses_owner(self):
         # Local ownership integration only; the fixture is not a FRP tunnel.
         import os,shutil,subprocess,time
