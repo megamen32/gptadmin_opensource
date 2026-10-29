@@ -237,6 +237,7 @@ def test_haos_quorum_is_opt_in_and_packaged() -> None:
         assert "gptadmin_quorum_config.py" in (source / name).read_text()
     assert "gptadmin_quorum_config.py" in (ROOT / "scripts/export_haos_app_repository.sh").read_text()
     assert "gptadmin_quorum_config.py" in (ROOT / "scripts/deploy_haos_hub_standby.sh").read_text()
+    assert "gptadmin_hub_standby/gptadmin_quorum_config.py" in (source / "public_publish_image_workflow.yml").read_text()
 
 
 def test_haos_quorum_runtime_opt_in_exports_private_config(tmp_path: Path) -> None:

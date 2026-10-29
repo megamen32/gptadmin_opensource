@@ -592,6 +592,7 @@ type Server struct {
 	meshCore                      *meshroute.Verifier
 	meshCoreErr                   error
 	quorumNode                    *quorum.Node
+	quorumPrivateTLS              *quorumPrivateTLS
 	quorumPeers                   []quorum.Peer
 	quorumClusterID               string
 	quorumBootstrapperID          string
@@ -1652,8 +1653,21 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 	go s.registryCleanupLoop()
 	s.startMembershipLoops()
 	defer s.stopMembershipLoops()
-	srv := &http.Server{Addr: s.cfg.Addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	done := make(chan error, 1)
+	handler := s.Handler()
+	srv := &http.Server{Addr: s.cfg.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	defer srv.Close()
+	done := make(chan error, 2)
+	var privateSrv *http.Server
+	if s.quorumPrivateTLS != nil {
+		privateListener, err := s.quorumPrivateTLS.listen()
+		if err != nil {
+			return fmt.Errorf("private quorum HTTPS listener: %w", err)
+		}
+		defer privateListener.Close()
+		privateSrv = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		defer privateSrv.Close()
+		go func() { done <- privateSrv.Serve(privateListener) }()
+	}
 	go func() { done <- srv.Serve(listener) }()
 	select {
 	case err := <-done:
@@ -1664,8 +1678,12 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if privateSrv != nil {
+			if err := privateSrv.Shutdown(shutdownCtx); err != nil {
+				return err
+			}
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			_ = srv.Close()
 			return err
 		}
 		return nil

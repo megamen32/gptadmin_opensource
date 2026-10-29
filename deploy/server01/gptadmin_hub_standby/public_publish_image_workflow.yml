@@ -111,6 +111,7 @@ jobs:
             gptadmin_hub_standby/gptadmin_failover_proxy.py \
             gptadmin_hub_standby/gptadmin_failover_runtime.py \
             gptadmin_hub_standby/gptadmin_failover_config.py \
+            gptadmin_hub_standby/gptadmin_quorum_config.py \
             gptadmin_hub_standby/gptadmin_frpc_processes.py "$context/"
           cp gptadmin-source/deploy/server01/gptadmin_hub_standby/public_standby_index.html "$context/public/index.html"
           (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \

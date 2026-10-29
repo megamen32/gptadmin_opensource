@@ -60,3 +60,14 @@ peer origin and passes the configuration to the Node; quorum itself validates
 the voters, certificates and storage. This does not create a cluster or allow
 an independent writer: a majority and the authoritative baseline remain
 required. Do not enable it against an unfenced legacy writer.
+
+For a quorum that must remain usable when its public edge is down, configure
+`internal_hub_url` on every voter as a unique private-IP HTTPS origin. The Node
+opens that voter’s private listener itself, checks a client certificate against
+the configured cluster CA and the enrolled peer names, and verifies the leader
+certificate against its enrolled `server_name`. Certificates must chain to the
+configured CA, match their local enrolled name, and permit both TLS server and
+client authentication. Do not mix HTTP and HTTPS private voter routes. Allow the
+selected private ports between voters, and test election, authentication and
+client operations during an actual controlled primary outage before relying on
+the cluster.

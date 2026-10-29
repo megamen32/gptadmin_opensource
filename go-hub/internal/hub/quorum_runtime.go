@@ -83,6 +83,10 @@ func (s *Server) openQuorum() error {
 		s.quorumSnapshotDataDir = ""
 		return fmt.Errorf("initialize task quorum store: %w", err)
 	}
+	privateTLS, err := prepareQuorumPrivateTLS(config)
+	if err != nil {
+		return fmt.Errorf("configure private quorum HTTPS: %w", err)
+	}
 	node, err := quorum.OpenWithExternalState(config, s.applyTaskQuorumMutations, quorum.ExternalSnapshotCallbacks{
 		Snapshot: s.snapshotTaskQuorumState,
 		Restore:  s.restoreTaskQuorumState,
@@ -96,6 +100,7 @@ func (s *Server) openQuorum() error {
 		return err
 	}
 	s.quorumNode = node
+	s.quorumPrivateTLS = privateTLS
 	go s.quorumBootstrapLoop()
 	go s.quorumVoterPromotionLoop()
 	return nil
@@ -228,7 +233,11 @@ func quorumMemberPromotionReady(member nodeMember, peer quorum.Peer, now time.Ti
 }
 
 func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
-	target, err := url.Parse(strings.TrimRight(peer.HubURL, "/") + "/healthz")
+	endpoint := peer.HubURL
+	if s.quorumPrivateTLS != nil {
+		endpoint = peer.InternalHubURL
+	}
+	target, err := url.Parse(strings.TrimRight(endpoint, "/") + "/healthz")
 	if err != nil || target.Scheme != "https" || target.Host == "" {
 		return false
 	}
@@ -240,6 +249,12 @@ func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	if s.quorumPrivateTLS != nil {
+		transport, err = s.quorumPrivateTLS.transport(peer.ID)
+		if err != nil {
+			return false
+		}
+	}
 	defer transport.CloseIdleConnections()
 	response, err := (&http.Client{Transport: transport, Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
@@ -281,6 +296,15 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				director := proxy.Director
 				transport := http.DefaultTransport.(*http.Transport).Clone()
 				transport.Proxy = nil
+				if s.quorumPrivateTLS != nil {
+					var transportErr error
+					transport, transportErr = s.quorumPrivateTLS.transport(leaderID)
+					if transportErr != nil {
+						writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leader has no authenticated private route"})
+						return
+					}
+				}
+				defer transport.CloseIdleConnections()
 				proxy.Transport = transport
 				proxy.Director = func(outbound *http.Request) {
 					director(outbound)

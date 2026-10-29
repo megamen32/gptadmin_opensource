@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.19
+
+- Provide direct mutually authenticated HTTPS between configured quorum Nodes.
+
 ## 1.0.18
 
 - Allow securely provisioned HAOS Nodes to join an explicitly enabled quorum.

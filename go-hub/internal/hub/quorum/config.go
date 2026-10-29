@@ -20,8 +20,9 @@ type Peer struct {
 	Address    string `json:"address"`
 	ServerName string `json:"server_name"`
 	HubURL     string `json:"hub_url,omitempty"`
-	// InternalHubURL is the private HTTP listener used for follower-to-leader
-	// forwarding. HubURL remains the public HTTPS origin for client ingress.
+	// InternalHubURL is the private listener used for follower-to-leader
+	// forwarding. HTTPS enables mutually authenticated Node-to-Node traffic;
+	// legacy HTTP remains supported. HubURL is the public client origin.
 	InternalHubURL string `json:"internal_hub_url,omitempty"`
 	NodeKeyHash    string `json:"node_key_sha256"`
 	// FailureDomain is an operator-assigned physical/network isolation scope.
@@ -196,9 +197,9 @@ func (c Config) normalized() (Config, error) {
 
 func validateInternalHubURL(raw string) error {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil ||
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
 		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("must be a plain private HTTP origin without credentials or path")
+		return errors.New("must be a private HTTP or HTTPS origin without credentials or path")
 	}
 	host := net.ParseIP(parsed.Hostname())
 	if host == nil || (!host.IsPrivate() && !host.IsLoopback()) {

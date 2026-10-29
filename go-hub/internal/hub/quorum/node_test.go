@@ -363,13 +363,15 @@ func TestQuorumLeaderHubURLPrefersPrivateForwardEndpoint(t *testing.T) {
 	}
 }
 
-func TestValidateInternalHubURLRequiresPrivateHTTPOrigin(t *testing.T) {
+func TestValidateInternalHubURLRequiresPrivateOrigin(t *testing.T) {
 	privateURL := "http://192.168." + "2.44:9001"
 	if err := validateInternalHubURL(privateURL); err != nil {
 		t.Fatalf("valid private URL rejected: %v", err)
 	}
+	if err := validateInternalHubURL("https://192.168." + "2.44:9001"); err != nil {
+		t.Fatalf("valid private HTTPS URL rejected: %v", err)
+	}
 	for _, raw := range []string{
-		"https://192.168." + "2.44:9001",
 		"http://8.8.8.8:9001",
 		"http://leader.example:9001",
 		"http://192.168." + "2.44",
