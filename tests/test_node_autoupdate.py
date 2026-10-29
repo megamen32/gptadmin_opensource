@@ -1253,6 +1253,54 @@ class NodeAutoupdateTests(unittest.TestCase):
             self.assertEqual(manager.current_target(layout),old)
             self.assertEqual(healthy.call_count,2);cancel.assert_called_once()
 
+    def test_legacy_origins_are_validated_and_require_drain(self):
+        parsed=manager.build_parser().parse_args([
+            'update','--name','node44','--package','node.tar.gz',
+            '--legacy-public-origins','https://old.example/,https://other.example','--require-drain'])
+        self.assertEqual(manager.validate_legacy_public_origins(parsed.legacy_public_origins),
+                         'https://old.example,https://other.example')
+        self.assertEqual(manager.validate_legacy_public_origins(''), '')
+        for invalid in ('http://old.example', 'https://example.test/path',
+                        'https://user:secret@example.test', 'https://example.test,',
+                        'https://example.test:notaport'):
+            with self.assertRaises(manager.UsageError):
+                manager.validate_legacy_public_origins(invalid)
+        parsed.require_drain=False
+        with patch.object(manager, 'require_root'), patch.object(manager, 'resolve_instance_name', return_value='one'), \
+             patch.object(manager, 'read_installed_env', return_value={}):
+            with self.assertRaisesRegex(manager.UsageError, 'require-drain'):
+                manager.update_with_budget(parsed,manager.Layout(),manager.Runner(),SimpleNamespace())
+
+    def test_legacy_origins_are_restored_on_failed_drained_update(self):
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            root=Path(d);layout=manager.Layout(opt_root=root/'opt',config_root=root/'config')
+            old=layout.versions_root()/'old-1';old.mkdir(parents=True);manager.switch_current(layout,old)
+            manager.write_env_file(layout.env_file('one'),{
+                'CTL_TOKEN':'unit-only','PUBLIC_ORIGIN':'https://app.example.test',
+                'GPTADMIN_LEGACY_PUBLIC_ORIGINS':'https://existing.example'})
+            def extract(package,arch,target):
+                target.mkdir();return {'git_commit':'2'*40,'build_version':123}
+            for name,value in [('require_root',None),('resolve_instance_name','one'),
+                ('read_admin_token','unit-only'),('origin_from_env','https://app.example.test'),
+                ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
+                ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True),
+                ('drain_wait_ready',{'ready_to_stop':True})]:
+                stack.enter_context(patch.object(manager,name,return_value=value))
+            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(patch.object(manager,'systemctl'))
+            observed=[]
+            def check_health(origin,sha):
+                observed.append(manager.parse_env_file(layout.env_file('one')).get('GPTADMIN_LEGACY_PUBLIC_ORIGINS'))
+                if len(observed)==1:raise manager.RuntimeFailure('new origin rejected')
+            stack.enter_context(patch.object(manager,'wait_healthy',side_effect=check_health))
+            stack.enter_context(patch.object(manager,'drain_cancel',return_value=True))
+            args=SimpleNamespace(name='one',package='unit.tar.gz',wait_secs=20,require_drain=True,
+                                 node_public_url=None,legacy_public_origins='https://old.example/')
+            with self.assertRaisesRegex(manager.RuntimeFailure,'rolled back'):
+                manager.update_with_budget(args,layout,manager.Runner(),SimpleNamespace(cleanup=unittest.mock.Mock()))
+            self.assertEqual(observed,['https://old.example','https://existing.example'])
+            self.assertEqual(manager.current_target(layout),old)
+
     def test_lost_drain_begin_response_is_cancelled_before_any_switch(self):
         with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
             root=Path(d);layout=manager.Layout(opt_root=root/'opt')

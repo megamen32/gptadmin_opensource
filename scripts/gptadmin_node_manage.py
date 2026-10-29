@@ -130,6 +130,7 @@ ENV_KEY_ORDER = (
     'GPTADMIN_CONFIG_DIR',
     'GPTADMIN_ENV_FILE',
     'PUBLIC_ORIGIN',
+    'GPTADMIN_LEGACY_PUBLIC_ORIGINS',
     'GPTADMIN_NODE_PUBLIC_URL',
     'GPTADMIN_AUTH_MODE',
     'SHELL_NAME',
@@ -387,6 +388,24 @@ def validate_node_public_url(text: str) -> str:
     if urllib.parse.urlsplit(value).scheme != 'https':
         raise UsageError('--node-public-url must use HTTPS')
     return value
+
+
+def validate_legacy_public_origins(text: str) -> str:
+    if not text.strip():
+        return ''
+    origins = []
+    for item in text.split(','):
+        origin = validate_origin(item.strip(), '--legacy-public-origins')
+        parsed = urllib.parse.urlsplit(origin)
+        if parsed.scheme != 'https':
+            raise UsageError('--legacy-public-origins must contain HTTPS origins')
+        try:
+            parsed.port
+        except ValueError:
+            raise UsageError('--legacy-public-origins contains an invalid port') from None
+        if origin not in origins:
+            origins.append(origin)
+    return ','.join(origins)
 
 
 def read_join_grant_stdin() -> str:
@@ -1987,6 +2006,11 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
         requested_node_url = validate_node_public_url(requested_node_url)
         if not getattr(args, 'require_drain', False):
             raise UsageError('--node-public-url updates require --require-drain')
+    requested_legacy_origins = getattr(args, 'legacy_public_origins', None)
+    if requested_legacy_origins is not None:
+        requested_legacy_origins = validate_legacy_public_origins(requested_legacy_origins)
+        if not getattr(args, 'require_drain', False):
+            raise UsageError('--legacy-public-origins updates require --require-drain')
     token = read_admin_token(layout, name, env)
     origin = origin_from_env(env)
     current = current_target(layout)
@@ -2015,7 +2039,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
 
     unit = layout.unit_instance(name)
     env_path = layout.env_file(name)
-    previous_env_text = env_path.read_text() if requested_node_url is not None else None
+    previous_env_text = env_path.read_text() if requested_node_url is not None or requested_legacy_origins is not None else None
     drain_active = False
     drain_attempted = False
     try:
@@ -2040,9 +2064,12 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     try:
         final = next_version_dir(versions_root, new_commit)
         os.rename(staging, final)
-        if requested_node_url is not None:
+        if requested_node_url is not None or requested_legacy_origins is not None:
             updated_env = dict(env)
-            updated_env['GPTADMIN_NODE_PUBLIC_URL'] = requested_node_url
+            if requested_node_url is not None:
+                updated_env['GPTADMIN_NODE_PUBLIC_URL'] = requested_node_url
+            if requested_legacy_origins is not None:
+                updated_env['GPTADMIN_LEGACY_PUBLIC_ORIGINS'] = requested_legacy_origins
             write_env_file(env_path, updated_env)
             env_updated = True
         switch_current(layout, final)
@@ -2472,6 +2499,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='refuse automatic update if drain/readiness is unsupported')
     update.add_argument('--node-public-url', default=None, metavar='HTTPS-URL',
                         help='change this node public HTTPS URL during the drained update')
+    update.add_argument('--legacy-public-origins', default=None, metavar='HTTPS-URLS',
+                        help='comma-separated explicit legacy issuer/resource origins; empty clears the list')
     update.add_argument('--operation-deadline-secs', type=float, default=None,
                         help='catchable update deadline (1..50s), plus 80s rollback reserve')
     update.set_defaults(func=cmd_update)
