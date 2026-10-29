@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_sanitizer_preserves_supervisor_api_key_and_redacts_hostname(tmp_path: Path) -> None:
+    if not (ROOT / ".gitpublic" / "replace").exists():
+        pytest.skip("private replacement rules are absent from the sanitized public source")
     project = tmp_path / "project"
     scripts = project / "scripts"
     scripts.mkdir(parents=True)
