@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.14
+
+- Correct the published Home Assistant API capability for the unified Node runtime.
+
+
 ## 1.0.13
 
 - Add an opt-in unified member Node with the existing HAOS shell executor.

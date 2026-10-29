@@ -110,7 +110,7 @@ def test_haos_member_mode_is_a_single_executor_node_with_legacy_rollout_default(
     dockerfile = (source / "Dockerfile.public").read_text(encoding="utf-8")
     workflow = (source / "public_publish_image_workflow.yml").read_text(encoding="utf-8")
 
-    assert 'version: "1.0.13"' in config
+    assert 'version: "1.0.14"' in config
     assert 'node_mode: "legacy"' in config
     assert 'node_mode: str' in config
     assert 'node_mode: "member"' not in config
@@ -128,6 +128,7 @@ def test_haos_member_mode_is_a_single_executor_node_with_legacy_rollout_default(
     assert './cmd/gptadmin-node' in workflow
     for capability in ('server01_api: true', 'hassio_api: true', 'docker_api: true', 'full_access: true'):
         assert capability in config
+    assert 'server01_api:' not in config
     for path in ('- config:rw', '- ssl:rw', '- addons:rw', '- share:rw', '- backup:rw', '- media:rw'):
         assert path in config
 
