@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.23
+
+- Allow explicitly configured legacy public origins for existing OAuth and managed bearer credentials.
+
 ## 1.0.22
 
 - Keep executor queue polls and their accepted callbacks visible during drain.

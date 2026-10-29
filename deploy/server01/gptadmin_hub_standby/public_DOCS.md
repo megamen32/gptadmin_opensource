@@ -71,3 +71,5 @@ client authentication. Do not mix HTTP and HTTPS private voter routes. Allow the
 selected private ports between voters, and test election, authentication and
 client operations during an actual controlled primary outage before relying on
 the cluster.
+
+For credentials issued before a public-origin migration, set `legacy_public_origins` to the explicit previous HTTPS origins. Leave it empty for a new installation. The list is used for issuer and resource validation; it does not disable authentication or permit arbitrary origins.

@@ -32,6 +32,7 @@ options:
   quorum_enabled: false
   hub_host: "0.0.0.0"
   hub_port: 9001
+  legacy_public_origins: []
   public_origin: "__PUBLIC_ORIGIN__"
   mcp_resource: "__MCP_RESOURCE__"
   hub_public_url: "__HUB_PUBLIC_URL__"
@@ -65,6 +66,8 @@ schema:
   quorum_enabled: bool
   hub_host: str
   hub_port: int
+  legacy_public_origins:
+    - url
   public_origin: str
   mcp_resource: str
   hub_public_url: str

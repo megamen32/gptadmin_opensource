@@ -278,3 +278,21 @@ def test_haos_quorum_runtime_opt_in_exports_private_config(tmp_path: Path) -> No
     quorum.chmod(0o644)
     assert start(True).returncode != 0
     assert start(True, "legacy").returncode != 0
+
+
+def test_haos_legacy_origins_are_opt_in_and_exported(tmp_path: Path) -> None:
+    import shutil
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the actual HAOS entrypoint")
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    for name in ("public_config.yaml", "config.yaml.template"):
+        config = (source / name).read_text()
+        assert "legacy_public_origins: []" in config
+        assert "legacy_public_origins:\n    - url" in config
+    line = next(line for line in (source / "run.sh").read_text().splitlines() if line.startswith("export GPTADMIN_LEGACY_PUBLIC_ORIGINS="))
+    opts = tmp_path / "options.json"
+    script = "set -euo pipefail\nOPTS=$1\njqr(){ jq -r \"$1 // empty\" \"$OPTS\"; }\n" + line + "\nprintf \"%s\\n\" \"$GPTADMIN_LEGACY_PUBLIC_ORIGINS\"\n"
+    for payload, expected in [({}, ""), ({"legacy_public_origins": ["https://old.example", "https://second.example"]}, "https://old.example,https://second.example")]:
+        opts.write_text(json.dumps(payload))
+        result = subprocess.run(["bash", "-c", script, "test", str(opts)], capture_output=True, text=True, check=True)
+        assert result.stdout.rstrip("\n") == expected
