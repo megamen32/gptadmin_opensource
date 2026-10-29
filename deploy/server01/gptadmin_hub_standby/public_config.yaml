@@ -1,7 +1,7 @@
 name: GPTAdmin Hub Standby
-version: "1.0.12"
+version: "1.0.13"
 slug: gptadmin_hub_standby
-description: "Independent GPTAdmin Hub standby with automatic Tunnel failover and reclaim"
+description: "GPTAdmin Hub with an optional unified HAOS Node and automatic failover"
 url: "https://github.com/megamen32/gptadmin-haos-addons"
 arch:
   - aarch64
@@ -10,9 +10,26 @@ startup: services
 boot: auto
 init: false
 host_network: true
+full_access: true
 protected: true
 apparmor: false
+server01_api: true
+hassio_api: true
+hassio_role: admin
+auth_api: true
+docker_api: true
+privileged:
+  - SYS_ADMIN
+  - NET_ADMIN
+map:
+  - config:rw
+  - ssl:rw
+  - addons:rw
+  - share:rw
+  - backup:rw
+  - media:rw
 options:
+  node_mode: "legacy"
   hub_host: "0.0.0.0"
   hub_port: 9001
   public_origin:
@@ -21,7 +38,7 @@ options:
   failover:
     primary_health_url:
     primary_public_url:
-    node_id: "standby"
+    node_id: "shell:haos"
     rank: 1
     fail_count_base: 3
     local_hub_port: 9001
@@ -32,6 +49,7 @@ options:
     public_confirm_timeout_sec: 3
     maintenance_until: ""
 schema:
+  node_mode: str
   hub_host: str
   hub_port: int
   public_origin: url

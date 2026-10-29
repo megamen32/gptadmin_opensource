@@ -17,7 +17,9 @@ def test_haos_addon_packages_and_starts_the_physical_failover_path() -> None:
     assert "COPY gptadmin_failover_watchdog.py" in dockerfile
     assert "gptadmin_failover_proxy.py" in dockerfile
     assert "gptadmin_failover_runtime.py" in dockerfile
-    assert "gptadmin_hub &" in run_script
+    assert "NODE_BINARY=/usr/local/bin/gptadmin_hub" in run_script
+    assert "NODE_BINARY=/usr/local/bin/gptadmin-node" in run_script
+    assert '"$NODE_BINARY" &' in run_script
     assert "gptadmin_failover_runtime.py" in run_script
 
 

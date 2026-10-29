@@ -116,13 +116,16 @@ jobs:
           (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
             -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
             -o "$context/gptadmin_hub" ./cmd/gptadmin-hub)
+          (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
+            -o "$context/gptadmin-node" ./cmd/gptadmin-node)
           archive="frp_${FRP_VERSION}_linux_arm64.tar.gz"
           curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${archive}" -o "$RUNNER_TEMP/$archive"
           curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_sha256_checksums.txt" -o "$RUNNER_TEMP/frp_checksums.txt"
           (cd "$RUNNER_TEMP" && grep "  $archive$" frp_checksums.txt | sha256sum -c -)
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
           cp "$RUNNER_TEMP/frp_${FRP_VERSION}_linux_arm64/frpc" "$context/frpc"
-          chmod 0755 "$context/gptadmin_hub" "$context/frpc"
+          chmod 0755 "$context/gptadmin_hub" "$context/gptadmin-node" "$context/frpc"
           echo "$context" > "$RUNNER_TEMP/haos_image_context"
 
       - name: Build and publish ARM64 image

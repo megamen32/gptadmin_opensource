@@ -18,3 +18,10 @@ repository.
 The canonical runtime source and release exporter live in the private
 GPTAdmin source repository. This repository is a sanitized distribution
 surface, not a second implementation.
+
+
+Version 1.0.13 adds an opt-in unified Node runtime for HAOS. The default
+`legacy` mode preserves the earlier Hub service during staged migration;
+`member` uses the same HAOS add-on for the Hub API and local shell executor.
+Provision the writer membership identity and migrate the existing executor
+state before selecting `member`.

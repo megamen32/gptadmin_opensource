@@ -54,14 +54,19 @@ def read_body(handler):
     return json.loads(handler.rfile.read(length) or b'{}')
 
 
-def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd', version=181,
+def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + 'cafe', version=181,
                  payload=None, manifest_mutator=None, extra_members=()) -> Path:
     """Build a package tarball exactly like tools/build_node.py does."""
     files = payload if payload is not None else {
         'bin/gptadmin-node': ELF_PAYLOAD,
+        'bin/shellmcp': ELF_PAYLOAD,
+        'systemd/gptadmin-proxy-route-relay02.service': b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\n',
         'cli.py': b'# cli payload\n',
         'scripts/gptadmin_node_manage.py': b'# manager payload\n',
         'scripts/gptadmin_node_probe.py': b'# probe payload\n',
+        'scripts/gptadmin_node_autoupdate.py': b'# autoupdate payload\n',
+        'public/admin/index.html': b'<script src=\"assets/app.js\"></script>',
+        'public/admin/assets/app.js': b'// asset fixture',
     }
     manifest = {
         'schema': mgr.PACKAGE_SCHEMA, 'git_commit': commit, 'build_version': version,
@@ -310,7 +315,8 @@ class TestEnvFile(BaseTempCase):
     def build_values(self, **overrides):
         kwargs = dict(
             name='edge-1', layout=self.layout, bind_host='127.0.0.1', bind_port=9001,
-            token='t' * 64, admin_password=None, public_origin=None, seed=None, peers=None,
+            token='t' * 64, admin_password=None, public_origin=None,
+            node_public_url=None, seed=None, peers=None,
             default_user='root', default_home='/root')
         kwargs.update(overrides)
         return mgr.build_env_values(**kwargs)
@@ -543,6 +549,51 @@ class TestJoin(BaseTempCase):
         self.assertEqual(merged['writer_url'], writer_origin_holder['url'])
         self.assertEqual(merged['node_id'], identity['node_id'])
         self.assertEqual(os.stat(identity_path).st_mode & 0o777, 0o600)
+
+    def test_join_stdin_supports_external_node_state_without_printing_credentials(self):
+        captured = []
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                captured.append({'path': self.path,
+                                 'auth': self.headers.get('Authorization'),
+                                 'body': read_body(self)})
+                respond_json(self, 200, {'writer_id': 'writer-id',
+                                         'membership_revision': 9})
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        identity_path = self.tmp / 'haos' / 'node-identity.json'
+        args = argparse_namespace(name='haos', url=origin, grant=None,
+                                  join_grant_stdin=True, identity_file=str(identity_path),
+                                  bind_port=9001, endpoint=['http://192.0.2.101:9001'],
+                                  connect_to='192.0.2.101')
+        output = io.StringIO()
+        grant = 'a' * 64
+        with patch.object(mgr.sys, 'stdin', io.StringIO(grant + '\n')):
+            with redirect_stdout(output):
+                mgr.cmd_join(args, self.layout, mgr.Runner())
+        result = json.loads(output.getvalue())
+        identity = json.loads(identity_path.read_text())
+        self.assertEqual(captured[0]['path'], '/admin/api/nodes/join')
+        self.assertEqual(captured[0]['auth'], 'Bearer ' + grant)
+        self.assertEqual(captured[0]['body']['name'], 'shell:haos')
+        self.assertEqual(captured[0]['body']['endpoints'], ['http://192.0.2.101:9001'])
+        self.assertEqual(captured[0]['body']['connect_to'], '192.0.2.101')
+        self.assertEqual(identity['writer_id'], 'writer-id')
+        self.assertEqual(identity_path.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(grant, output.getvalue())
+        self.assertNotIn(identity['node_key'], output.getvalue())
+        self.assertEqual(result['writer_id'], 'writer-id')
+
+    def test_join_rejects_non_ip_connect_to(self):
+        args = argparse_namespace(name='haos', url='https://writer.example',
+                                  grant='a' * 64, join_grant_stdin=False,
+                                  identity_file=str(self.tmp / 'node-id.json'),
+                                  bind_port=9001, endpoint=['http://192.0.2.101:9001'],
+                                  connect_to='writer.example')
+        with self.assertRaisesRegex(mgr.UsageError, '--connect-to must be a literal IP'):
+            mgr.cmd_join(args, self.layout, mgr.Runner())
 
     def test_join_failure_is_a_runtime_failure(self):
         class Handler(QuietHandler):

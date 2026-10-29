@@ -48,6 +48,21 @@ class FRPCRegistryTests(unittest.TestCase):
             with patch.object(owned,'inspect',return_value={**r,'started':'11'}):
                 with self.assertRaises(ValueError):owned.read_records(p,'/bin/frpc',[])
 
+    def test_reused_pid_with_an_unrelated_generation_is_ignored(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'owners'
+            owned.write_records(p,[{'pid':os.getpid(),'started':'0','config':'/lease/frpc.toml'}])
+            self.assertEqual(owned.read_records(p,'/bin/frpc',[Path('/lease/frpc.toml')]),[])
+
+    def test_reused_pid_still_running_another_frpc_generation_fails_closed(self):
+        import os, sys
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'owners'
+            owned.write_records(p,[{'pid':os.getpid(),'started':'0','config':'/lease/frpc.toml'}])
+            with self.assertRaisesRegex(ValueError,'generation changed'):
+                owned.read_records(p,sys.executable,[Path('/lease/frpc.toml')])
+
     def test_duplicate_malformed_and_large_registry_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'owners'

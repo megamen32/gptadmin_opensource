@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.13
+
+- Add an opt-in unified member Node with the existing HAOS shell executor.
+- Keep the previous Hub runtime as the default until identity and executor state are migrated.
+- Include the command-line dependencies and HAOS mounts previously provided by ShellMCP.
+- Recover safely when a persisted FRP PID is reused by a different process after container restart.
+
 ## 1.0.9
 
 - Include the Go Hub guard that keeps terminal webhook jobs from returning to `running`.

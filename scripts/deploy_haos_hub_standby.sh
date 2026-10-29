@@ -65,7 +65,10 @@ cd "$ROOT/go-hub"
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$GO_BIN" build \
   -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$GIT_COMMIT" \
   -o "$OUT_DIR/gptadmin_hub" ./cmd/gptadmin-hub
-chmod 0755 "$OUT_DIR/gptadmin_hub"
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$GO_BIN" build \
+  -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$GIT_COMMIT" \
+  -o "$OUT_DIR/gptadmin-node" ./cmd/gptadmin-node
+chmod 0755 "$OUT_DIR/gptadmin_hub" "$OUT_DIR/gptadmin-node"
 
 python3 - "$FAILOVER_CONFIG_FILE" "$FAILOVER_STATE_FILE" "$OUT_DIR" <<'PY'
 import shutil
@@ -168,7 +171,7 @@ s = open(sys.argv[1], encoding='utf-8').read()
 s = re.sub(r'((token|secret|password|key|bearer|access[_-]?token|refresh[_-]?token|api[_-]?key): ")[^"]+', r'\1***redacted***', s, flags=re.I)
 print(s)
 PY
-sha256sum "$OUT_DIR/gptadmin_hub"
+sha256sum "$OUT_DIR/gptadmin_hub" "$OUT_DIR/gptadmin-node"
 
 echo "built=$OUT_DIR"
 

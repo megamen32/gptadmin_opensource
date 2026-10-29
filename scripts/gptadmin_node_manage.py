@@ -2172,13 +2172,22 @@ def cmd_grant_issue(args, layout: Layout, runner: Runner) -> None:
 def cmd_join(args, layout: Layout, runner: Runner) -> None:
     validate_name(args.name)
     origin = validate_origin(args.url, '--url')
-    env = read_installed_env(layout, args.name)
-    bind_port = int(env.get('GPTADMIN_HUB_PORT') or DEFAULT_BIND[1])
-    current = current_target(layout)
+    if getattr(args, 'join_grant_stdin', False):
+        if args.grant:
+            raise UsageError('--grant and --join-grant-stdin are mutually exclusive')
+        args.grant = read_join_grant_stdin()
+    if not args.grant:
+        raise UsageError('--grant or --join-grant-stdin is required')
+
+    env = {} if args.identity_file else read_installed_env(layout, args.name)
+    bind_port = int(args.bind_port or env.get('GPTADMIN_HUB_PORT') or DEFAULT_BIND[1])
+    if not 1 <= bind_port <= 65535:
+        raise UsageError('--bind-port must be between 1 and 65535')
+    current = current_target(layout) if not args.identity_file else None
     manifest = manifest_summary(current) if current else None
     if args.endpoint:
         endpoints = [validate_origin(ep, '--endpoint') for ep in args.endpoint]
-        connect_to = None
+        connect_to = args.connect_to
     else:
         parsed = urllib.parse.urlsplit(origin)
         join_port = parsed.port or (443 if parsed.scheme == 'https' else 80)
@@ -2186,10 +2195,21 @@ def cmd_join(args, layout: Layout, runner: Runner) -> None:
         if not lan_ip:
             raise PreflightError('could not determine the local LAN address; pass --endpoint explicitly')
         endpoints = [f'http://{lan_ip}:{bind_port}']
-        connect_to = lan_ip
-    payload = perform_join(origin, args.grant, layout.identity_file(args.name), args.name,
+        connect_to = args.connect_to or lan_ip
+    if connect_to:
+        try:
+            socket.inet_pton(socket.AF_INET6 if ':' in connect_to else socket.AF_INET, connect_to)
+        except OSError:
+            raise UsageError('--connect-to must be a literal IP address') from None
+
+    identity_path = Path(args.identity_file) if args.identity_file else layout.identity_file(args.name)
+    identity_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = perform_join(origin, args.grant, identity_path, args.name,
                            endpoints, connect_to, manifest)
+    identity = json.loads(identity_path.read_text(encoding='utf-8'))
     print(json.dumps({'ok': True, 'command': 'join', 'name': args.name,
+                      'writer_url': identity.get('writer_url'),
+                      'writer_id': identity.get('writer_id'),
                       'membership': payload}, sort_keys=True))
 
 
@@ -2498,12 +2518,20 @@ def build_parser() -> argparse.ArgumentParser:
                        help='environment variable holding the writer owner bearer; default GPTADMIN_ADMIN_BEARER')
     issue.set_defaults(func=cmd_grant_issue)
 
-    join = sub.add_parser('join', help='join this installed node to a mesh writer with a grant')
+    join = sub.add_parser('join', help='join a node to a mesh writer with a one-time grant')
     join.add_argument('--name', required=True, metavar='NAME')
     join.add_argument('--url', required=True, metavar='ORIGIN')
-    join.add_argument('--grant', required=True, metavar='GRANT')
+    join.add_argument('--grant', default=None, metavar='GRANT')
+    join.add_argument('--join-grant-stdin', action='store_true',
+                      help='read the one-time join grant from stdin instead of argv')
+    join.add_argument('--identity-file', default=None, metavar='PATH',
+                      help='write the joined identity here instead of the installed-node state path')
+    join.add_argument('--bind-port', type=int, default=None, metavar='PORT',
+                      help=f'advertised local node port; default {DEFAULT_BIND[1]}')
     join.add_argument('--endpoint', action='append', metavar='URL',
                       help='advertised endpoint; repeatable, default auto LAN detection')
+    join.add_argument('--connect-to', default=None, metavar='IP',
+                      help='connect directly to this LAN IP while preserving endpoint TLS verification')
     join.set_defaults(func=cmd_join)
 
     autoupdate = sub.add_parser('autoupdate', help='opt in to verified public Node releases')

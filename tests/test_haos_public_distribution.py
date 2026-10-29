@@ -103,6 +103,35 @@ def test_existing_client_bearers_survive_internal_secret_initialization(tmp_path
     assert json.loads(path.read_text())["codex_mcp_bearer"] == "provisioned-test-bearer"
 
 
+def test_haos_member_mode_is_a_single_executor_node_with_legacy_rollout_default() -> None:
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    config = (source / "public_config.yaml").read_text(encoding="utf-8")
+    run_script = (source / "run.sh").read_text(encoding="utf-8")
+    dockerfile = (source / "Dockerfile.public").read_text(encoding="utf-8")
+    workflow = (source / "public_publish_image_workflow.yml").read_text(encoding="utf-8")
+
+    assert 'version: "1.0.13"' in config
+    assert 'node_mode: "legacy"' in config
+    assert 'node_mode: str' in config
+    assert 'node_mode: "member"' not in config
+    assert 'export GPTADMIN_AUTH_MODE=reader' in run_script
+    assert 'export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json' in run_script
+    assert "jqr '.failover.primary_public_url'" in run_script
+    assert '-z "$GPTADMIN_NODE_SEED"' in run_script
+    assert 'export SHELL_IDENTITY_DIR=/data/identity' in run_script
+    assert 'export SHELL_SPOOL_DIR=/data/spool' in run_script
+    assert 'export SHELL_OUTBOX_DIR=/data/outbox' in run_script
+    assert 'NODE_BINARY=/usr/local/bin/gptadmin-node' in run_script
+    assert 'gptadmin-node' in dockerfile
+    for package in ('docker-cli', 'iproute2', 'iputils', 'bind-tools', 'coreutils', 'procps', 'sudo'):
+        assert package in dockerfile
+    assert './cmd/gptadmin-node' in workflow
+    for capability in ('server01_api: true', 'hassio_api: true', 'docker_api: true', 'full_access: true'):
+        assert capability in config
+    for path in ('- config:rw', '- ssl:rw', '- addons:rw', '- share:rw', '- backup:rw', '- media:rw'):
+        assert path in config
+
+
 def test_standby_template_preserves_existing_client_bearer_inputs() -> None:
     source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
     template = (source / "config.yaml.template").read_text(encoding="utf-8")

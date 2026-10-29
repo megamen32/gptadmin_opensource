@@ -1,5 +1,5 @@
 name: GPTAdmin Hub Standby
-version: "1.0.6"
+version: "1.0.13"
 slug: gptadmin_hub_standby
 description: "Standby GPTAdmin hub on HAOS for admin-node-100 failover"
 url: "https://became.bezrabotnyi.com"
@@ -12,13 +12,23 @@ host_network: true
 full_access: true
 protected: true
 apparmor: false
+server01_api: true
+hassio_api: true
+hassio_role: admin
+auth_api: true
+docker_api: true
+privileged:
+  - SYS_ADMIN
+  - NET_ADMIN
 map:
   - config:rw
   - ssl:rw
   - addons:rw
   - share:rw
   - backup:rw
+  - media:rw
 options:
+  node_mode: "legacy"
   hub_host: "0.0.0.0"
   hub_port: 9001
   public_origin: "__PUBLIC_ORIGIN__"
@@ -50,6 +60,7 @@ options:
   failover_proxy_listen: "0.0.0.0:9101"
   failover_check_interval_sec: 15
 schema:
+  node_mode: str
   hub_host: str
   hub_port: int
   public_origin: str

@@ -20,7 +20,7 @@ def config_paths(base, count):
         base.with_name(f'{base.stem}-{n}{base.suffix}') for n in range(1, count + 1)]
 
 
-def inspect(pid, binary, configs):
+def inspect(pid, binary, configs, expected_started=None):
     if type(pid) is not int or pid <= 1:
         raise ValueError('invalid client pid')
     root = Path('/proc') / str(pid)
@@ -30,12 +30,23 @@ def inspect(pid, binary, configs):
             return None
         args = (root / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
         expected = str(Path(binary).resolve())
+        executable = str((root / 'exe').resolve())
         allowed = {str(p.absolute()).encode() for p in configs}
+        started = stat[19]
+        # A recorded PID can be reused after the add-on container restarts.
+        # If its recorded generation differs and the PID now belongs to a
+        # different executable, the old FRP owner is gone; never inspect or
+        # signal the unrelated process. A different FRP generation stays
+        # fail-closed because it may already own the configured tunnel.
+        if expected_started and expected_started != started:
+            if executable != expected:
+                return None
+            raise ValueError('recorded client generation changed')
         if (root.stat().st_uid != os.getuid() or os.getpgid(pid) != pid
-                or str((root / 'exe').resolve()) != expected or len(args) != 3
+                or executable != expected or len(args) != 3
                 or args[0] != str(binary).encode() or args[1] != b'-c' or args[2] not in allowed):
             raise ValueError('recorded pid does not own this FRP client')
-        return {'pid': pid, 'started': stat[19], 'config': args[2].decode()}
+        return {'pid': pid, 'started': started, 'config': args[2].decode()}
     except (FileNotFoundError, ProcessLookupError):
         return None
 
@@ -76,7 +87,7 @@ def read_records(path, binary, configs):
         raise ValueError('unbounded or duplicate client registry')
     live = []
     for record in records:
-        found = inspect(record['pid'], binary, configs)
+        found = inspect(record['pid'], binary, configs, record.get('started'))
         if found is None:
             continue
         if record.get('started') and record['started'] != found['started']:

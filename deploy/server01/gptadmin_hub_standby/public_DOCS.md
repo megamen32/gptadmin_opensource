@@ -31,3 +31,20 @@ to the repository.
 
 The first production acceptance must stop only the primary Hub, verify public
 `/healthz` and `/version`, then start the primary and verify automatic reclaim.
+
+
+## Unified Node mode
+
+The app supports `node_mode: legacy` (the default during staged updates) and
+`node_mode: member`. Member mode runs the Hub API and the local shell executor
+in one `gptadmin-node` process. It requires a writer-enrolled identity at
+`/data/config/membership/node-identity.json`, plus the existing executor
+identity, spool and outbox migrated into `/data/identity`, `/data/spool` and
+`/data/outbox`. The add-on refuses member startup without the enrolled identity
+and pinned writer information.
+
+The member uses `failover.primary_public_url` as its enrolled writer's stable
+direct node endpoint. Keep `public_origin` and `mcp_resource` on the canonical
+client-facing URL; the writer seed is separate so member heartbeats cannot loop
+through a failover edge that points back to this HAOS node. The existing failover proxy continues
+to serve the canonical OAuth and MCP hostname through local port 9001.

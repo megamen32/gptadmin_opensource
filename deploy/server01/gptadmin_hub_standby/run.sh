@@ -76,7 +76,56 @@ if jq -e '.failover | type == "object"' "$OPTS" >/dev/null 2>&1; then
     --state /opt/gptadmin/failover/failover_state.json
 fi
 
-/usr/local/bin/gptadmin_hub &
+NODE_MODE="$(jqr '.node_mode')"
+: "${NODE_MODE:=legacy}"
+case "$NODE_MODE" in
+  legacy)
+    NODE_BINARY=/usr/local/bin/gptadmin_hub
+    ;;
+  member)
+    NODE_BINARY=/usr/local/bin/gptadmin-node
+    export SHELL_NAME=haos
+    export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json
+    export GPTADMIN_NODE_SEED="$(jqr '.failover.primary_public_url')"
+    export GPTADMIN_AUTH_MODE=reader
+    mkdir -p /data/config/membership /data/identity /data/spool /data/outbox
+    if [[ ! -s "$GPTADMIN_NODE_IDENTITY" || -z "$GPTADMIN_NODE_SEED" ]]; then
+      echo 'member mode requires a joined Node identity and failover.primary_public_url as writer seed' >&2
+      exit 1
+    fi
+    if [[ ! -s /data/identity/shellmcp_identity.json || ! -s /data/identity/shellmcp_ed25519 ]]; then
+      echo 'member mode requires the existing HAOS Shell identity to preserve its target' >&2
+      exit 1
+    fi
+    export SHELL_IDENTITY_DIR=/data/identity
+    export SHELL_SPOOL_DIR=/data/spool
+    export SHELL_OUTBOX_DIR=/data/outbox
+    export SHELL_DEFAULT_HOME=/config
+    export SHELL_DEFAULT_CWD=/config
+    export SHELL_DEFAULT_USER=root
+    export SHELL_HOST=127.0.0.1
+    export SHELL_PORT=25901
+    export SHELL_HEARTBEAT=1
+    export SHELLMCP_MCP_CONFIG=/data/shellmcp-mcp.json
+    export GPTADMIN_AUTH_SOURCE_ID="$(jq -r '.writer_id // empty' "$GPTADMIN_NODE_IDENTITY")"
+    python3 - "$GPTADMIN_NODE_IDENTITY" <<'PY_NODE_IDENTITY'
+import json, re, sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    identity = json.load(handle)
+if (identity.get('schema') != 'gptadmin.node-identity/v1'
+        or not re.fullmatch(r'[0-9a-f]{16,64}', str(identity.get('node_id', '')))
+        or not re.fullmatch(r'(?:[0-9a-f]{2}){32}', str(identity.get('node_key', '')))
+        or not identity.get('writer_id') or not identity.get('writer_url')):
+    raise SystemExit('member mode requires a valid joined Node identity with pinned writer')
+PY_NODE_IDENTITY
+    ;;
+  *)
+    echo 'node_mode must be legacy or member' >&2
+    exit 2
+    ;;
+esac
+
+"$NODE_BINARY" &
 hub_pid=$!
 runtime_pid=""
 cleanup() {
