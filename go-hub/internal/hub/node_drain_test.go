@@ -301,3 +301,31 @@ func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
 		}
 	}
 }
+
+type drainGateStub struct{ draining bool }
+
+func (g *drainGateStub) ActiveCallbacks() int    { return 0 }
+func (g *drainGateStub) OutboxPending() int      { return 0 }
+func (g *drainGateStub) SetQueueDraining(v bool) { g.draining = v }
+
+func TestNodeDrainSynchronizesExecutorPollGate(t *testing.T) {
+	s := drainTestHub(t, nil)
+	gate := &drainGateStub{}
+	s.SetNodeRuntimeCounters(gate)
+	if gate.draining {
+		t.Fatal("new executor started draining")
+	}
+	s.EnableNodeDrain("update")
+	if !gate.draining {
+		t.Fatal("executor poll gate remained open")
+	}
+	replacement := &drainGateStub{}
+	s.SetNodeRuntimeCounters(replacement)
+	if !replacement.draining {
+		t.Fatal("replacement executor missed existing drain")
+	}
+	s.CancelNodeDrain()
+	if replacement.draining {
+		t.Fatal("poll gate did not reopen")
+	}
+}

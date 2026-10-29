@@ -266,6 +266,8 @@ type Server struct {
 	callbackMu            sync.Mutex
 	callbackWG            sync.WaitGroup
 	callbackClosed        bool
+	queueDraining         bool
+	queuePollsInFlight    int
 	callbackCancels       map[string]context.CancelFunc
 	callbackCancelled     map[string]bool
 	queuePollCount        atomic.Int64
@@ -873,7 +875,10 @@ func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID, "delivery": "local_job"})
 		return
 	}
-	go s.runCallbackJob(jobID, req)
+	if !s.startCallbackJob(jobID, req, false) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "executor is stopping"})
+		return
+	}
 	writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": jobID, "delivery": "hub_queue_result"})
 }
 func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
@@ -1213,6 +1218,14 @@ func (s *Server) queueLoop(ctx context.Context) {
 	}
 	for {
 		s.flushOutbox(ctx)
+		if !s.beginQueuePoll() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
 		pollStarted := time.Now()
 		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.cfg.QueueTimeout)
 		s.queuePollCount.Add(1)
@@ -1225,6 +1238,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 			s.cleanupSpoolByAge()
 		}
 		if err != nil {
+			s.endQueuePoll()
 			if ctx.Err() != nil {
 				return
 			}
@@ -1242,16 +1256,18 @@ func (s *Server) queueLoop(ctx context.Context) {
 			if q.ToolName == "__gptadmin_cancel_task" {
 				taskID, _ := q.Arguments["task_id"].(string)
 				s.cancelCallbackJob(taskID)
+				s.endQueuePoll()
 				continue
 			}
 			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				go s.runCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
+				s.startCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
 			} else {
 				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 				s.applyDefaults(&req)
-				go s.runCallbackJob(q.ID, req)
+				s.startCallbackJob(q.ID, req, true)
 			}
 		}
+		s.endQueuePoll()
 	}
 }
 
@@ -1263,12 +1279,16 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	return shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
 }
 
-func (s *Server) runCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
-	runCtx, finish, ok := s.beginCallback(jobID)
+func (s *Server) startCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) bool {
+	runCtx, finish, ok := s.beginCallback(jobID, true)
 	if !ok {
-		return
+		return false
 	}
-	defer finish()
+	go func() { defer finish(); s.runCallbackTool(runCtx, jobID, traceID, traceParent, name, args, queueACL) }()
+	return true
+}
+
+func (s *Server) runCallbackTool(runCtx context.Context, jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
 	traceID = normalizeTraceID(traceID)
 	var result map[string]any
 	var err error
@@ -1339,13 +1359,17 @@ func (s *Server) cancelCallbackJob(jobID string) {
 	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "status": "cancel_requested"})
 }
 
-func (s *Server) runCallbackJob(jobID string, req shell.Request) {
-	req.TraceID = normalizeTraceID(req.TraceID)
-	runCtx, finish, ok := s.beginCallback(jobID)
+func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool) bool {
+	runCtx, finish, ok := s.beginCallback(jobID, acceptedPoll)
 	if !ok {
-		return
+		return false
 	}
-	defer finish()
+	go func() { defer finish(); s.runCallbackJob(runCtx, jobID, req) }()
+	return true
+}
+
+func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.Request) {
+	req.TraceID = normalizeTraceID(req.TraceID)
 	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
 	res := s.runShell(runCtx, req)
 	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})

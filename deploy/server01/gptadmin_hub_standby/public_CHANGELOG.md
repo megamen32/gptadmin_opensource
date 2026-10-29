@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.22
+
+- Keep executor queue polls and their accepted callbacks visible during drain.
+
 ## 1.0.21
 
 - Protect and recover undispatched quorum jobs after a leader change, without replaying started jobs.

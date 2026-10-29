@@ -44,6 +44,12 @@ const nodeDrainRetryDetail = "node is draining; retry after drain completes"
 func (s *Server) EnableNodeDrain(reason string) {
 	s.drainMu.Lock()
 	defer s.drainMu.Unlock()
+	s.mu.Lock()
+	hook := s.nodeRuntime
+	s.mu.Unlock()
+	if gate, ok := hook.(interface{ SetQueueDraining(bool) }); ok {
+		gate.SetQueueDraining(true)
+	}
 	if !s.nodeDrainActive {
 		s.nodeDrainActive = true
 		s.nodeDrainSince = time.Now()
@@ -55,9 +61,15 @@ func (s *Server) EnableNodeDrain(reason string) {
 func (s *Server) CancelNodeDrain() {
 	s.drainMu.Lock()
 	defer s.drainMu.Unlock()
+	s.mu.Lock()
+	hook := s.nodeRuntime
+	s.mu.Unlock()
 	s.nodeDrainActive = false
 	s.nodeDrainReason = ""
 	s.nodeDrainSince = time.Time{}
+	if gate, ok := hook.(interface{ SetQueueDraining(bool) }); ok {
+		gate.SetQueueDraining(false)
+	}
 }
 
 // NodeDrainStatus reports the current drain state and readiness counters.
@@ -98,6 +110,11 @@ func (s *Server) nodeRuntimeCounterValues() (callbacks, outbox int) {
 // SetNodeRuntimeCounters wires the in-process executor so drain can observe
 // its callbacks and outbox. The combined node binary calls this before serving.
 func (s *Server) SetNodeRuntimeCounters(counters NodeRuntimeCounters) {
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
+	if gate, ok := counters.(interface{ SetQueueDraining(bool) }); ok {
+		gate.SetQueueDraining(s.nodeDrainActive)
+	}
 	s.mu.Lock()
 	s.nodeRuntime = counters
 	s.mu.Unlock()

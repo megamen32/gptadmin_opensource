@@ -19,10 +19,10 @@ func (s *Server) LocalIdentity() (string, map[string]string, error) {
 	}, nil
 }
 
-func (s *Server) beginCallback(id string) (context.Context, func(), bool) {
+func (s *Server) beginCallback(id string, acceptedPoll bool) (context.Context, func(), bool) {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
-	if s.callbackClosed {
+	if s.callbackClosed || (s.queueDraining && !acceptedPoll) {
 		return nil, nil, false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,11 +64,33 @@ func (s *Server) callbackResultContext() (context.Context, context.CancelFunc) {
 func (s *Server) ActiveCallbacks() int {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
-	return len(s.callbackCancels)
+	return len(s.callbackCancels) + s.queuePollsInFlight
 }
 
 // OutboxPending reports undelivered outbox entries, the same depth the
 // metrics endpoint publishes.
 func (s *Server) OutboxPending() int {
 	return s.storageStats().OutboxDepth
+}
+
+// SetQueueDraining closes poll admission under the same lock used to count
+// polls, so accepted responses remain visible until their callback is reserved.
+func (s *Server) SetQueueDraining(draining bool) {
+	s.callbackMu.Lock()
+	s.queueDraining = draining
+	s.callbackMu.Unlock()
+}
+func (s *Server) beginQueuePoll() bool {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	if s.queueDraining || s.callbackClosed {
+		return false
+	}
+	s.queuePollsInFlight++
+	return true
+}
+func (s *Server) endQueuePoll() {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	s.queuePollsInFlight--
 }

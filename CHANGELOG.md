@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
 
 ### Fixed
+- Node drain closes executor poll admission and counts accepted polls until callbacks are reserved, avoiding a false idle report during task delivery.
 - Quorum leaders preserve encrypted undispatched executor input across leader changes and avoid replaying started work; enrolled follower requests use the leader queue.
 - Quorum task log replay validates an atomic cumulative checkpoint before accepting historical entries; old quorum snapshots without this checkpoint require an explicit migration. Follower drain remains unavailable until leader-owned in-flight work can be verified.
 - The browser OAuth callback now delivers its PKCE-bound authorization code to
