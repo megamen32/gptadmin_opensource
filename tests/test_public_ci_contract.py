@@ -91,6 +91,7 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     assert "['git', 'merge-base', '--is-ancestor'" in workflow
     assert "['git', 'diff', '--name-only', installed_sha, source_sha]" in workflow
     assert "'go-hub/'" in workflow
+    assert "'go-shellmcp/'" in workflow
     assert "'.github/workflows/publish-haos-addon.yml'" not in workflow
     assert 'secrets.' not in workflow
     source_root = ROOT if (ROOT / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').is_file() else ROOT.parent.parent
