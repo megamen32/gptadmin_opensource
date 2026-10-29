@@ -9039,6 +9039,23 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 			if peer.Code >= 400 {
 				raw["status"] = "failed"
 			}
+			if firstString(raw, "status") == "failed" {
+				return unwrapMCPUpstream(raw)
+			}
+			if firstString(raw, "status") != "completed" || truthy(raw["background"]) {
+				return nil, map[string]any{"code": -32001, "message": "upstream MCP call is still running", "data": raw}
+			}
+			if result, ok := raw["result"]; ok {
+				if payload := mapValue(result); len(sliceValue(payload["content"])) > 0 {
+					return payload, nil
+				}
+				wrapped := mcpToolResult(result)
+				if truthy(mapValue(result)["isError"]) {
+					wrapped["isError"] = true
+				}
+				return wrapped, nil
+			}
+			return nil, map[string]any{"code": -32000, "message": "node peer receipt missing result"}
 		} else {
 			raw = s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
 				"ref": ref, "name": name, "arguments": args,

@@ -20,16 +20,19 @@ func TestChildToolRoutesToNodeBeforeLegacyQueue(t *testing.T) {
 		if r.URL.Path != "/mcp-relay/call" || r.Header.Get("Authorization") != "Bearer token" || firstString(body, "target") != "mcp:shell:peer:grepmesh" || firstString(body, "tool") != "list_locations" {
 			t.Errorf("incorrect child forwarding")
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "response": map[string]any{"structuredContent": map[string]any{"ref": "grepmesh", "result": map[string]any{"ok": true}}}})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "result": map[string]any{"locations": []any{"fixture-location"}}})
 	}))
 	defer peer.Close()
 	s := peerTestHub(t, "token", map[string]string{"shell:peer": peer.URL})
 	agent := Agent{AgentID: "mcp:shell:peer:grepmesh", Kind: "child_mcp", Meta: map[string]any{"parent_server_id": "shell:peer", "child_ref": "grepmesh", "enabled": true}}
 	r := httptest.NewRequest(http.MethodPost, "/server/grepmesh/mcp", nil)
 	r.Header.Set("Authorization", "Bearer token")
-	_, rpcErr := s.agentToolCall(r, agent, "list_locations", map[string]any{"hosts": "local"})
+	result, rpcErr := s.agentToolCall(r, agent, "list_locations", map[string]any{"hosts": "local"})
 	if rpcErr != nil || calls.Load() != 1 {
 		t.Fatalf("child route failed: error=%v calls=%d", rpcErr, calls.Load())
+	}
+	if len(sliceValue(mapValue(mapValue(result)["structuredContent"])["locations"])) != 1 {
+		t.Fatalf("peer result was not preserved in MCP structured content: %#v", result)
 	}
 	if len(s.shellJobs) != 0 {
 		t.Fatal("child route allocated a legacy queue task")
@@ -92,5 +95,23 @@ func TestChildPeerHopRejectsNonOwner(t *testing.T) {
 	}
 	if len(s.shellJobs) != 0 {
 		t.Fatal("foreign child entered local queue")
+	}
+}
+
+func TestChildNodePendingReceiptPreservedWithoutReplay(t *testing.T) {
+	var calls atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "job_id": "job-owned", "owner_target": "shell:peer"})
+	}))
+	defer peer.Close()
+	s := peerTestHub(t, "token", map[string]string{"shell:peer": peer.URL})
+	agent := Agent{AgentID: "mcp:shell:peer:grepmesh", Kind: "child_mcp", Meta: map[string]any{"parent_server_id": "shell:peer", "child_ref": "grepmesh", "enabled": true}}
+	req := httptest.NewRequest(http.MethodPost, "/server/grepmesh/mcp", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	_, rpcErr := s.agentToolCall(req, agent, "list_locations", map[string]any{"hosts": "local"})
+	data := mapValue(mapValue(rpcErr)["data"])
+	if firstString(data, "job_id") != "job-owned" || calls.Load() != 1 || len(s.shellJobs) != 0 {
+		t.Fatalf("pending receipt lost or request replayed: receipt=%v calls=%d", data, calls.Load())
 	}
 }

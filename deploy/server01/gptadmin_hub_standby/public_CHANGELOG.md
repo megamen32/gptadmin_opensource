@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.17
+
+- Preserve child MCP results and pending task receipts across Node routing.
+
 ## 1.0.16
 
 - Route child MCP calls and discovery to their owning Node without unsafe retries.
