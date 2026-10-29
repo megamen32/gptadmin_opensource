@@ -126,7 +126,7 @@ def test_haos_member_mode_is_a_single_executor_node_with_legacy_rollout_default(
     for package in ('docker-cli', 'iproute2', 'iputils', 'bind-tools', 'coreutils', 'procps', 'sudo'):
         assert package in dockerfile
     assert './cmd/gptadmin-node' in workflow
-    for capability in ('server01_api: true', 'hassio_api: true', 'docker_api: true', 'full_access: true'):
+    for capability in ('homeassistant_api: true', 'hassio_api: true', 'docker_api: true', 'full_access: true'):
         assert capability in config
     assert 'server01_api:' not in config
     for path in ('- config:rw', '- ssl:rw', '- addons:rw', '- share:rw', '- backup:rw', '- media:rw'):

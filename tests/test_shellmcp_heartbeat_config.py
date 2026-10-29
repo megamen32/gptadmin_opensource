@@ -46,14 +46,14 @@ def test_admin_ui_exposes_heartbeat_as_an_explicit_setting() -> None:
     assert "shellmcp_heartbeat" in screen
 
 
-def test_server01_runtime_keeps_heartbeat_opt_in() -> None:
+def test_homeassistant_runtime_keeps_heartbeat_opt_in() -> None:
     """The add-on launcher must not override its false schema default."""
     root = cli.Path(__file__).resolve().parents[1]
     run_script = (root / "deploy/server01/gptadmin_shellmcp/run.sh").read_text()
     assert 'SHELL_HEARTBEAT="$(opt heartbeat \'false\')"' in run_script
 
 
-def test_server01_deploy_refreshes_existing_addon_options() -> None:
+def test_homeassistant_deploy_refreshes_existing_addon_options() -> None:
     """Rebuilds must replace persisted credentials before restarting the add-on."""
     root = cli.Path(__file__).resolve().parents[1]
     deploy_script = (root / "scripts/deploy_haos_shellmcp.sh").read_text(encoding="utf-8")
