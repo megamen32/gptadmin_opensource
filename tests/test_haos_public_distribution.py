@@ -110,7 +110,10 @@ def test_haos_member_mode_is_a_single_executor_node_with_legacy_rollout_default(
     dockerfile = (source / "Dockerfile.public").read_text(encoding="utf-8")
     workflow = (source / "public_publish_image_workflow.yml").read_text(encoding="utf-8")
 
-    assert 'version: "1.0.14"' in config
+    version = re.search(r'^version: "([0-9]+\.[0-9]+\.[0-9]+)"$', config, re.MULTILINE)
+    assert version is not None
+    changelog = (source / "public_CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## {version.group(1)}" in changelog
     assert 'node_mode: "legacy"' in config
     assert 'node_mode: str' in config
     assert 'node_mode: "member"' not in config

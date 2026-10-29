@@ -126,21 +126,36 @@ def main():
     request('/mcp', {'jsonrpc':'2.0','method':'notifications/initialized'})
     marker = 'node-probe-' + secrets.token_hex(12)
     # A harmless real execution, on one explicit owner, submitted exactly once.
-    result = tool('execute', {'target':args.target,'tool':'shell_exec',
-        'args':{'cmd':'printf '+marker,'timeout':10},'background':True,'idempotency_key':marker})
-    job = result.get('job_id') or result.get('task_id')
-    if not job:
-        raise RuntimeError('execution returned no job receipt')
-    job_args = {'job_id':job}
-    if result.get('owner_target') is not None:
-        if result['owner_target'] != args.target:
-            raise RuntimeError('receipt owner differs from the requested executor')
-        job_args['owner_target'] = args.target
-    while result.get('status') != 'completed':
-        if result.get('status') in ('failed', 'cancelled', 'canceled'):
-            raise RuntimeError('probe job did not complete successfully')
-        time.sleep(min(.2, max(0, deadline-time.monotonic())))
-        result = tool('job', job_args)
+    call = {'target': args.target, 'tool': 'shell_exec',
+            'args': {'cmd': 'printf '+marker, 'timeout': 10}, 'idempotency_key': marker}
+    result = tool('exec', {'code': 'return await mcp.call('+json.dumps(call)+');',
+                           'timeout_ms': min(20000, max(1000, int((deadline-time.monotonic())*1000)))})
+    job = None
+    if result.get('status') == 'completed':
+        result = result.get('result')
+        if not isinstance(result, dict):
+            raise RuntimeError('exec returned no command receipt')
+    else:
+        error = result.get('error') if isinstance(result.get('error'), dict) else {}
+        receipt = error.get('receipt') if isinstance(error.get('receipt'), dict) else {}
+        if error.get('code') != 'nonterminal':
+            raise RuntimeError('exec did not complete successfully')
+        job = receipt.get('job_id') or receipt.get('task_id')
+        if not job:
+            raise RuntimeError('execution returned no job receipt')
+    if not job and result.get('status') in ('queued', 'running', 'nonterminal'):
+        job = result.get('job_id') or result.get('task_id')
+        if not job:
+            raise RuntimeError('execution returned no job receipt')
+    if job:
+        job_args = {'id': job, 'owner_target': args.target}
+        while True:
+            result = tool('job', job_args)
+            if result.get('status') == 'completed':
+                break
+            if result.get('status') in ('failed', 'cancelled', 'canceled'):
+                raise RuntimeError('probe job did not complete successfully')
+            time.sleep(min(.2, max(0, deadline-time.monotonic())))
     if result.get('error') or result.get('returncode', 0) != 0 or result.get('stdout') != marker:
         raise RuntimeError('completed receipt does not contain the successful command stdout')
     print(json.dumps({'ok':True,'origin':origin,'connect_to':args.connect_to,'target':args.target,
