@@ -68,7 +68,7 @@ def test_userscript_supported_sites():
 
 def test_userscript_version_is_bumped_for_installable_update():
     content = USERSCRIPT.read_text()
-    assert "// @version      2.3.15" in content
+    assert "// @version      2.3.16" in content
 
 
 def test_injected_prompt_describes_current_code_mode():
@@ -110,6 +110,7 @@ def test_injected_prompt_describes_current_code_mode():
 def test_auto_submit_waits_for_the_real_provider_send_button():
     content = USERSCRIPT.read_text()
     assert "'chat.z.ai':         ['button.sendMessageButton']" in content
+    assert "'chat.qwen.ai':      ['button.send-button', 'button[aria-label=\"Отправить\"]']" in content
     assert "'alice.yandex.ru': ['button[data-testid=\"oknyx\"]'" in content
     assert "function autoSubmitInserted(el, expectedText, onResult)" in content
     assert "readInputText(el) !== expectedText" in content
