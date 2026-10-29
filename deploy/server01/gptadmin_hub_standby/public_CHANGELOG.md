@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.15
+
+- Reconcile named instructions with the writer and apply control snapshots fail-closed.
+
 ## 1.0.14
 
 - Correct the published Home Assistant API capability for the unified Node runtime.

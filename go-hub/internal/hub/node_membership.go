@@ -1251,7 +1251,9 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	if heartbeatResponse.Changed || forceSync || s.membershipView == nil {
 		s.membershipPullView(client, writer)
 	}
-	if heartbeatResponse.AuthGeneration > 0 && heartbeatResponse.AuthGeneration != s.writerAuthGeneration() {
+	// Named instructions may change independently of the auth generation.
+	// Reconcile the authenticated control snapshot even when the generation is equal.
+	if heartbeatResponse.AuthGeneration > 0 {
 		s.membershipApplyControlSnapshot(client, writer)
 	}
 }
@@ -1354,40 +1356,69 @@ func (s *Server) membershipApplyControlSnapshot(client *http.Client, writer stri
 		log.Printf("control snapshot checksum mismatch writer=%s", writer)
 		return
 	}
-	if snapshot.Revision <= s.writerAuthGeneration() {
+	if snapshot.Revision != snapshot.Bundle.Generation || snapshot.Generation != snapshot.Revision {
+		log.Printf("control snapshot generation mismatch writer=%s", writer)
 		return
 	}
+	if snapshot.Revision < s.writerAuthGeneration() {
+		return
+	}
+	sets := map[string]InstructionSet{}
 	if snapshot.InstructionSets != nil {
-		if len(snapshot.InstructionSets.Sets) == 0 {
-			log.Printf("control snapshot instruction sets rejected writer=%s", writer)
+		sets = snapshot.InstructionSets.Sets
+	}
+	for id, set := range sets {
+		if err := validateNamedInstructionSetID(id); err != nil || set.ID != id || validateInstructionContent(set.Content) != nil || set.Version != instructionSetVersion(set.Content) {
+			log.Printf("control snapshot instruction set invalid id=%s writer=%s", id, writer)
 			return
 		}
-		for id, set := range snapshot.InstructionSets.Sets {
-			if err := validateNamedInstructionSetID(id); err != nil || set.ID != id {
-				log.Printf("control snapshot instruction set invalid id=%s writer=%s", id, writer)
-				return
-			}
-		}
 	}
-	// Same lock order as the auth snapshot HTTP path: auth admission first.
+	if err := validateAuthSnapshotValues(snapshot.Bundle, s.cfg.AuthSnapshotBudget, s.cfg.CtlToken, func(id string) bool {
+		if id == "" || id == defaultInstructionSetID {
+			return true
+		}
+		_, ok := sets[id]
+		return ok
+	}); err != nil {
+		log.Printf("control snapshot validation rejected writer=%s err=%v", writer, err)
+		return
+	}
 	s.authMu.Lock()
 	s.mu.Lock()
-	err = s.commitAuthSnapshotLocked(snapshot.Bundle, true)
+	if snapshot.Revision < s.authState.Generation || (snapshot.Revision == s.authState.Generation && s.authState.Generation != 0 && authSnapshotDigest(snapshot.Bundle) != s.authState.Digest) {
+		s.mu.Unlock()
+		s.authMu.Unlock()
+		log.Printf("control snapshot stale or inconsistent writer=%s", writer)
+		return
+	}
+	s.instructionSetsMu.RLock()
+	current, _ := json.Marshal(s.instructionSets)
+	incoming, _ := json.Marshal(sets)
+	s.instructionSetsMu.RUnlock()
+	if snapshot.Revision == s.authState.Generation && !s.authState.Pending && bytes.Equal(current, incoming) {
+		s.mu.Unlock()
+		s.authMu.Unlock()
+		return
+	}
+	// Persist the fail-closed marker before changing either store. A crash or
+	// write failure leaves admission closed until the writer snapshot retries.
+	s.authState.Pending = true
+	err = writeAccessStateJSON(s.authStatePath(), s.authState, 4096)
+	if err == nil {
+		err = writeInstructionSetsStateAtomic(s.instructionSetsStatePath(), sets)
+	}
+	if err == nil {
+		s.instructionSetsMu.Lock()
+		s.instructionSets = cloneInstructionSets(sets)
+		s.instructionSetsMu.Unlock()
+		err = s.commitAuthSnapshotLocked(snapshot.Bundle, true)
+	}
 	s.mu.Unlock()
 	s.authMu.Unlock()
 	if err != nil {
 		log.Printf("control snapshot apply rejected writer=%s err=%v", writer, err)
-		return
 	}
-	if snapshot.InstructionSets != nil {
-		s.instructionSetsMu.Lock()
-		s.instructionSets = cloneInstructionSets(snapshot.InstructionSets.Sets)
-		path := s.instructionSetsStatePath()
-		if err := writeInstructionSetsStateAtomic(path, s.instructionSets); err != nil {
-			log.Printf("control snapshot instruction sets persist failed: %v", err)
-		}
-		s.instructionSetsMu.Unlock()
-	}
+
 }
 
 // newNodeDialTransport dials through the pinned physical address when
