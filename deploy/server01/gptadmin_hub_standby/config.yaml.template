@@ -29,6 +29,7 @@ map:
   - media:rw
 options:
   node_mode: "legacy"
+  quorum_enabled: false
   hub_host: "0.0.0.0"
   hub_port: 9001
   public_origin: "__PUBLIC_ORIGIN__"
@@ -61,6 +62,7 @@ options:
   failover_check_interval_sec: 15
 schema:
   node_mode: str
+  quorum_enabled: bool
   hub_host: str
   hub_port: int
   public_origin: str

@@ -48,3 +48,15 @@ direct node endpoint. Keep `public_origin` and `mcp_resource` on the canonical
 client-facing URL; the writer seed is separate so member heartbeats cannot loop
 through a failover edge that points back to this HAOS node. The existing failover proxy continues
 to serve the canonical OAuth and MCP hostname through local port 9001.
+
+## Optional quorum membership
+
+`quorum_enabled` defaults to false. A provisioned voter may enable it only after
+its authenticated cluster and private peer routes are ready. Stage the complete
+node-specific quorum configuration at `/data/config/quorum/quorum.json` as a
+regular file readable only by its owner, with its TLS keys, CA and encrypted
+state key at the configured private paths. The app validates its unique HTTPS
+peer origin and passes the configuration to the Node; quorum itself validates
+the voters, certificates and storage. This does not create a cluster or allow
+an independent writer: a majority and the authoritative baseline remain
+required. Do not enable it against an unfenced legacy writer.

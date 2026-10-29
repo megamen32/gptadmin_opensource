@@ -80,6 +80,10 @@ NODE_MODE="$(jqr '.node_mode')"
 : "${NODE_MODE:=legacy}"
 case "$NODE_MODE" in
   legacy)
+    if [[ "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
+      echo 'quorum_enabled requires node_mode member' >&2
+      exit 1
+    fi
     NODE_BINARY=/usr/local/bin/gptadmin_hub
     ;;
   member)
@@ -88,6 +92,11 @@ case "$NODE_MODE" in
     export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json
     export GPTADMIN_NODE_SEED="$(jqr '.failover.primary_public_url')"
     export GPTADMIN_AUTH_MODE=reader
+    if [[ "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
+      export GPTADMIN_QUORUM_CONFIG_FILE=/data/config/quorum/quorum.json
+      GPTADMIN_NODE_PUBLIC_URL="$(python3 /usr/local/bin/gptadmin_quorum_config.py "$GPTADMIN_QUORUM_CONFIG_FILE")"
+      export GPTADMIN_NODE_PUBLIC_URL
+    fi
     mkdir -p /data/config/membership /data/identity /data/spool /data/outbox
     if [[ ! -s "$GPTADMIN_NODE_IDENTITY" || -z "$GPTADMIN_NODE_SEED" ]]; then
       echo 'member mode requires a joined Node identity and failover.primary_public_url as writer seed' >&2

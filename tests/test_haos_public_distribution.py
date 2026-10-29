@@ -188,3 +188,92 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     assert "192.168.2." not in public_text
     assert "/etc/gptadmin" not in public_text
     assert "__CTL_TOKEN__" not in public_text
+
+
+def test_haos_quorum_config_requires_private_unique_https_local_peer(tmp_path: Path) -> None:
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    helper = source / "gptadmin_quorum_config.py"
+    config = tmp_path / "quorum.json"
+    secret = "test-secret-never-print"
+    payload = {"node_id": "haos", "node_key": secret, "peers": [{"id": "haos", "hub_url": "https://haos.example.invalid"}]}
+
+    def check(ok: bool) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(["python3", str(helper), str(config)], capture_output=True, text=True, check=False)
+        assert (result.returncode == 0) is ok
+        assert secret not in result.stdout + result.stderr
+        return result
+
+    config.write_text(json.dumps(payload))
+    config.chmod(0o600)
+    assert check(True).stdout.strip() == "https://haos.example.invalid"
+    config.chmod(0o644)
+    check(False)
+    config.chmod(0o600)
+    payload["peers"].append({"id": "haos", "hub_url": "https://duplicate.example.invalid"})
+    config.write_text(json.dumps(payload))
+    check(False)
+    payload["peers"] = [{"id": "haos", "hub_url": "http://insecure.invalid"}]
+    config.write_text(json.dumps(payload))
+    check(False)
+    config.unlink()
+    target = tmp_path / "real.json"
+    target.write_text(json.dumps(payload))
+    target.chmod(0o600)
+    config.symlink_to(target)
+    check(False)
+
+
+def test_haos_quorum_is_opt_in_and_packaged() -> None:
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    for name in ("public_config.yaml", "config.yaml.template"):
+        config = (source / name).read_text()
+        assert "quorum_enabled: false" in config
+        assert "quorum_enabled: bool" in config
+    run = (source / "run.sh").read_text()
+    assert ".quorum_enabled // false" in run
+    assert "GPTADMIN_QUORUM_CONFIG_FILE=/data/config/quorum/quorum.json" in run
+    assert "gptadmin_quorum_config.py" in run
+    for name in ("Dockerfile", "Dockerfile.public"):
+        assert "gptadmin_quorum_config.py" in (source / name).read_text()
+    assert "gptadmin_quorum_config.py" in (ROOT / "scripts/export_haos_app_repository.sh").read_text()
+    assert "gptadmin_quorum_config.py" in (ROOT / "scripts/deploy_haos_hub_standby.sh").read_text()
+
+
+def test_haos_quorum_runtime_opt_in_exports_private_config(tmp_path: Path) -> None:
+    import shutil
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the actual HAOS entrypoint")
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    entrypoint = (source / "run.sh").read_text()
+    case = entrypoint.split("case \"$NODE_MODE\" in", 1)[1].split("\nesac", 1)[0]
+    case = "case \"$NODE_MODE\" in" + case + "\nesac\n"
+    data = tmp_path / "data"
+    (data / "config/membership").mkdir(parents=True)
+    (data / "identity").mkdir()
+    (data / "config/membership/node-identity.json").write_text(json.dumps({
+        "schema": "gptadmin.node-identity/v1", "node_id": "a" * 16,
+        "node_key": "b" * 64, "writer_id": "writer", "writer_url": "https://writer.example.invalid",
+    }))
+    for name in ("shellmcp_identity.json", "shellmcp_ed25519"):
+        (data / "identity" / name).write_text("fixture")
+    quorum = data / "config/quorum/quorum.json"
+    quorum.parent.mkdir()
+    quorum.write_text(json.dumps({"node_id": "haos", "peers": [{"id": "haos", "hub_url": "https://haos.example.invalid"}]}))
+    quorum.chmod(0o600)
+    opts = data / "options.json"
+    case = case.replace("/data/", str(data) + "/")
+    case = case.replace("/usr/local/bin/gptadmin_quorum_config.py", str(source / "gptadmin_quorum_config.py"))
+    script = "set -euo pipefail\nOPTS=$1\nNODE_MODE=$2\njqr(){ jq -r \"$1 // empty\" \"$OPTS\"; }\n" + case
+    script += 'printf \"%s\\n\" \"${GPTADMIN_QUORUM_CONFIG_FILE:-disabled}\" \"${GPTADMIN_NODE_PUBLIC_URL:-disabled}\"\n'
+
+    def start(enabled: bool, mode: str = "member") -> subprocess.CompletedProcess[str]:
+        opts.write_text(json.dumps({"quorum_enabled": enabled, "failover": {"primary_public_url": "https://writer.example.invalid"}}))
+        return subprocess.run(["bash", "-c", script, "entrypoint-test", str(opts), mode], capture_output=True, text=True, check=False)
+
+    disabled = start(False)
+    assert disabled.returncode == 0 and disabled.stdout.splitlines() == ["disabled", "disabled"]
+    enabled = start(True)
+    assert enabled.returncode == 0 and enabled.stdout.splitlines() == [str(quorum), "https://haos.example.invalid"]
+    quorum.chmod(0o644)
+    assert start(True).returncode != 0
+    assert start(True, "legacy").returncode != 0

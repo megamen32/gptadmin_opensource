@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.18
+
+- Allow securely provisioned HAOS Nodes to join an explicitly enabled quorum.
+
 ## 1.0.17
 
 - Preserve child MCP results and pending task receipts across Node routing.
