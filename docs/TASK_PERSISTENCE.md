@@ -34,6 +34,25 @@ Already-running tasks can still report results through another Hub. Group
 status is derived from its children rather than from the survival of the group
 creator alone.
 
+## Quorum mode: undispatched shell input
+
+The shared-host behavior above describes non-quorum mode. In configured quorum
+mode, a newly accepted, never-dispatched shell task stores its executable input
+as an authenticated encrypted payload under the quorum state key. A promoted
+leader may claim it only after quorum and replica-readiness checks; dispatch is
+committed as running before delivery, and its sealed input is then removed.
+Started or uncertain work is not automatically replayed. This is not an
+exactly-once guarantee for external effects, and it does not reconstruct inputs
+of older tasks that were kept solely in the previous process memory.
+
+Task history now includes an atomic cumulative replay checkpoint. Earlier
+quorum snapshots and already-populated quorum databases without that checkpoint
+cannot be upgraded safely by inventing a digest: they fail closed and need an
+explicit, verified migration. Do not enable a cluster or restart a legacy
+primary with outstanding memory-only work without a proven lossless handover.
+Quorum follower drain also remains blocked until in-flight deliveries can be
+verified against the leader and executor, including cancellation races.
+
 ## Commit boundary
 
 `task_mutation.go` snapshots selected tasks, group children, associated controls,
