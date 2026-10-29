@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The Node lifecycle manager can enroll an external member through a private identity file and stdin-only join grant, with an explicit advertised endpoint and connect IP.
+
 ### Performance
 - Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
 
