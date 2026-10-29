@@ -2258,6 +2258,7 @@ func (s *Server) requireArtifact(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expected := s.cfg.ShellToken
+		quorumExecutor := s.authenticatedQuorumExecutor(r)
 		r.Header.Del(selfEnrollTokenHeader)
 		r.Header.Del(globalShellAuthHeader)
 		s.mu.Lock()
@@ -2290,7 +2291,7 @@ func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set(globalShellAuthHeader, "1")
 			}
 		}
-		allowed := expected != "" && tokenMatches(r, expected)
+		allowed := quorumExecutor || expected != "" && tokenMatches(r, expected)
 		if r.URL.Path == "/heartbeat" {
 			for _, local := range s.localExecutorTokens {
 				allowed = allowed || tokenMatches(r, local)

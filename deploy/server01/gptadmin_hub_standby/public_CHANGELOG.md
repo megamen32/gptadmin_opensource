@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.20
+
+- Authenticate a follower’s local executor against the quorum leader over enrolled mutual TLS.
+
 ## 1.0.19
 
 - Provide direct mutually authenticated HTTPS between configured quorum Nodes.

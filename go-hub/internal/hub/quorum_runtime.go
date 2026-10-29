@@ -289,6 +289,11 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
 				return
 			}
+			forwardedExecutor, executorErr := s.localQuorumExecutorForForward(r)
+			if executorErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid local executor request"})
+				return
+			}
 			hubURL, leaderID := s.quorumNode.LeaderForwardURL()
 			target, parseErr := url.Parse(hubURL)
 			if parseErr == nil && (target.Scheme == "https" || target.Scheme == "http") && target.Host != "" && leaderID != "" && target.Host != r.Host {
@@ -309,6 +314,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				proxy.Director = func(outbound *http.Request) {
 					director(outbound)
 					outbound.Host = target.Host
+					outbound.Header.Del(quorumExecutorHeader)
+					if forwardedExecutor != "" {
+						outbound.Header.Set(quorumExecutorHeader, forwardedExecutor)
+					}
 					outbound.Header.Set("X-GPTAdmin-Quorum-Forwarded", leaderID)
 				}
 				proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
