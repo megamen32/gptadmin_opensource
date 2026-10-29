@@ -89,7 +89,7 @@ if env_path.exists():
 def get(key, default=''):
     return vals.get(key, default)
 
-hub = get('HUB_PUBLIC_URL') or get('HUB_URL') or get('PUBLIC_ORIGIN') or 'https://became.bezrabotnyi.com'
+hub = get('HAOS_HUB_URL') or 'https://became.bezrabotnyi.com'
 shell_url = f'http://{haos_host}:25900'
 repl = {
     '__HUB_URL__': hub,
