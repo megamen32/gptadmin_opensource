@@ -84,6 +84,9 @@ def start_proxy(options: dict[str, Any]) -> subprocess.Popen[bytes]:
             str(RECLAIM_COMMAND),
             "--node-id",
             str(options.get("failover_node_id") or "shell:haos"),
+            # Hub long-poll supports up to 120 seconds; leave 10 seconds for overhead.
+            "--timeout",
+            "130",
         ]
     )
 

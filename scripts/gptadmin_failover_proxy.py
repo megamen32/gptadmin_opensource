@@ -102,7 +102,7 @@ def main() -> int:
     ap.add_argument("--upstream", default=os.environ.get("GPTADMIN_FAILOVER_PROXY_UPSTREAM", "http://127.0.0.1:9001"))
     ap.add_argument("--command-file", default=os.environ.get("GPTADMIN_FAILOVER_RECLAIM_COMMAND_FILE", "/var/lib/gptadmin/failover_reclaim_command.json"))
     ap.add_argument("--node-id", default=os.environ.get("GPTADMIN_FAILOVER_NODE_ID", "shell:haos"))
-    ap.add_argument("--timeout", type=float, default=30.0)
+    ap.add_argument("--timeout", type=float, default=130.0, help="upstream request timeout; must exceed the Hub long-poll limit")
     args = ap.parse_args()
     host, _, port_s = args.listen.rpartition(":")
     host = host or "127.0.0.1"

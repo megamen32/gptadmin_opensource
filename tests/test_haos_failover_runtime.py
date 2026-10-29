@@ -33,6 +33,14 @@ def test_haos_runtime_promotes_proxy_port_and_runs_without_systemd() -> None:
     assert "9101" in runtime
     assert "gptadmin_failover_watchdog.py" in runtime
     assert "gptadmin_failover_proxy.py" in runtime
+    assert '"--timeout"' in runtime
+    assert '"130"' in runtime
+
+
+def test_failover_proxy_timeout_exceeds_hub_long_poll_limit() -> None:
+    proxy = (ROOT / "scripts/gptadmin_failover_proxy.py").read_text(encoding="utf-8")
+
+    assert "default=130.0" in proxy
 
 
 def test_frpc_client_config_does_not_merge_multiple_servers_into_one_toml() -> None:
