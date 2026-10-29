@@ -19,6 +19,9 @@ func TestTaskQuorumSQLiteSnapshotRestoresExactSequenceAndRows(t *testing.T) {
 		if _, err := tx.tx.Exec(`INSERT INTO task_quorum_revisions(namespace,row_key,revision) VALUES('task_records/shell','job-1',1)`); err != nil {
 			return err
 		}
+		if _, err := tx.tx.Exec(`INSERT INTO task_quorum_chain(id,sequence,digest) VALUES(1,7,?)`, make([]byte, 32)); err != nil {
+			return err
+		}
 		_, err := tx.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,applied_index,baseline_ready,authority_ready) VALUES(1,?,7,1,1)`, clusterID)
 		return err
 	}); err != nil {

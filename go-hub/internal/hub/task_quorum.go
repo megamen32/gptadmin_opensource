@@ -77,6 +77,9 @@ func (s *Server) commitTaskQuorumChanges(t *taskTransaction) error {
 	}
 	t.quorumIndex = externalSequence
 	t.quorumBatch = append([]quorum.Mutation(nil), mutations...)
+	if err := taskQuorumChainAdvance(t.tx, externalSequence, digest); err != nil {
+		return err
+	}
 	_, err = t.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,applied_index) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET cluster_id=excluded.cluster_id,applied_index=max(applied_index,excluded.applied_index)`, s.quorumClusterID, externalSequence)
 	if err != nil {
 		return err
@@ -219,6 +222,10 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 	if len(external) == 0 && !baselineReady {
 		return nil
 	}
+	externalDigest, err := quorumBatchDigest(external)
+	if err != nil {
+		return err
+	}
 	s.taskQuorumApplying.Store(true)
 	defer s.taskQuorumApplying.Store(false)
 	return s.withTaskDatabase(func(t *taskTransaction) error {
@@ -232,7 +239,23 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			if clusterID != "" && clusterID != s.quorumClusterID {
 				return errors.New("task quorum database belongs to a different cluster")
 			}
+			if externalSequence < previousSequence {
+				_, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
+				return err
+			}
 			if externalSequence == previousSequence {
+				s.taskQuorumReplayMu.Lock()
+				replaying := s.taskQuorumReplay.target != 0
+				s.taskQuorumReplayMu.Unlock()
+				if replaying {
+					complete, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
+					if err != nil {
+						return err
+					}
+					if !complete {
+						return errors.New("task quorum replay is incomplete")
+					}
+				}
 				matches, err := taskQuorumBatchMatches(t.tx, external)
 				if err != nil {
 					return err
@@ -247,6 +270,11 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			}
 			if externalSequence != previousSequence+1 {
 				return fmt.Errorf("task quorum replica sequence gap: local=%d incoming=%d", previousSequence, externalSequence)
+			}
+		}
+		if len(external) > 0 {
+			if err := taskQuorumChainAdvance(t.tx, externalSequence, externalDigest); err != nil {
+				return err
 			}
 		}
 		for _, mutation := range external {

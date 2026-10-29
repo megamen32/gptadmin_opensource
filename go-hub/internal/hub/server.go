@@ -448,33 +448,36 @@ type shellControl struct {
 }
 
 type shellJob struct {
-	CachedAt          float64              `json:"-"`
-	RequestKey        string               `json:"request_key,omitempty"`
-	Revision          int64                `json:"-"`
-	OwnerID           string               `json:"owner_id,omitempty"`
-	Caller            *taskCaller          `json:"caller,omitempty"`
-	ID                string               `json:"id"`
-	Server            string               `json:"server,omitempty"`
-	TraceID           string               `json:"trace_id,omitempty"`
-	TraceParent       string               `json:"traceparent,omitempty"`
-	ToolName          string               `json:"tool_name,omitempty"`
-	Arguments         map[string]any       `json:"arguments,omitempty"`
-	Cmd               string               `json:"cmd,omitempty"`
-	Cwd               string               `json:"cwd,omitempty"`
-	Timeout           int                  `json:"timeout,omitempty"`
-	Env               map[string]any       `json:"env,omitempty"`
-	SecretValues      []string             `json:"-"`
-	CreatedAt         float64              `json:"created_at"`
-	StartedAt         float64              `json:"started_at,omitempty"`
-	DoneAt            float64              `json:"completed_at,omitempty"`
-	Status            string               `json:"status"`
-	Result            any                  `json:"result,omitempty"`
-	Error             any                  `json:"error,omitempty"`
-	ApprovalID        string               `json:"approval_id,omitempty"`
-	ApprovalActor     string               `json:"-"`
-	ApprovalProfileID string               `json:"-"`
-	FilesystemACL     *filesystemACLPolicy `json:"filesystem_acl,omitempty"`
-	ParentTaskID      string               `json:"parent_task_id,omitempty"`
+	quorumPendingSealed         json.RawMessage
+	quorumPendingDigest         [32]byte
+	quorumPendingUnmaterialized bool
+	CachedAt                    float64              `json:"-"`
+	RequestKey                  string               `json:"request_key,omitempty"`
+	Revision                    int64                `json:"-"`
+	OwnerID                     string               `json:"owner_id,omitempty"`
+	Caller                      *taskCaller          `json:"caller,omitempty"`
+	ID                          string               `json:"id"`
+	Server                      string               `json:"server,omitempty"`
+	TraceID                     string               `json:"trace_id,omitempty"`
+	TraceParent                 string               `json:"traceparent,omitempty"`
+	ToolName                    string               `json:"tool_name,omitempty"`
+	Arguments                   map[string]any       `json:"arguments,omitempty"`
+	Cmd                         string               `json:"cmd,omitempty"`
+	Cwd                         string               `json:"cwd,omitempty"`
+	Timeout                     int                  `json:"timeout,omitempty"`
+	Env                         map[string]any       `json:"env,omitempty"`
+	SecretValues                []string             `json:"-"`
+	CreatedAt                   float64              `json:"created_at"`
+	StartedAt                   float64              `json:"started_at,omitempty"`
+	DoneAt                      float64              `json:"completed_at,omitempty"`
+	Status                      string               `json:"status"`
+	Result                      any                  `json:"result,omitempty"`
+	Error                       any                  `json:"error,omitempty"`
+	ApprovalID                  string               `json:"approval_id,omitempty"`
+	ApprovalActor               string               `json:"-"`
+	ApprovalProfileID           string               `json:"-"`
+	FilesystemACL               *filesystemACLPolicy `json:"filesystem_acl,omitempty"`
+	ParentTaskID                string               `json:"parent_task_id,omitempty"`
 }
 
 type auditEvent struct {
@@ -600,6 +603,8 @@ type Server struct {
 	quorumSnapshotFreeReserve     int64
 	quorumSnapshotDataDir         string
 	taskQuorumMu                  sync.Mutex
+	taskQuorumReplayMu            sync.Mutex
+	taskQuorumReplay              taskQuorumReplay
 	taskQuorumDBMu                sync.RWMutex
 	quorumAuthorityLoadMu         sync.Mutex
 	quorumAuthorityLoadedRevision uint64
@@ -3794,6 +3799,10 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 	defer s.mu.Unlock()
 	if !s.touchShellPollLocked(name, r) {
 		writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
+		return
+	}
+	if err := s.recoverQuorumPendingShellLocked(r.Context(), name); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "queued quorum task recovery unavailable; retry"})
 		return
 	}
 	for {

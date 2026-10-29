@@ -204,12 +204,14 @@ func finalizeNodePeerReceipt(endpoint, target, origin string, data []byte) []byt
 func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, target string, body []byte, endpoint string) bool {
 	target = strings.TrimSpace(target)
 	s.mu.Lock()
+	queueTarget := target
 	local := s.localExecutors[target] != nil
 	if !local {
 		// A child MCP is owned by its embedded parent executor, even though its
 		// public target ID is distinct from the shell executor ID.
 		if child, ok := s.exposedAgentByIDLocked(target); ok && isChildMCPAgent(child) {
-			local = s.localExecutors[firstString(child.Meta, "parent_server_id")] != nil
+			queueTarget = firstString(child.Meta, "parent_server_id")
+			local = s.localExecutors[queueTarget] != nil
 		}
 	}
 	route, routed := s.nodePeerRouteLocked(target)
@@ -271,6 +273,20 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	// A static route can never replace the process's pinned local executor.
 	if local {
 		return false
+	}
+	if !readingJob && (endpoint == "/mcp-relay/call" || endpoint == "/mcp-relay/tools" || endpoint == "/mcp") {
+		useQueue, err := s.quorumExecutorUsesLeaderQueue(r.Context(), queueTarget)
+		if err != nil {
+			fail(http.StatusServiceUnavailable, "quorum executor queue is not ready", false)
+			return true
+		}
+		if useQueue {
+			if r.Header.Get("Authorization") == "" {
+				fail(http.StatusUnauthorized, "node peer calls require the original bearer credential", false)
+				return true
+			}
+			return false
+		}
 	}
 	if !routed && s.nodeConns.get(target) == nil {
 		return false

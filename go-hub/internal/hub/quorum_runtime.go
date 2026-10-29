@@ -294,6 +294,14 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid local executor request"})
 				return
 			}
+			if forwardedExecutor != "" && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/queue/") {
+				release, admitted := s.beginNodeSubmission(forwardedExecutor, "__quorum_queue_poll")
+				if !admitted {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": nodeDrainRetryDetail, "retryable": true})
+					return
+				}
+				defer release()
+			}
 			hubURL, leaderID := s.quorumNode.LeaderForwardURL()
 			target, parseErr := url.Parse(hubURL)
 			if parseErr == nil && (target.Scheme == "https" || target.Scheme == "http") && target.Host != "" && leaderID != "" && target.Host != r.Host {

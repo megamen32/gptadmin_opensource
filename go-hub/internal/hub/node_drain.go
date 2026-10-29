@@ -67,6 +67,14 @@ func (s *Server) NodeDrainStatus() NodeDrainStatus {
 	s.drainMu.Unlock()
 	counters := NodeDrainCounters{ActiveSubmissions: submissions, UnfinishedExecutions: s.unfinishedExecutionCount()}
 	counters.ActiveCallbacks, counters.OutboxPending = s.nodeRuntimeCounterValues()
+	if draining && s.quorumNode != nil && s.quorumPrivateTLS != nil && !s.quorumNode.Status().Leader {
+		// Until a leader-authoritative running-task check is wired, a follower
+		// cannot prove that an already delivered remote lease has finished.
+		counters.UnfinishedExecutions++
+		if reason == "" {
+			reason = "quorum follower in-flight task verification unavailable"
+		}
+	}
 	return NodeDrainStatus{Draining: draining, Reason: reason, Since: drainTimestamp(since), ReadyToStop: draining && counters.allZero(), Counters: counters}
 }
 

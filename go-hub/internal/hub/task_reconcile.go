@@ -36,6 +36,11 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 						j = &shellJob{CachedAt: nowFloat()}
 						s.shellJobs[id] = j
 					}
+					ownedHere := s.taskOwner != nil && p.OwnerID != "" && p.OwnerID == s.taskOwner.id
+					if !ownedHere {
+						j.quorumPendingSealed = append([]byte(nil), p.SealedPending...)
+						j.quorumPendingUnmaterialized = s.cfg.QuorumConfigFile != "" && p.Status == "queued" && p.StartedAt == 0 && len(p.SealedPending) > 0
+					}
 					j.RequestKey = p.RequestKey
 					j.ID = p.ID
 					j.Revision = p.Revision
@@ -101,6 +106,11 @@ func (s *Server) addTaskCancelControlLocked(j *shellJob) {
 // A standby notices exited task creators while serving, without a restart.
 func (s *Server) recoverOrphanedTaskLocked(id string) error {
 	if group := s.relayJobs[id]; group != nil && group.Method == "task/group" {
+		return nil
+	}
+	if job := s.shellJobs[id]; job != nil && s.cfg.QuorumConfigFile != "" && job.Status == "queued" && job.StartedAt == 0 && job.quorumPendingUnmaterialized && len(job.quorumPendingSealed) > 0 {
+		// Keep the encrypted input quarantined until a quorum-confirmed leader
+		// can safely recover it; never fail or dispatch it during startup.
 		return nil
 	}
 	owner, status := "", ""

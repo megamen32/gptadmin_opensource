@@ -118,7 +118,10 @@ func (s *Server) snapshotTaskQuorumState(sequence uint64) (io.ReadCloser, int64,
 	var clusterID string
 	var applied uint64
 	if err := withTaskSnapshotRead(destinationPath, func(tx *sql.Tx) error {
-		return tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &applied)
+		if err := tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &applied); err != nil {
+			return err
+		}
+		return taskQuorumSnapshotChainMatches(tx, sequence)
 	}); err != nil {
 		return nil, 0, err
 	}
@@ -190,7 +193,10 @@ func (s *Server) restoreTaskQuorumState(sequence uint64, source io.Reader, size 
 		if integrity != "ok" {
 			return fmt.Errorf("task quorum snapshot failed SQLite integrity_check: %s", integrity)
 		}
-		return tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &applied)
+		if err := tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &applied); err != nil {
+			return err
+		}
+		return taskQuorumSnapshotChainMatches(tx, sequence)
 	}); err != nil {
 		return err
 	}
@@ -223,7 +229,7 @@ func (s *Server) restoreTaskQuorumState(sequence uint64, source io.Reader, size 
 	// A restored FSM snapshot can precede newer rows already committed to this
 	// local SQLite file. Replace the file's task image with the exact snapshot;
 	// Raft replays its retained log suffix before the node can pass admission.
-	for _, table := range []string{"task_records", "task_controls", "task_requests", "task_quorum_authority", "task_quorum_revisions", "task_quorum_meta"} {
+	for _, table := range []string{"task_records", "task_controls", "task_requests", "task_quorum_authority", "task_quorum_revisions", "task_quorum_meta", "task_quorum_chain"} {
 		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
 			return fmt.Errorf("clear local %s before snapshot restore: %w", table, err)
 		}
@@ -235,6 +241,7 @@ func (s *Server) restoreTaskQuorumState(sequence uint64, source io.Reader, size 
 		`INSERT INTO task_quorum_authority(namespace,row_key,payload,revision) SELECT namespace,row_key,payload,revision FROM quorum_snapshot.task_quorum_authority`,
 		`INSERT INTO task_quorum_revisions(namespace,row_key,revision) SELECT namespace,row_key,revision FROM quorum_snapshot.task_quorum_revisions`,
 		`INSERT INTO task_quorum_meta(id,cluster_id,applied_index,baseline_ready,authority_ready,authority_revision) SELECT id,cluster_id,applied_index,baseline_ready,authority_ready,authority_revision FROM quorum_snapshot.task_quorum_meta`,
+		`INSERT INTO task_quorum_chain(id,sequence,digest) SELECT id,sequence,digest FROM quorum_snapshot.task_quorum_chain`,
 	} {
 		if _, err := tx.Exec(insert); err != nil {
 			return fmt.Errorf("copy task quorum snapshot rows: %w", err)
@@ -243,5 +250,8 @@ func (s *Server) restoreTaskQuorumState(sequence uint64, source io.Reader, size 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit task quorum snapshot restore: %w", err)
 	}
+	s.taskQuorumReplayMu.Lock()
+	s.taskQuorumReplay = taskQuorumReplay{}
+	s.taskQuorumReplayMu.Unlock()
 	return nil
 }

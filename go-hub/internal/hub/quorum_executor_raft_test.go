@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,7 +52,15 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	identity := map[string]string{"server_id": "haos-id", "public_key": "haos-key", "fingerprint": "haos-fp"}
 	leaderHub.agents["shell:haos"] = &Agent{AgentID: "shell:haos", Meta: map[string]any{"approved": true, "server_id": "haos-id", "public_key": "haos-key", "fingerprint": "haos-fp"}}
 	queueHandler := leaderHub.requireShell(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	var blockPoll atomic.Bool
+	pollEntered, pollRelease := make(chan struct{}), make(chan struct{})
+	var releasePoll sync.Once
+	defer releasePoll.Do(func() { close(pollRelease) })
 	handler := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/queue/haos" && r.Method == http.MethodGet && blockPoll.Load() {
+			close(pollEntered)
+			<-pollRelease
+		}
 		if r.URL.Path == "/mcp-relay/call" {
 			leaderHub.forwardNodePeerCall(w, r, "shell:haos", []byte(`{"target":"shell:haos","tool":"shell_exec"}`))
 			return
@@ -179,6 +189,39 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 			t.Fatalf("authorized %s: got %d", tc.path, got)
 		}
 	}
+	blockPoll.Store(true)
+	finishedPoll := make(chan int, 1)
+	go func() { finishedPoll <- check(http.MethodGet, "/queue/haos?timeout=0", "", localToken, "") }()
+	select {
+	case <-pollEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not reach leader")
+	}
+	follower.EnableNodeDrain("maintenance")
+	drain := follower.NodeDrainStatus()
+	if drain.ReadyToStop || drain.Counters.ActiveSubmissions == 0 || drain.Counters.UnfinishedExecutions == 0 {
+		t.Fatal("quorum follower drain did not fence in-flight poll and unknown remote work")
+	}
+	releasePoll.Do(func() { close(pollRelease) })
+	select {
+	case status := <-finishedPoll:
+		if status != http.StatusNoContent {
+			t.Fatalf("admitted poll failed: %d", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("admitted poll did not finish")
+	}
+	blockPoll.Store(false)
+	if got := check(http.MethodGet, "/queue/haos?timeout=0", "", localToken, ""); got != http.StatusServiceUnavailable {
+		t.Fatalf("draining follower accepted new queue poll: %d", got)
+	}
+	if got := check(http.MethodPost, "/queue/haos/result", "{}", localToken, ""); got != http.StatusNoContent {
+		t.Fatalf("draining follower rejected result: %d", got)
+	}
+	if got := check(http.MethodPost, "/heartbeat", `{"name":"haos"}`, localToken, ""); got != http.StatusNoContent {
+		t.Fatalf("draining follower rejected heartbeat: %d", got)
+	}
+	follower.CancelNodeDrain()
 	if got := check(http.MethodGet, "/queue/haos?timeout=0", "", strings.Repeat("x", 32), "shell:haos"); got != http.StatusUnauthorized {
 		t.Fatalf("forged header accepted: %d", got)
 	}

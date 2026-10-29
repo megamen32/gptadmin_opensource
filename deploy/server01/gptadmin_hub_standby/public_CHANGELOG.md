@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.21
+
+- Protect and recover undispatched quorum jobs after a leader change, without replaying started jobs.
+- Route enrolled executor work through the quorum leader and prevent unsafe follower drain.
+
 ## 1.0.20
 
 - Authenticate a follower’s local executor against the quorum leader over enrolled mutual TLS.

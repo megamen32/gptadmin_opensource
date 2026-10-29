@@ -300,6 +300,7 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 	if s.cfg.QuorumConfigFile != "" {
 		for _, ddl := range []string{
 			`CREATE TABLE IF NOT EXISTS task_quorum_revisions (namespace TEXT NOT NULL, row_key TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
+			`CREATE TABLE IF NOT EXISTS task_quorum_chain (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL, digest BLOB NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS task_quorum_meta (id INTEGER PRIMARY KEY CHECK(id=1), cluster_id TEXT NOT NULL DEFAULT '', applied_index INTEGER NOT NULL DEFAULT 0, baseline_ready INTEGER NOT NULL DEFAULT 0, authority_ready INTEGER NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS task_quorum_authority (namespace TEXT NOT NULL, row_key TEXT NOT NULL, payload BLOB NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
 		} {
@@ -362,6 +363,17 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 		return err
 	}
 	if err = s.commitTaskQuorumChanges(store); err != nil {
+		if store.quorumIndex != 0 {
+			// Raft already accepted the batch. Release the failed SQLite
+			// transaction before replaying it; never acknowledge the caller
+			// when the original local commit did not complete.
+			_ = tx.Rollback()
+			s.taskQuorumDBMu.RUnlock()
+			locked = false
+			if reconcileErr := s.applyTaskQuorumMutations(0, store.quorumIndex, store.quorumBatch); reconcileErr != nil {
+				return fmt.Errorf("task local preparation failed after quorum commit (%v); local quorum reconciliation failed: %w", err, reconcileErr)
+			}
+		}
 		return err
 	}
 	if err := tx.Commit(); err != nil {
