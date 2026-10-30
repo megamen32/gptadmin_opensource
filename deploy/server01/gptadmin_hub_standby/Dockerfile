@@ -4,7 +4,7 @@ RUN apk add --no-cache bash ca-certificates curl jq python3 tzdata openssl docke
 COPY gptadmin_hub /usr/local/bin/gptadmin_hub
 COPY gptadmin-node /usr/local/bin/gptadmin-node
 COPY frpc /usr/local/bin/frpc
-COPY gptadmin_failover_watchdog.py gptadmin_frpc_processes.py gptadmin_failover_proxy.py gptadmin_failover_runtime.py gptadmin_failover_config.py gptadmin_quorum_config.py /usr/local/bin/
+COPY gptadmin_failover_watchdog.py gptadmin_frpc_processes.py gptadmin_failover_proxy.py gptadmin_failover_runtime.py gptadmin_failover_config.py gptadmin_quorum_config.py gptadmin_single_writer.py /usr/local/bin/
 COPY failover_config.json failover_state.json /opt/gptadmin/failover/
 COPY build /opt/gptadmin/build
 COPY public /opt/gptadmin/public

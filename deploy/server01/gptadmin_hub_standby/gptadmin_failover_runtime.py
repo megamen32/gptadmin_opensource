@@ -144,10 +144,11 @@ def main() -> int:
         while not stop:
             if proxy.poll() is not None:
                 proxy = start_proxy(options)
-            reset_dead_frpc_cooldown()
-            result = subprocess.run(command(options), check=False)
-            if result.returncode != 0:
-                print(json.dumps({"ok": False, "failover_runtime": "watchdog_failed", "returncode": result.returncode}), flush=True)
+            if options.get("node_mode") != "writer":
+                reset_dead_frpc_cooldown()
+                result = subprocess.run(command(options), check=False)
+                if result.returncode != 0:
+                    print(json.dumps({"ok": False, "failover_runtime": "watchdog_failed", "returncode": result.returncode}), flush=True)
             deadline = time.monotonic() + interval
             while not stop and time.monotonic() < deadline:
                 time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))

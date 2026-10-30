@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.31
+
+- Support an explicitly prepared single-writer Node on HAOS without a quorum dependency.
+
 ## 1.0.30
 
 - Let already accepted local tasks complete during a safe node drain.

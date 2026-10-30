@@ -49,6 +49,7 @@ cp "$SRC/gptadmin_failover_runtime.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$ROOT/scripts/gptadmin_frpc_processes.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_failover_config.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_quorum_config.py" "$OUTPUT/gptadmin_hub_standby/"
+cp "$SRC/gptadmin_single_writer.py" "$OUTPUT/gptadmin_hub_standby/"
 
 APP_VERSION=$(python3 - "$SRC/public_config.yaml" <<'PY'
 from pathlib import Path

@@ -19,7 +19,7 @@ COPY gptadmin-node /usr/local/bin/gptadmin-node
 COPY frpc /usr/local/bin/frpc
 COPY public /opt/gptadmin/public
 COPY gptadmin_failover_watchdog.py gptadmin_frpc_processes.py gptadmin_failover_proxy.py \
-  gptadmin_failover_runtime.py gptadmin_failover_config.py gptadmin_quorum_config.py /usr/local/bin/
+  gptadmin_failover_runtime.py gptadmin_failover_config.py gptadmin_quorum_config.py gptadmin_single_writer.py /usr/local/bin/
 COPY run.sh /run.sh
 
 RUN chmod 0755 /usr/local/bin/gptadmin_hub /usr/local/bin/gptadmin-node /usr/local/bin/frpc \

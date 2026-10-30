@@ -49,6 +49,21 @@ client-facing URL; the writer seed is separate so member heartbeats cannot loop
 through a failover edge that points back to this HAOS node. The existing failover proxy continues
 to serve the canonical OAuth and MCP hostname through local port 9001.
 
+## Single-writer Node
+
+`node_mode: writer` runs the same unified Node as the sole authority on HAOS.
+It must only be enabled after the previous writer is fenced and the complete
+authority, task history, membership and matching credentials are migrated.
+Startup rejects missing or mismatched private handoff evidence, incomplete auth
+snapshots, an invalid membership writer, missing history or mismatched control,
+OAuth, relay and administrator credentials. This guard validates local
+evidence; it does not itself fence another machine or perform a migration.
+
+In this mode the local proxy remains available, but the standby promotion
+watchdog does not run. HAOS becomes a single availability dependency: if HAOS
+is unavailable, another writer must not be started without a separate safe
+handoff. Existing member and legacy modes retain their current behavior.
+
 ## Optional quorum membership
 
 `quorum_enabled` defaults to false. A provisioned voter may enable it only after

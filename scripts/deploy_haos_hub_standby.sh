@@ -49,7 +49,7 @@ rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/build" "$OUT_DIR/public"
 cp "$SRC/Dockerfile" "$SRC/run.sh" "$OUT_DIR/"
 cp "$ROOT/scripts/gptadmin_failover_watchdog.py" "$ROOT/scripts/gptadmin_frpc_processes.py" "$ROOT/scripts/gptadmin_failover_proxy.py" \
-  "$SRC/gptadmin_failover_runtime.py" "$SRC/gptadmin_failover_config.py" "$SRC/gptadmin_quorum_config.py" "$OUT_DIR/"
+  "$SRC/gptadmin_failover_runtime.py" "$SRC/gptadmin_failover_config.py" "$SRC/gptadmin_quorum_config.py" "$SRC/gptadmin_single_writer.py" "$OUT_DIR/"
 cp "$FRPC_BIN" "$OUT_DIR/frpc"
 chmod 0755 "$OUT_DIR/run.sh"
 cat > "$OUT_DIR/public/index.html" <<'HTML'

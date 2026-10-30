@@ -88,20 +88,31 @@ case "$NODE_MODE" in
     fi
     NODE_BINARY=/usr/local/bin/gptadmin_hub
     ;;
-  member)
+  member|writer)
     NODE_BINARY=/usr/local/bin/gptadmin-node
     export SHELL_NAME=haos
-    export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json
-    export GPTADMIN_NODE_SEED="$(jqr '.failover.primary_public_url')"
-    export GPTADMIN_AUTH_MODE=reader
-    export GPTADMIN_READER_OFFLINE_SHARED_SIGNER="$(jqr '.offline_shared_signer')"
-    if [[ "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
+    if [[ "$NODE_MODE" == writer ]]; then
+      if [[ "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
+        echo 'single writer mode cannot enable quorum' >&2
+        exit 1
+      fi
+      python3 /usr/local/bin/gptadmin_single_writer.py /data/config /data/identity/shellmcp_identity.json "$PUBLIC_ORIGIN"
+      export GPTADMIN_AUTH_MODE=writer
+      export GPTADMIN_NODE_PUBLIC_URL="$PUBLIC_ORIGIN"
+      unset GPTADMIN_NODE_IDENTITY GPTADMIN_NODE_SEED GPTADMIN_AUTH_SOURCE_ID
+    else
+      export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json
+      export GPTADMIN_NODE_SEED="$(jqr '.failover.primary_public_url')"
+      export GPTADMIN_AUTH_MODE=reader
+      export GPTADMIN_READER_OFFLINE_SHARED_SIGNER="$(jqr '.offline_shared_signer')"
+    fi
+    if [[ "$NODE_MODE" == member && "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
       export GPTADMIN_QUORUM_CONFIG_FILE=/data/config/quorum/quorum.json
       GPTADMIN_NODE_PUBLIC_URL="$(python3 /usr/local/bin/gptadmin_quorum_config.py "$GPTADMIN_QUORUM_CONFIG_FILE")"
       export GPTADMIN_NODE_PUBLIC_URL
     fi
     mkdir -p /data/config/membership /data/identity /data/spool /data/outbox
-    if [[ ! -s "$GPTADMIN_NODE_IDENTITY" || -z "$GPTADMIN_NODE_SEED" ]]; then
+    if [[ "$NODE_MODE" == member && ( ! -s "$GPTADMIN_NODE_IDENTITY" || -z "$GPTADMIN_NODE_SEED" ) ]]; then
       echo 'member mode requires a joined Node identity and failover.primary_public_url as writer seed' >&2
       exit 1
     fi
@@ -119,8 +130,9 @@ case "$NODE_MODE" in
     export SHELL_PORT=25901
     export SHELL_HEARTBEAT=1
     export SHELLMCP_MCP_CONFIG=/data/shellmcp-mcp.json
-    export GPTADMIN_AUTH_SOURCE_ID="$(jq -r '.writer_id // empty' "$GPTADMIN_NODE_IDENTITY")"
-    python3 - "$GPTADMIN_NODE_IDENTITY" <<'PY_NODE_IDENTITY'
+    if [[ "$NODE_MODE" == member ]]; then
+      export GPTADMIN_AUTH_SOURCE_ID="$(jq -r '.writer_id // empty' "$GPTADMIN_NODE_IDENTITY")"
+      python3 - "$GPTADMIN_NODE_IDENTITY" <<'PY_NODE_IDENTITY'
 import json, re, sys
 with open(sys.argv[1], encoding='utf-8') as handle:
     identity = json.load(handle)
@@ -130,9 +142,10 @@ if (identity.get('schema') != 'gptadmin.node-identity/v1'
         or not identity.get('writer_id') or not identity.get('writer_url')):
     raise SystemExit('member mode requires a valid joined Node identity with pinned writer')
 PY_NODE_IDENTITY
+    fi
     ;;
   *)
-    echo 'node_mode must be legacy or member' >&2
+    echo 'node_mode must be legacy, member or writer' >&2
     exit 2
     ;;
 esac
