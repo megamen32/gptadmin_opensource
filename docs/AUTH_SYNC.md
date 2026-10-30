@@ -47,6 +47,22 @@ later than that timestamp can understate age. Restart never sets age to zero.
 When evaluating a new promotion after a long outage, an expired status is not
 eligible; do not reinterpret this check as an ongoing command-admission gate.
 
+## Final export from a stopped writer
+
+For an explicit single-writer handoff, `auth-snapshot-export
+--stopped-writer-dir <config-dir> --writer-id <existing-writer-id> --output
+<new-private-file>` reads the final active authority slot and emits its next
+generation. Supply `CTL_TOKEN` from the existing protected environment. The
+command takes the writer runtime lock and refuses to run while a local writer
+holds it; it also refuses foreign, pending, read-only or malformed state and
+never overwrites an output. The output contains sensitive authorization
+material and must remain owner-only.
+
+The runtime lock protects the local snapshot only. The operator must separately
+prevent service restarts and fence every other possible writer until the new
+authority is established. Exporting auth alone does not transfer task history,
+membership, registry, instructions, secret ingress or other state.
+
 ## Exact OAuth callback exceptions
 
 `GPTADMIN_OAUTH_ALLOWED_REDIRECTS` is an optional JSON array of exact HTTPS

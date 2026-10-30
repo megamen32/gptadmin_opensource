@@ -17,6 +17,76 @@ import (
 // Server or changing source files. Generation 1 is only for an unseeded reader.
 // The existing CTL value is needed to exclude control aliases as well as kinds.
 func ExportLegacyAuthSnapshot(configDir, writerID, output string, budget int, ctlToken string) error {
+	return exportAuthFiles(configDir, writerID, output, budget, ctlToken, 1)
+}
+
+// ExportStoppedWriterAuthSnapshot exports the last on-disk writer generation.
+// The exclusive runtime lock prevents the local writer from running during the
+// export; the operator must separately fence restarts and other writers.
+func ExportStoppedWriterAuthSnapshot(configDir, writerID, output string, budget int, ctlToken string) error {
+	root, err := filepath.Abs(configDir)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("writer config must be a real directory")
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(output))
+	if err != nil {
+		return err
+	}
+	parent, err = filepath.Abs(parent)
+	if err != nil {
+		return err
+	}
+	if rel, err := filepath.Rel(root, parent); err != nil || rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+		return errors.New("output must be outside the writer config directory")
+	}
+	base := filepath.Join(root, "auth-continuity")
+	if info, err := os.Lstat(base); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("auth continuity must be a real directory")
+	}
+	lockPath := filepath.Join(base, "runtime.lock")
+	if err := regularAuthPath(lockPath, false); err != nil {
+		return err
+	}
+	lock := flock.New(lockPath)
+	held, err := lock.TryLock()
+	if err != nil {
+		return err
+	}
+	if !held {
+		return errors.New("writer auth runtime is still active")
+	}
+	defer lock.Close()
+	var state authSnapshotState
+	if err := regularAuthPath(filepath.Join(base, "state.json"), false); err != nil {
+		return err
+	}
+	if err := readAccessStateJSON(filepath.Join(base, "state.json"), 4096, &state); err != nil {
+		return err
+	}
+	if state.WriterID != writerID || state.Generation == 0 || state.Generation == ^uint64(0) || state.Pending || state.ReadOnly || (state.Slot != 0 && state.Slot != 1) {
+		return errors.New("writer auth state is incomplete, foreign, read-only or exhausted")
+	}
+	slot := filepath.Join(base, fmt.Sprintf("slot-%d", state.Slot))
+	profilePath := filepath.Join(slot, accessProfilesStateFilename)
+	if state.ProfilesPresent {
+		if err := regularAuthPath(profilePath, false); err != nil {
+			return err
+		}
+	} else if _, err := os.Lstat(profilePath); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("unexpected optional auth profile store")
+	}
+	return exportAuthFiles(slot, writerID, output, budget, ctlToken, state.Generation+1)
+}
+
+func exportAuthFiles(configDir, writerID, output string, budget int, ctlToken string, generation uint64) error {
 	if writerID == "" || strings.TrimSpace(writerID) != writerID || ctlToken == "" {
 		return errors.New("explicit existing writer identity and CTL_TOKEN are required")
 	}
@@ -57,7 +127,7 @@ func ExportLegacyAuthSnapshot(configDir, writerID, output string, budget int, ct
 		return errors.New("output must be outside the source config directory")
 	}
 	output = filepath.Join(parent, filepath.Base(output))
-	bundle := authSnapshot{Version: 1, WriterID: writerID, Generation: 1, Tokens: &managedMCPTokenState{}, Clients: &oauthClientsState{}}
+	bundle := authSnapshot{Version: 1, WriterID: writerID, Generation: generation, Tokens: &managedMCPTokenState{}, Clients: &oauthClientsState{}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	locks := []*flock.Flock{}

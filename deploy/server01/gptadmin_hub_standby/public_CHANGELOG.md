@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.32
+
+- Support a locked final authorization export from a stopped writer.
+
 ## 1.0.31
 
 - Support an explicitly prepared single-writer Node on HAOS without a quorum dependency.
