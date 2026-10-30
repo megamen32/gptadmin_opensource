@@ -172,8 +172,9 @@ def build_frpc_config(bundle: dict[str, Any], local_port: int, node_id: str, end
     if frp.get("proxy_url"):
         parts += ["", "[transport]", f"proxyURL = {json.dumps(frp['proxy_url'])}"]
     parts += ["", "[transport.tls]", "enable = true"]
-    if domain:
-        parts.append(f"serverName = {json.dumps(domain)}")
+    # Match the actual FRP endpoint: TLS-sniffing proxies may otherwise
+    # override the destination with the unrelated public routing domain.
+    parts.append(f"serverName = {json.dumps(host)}")
     parts += [
         "",
         "[[proxies]]",

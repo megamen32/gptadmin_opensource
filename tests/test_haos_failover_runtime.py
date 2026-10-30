@@ -99,3 +99,9 @@ def test_reclaim_clears_promotion_cooldown_for_the_next_outage() -> None:
     watchdog = (ROOT / "scripts/gptadmin_failover_watchdog.py").read_text(encoding="utf-8")
 
     assert 'runtime["last_promotion_at"] = 0' in watchdog
+
+
+def test_frp_sni_targets_endpoint_not_public_proxy_domain() -> None:
+    bundle = {"tunnel": {"frp": {"token": "test", "subdomain": "fallback", "domain": "public.example", "endpoints": ["backup=endpoint.example:27001"]}}}
+    config = build_frpc_config(bundle, 9101, "shell:haos")
+    assert "serverName = \"endpoint.example\"" in config
