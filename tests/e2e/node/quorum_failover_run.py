@@ -206,6 +206,7 @@ def main():
             GPTADMIN_HUB_HOST="127.0.0.1", GPTADMIN_HUB_PORT=str(port()), CTL_TOKEN=secrets.token_urlsafe(32),
             SHELL_TOKEN=secrets.token_urlsafe(32), OAUTH_CLIENT_SECRET=signer, ADMIN_PASSWORD=password,
             MCP_RELAY_AGENT_TOKEN=secrets.token_urlsafe(32), PUBLIC_ORIGIN=issuer, MCP_RESOURCE=resource,
+            GPTADMIN_OAUTH_ALLOWED_REDIRECTS=json.dumps(["https://legacy.example/oauth/callback"]),
             GPTADMIN_AUTH_MODE="writer" if i == 0 else "reader", SHELL_NAME=f"node{i}",
             SHELL_IDENTITY_DIR=str(directory), SHELL_SPOOL_DIR=str(directory / "spool"),
             SHELL_OUTBOX_DIR=str(directory / "spool/outbox"), SHELL_DEFAULT_CWD=str(directory),
@@ -338,7 +339,8 @@ def main():
             return status == 503 and data and data.get("role") == "follower" and data.get("leader_id")
         wait_for("old node rejoins before refresh", old_follower_ready, 90)
         # A client and an access policy created on the successor must survive its loss.
-        status, registration2, _ = request(leader, "/register", {"redirect_uris":[callback], "client_name":"second-leader-client"})
+        callback2 = "https://legacy.example/oauth/callback"
+        status, registration2, _ = request(leader, "/register", {"redirect_uris":[callback2], "client_name":"second-leader-client"})
         assert status == 201, f"registration on second leader HTTP {status}"
         basic2 = (registration2["client_id"], registration2["client_secret"])
         connection = http.client.HTTPConnection("127.0.0.1", nodes[leader]["http"], timeout=45)
@@ -363,12 +365,12 @@ def main():
         assert status == 200 and restored_profile.get("id") == "replicated-policy", f"access policy lost HTTP {status}"
         verifier2=secrets.token_urlsafe(48)
         challenge2=base64.urlsafe_b64encode(hashlib.sha256(verifier2.encode()).digest()).decode().rstrip("=")
-        status, _, headers = request(second, "/oauth/authorize", form={"client_id":basic2[0], "redirect_uri":callback, "resource":resource, "scope":"gptadmin.read gptadmin.exec offline_access", "password":password, "code_challenge":challenge2, "code_challenge_method":"S256"})
+        status, _, headers = request(second, "/oauth/authorize", form={"client_id":basic2[0], "redirect_uri":callback2, "resource":resource, "scope":"gptadmin.read gptadmin.exec offline_access", "password":password, "code_challenge":challenge2, "code_challenge_method":"S256"})
         assert status == 302, f"replicated client authorization HTTP {status}"
         code2=urllib.parse.parse_qs(urllib.parse.urlparse(headers["Location"]).query)["code"][0]
-        status, issued2, _ = request(second, "/oauth/token", form={"grant_type":"authorization_code", "code":code2, "redirect_uri":callback, "resource":resource, "code_verifier":verifier2}, basic=basic2)
+        status, issued2, _ = request(second, "/oauth/token", form={"grant_type":"authorization_code", "code":code2, "redirect_uri":callback2, "resource":resource, "code_verifier":verifier2}, basic=basic2)
         assert status == 200 and issued2.get("refresh_token"), f"replicated client exchange HTTP {status}"
-        print("client registration and access policy survive two leader changes", flush=True)
+        print("client registration, exact callback and access policy survive two leader changes", flush=True)
         return
     status, response, _ = rpc(leader, oauth["access_token"], "initialize", init)
     assert status == 200 and response and "result" in response, f"surviving OAuth initialize HTTP {status}"

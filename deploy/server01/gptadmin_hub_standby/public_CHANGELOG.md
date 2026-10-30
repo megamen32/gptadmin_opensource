@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.29
+
+- Support an explicit list of exact HTTPS OAuth callbacks for trusted existing clients.
+
 ## 1.0.28
 
 - Preserve OAuth clients, refresh rotations and access profiles across quorum leader changes.

@@ -49,6 +49,7 @@ for client in CODEX CLAUDE CUSTOM OPENCODE HERMES OPENCLAW VSCODE ZED AVAILABILI
 done
 export PUBLIC_ORIGIN="$(jqr '.public_origin')"
 export GPTADMIN_LEGACY_PUBLIC_ORIGINS="$(jqr '(.legacy_public_origins // []) | join(",")')"
+export GPTADMIN_OAUTH_ALLOWED_REDIRECTS="$(jq -c '.oauth_allowed_redirects // []' "$OPTS")"
 export MCP_RESOURCE="$(jqr '.mcp_resource')"
 export HUB_PUBLIC_URL="$(jqr '.hub_public_url')"
 export HUB_URL="$(jqr '.hub_url')"

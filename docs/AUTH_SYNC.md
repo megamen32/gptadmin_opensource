@@ -47,6 +47,15 @@ later than that timestamp can understate age. Restart never sets age to zero.
 When evaluating a new promotion after a long outage, an expired status is not
 eligible; do not reinterpret this check as an ongoing command-admission gate.
 
+## Exact OAuth callback exceptions
+
+`GPTADMIN_OAUTH_ALLOWED_REDIRECTS` is an optional JSON array of exact HTTPS
+callback URLs, provisioned by an administrator. HAOS exposes the same list
+as `oauth_allowed_redirects`. The default is empty. Entries do not allow
+other hosts, paths, queries or fragments; client registration binding and
+PKCE checks still apply. An invalid list grants no exceptions. Keep voter configurations
+aligned when migrating existing OAuth clients.
+
 ## Offline verification with an explicitly shared signer
 
 Reader nodes normally delegate OAuth JWT verification to their enrolled writer.

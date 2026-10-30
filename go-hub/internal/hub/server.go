@@ -102,11 +102,13 @@ type Config struct {
 	MCPResource              string
 	// LegacyPublicOrigins is an explicit migration allowlist for previously
 	// issued OAuth/JWT origins/resources. It never enables wildcard matching.
-	LegacyPublicOrigins      []string
-	AdminPassword            string
-	OAuthClientSecret        string
-	OAuthKeyID               string
-	EnvFile                  string
+	LegacyPublicOrigins []string
+	AdminPassword       string
+	OAuthClientSecret   string
+	OAuthKeyID          string
+	EnvFile             string
+	// OAuthAllowedRedirects contains exact, operator-provisioned HTTPS callbacks.
+	OAuthAllowedRedirects    []string
 	OAuthPermissiveRedirects bool
 	OAuthPermissiveResources bool
 	// RelaxAuthChecks is an emergency compatibility switch. It preserves
@@ -199,6 +201,7 @@ func FromEnv() Config {
 		OAuthClientSecret:          env("OAUTH_CLIENT_SECRET", ""),
 		OAuthKeyID:                 env("GPTADMIN_JWT_KEY_ID", defaultJWTKeyID),
 		EnvFile:                    env("GPTADMIN_ENV_FILE", "/etc/gptadmin/gptadmin.env"),
+		OAuthAllowedRedirects:      parseExplicitOAuthRedirects(env("GPTADMIN_OAUTH_ALLOWED_REDIRECTS", "")),
 		OAuthPermissiveRedirects:   truthyString(env("OAUTH_PERMISSIVE_REDIRECTS", "0")),
 		OAuthPermissiveResources:   truthyString(env("OAUTH_PERMISSIVE_RESOURCES", "0")),
 		RelaxAuthChecks:            truthyString(env("GPTADMIN_RELAX_AUTH_CHECKS", "0")),
@@ -11108,6 +11111,11 @@ func (s *Server) allowedRedirect(uri string) bool {
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
+	}
+	for _, allowed := range s.cfg.OAuthAllowedRedirects {
+		if allowed == uri && validExplicitOAuthRedirect(allowed) {
+			return true
+		}
 	}
 	if s.sameOriginOAuthCallback(u) {
 		return true
