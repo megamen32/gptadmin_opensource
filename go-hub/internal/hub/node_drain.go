@@ -50,6 +50,9 @@ func (s *Server) EnableNodeDrain(reason string) {
 	if gate, ok := hook.(interface{ SetQueueDraining(bool) }); ok {
 		gate.SetQueueDraining(true)
 	}
+	if gate, ok := hook.(interface{ SetQueueDrainPending(bool) }); ok {
+		gate.SetQueueDrainPending(s.unfinishedExecutionCount() > 0)
+	}
 	if !s.nodeDrainActive {
 		s.nodeDrainActive = true
 		s.nodeDrainSince = time.Now()
@@ -75,9 +78,15 @@ func (s *Server) CancelNodeDrain() {
 // NodeDrainStatus reports the current drain state and readiness counters.
 func (s *Server) NodeDrainStatus() NodeDrainStatus {
 	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
 	draining, reason, since, submissions := s.nodeDrainActive, s.nodeDrainReason, s.nodeDrainSince, s.nodeDrainSubmissions
-	s.drainMu.Unlock()
 	counters := NodeDrainCounters{ActiveSubmissions: submissions, UnfinishedExecutions: s.unfinishedExecutionCount()}
+	s.mu.Lock()
+	hook := s.nodeRuntime
+	s.mu.Unlock()
+	if gate, ok := hook.(interface{ SetQueueDrainPending(bool) }); ok {
+		gate.SetQueueDrainPending(draining && counters.UnfinishedExecutions > 0)
+	}
 	counters.ActiveCallbacks, counters.OutboxPending = s.nodeRuntimeCounterValues()
 	if draining && s.quorumNode != nil && s.quorumPrivateTLS != nil && !s.quorumNode.Status().Leader {
 		// Until a leader-authoritative running-task check is wired, a follower
@@ -114,6 +123,9 @@ func (s *Server) SetNodeRuntimeCounters(counters NodeRuntimeCounters) {
 	defer s.drainMu.Unlock()
 	if gate, ok := counters.(interface{ SetQueueDraining(bool) }); ok {
 		gate.SetQueueDraining(s.nodeDrainActive)
+	}
+	if gate, ok := counters.(interface{ SetQueueDrainPending(bool) }); ok {
+		gate.SetQueueDrainPending(s.nodeDrainActive && s.unfinishedExecutionCount() > 0)
 	}
 	s.mu.Lock()
 	s.nodeRuntime = counters
@@ -165,9 +177,10 @@ func (s *Server) nodeDrainBlocked() bool {
 // beginNodeSubmission atomically admits one gated submission. The drain check
 // and the in-flight increment share one lock, so a submission admitted before
 // EnableNodeDrain always holds ready_to_stop open until it is released.
-// Receipt reads and read-only tools pass through ungated and uncounted.
+// Receipt and local Hub reads pass through; executor reads are gated because
+// they also create queued work and must not enter after the drain fence.
 func (s *Server) beginNodeSubmission(target, toolName string) (func(), bool) {
-	if nodePeerJobTool(toolName) || isReadOnlyTool(target, toolName) {
+	if nodePeerJobTool(toolName) || ((target == "hub" || target == "control:hub") && isReadOnlyTool(target, toolName)) {
 		return func() {}, true
 	}
 	s.drainMu.Lock()

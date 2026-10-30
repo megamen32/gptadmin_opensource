@@ -78,12 +78,24 @@ func (s *Server) OutboxPending() int {
 func (s *Server) SetQueueDraining(draining bool) {
 	s.callbackMu.Lock()
 	s.queueDraining = draining
+	if !draining {
+		s.queueDrainPending = false
+	}
 	s.callbackMu.Unlock()
 }
+
+// SetQueueDrainPending permits polling for already admitted work while
+// direct callbacks remain fenced. Each poll remains visible to drain.
+func (s *Server) SetQueueDrainPending(pending bool) {
+	s.callbackMu.Lock()
+	s.queueDrainPending = s.queueDraining && pending
+	s.callbackMu.Unlock()
+}
+
 func (s *Server) beginQueuePoll() bool {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
-	if s.queueDraining || s.callbackClosed {
+	if (s.queueDraining && !s.queueDrainPending) || s.callbackClosed {
 		return false
 	}
 	s.queuePollsInFlight++

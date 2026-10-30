@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.30
+
+- Let already accepted local tasks complete during a safe node drain.
+
 ## 1.0.29
 
 - Support an explicit list of exact HTTPS OAuth callbacks for trusted existing clients.

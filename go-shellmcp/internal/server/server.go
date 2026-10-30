@@ -267,6 +267,7 @@ type Server struct {
 	callbackWG            sync.WaitGroup
 	callbackClosed        bool
 	queueDraining         bool
+	queueDrainPending     bool
 	queuePollsInFlight    int
 	callbackCancels       map[string]context.CancelFunc
 	callbackCancelled     map[string]bool
