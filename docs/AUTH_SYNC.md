@@ -73,6 +73,9 @@ it a successor cannot validate existing signed access tokens or mint new
 ones. Provision it through the protected node environment, verify equality
 without printing the key, and rotate all voters together. A shared signer
 allows each voter to mint tokens, so enroll only fully trusted nodes.
+A voter that will accept the same interactive OAuth login also needs the
+same protected `ADMIN_PASSWORD` as the current writer. The auth bundle does
+not provision this password; verify the intended login without revealing it.
 
 In configured quorum mode, changes to managed credentials, OAuth clients and
 access profiles are majority-committed before the writer acknowledges the
