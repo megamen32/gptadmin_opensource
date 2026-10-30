@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.26
+
+- Route failover FRP TLS to the selected server through SNI-sniffing proxies.
+
 ## 1.0.25
 
 - Retry a bounded transient procfs argument read for a newly launched FRP child, while preserving strict owner checks.
