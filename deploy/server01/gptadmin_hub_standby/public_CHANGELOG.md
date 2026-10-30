@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.28
+
+- Preserve OAuth clients, refresh rotations and access profiles across quorum leader changes.
+- Advance control-snapshot revisions when authority data changes.
+
 ## 1.0.27
 
 - Add opt-in offline verification of OAuth access tokens for trusted HAOS nodes with a provisioned shared signer.

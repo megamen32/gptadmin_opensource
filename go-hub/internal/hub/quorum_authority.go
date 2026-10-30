@@ -43,30 +43,33 @@ func (s *Server) ensureQuorumAuthorityMaterialized(ctx context.Context) error {
 		}
 	}
 
-	image, err := s.readQuorumAuthorityImage()
-	if err != nil {
-		return err
-	}
-	if image.AppliedIndex != node.ExternalAppliedIndex() {
-		return errors.New("quorum authority snapshot is behind the committed task state")
-	}
-	decoded := make(map[string]json.RawMessage, len(image.Values))
-	for domain, key := range quorumRequiredAuthorityRecords {
-		name := domain + "/" + key
-		payload, ok := image.Values[name]
-		if !ok {
-			return fmt.Errorf("quorum authority snapshot is missing %s", name)
+	// Fence admitted auth mutations before reading the committed image, not
+	// merely while applying it. Otherwise an acknowledged refresh can commit
+	// after the read and then be replaced by this older image.
+	if err := func() error {
+		s.authMu.Lock()
+		defer s.authMu.Unlock()
+		image, err := s.readQuorumAuthorityImage()
+		if err != nil {
+			return err
 		}
-		// The row revision is stored in the envelope alongside the payload.
-		// readQuorumAuthorityImage already decrypted and authenticated it.
-		decoded[domain] = payload
-	}
-
-	previousApplying := s.taskQuorumApplying.Swap(true)
-	applyErr := s.materializeQuorumAuthority(decoded)
-	s.taskQuorumApplying.Store(previousApplying)
-	if applyErr != nil {
-		return applyErr
+		if image.AppliedIndex != node.ExternalAppliedIndex() {
+			return errors.New("quorum authority snapshot is behind the committed task state")
+		}
+		decoded := make(map[string]json.RawMessage, len(image.Values))
+		for domain, key := range quorumRequiredAuthorityRecords {
+			name := domain + "/" + key
+			payload, ok := image.Values[name]
+			if !ok {
+				return fmt.Errorf("quorum authority snapshot is missing %s", name)
+			}
+			decoded[name] = payload
+		}
+		previousApplying := s.taskQuorumApplying.Swap(true)
+		defer s.taskQuorumApplying.Store(previousApplying)
+		return s.materializeQuorumAuthority(decoded)
+	}(); err != nil {
+		return err
 	}
 	if err := node.VerifyLeader(ctx); err != nil {
 		return err
@@ -324,15 +327,13 @@ func (s *Server) materializeQuorumAuthority(values map[string]json.RawMessage) e
 		authBundle.Generation++
 		authBundle.WriterID = s.authLocalID
 	}
-	s.authMu.Lock()
+	// The caller holds authMu exclusively across reading and applying the image.
 	s.mu.Lock()
 	if err := s.commitAuthSnapshotLocked(authBundle, false); err != nil {
 		s.mu.Unlock()
-		s.authMu.Unlock()
 		return fmt.Errorf("materialize auth state: %w", err)
 	}
 	s.mu.Unlock()
-	s.authMu.Unlock()
 
 	var membership *nodeMembershipState
 	if err := json.Unmarshal(values["membership/writer"], &membership); err != nil {
@@ -353,6 +354,53 @@ func (s *Server) materializeQuorumRegistry(state persistentRegistryState) error 
 	localTokens := make(map[string]string, len(s.localExecutorTokens))
 	for id, token := range s.localExecutorTokens {
 		localTokens[id] = token
+	}
+	if state.Agents == nil {
+		state.Agents = make(map[string]Agent)
+	}
+	for id, identity := range s.localExecutors {
+		// Pending self-enrollment also uses localExecutors with an empty
+		// identity; it must never become an approved pinned executor here.
+		if identity["server_id"] == "" || identity["public_key"] == "" || identity["fingerprint"] == "" {
+			continue
+		}
+		if committed, exists := state.Agents[id]; exists {
+			if approved, recorded := committed.Meta["approved"]; recorded && !truthy(approved) {
+				continue
+			}
+			conflicting := false
+			for key, value := range identity {
+				raw, recorded := committed.Meta[key]
+				old, valid := raw.(string)
+				if recorded && (!valid || (old != "" && old != value)) {
+					conflicting = true
+					break
+				}
+			}
+			if conflicting {
+				continue
+			}
+		}
+		local := state.Agents[id]
+		meta := make(map[string]any, len(local.Meta)+len(identity)+2)
+		for key, value := range local.Meta {
+			meta[key] = value
+		}
+		meta["approved"], meta["local_executor"] = true, true
+		for key, value := range identity {
+			meta[key] = value
+		}
+		local.AgentID = id
+		if local.Name == "" {
+			local.Name = "Shell: " + strings.TrimPrefix(id, "shell:")
+		}
+		local.Kind, local.Transport, local.Status = "virtual_shell", "long_poll", "online"
+		local.LastSeen, local.OfflineSince, local.StaleSince = nowFloat(), 0, 0
+		if len(local.Capabilities) == 0 {
+			local.Capabilities = []string{"shell", "system", "tasks", "logs"}
+		}
+		local.Meta = meta
+		state.Agents[id] = local
 	}
 	state.LocalExecutorTokens = localTokens
 	err := withStateFileLock(path, func() error { return writeAccessStateJSON(path, state, 16<<20) })
@@ -437,7 +485,22 @@ func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {
 	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil {
 		return errors.New("this quorum voter has no valid public Hub URL")
 	}
+	if state.Revision == 0 || state.WriterID == "" {
+		return errors.New("authoritative membership epoch is invalid")
+	}
+	// Legacy membership stores predate epochs and start at zero. Give the
+	// already-authoritative writer its first epoch before recording a change.
+	if state.Epoch == 0 {
+		if state.Revision == ^uint64(0) {
+			return errors.New("authoritative membership revision overflow")
+		}
+		state.Epoch = 1
+		state.Revision++
+	}
 	if state.WriterID != writerID {
+		if state.Epoch == ^uint64(0) || state.Revision == ^uint64(0) {
+			return errors.New("authoritative membership epoch or revision overflow")
+		}
 		state.WriterID = writerID
 		state.Epoch++
 		state.Revision++
@@ -453,6 +516,24 @@ func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {
 	member.LocalID = s.authLocalID
 	member.Build = GitCommit
 	s.membershipMu.Lock()
+	// Heartbeat leases are deliberately absent from the replicated authority
+	// image. Retain only leases observed by this same writer in this epoch,
+	// and only while the enrolled identity and generation are unchanged.
+	if current := s.membership; current != nil && current.WriterID == writerID && current.Epoch == state.Epoch {
+		for id, incoming := range state.Nodes {
+			previous := current.Nodes[id]
+			if incoming == nil || previous == nil || (incoming.State != nodeStateReady && incoming.State != nodeStateOffline) ||
+				previous.State != nodeStateReady || !previous.LeaseExpires.After(s.now()) ||
+				incoming.KeyHash == "" || incoming.KeyHash != previous.KeyHash || incoming.Generation != previous.Generation {
+				continue
+			}
+			incoming.State = previous.State
+			incoming.LastSeen = previous.LastSeen
+			incoming.LeaseExpires = previous.LeaseExpires
+			incoming.Build = previous.Build
+			incoming.SnapshotRev = previous.SnapshotRev
+		}
+	}
 	s.membership = state
 	err = s.persistMembershipStateLocked(state)
 	s.membershipMu.Unlock()

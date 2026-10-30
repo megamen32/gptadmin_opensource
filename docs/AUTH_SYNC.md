@@ -64,6 +64,16 @@ snapshot contract, revocations made after the last successful sync cannot be
 seen while the writer is unavailable. This option does not make the reader an
 OAuth writer and does not provide refresh-token rotation or new client grants.
 
+## Quorum authority writes
+
+In configured quorum mode, changes to managed credentials, OAuth clients and
+access profiles are majority-committed before the writer acknowledges the
+local store update. A successor materializes the committed authority before
+serving client requests. If local persistence fails after quorum commit, the
+writer attempts to restore the previous image and fences itself for recovery.
+Outside quorum, writer control snapshots advance their generation when the
+underlying authority contents change, so members can apply the new state.
+
 ## Configuration
 
 The generic service template is `deploy/systemd/gptadmin-auth-sync@.service`.

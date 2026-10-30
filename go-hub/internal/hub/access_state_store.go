@@ -187,7 +187,13 @@ func (s *Server) saveManagedMCPStateLocked() error {
 			return err
 		}
 		if !reflect.DeepEqual(latest, merged) {
-			if err := writeAccessStateJSON(path, managedMCPTokenState{Tokens: merged}, 8<<20); err != nil {
+			candidate := managedMCPTokenState{Tokens: merged}
+			rollback, err := s.quorumPrepareAuthMutationLocked(&candidate, nil, nil)
+			if err != nil {
+				return err
+			}
+			if err := writeAccessStateJSON(path, candidate, 8<<20); err != nil {
+				s.quorumRollbackAuthMutationLocked(rollback)
 				return err
 			}
 		}
@@ -246,7 +252,13 @@ func (s *Server) saveOAuthClientsStateLocked() error {
 			return errors.New("too many OAuth clients")
 		}
 		if !reflect.DeepEqual(latest, merged) {
-			if err := writeAccessStateJSON(path, oauthClientsState{Clients: merged}, oauthClientsStateMaxBytes); err != nil {
+			candidate := oauthClientsState{Clients: merged}
+			rollback, err := s.quorumPrepareAuthMutationLocked(nil, &candidate, nil)
+			if err != nil {
+				return err
+			}
+			if err := writeAccessStateJSON(path, candidate, oauthClientsStateMaxBytes); err != nil {
+				s.quorumRollbackAuthMutationLocked(rollback)
 				return err
 			}
 		}

@@ -366,25 +366,42 @@ func (s *Server) updateAccessProfiles(mutator func(map[string]AccessProfile) err
 		_ = ReleaseUpdateLock(lock)
 		return nil, err
 	}
-	err = saveAccessProfilesState(path, profiles)
-	if err != nil {
+	// Serialize the complete authority image with token/client writes. Quorum
+	// must commit this profile change before the local file is acknowledged.
+	s.mu.Lock()
+	if err := s.authWriteErrorLocked(); err != nil {
+		s.mu.Unlock()
 		_ = ReleaseUpdateLock(lock)
 		return nil, err
 	}
-	if err := ReleaseUpdateLock(lock); err != nil {
+	candidate := accessProfilesState{Profiles: cloneAccessProfiles(profiles)}
+	rollback, err := s.quorumPrepareAuthMutationLocked(nil, nil, &candidate)
+	if err != nil {
+		s.mu.Unlock()
+		_ = ReleaseUpdateLock(lock)
 		return nil, err
 	}
-	s.mu.Lock()
+	if err = saveAccessProfilesState(path, profiles); err != nil {
+		s.quorumRollbackAuthMutationLocked(rollback)
+		s.mu.Unlock()
+		_ = ReleaseUpdateLock(lock)
+		return nil, err
+	}
 	s.accessProfiles = cloneAccessProfiles(profiles)
 	if s.authContinuityEnabled() {
 		s.authState.ProfilesPresent = true
 		if err := writeAccessStateJSON(s.authStatePath(), s.authState, 4096); err != nil {
 			s.authState.Pending = true
+			s.quorumAuthorityActiveWriter.Store(false)
 			s.mu.Unlock()
+			_ = ReleaseUpdateLock(lock)
 			return nil, err
 		}
 	}
 	s.mu.Unlock()
+	if err := ReleaseUpdateLock(lock); err != nil {
+		return nil, err
+	}
 	return profiles, nil
 }
 

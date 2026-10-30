@@ -417,9 +417,9 @@ func (s *Server) rebuildMembershipRoutes() {
 		if len(member.Endpoints) == 0 && !(s.nodeIdentity != nil && s.nodeIdentity.WriterID == member.NodeID && heartbeatWriterURL != "") {
 			continue
 		}
-		endpoint := member.Endpoints[0]
-		if len(member.Endpoints) == 0 {
-			endpoint = heartbeatWriterURL
+		endpoint := heartbeatWriterURL
+		if len(member.Endpoints) > 0 {
+			endpoint = member.Endpoints[0]
 		}
 		routes[member.Name] = nodePeerRoute{URL: endpoint, ConnectTo: member.ConnectTo}
 	}
@@ -991,20 +991,12 @@ func (s *Server) nodeMembershipControlSnapshot(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusConflict, map[string]any{"detail": "control snapshots require auth continuity"})
 		return
 	}
-	// authSnapshotGate already holds the auth admission read lock for this
-	// request; taking authMu again here would self-deadlock the handler.
-	s.mu.Lock()
-	bundle, err := s.readAuthSlot(s.authState)
-	initialized := s.authInitialized
-	generation := s.authState.Generation
-	s.mu.Unlock()
-	if err != nil || !initialized {
+	bundle, err := s.currentWriterControlBundle()
+	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "auth store unavailable"})
 		return
 	}
-	bundle.WriterID = s.authLocalID
-	s.excludeSnapshotControlCredentials(&bundle)
-	snapshot := controlSnapshot{Revision: generation, Generation: generation, Bundle: bundle}
+	snapshot := controlSnapshot{Revision: bundle.Generation, Generation: bundle.Generation, Bundle: bundle}
 	s.instructionSetsMu.RLock()
 	if len(s.instructionSets) > 0 {
 		snapshot.InstructionSets = &instructionSetsState{Sets: cloneInstructionSets(s.instructionSets)}
@@ -1068,7 +1060,7 @@ func (s *Server) startMembershipLoops() {
 		s.membershipDone.Add(1)
 		go s.membershipWriterLoop()
 	}
-	if s.quorumNode == nil && s.nodeIdentity != nil && s.membership == nil {
+	if s.nodeIdentity != nil && (s.quorumNode != nil || s.membership == nil) {
 		s.membershipDone.Add(1)
 		go s.membershipMemberLoop()
 	}
@@ -1209,6 +1201,27 @@ func (s *Server) memberNodeKey() string {
 
 func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	writer := strings.TrimSuffix(s.memberWriterURL(), "/")
+	if s.quorumNode != nil {
+		if s.quorumNode.Status().Leader {
+			return
+		}
+		var leaderID string
+		writer, leaderID = s.quorumNode.LeaderForwardURL()
+		if writer == "" || leaderID == "" {
+			return
+		}
+		if s.quorumPrivateTLS != nil {
+			transport, err := s.quorumPrivateTLS.transport(leaderID)
+			if err != nil {
+				return
+			}
+			defer transport.CloseIdleConnections()
+			client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
+		} else {
+			// A previous writer's IP pin must not redirect a newly elected leader.
+			client = newNodeMembershipClient("")
+		}
+	}
 	if writer == "" {
 		return
 	}

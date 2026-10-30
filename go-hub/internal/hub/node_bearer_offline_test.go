@@ -58,6 +58,14 @@ func TestReaderOfflineSharedSignerAdmission(t *testing.T) {
 	if member.mcpAuth(w, r) {
 		t.Fatal("foreign issuer accepted")
 	}
+	wrongResource, err := writer.signJWT(map[string]any{"sub": "admin", "scope": "gptadmin.read", "iss": writer.cfg.PublicOrigin, "aud": "https://foreign.example/mcp", "resource": "https://foreign.example/mcp", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "kid": writer.jwtKeyID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w = request(wrongResource)
+	if member.mcpAuth(w, r) {
+		t.Fatal("foreign audience/resource accepted")
+	}
 	member.authState.Pending = true
 	r, w = request(token)
 	if member.mcpAuth(w, r) {

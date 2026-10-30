@@ -166,6 +166,7 @@ func (s *Server) taskQuorumReplicaReady() error {
 func (s *Server) quorumVoterPromotionLoop() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	lastAuthorityError := ""
 	for {
 		select {
 		case <-s.taskRuntimeStop:
@@ -182,9 +183,14 @@ func (s *Server) quorumVoterPromotionLoop() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		if err := s.ensureQuorumAuthorityMaterialized(ctx); err != nil {
+			if err.Error() != lastAuthorityError {
+				log.Printf("quorum authority materialization failed: %v", err)
+				lastAuthorityError = err.Error()
+			}
 			cancel()
 			continue
 		}
+		lastAuthorityError = ""
 		if err := s.taskQuorumReplicaReady(); err != nil {
 			cancel()
 			continue
@@ -340,6 +346,20 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		if err := s.ensureQuorumAuthorityMaterialized(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum authority state is not ready on this leader"})
 			return
+		}
+		// Bootstrap must let enrolled voters renew their leases before the
+		// ordinary three-voter admission gate can open. The heartbeat handler
+		// still authenticates the member and refuses disabled identities.
+		if r.Method == http.MethodPost && r.URL.Path == "/admin/api/nodes/heartbeat" && s.quorumNode.Status().VoterCount < quorumMinimumVoters && s.taskQuorumReplicaReady() == nil {
+			member := s.nodeMemberAuth(r)
+			if member != nil {
+				for _, peer := range s.quorumPeers {
+					if peer.ID == member.NodeID {
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
+			}
 		}
 		if err := s.taskQuorumReady(); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum Hub state is not ready"})
