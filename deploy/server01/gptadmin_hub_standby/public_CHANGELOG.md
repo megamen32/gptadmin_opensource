@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.25
+
+- Retry a bounded transient procfs argument read for a newly launched FRP child, while preserving strict owner checks.
+
 ## 1.0.24
 
 - Report the failing FRP ownership check without exposing process arguments.

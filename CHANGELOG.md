@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse delivered profile-instruction receipts for the same authenticated credential and profile by default, avoiding repeated receipt transmission on each Hub call.
 
 ### Fixed
+- Failover promotion tolerates a briefly incomplete procfs argument read for its own unreaped FRP child, then still requires exact executable, configuration and process ownership.
 - FRP ownership failures now identify failed checks without disclosing process arguments; strict ownership enforcement is unchanged.
 - A drained Node package update can set an explicit HTTPS legacy-origin allowlist with automatic environment rollback on failure.
 - The HAOS app now passes an explicit legacy-origin allowlist into bearer issuer and resource validation for credentials issued before a public-origin migration.

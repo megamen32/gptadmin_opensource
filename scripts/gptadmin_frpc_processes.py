@@ -12,6 +12,10 @@ import stat
 import time
 
 
+class ProcessArgumentsPending(ValueError):
+    """A live just-execed child temporarily has incomplete /proc arguments."""
+
+
 def config_paths(base, count):
     base = Path(base).absolute()
     if not 1 <= count <= 16:
@@ -56,7 +60,10 @@ def inspect(pid, binary, configs, expected_started=None):
         elif args[0] != str(binary).encode() or args[1] != b'-c' or args[2] not in allowed:
             failures.append('argument-binding')
         if failures:
-            raise ValueError('recorded pid does not own this FRP client: ' + ','.join(failures))
+            message = 'recorded pid does not own this FRP client: ' + ','.join(failures)
+            if failures == ['argument-count']:
+                raise ProcessArgumentsPending(message)
+            raise ValueError(message)
         return {'pid': pid, 'started': started, 'config': args[2].decode()}
     except (FileNotFoundError, ProcessLookupError):
         return None

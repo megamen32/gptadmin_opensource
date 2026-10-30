@@ -19,9 +19,9 @@ import sys
 import time
 from datetime import datetime
 try:
-    from gptadmin_frpc_processes import config_paths, read_records, write_records, inspect, stop_records
+    from gptadmin_frpc_processes import config_paths, read_records, write_records, inspect, stop_records, ProcessArgumentsPending
 except ModuleNotFoundError:
-    from scripts.gptadmin_frpc_processes import config_paths, read_records, write_records, inspect, stop_records
+    from scripts.gptadmin_frpc_processes import config_paths, read_records, write_records, inspect, stop_records, ProcessArgumentsPending
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -275,6 +275,19 @@ def demote(args: argparse.Namespace, runtime: dict[str, Any], dry_run: bool) -> 
     runtime["last_demote_at"] = time.time()
 
 
+def inspect_new_frpc_child(proc, binary, paths):
+    # The owned, unreaped Popen child cannot have its PID reused. Linux can
+    # briefly expose an incomplete /proc cmdline immediately after exec.
+    # Retry only that observation, then require every normal ownership check.
+    for attempt in range(20):
+        try:
+            return inspect(proc.pid, binary, paths)
+        except ProcessArgumentsPending:
+            if proc.poll() is not None or attempt == 19:
+                raise
+            time.sleep(0.005)
+
+
 def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any], node: dict[str, Any], dry_run: bool) -> None:
     local_port = int(node.get("local_hub_port") or ((bundle.get("tunnel") or {}).get("frp") or {}).get("local_port") or 9001)
     if args.hub_service and args.hub_service != "none":
@@ -318,7 +331,7 @@ def promote(args: argparse.Namespace, cfg: dict[str, Any], bundle: dict[str, Any
                 previous = list(records)
                 try:
                     proc = subprocess.Popen([args.frpc_bin, "-c", str(path)], start_new_session=True)
-                    record = inspect(proc.pid, args.frpc_bin, config_paths)
+                    record = inspect_new_frpc_child(proc, args.frpc_bin, config_paths)
                     if record is None:
                         raise RuntimeError('new FRP client exited before owner registration')
                     records.append(record)

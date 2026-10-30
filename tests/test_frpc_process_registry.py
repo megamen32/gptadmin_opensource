@@ -137,6 +137,32 @@ class FRPCRegistryTests(unittest.TestCase):
                     children[0].terminate.assert_not_called()
                     self.assertEqual(len(json.loads(pidfile.read_text())['clients']),1)
 
+    def test_new_child_retries_only_transient_incomplete_arguments(self):
+        from unittest.mock import Mock
+        proc=Mock(pid=71);proc.poll.return_value=None
+        pending=owned.ProcessArgumentsPending('transient argument-count')
+        expected={'pid':71,'started':'9','config':'/lease/a'}
+        with patch.object(watchdog,'inspect',side_effect=[pending,pending,expected]) as read, \
+             patch.object(watchdog.time,'sleep') as sleep:
+            self.assertEqual(watchdog.inspect_new_frpc_child(proc,'/bin/frpc',[Path('/lease/a')]),expected)
+            self.assertEqual(read.call_count,3);self.assertEqual(sleep.call_count,2)
+        with patch.object(watchdog,'inspect',side_effect=ValueError('wrong executable')) as read, \
+             patch.object(watchdog.time,'sleep') as sleep:
+            with self.assertRaisesRegex(ValueError,'wrong executable'):
+                watchdog.inspect_new_frpc_child(proc,'/bin/frpc',[Path('/lease/a')])
+            read.assert_called_once();sleep.assert_not_called()
+        with patch.object(watchdog,'inspect',side_effect=pending) as read, \
+             patch.object(watchdog.time,'sleep'):
+            with self.assertRaises(owned.ProcessArgumentsPending):
+                watchdog.inspect_new_frpc_child(proc,'/bin/frpc',[Path('/lease/a')])
+            self.assertEqual(read.call_count,20)
+        proc.poll.return_value=1
+        with patch.object(watchdog,'inspect',side_effect=pending) as read, \
+             patch.object(watchdog.time,'sleep') as sleep:
+            with self.assertRaises(owned.ProcessArgumentsPending):
+                watchdog.inspect_new_frpc_child(proc,'/bin/frpc',[Path('/lease/a')])
+            read.assert_called_once();sleep.assert_not_called()
+
     def test_unreaped_child_is_killed_or_keeps_durable_hold(self):
         from unittest.mock import Mock
         import subprocess
