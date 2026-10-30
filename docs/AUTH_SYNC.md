@@ -66,6 +66,14 @@ OAuth writer and does not provide refresh-token rotation or new client grants.
 
 ## Quorum authority writes
 
+Every voter that can become the OAuth writer must have the same protected
+`OAUTH_CLIENT_SECRET` as the current writer before quorum is enabled. The
+replicated authority bundle does not provision this signing secret: without
+it a successor cannot validate existing signed access tokens or mint new
+ones. Provision it through the protected node environment, verify equality
+without printing the key, and rotate all voters together. A shared signer
+allows each voter to mint tokens, so enroll only fully trusted nodes.
+
 In configured quorum mode, changes to managed credentials, OAuth clients and
 access profiles are majority-committed before the writer acknowledges the
 local store update. A successor materializes the committed authority before
