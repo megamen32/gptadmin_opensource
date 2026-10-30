@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -313,9 +314,18 @@ def refresh_installed_helpers(verified_root):
             temp.unlink(missing_ok=True)
 
 
+def get_release_index(deadline):
+    # A broken chunked response is not a valid index. Retry the entire read
+    # once within the original deadline; never use a partial response.
+    try:
+        return get(API, 2 * 1024**2, deadline)
+    except http.client.IncompleteRead:
+        return get(API, 2 * 1024**2, deadline)
+
+
 def select_release_with_fallback(arch, deadline):
     try:
-        releases = json.loads(get(API, 2 * 1024**2, deadline))
+        releases = json.loads(get_release_index(deadline))
         release, asset, short = select_release(releases, arch)
         source = resolve_tag(release['tag_name'], deadline)
         if not source.startswith(short):
