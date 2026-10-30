@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.33
+
+- Preserve both Nodes' task histories during a single-writer handoff.
+
 ## 1.0.32
 
 - Support a locked final authorization export from a stopped writer.

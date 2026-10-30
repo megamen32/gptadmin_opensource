@@ -63,6 +63,17 @@ prevent service restarts and fence every other possible writer until the new
 authority is established. Exporting auth alone does not transfer task history,
 membership, registry, instructions, secret ingress or other state.
 
+## Combining task history for a single-writer handoff
+
+After both participating Nodes have been stopped and fenced, take consistent
+SQLite snapshots of each task database. Run `scripts/gptadmin_handoff_merge.py`
+with `--primary`, `--other`, and a new `--output` in an owner-only
+directory. It copies the primary snapshot, imports distinct task records,
+controls and idempotency receipts, and validates schema, integrity and the
+derived task-status index. Identical duplicates are retained once; conflicting
+records fail the operation without changing either input. The utility does not
+stop a running service, replay work or migrate authorization or other domains.
+
 ## Exact OAuth callback exceptions
 
 `GPTADMIN_OAUTH_ALLOWED_REDIRECTS` is an optional JSON array of exact HTTPS
