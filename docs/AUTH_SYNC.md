@@ -47,6 +47,23 @@ later than that timestamp can understate age. Restart never sets age to zero.
 When evaluating a new promotion after a long outage, an expired status is not
 eligible; do not reinterpret this check as an ongoing command-admission gate.
 
+## Offline verification with an explicitly shared signer
+
+Reader nodes normally delegate OAuth JWT verification to their enrolled writer.
+An HAOS member may explicitly enable `offline_shared_signer` only when its
+`OAUTH_CLIENT_SECRET` is securely provisioned to match the writer. This grants
+that node the ability to mint JWTs as well as verify them; use it only for an
+already trusted node, and rotate both copies together. The default is disabled.
+
+After a writer connection failure or a 409 caused by the writer URL routing back
+to the reader, the node verifies the JWT signature, expiry, issuer, audience,
+resource and scope locally, using the intact snapshot from its enrolled writer
+and the locally replicated access profile. Explicit writer denial, TLS identity
+failure and invalid writer proof never trigger this path. Like the existing
+snapshot contract, revocations made after the last successful sync cannot be
+seen while the writer is unavailable. This option does not make the reader an
+OAuth writer and does not provide refresh-token rotation or new client grants.
+
 ## Configuration
 
 The generic service template is `deploy/systemd/gptadmin-auth-sync@.service`.

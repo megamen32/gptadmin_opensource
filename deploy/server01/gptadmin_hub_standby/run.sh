@@ -93,6 +93,7 @@ case "$NODE_MODE" in
     export GPTADMIN_NODE_IDENTITY=/data/config/membership/node-identity.json
     export GPTADMIN_NODE_SEED="$(jqr '.failover.primary_public_url')"
     export GPTADMIN_AUTH_MODE=reader
+    export GPTADMIN_READER_OFFLINE_SHARED_SIGNER="$(jqr '.offline_shared_signer')"
     if [[ "$(jq -r '.quorum_enabled // false' "$OPTS")" == true ]]; then
       export GPTADMIN_QUORUM_CONFIG_FILE=/data/config/quorum/quorum.json
       GPTADMIN_NODE_PUBLIC_URL="$(python3 /usr/local/bin/gptadmin_quorum_config.py "$GPTADMIN_QUORUM_CONFIG_FILE")"

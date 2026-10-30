@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,7 +24,10 @@ type nodeBearerAdmission struct {
 	Claims          map[string]any `json:"claims"`
 }
 
-type nodeBearerAdmissionError struct{ unavailable bool }
+type nodeBearerAdmissionError struct {
+	unavailable     bool
+	offlineEligible bool
+}
 
 func (e *nodeBearerAdmissionError) Error() string {
 	if e.unavailable {
@@ -183,9 +187,10 @@ func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byt
 	return data, http.StatusOK
 }
 
-// The reader retains its own local profile/target/tool checks. Only the
-// writer's cryptographic bearer verification is delegated; failures never
-// fall back to unsigned claims or another credential/host.
+// The reader retains its own local profile/target/tool checks. The normal
+// path delegates cryptographic verification to the enrolled writer. A trusted
+// shared-signer reader may separately verify a JWT during a transport outage;
+// it never falls back to unsigned claims or another credential/host.
 func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[string]any, error) {
 	unavailable := &nodeBearerAdmissionError{unavailable: true}
 	if !validNodeAdmissionToken(token) {
@@ -226,11 +231,22 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 	request.GetBody = nil
 	response, err := s.nodeBearerAdmissionClient.Do(request)
 	if err != nil {
-		return nil, unavailable
+		// A failed certificate, TLS protocol error, or malformed peer response is
+		// not an outage: never downgrade authentication after such failures.
+		var dial *net.OpError
+		connectionUnavailable := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &dial) && dial.Op == "dial")
+		if r.Context().Err() != nil || !connectionUnavailable {
+			return nil, unavailable
+		}
+		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true}
 	}
 	defer response.Body.Close()
 	if response.StatusCode == 401 || response.StatusCode == 403 {
 		return nil, &nodeBearerAdmissionError{}
+	}
+	if response.StatusCode == http.StatusConflict {
+		// The public writer address can return to this reader after ingress failover.
+		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true}
 	}
 	if response.StatusCode != 200 {
 		return nil, unavailable
@@ -251,4 +267,20 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 func nodeBearerUnavailable(err error) bool {
 	var failure *nodeBearerAdmissionError
 	return errors.As(err, &failure) && failure.unavailable
+}
+
+// A locally provisioned shared signer may be used only against an intact,
+// fully applied snapshot belonging to the node's enrolled writer. The caller
+// still verifies signature, expiry, issuer, audience, resource and local policy.
+func (s *Server) readerOfflineAuthReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.authState
+	if !s.authInitialized || !state.ReadOnly || state.Pending || state.Generation == 0 ||
+		s.nodeIdentity == nil || s.nodeIdentity.WriterID == "" ||
+		s.nodeIdentity.WriterID != s.cfg.AuthSourceID || state.WriterID != s.nodeIdentity.WriterID {
+		return false
+	}
+	bundle, err := s.readAuthSlot(state)
+	return err == nil && authSnapshotDigest(bundle) == state.Digest
 }

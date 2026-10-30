@@ -81,13 +81,15 @@ type Config struct {
 	// the writer URL hostname for verified TLS/SNI.
 	NodeWriterConnectTo string
 	// NodePublicURL is the routable origin this node advertises in membership.
-	NodePublicURL            string
-	AuthMode                 string
-	AuthSourceID             string
-	AuthSnapshotReserveBytes int64
-	AuthSnapshotBudget       int
-	DefaultTimeout           time.Duration
-	PollMaxTimeout           time.Duration
+	NodePublicURL string
+	AuthMode      string
+	// Shared signer is opt-in because this node can also mint writer tokens.
+	ReaderOfflineSharedSigner bool
+	AuthSourceID              string
+	AuthSnapshotReserveBytes  int64
+	AuthSnapshotBudget        int
+	DefaultTimeout            time.Duration
+	PollMaxTimeout            time.Duration
 	// ActionSyncWait bounds how long the HTTP Actions facade waits for a
 	// queued shell/child MCP operation before returning a durable job handle.
 	// Tool/command timeout remains an independent argument.
@@ -180,6 +182,7 @@ func FromEnv() Config {
 		NodeWriterConnectTo:        strings.TrimSpace(env("GPTADMIN_NODE_WRITER_CONNECT_TO", "")),
 		NodePublicURL:              normalizePublicURL(env("GPTADMIN_NODE_PUBLIC_URL", "")),
 		AuthMode:                   strings.ToLower(strings.TrimSpace(env("GPTADMIN_AUTH_MODE", "legacy"))),
+		ReaderOfflineSharedSigner:  truthyString(env("GPTADMIN_READER_OFFLINE_SHARED_SIGNER", "0")),
 		StandaloneAutoTrust:        truthyString(env("GPTADMIN_STANDALONE", "0")),
 		AuthSourceID:               strings.TrimSpace(env("GPTADMIN_AUTH_SOURCE_ID", "")),
 		AuthSnapshotReserveBytes:   authSnapshotReserveFromEnv(),
@@ -10781,7 +10784,14 @@ func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]
 			return nil, errors.New("invalid managed MCP bearer")
 		}
 		if s.effectiveAuthMode() == "reader" {
-			return s.verifyNodeWriterBearer(r, token)
+			delegated, err := s.verifyNodeWriterBearer(r, token)
+			if err == nil {
+				return delegated, nil
+			}
+			var failure *nodeBearerAdmissionError
+			if !s.cfg.ReaderOfflineSharedSigner || !errors.As(err, &failure) || !failure.offlineEligible || !s.readerOfflineAuthReady() {
+				return nil, err
+			}
 		}
 		var err error
 		claims, err = s.verifyJWT(token)

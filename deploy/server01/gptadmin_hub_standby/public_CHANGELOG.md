@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.27
+
+- Add opt-in offline verification of OAuth access tokens for trusted HAOS nodes with a provisioned shared signer.
+
 ## 1.0.26
 
 - Route failover FRP TLS to the selected server through SNI-sniffing proxies.

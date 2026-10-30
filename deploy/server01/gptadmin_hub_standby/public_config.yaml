@@ -1,5 +1,5 @@
 name: GPTAdmin Hub Standby
-version: "1.0.26"
+version: "1.0.27"
 slug: gptadmin_hub_standby
 description: "GPTAdmin Hub with an optional unified HAOS Node and automatic failover"
 url: "https://github.com/megamen32/gptadmin-haos-addons"
@@ -31,6 +31,7 @@ map:
 options:
   node_mode: "legacy"
   quorum_enabled: false
+  offline_shared_signer: false
   hub_host: "0.0.0.0"
   hub_port: 9001
   legacy_public_origins: []
@@ -53,6 +54,7 @@ options:
 schema:
   node_mode: str
   quorum_enabled: bool
+  offline_shared_signer: bool
   hub_host: str
   hub_port: int
   legacy_public_origins:
