@@ -37,8 +37,14 @@ func TestBrowserAliasRoutesToPhysicalRelayWithLogicalOwner(t *testing.T) {
 	if len(list) != 2 || firstString(list[0], "name") != "list_pages" || firstString(list[1], "name") != "take_snapshot" {
 		t.Fatalf("retarget tool leaked: %#v", list)
 	}
+	// A versioned GPTAdmin Node advertises its child MCP registry separately
+	// from an old standalone ShellMCP heartbeat. Missing heartbeat metadata
+	// must not make a verified fixed route vanish from the logical catalog.
 	s.agents["shell:node-44"].Meta = map[string]any{"mcp_agents": []any{}}
-	if len(s.browserMCPAliasesLocked()) != 0 {
-		t.Fatal("alias survives removal of physical MCP")
+	s.agents["shell:node-44"].Status = "stale"
+	fallback := s.browserMCPAliasesLocked()
+	if len(fallback) != 1 || fallback[0].Status != "online" ||
+		fallback[0].Transport != "streamable-http" {
+		t.Fatalf("logical Browser disappeared with stale backing heartbeat: %#v", fallback)
 	}
 }

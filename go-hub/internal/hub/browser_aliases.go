@@ -82,13 +82,14 @@ func (s *Server) browserMCPAliasesLocked() []Agent {
 				break
 			}
 		}
+		// Node-owned child MCPs can be reachable through GPTAdmin's node
+		// transport even when an older standalone ShellMCP heartbeat has not
+		// advertised them. The root-owned route file pins the child ref;
+		// mcp_tools/mcp_call independently validate it on the upstream Node.
 		if descriptor == nil {
-			continue
+			descriptor = map[string]any{"transport": "streamable-http"}
 		}
-		status := physical.Status
-		if owner.Status != "online" {
-			status = owner.Status
-		}
+		status := owner.Status
 		health := mapValue(descriptor["health"])
 		protocol := mapValue(health["protocol"])
 		if firstString(protocol, "state") == "failed" {
