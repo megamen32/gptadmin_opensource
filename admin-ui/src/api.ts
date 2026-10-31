@@ -771,9 +771,23 @@ export async function sampleServerResources(serverId: string, signal?: AbortSign
   return findResourcePayload(await responseJSON(response), serverId);
 }
 
+/** Read the canonical MCP Tasks ledger via the authenticated admin session.
+ * Browser cookies are never forwarded to /mcp or turned into a bearer token. */
+export async function getTaskReceipt(taskId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  if (!/^[a-zA-Z0-9._-]{1,256}$/.test(taskId)) throw new ApiError(400, "Некорректный идентификатор задачи.");
+  const response = await request(`/admin/api/tasks/${encodeURIComponent(taskId)}`, { signal });
+  const task = asRecord(await responseJSON(response), "Hub вернул некорректную задачу MCP.");
+  if (task.taskId !== taskId || task.resultType !== "complete") throw new ApiError(502, "Неверный ответ MCP Tasks.");
+  return task;
+}
+
 export async function readServerResourceJob(jobId: string, serverId: string, signal?: AbortSignal): Promise<ResourceSampleResult> {
-  const response = await request(`/mcp-relay/job/${encodeURIComponent(jobId)}?detail=full`, { signal });
-  return findResourcePayload(await responseJSON(response), serverId);
+  const task = await getTaskReceipt(jobId, signal);
+  if (task.status === "working" || task.status === "input_required") {
+    return { server_id: serverId, status: "pending", job_id: jobId };
+  }
+  if (task.status !== "completed") throw new ApiError(502, "Измерение ресурсов завершилось без результата.");
+  return findResourcePayload(task, serverId);
 }
 
 export async function getLatestJobForServer(serverId: string, signal?: AbortSignal): Promise<HistoricalJobSummary | null> {

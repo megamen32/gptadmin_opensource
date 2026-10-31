@@ -19,7 +19,7 @@ function mockActivity() {
       return new Response(JSON.stringify({ events: filtered, total: filtered.length, clients: { grepmesh: 1, opencode: 1 } }), { status: 200 });
     }
     if (url.pathname === "/admin/api/jobs") return new Response(JSON.stringify({ recent: jobs }), { status: 200 });
-    if (url.pathname === "/mcp-relay/job/job-1") return new Response(JSON.stringify({ status: "completed", arguments: { cmd: "true" }, result: { stdout: "ok" } }), { status: 200 });
+    if (url.pathname === "/admin/api/tasks/job-1") return new Response(JSON.stringify({ resultType: "complete", taskId: "job-1", status: "completed", result: { stdout: "ok" } }), { status: 200 });
     throw new Error("unexpected " + String(input));
   });
 }

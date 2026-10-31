@@ -20,8 +20,8 @@ it("opens the exact historical task linked from an offline node while listing hi
     if (path === "/admin/api/jobs?server_id=shell%3Ahost-a&limit=1") {
       return response({ count: 1, recent: [{ job_id: "newer-task-8", server_id: serverId, status: "completed", tool_name: "system_inspect" }] });
     }
-    if (path === "/mcp-relay/job/historical-task-7?detail=full") {
-      return response({ job_id: "historical-task-7", server_id: serverId, status: "failed", response: { error: "historical result retained" } });
+    if (path === "/admin/api/tasks/historical-task-7") {
+      return response({ resultType: "complete", taskId: "historical-task-7", status: "failed", error: { message: "historical result retained" } });
     }
     throw new Error(`Unexpected request ${path}`);
   });
@@ -31,5 +31,5 @@ it("opens the exact historical task linked from an offline node while listing hi
   expect(await screen.findByText(/historical result retained/)).toBeInTheDocument();
   expect(screen.getByText("shell:host-a", { selector: "code" })).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Ahost-a&limit=1", expect.objectContaining({ credentials: "same-origin" }));
-  expect(fetchMock).toHaveBeenCalledWith("/mcp-relay/job/historical-task-7?detail=full", expect.objectContaining({ credentials: "same-origin" }));
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/tasks/historical-task-7", expect.objectContaining({ credentials: "same-origin" }));
 });

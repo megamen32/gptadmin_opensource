@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ErrorNotice, PageHeader } from "./ui/Primitives";
+import { getTaskReceipt } from "./api";
 
 type ToolDef = { name?: string; description?: string };
 type Server = { server_id?: string; status?: string };
@@ -59,7 +60,7 @@ export default function ToolsScreen() {
         setResult(data);
       } else {
         if (!jobId.trim()) throw new Error("Укажите job_id");
-        setResult(await jsonRequest(`/mcp-relay/job/${encodeURIComponent(jobId.trim())}?detail=full`));
+        setResult(await getTaskReceipt(jobId.trim()));
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Операция не выполнена");

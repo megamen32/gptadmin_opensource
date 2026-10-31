@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
+import { getTaskReceipt } from "./api";
 import "./ActivityScreen.css";
 
 type AuditEntry = { time: string; name: string; fields?: Record<string, unknown> };
@@ -236,11 +237,7 @@ export default function ActivityScreen({ mode = "timeline" }: { mode?: "timeline
     if (!isJobId(op.jobId)) { setDetailLoading(false); return; }
     setDetailLoading(true);
     try {
-      const response = await fetch("/mcp-relay/job/" + encodeURIComponent(op.jobId) + "?detail=full", { credentials: "same-origin" });
-      if (!response.ok) throw new Error("Детали задачи: HTTP " + response.status);
-      const content = await response.text();
-      let data: unknown = content;
-      try { data = JSON.parse(content); } catch { /* show original result */ }
+      const data = await getTaskReceipt(op.jobId);
       if (detailGeneration.current === generation) setJobDetail(data);
     } catch (caught) {
       if (detailGeneration.current === generation) setDetailError(caught instanceof Error ? caught.message : "Данные задачи недоступны");

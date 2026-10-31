@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getLatestJobForServer } from "./api";
+import { getLatestJobForServer, getTaskReceipt } from "./api";
 import { formatTimestamp, friendlyActionName, friendlyServerName, jobStatusLabel, timestampTitle } from "./ui/format";
 import { ErrorNotice, PageHeader, StatusBadge } from "./ui/Primitives";
 
@@ -77,11 +77,7 @@ export default function JobsScreen() {
     setSelected(job); setDetail(null); setDetailLoading(true); setError(null);
     try {
       if (!job.job_id) throw new Error("У задачи нет job_id");
-      const response = await fetch(`/mcp-relay/job/${encodeURIComponent(job.job_id)}?detail=full`, { credentials: "same-origin", headers: { Accept: "application/json" } });
-      const text = await response.text();
-      let data: unknown = text;
-      try { data = text ? JSON.parse(text) : {}; } catch { /* keep text */ }
-      if (!response.ok) throw new Error(`Hub вернул HTTP ${response.status}`);
+      const data: unknown = await getTaskReceipt(job.job_id);
       if (typeof data === "object" && data !== null) {
         const record = data as Record<string, unknown>;
         setSelected((current) => current?.job_id !== job.job_id ? current : {

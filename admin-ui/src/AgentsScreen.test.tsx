@@ -145,7 +145,7 @@ it("polls an admitted resource job by its existing id and renders measured value
     const path = String(input);
     if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: serverId, name: "Shell: host-a", status: "online" }] });
     if (path === "/admin/api/servers/resources") return response({ server_id: serverId, status: "pending", job_id: "resource-job-1" });
-    if (path === "/mcp-relay/job/resource-job-1?detail=full") return response({ server_id: serverId, status: "completed", response: { structuredContent: { result: summary } } });
+    if (path === "/admin/api/tasks/resource-job-1") return response({ resultType: "complete", taskId: "resource-job-1", status: "completed", result: { structuredContent: { result: summary } } });
     if (path === "/admin/api/agents/connect-info") return response({ detail: "not needed" });
     throw new Error(`Unexpected request ${path}`);
   });
@@ -157,5 +157,5 @@ it("polls an admitted resource job by its existing id and renders measured value
   expect(screen.getByText(/10 ГиБ из 16 ГиБ/)).toBeInTheDocument();
   expect(screen.getByText(/40 ГиБ из 100 ГиБ/)).toBeInTheDocument();
   await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => input === "/admin/api/servers/resources")).toHaveLength(1));
-  expect(fetchMock).toHaveBeenCalledWith("/mcp-relay/job/resource-job-1?detail=full", expect.anything());
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/tasks/resource-job-1", expect.anything());
 });

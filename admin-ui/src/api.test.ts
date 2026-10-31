@@ -149,18 +149,17 @@ describe("admin API contracts", () => {
       root_filesystem: { status: "available", mount: "/", total_bytes: 100, used_bytes: 40, free_bytes: 60 },
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse(pending)).mockResolvedValueOnce(jsonResponse({
-      server_id: "shell:host-a", status: "running", job_id: "resource-job",
+      resultType: "complete", taskId: "resource-job", status: "working",
     })).mockResolvedValueOnce(jsonResponse({
-      server_id: "shell:host-a",
-      status: "completed",
-      response: { structuredContent: { server: "host-a", result: summary } },
+      resultType: "complete", taskId: "resource-job", status: "completed",
+      result: { structuredContent: { server: "host-a", result: summary } },
     }));
 
     await expect(sampleServerResources("shell:host-a")).resolves.toEqual(pending);
     await expect(readServerResourceJob("resource-job", "shell:host-a")).resolves.toEqual(pending);
     await expect(readServerResourceJob("resource-job", "shell:host-a")).resolves.toMatchObject(summary);
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/mcp-relay/job/resource-job?detail=full", expect.objectContaining({ credentials: "same-origin" }));
-    expect(fetchMock).toHaveBeenNthCalledWith(3, "/mcp-relay/job/resource-job?detail=full", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/admin/api/tasks/resource-job", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/admin/api/tasks/resource-job", expect.objectContaining({ credentials: "same-origin" }));
     expect(fetchMock.mock.calls.filter(([input]) => input === "/admin/api/servers/resources")).toHaveLength(1);
   });
 
