@@ -42,7 +42,9 @@ func finishChildSchema(t *testing.T, s *Server, id string, result any) {
 func TestChildSchemaNativeDispatchUsesParentAndOneID(t *testing.T) {
 	s, child := childSchemaFixture(t, t.TempDir())
 	r := httptest.NewRequest("POST", "/mcp", nil)
-	response := mapValue(s.appsSDKSchemaForRequest(r, map[string]any{"target": child.AgentID}))
+	// The historical durable receipt remains readable for already-issued IDs.
+	// New explicit tools/list requests use the direct read-only path.
+	response := s.childSchemaForRequest(r, child)
 	id := firstString(response, "job_id")
 	if id == "" || response["owner_target"] != "shell:fixture" {
 		t.Fatalf("missing explicit owner receipt: %v", response)

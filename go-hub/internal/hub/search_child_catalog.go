@@ -16,6 +16,7 @@ import (
 // refresh only on a cold entry, descriptor change, or TTL expiry.
 const (
 	childSearchSchemaTTL        = 5 * time.Minute
+	childSearchErrorTTL         = 20 * time.Second
 	childSearchColdLimit        = 4
 	childSearchWarmLimit        = 96
 	childSearchConcurrency      = 6
@@ -317,9 +318,9 @@ func cloneChildSearchTools(tools []map[string]any) []map[string]any {
 	return out
 }
 
-// startChildSearchRefresh deduplicates concurrent cold/expired requests. The
-// relay call itself performs current profile, connection-owner, and approved
-// parent checks before dispatch; cache readers repeat current authorization.
+// startChildSearchRefresh deduplicates cold/expired reads without durable
+// Jobs. The owner performs current profile and connection checks; cache
+// readers reauthorize every tool before exposing it.
 func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Request, child Agent, key, fingerprint string) <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -336,12 +337,20 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 	entry.refreshing, entry.done = true, make(chan struct{})
 	done := entry.done
 	request := r
+	var cancel context.CancelFunc
 	if r != nil {
-		request = r.Clone(r.Context())
+		// A search can finish before a cold refresh. Retain authenticated
+		// request values but bound the read independently of the client socket.
+		var ctx context.Context
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), directChildSchemaTimeout)
+		request = r.Clone(ctx)
 	}
 	go func() {
+		if cancel != nil {
+			defer cancel()
+		}
 		childSearchRefreshSlots <- struct{}{}
-		response := s.childSchemaForRequest(request, child)
+		response := s.directChildSchemaForRequest(request, child)
 		<-childSearchRefreshSlots
 		var tools []map[string]any
 		failure := ""
@@ -402,12 +411,24 @@ func boundedSearchChildTools(tools []map[string]any) []map[string]any {
 	return out
 }
 
+// A failed read should be retried soon without stampeding a temporarily
+// unreachable host. Valid successful schemas can keep their longer TTL.
+func childSearchEntryFresh(entry *childSearchSchemaEntry, fingerprint string) bool {
+	if entry == nil || entry.fingerprint != fingerprint || entry.loadedAt.IsZero() {
+		return false
+	}
+	ttl := childSearchSchemaTTL
+	if entry.err != "" {
+		ttl = childSearchErrorTTL
+	}
+	return time.Since(entry.loadedAt) < ttl
+}
+
 // childSearchCatalogForRequest returns cached schemas for currently visible,
-// enabled child targets. On cold search it queues refreshes for up to
-// childSearchWarmLimit targets. At most childSearchConcurrency relay calls run
-// at once; the request waits for a short shared window while queued refreshes
-// continue in the background. `coverage` reports failed and pending refreshes;
-// callers must not imply complete child coverage when it is false.
+// enabled child targets. Cold searches start bounded in-memory read-only
+// refreshes (never durable Jobs). At most childSearchConcurrency reads run at
+// once; the request waits for a short shared window. `coverage` reports
+// failed and pending refreshes; callers must not imply complete coverage.
 func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter string) (rows []map[string]any, coverage map[string]any) {
 	coverage = map[string]any{"complete": true, "status": "complete", "missing": []string{}, "pending": 0, "failed": 0, "failure_reasons": map[string]string{}}
 	if targetFilter != "" && !strings.HasPrefix(targetFilter, "child:") && !strings.HasPrefix(targetFilter, "mcp:") {
@@ -450,7 +471,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		key, fingerprint := childSearchCacheKey(r, child), childSearchFingerprint(s, child)
 		cache.mu.Lock()
 		entry := cache.entries[key]
-		fresh := entry != nil && entry.fingerprint == fingerprint && time.Since(entry.loadedAt) < childSearchSchemaTTL && entry.loadedAt.After(time.Time{})
+		fresh := childSearchEntryFresh(entry, fingerprint)
 		cache.mu.Unlock()
 		if !fresh && len(refreshes) < childSearchWarmLimit {
 			refreshes = append(refreshes, refresh{cache.startChildSearchRefresh(s, r, child, key, fingerprint)})

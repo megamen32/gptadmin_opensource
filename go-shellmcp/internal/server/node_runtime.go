@@ -67,6 +67,14 @@ func (s *Server) ActiveCallbacks() int {
 	return len(s.callbackCancels) + s.queuePollsInFlight
 }
 
+// DirectChildTools reads a child MCP schema without enqueueing a ShellMCP
+// callback or durable GPTAdmin Job. The caller (Hub) authorizes the target and
+// connection; mcpChildTools still validates the child's generation/scope and
+// enforces its tool allowlist.
+func (s *Server) DirectChildTools(ctx context.Context, args map[string]any) (map[string]any, error) {
+	return s.mcpChildTools(ctx, args)
+}
+
 // OutboxPending reports undelivered outbox entries, the same depth the
 // metrics endpoint publishes.
 func (s *Server) OutboxPending() int {

@@ -202,3 +202,22 @@ func TestSearchFailedChildRefreshIsReportedAsUnreachable(t *testing.T) {
 		t.Fatalf("completed failed refresh got a retry hint despite no pending work: %#v", coverage)
 	}
 }
+
+// Failed schema reads must not poison the cache for five minutes. No new
+// durable task is created on a retry: only a bounded read-only refresh runs.
+func TestDirectChildSearchErrorCacheExpiresQuickly(t *testing.T) {
+	now := time.Now()
+	entry := &childSearchSchemaEntry{fingerprint: "generation-1", loadedAt: now.Add(-25 * time.Second), err: "owner temporarily unavailable"}
+	if childSearchEntryFresh(entry, "generation-1") {
+		t.Fatal("failed schema remained cached beyond short error TTL")
+	}
+	entry.loadedAt = now.Add(-10 * time.Second)
+	if !childSearchEntryFresh(entry, "generation-1") {
+		t.Fatal("short failure TTL did not suppress repeated requests")
+	}
+	entry.err = ""
+	entry.loadedAt = now.Add(-4 * time.Minute)
+	if !childSearchEntryFresh(entry, "generation-1") {
+		t.Fatal("successful schema lost its normal five-minute cache")
+	}
+}

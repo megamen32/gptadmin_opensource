@@ -10453,7 +10453,9 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 		child, exists := s.exposedAgentByIDLocked(target)
 		s.mu.Unlock()
 		if exists && isChildMCPAgent(child) {
-			result = s.childSchemaForRequest(r, child)
+			// Explicit tools/list is discovery, not executable work. Fail
+			// promptly if the owner is unavailable; never allocate a Job.
+			result = s.directChildSchemaForRequest(r, child)
 		} else {
 			waitBudget := s.cfg.DefaultTimeout
 			if r != nil {
