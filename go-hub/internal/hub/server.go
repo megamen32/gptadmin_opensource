@@ -1833,6 +1833,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
+	mux.HandleFunc("/admin/api/console", s.requireCtl(s.adminConsole))
 	mux.HandleFunc("/admin/api/operations", s.requireCtl(s.adminOperations))
 	mux.HandleFunc("/admin/api/connection-debug", s.requireCtl(s.connectionDebug))
 	mux.HandleFunc("/admin/api/approvals", s.requireCtl(s.adminApprovals))
@@ -5422,7 +5423,13 @@ func (s *Server) auditToolDecision(r *http.Request, target, toolName string, arg
 			actor = "admin_session"
 		}
 	}
+	argumentKeys := make([]string, 0, len(args))
+	for key := range args {
+		argumentKeys = append(argumentKeys, key)
+	}
+	sort.Strings(argumentKeys)
 	fields := map[string]any{
+		"argument_keys":    argumentKeys,
 		"actor":            actor,
 		"profile_id":       AccessProfileIDFromRequest(r),
 		"target":           target,
@@ -5432,6 +5439,15 @@ func (s *Server) auditToolDecision(r *http.Request, target, toolName string, arg
 		"result_reference": resultReference,
 		"status":           status,
 		"access_mode":      requestAccessMode(r),
+	}
+	if r != nil {
+		fields["method"] = r.Method
+		// Audit only known static MCP endpoints, never an arbitrary path
+		// which could contain user-supplied identifiers or credentials.
+		switch r.URL.Path {
+		case "/mcp", "/mcp-relay/call", "/mcp-relay/call_mcp_tool", "/mcp-prompt/call":
+			fields["endpoint"] = r.URL.Path
+		}
 	}
 	if reason != "" {
 		fields["policy_reason"] = reason
@@ -6888,7 +6904,12 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	all, err := s.auditSnapshot()
+	var all []auditEvent
+	if r.URL.Query().Get("recent") == "1" {
+		all, err = s.auditSnapshot(5000)
+	} else {
+		all, err = s.auditSnapshot()
+	}
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "recent audit history unavailable"})
 		return
@@ -6897,9 +6918,41 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 	actorFilter := strings.TrimSpace(query.Get("actor"))
 	targetFilter := strings.TrimSpace(query.Get("target"))
 	textFilter := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	// Timeline clients are discovered from actual audited requests; hiding a noisy
+	// client must not exhaust the page before quieter clients can be shown.
+	since := int64(0)
+	if raw := strings.TrimSpace(query.Get("since")); raw != "" {
+		since, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || since < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "since must be a unix timestamp"})
+			return
+		}
+	}
+	recent := query.Get("recent") == "1"
+	excluded := make(map[string]bool)
+	for _, client := range query["exclude_client"] {
+		if client != "" {
+			excluded[client] = true
+		}
+	}
+	clientCounts := make(map[string]int)
 	filtered := make([]auditEvent, 0, len(all))
 	for _, event := range all {
 		if nameFilter != "" && event.Name != nameFilter {
+			continue
+		}
+		if since > 0 {
+			when, parseErr := time.Parse(time.RFC3339Nano, event.Time)
+			if parseErr != nil || when.Unix() < since {
+				continue
+			}
+		}
+		client := firstString(event.Fields, "client_id", "actor", "subject")
+		if client == "" {
+			client = "unattributed"
+		}
+		clientCounts[client]++
+		if excluded[client] {
 			continue
 		}
 		if actorFilter != "" && firstString(event.Fields, "actor", "client_id", "subject") != actorFilter {
@@ -6925,7 +6978,13 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 		end = total
 	}
 	items := filtered[offset:end]
-	response := map[string]any{"events": items, "count": len(items), "total": total, "offset": offset, "audit_log": "durable-jsonl"}
+	if recent {
+		items = make([]auditEvent, 0, end-offset)
+		for i := offset; i < end; i++ {
+			items = append(items, filtered[total-1-i])
+		}
+	}
+	response := map[string]any{"events": items, "count": len(items), "total": total, "offset": offset, "audit_log": "durable-jsonl", "clients": clientCounts}
 	if end < total {
 		response["next_offset"] = end
 	}

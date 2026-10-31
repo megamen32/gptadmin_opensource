@@ -88,10 +88,15 @@ func readAuditTail(path string, limit int) ([]auditEvent, error) {
 	return events, nil
 }
 
-func (s *Server) auditSnapshot() ([]auditEvent, error) {
+func (s *Server) auditSnapshot(recentWindow ...int) ([]auditEvent, error) {
 	s.mu.Lock()
 	current := append([]auditEvent(nil), s.audit...)
 	limit := s.hubSettingIntLocked("audit_max_events")
+	// The activity timeline needs a broader durable tail when a noisy caller
+	// occupies the ordinary audit window. Do not change the memory retention.
+	if len(recentWindow) > 0 && recentWindow[0] > limit {
+		limit = min(recentWindow[0], 5000)
+	}
 	path := s.auditStatePath()
 	s.mu.Unlock()
 	history, err := readAuditTail(path, limit)

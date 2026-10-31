@@ -6,6 +6,8 @@ import ResourcesScreen from "./ResourcesScreen";
 import ToolsScreen from "./ToolsScreen";
 import RawScreen from "./RawScreen";
 import AuditScreen from "./AuditScreen";
+import ActivityScreen from "./ActivityScreen";
+import ConsoleScreen from "./ConsoleScreen";
 import OverviewScreen from "./OverviewScreen";
 import AccessOperations from "./AccessOperations";
 import McpManageScreen from "./McpManageScreen";
@@ -60,7 +62,7 @@ import {
 } from "./api";
 import "./styles.css";
 
-type View = "overview" | "audit" | "raw" | "tools" | "resources" | "agents" | "jobs" | "mcpmanage" | "failover" | "proxyroute" | "security" | "operations" | "instructions" | "profiles" | "clients" | "webhooks" | "auth" | "capabilities";
+type View = "overview" | "activity" | "requests" | "console" | "audit" | "raw" | "tools" | "resources" | "agents" | "jobs" | "mcpmanage" | "failover" | "proxyroute" | "security" | "operations" | "instructions" | "profiles" | "clients" | "webhooks" | "auth" | "capabilities";
 type LoadState = "loading" | "ready" | "empty" | "error" | "stale";
 
 type NavigationSection = {
@@ -77,8 +79,7 @@ const primaryNavigation: NavigationSection[] = [
   { id: "infrastructure", label: "Серверы", target: "agents", views: ["agents", "mcpmanage", "resources", "failover", "proxyroute"] },
   { id: "access", label: "Доступ", target: "clients", views: ["clients", "profiles", "auth"] },
   { id: "automation", label: "Автоматизация", target: "webhooks", views: ["webhooks"] },
-  { id: "jobs", label: "Задачи", target: "jobs", views: ["jobs", "tools"] },
-  { id: "journal", label: "Журнал", target: "audit", views: ["audit", "operations", "raw"] },
+  { id: "activity", label: "Активность", target: "activity", views: ["activity", "requests", "console", "jobs", "tools", "audit", "operations", "raw"] },
 ];
 
 const contextualNavigation: Partial<Record<string, ContextLink[]>> = {
@@ -94,12 +95,13 @@ const contextualNavigation: Partial<Record<string, ContextLink[]>> = {
     { id: "profiles", label: "Профили" },
     { id: "auth", label: "Подключение" },
   ],
-  jobs: [
-    { id: "jobs", label: "Очередь" },
+  activity: [
+    { id: "activity", label: "Таймлайн" },
+    { id: "requests", label: "Запросы" },
+    { id: "console", label: "Консоль" },
+    { id: "jobs", label: "Задачи" },
+    { id: "audit", label: "Журнал" },
     { id: "tools", label: "Ручной запуск" },
-  ],
-  journal: [
-    { id: "audit", label: "События" },
     { id: "operations", label: "Изменения доступа" },
     { id: "raw", label: "Технические данные" },
   ],
@@ -125,7 +127,7 @@ function isAdvancedView(view: View): boolean {
 }
 
 const allViews: readonly View[] = [
-  "overview", "agents", "jobs", "operations", "mcpmanage", "tools", "resources", "proxyroute",
+  "overview", "agents", "activity", "requests", "console", "jobs", "operations", "mcpmanage", "tools", "resources", "proxyroute",
   "instructions", "profiles", "clients", "webhooks", "auth", "capabilities",
   "failover", "security", "audit", "raw",
 ];
@@ -1548,7 +1550,7 @@ export default function App() {
       </aside>
       <main className="main-content">
         {contextLinks.length > 1 && <nav className="context-nav" aria-label={`${activeSection?.label ?? "Раздел"}: подразделы`}>{contextLinks.map((item) => <a key={item.id} href={`#${item.id}`} className={view === item.id ? "active" : ""} aria-current={view === item.id ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.id); }}>{item.label}</a>)}</nav>}
-        {view === "overview" ? <OverviewScreen /> : view === "audit" ? <AuditScreen /> : view === "raw" ? <RawScreen /> : view === "tools" ? <ToolsScreen /> : view === "resources" ? <ResourcesScreen /> : view === "agents" ? <AgentsScreen /> : view === "jobs" ? <JobsScreen /> : view === "mcpmanage" ? <McpManageScreen /> : view === "failover" ? <FailoverScreen /> : view === "proxyroute" ? <ProxyRouteScreen load={loadProxyRoute} save={saveProxyRoute} action={actOnProxyRoute} /> : view === "security" ? <SecurityScreen /> : view === "operations" ? <AccessOperations /> : view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen token={issuedToken} setToken={setIssuedToken} /> : view === "webhooks" ? <WebhooksScreen /> : view === "capabilities" ? <CapabilitiesScreen /> : <AuthScreen token={issuedToken} />}
+        {view === "overview" ? <OverviewScreen /> : view === "activity" ? <ActivityScreen key="timeline" mode="timeline" /> : view === "requests" ? <ActivityScreen key="requests" mode="requests" /> : view === "console" ? <ConsoleScreen /> : view === "audit" ? <AuditScreen /> : view === "raw" ? <RawScreen /> : view === "tools" ? <ToolsScreen /> : view === "resources" ? <ResourcesScreen /> : view === "agents" ? <AgentsScreen /> : view === "jobs" ? <JobsScreen /> : view === "mcpmanage" ? <McpManageScreen /> : view === "failover" ? <FailoverScreen /> : view === "proxyroute" ? <ProxyRouteScreen load={loadProxyRoute} save={saveProxyRoute} action={actOnProxyRoute} /> : view === "security" ? <SecurityScreen /> : view === "operations" ? <AccessOperations /> : view === "instructions" ? <InstructionsScreen /> : view === "profiles" ? <ProfilesScreen /> : view === "clients" ? <ClientsScreen token={issuedToken} setToken={setIssuedToken} /> : view === "webhooks" ? <WebhooksScreen /> : view === "capabilities" ? <CapabilitiesScreen /> : <AuthScreen token={issuedToken} />}
       </main>
     </div>
   );
