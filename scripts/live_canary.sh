@@ -26,6 +26,7 @@ MAIN_ORIGIN="$(env_val MCP_ORIGIN)"
 TENANT_ORIGIN="$(env_val TENANT_ORIGIN)"
 BEARER="$(env_val GPTADMIN_CUSTOM_MCP_BEARER)"
 TARGET="${GPTADMIN_CANARY_TARGET:-shell:admin-node-100}"
+NATIVE_HELPER="${GPTADMIN_NATIVE_CANARY_HELPER:-/opt/gptadmin/bin/gptadmin-live-canary-native.py}"
 
 if [ -r "$NOTIFY_ENV_FILE" ]; then
 	set -a
@@ -89,28 +90,13 @@ discover_status() {
 }
 
 execute_stdout() {
-	# The 1067a84 instruction-context gate rejects any execute that arrives
-	# without a context token. Follow the product contract: fetch the schema
-	# once (it returns the current context), then echo it on the execute call.
-	local context
-	context="$(curl -sS -m 20 -X POST -H "Authorization: Bearer $BEARER" \
-		-H 'Content-Type: application/json' \
-		-d '{"target":"hub","tool_name":"schema","args":{"target":"hub","tool":"discover"}}' \
-		"$1/mcp-relay/call" 2>/dev/null \
-		| python3 -c 'import json,sys
-try:
-    print(json.load(sys.stdin)["response"]["context"])
-except Exception:
-    pass' 2>/dev/null)"
-	if [ -z "$context" ]; then
-		echo "context unavailable"
-		return
-	fi
-	curl -sS -m 60 -X POST -H "Authorization: Bearer $BEARER" \
-		-H 'Content-Type: application/json' \
-		-d "{\"target\":\"$TARGET\",\"tool_name\":\"shell_exec\",\"context\":\"$context\",\"cmd\":\"hostname\"}" \
-		"$1/mcp-relay/call" 2>/dev/null \
-		| grep -oP '(?<="stdout":")[^"]*'
+    local origin="$1"
+    if [ ! -r "$NATIVE_HELPER" ]; then
+        echo "native MCP helper missing" >&2
+        return 1
+    fi
+	# The bearer never appears in argv or the request URL.
+    printf '%s' "$BEARER" | python3 "$NATIVE_HELPER" "$origin" "$TARGET"
 }
 
 for origin in "$MAIN_ORIGIN" "$TENANT_ORIGIN"; do
@@ -118,14 +104,16 @@ for origin in "$MAIN_ORIGIN" "$TENANT_ORIGIN"; do
 	check "spec-domain $origin" "$origin" "$(spec_servers_url "$origin")"
 	check "secret-input $origin" "200" "$(secret_input_status "$origin")"
 	check "discover $origin" "200" "$(discover_status "$origin")"
-	hostname_out="$(execute_stdout "$origin")"
-	if [ -n "$hostname_out" ]; then
-		echo "PASS execute $origin ($hostname_out)"
-	else
-		echo "FAIL execute $origin: empty stdout"
-		failures=$((failures + 1))
-		failed_names+=("execute $origin||empty stdout")
-	fi
+    hostname_out=""
+    if hostname_out="$(execute_stdout "$origin" 2>&1)" && [[ "$hostname_out" =~ ^gptadmin-native-canary-[0-9a-f]{20}$ ]]; then
+        echo "PASS native-execute $origin (fresh marker verified)"
+    else
+        detail="${hostname_out:0:160}"
+        [ -n "$detail" ] || detail="empty or rejected output"
+        echo "FAIL native-execute $origin: $detail"
+        failures=$((failures + 1))
+        failed_names+=("native-execute $origin|verified fresh stdout|$detail")
+    fi
 done
 
 if [ "$failures" -gt 0 ]; then
