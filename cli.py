@@ -5308,7 +5308,7 @@ def _openapi_operation_map(text: str) -> dict[str, tuple[str, str]]:
     return operations
 
 
-def _candidate_http(base: str, method: str, path: str, *, host: str = '', token: str = '', payload=None, timeout: float = 12.0, max_response_bytes: int = 0):
+def _candidate_http(base: str, method: str, path: str, *, host: str = '', token: str = '', payload=None, timeout: float = 12.0, max_response_bytes: int = 0, extra_headers: dict | None = None):
     data = None if payload is None else json.dumps(payload).encode('utf-8')
     headers = {'Accept': 'application/json, text/yaml, */*', 'User-Agent': 'gptadmin-candidate-gate/1'}
     if host:
@@ -5317,6 +5317,8 @@ def _candidate_http(base: str, method: str, path: str, *, host: str = '', token:
         headers['Authorization'] = 'Bearer ' + token
     if data is not None:
         headers['Content-Type'] = 'application/json'
+    if extra_headers:
+        headers.update(extra_headers)
     request = urllib.request.Request(base.rstrip('/') + path, data=data, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - explicit local/public update probe
         body = response.read(max_response_bytes + 1) if max_response_bytes else response.read()
@@ -5343,6 +5345,75 @@ def _candidate_mcp_rpc(base: str, method: str, params: dict, *, token: str, host
     if 'result' not in payload:
         raise RuntimeError(f'candidate gate: MCP {method} response has no result')
     return payload['result']
+
+
+def _candidate_task_job_receipt(base: str, task_id: str, *, token: str, host: str = '', timeout: float = 5.0) -> dict:
+    """Prefer MCP Tasks for one previously accepted job; keep old-node fallback.
+
+    A job created by the legacy Actions/relay transport already has a durable
+    task ID. Polling it via tasks/get does not create a second execution.
+    Only an explicitly unsupported Tasks method triggers the legacy read.
+    Unknown IDs, permission errors and unexpected responses fail closed.
+    """
+    params = {
+        'taskId': task_id,
+        '_meta': {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientInfo': {'name': 'gptadmin-runtime-verifier', 'version': '1'},
+            'io.modelcontextprotocol/clientCapabilities': {
+                'extensions': {'io.modelcontextprotocol/tasks': {}},
+            },
+        },
+    }
+    unavailable = False
+    try:
+        rpc = _candidate_http(
+            base, 'POST', '/mcp', host=host, token=token,
+            payload={'jsonrpc': '2.0', 'id': 2, 'method': 'tasks/get', 'params': params},
+            timeout=timeout, max_response_bytes=1024 * 1024,
+            extra_headers={
+                'MCP-Protocol-Version': '2026-07-28',
+                'Mcp-Method': 'tasks/get',
+                'Accept': 'application/json',
+            },
+        )
+    except urllib.error.HTTPError as error:
+        if error.code in (404, 405, 501):
+            unavailable = True
+        else:
+            raise RuntimeError(f'candidate gate: MCP tasks/get failed with HTTP {error.code}') from None
+    else:
+        if not isinstance(rpc, dict):
+            raise RuntimeError('candidate gate: MCP tasks/get returned invalid JSON')
+        error = rpc.get('error')
+        if isinstance(error, dict) and error.get('code') == -32601:
+            unavailable = True
+        elif error:
+            raise RuntimeError('candidate gate: MCP tasks/get returned a task error')
+        else:
+            task = rpc.get('result')
+            if not isinstance(task, dict) or task.get('resultType') != 'complete' or task.get('taskId') != task_id:
+                raise RuntimeError('candidate gate: MCP tasks/get returned an invalid task receipt')
+            status = task.get('status')
+            if status not in {'working', 'input_required', 'completed', 'failed', 'cancelled'}:
+                raise RuntimeError('candidate gate: MCP tasks/get returned an unknown task status')
+            interval = task.get('pollIntervalMs')
+            receipt = {
+                'status': 'running' if status == 'working' else status,
+                'job_id': task_id,
+                'task_transport': 'mcp',
+                'poll_interval_ms': interval if isinstance(interval, int) and interval > 0 else 1000,
+            }
+            if 'result' in task:
+                receipt['result'] = task['result']
+                receipt['response'] = task['result']
+            return receipt
+    if unavailable:
+        return _candidate_http(
+            base, 'GET', '/mcp-relay/job/' + urllib.parse.quote(task_id, safe=''),
+            host=host, token=token, timeout=timeout,
+        )
+    raise RuntimeError('candidate gate: MCP tasks/get unavailable')
 
 
 def _candidate_mcp_content(result) -> dict:
@@ -5670,22 +5741,24 @@ def _require_real_local_shell_exec(env: dict, timeout_s: int = 90) -> dict:
         per_attempt = min(15.0, max(3.0, float(timeout_s) / max_attempts), remaining)
         attempt_deadline = time.monotonic() + per_attempt
         while time.monotonic() < attempt_deadline and time.monotonic() < deadline:
-            current = _candidate_http(
-                base, 'GET', '/mcp-relay/job/' + urllib.parse.quote(job_id, safe=''),
-                token=token, timeout=5.0,
-            )
+            current = _candidate_task_job_receipt(base, job_id, token=token, timeout=5.0)
             status = str(current.get('status') or '') if isinstance(current, dict) else ''
             last_status = status
             if status in {'completed', 'success'}:
                 if expected not in json.dumps(current, ensure_ascii=False):
-                    raise RuntimeError(f'local ShellMCP execution completed without expected output: {current}')
+                    raise RuntimeError('local ShellMCP execution completed without expected output')
                 return {
                     'status': 'passed', 'target': selected, 'job_id': job_id,
-                    'mode': 'job', 'attempts': attempts,
+                    'mode': 'mcp_tasks' if current.get('task_transport') == 'mcp' else 'job',
+                    'attempts': attempts,
                 }
+            if status == 'input_required':
+                raise RuntimeError('local ShellMCP execution requires input')
             if status in {'failed', 'error', 'cancelled'}:
                 break
-            time.sleep(0.25)
+            poll_ms = current.get('poll_interval_ms', 250)
+            delay = float(poll_ms) / 1000 if isinstance(poll_ms, (int, float)) and poll_ms > 0 else 0.25
+            time.sleep(min(delay, max(0, attempt_deadline - time.monotonic())))
 
     detail = f'last job {last_job_id or "none"} status {last_status or "unknown"}'
     raise RuntimeError(

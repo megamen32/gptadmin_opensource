@@ -372,10 +372,17 @@ def test_local_shell_exec_verifier_retries_a_stranded_job(monkeypatch):
             job_id = f"job-{len(posted) + 1}"
             posted.append((job_id, marker))
             return {"status": "running", "job_id": job_id}
-        if method == "GET" and path.endswith("job-1"):
-            return {"status": "running", "job_id": "job-1"}
-        if method == "GET" and path.endswith("job-2"):
-            return {"status": "completed", "job_id": "job-2", "result": posted[1][1]}
+        if method == "POST" and path == "/mcp" and kwargs["payload"]["method"] == "tasks/get":
+            assert kwargs["extra_headers"]["MCP-Protocol-Version"] == "2026-07-28"
+            assert kwargs["extra_headers"]["Mcp-Method"] == "tasks/get"
+            assert "io.modelcontextprotocol/tasks" in kwargs["payload"]["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["extensions"]
+            job_id = kwargs["payload"]["params"]["taskId"]
+            return {"jsonrpc": "2.0", "id": 2, "result": {
+                "resultType": "complete", "taskId": job_id,
+                "status": "working" if job_id == "job-1" else "completed",
+                "pollIntervalMs": 1000,
+                **({"result": {"structuredContent": {"stdout": posted[1][1]}}} if job_id == "job-2" else {}),
+            }}
         raise AssertionError((method, path, kwargs))
 
     monkeypatch.setattr(cli, "_candidate_http", fake_http)
@@ -406,8 +413,12 @@ def test_local_shell_exec_verifier_fails_when_all_probe_jobs_stall(monkeypatch):
             job_id = f"job-{len(posted) + 1}"
             posted.append(job_id)
             return {"status": "running", "job_id": job_id}
-        if method == "GET" and path.startswith("/mcp-relay/job/"):
-            return {"status": "running", "job_id": path.rsplit("/", 1)[-1]}
+        if method == "POST" and path == "/mcp" and kwargs["payload"]["method"] == "tasks/get":
+            job_id = kwargs["payload"]["params"]["taskId"]
+            return {"jsonrpc": "2.0", "id": 2, "result": {
+                "resultType": "complete", "taskId": job_id,
+                "status": "working", "pollIntervalMs": 1000,
+            }}
         raise AssertionError((method, path, kwargs))
 
     monkeypatch.setattr(cli, "_candidate_http", fake_http)
@@ -415,6 +426,90 @@ def test_local_shell_exec_verifier_fails_when_all_probe_jobs_stall(monkeypatch):
     with pytest.raises(RuntimeError, match=r"after 3 attempt\(s\).+status running"):
         cli._require_real_local_shell_exec({"HUB_PORT": "9001"}, timeout_s=9)
     assert posted == ["job-1", "job-2", "job-3"]
+
+
+def test_candidate_task_status_legacy_fallback_only_for_unsupported_method(monkeypatch):
+    calls = []
+
+    def http(_base, method, path, **kwargs):
+        calls.append((method, path))
+        if method == "POST" and path == "/mcp":
+            assert kwargs["payload"]["params"]["taskId"] == "fixture-task"
+            return {"jsonrpc": "2.0", "id": 2, "error": {"code": -32601, "message": "method not found"}}
+        if method == "GET" and path == "/mcp-relay/job/fixture-task":
+            return {"status": "completed", "response": {"stdout": "verified"}}
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(cli, "_candidate_http", http)
+    got = cli._candidate_task_job_receipt("http://localhost:9001", "fixture-task", token="fixture-token")
+    assert got["status"] == "completed"
+    assert got["response"]["stdout"] == "verified"
+    assert calls == [("POST", "/mcp"), ("GET", "/mcp-relay/job/fixture-task")]
+
+
+def test_candidate_task_get_sends_protocol_headers_on_real_http_request(monkeypatch):
+    inspected = []
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            return json.dumps({"jsonrpc": "2.0", "id": 2, "result": {
+                "resultType": "complete", "taskId": "task-123",
+                "status": "completed", "result": {"content": [{"type": "text", "text": "done"}]},
+            }}).encode()
+
+    def open_url(request, timeout):
+        headers = {k.lower(): v for k, v in request.header_items()}
+        assert request.full_url == "http://127.0.0.1:9001/mcp"
+        assert request.get_method() == "POST"
+        assert headers["authorization"] == "Bearer local-token"
+        assert headers["mcp-protocol-version"] == "2026-07-28"
+        assert headers["mcp-method"] == "tasks/get"
+        assert headers["host"] == "local.example"
+        inspected.append(True)
+        return Response()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", open_url)
+    result = cli._candidate_task_job_receipt(
+        "http://127.0.0.1:9001", "task-123", token="local-token", host="local.example",
+    )
+    assert inspected == [True]
+    assert result["task_transport"] == "mcp"
+    assert result["status"] == "completed"
+    assert result["result"]["content"][0]["text"] == "done"
+
+
+def test_candidate_task_status_does_not_fallback_for_bad_task_or_authorization(monkeypatch):
+    calls = []
+
+    def bad_task(_base, method, path, **kwargs):
+        calls.append((method, path))
+        return {"jsonrpc": "2.0", "id": 2, "result": {
+            "resultType": "complete", "taskId": "different-task", "status": "completed",
+        }}
+
+    monkeypatch.setattr(cli, "_candidate_http", bad_task)
+    with pytest.raises(RuntimeError, match="invalid task receipt"):
+        cli._candidate_task_job_receipt("http://localhost:9001", "expected-task", token="fixture-token")
+    assert calls == [("POST", "/mcp")]
+
+    def denied(_base, method, path, **kwargs):
+        raise cli.urllib.error.HTTPError(
+            "http://localhost:9001/mcp", 403, "forbidden", {}, None,
+        )
+
+    monkeypatch.setattr(cli, "_candidate_http", denied)
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        cli._candidate_task_job_receipt("http://localhost:9001", "expected-task", token="fixture-token")
+
 
 def test_update_requires_fresh_local_shell_registration_before_success():
     text = CLI.read_text()
