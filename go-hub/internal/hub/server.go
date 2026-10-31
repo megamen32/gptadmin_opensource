@@ -4579,6 +4579,10 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 	for _, virtual := range s.virtualAgentsLocked() {
 		agents = append(agents, s.withExposeMetaLocked(virtual, r))
 	}
+	browserAliases := s.browserMCPAliasesLocked()
+	for _, alias := range browserAliases {
+		agents = append(agents, s.withExposeMetaLocked(alias, r))
+	}
 	parents := make([]Agent, 0, len(s.agents))
 	for _, a := range s.agents {
 		cp := *a
@@ -4611,6 +4615,9 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 		}
 		children := childMCPAgents(parent)
 		for _, child := range children {
+			if backingHiddenByBrowserAliases(child, browserAliases) {
+				continue
+			}
 			slug := agentSlug(firstString(child.Meta, "child_ref"))
 			if slug == "" {
 				continue
@@ -8921,7 +8928,11 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
 			return unwrapMCPUpstream(raw)
 		}
-		return map[string]any{"tools": childMCPTools(raw)}, nil
+		tools := childMCPTools(raw)
+		if isLogicalBrowserAgent(agent) {
+			tools = hideBrowserRetargetTool(tools)
+		}
+		return map[string]any{"tools": tools}, nil
 	}
 	jobID := s.enqueueRelay(agent.AgentID, "tools/list", map[string]any{})
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
@@ -8940,7 +8951,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		// Managed personal sessions use their dedicated owner-session transport.
 		// For ordinary child discovery, ask the owning Node using the original
 		// bearer and the child target, so its policy is independently enforced.
-		if firstString(agent.Meta, "owner_profile_id") == "" {
+		if !isLogicalBrowserAgent(agent) && firstString(agent.Meta, "owner_profile_id") == "" {
 			payload, marshalErr := json.Marshal(map[string]any{"target": agent.AgentID})
 			if marshalErr != nil {
 				return nil, map[string]any{"code": -32602, "message": "invalid child target"}
@@ -8959,7 +8970,11 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
 			return unwrapMCPUpstream(raw)
 		}
-		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, childMCPTools(raw))}, nil
+		tools := childMCPTools(raw)
+		if isLogicalBrowserAgent(agent) {
+			tools = hideBrowserRetargetTool(tools)
+		}
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, tools)}, nil
 	}
 	if requestAccessMode(r) != accessModeReadonly {
 		return s.agentToolsList(agent)
@@ -9055,6 +9070,9 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 		return unwrapMCPUpstream(raw)
 	}
 	if isChildMCPAgent(agent) {
+		if isLogicalBrowserAgent(agent) && name == "set_remote" {
+			return nil, map[string]any{"code": -32601, "message": "browser retargeting is disabled"}
+		}
 		parent := firstString(agent.Meta, "parent_server_id")
 		ref := firstString(agent.Meta, "child_ref")
 		// Route the original child target to its owning Node before falling back
@@ -9066,7 +9084,7 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 		}
 		peer := httptest.NewRecorder()
 		var raw map[string]any
-		if s.forwardNodePeerCall(peer, r, parent, peerBody) {
+		if !isLogicalBrowserAgent(agent) && s.forwardNodePeerCall(peer, r, parent, peerBody) {
 			if json.Unmarshal(peer.Body.Bytes(), &raw) != nil || raw == nil {
 				return nil, map[string]any{"code": -32000, "message": "invalid node peer receipt"}
 			}
