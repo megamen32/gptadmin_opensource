@@ -9010,8 +9010,12 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		// Managed personal sessions use their dedicated owner-session transport.
 		// For ordinary child discovery, ask the owning Node using the original
 		// bearer and the child target, so its policy is independently enforced.
-		if !isLogicalBrowserAgent(agent) && firstString(agent.Meta, "owner_profile_id") == "" {
-			payload, marshalErr := json.Marshal(map[string]any{"target": agent.AgentID})
+		if isLogicalBrowserAgent(agent) || firstString(agent.Meta, "owner_profile_id") == "" {
+			peerTarget := agent.AgentID
+			if isLogicalBrowserAgent(agent) {
+				peerTarget = "mcp:" + parent + ":" + firstString(agent.Meta, "child_ref")
+			}
+			payload, marshalErr := json.Marshal(map[string]any{"target": peerTarget})
 			if marshalErr != nil {
 				return nil, map[string]any{"code": -32602, "message": "invalid child target"}
 			}
@@ -9021,7 +9025,15 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 				if json.Unmarshal(peer.Body.Bytes(), &reply) != nil || peer.Code >= 400 || firstString(reply, "status") != "completed" {
 					return nil, map[string]any{"code": -32000, "message": "child schema owner unavailable", "data": reply}
 				}
-				return mapValue(reply["response"]), nil
+				response := mapValue(reply["response"])
+				if isLogicalBrowserAgent(agent) {
+					tools := hideBrowserRetargetTool(searchChildToolMaps(response["tools"]))
+					return map[string]any{"tools": toolsForRequest(r, agent.AgentID, tools)}, nil
+				}
+				return response, nil
+			}
+			if isLogicalBrowserAgent(agent) {
+				return nil, map[string]any{"code": -32000, "message": "Browser owner Node is unavailable"}
 			}
 		}
 		args := childConnectionArguments(r, agent, map[string]any{"ref": firstString(agent.Meta, "child_ref")})
@@ -9137,13 +9149,17 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 		// Route the original child target to its owning Node before falling back
 		// to the local legacy queue. The destination reauthorizes the same
 		// bearer against the child target and connection owner.
-		peerBody, marshalErr := json.Marshal(map[string]any{"target": agent.AgentID, "tool": name, "arguments": args})
+		peerTarget := agent.AgentID
+		if isLogicalBrowserAgent(agent) {
+			peerTarget = "mcp:" + parent + ":" + ref
+		}
+		peerBody, marshalErr := json.Marshal(map[string]any{"target": peerTarget, "tool": name, "arguments": args})
 		if marshalErr != nil {
 			return nil, map[string]any{"code": -32602, "message": "invalid child arguments"}
 		}
 		peer := httptest.NewRecorder()
 		var raw map[string]any
-		if !isLogicalBrowserAgent(agent) && s.forwardNodePeerCall(peer, r, parent, peerBody) {
+		if s.forwardNodePeerCall(peer, r, parent, peerBody) {
 			if json.Unmarshal(peer.Body.Bytes(), &raw) != nil || raw == nil {
 				return nil, map[string]any{"code": -32000, "message": "invalid node peer receipt"}
 			}
@@ -9168,6 +9184,9 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 			}
 			return nil, map[string]any{"code": -32000, "message": "node peer receipt missing result"}
 		} else {
+			if isLogicalBrowserAgent(agent) {
+				return nil, map[string]any{"code": -32000, "message": "Browser owner Node is unavailable"}
+			}
 			raw = s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
 				"ref": ref, "name": name, "arguments": args,
 			}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))

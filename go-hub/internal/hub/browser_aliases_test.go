@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,5 +49,81 @@ func TestBrowserAliasRoutesToPhysicalRelayWithLogicalOwner(t *testing.T) {
 	if len(fallback) != 1 || fallback[0].Status != "online" ||
 		fallback[0].Transport != "streamable-http" {
 		t.Fatalf("logical Browser disappeared with stale backing heartbeat: %#v", fallback)
+	}
+}
+
+func TestLogicalBrowserRoutesThroughUpstreamNodePeer(t *testing.T) {
+	calls := 0
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if firstString(body, "target") != "mcp:shell:node-44:VibeBrowserMacM1" {
+			t.Errorf("target was not translated to the pinned upstream: %#v", body)
+		}
+		calls++
+		switch r.URL.Path {
+		case "/mcp-relay/tools":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "completed", "response": map[string]any{"tools": []any{
+					map[string]any{"name": "list_pages"},
+					map[string]any{"name": "set_remote"},
+				}},
+			})
+		case "/mcp-relay/call":
+			if firstString(body, "tool") != "list_pages" {
+				t.Error("wrong browser tool")
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "completed", "result": map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": "pinned Mac M1"}},
+				},
+			})
+		default:
+			t.Errorf("unexpected route: %s", r.URL.Path)
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "unexpected"})
+		}
+	}))
+	defer peer.Close()
+	s := peerTestHub(t, "token", map[string]string{"shell:node-44": peer.URL})
+	agent := Agent{
+		AgentID: "mcp:shell:MacBook-Pro-User.local:Browser",
+		Kind:    "child_mcp",
+		Meta: map[string]any{
+			"parent_server_id":        "shell:node-44",
+			"child_ref":               "VibeBrowserMacM1",
+			"logical_owner_server_id": "shell:MacBook-Pro-User.local",
+			"fixed_session":           true,
+			"enabled":                 true,
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/server/browser/mcp", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	schema, rpcErr := s.agentToolsListForRequest(req, agent)
+	if rpcErr != nil {
+		t.Fatalf("list tools failed: %#v", rpcErr)
+	}
+	tools, ok := mapValue(schema)["tools"].([]map[string]any)
+	if !ok || len(tools) != 1 || firstString(tools[0], "name") != "list_pages" {
+		t.Fatalf("unsafe or missing Browser schema: %#v", schema)
+	}
+	result, rpcErr := s.agentToolCall(req, agent, "list_pages", map[string]any{})
+	if rpcErr != nil {
+		t.Fatalf("list_pages failed: %#v", rpcErr)
+	}
+	if calls != 2 || len(s.shellJobs) != 0 {
+		t.Fatalf("Browser fell back to legacy queue: calls=%d queued=%d", calls, len(s.shellJobs))
+	}
+	text := ""
+	for _, part := range sliceValue(mapValue(result)["content"]) {
+		text += firstString(mapValue(part), "text")
+	}
+	if text != "pinned Mac M1" {
+		t.Fatalf("unexpected upstream response: %#v", result)
+	}
+	_, rpcErr = s.agentToolCall(req, agent, "set_remote", map[string]any{})
+	if firstString(mapValue(rpcErr), "message") != "browser retargeting is disabled" || calls != 2 {
+		t.Fatalf("set_remote was not denied before dispatch: %#v", rpcErr)
 	}
 }

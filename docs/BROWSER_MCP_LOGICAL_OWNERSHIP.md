@@ -20,8 +20,11 @@ must exist and be enabled. Both the owner and upstream must be registered
 and approved in GPT Admin.
 
 Tools/list and tools/call travel over GPT Admin's existing authenticated
-Hub → ShellMCP mechanism, to the remote child on node-44. No additional
-bearer credential is copied to Chrome hosts. The alias target is routed using
+Hub → node-44 GPTAdmin Node peer /mcp-relay transport, to the remote child.
+The Hub maps the logical target to the pinned physical child **before**
+forwarding. A stale standalone ShellMCP heartbeat must not remove aliases,
+and the Hub must never fall back to a legacy queue for a logical Browser.
+No additional bearer credential is copied to Chrome hosts. The alias target is routed using
 `parent_server_id` (actual upstream) and `child_ref` while the exposed
 `agent_id` identifies the logical owner. The Vibe HTTP transports on 44
 use `--session <device>` and never pick the first connected browser.
