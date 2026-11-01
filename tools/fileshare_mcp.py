@@ -16,7 +16,7 @@ from typing import Any, Dict
 
 PUBLIC_ROOT = Path(os.environ.get("GPTADMIN_FILESHARE_PUBLIC_ROOT", "/var/www/gptadmin-downloads"))
 STATE_DIR = Path(os.environ.get("GPTADMIN_FILESHARE_STATE_DIR", "/var/lib/gptadmin-file-share"))
-BASE_URL = os.environ.get("GPTADMIN_FILESHARE_BASE_URL", "https://your-subdomain.t.became.bezrabotnyi.com/_files")
+BASE_URL = os.environ.get("GPTADMIN_FILESHARE_BASE_URL", "https://your-subdomain.t.gptadmin.bezrabotnyi.com/_files")
 MAX_SIZE_MB_DEFAULT = int(os.environ.get("GPTADMIN_FILESHARE_MAX_SIZE_MB", "1024"))
 HTTP_HOST = os.environ.get("GPTADMIN_FILESHARE_HTTP_HOST", "127.0.0.1")
 HTTP_PORT = int(os.environ.get("GPTADMIN_FILESHARE_HTTP_PORT", "18082"))

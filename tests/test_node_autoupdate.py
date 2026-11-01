@@ -422,7 +422,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             with patch.object(manager,'require_root'),patch.object(manager,'host_arch',return_value='amd64'), \
                  patch.object(manager,'systemctl',side_effect=fake_systemctl):
                 manager.cmd_proxy_route_install(SimpleNamespace(package=str(archive)),layout,SystemdRunner())
-            self.assertIn('User=admin',layout.proxy_route_unit_path.read_text())
+            self.assertIn('User=roomhacker',layout.proxy_route_unit_path.read_text())
             self.assertEqual(calls,[('is-active',manager.PRIMARY_SERVICE),('daemon-reload',)])
             state=json.loads(layout.proxy_route_state_file.read_text())
             self.assertEqual(state['schema'],'gptadmin.proxy-route-package/v1')
@@ -434,7 +434,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(name)
             unit=root/node_builder.PROXY_ROUTE_UNIT_SOURCE
             unit.parent.mkdir(parents=True,exist_ok=True)
-            unit.write_text('[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
+            unit.write_text('[Unit]\nDescription=fixture\n[Service]\nUser=roomhacker\nExecStart=/usr/bin/ssh\n')
             ui=root/'public/admin';ui.mkdir(parents=True)
             (ui/'index.html').write_text('<script src="/admin/assets/a.js"></script>')
             (ui/'assets').mkdir();(ui/'assets/a.js').write_text('ui')

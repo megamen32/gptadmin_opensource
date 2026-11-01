@@ -85,10 +85,10 @@ func TestFromEnvReadsHubDNSServer(t *testing.T) {
 }
 
 func TestFromEnvReadsHubResolveTo(t *testing.T) {
-	t.Setenv("SHELLMCP_HUB_RESOLVE_TO", "203.0.113.10")
+	t.Setenv("SHELLMCP_HUB_RESOLVE_TO", "192.168.2.100")
 
 	cfg := FromEnv()
-	if cfg.HubResolveTo != "203.0.113.10" {
+	if cfg.HubResolveTo != "192.168.2.100" {
 		t.Fatalf("HubResolveTo=%q want explicit Hub route", cfg.HubResolveTo)
 	}
 }

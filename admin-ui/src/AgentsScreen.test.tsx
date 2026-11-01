@@ -111,7 +111,7 @@ it("shows stale-node resources as unavailable and links to that exact node's sav
       memory: { status: "unavailable", error: "node_not_online" },
       root_filesystem: { status: "unavailable", error: "node_not_online" },
     });
-    if (path === `/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1`) return response({ count: 1, recent: [task] });
+    if (path === `/admin/api/jobs?server_id=shell%3Aroomhacker-node-100&limit=1`) return response({ count: 1, recent: [task] });
     if (path === "/admin/api/agents/connect-info") return response({ detail: "not needed" });
     throw new Error(`Unexpected request ${path} ${init?.method ?? "GET"}`);
   });
@@ -124,12 +124,12 @@ it("shows stale-node resources as unavailable and links to that exact node's sav
   expect(screen.getByText(/снимок не выполнялся/)).toBeInTheDocument();
   expect(screen.getAllByText("Недоступно: node_not_online")).toHaveLength(3);
   expect(screen.queryByText(/ГиБ|%/)).toBeNull();
-  expect(taskLink).toHaveAttribute("href", "#jobs?server_id=shell%3Aadmin-node-100&job_id=historical-task-7");
+  expect(taskLink).toHaveAttribute("href", "#jobs?server_id=shell%3Aroomhacker-node-100&job_id=historical-task-7");
   expect(fetchMock).toHaveBeenCalledWith("/admin/api/servers/resources", expect.objectContaining({
     method: "POST",
     body: JSON.stringify({ server_id: serverId }),
   }));
-  expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1", expect.anything());
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Aroomhacker-node-100&limit=1", expect.anything());
 });
 
 it("polls an admitted resource job by its existing id and renders measured values", async () => {

@@ -42,7 +42,7 @@ func TestPublicRelayRoundTripAcrossClientAndAgentEndpoints(t *testing.T) {
 			Kind: ticket.KindStream, ProtocolVersion: relay.ProtocolVersion,
 			CapabilityID: "cap-blackbox", StreamID: "stream-blackbox",
 			ProfileID: "profile-blackbox", AgentID: "agent-blackbox",
-			Target: "203.0.113.10:443", Role: role,
+			Target: "192.168.2.50:443", Role: role,
 			ExpiresAt: time.Now().Add(time.Minute).Unix(), JTI: jti,
 			Limits: ticket.Limits{MaxFrameBytes: 1024, MaxPendingFrames: 4, DialTimeoutSeconds: 1, IdleTimeoutSeconds: 5, MaxStreamLifetimeSeconds: 30, MaxBytes: 4096, MaxStreamsPerAgent: 2, MaxStreamsPerProfile: 2},
 		}

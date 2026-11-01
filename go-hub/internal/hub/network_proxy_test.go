@@ -236,7 +236,7 @@ func TestNetworkProxyScopesAreExplicitAndIsolateDestinations(t *testing.T) {
 		t.Fatalf("approve internet capability: %v", err)
 	}
 	for _, target := range []string{
-		"203.0.113.10:443",
+		"10.0.0.1:443",
 		"127.0.0.1:443",
 		"169.254.169.254:443",
 		"100.100.100.200:443",

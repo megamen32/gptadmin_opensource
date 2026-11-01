@@ -555,7 +555,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S3.2`
 - Owner: `Codex`
-- Scope: Add the operator-facing SLO/error-budget contract and alert recovery runbook in `/home/admin/gptadmin/docs/SLO_ALERTS.md`, with a documentation acceptance test; no runtime or deployment changes.
+- Scope: Add the operator-facing SLO/error-budget contract and alert recovery runbook in `/home/roomhacker/gptadmin/docs/SLO_ALERTS.md`, with a documentation acceptance test; no runtime or deployment changes.
 - Baseline / red evidence: `tests/test_slo_docs.py` failed because the canonical SLO/runbook document did not exist.
 - Change: Added `docs/SLO_ALERTS.md` with measurable availability/readiness/MCP/job objectives, error-budget policy, machine-readable probe sources, and owner/symptom/diagnosis/recovery steps for Hub, auth/policy, relay/jobs and backup/failover incidents. Added the runbook to the executable completion matrix.
 - Verification: `python3 -m pytest tests/test_slo_docs.py -q` -> `1 passed` after the RED test; full matrix verification remains part of the integration ladder.
@@ -566,7 +566,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S0.2` / `S0.3` / acceptance gates for proxy, endpoints, hooks, MCP, file sharing, profiles and security
 - Owner: `Codex`
-- Scope: `/home/admin/gptadmin`; preserve pre-existing dirty webhook/docs work while building one automated completion matrix and closing only evidence-backed runtime gaps.
+- Scope: `/home/roomhacker/gptadmin`; preserve pre-existing dirty webhook/docs work while building one automated completion matrix and closing only evidence-backed runtime gaps.
 - Baseline / red evidence: Canonical `docs/PROJECT_PLAN.md` still lists multiple roadmap milestones as planned/in progress; the pre-fix webhook tree had no durable state, no route CRUD, the matrix was structural-only, and the Docker installer scenario exhausted stale input.
 - Change: Added the executable `tests/test_completion_matrix.py` and fixture; completed webhook route CRUD, secret-free metadata, atomic `0600` config/state persistence, restart-safe jobs/idempotency and bounded callback retries; added OpenAPI parity, profile instruction-set fail-closed validation, readonly/file-backup/symlink regressions and policy-denial audit attribution; synchronized disposable installer E2E with the checked-in CLI and current service contracts.
 - Verification: `python3 -m pytest tests/ --ignore=tests/e2e -q` -> `157 passed, 2 skipped`; `cd go-hub && go test -race ./...` -> pass; `cd go-shellmcp && go test -race ./...` -> pass; `cd go-proxyrelay && go test -race ./...` -> pass; all modules `go vet` -> pass; Go Hub and ShellMCP Darwin arm64 builds -> pass; Hub/ShellMCP black-box contracts -> `12 passed`; completion matrix -> `9 passed`; Docker failover -> 7 scenarios passed; Docker installer/tunnel -> user install, system/FRP and backend scenarios passed with exit code 0; public/security scan -> `3 passed`.
@@ -593,7 +593,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Baseline / red evidence: HAOS host `a0d7b954-ssh` ran `local_gptadmin_hub_standby` image `1.0.4`; public image digest and repository commit are recorded in the handed-off entry above. The immutable runtime evidence is `trash/logs/haos-public-drill-20260723-01.txt`.
 - Change: Registered public repository slug `21623b8c`, installed public `gptadmin_hub_standby` `1.0.5`, preserved Supervisor options and `/data` through `/backup/gptadmin-hub-standby-migration-20260723T184032Z`, configured direct primary health plus fallback `9101`, preserved only the cross-node reclaim bridge key in protected data, and removed the stopped local add-on after the drill.
 - Verification: Public app is `started` on repository `21623b8c`; Hub `:9001` and origin-form fallback `:9101` return `200`; credential-only scan reports `0` exact secret hits with options/internal secrets mode `600`; stopping only `gptadmin-hub.service` promoted public build `1.0.5`; starting Hub yielded `accepted=true` and `reclaimed_primary=true`; restoring primary FRP returned public build `128`. Primary Hub and FRP are active; old local container/image are absent; rollback data and image archives remain present.
-- Delivery: Live HAOS migration and full physical drill completed. Source/docs changes are local in `/home/admin/gptadmin`; no new commit or push was created in this operational slice.
+- Delivery: Live HAOS migration and full physical drill completed. Source/docs changes are local in `/home/roomhacker/gptadmin`; no new commit or push was created in this operational slice.
 - Next: Run the separate second-physical-fallback drill required by `S3.4`.
 
 ## 2026-07-23 - Public HAOS app installation and acceptance - handed-off
@@ -636,7 +636,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: Codex
 - Scope: `android-4g-lan-proxy.service`, LAN firewall rules, Mac SOCKS5/HTTP
   smoke; no public Internet bind.
-- Baseline / red evidence: The service listened on `203.0.113.10:3126` and
+- Baseline / red evidence: The service listened on `192.168.2.100:3126` and
   passed a node-local proxy smoke, but the Mac TCP connection stalled; UFW
   had default-deny input and no TCP/3126 allow rule.
 - Change: Added idempotent private-LAN UFW rules to the deployment script and
@@ -714,7 +714,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Change: Added stable JSON tags for edge limits and `-dns-server` resolution
   through an explicit UDP endpoint; rebuilt the Android package.
 - Verification: Agent on `R5CR702SRFP` logged a cellular `rmnet4` source
-  (`203.0.113.10`), local connector returned `HTTP/1.1 200 Connection
+  (`10.186.8.46`), local connector returned `HTTP/1.1 200 Connection
   Established`, and the public target returned `HTTP/2 520` through the
   Android path. Temporary device/relay processes and files were removed.
 - Delivery: Code commit pending with the next focused test run; acceptance
@@ -727,7 +727,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: Codex
 - Scope: Ephemeral external relay/agent/client run through `relay01`, using a
   free loopback connector port and a public Internet target.
-- Baseline / red evidence: Existing `203.0.113.10:3126` was unreachable from
+- Baseline / red evidence: Existing `192.168.2.100:3126` was unreachable from
   `relay01`; direct `relay01` egress worked, confirming the old LAN proxy was not an
   external endpoint. A first test port was also rejected because it belonged
   to an unrelated ADB forward.
@@ -1006,7 +1006,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Owner: Codex
 - Scope: Move the existing private `gptadmin-hubhub` linked worktree under `private/Cloud` without merging its obsolete branch into `main` or exposing it in the public mirror.
 - Baseline / red evidence: The private Cloud worktree lives beside the repository root under a legacy folder name, while `private/` is already the sanctioned mirror-excluded location for private materials.
-- Change: Renamed and moved the linked worktree from `/home/admin/gptadmin-hubhub` to `private/Cloud` using `git worktree move`. Its private branch, staged files and untracked Cloud document were preserved; no obsolete branch history was merged into `main`. Added a local Git exclusion so the nested worktree does not pollute `main` status.
+- Change: Renamed and moved the linked worktree from `/home/roomhacker/gptadmin-hubhub` to `private/Cloud` using `git worktree move`. Its private branch, staged files and untracked Cloud document were preserved; no obsolete branch history was merged into `main`. Added a local Git exclusion so the nested worktree does not pollute `main` status.
 - Verification: `git worktree list --porcelain` reports `private/Cloud` on `gptadmin-hubhub`; its Git common directory is the root private repository; its staged/untracked state remains present; root `git check-ignore` matches `private/Cloud`; `.gitpublic/ignore` excludes `private/`.
 - Delivery: Local workspace organization only; no public release.
 - Next: Use `private/Cloud` as the private Cloud workspace; merge only reviewed, current slices into `main`.
@@ -1208,7 +1208,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 - Milestone: `S1.1`, `S1.3`
 - Owner: Codex
-- Scope: `/home/admin/gptadmin/cli.py` client registration and its
+- Scope: `/home/roomhacker/gptadmin/cli.py` client registration and its
   installer/update regression tests for Codex, Claude Code, OpenCode and VS
   Code.
 - Baseline / red evidence: Existing setup registers only three clients, emits
@@ -2221,7 +2221,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
   test failed before the code change.
 - Change: `sync_oauth_origin_env()` now derives the canonical HTTPS origin from
   enabled FRP settings, preventing private-origin drift. Live node-100 env was
-  repaired with the external origin and `admin` default user. Server-44 was
+  repaired with the external origin and `roomhacker` default user. Server-44 was
   migrated to the working Go ShellMCP binary, canonical shared token, outbound
   long-poll queue, and heartbeat disabled; node-88 was aligned to the same
   queue/heartbeat policy. Existing per-host identities were preserved.
@@ -2857,7 +2857,7 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Objective (user): "cloud os доделать: найти лучшую основу для fork — web ui like mac os with terminal finder browser etc. — форкнуть и использовать; все ноды по умолчанию часть cloud os."
 - Fork base: PuruVJ/macos-web (MIT, commit 1420480, vendored as `cloudos-ui/` with `FORK.md`). Puter rejected: mandatory second Node backend/DB/auth violates "CloudOS is only a client of the hub". DaedalOS rejected: Windows-style.
 - Change: new Svelte apps Terminal/Finder/Browser/Computers over the hub `/api/v1/cloud-os/*` APIs; hub now serves the built UI statically from `PublicDir/cloudos-ui` (reverse proxy to the 3030 Next.js service removed); cloudos shell exec/inspect/tabs got a foreground wait-timeout floor so a 0 DefaultTimeout no longer answers "still running" before execution.
-- Verification: `go vet` + full `go test ./...` green (new `cloudos_ui_static_test.go`: serves dist, blocks traversal, 503 when not installed); real browser canary on the deployed hub: Terminal ran `hostname && echo CLOUDOS-CANARY-OK` on `admin-node-100` and printed the real output; Finder listed the real `/home/admin` (464 entries, 245 folders); Computers showed 23 machines (7 online, nodes + direct agents) with no pairing; Browser listed real BrowserClaw/AgentBrowser connectors; personal tunnel `https://your-subdomain.t.became.bezrabotnyi.com/cloudos/` returns 200. Screenshot: `.tmp/cloudos-live-canary-20260910.png`.
+- Verification: `go vet` + full `go test ./...` green (new `cloudos_ui_static_test.go`: serves dist, blocks traversal, 503 when not installed); real browser canary on the deployed hub: Terminal ran `hostname && echo CLOUDOS-CANARY-OK` on `admin-node-100` and printed the real output; Finder listed the real `/home/roomhacker` (464 entries, 245 folders); Computers showed 23 machines (7 online, nodes + direct agents) with no pairing; Browser listed real BrowserClaw/AgentBrowser connectors; personal tunnel `https://u-f1102930.t.gptadmin.bezrabotnyi.com/cloudos/` returns 200. Screenshot: `.tmp/cloudos-live-canary-20260910.png`.
 - Nodes by default: every unified-node shell executor is projected by `/api/v1/cloud-os/shell/computers` and rendered across all CloudOS apps — no opt-in.
 - Deploy: binaries rebuilt and installed atomically to `/opt/gptadmin/bin` (with `.pre-cloudos-*` backup), dist copied to `/opt/gptadmin/public/cloudos-ui`, `gptadmin-hub.service` restarted once.
 - Not now: xterm.js PTY sessions, file open/edit in Finder, porting the old opencode/grepmesh apps, auth on /cloudos/ (unchanged existing behavior).

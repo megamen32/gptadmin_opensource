@@ -30,7 +30,7 @@ sessions. Retain the original client entry and service configuration for rollbac
 
 The installed node-100 connection is `TGC-ZCode100`, exposed at
 `/connection/tgc-zcode100/mcp` on the existing tenant origin. Its dedicated
-`zcode-tgc-admin-100-managed` profile allows only this child target and
+`zcode-tgc-roomhacker-100-managed` profile allows only this child target and
 preserves the original tool authority. Other profiles cannot use this personal
 connection. The upstream and client credentials are separate protected values.
 

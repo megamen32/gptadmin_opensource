@@ -1,7 +1,7 @@
 // bezhook: one-command public tunnel for a local port.
 //
 //	bezhook 3000                 -> https://your-subdomain.t.gptadmin.example
-//	bezhook 3000 --sub myapp     -> https://myapp.t.became.bezrabotnyi.com
+//	bezhook 3000 --sub myapp     -> https://myapp.t.gptadmin.bezrabotnyi.com
 //
 // Connects to every fleet gateway (node-100, relay02, relay01) at once, so the
 // tunnel keeps working while any single gateway is alive. Default lease TTL

@@ -2,7 +2,7 @@ name: GPTAdmin Hub Standby
 version: "1.0.13"
 slug: gptadmin_hub_standby
 description: "Standby GPTAdmin hub on HAOS for admin-node-100 failover"
-url: "https://became.bezrabotnyi.com"
+url: "https://gptadmin.bezrabotnyi.com"
 arch:
   - aarch64
 startup: services

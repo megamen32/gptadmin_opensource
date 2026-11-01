@@ -172,11 +172,11 @@ class TestFrpTunnel:
         tunnel = FrpTunnel(
             server_addr="frp.example.com", server_port=7000, token="secret",
             subdomain="myhub", domain="example.com", config_path=config_path,
-            local_ip="203.0.113.10",
+            local_ip="192.168.2.100",
         )
         tunnel._write_config(9001)
         content = config_path.read_text()
-        assert 'localIP = "203.0.113.10"' in content
+        assert 'localIP = "192.168.2.100"' in content
         assert 'localPort = 9001' in content
 
     def test_start_constructs_public_url(self, tmp_path):

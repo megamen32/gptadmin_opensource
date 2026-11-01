@@ -52,7 +52,7 @@ ExecStart=
 ExecStart=/opt/gptadmin-shellmcp/current/bin/shellmcp
 '''
 PROXY_ROUTE_SERVICE = 'gptadmin-proxy-route-relay02.service'
-PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=admin'
+PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=roomhacker'
 DISK_FLOOR_BYTES = 500 * 1024 * 1024
 HEALTH_TIMEOUT_SECS = 30.0
 DRAIN_POLL_INTERVAL_SECS = 2.0
@@ -561,8 +561,8 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
         except UnicodeDecodeError:
             raise PreflightError('proxy route unit is not UTF-8 text') from None
         if '[Unit]' not in unit_text or '[Service]' not in unit_text or not re.search(
-                r'(?m)^User=admin\s*$', unit_text):
-            raise PreflightError('proxy route unit does not match the fixed admin service contract')
+                r'(?m)^User=roomhacker\s*$', unit_text):
+            raise PreflightError('proxy route unit does not match the fixed roomhacker service contract')
         # Everything verified; materialize exactly the manifest tree.
         if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
             raise PreflightError('package extraction destination is not a regular directory')

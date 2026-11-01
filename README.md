@@ -13,7 +13,7 @@ one of three adapters. Manage everything from server admin to running subagents
 — from ChatGPT, Claude, Codex, DeepSeek, Qwen, even Yandex Alice or Sber
 GigaChat.
 
-> 🌐 Website & live docs: **https://became.bezrabotnyi.com**
+> 🌐 Website & live docs: **https://gptadmin.bezrabotnyi.com**
 > 📚 Full docs: **[docs/](./docs/Home.md)** — architecture, adapters, hub, install, config, API, security, FAQ
 > 📦 Install: `curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install.sh | bash`
 
@@ -94,7 +94,7 @@ https://mcp.bezrabotnyi.com/mcp
 ```
 
 Use that same origin when following OAuth discovery and reconnecting a client.
-The per-tunnel `u-f<ID>.t.became.bezrabotnyi.com` hostname is a legacy FRP
+The per-tunnel `u-f<ID>.t.gptadmin.bezrabotnyi.com` hostname is a legacy FRP
 transport/recovery fallback, not the connector identity for new ChatGPT or
 Codex setup. Do not replace the canonical origin with a loopback Hub URL or a
 transient tunnel name.
@@ -119,7 +119,7 @@ different adapter, use the dedicated docs below.
 #    "поставь nginx", "почини сайт", "покажи логи", "запусти codex для фикса бага"
 ```
 
-Full per-adapter instructions: **https://became.bezrabotnyi.com/#/docs**
+Full per-adapter instructions: **https://gptadmin.bezrabotnyi.com/#/docs**
 
 ### Администрирование и CloudOS
 
@@ -215,7 +215,7 @@ advanced panel, support) will live in a separate repo — the core stays open.
 
 ## Links
 
-- 🌐 Website & docs: https://became.bezrabotnyi.com
+- 🌐 Website & docs: https://gptadmin.bezrabotnyi.com
 - 💬 Telegram: [@careviolan](https://t.me/careviolan)
 - 📦 Other projects: https://bezrabotnyi.com
 

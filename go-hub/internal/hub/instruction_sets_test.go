@@ -183,7 +183,7 @@ func TestNamedInstructionSetCRUDAndProfileInitialize(t *testing.T) {
 		}
 		return result.(map[string]any)
 	}
-	if got := initialize(s)["instructions"]; got != content {
+	if got := initialize(s)["instructions"]; got != expectedSharedInstructions(content) {
 		t.Fatalf("profile instructions=%q, want %q", got, content)
 	}
 
@@ -192,7 +192,7 @@ func TestNamedInstructionSetCRUDAndProfileInitialize(t *testing.T) {
 	if loaded.Code != http.StatusOK || decodeInstructionSet(t, loaded).Content != content {
 		t.Fatalf("named instruction set did not survive restart: status=%d body=%s", loaded.Code, loaded.Body.String())
 	}
-	if got := initialize(restarted)["instructions"]; got != content {
+	if got := initialize(restarted)["instructions"]; got != expectedSharedInstructions(content) {
 		t.Fatalf("restarted profile instructions=%q, want %q", got, content)
 	}
 
@@ -224,12 +224,12 @@ func TestInstructionSetPutRequiresCurrentETagAndPublishesAtomically(t *testing.T
 	}
 
 	initialized := mcpResult(t, s, 1, "initialize", `{}`)
-	if initialized["instructions"] != updated {
+	if initialized["instructions"] != expectedSharedInstructions(updated) {
 		t.Fatalf("initialize instructions=%q, want %q", initialized["instructions"], updated)
 	}
 	resource := mcpResult(t, s, 2, "resources/read", `{"uri":"gptadmin://startup-instructions"}`)
 	contents := resource["contents"].([]any)
-	if contents[0].(map[string]any)["text"] != updated {
+	if contents[0].(map[string]any)["text"] != expectedSharedInstructions(updated) {
 		t.Fatalf("startup resource=%v, want %q", contents, updated)
 	}
 
@@ -312,7 +312,7 @@ func TestInstructionSetReadsRefreshAcrossServerInstances(t *testing.T) {
 	if refreshed.Content != content {
 		t.Fatalf("second Server GET content=%q, want %q", refreshed.Content, content)
 	}
-	if got := mcpResult(t, second, 1, "initialize", `{}`)["instructions"]; got != content {
+	if got := mcpResult(t, second, 1, "initialize", `{}`)["instructions"]; got != expectedSharedInstructions(content) {
 		t.Fatalf("second Server MCP instructions=%q, want %q", got, content)
 	}
 }
@@ -438,7 +438,7 @@ func TestInstructionSetNormalizesContentAndPersistsExactValue(t *testing.T) {
 		t.Errorf("published content=%q, want normalized %q", got, want)
 	}
 	initialized := mcpResult(t, s, 1, "initialize", `{}`)
-	if got := initialized["instructions"]; got != want {
+	if got := initialized["instructions"]; got != expectedSharedInstructions(want) {
 		t.Errorf("runtime instructions=%q, want normalized %q", got, want)
 	}
 	restarted := New(cfg)
@@ -459,7 +459,7 @@ func TestInstructionSetPutKeepsRuntimeInSyncWhenDirectorySyncFailsAfterRename(t 
 	if put.Code != http.StatusOK {
 		t.Fatalf("PUT status=%d body=%s", put.Code, put.Body.String())
 	}
-	if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != content {
+	if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != expectedSharedInstructions(content) {
 		t.Fatalf("runtime instructions=%q, want %q", got, content)
 	}
 	if got, err := os.ReadFile(cfg.StartupInstructionsFile); err != nil {
@@ -508,7 +508,7 @@ func TestInstructionSetPutConflictsWithInlineOverride(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Errorf("PUT status=%d body=%s, want 409", w.Code, w.Body.String())
 	}
-	if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != cfg.StartupInstructions {
+	if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != expectedSharedInstructions(cfg.StartupInstructions) {
 		t.Errorf("runtime instructions=%q, want unchanged inline override %q", got, cfg.StartupInstructions)
 	}
 }
@@ -560,7 +560,7 @@ func TestInstructionSetPutOnlyConflictsWithEffectiveInlineOverride(t *testing.T)
 			if w.Code != tt.wantStatus {
 				t.Fatalf("PUT status=%d body=%s, want %d", w.Code, w.Body.String(), tt.wantStatus)
 			}
-			if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != tt.wantRuntimeValue {
+			if got := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; got != expectedSharedInstructions(tt.wantRuntimeValue) {
 				t.Fatalf("runtime instructions=%q, want %q", got, tt.wantRuntimeValue)
 			}
 		})
@@ -621,7 +621,7 @@ func TestInstructionSetLoaderFallsBackFromInvalidUTF8(t *testing.T) {
 	if etag := w.Header().Get("ETag"); etag != `"`+got.Version+`"` {
 		t.Errorf("ETag=%q does not describe response version=%q", etag, got.Version)
 	}
-	if instructions := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; instructions != got.Content {
+	if instructions := mcpResult(t, s, 1, "initialize", `{}`)["instructions"]; instructions != expectedSharedInstructions(got.Content) {
 		t.Errorf("MCP instructions=%q differ from GET content=%q", instructions, got.Content)
 	}
 }

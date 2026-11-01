@@ -17,7 +17,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-NOTICEPLACE_ROOT = Path("/home/admin/agents-projects/noticeplace")
+NOTICEPLACE_ROOT = Path("/home/roomhacker/agents-projects/noticeplace")
 if str(NOTICEPLACE_ROOT) not in sys.path:
     sys.path.insert(0, str(NOTICEPLACE_ROOT))
 

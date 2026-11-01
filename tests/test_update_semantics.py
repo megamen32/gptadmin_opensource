@@ -231,15 +231,15 @@ def test_sync_oauth_origin_repairs_stale_internal_fallback_when_frp_is_enabled()
     """FRP installs must not publish a loopback/private Hub origin after update."""
     env = {
         "FRP_ENABLE": "true",
-        "FRP_SUBDOMAIN": "your-subdomain",
-        "FRP_DOMAIN": "t.became.bezrabotnyi.com",
-        "HUB_PUBLIC_URL": "http://203.0.113.10:9001",
+        "FRP_SUBDOMAIN": "u-f1102930",
+        "FRP_DOMAIN": "t.gptadmin.bezrabotnyi.com",
+        "HUB_PUBLIC_URL": "http://95.165.165.65:9001",
         "HUB_URL": "http://127.0.0.1:9001",
     }
 
     cli.sync_oauth_origin_env(env)
 
-    expected = "https://your-subdomain.t.became.bezrabotnyi.com"
+    expected = "https://u-f1102930.t.gptadmin.bezrabotnyi.com"
     assert env["HUB_PUBLIC_URL"] == expected
     assert env["PUBLIC_ORIGIN"] == expected
     assert env["MCP_RESOURCE"] == expected
@@ -249,13 +249,13 @@ def test_sync_oauth_origin_preserves_explicit_public_origin_over_loopback_hub():
     """Token issuance must not silently replace the Hub's published identity."""
     env = {
         "HUB_URL": "http://127.0.0.1:9001",
-        "PUBLIC_ORIGIN": "https://u-example.t.became.bezrabotnyi.com/",
-        "MCP_RESOURCE": "https://u-example.t.became.bezrabotnyi.com/",
+        "PUBLIC_ORIGIN": "https://u-example.t.gptadmin.bezrabotnyi.com/",
+        "MCP_RESOURCE": "https://u-example.t.gptadmin.bezrabotnyi.com/",
     }
 
     cli.sync_oauth_origin_env(env)
 
-    expected = "https://u-example.t.became.bezrabotnyi.com"
+    expected = "https://u-example.t.gptadmin.bezrabotnyi.com"
     assert env["PUBLIC_ORIGIN"] == expected
     assert env["MCP_RESOURCE"] == expected
 
@@ -264,8 +264,8 @@ def test_sync_oauth_origin_preserves_explicit_public_origin_when_frp_is_enabled(
     """A transport hostname must not replace the owner-selected MCP identity."""
     env = {
         "FRP_ENABLE": "true",
-        "FRP_SUBDOMAIN": "your-subdomain",
-        "FRP_DOMAIN": "t.became.bezrabotnyi.com",
+        "FRP_SUBDOMAIN": "u-f1102930",
+        "FRP_DOMAIN": "t.gptadmin.bezrabotnyi.com",
         "HUB_PUBLIC_URL": "https://mcp.bezrabotnyi.com",
         "PUBLIC_ORIGIN": "https://mcp.bezrabotnyi.com",
         "MCP_RESOURCE": "https://mcp.bezrabotnyi.com",
@@ -283,22 +283,22 @@ def test_sync_oauth_origin_preserves_explicit_public_origin_when_frp_is_enabled(
 def test_bundled_shellmcp_normalizes_legacy_public_hub_url_to_loopback():
     env = {
         "HUB_PORT": "9001",
-        "HUB_PUBLIC_URL": "https://u-example.t.became.bezrabotnyi.com",
-        "PUBLIC_ORIGIN": "https://u-example.t.became.bezrabotnyi.com",
-        "MCP_RESOURCE": "https://u-example.t.became.bezrabotnyi.com",
-        "HUB_URL": "https://u-example.t.became.bezrabotnyi.com",
+        "HUB_PUBLIC_URL": "https://u-example.t.gptadmin.bezrabotnyi.com",
+        "PUBLIC_ORIGIN": "https://u-example.t.gptadmin.bezrabotnyi.com",
+        "MCP_RESOURCE": "https://u-example.t.gptadmin.bezrabotnyi.com",
+        "HUB_URL": "https://u-example.t.gptadmin.bezrabotnyi.com",
         "SHELLMCP_TRANSPORT": "polling",
         "SHELLMCP_QUEUE": "1",
-        "QUEUE_URL": "https://u-example.t.became.bezrabotnyi.com/queue",
+        "QUEUE_URL": "https://u-example.t.gptadmin.bezrabotnyi.com/queue",
     }
 
     cli.normalize_bundled_shellmcp_hub_url(env, True, True)
 
     assert env["HUB_URL"] == "http://127.0.0.1:9001"
     assert env["QUEUE_URL"] == "http://127.0.0.1:9001/queue"
-    assert env["HUB_PUBLIC_URL"] == "https://u-example.t.became.bezrabotnyi.com"
-    assert env["PUBLIC_ORIGIN"] == "https://u-example.t.became.bezrabotnyi.com"
-    assert env["MCP_RESOURCE"] == "https://u-example.t.became.bezrabotnyi.com"
+    assert env["HUB_PUBLIC_URL"] == "https://u-example.t.gptadmin.bezrabotnyi.com"
+    assert env["PUBLIC_ORIGIN"] == "https://u-example.t.gptadmin.bezrabotnyi.com"
+    assert env["MCP_RESOURCE"] == "https://u-example.t.gptadmin.bezrabotnyi.com"
 
 
 def test_shell_only_install_keeps_remote_hub_url():
@@ -328,7 +328,7 @@ def test_cleanup_removes_obsolete_shellmcp_primary_override(monkeypatch, tmp_pat
     obsolete.write_text("[Service]\nEnvironmentFile=/etc/gptadmin/go-shellmcp-primary.env\n")
     newer_obsolete.write_text("[Service]\nEnvironmentFile=/etc/gptadmin/go-shellmcp.env\n")
     preserved.write_text("[Service]\nExecStartPre=/usr/bin/true\n")
-    legacy_user.write_text("[Service]\nUser=admin\nGroup=admin\n")
+    legacy_user.write_text("[Service]\nUser=roomhacker\nGroup=roomhacker\n")
     legacy_no_update.write_text("[Service]\nEnvironment=SHELLMCP_AUTO_UPDATE=0\n")
     legacy_access.write_text("[Service]\nExecStartPre=/usr/bin/true\n")
     legacy_zz.write_text("[Service]\nEnvironment=ROOTD_AUTO_UPDATE=0\n")

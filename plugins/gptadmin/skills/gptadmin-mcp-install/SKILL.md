@@ -11,7 +11,7 @@ task is meant to go through GPTAdmin.
 
 The packaged parent endpoint is `https://mcp.bezrabotnyi.com/mcp`. For this
 managed installation, keep the parent connection on that canonical OAuth
-origin; an `u-f….t.became.bezrabotnyi.com` FRP address is legacy/fallback
+origin; an `u-f….t.gptadmin.bezrabotnyi.com` FRP address is legacy/fallback
 transport only. A separately configured Hub uses its own stable HTTPS origin.
 
 ## Canonical workflow

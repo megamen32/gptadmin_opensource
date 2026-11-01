@@ -81,7 +81,7 @@ ZCode использует исходный формат `.zcode/cli/config.json
 FastAgent отклоняет хранилище durable processes при несовпадении владельца;
 это приводит к падению до handshake и внешнему `EOF`. Для Linux-определения
 FastAgent запуск явно закрепляется за его исходным владельцем через
-`runuser -u admin -- /home/admin/.local/bin/fast-agent-mcp ...`.
+`runuser -u roomhacker -- /home/roomhacker/.local/bin/fast-agent-mcp ...`.
 Реальный handshake/tools/list через GPTAdmin проверяет исправление.
 Проверка моделей использует исходные маршруты FastAgent и ZCode, а usage
 провайдера отделяет вход, выход и кеш; прокси-токенизатор не заменяет эту проверку.

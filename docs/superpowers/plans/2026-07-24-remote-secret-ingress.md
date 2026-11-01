@@ -16,7 +16,7 @@
 - Secret records and the encryption key are created with mode `0600`; parent secret directories are mode `0700`.
 - A missing or invalid encryption key fails closed; the Hub must not silently fall back to plaintext files or environment variables.
 - Existing MCP auth, access profiles, and the `2.1` router exception remain unchanged; only the public Hub origin is used for generated links.
-- Preserve unrelated dirty changes in `/home/admin/gptadmin` (`docs/BUGS.md` and `docs/WORKLOG.md` are already modified).
+- Preserve unrelated dirty changes in `/home/roomhacker/gptadmin` (`docs/BUGS.md` and `docs/WORKLOG.md` are already modified).
 
 ---
 
@@ -65,7 +65,7 @@ func TestSecretStoreRejectsExpiredAndWrongOwnerRequests(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
 
 Expected: FAIL because `NewSecretStore`, `CreateRequest`, and the typed errors do not exist.
 
@@ -75,7 +75,7 @@ Implement AES-256-GCM records under `<storeDir>/<ref-id>.json`, a state file for
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
 
 Expected: PASS with no secret value in test output.
 
@@ -122,7 +122,7 @@ func TestSecretIngressPageConsumesTokenWithoutReturningSecret(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
 
 Expected: FAIL because the route and node-owned secret store are not present.
 
@@ -132,7 +132,7 @@ Initialize the store in `New`, fail Hub startup when the key cannot be loaded, r
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
 
 Expected: PASS; the response body and logs contain no submitted secret.
 
@@ -184,7 +184,7 @@ func TestMCPSecretStatusDoesNotReturnPlaintext(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
 
 Expected: FAIL because the tools are not advertised or dispatched.
 
@@ -194,7 +194,7 @@ Add exact JSON schemas with `additionalProperties: false`, use `PublicOrigin` to
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
 
 Expected: PASS; `tools/list`, `secret_request`, and `secret_status` work through the same remote MCP endpoint.
 
@@ -231,7 +231,7 @@ func TestShellExecResolvesSecretReferenceWithoutLeakingValue(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret' -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret' -count=1`
 
 Expected: FAIL because `secret_env` is currently ignored or rejected.
 
@@ -241,7 +241,7 @@ Resolve references before `callShellTool`/relay enqueue, keep plaintext only in 
 
 - [ ] **Step 4: Run focused and package tests**
 
-Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret|TestAuditRedacts' -count=1 && go test ./internal/hub -count=1`
+Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret|TestAuditRedacts' -count=1 && go test ./internal/hub -count=1`
 
 Expected: PASS; existing relay, auth, and redaction tests remain green.
 
@@ -291,10 +291,10 @@ Include examples with fake names only, never real tokens, and explain that file 
 Run:
 
 ```bash
-cd /home/admin/gptadmin/go-hub
+cd /home/roomhacker/gptadmin/go-hub
 go test ./internal/hub -count=1
 go build ./cmd/gptadmin-hub
-cd /home/admin/gptadmin
+cd /home/roomhacker/gptadmin
 pytest -q tests/test_secret_ingress_contract.py tests/test_no_secrets.py
 git diff --check
 ```

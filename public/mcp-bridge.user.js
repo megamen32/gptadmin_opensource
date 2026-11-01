@@ -3,7 +3,7 @@
 // @namespace    mcp-bridge
 // @version      2.3.16
 // @description  Universal MCP bridge for any chat LLM — ChatGPT, DeepSeek, Qwen, Yandex Alice, Z.ai
-// @author       admin
+// @author       roomhacker
 // @downloadURL  https://became.bezrabotnyi.com/mcp-bridge.user.js
 // @updateURL    https://became.bezrabotnyi.com/mcp-bridge.user.js
 // @match        *://chatgpt.com/*

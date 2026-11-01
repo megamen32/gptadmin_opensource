@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const defaultOrigin = "https://became.bezrabotnyi.com"
+const defaultOrigin = "https://gptadmin.bezrabotnyi.com"
 
 func main() {
 	originFlag := flag.String("origin", defaultOrigin, "public GPTAdmin origin")

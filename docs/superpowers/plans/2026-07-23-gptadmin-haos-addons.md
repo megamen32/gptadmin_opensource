@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use test-driven development for the public distribution contract and verify the resulting repository before publishing.
 
-**Goal:** Publish a clean Home Assistant Apps repository for GPTAdmin Hub Standby while keeping `/home/admin/gptadmin` as the source of truth and keeping all instance credentials out of Git.
+**Goal:** Publish a clean Home Assistant Apps repository for GPTAdmin Hub Standby while keeping `/home/roomhacker/gptadmin` as the source of truth and keeping all instance credentials out of Git.
 
 **Architecture:** The public repository contains `repository.yaml`, one `gptadmin_hub_standby` app, installation documentation, and a sync marker. The main repository owns runtime code and a packaging/export script; the public repository is refreshed from an explicit source commit. The app accepts instance configuration through Supervisor options, generates its failover bundle on startup, and uses a public ARM64 image reference or local build without embedding live state.
 
@@ -23,7 +23,7 @@
 
 **Files:**
 - Create: `tests/test_haos_public_distribution.py`
-- Create: `deploy/server01/gptadmin_hub_standby/gptadmin_failover_config.py`
+- Create: `deploy/homeassistant/gptadmin_hub_standby/gptadmin_failover_config.py`
 
 **Interfaces:**
 - `build_failover_config(options: dict[str, Any]) -> dict[str, Any]`
@@ -38,11 +38,11 @@
 ### Task 2: Make the add-on installable from a clean repository
 
 **Files:**
-- Modify: `deploy/server01/gptadmin_hub_standby/run.sh`
-- Modify: `deploy/server01/gptadmin_hub_standby/Dockerfile`
-- Create: `deploy/server01/gptadmin_hub_standby/config.yaml`
-- Create: `deploy/server01/gptadmin_hub_standby/DOCS.md`
-- Create: `deploy/server01/gptadmin_hub_standby/CHANGELOG.md`
+- Modify: `deploy/homeassistant/gptadmin_hub_standby/run.sh`
+- Modify: `deploy/homeassistant/gptadmin_hub_standby/Dockerfile`
+- Create: `deploy/homeassistant/gptadmin_hub_standby/config.yaml`
+- Create: `deploy/homeassistant/gptadmin_hub_standby/DOCS.md`
+- Create: `deploy/homeassistant/gptadmin_hub_standby/CHANGELOG.md`
 
 **Interfaces:**
 - `run.sh` writes `/data/config/failover_config.json` and `/data/config/failover_state.json` from nested Supervisor `failover` options before starting Hub/runtime.
@@ -58,7 +58,7 @@
 **Files:**
 - Create: `scripts/export_haos_app_repository.sh`
 - Create: `.github/workflows/publish-haos-app.yml`
-- Modify: `deploy/server01/gptadmin_hub_standby/README.md`
+- Modify: `deploy/homeassistant/gptadmin_hub_standby/README.md`
 
 **Interfaces:**
 - `scripts/export_haos_app_repository.sh --output DIR --source-ref REF` creates a sanitized distribution tree from the current source and refuses to copy live state/config files.

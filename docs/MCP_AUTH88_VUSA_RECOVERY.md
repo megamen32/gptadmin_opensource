@@ -14,9 +14,9 @@ GPTADMIN_NODE_PUBLIC_URL задавать отдельно для собстве
 Не добавлять произвольные aliases, не ослаблять issuer/audience validation.
 
 Свежий реальный bearer-admission POST с88 через public DNS уходил в timeout5s,
-а тот же запрос через203.0.113.10 с прежним HTTPS hostname/SNI/CA дал200 и
+а тот же запрос через192.168.2.100 с прежним HTTPS hostname/SNI/CA дал200 и
 полный proof. Для обоих readers задаётся существующий supported TCP pin
-GPTADMIN_NODE_WRITER_CONNECT_TO=203.0.113.10. URL/сертификат/WriterID/NodeKey
+GPTADMIN_NODE_WRITER_CONNECT_TO=192.168.2.100. URL/сертификат/WriterID/NodeKey
 не меняются; прямой LAN не заменяет TLS или проверку криптографического proof.
 
 Первый auth-admission rollout использовал принятый cloud Node package

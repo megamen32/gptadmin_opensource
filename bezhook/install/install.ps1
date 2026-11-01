@@ -1,8 +1,8 @@
 # bezhook installer for Windows (PowerShell 5.1+). One command:
-#   iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex
+#   iwr -useb https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.ps1 | iex
 # Overrides: -Mirror, -InstallDir
 param(
-  [string]$Mirror = "https://dl.t.became.bezrabotnyi.com/bezhook",
+  [string]$Mirror = "https://dl.t.gptadmin.bezrabotnyi.com/bezhook",
   [string]$InstallDir = "$env:USERPROFILE\.local\bin"
 )
 
@@ -49,4 +49,4 @@ if ($userPath -notlike "*$InstallDir*") {
 Write-Host ""
 Write-Host "Usage: bezhook <local-port> [--sub name] [--ttl 72h]"
 Write-Host "  e.g.  bezhook 3000 --sub myapp"
-Write-Host "  ->    https://myapp.t.became.bezrabotnyi.com"
+Write-Host "  ->    https://myapp.t.gptadmin.bezrabotnyi.com"

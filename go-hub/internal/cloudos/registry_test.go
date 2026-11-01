@@ -92,8 +92,8 @@ func TestConcurrentAccess(t *testing.T) {
 
 func TestRegisterReplacesReconnectedDirectAgent(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(&Computer{ID: "old", Name: "Windows", OS: "windows", SessionID: "win-1", Endpoint: "http://203.0.113.10:9137"})
-	registry.Register(&Computer{ID: "new", Name: "Windows", OS: "windows", SessionID: "win-1", Endpoint: "http://203.0.113.10:9137"})
+	registry.Register(&Computer{ID: "old", Name: "Windows", OS: "windows", SessionID: "win-1", Endpoint: "http://192.168.2.190:9137"})
+	registry.Register(&Computer{ID: "new", Name: "Windows", OS: "windows", SessionID: "win-1", Endpoint: "http://192.168.2.190:9137"})
 	computers := registry.List()
 	if len(computers) != 1 || computers[0].ID != "new" {
 		t.Fatalf("got %#v, want only the newest agent", computers)

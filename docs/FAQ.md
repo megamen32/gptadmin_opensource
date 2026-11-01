@@ -122,4 +122,4 @@ Removes binaries, configs, and service units. File backups are preserved.
 
 - [Open a GitHub issue](https://github.com/megamen32/gptadmin/issues)
 - Telegram: [@careviolan](https://t.me/careviolan)
-- Website: https://became.bezrabotnyi.com
+- Website: https://gptadmin.bezrabotnyi.com

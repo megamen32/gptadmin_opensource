@@ -7,7 +7,7 @@
 从[产品理念](./PHILOSOPHY.md)开始，做出以下决策：
 管理设置、弹性、MCP 上下文成本和渐进式配置。
 
-**网站：** https://became.bezrabotnyi.com
+**网站：** https://gptadmin.bezrabotnyi.com
 **安装：** `curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install.sh | bash`
 
 ## 目录

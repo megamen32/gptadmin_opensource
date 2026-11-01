@@ -3,15 +3,15 @@
 Публичный туннель для локального порта одной командой — на своём железе,
 почти бесплатно. `ngrok`/`localtunnel`, только шлюзы — наши серверы
 (node-100, relay02, relay01), а URL живёт на нашем wildcard-домене
-`t.became.bezrabotnyi.com`.
+`t.gptadmin.bezrabotnyi.com`.
 
 ```
 bezhook 3000 --sub myapp
-  URL:      https://myapp.t.became.bezrabotnyi.com
+  URL:      https://myapp.t.gptadmin.bezrabotnyi.com
   local:    127.0.0.1:3000
-  gateways: became.bezrabotnyi.com:7000, relay02.bezrabotnyi.com:27000, relay01.bezrabotnyi.com:27001
+  gateways: gptadmin.bezrabotnyi.com:7000, relay02.bezrabotnyi.com:27000, relay01.bezrabotnyi.com:27001
   ttl:      72h0m0s  (--ttl 0 = unlimited)
-  [ok] became.bezrabotnyi.com:7000 online
+  [ok] gptadmin.bezrabotnyi.com:7000 online
   [ok] relay02.bezrabotnyi.com:27000 online
   [ok] relay01.bezrabotnyi.com:27001 online
 ```
@@ -21,13 +21,13 @@ bezhook 3000 --sub myapp
 Linux / macOS:
 
 ```sh
-curl -fsSL https://dl.t.became.bezrabotnyi.com/bezhook/install.sh | sh
+curl -fsSL https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex
+iwr -useb https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.ps1 | iex
 ```
 
 Один статический бинарник, никаких зависимостей (npx/pipx/npm не нужны).
@@ -39,7 +39,7 @@ iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex
 bezhook <порт>                     случайный субдомен u-fNNNNNNN, TTL 72ч
 bezhook 3000 --sub myapp           фиксированный субдомен
 bezhook 3000 --sub myapp --ttl 0   без авто-остановки
-bezhook 8080 --host 203.0.113.10    пробросить порт другого хоста в LAN
+bezhook 8080 --host 192.168.1.5    пробросить порт другого хоста в LAN
 bezhook --port 3000                флаг вместо позиционного аргумента
 ```
 
@@ -77,8 +77,8 @@ bezhook 3000 --backend ngrok             # только ngrok (нужен NGROK_
 
 ```toml
 token = "..."
-domain = "t.became.bezrabotnyi.com"
-endpoints = ["became.bezrabotnyi.com:7000", "relay02.bezrabotnyi.com:27000", "relay01.bezrabotnyi.com:27001"]
+domain = "t.gptadmin.bezrabotnyi.com"
+endpoints = ["gptadmin.bezrabotnyi.com:7000", "relay02.bezrabotnyi.com:27000", "relay01.bezrabotnyi.com:27001"]
 default_ttl = "72h"
 ```
 
@@ -94,7 +94,7 @@ default_ttl = "72h"
   (node-100/домашний вход — best-effort, relay02 и relay01 — always-on)
   (node-100/домашний вход, relay02, relay01) и регистрирует один и тот же
   субдомен на всех. Пока жив любой шлюз — туннель работает. Публичный URL
-  один: `https://<sub>.t.became.bezrabotnyi.com` (wildcard-сертификат на
+  один: `https://<sub>.t.gptadmin.bezrabotnyi.com` (wildcard-сертификат на
   всех трёх nginx).
 - **TTL**: туннель живёт, пока запущен процесс (heartbeat-ы frp держат
   соединение даже без трафика). По умолчанию через 72 ч процесс завершится
@@ -110,9 +110,9 @@ default_ttl = "72h"
   вне HTTP не пробрасывает (можно добавить `--tcp` поверх frp `type=tcp`).
 - Канонический URL с самой машины node-100 может не открываться — домашний
   NAT не делает hairpin. Из интернета работает; с сервера проверяй напрямую:
-  `curl --resolve <sub>.t.became.bezrabotnyi.com:443:185.240.120.152 https://<sub>.t.became.bezrabotnyi.com/`
+  `curl --resolve <sub>.t.gptadmin.bezrabotnyi.com:443:185.240.120.152 https://<sub>.t.gptadmin.bezrabotnyi.com/`
   (или 212.192.31.128 для relay01).
-- Вход DNS `*.t.became.bezrabotnyi.com` → 203.0.113.10 (домашний). Если
+- Вход DNS `*.t.gptadmin.bezrabotnyi.com` → 95.165.165.65 (домашний). Если
   домашний канал лёг, туннели живы на relay02/relay01 и включаются, как только
   ingress-failover (node-mesh) переключит DNS; вручную — `--resolve`.
 - Windows-бинарник собирается и подписывается checksum-ами, но

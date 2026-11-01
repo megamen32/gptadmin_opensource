@@ -27,11 +27,11 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://localhost:*/*", "*://became.bezrabotnyi.com/*"],
+      "matches": ["*://localhost:*/*", "*://gptadmin.bezrabotnyi.com/*"],
       "js": ["content.js"]
     }
   ],
   "externally_connectable": {
-    "matches": ["*://localhost:*/*", "*://became.bezrabotnyi.com/*"]
+    "matches": ["*://localhost:*/*", "*://gptadmin.bezrabotnyi.com/*"]
   }
 }

@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Treat `/home/admin/gptadmin` as the only source tree; do not merge private workspace content or machine-specific paths into public docs.
+- Treat `/home/roomhacker/gptadmin` as the only source tree; do not merge private workspace content or machine-specific paths into public docs.
 - Preserve the existing dirty files and the untracked remote-secret plan unless a task explicitly owns them; do not discard user work.
 - Use TDD for behavioral changes: write and run a failing regression before implementation, then focused and full verification.
 - Product vocabulary remains Hub, MCP clients and Tunnel; do not expose internal token names in normal user-facing setup text.

@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$hub = 'http://203.0.113.10:9001/api/v1/cloud-os'
+$hub = 'http://192.168.2.100:9001/api/v1/cloud-os'
 $stateDir = Join-Path $env:LOCALAPPDATA 'GPTAdminCloudOS'
 $stateFile = Join-Path $stateDir 'computer-id.txt'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null

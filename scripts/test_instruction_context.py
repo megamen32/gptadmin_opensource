@@ -23,14 +23,14 @@ def main():
     rules=root/'rules.md';rules.write_text('Fixture profile instructions version one.')
     ctl=secrets.token_urlsafe(40)
     browser_password=secrets.token_urlsafe(40)
-    env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':str(root/'home'),'USER':'admin',
+    env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':str(root/'home'),'USER':'roomhacker',
          'TMPDIR':str(root/'tmp'),'GOMAXPROCS':'2','GPTADMIN_HUB_HOST':'127.0.0.1','GPTADMIN_HUB_PORT':str(port),
          'GPTADMIN_ROOT':str(root),'GPTADMIN_CONFIG_DIR':str(root/'config'),'GPTADMIN_PUBLIC_DIR':str(root/'public'),
          'GPTADMIN_ARTIFACT_DIR':str(root/'artifacts'),'GPTADMIN_OUTPUT_DIR':str(root/'output'),
          'GPTADMIN_STARTUP_INSTRUCTIONS_FILE':str(rules),'GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED':'1',
          'GPTADMIN_ENV_FILE':str(root/'own.env'),'CTL_TOKEN':ctl,'SHELL_TOKEN':secrets.token_urlsafe(40),
          'ADMIN_PASSWORD':browser_password,'OAUTH_CLIENT_SECRET':secrets.token_urlsafe(40),'PUBLIC_ORIGIN':base,'MCP_RESOURCE':base,
-         'GPTADMIN_AUTH_MODE':'legacy','SHELL_NAME':'code-mode-local-canary','SHELL_DEFAULT_USER':'admin',
+         'GPTADMIN_AUTH_MODE':'legacy','SHELL_NAME':'code-mode-local-canary','SHELL_DEFAULT_USER':'roomhacker',
          'SHELL_DEFAULT_HOME':str(root/'home'),'SHELL_DEFAULT_CWD':str(root),'SHELL_IDENTITY_DIR':str(root/'identity'),
          'SHELL_SPOOL_DIR':str(root/'spool'),'SHELL_OUTBOX_DIR':str(root/'spool/outbox'),
          'SHELLMCP_MCP_CONFIG':str(root/'mcp'),'MCP_RELAY_DEFAULT_TIMEOUT':'6','MCP_RELAY_POLL_MAX_TIMEOUT':'6'}

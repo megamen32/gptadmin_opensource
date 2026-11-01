@@ -4,7 +4,7 @@ import json, os, subprocess, time
 from pathlib import Path
 
 STATE=Path('/var/lib/gptadmin/wanb-health.json')
-ROUTER='root@203.0.113.10'
+ROUTER='root@192.168.2.1'
 SSH=['ssh','-o','BatchMode=yes','-o','ConnectTimeout=3',ROUTER]
 FAIL_THRESHOLD=3
 BOUNCE_COOLDOWN=1800
@@ -38,7 +38,7 @@ def main():
     if up and gw:
         gateway_ok=ssh(f"ping -c 1 -W 1 {gw} >/dev/null 2>&1",4).returncode==0
     if up:
-        # Provider DNS must answer; this catches the current half-open uplink session.
+        # Provider DNS must answer; this catches the current half-open Beeline session.
         dns=ssh("nslookup ya.ru 85.21.192.3 2>/dev/null | grep -q '^Address.*:'",6)
         dns_ok=dns.returncode==0
     healthy=up and gateway_ok and dns_ok

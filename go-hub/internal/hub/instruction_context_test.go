@@ -192,7 +192,7 @@ func TestInstructionContextBoundProfileRules(t *testing.T) {
 			AllowedTargets: []string{"*"}, AllowedTools: []string{"*"},
 		})
 		issued := instructionDiscovery(t, s, requests[i])
-		if issued["instructions"] != tc.want || issued["profile"] != tc.profile {
+		if !strings.HasPrefix(firstString(issued, "instructions"), tc.want+"\n\n") || !strings.Contains(firstString(issued, "instructions"), strings.TrimSpace(sharedWorkflowInstructions)) || issued["profile"] != tc.profile {
 			t.Fatalf("profile %s received the wrong rules: %v", tc.profile, issued)
 		}
 		receipts[i] = firstString(issued, "context")
@@ -210,7 +210,7 @@ func TestInstructionContextBoundProfileRules(t *testing.T) {
 				foreign := requestWithInstructionContext(requests[j], map[string]any{"context": receipts[i]})
 				failure := s.requireInstructionContext(foreign, "hub", "code_mode")
 				if failure["executed"] != false || firstString(mapValue(failure["error"]), "code") != "instructions_required" ||
-					failure["instructions"] != destination.want {
+					failure["instructions"] != destination.want+"\n\n<!-- gptadmin-shared-workflow -->\n"+sharedWorkflowInstructions {
 					t.Fatalf("cross-profile receipt accepted or wrong rules delivered: %v", failure)
 				}
 			})
@@ -231,7 +231,7 @@ func TestInstructionContextBoundProfileRules(t *testing.T) {
 		withContext := requestWithInstructionContext(requests[i], map[string]any{"context": receipts[i]})
 		failure := s.requireInstructionContext(withContext, "hub", "code_mode")
 		if tc.set == "rules-a" {
-			if failure["executed"] != false || failure["instructions"] != "Updated rules for profile A." {
+			if failure["executed"] != false || failure["instructions"] != "Updated rules for profile A.\n\n<!-- gptadmin-shared-workflow -->\n"+sharedWorkflowInstructions {
 				t.Fatalf("profile %s kept outdated shared rules: %v", tc.profile, failure)
 			}
 		} else if failure != nil {

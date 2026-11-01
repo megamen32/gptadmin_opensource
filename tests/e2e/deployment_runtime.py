@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", choices=sorted(REMOTE_SCRIPTS), required=True)
     parser.add_argument("--host", default=os.environ.get("GPTADMIN_RUNTIME_HOST", ""))
     parser.add_argument("--port", type=int, default=int(os.environ.get("GPTADMIN_RUNTIME_SSH_PORT", "22")))
-    parser.add_argument("--user", default=os.environ.get("GPTADMIN_RUNTIME_USER", "admin"))
+    parser.add_argument("--user", default=os.environ.get("GPTADMIN_RUNTIME_USER", "roomhacker"))
     args = parser.parse_args(argv)
     try:
         report = run_remote_probe(args.host, args.port, args.user, args.kind)

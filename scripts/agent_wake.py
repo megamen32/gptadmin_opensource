@@ -41,7 +41,7 @@ def main() -> int:
     except (OSError, RuntimeError, ValueError):
         print(json.dumps({"ok": False, "error": "invalid cwd"}), file=sys.stderr)
         return 2
-    if not Path(a.cwd).is_absolute() or Path('/home/admin') not in resolved.parents:
+    if not Path(a.cwd).is_absolute() or Path('/home/roomhacker') not in resolved.parents:
         print(json.dumps({"ok": False, "error": "cwd outside allowed root"}), file=sys.stderr)
         return 2
     a.cwd = str(resolved)

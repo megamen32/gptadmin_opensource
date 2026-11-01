@@ -12,7 +12,7 @@
 
 - Component: GPTADMIN Codex app connector authorization lifecycle.
 - Evidence: immutable Codex connector responses on 2026-07-27: `gptadmin_discover` and `gptadmin_ui` both failed with `UNAUTHORIZED`, `reauthentication_required`, and `oauth_refresh_token_missing`; no tool or interactive Allow surface could be reached. Reconnect then showed a generic setup failure; the screenshot remains in the private incident archive and is deliberately not a source-tree dependency.
-- Confirmed facts: GPTADMIN was discovered by Codex, but its connector could not use an existing session or obtain a refreshed session. The downstream ADB target remained `unauthorized` because the interactive approval path was unavailable. The Apps SDK widget Hub origin responded `200` for health, version and OAuth metadata; it reports deployed version `1.0.5`, commit `9d8a427`. The public `became.bezrabotnyi.com` origin redirects to the website and returns `404` for those Hub paths.
+- Confirmed facts: GPTADMIN was discovered by Codex, but its connector could not use an existing session or obtain a refreshed session. The downstream ADB target remained `unauthorized` because the interactive approval path was unavailable. The Apps SDK widget Hub origin responded `200` for health, version and OAuth metadata; it reports deployed version `1.0.5`, commit `9d8a427`. The public `gptadmin.bezrabotnyi.com` origin redirects to the website and returns `404` for those Hub paths.
 - Confirmed source cause: the Hub advertised only `authorization_code`, and `/oauth/token` returned a 12-hour access JWT without a `refresh_token`; a connector that requires refresh state necessarily reaches `oauth_refresh_token_missing` after access expiry/restart. The public-root origin mismatch remains a separate live-routing check.
 - Required regression: an ownership-specific lifecycle test must fail before the fix and then prove initial authorization, persisted refresh/session state, process or connector restart continuity, refresh continuity, and one real `discover -> schema -> execute` call. A mocked Hub `200` or a source-only token test is insufficient.
 - Deployment gate: do not deploy an authorization-related change until a fresh interactive authorization and the same post-restart/refresh client path pass against the deployment target; record only redacted immutable evidence.
@@ -430,7 +430,7 @@ Rules:
 
 - Component: `android-4g-lan-proxy.service` on admin-node-100.
 - First observed: 2026-07-23.
-- Symptom / evidence: Runtime probe `mac-curl-3126-20260723` stalled connecting to the LAN listener. The service was listening on `203.0.113.10:3126`, and a node-local proxy request completed successfully, while the UFW user rules had no TCP/3126 allow entry and the INPUT policy was deny.
+- Symptom / evidence: Runtime probe `mac-curl-3126-20260723` stalled connecting to the LAN listener. The service was listening on `192.168.2.100:3126`, and a node-local proxy request completed successfully, while the UFW user rules had no TCP/3126 allow entry and the INPUT policy was deny.
 - Root cause: The deployment created the LAN listener but did not install a matching UFW allow rule.
 - Fix / verification: Added UFW TCP rules limited to the private LAN ranges and
   made the deployment script install the matching rule idempotently for the
@@ -794,10 +794,10 @@ Rules:
 ## 2026-07-26 - ANDROID-LTE-ROUTE-PROOF-20260726 - Bridge could silently use Wi-Fi - fixed
 
 - Component: `android4gproxy` and `android-4g-lan-proxy.service` on the USB-connected Samsung benchmark device.
-- First observed: 2026-07-26; the bridge returned public IP `203.0.113.10`, matching the home ingress instead of a cellular egress.
+- First observed: 2026-07-26; the bridge returned public IP `95.165.165.65`, matching the home ingress instead of a cellular egress.
 - Confirmed facts: The native proxy uses the Android default route; when Wi-Fi was connected, `ip route get 1.1.1.1` selected `wlan0`. The Wi-Fi ADB reconnect timer and the Android persistent `wifi_on=1` setting could restore Wi-Fi after a transient `svc wifi disable`.
 - Root cause: LTE validation existed, but it did not bind proxy traffic to cellular or make the Wi-Fi-off requirement persistent, so a running bridge could falsely be labelled 4G.
-- Fix / verification: Disabled the Wi-Fi ADB reconnect timer for USB mode. The bridge now persists `wifi_on=0`, disables Wi-Fi, waits for an `rmnet` route, and fails closed otherwise. Focused regressions passed (`5 passed`). Two probes 15 seconds apart returned HTTP 200 through `203.0.113.10:3122` with egress `178.176.76.175`; Wi-Fi remained `0` and the route remained `rmnet4`.
+- Fix / verification: Disabled the Wi-Fi ADB reconnect timer for USB mode. The bridge now persists `wifi_on=0`, disables Wi-Fi, waits for an `rmnet` route, and fails closed otherwise. Focused regressions passed (`5 passed`). Two probes 15 seconds apart returned HTTP 200 through `192.168.2.100:3122` with egress `178.176.76.175`; Wi-Fi remained `0` and the route remained `rmnet4`.
 - Status: fixed.
 - Next action: Do not re-enable Wi-Fi ADB while this device is used as the LTE witness. Use USB ADB for recovery and monitoring.
 
@@ -805,7 +805,7 @@ Rules:
 
 - Component: managed MCP client-token lifecycle, OAuth JWT signing identity, `cli.py` client connection workflow, and Hub update/install persistence.
 - First observed: 2026-07-26, operator incident report: previously configured client keys were no longer accepted and the operator requires every key to remain valid until they explicitly revoke or rotate it.
-- Confirmed facts: `/home/admin/gptadmin/go-hub/internal/hub/server.go` signs every managed MCP JWT with a mandatory `exp`; `/admin/api/mcp/issue-token` defaults to 365 days. The same file invalidates a known token when `RevokedAt` is set, and all signatures depend on the configured OAuth signing secret. `cli.py` advertises a legacy bearer migration deadline of `2026-07-27`.
+- Confirmed facts: `/home/roomhacker/gptadmin/go-hub/internal/hub/server.go` signs every managed MCP JWT with a mandatory `exp`; `/admin/api/mcp/issue-token` defaults to 365 days. The same file invalidates a known token when `RevokedAt` is set, and all signatures depend on the configured OAuth signing secret. `cli.py` advertises a legacy bearer migration deadline of `2026-07-27`.
 - Root-cause hypothesis: expiration and legacy migration are automatic invalidation paths; an OAuth signing-secret replacement during setup/update would invalidate every previously issued JWT at once. The exact production trigger is not yet proven because the authenticated Hub and its audit/state data are unavailable to this session.
 - Status: urgent open.
 - Next action: Add an explicit non-expiring managed-key mode backed by a persistent signing-key ring, preserve old verification keys across controlled rotation, and prove that only an explicit client revoke/delete action invalidates an existing key.

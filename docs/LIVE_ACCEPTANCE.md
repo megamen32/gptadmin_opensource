@@ -75,7 +75,7 @@ listener, never the production Hub URL or administrator credential:
 ```bash
 GPTADMIN_BROWSER_TESTS=1 \
 GPTADMIN_BROWSER_CDP_URL=http://127.0.0.1:19102 \
-GPTADMIN_BROWSER_HUB_HOST=203.0.113.10 \
+GPTADMIN_BROWSER_HUB_HOST=192.168.2.100 \
   pytest -q tests/test_custom_gpt_browser_contract.py
 ```
 

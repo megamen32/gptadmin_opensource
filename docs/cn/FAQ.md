@@ -119,4 +119,4 @@ gptadmin uninstall
 
 - [打开 GitHub 问题](https://github.com/megamen32/gptadmin/issues)
 - 电报：[@careviolan](https://t.me/careviolan)
-- 网站：https://became.bezrabotnyi.com
+- 网站：https://gptadmin.bezrabotnyi.com

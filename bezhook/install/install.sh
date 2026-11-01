@@ -1,10 +1,10 @@
 #!/bin/sh
 # bezhook installer (Linux/macOS). One command:
-#   curl -fsSL https://dl.t.became.bezrabotnyi.com/bezhook/install.sh | sh
+#   curl -fsSL https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.sh | sh
 # Overrides: BEZHOOK_MIRROR, BEZHOOK_INSTALL_DIR
 set -eu
 
-MIRROR="${BEZHOOK_MIRROR:-https://dl.t.became.bezrabotnyi.com/bezhook}"
+MIRROR="${BEZHOOK_MIRROR:-https://dl.t.gptadmin.bezrabotnyi.com/bezhook}"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 MACHINE=$(uname -m)
@@ -78,4 +78,4 @@ echo "bezhook: installed $VERSION -> $DEST"
 echo
 echo "Usage: bezhook <local-port> [--sub name] [--ttl 72h]"
 echo "  e.g.  bezhook 3000 --sub myapp"
-echo "  ->    https://myapp.t.became.bezrabotnyi.com"
+echo "  ->    https://myapp.t.gptadmin.bezrabotnyi.com"

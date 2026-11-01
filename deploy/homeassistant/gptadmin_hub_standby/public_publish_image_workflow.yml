@@ -114,7 +114,7 @@ jobs:
             gptadmin_hub_standby/gptadmin_quorum_config.py \
             gptadmin_hub_standby/gptadmin_single_writer.py \
             gptadmin_hub_standby/gptadmin_frpc_processes.py "$context/"
-          cp gptadmin-source/deploy/server01/gptadmin_hub_standby/public_standby_index.html "$context/public/index.html"
+          cp gptadmin-source/deploy/homeassistant/gptadmin_hub_standby/public_standby_index.html "$context/public/index.html"
           (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
             -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
             -o "$context/gptadmin_hub" ./cmd/gptadmin-hub)

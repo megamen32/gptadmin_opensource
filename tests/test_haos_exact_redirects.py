@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "deploy/server01/gptadmin_hub_standby"
+APP = ROOT / "deploy/homeassistant/gptadmin_hub_standby"
 
 
 def test_exact_redirects_default_to_empty_and_are_exported(tmp_path):

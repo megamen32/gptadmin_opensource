@@ -12,7 +12,7 @@ is expected to be centrally available through GPTADMIN.
 
 - For this managed installation, the parent GPTADMIN MCP connection should use
   the canonical `https://mcp.bezrabotnyi.com/mcp` endpoint. If its client has a
-  legacy `u-f….t.became.bezrabotnyi.com` entry, repair it through browser
+  legacy `u-f….t.gptadmin.bezrabotnyi.com` entry, repair it through browser
   OAuth with `gptadmin.read gptadmin.exec offline_access`. A separate Hub uses
   its own explicitly selected stable HTTPS origin.
 - The real GPTADMIN connector must expose `listMcpAgents`, `callMcpTool`, and

@@ -14,7 +14,7 @@ import sys
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = Path('/home/admin/ServersAdministartion/templates/server100-resource-guard/bounded-foreground.py')
+HELPER = Path('/home/roomhacker/ServersAdministartion/templates/server100-resource-guard/bounded-foreground.py')
 TEMP = ROOT / '.tmp' / 'mcp-relay-check'
 MIB, GIB = 1024**2, 1024**3
 BUDGET = {'high': 384*MIB, 'max': 512*MIB, 'tasks': 128, 'cpu': 1,

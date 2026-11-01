@@ -2,7 +2,7 @@ name: GPTAdmin ShellMCP
 version: "1.0.0"
 slug: gptadmin_shellmcp
 description: "GPTAdmin ShellMCP agent for Home Assistant OS"
-url: "https://became.bezrabotnyi.com"
+url: "https://gptadmin.bezrabotnyi.com"
 arch:
   - aarch64
 startup: services

@@ -23,7 +23,7 @@ const (
 	proxyRouteProbePath           = "/var/lib/gptadmin/proxy-route/last-probe.json"
 	proxyRouteUnit                = "gptadmin-proxy-route-relay02.service"
 	proxyRoutePort                = 24836
-	proxyRouteExitAddress         = "203.0.113.10:3128"
+	proxyRouteExitAddress         = "192.168.2.5:3128"
 	proxyRouteProbeURL            = "https://api.ipify.org"
 	proxyRoutePathReadbackTimeout = 11 * time.Second
 )
@@ -202,7 +202,7 @@ func (c *proxyRouteController) systemctl(ctx context.Context, args ...string) er
 }
 
 func (c *proxyRouteController) sshVUSA(ctx context.Context, remoteArgs ...string) ([]byte, error) {
-	args := []string{"-u", "admin", "--", "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "relay02"}
+	args := []string{"-u", "roomhacker", "--", "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "relay02"}
 	args = append(args, remoteArgs...)
 	out, err := c.command(ctx, "/usr/sbin/runuser", args...)
 	if err != nil {
@@ -618,13 +618,13 @@ probeLoop:
 	}
 	if pathConfirmed {
 		result.Server44PathVerified = boolPtr(true)
-		appendProxyRouteReason(&result, "Established TCP connection to 203.0.113.10:3128 observed on node-100 during the VUSA proxy request.")
+		appendProxyRouteReason(&result, "Established TCP connection to 192.168.2.5:3128 observed on node-100 during the VUSA proxy request.")
 	} else if pathReadbackErr != nil {
 		result.Server44PathVerified = nil
 		appendProxyRouteReason(&result, "Could not verify the established node-44 socket: "+pathReadbackErr.Error())
 	} else {
 		result.Server44PathVerified = boolPtr(false)
-		appendProxyRouteReason(&result, "No established TCP connection to 203.0.113.10:3128 was observed during the VUSA proxy request.")
+		appendProxyRouteReason(&result, "No established TCP connection to 192.168.2.5:3128 was observed during the VUSA proxy request.")
 	}
 
 	if directErr != nil {

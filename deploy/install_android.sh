@@ -58,8 +58,8 @@ if [[ -z "$HUB_URL" ]]; then
   HUB_URL=$(read_existing_env HUB_URL)
 fi
 if [[ -z "$HUB_URL" ]]; then
-  read -r -p "GPTAdmin Hub URL [https://became.bezrabotnyi.com]: " HUB_URL || true
-  HUB_URL=${HUB_URL:-https://became.bezrabotnyi.com}
+  read -r -p "GPTAdmin Hub URL [https://gptadmin.bezrabotnyi.com]: " HUB_URL || true
+  HUB_URL=${HUB_URL:-https://gptadmin.bezrabotnyi.com}
 fi
 HUB_URL=${HUB_URL%/}
 

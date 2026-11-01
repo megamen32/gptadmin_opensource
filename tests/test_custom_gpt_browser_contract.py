@@ -10,7 +10,7 @@ Set ``GPTADMIN_BROWSER_TESTS=1`` for a disposable local Hub.  Set
 ``GPTADMIN_BROWSER_CDP_URL`` to run the browser portion through BrowserOS on a
 separate Mac; otherwise a local headless Chromium is used.  If that browser is
 on another host, set ``GPTADMIN_BROWSER_HUB_HOST`` to the LAN/public address it
-can reach (for example ``203.0.113.10``); the test binds its disposable Hub
+can reach (for example ``192.168.2.100``); the test binds its disposable Hub
 and callback there.  The address must point to a non-production test Hub.
 """
 

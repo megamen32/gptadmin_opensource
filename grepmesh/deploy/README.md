@@ -11,9 +11,9 @@ must provision the same `GREPMESH_PEER_TOKEN` in
 allowlist. The rollout helper refuses to mutate a host when that file is
 missing.
 
-The service runs as `admin-search` and receives the `admin`
+The service runs as `roomhacker-search` and receives the `roomhacker`
 supplementary group at process start. This is required on node-88 where
-`/home/admin` is `0750`; it grants only the files already readable by that
+`/home/roomhacker` is `0750`; it grants only the files already readable by that
 group, while explicit secret excludes remain active.
 
 Commands:

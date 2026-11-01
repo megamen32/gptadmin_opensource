@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/admin/bin/android-s21-gptadmin-bridge.sh
+ExecStart=/home/roomhacker/bin/android-s21-gptadmin-bridge.sh
 TimeoutStartSec=90
 
 [Install]

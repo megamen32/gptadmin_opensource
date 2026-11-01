@@ -69,17 +69,17 @@ lines.
 The old fleet-health controller also has a separate correctness gap: a dry-run
 filtered to `relay01` emitted a `router` recovery because its state file is global
 to all hosts. This is recorded in
-`/home/admin/gptadmin/.agents/tasks/todo-20260809-fleet-health-dry-run-cross-host-state.md`;
+`/home/roomhacker/gptadmin/.agents/tasks/todo-20260809-fleet-health-dry-run-cross-host-state.md`;
 the new producer must not reuse that filtered state path until reconciled.
 
 The source-level implementation remains in:
 
-- `/home/admin/ServersAdministartion/automation/health-incident-monitor/`
-- `/home/admin/agents-projects/noticeplace/`
-- `/home/admin/gptadmin/go-hub/`
-- `/home/admin/agents-projects/agent-herder/`
-- `/home/admin/agents-projects/hermes-config/plugins/agent-herder-bridge/`
-- `/home/admin/agents-projects/agent-resume/` (compatibility fix: stop
+- `/home/roomhacker/ServersAdministartion/automation/health-incident-monitor/`
+- `/home/roomhacker/agents-projects/noticeplace/`
+- `/home/roomhacker/gptadmin/go-hub/`
+- `/home/roomhacker/agents-projects/agent-herder/`
+- `/home/roomhacker/agents-projects/hermes-config/plugins/agent-herder-bridge/`
+- `/home/roomhacker/agents-projects/agent-resume/` (compatibility fix: stop
   registering unsupported `gateway_startup`; local regression `5 passed`)
 
 The selected-plan execution seam is now source-complete as well: NoticePlace
@@ -221,7 +221,7 @@ Agent-Herder web bundle (`dist/web/server.js`) for the remediation route.
 The final Agent-Herder route hardening is also live: the service now answers a
 read-only `GET /api/health/remediation` with `405 method_not_allowed`; the
 latest atomic dist switch preserved the prior runtime at
-`/home/admin/agents-projects/agent-herder/dist.backup-20260809T154620Z`.
+`/home/roomhacker/agents-projects/agent-herder/dist.backup-20260809T154620Z`.
 
 ## Fleet config receipt and probe correction (2026-08-09)
 
@@ -232,7 +232,7 @@ Fleet apply returned `prepared`, and verify returned `verified` with
 `mismatches=[]`, source digest
 `sha256:e96fd1e9dfe41fa55e6909eb6ecfcc9142ec13ecfcbf1d32112786aa3d659eca`.
 The verified config is `/etc/health-incident-fleet.json`, mode `0640`, owner
-`root:admin`; its values are non-secret.
+`root:roomhacker`; its values are non-secret.
 
 The first verify receipt falsely reported `configFilePresent=false` because
 the remote probe used the non-portable `test -s -- path` form. This was fixed

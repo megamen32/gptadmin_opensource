@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-hub='http://203.0.113.10:9001/api/v1/cloud-os'
+hub='http://192.168.2.100:9001/api/v1/cloud-os'
 state_dir="$HOME/.local/share/gptadmin-cloudos"
 state_file="$state_dir/computer-id"
 mkdir -p "$state_dir"

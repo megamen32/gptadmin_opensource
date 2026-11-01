@@ -17,16 +17,16 @@ Typical deploy from `admin-node-100`:
 Defaults:
 
 ```text
-HAOS_HOST=203.0.113.10
+HAOS_HOST=192.168.2.101
 HAOS_SSH_PORT=2228
 HAOS_SSH_USER=root
-HAOS_SSH_KEY=/home/admin/.ssh/id_rsa
+HAOS_SSH_KEY=/home/roomhacker/.ssh/id_rsa
 HAOS_ADDON_DIR=/addons/gptadmin_shellmcp
 ```
 
 Validation endpoints after start:
 
 ```text
-http://203.0.113.10:25900/version
-http://203.0.113.10:25900/mcp
+http://192.168.2.101:25900/version
+http://192.168.2.101:25900/mcp
 ```

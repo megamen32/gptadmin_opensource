@@ -20,7 +20,7 @@ def package(root, arch='amd64', **changes):
     blobs['bin/gptadmin-node'] = b'\x7fELF-node-fixture'
     blobs['bin/shellmcp'] = b'\x7fELF-shellmcp-fixture'
     blobs['systemd/gptadmin-proxy-route-relay02.service'] = (
-        b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
+        b'[Unit]\nDescription=fixture\n[Service]\nUser=roomhacker\nExecStart=/usr/bin/ssh\n')
     ui_asset = 'public/admin/assets/index-a1b2c3.js'
     ui_css = 'public/admin/assets/index-d4e5f6.css'
     blobs[ui_asset] = b'js-fixture'

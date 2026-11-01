@@ -8,7 +8,7 @@ The existing consumer inventory is an explicitly dated 2026-10-07 private
 operator snapshot at `.agents/tasks/gptadmin-mcp-consumer-inventory-20261007.md`.
 It is ignored local evidence, not a repository document or a cloud-CI dependency.
 Infrastructure ownership and host access remain in the canonical
-`/home/admin/ServersAdministartion` checkout. Preserve existing Herder
+`/home/roomhacker/ServersAdministartion` checkout. Preserve existing Herder
 POST-only stdio bridging until the real native consumer proves a replacement.
 
 ## Connection contract

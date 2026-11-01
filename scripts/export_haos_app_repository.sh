@@ -16,7 +16,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 ROOT=$(git rev-parse --show-toplevel)
-SRC="$ROOT/deploy/server01/gptadmin_hub_standby"
+SRC="$ROOT/deploy/homeassistant/gptadmin_hub_standby"
 OUTPUT=${OUTPUT:?--output is required}
 SOURCE_REF=${SOURCE_REF:-$(git -C "$ROOT" rev-parse HEAD)}
 

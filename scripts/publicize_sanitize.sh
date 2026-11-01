@@ -21,27 +21,27 @@ while IFS= read -r file; do
 		-e 's/10\.[0-9]+\.[0-9]+\.[0-9]+/203.0.113.10/g' \
 		-e 's/192\.168\.[0-9]+\.[0-9A-Za-z]+/203.0.113.10/g' \
 		-e 's/172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+/203.0.113.10/g' \
-		-e 's/admin-node-100|admin-node-88|node-44|server01\b|server01|relay01|relay02/server01/g' \
-		-e 's/admin/admin/g' \
-		-e 's/uplink|uplink/uplink/g' \
+		-e 's/admin-node-100|admin-node-88|node-44|homeassistant\b|openwrt|relay01|relay02/server01/g' \
+		-e 's/roomhacker/admin/g' \
+		-e 's/MGTS|Beeline/uplink/g' \
 		-e 's/[0-9]{8,12}:[A-Za-z0-9_-]{30,}/<TELEGRAM_TOKEN>/g' \
 		-e 's/(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}/<GITHUB_TOKEN>/g' \
 		-e 's/sk-(proj-)?[A-Za-z0-9_-]{20,}/<OPENAI_KEY>/g' \
 		-e 's/AKIA[0-9A-Z]{16}/<AWS_EXAMPLE_KEY>/g' \
-		-e 's/your-subdomain\.t\.gptadmin\.bezrabotnyi\.com/your-subdomain.t.became.bezrabotnyi.com/g' \
-		-e 's/your-subdomain/your-subdomain/g' \
+		-e 's/u-f1102930\.t\.gptadmin\.bezrabotnyi\.com/your-subdomain.t.gptadmin.bezrabotnyi.com/g' \
+		-e 's/u-f1102930/your-subdomain/g' \
 		-e 's|https://gptadmin\.bezrabotnyi\.com|https://became.bezrabotnyi.com|g' \
 		-e 's/gptadmin\.bezrabotnyi\.com/became.bezrabotnyi.com/g' \
 		-e 's/gptadminmcp\.bezrabotnyi\.com/became.bezrabotnyi.com/g' \
 		-e 's/eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiJhZG1pbiJ9\.[A-Za-z0-9_-]+/<TEST_JWT>/g' \
 		"$file"
-done < <(grep -rIlE 'your-subdomain|bezrabotnyi\.com|admin|95\.(16[0-9]|31)\.[0-9]+\.[0-9]+|192\.168\.|AKIA[0-9A-Z]{16}|eyJhbGciOiJIUzI1NiJ9' \
+done < <(grep -rIlE 'u-f1102930|bezrabotnyi\.com|roomhacker|95\.(16[0-9]|31)\.[0-9]+\.[0-9]+|192\.168\.|AKIA[0-9A-Z]{16}|eyJhbGciOiJIUzI1NiJ9' \
 	--exclude-dir=.git --exclude-dir=.tmp --exclude-dir=node_modules \
 	--exclude-dir=dist --exclude='*.webp' --exclude='*.png' --exclude='*.jpg' \
 	--exclude='*.zip' --exclude='*.tar.gz' . 2>/dev/null || true)
 
 echo "▸ Verifying no personal data survives"
-leaks="$(grep -rInE 'your-subdomain|admin-server|95\.165\.165\.65|95\.31\.7\.115' \
+leaks="$(grep -rInE 'u-f1102930|roomhacker-server|95\.165\.165\.65|95\.31\.7\.115' \
 	--exclude-dir=.git --exclude-dir=.tmp --exclude-dir=node_modules \
 	--exclude=publicize_sanitize.sh \
 	--exclude='*.webp' --exclude='*.png' --exclude='*.jpg' \

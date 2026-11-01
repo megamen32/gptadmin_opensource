@@ -66,7 +66,7 @@ access to this camera LAN; I will inspect only the approved HTTP/API ports.”
 The same data-plane must support two explicit human workflows:
 
 ```text
-Mac local connector -> Hub -> Android proxy-agent -> 203.0.113.10 camera
+Mac local connector -> Hub -> Android proxy-agent -> 192.168.2.x camera
 Mac local connector -> Hub -> Android proxy-agent -> public API over Android 4G
 ```
 
@@ -212,7 +212,7 @@ The agent receives offers via the dedicated pull long-poll or signed webhook act
 - Modify: `deploy/android-4g-lan-proxy.sh` only for the local proof path and explicit authenticated-LAN mode
 - Modify: `cli.py` with `gptadmin proxy open|status|close`
 
-The first useful milestone is pull-mode Android plus a remote local connector bound to `127.0.0.1:3126`, SOCKS5 CONNECT and HTTP CONNECT, one WSS per TCP connection, a 15-minute capability lease, an allowlist such as `203.0.113.10/24` with selected ports, and no public/LAN listener. The current ADB proof remains a TCP-only local validation and is not treated as the remote protocol.
+The first useful milestone is pull-mode Android plus a remote local connector bound to `127.0.0.1:3126`, SOCKS5 CONNECT and HTTP CONNECT, one WSS per TCP connection, a 15-minute capability lease, an allowlist such as `192.168.2.0/24` with selected ports, and no public/LAN listener. The current ADB proof remains a TCP-only local validation and is not treated as the remote protocol.
 
 **TDD steps:**
 

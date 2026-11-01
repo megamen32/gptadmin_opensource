@@ -6030,7 +6030,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 
 func canonicalShellQueueName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "server01", "home-assistant":
+	case "homeassistant", "home-assistant":
 		return "haos"
 	default:
 		return strings.TrimSpace(name)
@@ -10764,18 +10764,18 @@ func (s *Server) appsSDKResourcesList() map[string]any {
 }
 
 func appsSDKWidgetMeta() map[string]any {
-	connectDomains := []string{"https://became.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
-	resourceDomains := []string{"https://your-subdomain.t.became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://persistent.oaistatic.com"}
+	connectDomains := []string{"https://gptadmin.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}
+	resourceDomains := []string{"https://u-f1102930.t.gptadmin.bezrabotnyi.com", "https://gptadmin.bezrabotnyi.com", "https://persistent.oaistatic.com"}
 	return map[string]any{
 		"ui": map[string]any{
-			"domain":        "https://your-subdomain.t.became.bezrabotnyi.com",
+			"domain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
 			"prefersBorder": true,
 			"csp":           map[string]any{"connectDomains": connectDomains, "resourceDomains": resourceDomains},
 		},
 		"openai/widgetDescription":   "Interactive GPTAdmin dashboard for selecting MCP servers, listing tools, running calls, and polling jobs.",
 		"openai/widgetPrefersBorder": true,
-		"openai/widgetDomain":        "https://your-subdomain.t.became.bezrabotnyi.com",
-		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}},
+		"openai/widgetDomain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://gptadmin.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}},
 	}
 }
 

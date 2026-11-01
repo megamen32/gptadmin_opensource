@@ -191,7 +191,7 @@ Additional protections:
 7. `MacBook Home` appears in Browser OS Files
 8. OpenCode reads and modifies a local file (filesystem stream via proxyrelay)
 9. OpenCode launches a local process and receives stdout (process stream via proxyrelay)
-10. OpenCode makes a TCP request to `203.0.113.10` via NetworkProxyController + proxyrelay
+10. OpenCode makes a TCP request to `192.168.1.1` via NetworkProxyController + proxyrelay
 11. User closes browser, opens again — same cloud session, same computer handle
 12. "Disconnect" posts revocation ticket to relay, immediately aborts all streams
 

@@ -1,10 +1,10 @@
 {
   "host_id": "node-100",
-  "bind": "203.0.113.10:9419",
+  "bind": "192.168.2.100:9419",
   "local_bind": "127.0.0.1:9419",
-  "root": "/home/admin",
+  "root": "/home/roomhacker",
   "roots": {
-    "home": ["/home/admin"],
+    "home": ["/home/roomhacker"],
     "opt": ["/opt"],
     "etc": ["/etc"]
   },

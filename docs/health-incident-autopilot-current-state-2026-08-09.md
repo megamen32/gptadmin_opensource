@@ -53,7 +53,7 @@ flowchart LR
 - NoticePlace принимает `POST /v1/events` с bearer auth и `Idempotency-Key`,
   хранит incident/delivery в SQLite и дедуплицирует unresolved incident по
   `(project, recipient, consumer_id, dedup_key)`:
-  `/home/admin/agents-projects/noticeplace/notification_center/http_api.py:568-576`,
+  `/home/roomhacker/agents-projects/noticeplace/notification_center/http_api.py:568-576`,
   `core.py:529-613`.
 - Канал `gptadmin.agent:<job>` подписывает payload, сохраняет delivery key и
   опрашивает `/webhook-jobs/{job_id}`:
@@ -61,10 +61,10 @@ flowchart LR
   `gptadmin_agent.py:141-181`.
 - GPTAdmin принимает webhook, сохраняет accepted/running/completed/failed,
   а callback failure отделяет от terminal job state:
-  `/home/admin/gptadmin/go-hub/internal/hub/webhook_gateway.go:191-260,389-443`.
+  `/home/roomhacker/gptadmin/go-hub/internal/hub/webhook_gateway.go:191-260,389-443`.
 - Agent Herder предоставляет `/api/sessions/new-or-resume`; идентичность named
   session — `(harness, canonical cwd, name)`, с lock и resume semantics:
-  `/home/admin/agents-projects/agent-herder/src/web/server.ts:139-154`,
+  `/home/roomhacker/agents-projects/agent-herder/src/web/server.ts:139-154`,
   `src/named-session.ts:64-166`.
 
 ## Состояние сигналов здоровья
@@ -77,7 +77,7 @@ flowchart LR
 | Error-level/keywords | Fail2Ban watches nginx/kernel logs, но это security enforcement, не incident feed | Fail2Ban | Cursor, keyword policy, severity, privacy filtering, event delivery |
 | RAM/log pressure | One-minute systemd timer реагирует на tmpfs ≥75%, чистит файлы и может restart VPN | Local systemd/VPN | Incident publication, deduplication, approval-aware remediation |
 
-Источники: `/home/admin/ServersAdministartion/docs/inventory/services/netdata.md:7-12`,
+Источники: `/home/roomhacker/ServersAdministartion/docs/inventory/services/netdata.md:7-12`,
 `infra/recovery.md:62-79,269-283`,
 `infra/security.md:3-13`,
 `automation/ram-log-guard/ram-log-guard.timer:4-8`,
@@ -134,7 +134,7 @@ Telegram и NoticePlace отправляются ссылки/opaque IDs и reda
   webhook, polling, named-session и audit seams.
 
 Эти правила согласованы с runtime source-ownership policy в
-`/home/admin/agents-projects/AGENTS.md`.
+`/home/roomhacker/agents-projects/AGENTS.md`.
 
 ## Acceptance proof после реализации
 
@@ -155,7 +155,7 @@ Telegram и NoticePlace отправляются ссылки/opaque IDs и reda
 ## Ограничения исследования
 
 - Запрошенный путь `~/serveradministation` отсутствует; использован существующий
-  `/home/admin/ServersAdministartion`.
+  `/home/roomhacker/ServersAdministartion`.
 - Graphify дал полезную карту `3,296 nodes / 5,421 edges`, но 3/7 semantic
   chunks завершились connection error, 197 файлов не дали nodes, а
   `nginx-dev/state` был недоступен. Graphify evidence поэтому навигационная,

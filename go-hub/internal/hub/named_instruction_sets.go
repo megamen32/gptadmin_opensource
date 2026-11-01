@@ -191,11 +191,13 @@ func (s *Server) instructionSetForRequest(r *http.Request) InstructionSet {
 }
 
 func (s *Server) startupInstructionsTextForRequest(r *http.Request) string {
-	content := s.instructionSetForRequest(r).Content
-	if strings.TrimSpace(content) == "" {
-		return defaultStartupInstructions
+	set, _, err := s.instructionDocument(r)
+	if err != nil {
+		// Never substitute another profile or drop the shared component.
+		// Execution remains fail-closed through requireInstructionContext.
+		return "GPTAdmin instructions unavailable; refresh the selected profile before executing tools."
 	}
-	return content
+	return set.Content
 }
 
 func instructionSetIDFromPath(r *http.Request) (string, error) {

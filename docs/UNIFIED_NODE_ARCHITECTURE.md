@@ -67,12 +67,12 @@ python3 tests/e2e/node/run.py .tmp/node-build/gptadmin-node
 
 Read-only проверка production дополнительно установила:
 
-- canonical `your-subdomain.t.became.bezrabotnyi.com` имеет единственный
-  A `203.0.113.10`; exact nginx vhost маршрутизирует на локальные `9001/19001`
+- canonical `u-f1102930.t.gptadmin.bezrabotnyi.com` имеет единственный
+  A `95.165.165.65`; exact nginx vhost маршрутизирует на локальные `9001/19001`
   и обходит FRP. Переключение процессов на одном хосте не переживёт потерю хоста.
   Это адрес транспортного canary, а не OAuth identity общего ChatGPT/Codex
   connector; официальный MCP endpoint — `https://mcp.bezrabotnyi.com/mcp`.
-- HAOS `203.0.113.10` — единственный включённый удалённый standby, build
+- HAOS `192.168.2.101` — единственный включённый удалённый standby, build
   `1.0.5 / 9d8a427`; node-44, node-88 и VUSA выключены в failover config.
 - Один credential даёт primary 200 и HAOS 401; OAuth signing secret также
   различается, managed token store на HAOS отсутствует. Значения не выводились.

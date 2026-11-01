@@ -104,22 +104,20 @@ func withoutInstructionContext(args map[string]any) map[string]any {
 func (s *Server) instructionDocument(r *http.Request) (InstructionSet, string, error) {
 	r = instructionCaller(r)
 	profile, bound := AccessProfileFromRequest(r)
+	var set InstructionSet
 	if bound && profile.InstructionSetID != "" && profile.InstructionSetID != defaultInstructionSetID {
-		set, ok := s.namedInstructionSetSnapshot(profile.InstructionSetID)
+		var ok bool
+		set, ok = s.namedInstructionSetSnapshot(profile.InstructionSetID)
 		if !ok {
 			return InstructionSet{}, profile.ID, errors.New("the selected instruction set is unavailable")
 		}
-		if err := validateInstructionContent(set.Content); err != nil {
-			return InstructionSet{}, profile.ID, err
-		}
-		return set, profile.ID, nil
+	} else {
+		set = s.instructionSetForRequest(r)
 	}
-	set := s.instructionSetForRequest(r)
-	if strings.TrimSpace(set.Content) == "" {
-		return InstructionSet{}, profile.ID, errors.New("profile instructions are empty")
-	}
-	return set, profile.ID, nil
+	effective, err := composeSharedWorkflow(set, sharedWorkflowInstructions)
+	return effective, profile.ID, err
 }
+
 func (s *Server) instructionSigningKey() []byte {
 	// Reuse the configured signing authority; never create a new secret/store.
 	// Replicas with the same authority and effective profile can verify a receipt.
@@ -310,6 +308,8 @@ func (s *Server) instructionFailure(r *http.Request) map[string]any {
 		if err == nil {
 			fail["context"] = token
 			fail["instructions"] = set.Content
+			fail["instruction_version"] = set.Version
+			fail["shared_workflow_version"] = instructionSetVersion(sharedWorkflowInstructions)
 			s.rememberInstructionReceipt(r, set)
 			if profile != "" {
 				fail["profile"] = profile
@@ -424,6 +424,8 @@ func (s *Server) presentInstructionContext(r *http.Request, name string, args ma
 		}
 		out["context"] = token
 		out["instructions"] = set.Content
+		out["instruction_version"] = set.Version
+		out["shared_workflow_version"] = instructionSetVersion(sharedWorkflowInstructions)
 		s.rememberInstructionReceipt(r, set)
 		if profile != "" {
 			out["profile"] = profile

@@ -120,7 +120,7 @@ func TestAdminServerResourcesAcceptsSameOriginCookiePostThroughIngressAlias(t *t
 	defer s.Close()
 	s.agents["shell:node"] = &Agent{AgentID: "shell:node", Kind: "virtual_shell", Status: "online", LastSeen: float64(now.Unix())}
 
-	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
+	const ingressOrigin = "https://u-f1102930.t.gptadmin.bezrabotnyi.com"
 	req := httptest.NewRequest(http.MethodPost, ingressOrigin+"/admin/api/servers/resources", strings.NewReader(`{"server_id":"shell:node"}`))
 	req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(now.Add(time.Hour))})
 	// The canonical VUSA ingress preserves the external Host and sets the
@@ -144,7 +144,7 @@ func TestAdminServerResourcesRejectsCrossOriginCookiePostThroughIngressAlias(t *
 	defer s.Close()
 	s.agents["shell:node"] = &Agent{AgentID: "shell:node", Kind: "virtual_shell", Status: "online", LastSeen: float64(now.Unix())}
 
-	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
+	const ingressOrigin = "https://u-f1102930.t.gptadmin.bezrabotnyi.com"
 	req := httptest.NewRequest(http.MethodPost, ingressOrigin+"/admin/api/servers/resources", strings.NewReader(`{"server_id":"shell:node"}`))
 	req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(now.Add(time.Hour))})
 	req.Header.Set("X-Forwarded-Proto", "https")

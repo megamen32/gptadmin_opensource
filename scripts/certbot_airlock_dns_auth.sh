@@ -19,7 +19,7 @@ relative_name="${domain%"$suffix"}"
 record_name="_acme-challenge${relative_name:+.$relative_name}"
 
 call_spaceweb() {
-  sudo -n -u admin env HOME=/home/admin ssh \
+  sudo -n -u roomhacker env HOME=/home/roomhacker ssh \
     -o BatchMode=yes \
     -o ConnectTimeout=12 \
     -o StrictHostKeyChecking=yes \
