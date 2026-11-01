@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/user"
+	"sort"
 	"strings"
 	"time"
 
@@ -161,8 +163,16 @@ func (s *Server) mcpAgentsForCapabilities() []map[string]any {
 			"managed_stdio_owner":       configuredUser != "" && configuredUser == runnerUser,
 			"managed_stdio_platform":    mcpclient.ScopedProcessGroupsSupported(),
 		}
+		// Metadata generation survives process restarts but changes with the
+		// actual definition, including credentials. Never publish the definition.
+		descriptor["catalog_config_digest"] = mcpCatalogConfigDigest(a)
 		if current, ok := health[a.Ref]; ok {
 			descriptor["health"] = current
+			if protocol, ok := current["protocol"].(map[string]any); ok {
+				if digest, ok := protocol["catalog_digest"].(string); ok && digest != "" {
+					descriptor["catalog_digest"] = digest
+				}
+			}
 		} else {
 			descriptor["health"] = unknownMCPHealth()
 		}
@@ -184,5 +194,45 @@ func (s *Server) mcpConnectionInstanceAt(ref string, generation uint64) string {
 	}
 	value := fmt.Sprintf("%s\x00%s\x00%d", s.connectionInstance, ref, generation)
 	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func mcpCatalogDigest(tools []map[string]any) string {
+	rows := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		b, _ := json.Marshal(tool)
+		rows = append(rows, string(b))
+	}
+	sort.Strings(rows)
+	b, _ := json.Marshal(rows)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// mcpCatalogConfigDigest fences cached metadata by effective credential inputs.
+// Hash only: neither resolved headers nor inherited environment leave this node.
+// Include the full stdio environment because legacy unscoped clients inherit it;
+// the narrower scoped-client allowlist alone cannot fence those credentials.
+func mcpCatalogConfigDigest(agent supervisor.Agent) string {
+	effective := agent
+	effective.Headers = make(map[string]string, len(agent.Headers))
+	effective.Env = make(map[string]string, len(agent.Env))
+	for key, value := range agent.Headers {
+		effective.Headers[key] = os.ExpandEnv(value)
+	}
+	for key, value := range agent.Env {
+		effective.Env[key] = os.ExpandEnv(value)
+	}
+	var environment []string
+	if agent.Transport == "stdio" {
+		environment = os.Environ()
+		sort.Strings(environment)
+	}
+	encoded, _ := json.Marshal(struct {
+		Definition  supervisor.Agent
+		Effective   supervisor.Agent
+		Environment []string
+	}{agent, effective, environment})
+	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }

@@ -125,6 +125,9 @@ done
 			beatDescriptor = candidate
 		}
 	}
+	if beatDescriptor != nil && (beatDescriptor["catalog_digest"] == nil || beatDescriptor["catalog_digest"] != descriptor["catalog_digest"]) {
+		t.Fatalf("heartbeat generation missing or unstable: %v", beatDescriptor)
+	}
 	if beatDescriptor == nil {
 		t.Fatalf("heartbeat BrowserClaw descriptor=%v", heartbeat["mcp_agents"])
 	}

@@ -3684,6 +3684,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	runtimeSettings := s.shellRuntimeSettingsLocked()
 	s.mu.Unlock()
+	s.refreshSearchCatalogHeartbeat(agentID)
 	responseStatus := "registered"
 	if !approved {
 		responseStatus = "awaiting_approval"

@@ -67,6 +67,14 @@ func (s *Server) authorizeMCPConnectionOwner(r *http.Request, target, tool strin
 		if parent == nil || ref == "" {
 			return nil
 		}
+		// Removal from discovery must not turn a personal connection into a
+		// shared parent-facade route while the executor may still serve the ref.
+		if owner := firstString(mapValue(parent.Meta["membership_catalog_owners"]), ref); owner != "" {
+			child := Agent{AgentID: "mcp:" + target + ":" + ref, Meta: map[string]any{"owner_profile_id": owner}}
+			if !agentOwnerConnectionAllowed(r, child) {
+				return errors.New("personal MCP requires its exact owner profile")
+			}
+		}
 		for _, raw := range sliceValue(parent.Meta["mcp_agents"]) {
 			descriptor := mapValue(raw)
 			if firstString(descriptor, "ref") == ref && firstString(descriptor, "owner_profile_id") != "" {

@@ -883,20 +883,39 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "node credential required"})
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, nodeHeartbeatBodyLimit+1))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body required"})
 		return
 	}
+	if len(raw) > nodeHeartbeatBodyLimit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "heartbeat body limit exceeded"})
+		return
+	}
 	var request struct {
-		Revision    uint64 `json:"revision"`
-		State       string `json:"state"`
-		Build       string `json:"build"`
-		StorageOK   bool   `json:"storage_ok"`
-		SnapshotRev uint64 `json:"snapshot_revision"`
+		Revision              uint64          `json:"revision"`
+		State                 string          `json:"state"`
+		Build                 string          `json:"build"`
+		StorageOK             bool            `json:"storage_ok"`
+		SnapshotRev           uint64          `json:"snapshot_revision"`
+		ExecutorCatalog       json.RawMessage `json:"executor_catalog"`
+		ExecutorCatalogStatus string          `json:"executor_catalog_status"`
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body must be JSON"})
+		return
+	}
+	if request.ExecutorCatalogStatus != "" && request.ExecutorCatalogStatus != "complete" && request.ExecutorCatalogStatus != "incomplete" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid executor catalog status"})
+		return
+	}
+	if request.ExecutorCatalogStatus == "incomplete" && request.ExecutorCatalog != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "incomplete executor catalog cannot replace descriptors"})
+		return
+	}
+	catalog, catalogErr := decodeNodeExecutorCatalog(request.ExecutorCatalog)
+	if catalogErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": catalogErr.Error()})
 		return
 	}
 	reported := strings.TrimSpace(request.State)
@@ -908,7 +927,7 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 	now := s.now()
 	s.membershipMu.Lock()
 	current := s.membership.Nodes[member.NodeID]
-	if current == nil || current.State == nodeStateDisabled {
+	if current == nil || current.State == nodeStateDisabled || current.KeyHash != member.KeyHash || current.Name != member.Name {
 		s.membershipMu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node is disabled"})
 		return
@@ -948,11 +967,25 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 	revision := s.membership.Revision
 	writerID, writerURL := s.membership.WriterID, s.membership.WriterURL
 	s.membershipMu.Unlock()
+	// Liveness is independent of optional catalog acceptance. Publish committed
+	// routing transitions even if the descriptor update below is rejected.
 	if changed {
 		s.rebuildMembershipRoutes()
 	}
+	catalogChanged := false
+	if request.ExecutorCatalog != nil || request.ExecutorCatalogStatus == "incomplete" {
+		var err error
+		catalogChanged, err = s.applyNodeExecutorCatalog(member, catalog)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	if catalogChanged {
+		s.refreshSearchCatalogHeartbeat(member.Name)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "changed": revision != request.Revision,
-		"writer_id": writerID, "writer_url": writerURL, "auth_generation": s.writerAuthGeneration()})
+		"writer_id": writerID, "writer_url": writerURL, "auth_generation": s.writerAuthGeneration(), "executor_catalog_status": request.ExecutorCatalogStatus})
 }
 
 func (s *Server) nodeMembershipGet(w http.ResponseWriter, r *http.Request) {
@@ -1231,10 +1264,21 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 		viewRevision = s.membershipView.Revision
 	}
 	s.membershipMu.Unlock()
-	body, _ := json.Marshal(map[string]any{
+	catalog, err := s.localNodeExecutorCatalog()
+	if err != nil {
+		log.Printf("membership executor catalog incomplete: %v", err)
+	}
+	payload := map[string]any{
 		"revision": viewRevision, "state": s.membershipReportedState(), "build": GitCommit,
 		"storage_ok": true, "snapshot_revision": s.writerAuthGeneration(),
-	})
+	}
+	if err != nil {
+		payload["executor_catalog_status"] = "incomplete"
+	} else if catalog != nil {
+		payload["executor_catalog"] = catalog
+		payload["executor_catalog_status"] = "complete"
+	}
+	body, _ := json.Marshal(payload)
 	response, err := postNodeJSON(client, writer+"/admin/api/nodes/heartbeat",
 		"Bearer "+s.memberNodeKey(), body, nodeMembershipStateLimit)
 	if err != nil {

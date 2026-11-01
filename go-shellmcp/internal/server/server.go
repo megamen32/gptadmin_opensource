@@ -1132,6 +1132,7 @@ func (s *Server) refreshMCPHealth(ctx context.Context) {
 			protocol["last_error"] = "health check failed"
 		} else {
 			protocol["tools_count"] = len(tools)
+			protocol["catalog_digest"] = mcpCatalogDigest(tools)
 		}
 		updated[agent.Ref] = map[string]any{
 			"process": map[string]any{
@@ -1142,6 +1143,15 @@ func (s *Server) refreshMCPHealth(ctx context.Context) {
 				"exit_code":  exitCode(status),
 			},
 			"protocol": protocol,
+		}
+	}
+	if previous, ok := s.mcpHealth.Load().(map[string]map[string]any); ok {
+		for ref, health := range updated {
+			protocol, _ := health["protocol"].(map[string]any)
+			prior, _ := previous[ref]["protocol"].(map[string]any)
+			if protocol != nil && protocol["catalog_digest"] == nil && prior != nil {
+				protocol["catalog_digest"] = prior["catalog_digest"]
+			}
 		}
 	}
 	s.mcpHealth.Store(updated)

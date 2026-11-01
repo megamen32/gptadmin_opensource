@@ -104,8 +104,16 @@ func (i *toolSearchIndex) queryLocked(query, targetFilter string, limit int) ([]
 	if len(quoted) == 0 {
 		return nil, nil
 	}
-	match := strings.Join(quoted, " AND ")
-	rows, err := i.db.Query(`SELECT target,name,title,description,settings,bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0) FROM tool_search WHERE tool_search MATCH ? AND (?='' OR target=?) ORDER BY bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0) LIMIT ?`, match, targetFilter, targetFilter, limit)
+	hits, err := i.queryMatchLocked(strings.Join(quoted, " AND "), query, targetFilter, limit)
+	if err != nil || len(hits) > 0 || len(quoted) == 1 {
+		return hits, err
+	}
+	// A missing qualifier must not hide every relevant capability.
+	return i.queryMatchLocked(strings.Join(quoted, " OR "), query, targetFilter, limit)
+}
+
+func (i *toolSearchIndex) queryMatchLocked(match, query, targetFilter string, limit int) ([]map[string]any, error) {
+	rows, err := i.db.Query(`SELECT target,name,title,description,settings,bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0) FROM tool_search WHERE tool_search MATCH ? AND (?='' OR target=?) ORDER BY CASE WHEN lower(name)=lower(?) THEN 0 WHEN lower(title)=lower(?) THEN 1 ELSE 2 END, bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0), target, name LIMIT ?`, match, targetFilter, targetFilter, query, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +181,7 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		childCoverage[key] = intFromAny(childCoverage[key]) + intFromAny(rootCoverage[key])
 	}
 	childCoverage["missing"] = append(stringSlice(childCoverage["missing"]), stringSlice(rootCoverage["missing"])...)
+	childCoverage["stale"] = append(stringSlice(childCoverage["stale"]), stringSlice(rootCoverage["stale"])...)
 	childCoverage["unreachable"] = append(stringSlice(childCoverage["unreachable"]), stringSlice(rootCoverage["unreachable"])...)
 	if !truthy(childCoverage["complete"]) {
 		childCoverage["status"] = "incomplete"

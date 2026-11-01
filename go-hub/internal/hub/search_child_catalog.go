@@ -21,7 +21,6 @@ const (
 	childSearchWarmLimit        = 96
 	childSearchConcurrency      = 6
 	childSearchRefreshWait      = 4 * time.Second
-	childSearchToolLimit        = 200
 	childSearchSchemaLimit      = 16 << 10
 	childSearchDescriptionLimit = 2000
 )
@@ -42,25 +41,32 @@ func childSearchUnreachable(child Agent) bool {
 }
 
 type childSearchSchemaEntry struct {
-	childID     string
-	parentID    string
-	fingerprint string
-	loadedAt    time.Time
-	tools       []map[string]any
-	err         string
-	refreshing  bool
-	done        chan struct{}
+	catalogDigest string
+	versioned     bool
+	childID       string
+	parentID      string
+	fingerprint   string
+	loadedAt      time.Time
+	tools         []map[string]any
+	err           string
+	refreshing    bool
+	done          chan struct{}
 }
 
 type childSearchSchemaCache struct {
-	mu      sync.Mutex
-	entries map[string]*childSearchSchemaEntry
+	closed      bool
+	wg          sync.WaitGroup
+	subscribers map[string]searchCatalogSubscriber
+	mu          sync.Mutex
+	entries     map[string]*childSearchSchemaEntry
 }
 
 // registeredRootSchemaCache mirrors the child cache for independently
 // registered MCP relay agents. Refreshes are per-target and bounded; queries
 // never fan out across the entire registry.
 type registeredRootSchemaCache struct {
+	closed  bool
+	wg      sync.WaitGroup
 	mu      sync.Mutex
 	entries map[string]*childSearchSchemaEntry
 }
@@ -70,13 +76,19 @@ const registeredRootSearchMaxEntries = 512
 var registeredRootSearchCaches sync.Map // map[*Server]*registeredRootSchemaCache
 
 func (s *Server) registeredRootSearchCache() *registeredRootSchemaCache {
-	v, _ := registeredRootSearchCaches.LoadOrStore(s, &registeredRootSchemaCache{entries: map[string]*childSearchSchemaEntry{}})
+	if v, ok := registeredRootSearchCaches.Load(s); ok {
+		return v.(*registeredRootSchemaCache)
+	}
+	v, _ := registeredRootSearchCaches.LoadOrStore(s, &registeredRootSchemaCache{entries: s.loadSearchSnapshot("root")})
 	return v.(*registeredRootSchemaCache)
 }
 
 func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Agent, key, fingerprint string) <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	entry := c.entries[key]
 	if entry == nil {
 		if len(c.entries) >= registeredRootSearchMaxEntries {
@@ -112,7 +124,9 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 	if r != nil {
 		request = r.Clone(r.Context())
 	}
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
 		value, rpcErr := s.agentToolsListForRequest(request, agent)
 		var tools []map[string]any
 		failure := ""
@@ -133,10 +147,14 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 		if c.entries[key] == entry {
 			entry.refreshing = false
 			if rootSearchFingerprint(s, agent) == fingerprint {
-				entry.loadedAt, entry.tools, entry.err = time.Now(), cloneChildSearchTools(tools), failure
+				entry.loadedAt, entry.err = time.Now(), failure
+				if failure == "" {
+					entry.tools = cloneChildSearchTools(tools)
+					s.saveSearchSnapshot("root", c.entries)
+				}
 			}
-			close(done)
 		}
+		close(done)
 		c.mu.Unlock()
 	}()
 	return done
@@ -220,7 +238,10 @@ func (s *Server) rootSearchCatalogForRequest(r *http.Request, targetFilter strin
 		key, fingerprint := rootSearchCacheKey(r, agent), rootSearchFingerprint(s, agent)
 		cache.mu.Lock()
 		entry := cache.entries[key]
-		if entry != nil && entry.fingerprint == fingerprint && !entry.loadedAt.IsZero() && time.Since(entry.loadedAt) < childSearchSchemaTTL {
+		if entry != nil && entry.fingerprint == fingerprint && !entry.loadedAt.IsZero() {
+			if time.Since(entry.loadedAt) >= childSearchSchemaTTL {
+				coverage["stale"] = append(stringSlice(coverage["stale"]), agent.AgentID)
+			}
 			for _, tool := range cloneChildSearchTools(entry.tools) {
 				name := firstString(tool, "name")
 				if authorizeToolCall(r, agent.AgentID, name) != nil {
@@ -247,7 +268,10 @@ func (s *Server) rootSearchCatalogForRequest(r *http.Request, targetFilter strin
 var childSearchCaches sync.Map // map[*Server]*childSearchSchemaCache
 
 func (s *Server) childSearchCache() *childSearchSchemaCache {
-	v, _ := childSearchCaches.LoadOrStore(s, &childSearchSchemaCache{entries: map[string]*childSearchSchemaEntry{}})
+	if v, ok := childSearchCaches.Load(s); ok {
+		return v.(*childSearchSchemaCache)
+	}
+	v, _ := childSearchCaches.LoadOrStore(s, &childSearchSchemaCache{entries: s.loadSearchSnapshot("child")})
 	return v.(*childSearchSchemaCache)
 }
 
@@ -272,7 +296,16 @@ func childSearchFingerprint(s *Server, child Agent) string {
 		for _, raw := range sliceValue(parent.Meta["mcp_agents"]) {
 			candidate := mapValue(raw)
 			if firstString(candidate, "ref") == firstString(child.Meta, "child_ref") {
-				descriptor["descriptor"] = stableChildSearchDescriptor(candidate)
+				stable := stableChildSearchDescriptor(candidate)
+				if firstString(candidate, "catalog_config_digest") != "" {
+					// Connection incarnation is still checked by authorization.
+					// Stable definition + separately checked catalog generation
+					// govern metadata reuse across a restart.
+					delete(childMeta, "connection_instance")
+					delete(stable, "connection_instance")
+					delete(stable, "catalog_digest")
+				}
+				descriptor["descriptor"] = stable
 				break
 			}
 		}
@@ -324,11 +357,37 @@ func cloneChildSearchTools(tools []map[string]any) []map[string]any {
 func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Request, child Agent, key, fingerprint string) <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	// Bound queued work as well as network concurrency. Pending children are
+	// picked up by completion/heartbeat, not one waiting goroutine per target.
+	if current := c.entries[key]; current != nil && current.refreshing {
+		return current.done
+	}
+	active := 0
+	for _, current := range c.entries {
+		if current.refreshing {
+			active++
+		}
+	}
+	if active >= childSearchConcurrency {
+		return nil
+	}
 	entry := c.entries[key]
 	if entry == nil {
 		entry = &childSearchSchemaEntry{}
 		c.entries[key] = entry
 	}
+	if entry.fingerprint != "" && (entry.fingerprint != fingerprint || s.childSearchGenerationChanged(entry, child)) {
+		entry.tools = nil
+		entry.loadedAt = time.Time{}
+		entry.err = ""
+		entry.fingerprint = fingerprint
+	}
+	entry.catalogDigest = s.childSearchCatalogDigest(child)
+	generation := entry.catalogDigest
+	entry.versioned = s.childSearchHasGeneration(child)
 	entry.childID = child.AgentID
 	entry.parentID = firstString(child.Meta, "parent_server_id")
 	if entry.refreshing {
@@ -345,11 +404,21 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		ctx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), directChildSchemaTimeout)
 		request = r.Clone(ctx)
 	}
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
 		if cancel != nil {
 			defer cancel()
 		}
-		childSearchRefreshSlots <- struct{}{}
+		select {
+		case childSearchRefreshSlots <- struct{}{}:
+		case <-request.Context().Done():
+			c.mu.Lock()
+			entry.refreshing = false
+			close(done)
+			c.mu.Unlock()
+			return
+		}
 		response := s.directChildSchemaForRequest(request, child)
 		<-childSearchRefreshSlots
 		var tools []map[string]any
@@ -369,13 +438,18 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		current := c.entries[key]
 		if current == entry {
 			current.refreshing = false
-			if childSearchFingerprint(s, child) == fingerprint {
+			if childSearchFingerprint(s, child) == fingerprint && s.childSearchCatalogDigest(child) == generation {
 				current.fingerprint, current.loadedAt = fingerprint, time.Now()
-				current.tools, current.err = cloneChildSearchTools(tools), failure
+				current.err = failure
+				if failure == "" {
+					current.tools = cloneChildSearchTools(tools)
+					s.saveSearchSnapshot("child", c.entries)
+				}
 			}
-			close(done)
 		}
+		close(done)
 		c.mu.Unlock()
+		c.refreshParent(s, "")
 	}()
 	return done
 }
@@ -392,9 +466,6 @@ func searchChildToolMaps(value any) []map[string]any {
 }
 
 func boundedSearchChildTools(tools []map[string]any) []map[string]any {
-	if len(tools) > childSearchToolLimit {
-		tools = tools[:childSearchToolLimit]
-	}
 	out := make([]map[string]any, 0, len(tools))
 	for _, raw := range tools {
 		tool := mapValue(redactPublicMetadata(raw))
@@ -404,7 +475,9 @@ func boundedSearchChildTools(tools []map[string]any) []map[string]any {
 		schema := tool["inputSchema"]
 		encoded, err := json.Marshal(schema)
 		if err != nil || len(encoded) > childSearchSchemaLimit {
-			continue
+			// Search indexes every capability, not only small input schemas.
+			// Exact schemas remain available through the schema endpoint.
+			tool["inputSchema"] = map[string]any{"type": "object", "schema_truncated": true}
 		}
 		out = append(out, tool)
 	}
@@ -421,6 +494,9 @@ func childSearchEntryFresh(entry *childSearchSchemaEntry, fingerprint string) bo
 	if entry.err != "" {
 		ttl = childSearchErrorTTL
 	}
+	if entry.err == "" && entry.versioned {
+		return true
+	} // Descriptor/heartbeat generation, not wall-clock TTL, invalidates successful schemas.
 	return time.Since(entry.loadedAt) < ttl
 }
 
@@ -436,6 +512,36 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 	}
 	s.mu.Lock()
 	visible := s.publicAgentsLocked(r)
+	// Catalog transport completeness is distinct from schema-cache freshness.
+	// Include visible parents even when their retained catalog has zero children.
+	for _, parent := range visible {
+		if !strings.HasPrefix(parent.AgentID, "shell:") || firstString(parent.Meta, "membership_catalog_status") != "incomplete" {
+			continue
+		}
+		parentAllowed := profileAllowsTarget(r, parent.AgentID) && agentOwnerConnectionAllowed(r, parent)
+		reasons := []string{}
+		if targetFilter == "" && parentAllowed {
+			reasons = append(reasons, parent.AgentID)
+		}
+		for _, child := range visible {
+			if !isChildMCPAgent(child) || firstString(child.Meta, "parent_server_id") != parent.AgentID ||
+				!profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
+				continue
+			}
+			if targetFilter != "" && targetFilter != child.AgentID && targetFilter != exposedAgentSlug(child) && targetFilter != "child:"+exposedAgentSlug(child) {
+				continue
+			}
+			if parentAllowed {
+				reasons = append(reasons, parent.AgentID)
+			} else {
+				reasons = append(reasons, child.AgentID)
+			}
+		}
+		for _, id := range reasons {
+			coverage["complete"] = false
+			coverage["failure_reasons"].(map[string]string)[id] = "member executor catalog incomplete"
+		}
+	}
 	s.mu.Unlock()
 	children := make([]Agent, 0)
 	unreachable := []string{}
@@ -448,12 +554,12 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		}
 		if targetFilter == "" && childSearchUnreachable(child) {
 			unreachable = append(unreachable, child.AgentID)
-			continue
 		}
 		children = append(children, child)
 	}
 	coverage["unreachable"] = unreachable
 	cache := s.childSearchCache()
+	cache.subscribe(s, r)
 	active := map[string]bool{}
 	for _, child := range children {
 		active[childSearchCacheKey(r, child)] = true
@@ -471,8 +577,11 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		key, fingerprint := childSearchCacheKey(r, child), childSearchFingerprint(s, child)
 		cache.mu.Lock()
 		entry := cache.entries[key]
-		fresh := childSearchEntryFresh(entry, fingerprint)
+		fresh := childSearchEntryFresh(entry, fingerprint) && !s.childSearchGenerationChanged(entry, child)
 		cache.mu.Unlock()
+		if targetFilter == "" {
+			continue
+		} // Query path is cache-only; bootstrap/heartbeat own refresh.
 		if !fresh && len(refreshes) < childSearchWarmLimit {
 			refreshes = append(refreshes, refresh{cache.startChildSearchRefresh(s, r, child, key, fingerprint)})
 		} else if !fresh {
@@ -499,11 +608,14 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		key, fingerprint := childSearchCacheKey(r, child), childSearchFingerprint(s, child)
 		cache.mu.Lock()
 		entry := cache.entries[key]
-		if entry != nil && entry.fingerprint != "" && entry.fingerprint != fingerprint {
+		if entry != nil && entry.fingerprint != "" && (entry.fingerprint != fingerprint || s.childSearchGenerationChanged(entry, child)) {
 			delete(cache.entries, key)
 			entry = nil
 		}
 		if entry != nil && entry.fingerprint == fingerprint && entry.loadedAt.After(time.Time{}) {
+			if childSearchUnreachable(child) || entry.err != "" || !childSearchEntryFresh(entry, fingerprint) {
+				coverage["stale"] = append(stringSlice(coverage["stale"]), child.AgentID)
+			}
 			for _, tool := range cloneChildSearchTools(entry.tools) {
 				if authorizeToolCall(r, child.AgentID, firstString(tool, "name")) != nil {
 					continue
@@ -518,7 +630,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		} else {
 			coverage["complete"] = false
 			coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
-			if entry != nil && entry.refreshing {
+			if targetFilter == "" || (entry != nil && entry.refreshing) {
 				coverage["pending"] = intFromAny(coverage["pending"]) + 1
 			} else {
 				coverage["failed"] = intFromAny(coverage["failed"]) + 1
