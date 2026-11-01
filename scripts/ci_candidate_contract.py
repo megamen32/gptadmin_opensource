@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI_PATH = ROOT / "cli.py"
-DEFAULT_CLIENT_ORIGIN = "https://u-f1102930.t.gptadmin.bezrabotnyi.com"
+DEFAULT_CLIENT_ORIGIN = "https://your-subdomain.t.became.bezrabotnyi.com"
 
 
 def load_cli():

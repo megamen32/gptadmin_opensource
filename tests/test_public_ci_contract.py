@@ -94,8 +94,8 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     assert "'go-shellmcp/'" in workflow
     assert "'.github/workflows/publish-haos-addon.yml'" not in workflow
     assert 'secrets.' not in workflow
-    source_root = ROOT if (ROOT / 'deploy/homeassistant/gptadmin_hub_standby/public_publish_image_workflow.yml').is_file() else ROOT.parent.parent
-    addon_image = (source_root / 'deploy/homeassistant/gptadmin_hub_standby/public_publish_image_workflow.yml').read_text()
+    source_root = ROOT if (ROOT / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').is_file() else ROOT.parent.parent
+    addon_image = (source_root / 'deploy/server01/gptadmin_hub_standby/public_publish_image_workflow.yml').read_text()
     assert 'packages: write' in addon_image
     assert 'github.token' in addon_image
     assert addon_image.index('docker/login-action') < addon_image.index('Reject an existing immutable app image version')
@@ -103,8 +103,8 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     assert 'docker buildx build' in addon_image
     assert 'refusing to overwrite' in addon_image
     assert 'secrets.' not in addon_image
-    image_config = yaml.safe_load((source_root / 'deploy/homeassistant/gptadmin_hub_standby/public_config.yaml').read_text())
+    image_config = yaml.safe_load((source_root / 'deploy/server01/gptadmin_hub_standby/public_config.yaml').read_text())
     image_workflow = yaml.safe_load(addon_image)
-    dockerfile = (source_root / 'deploy/homeassistant/gptadmin_hub_standby/Dockerfile.public').read_text()
+    dockerfile = (source_root / 'deploy/server01/gptadmin_hub_standby/Dockerfile.public').read_text()
     assert image_config['image'] == image_workflow['env']['IMAGE_NAME'] == 'ghcr.io/megamen32/gptadmin-haos-addons'
     assert 'org.opencontainers.image.source="https://github.com/megamen32/gptadmin-haos-addons"' in dockerfile

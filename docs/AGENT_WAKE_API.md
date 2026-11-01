@@ -33,7 +33,7 @@ producer / MCP / cron / service
   "target": {
     "harness": "opencode",
     "name": "secretary-excode",
-    "cwd": "/home/roomhacker/excode"
+    "cwd": "/home/admin/excode"
   },
   "subject": "New message in ИИ-Бенчмарки",
   "payload": {
@@ -49,7 +49,7 @@ Current target restrictions:
 
 - schema must equal `gptadmin.agent-wake.v1`;
 - harness is one of `opencode`, `codex`, `zcode`;
-- `cwd` must be absolute and resolve below `/home/roomhacker/`, including symlink resolution;
+- `cwd` must be absolute and resolve below `/home/admin/`, including symlink resolution;
 - target name <= 128 chars, subject <= 512 chars;
 - rendered wake message <= 32,000 UTF-8 bytes.
 

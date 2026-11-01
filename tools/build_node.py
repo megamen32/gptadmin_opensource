@@ -83,8 +83,8 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
             raise RuntimeError('proxy route systemd unit exceeds its package size limit')
         unit_text = proxy_unit.read_text()
         if '[Unit]' not in unit_text or '[Service]' not in unit_text or \
-                not any(line.strip() == 'User=roomhacker' for line in unit_text.splitlines()):
-            raise RuntimeError('proxy route systemd unit does not match the fixed roomhacker service contract')
+                not any(line.strip() == 'User=admin' for line in unit_text.splitlines()):
+            raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
         files = {
             'bin/gptadmin-node': binary,
             'bin/shellmcp': shellmcp_binary,

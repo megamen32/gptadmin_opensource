@@ -24,7 +24,7 @@ root) → папке, а результаты из живой файловой �
 | Пиринговый сервер рассчитан на приватную сеть/VPN и Bearer-токен между узлами; при внешнем bind требует отдельный localhost endpoint. | Браузер не обращается к узлам GrepMesh напрямую и никогда не получает peer token. |
 | В исходнике нет Yandex Object Storage/S3-адаптера или поиска резервных копий. | S3 — отдельный read-only backup adapter, а не «ещё один host» и не скрытая часть текущего поиска. |
 
-Авторитетный исходник: `/home/roomhacker/agents-projects/grepmesh`. Карта кода
+Авторитетный исходник: `/home/admin/agents-projects/grepmesh`. Карта кода
 подтверждает основные узлы: `MeshService`, `LocalBackend`, `IndexManager`,
 `Topology`, `SearchJobs`, `AppConfig`.
 

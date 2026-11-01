@@ -39,9 +39,9 @@ For a controlled bring-up, the local issuer is `go-proxyrelay/cmd/networkticket`
 cd go-proxyrelay
 go build -o ../trash/generated/network-tunnel-ticket ./cmd/networkticket
 ./../trash/generated/network-tunnel-ticket -key-file relay.key -role client \
-  -stream-id demo-1 -target 192.168.2.50:80 -output client.ticket
+  -stream-id demo-1 -target 203.0.113.10:80 -output client.ticket
 ./../trash/generated/network-tunnel-ticket -key-file relay.key -role agent \
-  -stream-id demo-1 -target 192.168.2.50:80 -output agent.ticket
+  -stream-id demo-1 -target 203.0.113.10:80 -output agent.ticket
 ```
 
 The issuer is deliberately a bring-up tool, not a replacement for Hub policy

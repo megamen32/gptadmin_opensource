@@ -36,7 +36,7 @@ func TestProxyRouteProcObserverRequiresEstablishedExactPeerAndPIDInode(t *testin
 	if err := os.Symlink("socket:[99123]", filepath.Join(proc, "fd", "10")); err != nil {
 		t.Fatal(err)
 	}
-	remote := procTCPHex("192.168.2.5", 3128)
+	remote := procTCPHex("203.0.113.10", 3128)
 	tcp := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
 		"   0: 0100007F:9C40 " + remote + " 01 00000000:00000000 00:00000000 00000000 0 0 99123\n"
 	if err := os.MkdirAll(filepath.Join(root, "net"), 0o700); err != nil {
@@ -305,7 +305,7 @@ func TestProxyRouteCookieMutationRequiresSameOrigin(t *testing.T) {
 }
 
 func TestProxyRouteCookieMutationUsesIngressOriginAndFailsClosed(t *testing.T) {
-	const ingressOrigin = "https://u-f1102930.t.gptadmin.bezrabotnyi.com"
+	const ingressOrigin = "https://your-subdomain.t.became.bezrabotnyi.com"
 	tests := []struct {
 		name       string
 		method     string
@@ -342,7 +342,7 @@ func TestProxyRouteCookieMutationUsesIngressOriginAndFailsClosed(t *testing.T) {
 			if method == http.MethodPost {
 				body = `{}`
 			}
-			req := httptest.NewRequest(method, "http://u-f1102930.t.gptadmin.bezrabotnyi.com"+requestPath, strings.NewReader(body))
+			req := httptest.NewRequest(method, "http://your-subdomain.t.became.bezrabotnyi.com"+requestPath, strings.NewReader(body))
 			req.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: s.signAdminSession(time.Now().Add(time.Hour))})
 			req.Header.Set("X-Forwarded-Proto", test.forwarded[0])
 			if len(test.forwarded) > 1 {
@@ -549,7 +549,7 @@ func TestProxyRouteProbeRequiresIndependentEstablishedServer44Socket(t *testing.
 			mu.Unlock()
 			select {
 			case <-proxyStarted:
-				return []byte("ESTAB 0 0 192.168.2.100:42000 192.168.2.5:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+				return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(10 * time.Millisecond):
@@ -598,7 +598,7 @@ func TestProxyRouteProbeStartsDirectAndProxyReadsConcurrently(t *testing.T) {
 			}
 		}
 		if name == "/usr/bin/ss" {
-			return []byte("ESTAB 0 0 192.168.2.100:42000 192.168.2.5:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+			return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
 		}
 		return nil, errors.New("unexpected probe command")
 	}
@@ -699,7 +699,7 @@ func TestProxyRouteProbeRetriesTransientSocketObserverError(t *testing.T) {
 			default:
 				close(pollStarted)
 			}
-			return []byte("ESTAB 0 0 192.168.2.100:42000 192.168.2.5:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+			return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
 		}
 		if name == "/usr/sbin/runuser" {
 			<-pollStarted
@@ -738,7 +738,7 @@ func TestProxyRouteProbePreservesDirectReadFailureReason(t *testing.T) {
 					return []byte("4321\n"), nil
 				}
 				if name == "/usr/bin/ss" {
-					return []byte("ESTAB 0 0 192.168.2.100:42000 192.168.2.5:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+					return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
 				}
 				if name == "/usr/sbin/runuser" {
 					if strings.Contains(joined, "--proxy http://127.0.0.1:24836") {
@@ -784,7 +784,7 @@ func TestProxyRouteProbeWaitsForEstablishedSocketAfterSSHSetup(t *testing.T) {
 			if time.Since(started) < sshSetupDelay {
 				return nil, nil
 			}
-			return []byte("ESTAB 0 0 192.168.2.100:42000 192.168.2.5:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
+			return []byte("ESTAB 0 0 203.0.113.10:42000 203.0.113.10:3128 users:((\"ssh\",pid=4321,fd=10))\n"), nil
 		case name == "/usr/sbin/runuser" && strings.Contains(joined, "--proxy http://127.0.0.1:24836"):
 			timer := time.NewTimer(sshSetupDelay + httpRequestDelay)
 			defer timer.Stop()

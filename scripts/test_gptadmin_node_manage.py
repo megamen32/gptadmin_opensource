@@ -60,7 +60,7 @@ def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + '
     files = payload if payload is not None else {
         'bin/gptadmin-node': ELF_PAYLOAD,
         'bin/shellmcp': ELF_PAYLOAD,
-        'systemd/gptadmin-proxy-route-relay02.service': b'[Unit]\nDescription=fixture\n[Service]\nUser=roomhacker\n',
+        'systemd/gptadmin-proxy-route-relay02.service': b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\n',
         'cli.py': b'# cli payload\n',
         'scripts/gptadmin_node_manage.py': b'# manager payload\n',
         'scripts/gptadmin_node_probe.py': b'# probe payload\n',
@@ -492,17 +492,17 @@ class TestDrainAndHealthHttp(BaseTempCase):
 class TestJoin(BaseTempCase):
     def test_join_body_construction(self):
         identity = {'node_id': 'a' * 32, 'node_key': 'b' * 64}
-        body = mgr.build_join_body(identity, 'edge-9', ['http://10.0.0.5:9001'], '10.0.0.5',
+        body = mgr.build_join_body(identity, 'edge-9', ['http://203.0.113.10:9001'], '203.0.113.10',
                                    {'git_commit': 'c0ffee', 'build_version': 7})
         self.assertEqual(body['node_id'], 'a' * 32)
         self.assertEqual(body['node_key'], 'b' * 64)
         self.assertEqual(body['node_key_hash'], hashlib.sha256(b'b' * 64).hexdigest())
         self.assertEqual(body['name'], 'edge-9')
-        self.assertEqual(body['endpoints'], ['http://10.0.0.5:9001'])
-        self.assertEqual(body['connect_to'], '10.0.0.5')
+        self.assertEqual(body['endpoints'], ['http://203.0.113.10:9001'])
+        self.assertEqual(body['connect_to'], '203.0.113.10')
         self.assertEqual(body['capabilities'], ['ingress', 'executor', 'replica'])
         self.assertEqual(body['build'], {'git_commit': 'c0ffee', 'build_version': 7})
-        without = mgr.build_join_body(identity, 'edge-9', ['http://10.0.0.5:9001'], None, None)
+        without = mgr.build_join_body(identity, 'edge-9', ['http://203.0.113.10:9001'], None, None)
         self.assertNotIn('connect_to', without)
         self.assertEqual(without['build'], {})
 
@@ -531,7 +531,7 @@ class TestJoin(BaseTempCase):
         identity_path = self.layout.identity_file('edge-9')
         manifest = {'git_commit': 'c0ffee', 'build_version': 7}
         payload = mgr.perform_join(hub_origin, 'g-secret', identity_path, 'edge-9',
-                                   ['http://10.0.0.5:9001'], '10.0.0.5', manifest)
+                                   ['http://203.0.113.10:9001'], '203.0.113.10', manifest)
         self.assertEqual(payload['revision'], 7)
         self.assertEqual(len(hub_captured), 1)
         self.assertEqual(len(writer_captured), 1)  # exactly one retry against the writer
@@ -604,7 +604,7 @@ class TestJoin(BaseTempCase):
         origin = f'http://127.0.0.1:{server.server_address[1]}'
         with self.assertRaises(mgr.RuntimeFailure):
             mgr.perform_join(origin, 'bad', self.layout.identity_file('edge-9'), 'edge-9',
-                             ['http://10.0.0.5:9001'], None, None)
+                             ['http://203.0.113.10:9001'], None, None)
 
     def test_grant_issue_posts_owner_bearer(self):
         captured = []

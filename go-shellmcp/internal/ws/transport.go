@@ -17,7 +17,7 @@
 // crypto/sha1, encoding/binary, encoding/base64) so go.mod stays clean.
 //
 // This package is intentionally a faithful port of the Python websocket
-// transport in /home/roomhacker/gptadmin/client/shellmcp.py around lines
+// transport in /home/admin/gptadmin/client/shellmcp.py around lines
 // 914-966 (websocket_loop). The Python hub expects:
 //
 //	-> {"type":"hello","payload":<Beat>}

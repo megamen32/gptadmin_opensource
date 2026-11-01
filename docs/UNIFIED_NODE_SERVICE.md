@@ -63,7 +63,7 @@ OAuth identity общего ChatGPT/Codex connector, для которого и�
 
 ```sh
 python3 scripts/gptadmin_node_probe.py \
-  --url https://u-f1102930.t.gptadmin.bezrabotnyi.com \
+  --url https://your-subdomain.t.became.bezrabotnyi.com \
   --connect-to 185.240.120.152 --target shell:relay02-unified \
   --expect-commit 0672047
 ```

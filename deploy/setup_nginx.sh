@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOMAIN="${GPTADMIN_DOMAIN:-gptadmin.bezrabotnyi.com}"
+DOMAIN="${GPTADMIN_DOMAIN:-became.bezrabotnyi.com}"
 SITE_DOMAIN="${GPTADMIN_SITE_DOMAIN:-became.bezrabotnyi.com}"
 CONF_DIR="/etc/nginx/sites-available"
 ENABLED_DIR="/etc/nginx/sites-enabled"

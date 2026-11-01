@@ -70,7 +70,7 @@
 ```json
 {
   "servers": [
-    { "name": "node-01", "url": "http://10.0.0.5:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```

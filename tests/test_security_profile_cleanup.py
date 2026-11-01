@@ -10,7 +10,7 @@ def test_cleanup_removes_only_legacy_shellmcp_home_hardening(tmp_path: Path, mon
     dropin_dir.mkdir()
     dropin = dropin_dir / "100-gptadmin-user-mode.conf"
     dropin.write_text(
-        "[Service]\nUser=roomhacker\nGroup=roomhacker\nProtectHome=read-only\n",
+        "[Service]\nUser=admin\nGroup=admin\nProtectHome=read-only\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(cli, "SYSTEMD_DIR", tmp_path)

@@ -19,8 +19,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-NOTICEPLACE_ROOT = Path("/home/roomhacker/agents-projects/noticeplace")
-HEALTH_ROOT = Path("/home/roomhacker/ServersAdministartion/automation/health-incident-monitor")
+NOTICEPLACE_ROOT = Path("/home/admin/agents-projects/noticeplace")
+HEALTH_ROOT = Path("/home/admin/ServersAdministartion/automation/health-incident-monitor")
 for root in (NOTICEPLACE_ROOT, HEALTH_ROOT):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))

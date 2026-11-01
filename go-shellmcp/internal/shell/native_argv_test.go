@@ -91,11 +91,11 @@ func TestNativeArgvKeepsCwdAndNonZeroExit(t *testing.T) {
 }
 
 func TestNativeArgvUserSelectionPreservesPrivilegeBoundaries(t *testing.T) {
-	ordinary := Request{Argv: []string{"printf", "hello"}, DefaultUser: "roomhacker"}
-	if user, explicit := TargetRunUser(ordinary); user != "roomhacker" || explicit {
+	ordinary := Request{Argv: []string{"printf", "hello"}, DefaultUser: "admin"}
+	if user, explicit := TargetRunUser(ordinary); user != "admin" || explicit {
 		t.Fatalf("wrong default user: %s %v", user, explicit)
 	}
-	elevated := Request{Argv: []string{"sudo", "-n", "id"}, DefaultUser: "roomhacker"}
+	elevated := Request{Argv: []string{"sudo", "-n", "id"}, DefaultUser: "admin"}
 	if user, _ := TargetRunUser(elevated); user != "" {
 		t.Fatalf("explicit sudo should not be downshifted: %s", user)
 	}

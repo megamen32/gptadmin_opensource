@@ -13,8 +13,8 @@ entering its secret again.
 
 The existing adapter contract in this repository is a Shell action on
 `shell:admin-node-100`, invoking
-`python3 /home/roomhacker/gptadmin/scripts/agent_deliver.py '{{json}}'` with
-`cwd` set to `/home/roomhacker/gptadmin`. The webhook gateway substitutes the
+`python3 /home/admin/gptadmin/scripts/agent_deliver.py '{{json}}'` with
+`cwd` set to `/home/admin/gptadmin`. The webhook gateway substitutes the
 event as a data-only environment value for the quoted `{{json}}` placeholder;
 the script validates the schema and target before calling Agent Herder's
 `deliver` tool. This is the fixed adapter path documented for the
@@ -62,7 +62,7 @@ Responsibilities:
   "target": {
     "harness": "opencode",
     "name": "secretary-excode",
-    "cwd": "/home/roomhacker/excode"
+    "cwd": "/home/admin/excode"
   },
   "subject": "Новое сообщение в ИИ-Бенчмарки",
   "payload": {},
@@ -84,7 +84,7 @@ Responsibilities:
 
 `delivery.mode`: `queue` or `sync`. Producers should normally submit asynchronously to GPTAdmin; using Herder `sync` does not block the producer because GPTAdmin returns `202` with a durable webhook job immediately. A successful webhook job/callback confirms the adapter's result, not necessarily a completed model turn: require `delivery=completed` for that claim. `skipped_inactive` and `deferred` are successful policy outcomes without a completed model turn; `queue` confirms enqueue acceptance.
 
-The local adapter requires an absolute CWD resolving below `/home/roomhacker/` (including symlink resolution), a target name of at most 128 characters, the policy values listed above, and a rendered message of at most 32,000 UTF-8 bytes. Invalid inputs fail before calling Herder.
+The local adapter requires an absolute CWD resolving below `/home/admin/` (including symlink resolution), a target name of at most 128 characters, the policy values listed above, and a rendered message of at most 32,000 UTF-8 bytes. Invalid inputs fail before calling Herder.
 
 ## Authentication and dedup
 
@@ -113,7 +113,7 @@ Target session:
 ```text
 harness=opencode
 name=secretary-excode
-cwd=/home/roomhacker/excode
+cwd=/home/admin/excode
 ```
 
 The production session is created once with its bootstrap instructions deferred; the first real live event flushes that bootstrap together with the event.
@@ -126,7 +126,7 @@ The Telegram producer uses `mode=sync`; GPTAdmin itself returns `202` immediatel
 
 ## ChatGPT targets
 
-Existing ChatGPT conversations are available as Agent Herder sessions with `harness: "chatgpt"`. Their Herder identity workspace is `/home/roomhacker/.chatgpt`; this is an identity anchor, not a source-code working directory. The webhook adapter accepts named targets only: use exact title + that CWD with `create: "never"`. Addressing a known ChatGPT `sessionId` is supported by Herder directly, not by this webhook adapter. Automatic creation of a missing ChatGPT conversation is intentionally not enabled yet.
+Existing ChatGPT conversations are available as Agent Herder sessions with `harness: "chatgpt"`. Their Herder identity workspace is `/home/admin/.chatgpt`; this is an identity anchor, not a source-code working directory. The webhook adapter accepts named targets only: use exact title + that CWD with `create: "never"`. Addressing a known ChatGPT `sessionId` is supported by Herder directly, not by this webhook adapter. Automatic creation of a missing ChatGPT conversation is intentionally not enabled yet.
 
 For `chatgpt`, `activation: "always"` / `resume_agent` continue the existing `/c/...` conversation through the same BrowserClaw-owned page. `activation: "if_running"` and `defer` keep the same generic Agent Herder semantics. The separate ChatGPT token driver is the preferred fast read path; BrowserClaw/CDP is the write/resume path.
 
@@ -152,4 +152,4 @@ Debounce state is persisted in `/var/lib/universal-userio/telegram-qr/agent-deli
 
 As of 2026-09-08, GPTAdmin's webhook dispatcher -> exposed child-MCP relay path can report a completed parent `mcp_call` while returning the child tool inventory/null instead of the child tool result. The production `agent-deliver-v1` route therefore uses GPTAdmin's fixed shell action to a narrow local adapter (`scripts/agent_deliver.py`), which calls the already-running local Agent Herder MCP directly and validates `ok=true`. This adapter is not a daemon, queue or alternative webhook service. Remove it after the generic child-MCP relay bug is fixed and revalidated.
 
-BrowserOS neo 0.49.3.1 currently bundles BrowserClaw server 0.0.26 (migrations through `m0013`). On 2026-09-08 the local BrowserClaw DB had `m0014`–`m0016` applied by a newer server while those migration files were absent from 0.0.26, causing the embedded server to exit and proxy `9010` to return 503. After backing up the DB, the three empty/new schema changes were rolled back (`skills`, `skill_runs`, `skill_run_marks`, and empty `tasks.task_summary`), preserving historical sessions/dispatches; `PRAGMA integrity_check` returned `ok`. DB backup: `/Users/roomhacker/.gptadmin/file-backups/browserclaw-db-20260908-052917`.
+BrowserOS neo 0.49.3.1 currently bundles BrowserClaw server 0.0.26 (migrations through `m0013`). On 2026-09-08 the local BrowserClaw DB had `m0014`–`m0016` applied by a newer server while those migration files were absent from 0.0.26, causing the embedded server to exit and proxy `9010` to return 503. After backing up the DB, the three empty/new schema changes were rolled back (`skills`, `skill_runs`, `skill_run_marks`, and empty `tasks.task_summary`), preserving historical sessions/dispatches; `PRAGMA integrity_check` returned `ok`. DB backup: `/Users/admin/.gptadmin/file-backups/browserclaw-db-20260908-052917`.

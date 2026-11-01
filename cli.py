@@ -302,13 +302,13 @@ def _launchctl_kickstart_cmd(label: str, is_user: bool) -> list[str]:
 # ===== FRPC defaults =====
 FRPC_VERSION          = os.environ.get('FRPC_VERSION', '0.64.0')
 FRPC_BASE_URL         = os.environ.get('FRPC_BASE_URL', 'https://became.bezrabotnyi.com/frp-mirror')
-FRPC_SERVER_ADDR_DEFAULT = 'gptadmin.bezrabotnyi.com'
+FRPC_SERVER_ADDR_DEFAULT = 'became.bezrabotnyi.com'
 FRPC_SERVER_PORT_DEFAULT = '7000'
 FRPC_TOKEN_DEFAULT = os.environ.get('GPTADMIN_FRP_TOKEN', '').strip()
-FRPC_DOMAIN_DEFAULT   = 't.gptadmin.bezrabotnyi.com'
+FRPC_DOMAIN_DEFAULT   = 't.became.bezrabotnyi.com'
 FRPC_SERVER_ENDPOINTS_DEFAULT = os.environ.get(
     'FRPC_SERVER_ENDPOINTS_DEFAULT',
-    'primary=gptadmin.bezrabotnyi.com:7000,relay01=relay01.bezrabotnyi.com:27001,relay02=relay02.bezrabotnyi.com:27000'
+    'primary=became.bezrabotnyi.com:7000,relay01=relay01.bezrabotnyi.com:27001,relay02=relay02.bezrabotnyi.com:27000'
 ).strip()
 CLOUDFLARED_VERSION   = os.environ.get('CLOUDFLARED_VERSION', 'latest')
 
@@ -2437,7 +2437,7 @@ def setup_interactive(args):
         ensure_shellmcp_identity_env(env)
         env.setdefault('SHELLMCP_UPDATE_INTERVAL_S', '3600')
         env.setdefault('SHELLMCP_UPDATE_TOKEN', env.get('SHELLMCP_TOKEN', ''))
-        env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
+        env.setdefault('SHELLMCP_UPDATE_MANIFEST_URL', (env.get('HUB_URL') or env.get('HUB_PUBLIC_URL') or 'https://became.bezrabotnyi.com').rstrip('/') + '/artifacts/shellmcp.json')
         env.setdefault('SHELLMCP_SERVICE_NAME', svc_shellmcp_name())
         env.setdefault('SHELLMCP_SERVICE_SCOPE', INSTALL_SCOPE)
         if not IS_USER_INSTALL:
@@ -2537,7 +2537,7 @@ def setup_interactive(args):
         elif not (install_hub and env.get('TUNNEL_MODE') == 'cloudflare'):
             configure_shellmcp_transport(env, install_hub, install_shellmcp)
     if install_shellmcp:
-        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://became.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
         env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('SHELLMCP_TOKEN', '')
         env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
@@ -2732,7 +2732,7 @@ def _json_write(path: Path, data):
 
 def _mcp_default_hub_url() -> str:
     env = env_read()
-    return (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+    return (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or os.environ.get('GPTADMIN_MCP_RELAY_HUB') or 'https://became.bezrabotnyi.com').rstrip('/')
 
 
 def _mcp_config() -> dict:
@@ -5813,7 +5813,7 @@ def cmd_update(args):
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
         env.setdefault('SHELLMCP_SELF_REPAIR_DISABLE', '0')
         env.setdefault('SHELLMCP_LEGACY_MANIFEST_UPDATE', '0')
-        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://gptadmin.bezrabotnyi.com').rstrip('/')
+        hub_for_update = (env.get('HUB_PUBLIC_URL') or env.get('HUB_URL') or 'https://became.bezrabotnyi.com').rstrip('/')
         env['SHELLMCP_UPDATE_MANIFEST_URL'] = hub_for_update + '/artifacts/shellmcp.json'
         env['SHELLMCP_UPDATE_TOKEN'] = env.get('SHELLMCP_UPDATE_TOKEN') or env.get('SHELLMCP_TOKEN', '')
         env['SHELLMCP_SERVICE_NAME'] = svc_shellmcp_name()
@@ -6468,7 +6468,7 @@ def _configure_zcode_mcp(url: str, token: str) -> str:
 # write keeps a timestamped backup. Nothing else in a client config is touched.
 NOTICE_PLACE_MCP_NAME = 'noticeplace'
 NOTICE_PLACE_MCP_COMMAND = '/opt/noticeplace/bin/ask-human-mcp'
-NOTICE_PLACE_MCP_ENV = {'ASK_HUMAN_ENV_FILE': '/home/roomhacker/.config/ask-human/env'}
+NOTICE_PLACE_MCP_ENV = {'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'}
 NOTICE_PLACE_MCP_URL = 'https://notify.bezrabotnyi.com/mcp'
 NOTICE_PLACE_URL_HOST = 'notify.bezrabotnyi.com'
 NOTICE_PLACE_URL_PATH = '/mcp'

@@ -19,7 +19,7 @@ Autostart uses built-in Windows Task Scheduler.
 
 Usage:
   iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
-  powershell -ExecutionPolicy Bypass -File .\install_win.ps1 -HubUrl https://gptadmin.bezrabotnyi.com -ShellmcpToken srv_secret
+  powershell -ExecutionPolicy Bypass -File .\install_win.ps1 -HubUrl https://became.bezrabotnyi.com -ShellmcpToken srv_secret
 
 Env overrides:
   PACKAGE_URL, GPTADMIN_DIR, HUB_URL, SHELLMCP_TOKEN, CTL_TOKEN,

@@ -10,7 +10,7 @@ The dedicated upstream credential is separate from the client credential.
 The native module continues to use its existing sudo read of the root-owned
 `/etc/telegramauto-ha/atv/runtime-v2.env` with the original exact PG identity,
 TLS verification and CA. Database credentials are never copied into the client
-or service environment. Consequently this unit retains the existing roomhacker
+or service environment. Consequently this unit retains the existing admin
 sudo authority with `NoNewPrivileges=false`; it does not run the service as root.
 
 The unit reserves 256 MiB high / 512 MiB hard memory, zero swap, one CPU,
@@ -23,7 +23,7 @@ protocol, owner-profile fence and original read-only backend path before changin
 only the global enabled `atv` client entry. Preserve a protected rollback copy.
 
 The installed `ATV-ZCode100` connection uses the dedicated
-`zcode-atv-roomhacker-100-managed` profile and `/connection/atv-zcode100/mcp`.
+`zcode-atv-admin-100-managed` profile and `/connection/atv-zcode100/mcp`.
 Its real managed `list_services(limit=1)` call completed in 0.500 seconds.
 All 34 original schemas matched the direct HTTP service. An unrelated
 credential received HTTP 401; the other owned TGC profile received HTTP 403

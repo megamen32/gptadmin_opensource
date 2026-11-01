@@ -32,7 +32,7 @@ let reconnectTimer = null;
 
 async function getHubUrl() {
   const { [HUB_URL_STORAGE_KEY]: url } = await chrome.storage.local.get(HUB_URL_STORAGE_KEY);
-  return url || "https://gptadmin.bezrabotnyi.com";
+  return url || "https://became.bezrabotnyi.com";
 }
 
 async function getComputerName() {

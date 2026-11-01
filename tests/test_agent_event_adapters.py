@@ -32,7 +32,7 @@ class AdapterValidationTests(unittest.TestCase):
     def event(self):
         return {'schema': 'gptadmin.agent-deliver.v1', 'event_id': 'test',
                 'target': {'harness': 'codex', 'name': 'test',
-                           'cwd': '/home/roomhacker/gptadmin'}, 'payload': {}}
+                           'cwd': '/home/admin/gptadmin'}, 'payload': {}}
 
     def assert_rejected(self, result):
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -52,7 +52,7 @@ class AdapterValidationTests(unittest.TestCase):
 
     def test_deliver_rejects_path_escape(self):
         event = self.event()
-        for cwd in ('/home/roomhacker/../../etc', '', '.', '/home/roomhacker'):
+        for cwd in ('/home/admin/../../etc', '', '.', '/home/admin'):
             event['target']['cwd'] = cwd
             self.assert_rejected(self.deliver(event))
 
@@ -67,7 +67,7 @@ class AdapterValidationTests(unittest.TestCase):
 
     def test_wake_rejects_path_escape(self):
         args = ['--schema', 'gptadmin.agent-wake.v1', '--harness', 'codex',
-                '--name', 'test', '--cwd', '/home/roomhacker/../../etc',
+                '--name', 'test', '--cwd', '/home/admin/../../etc',
                 '--event-id', 'test', '--source', '{}', '--subject', 'test',
                 '--payload', '{}']
         self.assert_rejected(self.run_adapter('agent_wake', args))

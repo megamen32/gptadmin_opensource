@@ -69,12 +69,12 @@ for each stage.
 ## File-tree diff
 
 ```text
-/home/roomhacker/ServersAdministartion/
+/home/admin/ServersAdministartion/
   automation/health-incident-monitor/health_monitor.py       [new]
   automation/health-incident-monitor/README.md              [new]
   automation/health-incident-monitor/fixtures/*.json        [new]
 
-/home/roomhacker/agents-projects/noticeplace/
+/home/admin/agents-projects/noticeplace/
   notification_center/health_workflow.py                    [new]
   notification_center/core.py                               [update]
   notification_center/http_api.py                           [update]
@@ -82,16 +82,16 @@ for each stage.
   notification_center/gptadmin_agent.py                     [update]
   tests/test_health_workflow.py                              [new]
 
-/home/roomhacker/agents-projects/agent-herder/
+/home/admin/agents-projects/agent-herder/
   src/health-progress.ts                                    [new]
   src/web/server.ts                                         [update]
   tests/health-progress.test.ts                             [new]
 
-/home/roomhacker/gptadmin/
+/home/admin/gptadmin/
   go-hub/internal/hub/webhook_gateway.go                    [update]
   go-hub/internal/hub/webhook_gateway_test.go               [update]
 
-/home/roomhacker/agents-projects/hermes-config/
+/home/admin/agents-projects/hermes-config/
   plugins/agent-herder-bridge/__init__.py                   [update]
   plugins/agent-herder-bridge/README.md                     [update]
 ```

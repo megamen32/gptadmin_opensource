@@ -3,8 +3,8 @@ set -u
 
 CONFIG_FILE="/etc/gptadmin/gptadmin.env"
 ADB_BIN="${ADB_BIN:-/usr/bin/adb}"
-ADB_USER="${ADB_USER:-roomhacker}"
-ADB_HOME="${ADB_HOME:-/home/roomhacker}"
+ADB_USER="${ADB_USER:-admin}"
+ADB_HOME="${ADB_HOME:-/home/admin}"
 BASE="/data/local/tmp/gptadmin"
 RUN="$BASE/run.sh"
 RUN_ONCE="$BASE/run-once.sh"

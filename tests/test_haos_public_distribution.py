@@ -177,7 +177,7 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     assert not list(output.rglob("failover_state.json"))
     assert not list(output.rglob("frpc"))
     source = json.loads((output / "SOURCE.json").read_text(encoding="utf-8"))
-    public_config = (root / "deploy/homeassistant/gptadmin_hub_standby/public_config.yaml").read_text(encoding="utf-8")
+    public_config = (root / "deploy/server01/gptadmin_hub_standby/public_config.yaml").read_text(encoding="utf-8")
     version = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', public_config, re.MULTILINE)
     assert version is not None
     assert source["app_version"] == version.group(1)

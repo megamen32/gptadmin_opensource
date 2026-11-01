@@ -83,7 +83,7 @@ def backup(path: Path, stamp: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", type=Path, default=Path("/etc/gptadmin"))
-    parser.add_argument("--runtime-home", type=Path, default=Path("/home/roomhacker"))
+    parser.add_argument("--runtime-home", type=Path, default=Path("/home/admin"))
     args = parser.parse_args()
     root = args.config_dir.resolve()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -99,8 +99,8 @@ def main() -> int:
             "command": "/usr/local/bin/npx",
             "args": ["-y", "mcp-remote", "http://127.0.0.1:9419/mcp"],
             "env": {},
-            "cwd": "/home/roomhacker",
-            "user": "roomhacker",
+            "cwd": "/home/admin",
+            "user": "admin",
             "enabled": True,
             "url": "http://127.0.0.1:9419/mcp",
             "transport": "streamable-http",
@@ -115,12 +115,12 @@ def main() -> int:
         "command": "/usr/local/bin/npx",
         "args": ["-y", "mcp-remote", "http://127.0.0.1:9419/mcp"],
         "env": {},
-        "cwd": "/home/roomhacker",
+        "cwd": "/home/admin",
         "stdio_format": "ndjson",
         "transport": "streamable-http",
         "enabled": True,
         "agent_id": "GrepMesh",
-        "run_as_user": "roomhacker",
+        "run_as_user": "admin",
         "url": "http://127.0.0.1:9419/mcp",
     }
     mcp_path.write_text(json.dumps(mcp, indent=2) + "\n", encoding="utf-8")
@@ -136,9 +136,9 @@ def main() -> int:
         "token_file": str(root / "mcp-relay.token"),
         "command": "/usr/local/bin/npx",
         "args": ["-y", "mcp-remote", "http://127.0.0.1:9419/mcp"],
-        "cwd": "/home/roomhacker",
+        "cwd": "/home/admin",
         "stdio_format": "ndjson",
-        "run_as_user": "roomhacker",
+        "run_as_user": "admin",
         "auto_start": True,
         "mode": "agent-config",
     }

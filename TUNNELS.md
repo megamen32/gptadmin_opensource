@@ -9,7 +9,7 @@ is `https://mcp.bezrabotnyi.com` and the endpoint is
 `https://mcp.bezrabotnyi.com/mcp`. OAuth issuer/resource discovery must use
 that origin.
 
-For this managed deployment, FRP `u-f<ID>.t.gptadmin.bezrabotnyi.com`
+For this managed deployment, FRP `u-f<ID>.t.became.bezrabotnyi.com`
 hostnames and Cloudflare Quick Tunnel URLs are transport or recovery fallbacks,
 not the shared connector identity. A separate installation may deliberately use
 its own stable tunnel URL as `PUBLIC_ORIGIN`; setup must not overwrite an
@@ -181,12 +181,12 @@ To add a new tunnel backend:
 полной установки хаба. Репозиторий: `bezhook/`, зеркало и установка:
 
 ```sh
-curl -fsSL https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.sh | sh   # Linux/macOS
-iwr -useb https://dl.t.gptadmin.bezrabotnyi.com/bezhook/install.ps1 | iex  # Windows
+curl -fsSL https://dl.t.became.bezrabotnyi.com/bezhook/install.sh | sh   # Linux/macOS
+iwr -useb https://dl.t.became.bezrabotnyi.com/bezhook/install.ps1 | iex  # Windows
 ```
 
 ```sh
-bezhook 3000 --sub myapp     # -> https://myapp.t.gptadmin.bezrabotnyi.com (TTL 72h)
+bezhook 3000 --sub myapp     # -> https://myapp.t.became.bezrabotnyi.com (TTL 72h)
 ```
 
 Fanout на все три frps (node-100 best-effort, relay02/relay01 always-on), один

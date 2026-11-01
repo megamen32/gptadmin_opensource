@@ -31,7 +31,7 @@ type Options struct {
 	LocalHost     string
 	LocalPort     int
 	Subdomain     string
-	Domain        string // public suffix, e.g. t.gptadmin.bezrabotnyi.com
+	Domain        string // public suffix, e.g. t.became.bezrabotnyi.com
 	Token         string
 	TLSServerName string
 	Endpoints     []Gateway
@@ -42,20 +42,20 @@ type Options struct {
 // Public defaults contain no shared credential. Configure BEZHOOK_TOKEN or
 // the existing protected per-user TOML token for an authenticated gateway.
 const (
-	DefaultDomain        = "t.gptadmin.bezrabotnyi.com"
-	DefaultTLSServerName = "t.gptadmin.bezrabotnyi.com"
+	DefaultDomain        = "t.became.bezrabotnyi.com"
+	DefaultTLSServerName = "t.became.bezrabotnyi.com"
 	DefaultToken         = ""
 	DefaultTTL           = 72 * time.Hour
 )
 
 var DefaultEndpoints = []Gateway{
 	// The home edge (node-100 frps via the home NAT) reliably works from the
-	// LAN (node-100's resolver overrides gptadmin.bezrabotnyi.com to the home
+	// LAN (node-100's resolver overrides became.bezrabotnyi.com to the home
 	// ingress). From the internet it is best-effort: public DNS for the name
 	// points at relay02 (port 7000 closed there) and the wildcard home entry on
 	// port 7000 is not always forwarded — external clients simply keep this
 	// edge retrying in the background while relay02/relay01 carry the tunnel.
-	{Addr: "gptadmin.bezrabotnyi.com", Port: 7000}, // node-100 (home edge, best-effort)
+	{Addr: "became.bezrabotnyi.com", Port: 7000}, // node-100 (home edge, best-effort)
 	{Addr: "relay02.bezrabotnyi.com", Port: 27000},    // relay02 (always-on)
 	{Addr: "relay01.bezrabotnyi.com", Port: 27001},    // relay01 (always-on)
 }

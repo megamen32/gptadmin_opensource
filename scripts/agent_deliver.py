@@ -33,7 +33,7 @@ def main() -> int:
         resolved = Path(cwd).resolve()
     except (OSError, RuntimeError, ValueError):
         return fail("invalid cwd")
-    if harness not in ALLOWED or not name or len(name) > 128 or Path('/home/roomhacker') not in resolved.parents:
+    if harness not in ALLOWED or not name or len(name) > 128 or Path('/home/admin') not in resolved.parents:
         return fail("invalid target")
     cwd = str(resolved)
     for key, allowed in {"create": {"if_missing", "never"}, "activation": {"always", "if_running", "defer"}, "mode": {"queue", "sync"}}.items():

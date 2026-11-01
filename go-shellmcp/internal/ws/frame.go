@@ -10,7 +10,7 @@ import (
 
 // HUBWSURL converts an http(s)://hub base URL into its ws(s):// equivalent
 // for the websocket transport. This mirrors the Python _hub_ws_url() helper
-// in /home/roomhacker/gptadmin/client/shellmcp.py around line 870.
+// in /home/admin/gptadmin/client/shellmcp.py around line 870.
 //
 // http://x.y/z  -> ws://x.y/z
 // https://x.y/z -> wss://x.y/z

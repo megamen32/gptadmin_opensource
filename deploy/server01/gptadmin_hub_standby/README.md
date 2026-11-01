@@ -15,18 +15,18 @@ Typical deploy from `admin-node-100`:
 Defaults:
 
 ```text
-HAOS_HOST=192.168.2.101
+HAOS_HOST=203.0.113.10
 HAOS_SSH_PORT=2228
 HAOS_SSH_USER=root
-HAOS_SSH_KEY=/home/roomhacker/.ssh/id_rsa
+HAOS_SSH_KEY=/home/admin/.ssh/id_rsa
 HAOS_ADDON_DIR=/addons/gptadmin_hub_standby
 ```
 
 Validation endpoints after start:
 
 ```text
-http://192.168.2.101:9001/version
-http://192.168.2.101:9001/healthz
+http://203.0.113.10:9001/version
+http://203.0.113.10:9001/healthz
 ```
 
 The add-on owns the fallback-side watchdog and starts one FRP client per

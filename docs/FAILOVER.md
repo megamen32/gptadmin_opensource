@@ -94,7 +94,7 @@ primary x86-64 binary silently produces a non-working standby.
 
 If the home ISP blocks the independent FRP server, set `failover.proxy_url`
 to an HTTP CONNECT proxy running on HAOS (for example
-`http://192.168.2.101:3127`). The generated FRPC transport then reaches the
+`http://203.0.113.10:3127`). The generated FRPC transport then reaches the
 external FRPS through that proxy while preserving FRP TLS. The proxy and its
 outbound route must survive loss of node-100. Confirm a real FRPS login
 and an authenticated MCP operation through the external server; a promotion

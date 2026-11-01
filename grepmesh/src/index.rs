@@ -652,12 +652,12 @@ mod tests {
     fn roots_prioritize_home_before_other_named_roots() {
         let mut roots = BTreeMap::new();
         roots.insert("etc".to_string(), vec![PathBuf::from("/etc")]);
-        roots.insert("home".to_string(), vec![PathBuf::from("/home/roomhacker")]);
+        roots.insert("home".to_string(), vec![PathBuf::from("/home/admin")]);
         roots.insert("opt".to_string(), vec![PathBuf::from("/opt")]);
         assert_eq!(
             ordered_roots(&roots),
             vec![
-                PathBuf::from("/home/roomhacker"),
+                PathBuf::from("/home/admin"),
                 PathBuf::from("/opt"),
                 PathBuf::from("/etc"),
             ]

@@ -25,7 +25,7 @@ prove that an integration works.
 
 Connect to your Hub using its supported OAuth/client connection. The managed
 public endpoint is `https://mcp.bezrabotnyi.com/mcp`; another installation uses
-its own stable HTTPS origin. Generated `u-f<ID>.t.gptadmin.bezrabotnyi.com`
+its own stable HTTPS origin. Generated `u-f<ID>.t.became.bezrabotnyi.com`
 addresses are legacy/fallback transport, not the identity for a new connector.
 
 The following examples use Hub tool-call notation, not shell commands. Replace

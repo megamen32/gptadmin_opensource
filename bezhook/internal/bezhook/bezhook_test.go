@@ -11,7 +11,7 @@ import (
 )
 
 func TestValidateSubdomain(t *testing.T) {
-	ok := []string{"myapp", "u-f1102930", "a", "abc-123", strings.Repeat("a", 63)}
+	ok := []string{"myapp", "your-subdomain", "a", "abc-123", strings.Repeat("a", 63)}
 	for _, s := range ok {
 		if err := ValidateSubdomain(s); err != nil {
 			t.Errorf("expected %q valid, got %v", s, err)

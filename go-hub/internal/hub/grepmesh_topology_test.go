@@ -18,7 +18,7 @@ func TestGrepMeshTopologyNodeIsControlOnlyAndUsesRoutablePeerURL(t *testing.T) {
 			"host_id":          "node-88",
 			"service":          "grepmesh-mcp",
 			"local_url":        "http://127.0.0.1:9419/mcp",
-			"advertise_url":    "https://192.168.2.88:9419/mcp",
+			"advertise_url":    "https://203.0.113.10:9419/mcp",
 			"version":          "0.1.0",
 			"protocol_version": "2025-11-25",
 			"generation":       "43",
@@ -37,7 +37,7 @@ func TestGrepMeshTopologyNodeIsControlOnlyAndUsesRoutablePeerURL(t *testing.T) {
 	if got := node["local_url"]; got != "http://127.0.0.1:9419/mcp" {
 		t.Fatalf("local_url = %#v", got)
 	}
-	if got := node["peer_url"]; got != "https://192.168.2.88:9419/mcp" {
+	if got := node["peer_url"]; got != "https://203.0.113.10:9419/mcp" {
 		t.Fatalf("peer_url = %#v", got)
 	}
 	if got := node["generation"]; got != int64(43) {
@@ -68,7 +68,7 @@ func TestGrepMeshTopologyEndpointIsReadOnlyAndFiltered(t *testing.T) {
 		Meta: map[string]any{
 			"host_id":       "node-88",
 			"local_url":     "http://127.0.0.1:9419/mcp",
-			"peer_url":      "https://192.168.2.88:9419/mcp",
+			"peer_url":      "https://203.0.113.10:9419/mcp",
 			"generation":    7,
 			"Authorization": "do-not-return",
 		},

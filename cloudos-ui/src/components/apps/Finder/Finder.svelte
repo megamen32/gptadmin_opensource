@@ -39,7 +39,7 @@
 
 	/** Inspection roots are configured per node; land on the first listing. */
 	async function default_root(): Promise<void> {
-		const candidates = ['/home/roomhacker', '/home', '/root', '/var/lib/gptadmin/workspaces', '/var/lib/gptadmin', '/'];
+		const candidates = ['/home/admin', '/home', '/root', '/var/lib/gptadmin/workspaces', '/var/lib/gptadmin', '/'];
 		for (const computer of computers.slice(0, 4)) {
 			for (const candidate of candidates) {
 				try {

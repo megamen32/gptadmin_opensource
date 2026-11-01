@@ -43,7 +43,7 @@ GPU/AVD and other owners' processes.
 
 GPTAdmin owns its Hub/service and consumer checks. Canonical infrastructure,
 shared resource policy and admission authority remain in
-`/home/roomhacker/ServersAdministartion/templates/server100-resource-guard/README.md`.
+`/home/admin/ServersAdministartion/templates/server100-resource-guard/README.md`.
 This candidate changes only the GPTAdmin system service. It does not raise
 UID/native limits, move processes or alter another project's quota.
 

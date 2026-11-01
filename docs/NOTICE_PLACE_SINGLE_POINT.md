@@ -129,8 +129,8 @@ admin-node-100. Ни одного локального stdio-процесса No
 ## Что осталось за пределами проверенного
 
 * **mac-mini-2012.lan — UNKNOWN.** Notice Place не зарегистрирован ни в одной
-  среде (`/Users/roomhacker/.codex/config.toml`,
-  `/Users/roomhacker/.hermes/config.yaml`): алиасов нет, дублировать нечего.
+  среде (`/Users/admin/.codex/config.toml`,
+  `/Users/admin/.hermes/config.yaml`): алиасов нет, дублировать нечего.
   Каноническую точку создать нельзя — на хосте нет локального релиза Notice
   Place и нет bearer ни в одном конфиге клиента.
   Следующий шаг: владелец хоста переносит общий bearer Notification Center в

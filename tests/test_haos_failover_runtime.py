@@ -4,7 +4,7 @@ from scripts.gptadmin_failover_watchdog import build_frpc_config, reclaim_secret
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADDON = ROOT / "deploy/homeassistant/gptadmin_hub_standby"
+ADDON = ROOT / "deploy/server01/gptadmin_hub_standby"
 
 
 def test_haos_addon_packages_and_starts_the_physical_failover_path() -> None:
@@ -78,10 +78,10 @@ def test_frpc_can_reach_backup_through_an_independent_http_proxy() -> None:
     bundle = {"tunnel": {"frp": {
         "token": "test-token", "subdomain": "fallback",
         "endpoints": ["relay01=backup.example:27001"],
-        "proxy_url": "http://192.168.2.101:3127",
+        "proxy_url": "http://203.0.113.10:3127",
     }}}
     config = build_frpc_config(bundle, 9101, "shell:haos")
-    assert '[transport]\nproxyURL = "http://192.168.2.101:3127"' in config
+    assert '[transport]\nproxyURL = "http://203.0.113.10:3127"' in config
     assert '[transport.tls]\nenable = true' in config
 
 

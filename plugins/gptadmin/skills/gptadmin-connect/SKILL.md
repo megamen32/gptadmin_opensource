@@ -34,7 +34,7 @@ write. Re-run the client's OAuth reconnect flow in the browser. Do not rotate,
 copy, decode, or print a token as a workaround.
 
 If the saved entry for this managed installation still names a legacy
-`u-f….t.gptadmin.bezrabotnyi.com` address, replace the entry with
+`u-f….t.became.bezrabotnyi.com` address, replace the entry with
 `https://mcp.bezrabotnyi.com/mcp` before reconnecting. Here FRP `u-f…` names
 are fallback transport addresses only; they are not the managed OAuth issuer,
 resource, or identity. A separate Hub uses its own explicitly selected stable
