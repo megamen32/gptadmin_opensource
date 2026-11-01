@@ -106,11 +106,12 @@ func resolveCodeModeLimits(args map[string]any) (codeModeLimits, error) {
 // value, and run accounting are exposed; intermediate tool results are never
 // included unless the script explicitly returns them.
 type codeModeResult struct {
-	result  any
-	logs    []any
-	calls   int
-	limits  codeModeLimits
-	elapsed time.Duration
+	result    any
+	logs      []any
+	calls     int
+	toolCalls []map[string]any
+	limits    codeModeLimits
+	elapsed   time.Duration
 }
 
 // codeModeError carries a machine-readable failure code so the caller can fail
@@ -262,7 +263,7 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 	if len(encoded)+len(logsJSON) <= limits.maxOut {
 		// A small result is returned exactly as before: no descriptor and no
 		// store write.
-		return &codeModeResult{result: decoded, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
+		return &codeModeResult{result: decoded, logs: logs, calls: bridge.calls(), toolCalls: bridge.toolCallTrace(), limits: limits, elapsed: elapsed}, nil
 	}
 	// The result does not fit the output budget. It is stored in full and the
 	// model receives a small descriptor instead. The script is never re-run.
@@ -287,7 +288,7 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 		// The saved source is named, so the result is not lost.
 		return nil, bridge.annotate(&codeModeError{code: "output_too_large", detail: fmt.Sprintf("the saved result descriptor and the logs use %d bytes; limit is %d", len(descriptorJSON)+len(logsJSON), limits.maxOut), call: bridge.calls(), receipt: map[string]any{"source": firstString(descriptor, "source")}})
 	}
-	return &codeModeResult{result: descriptor, logs: logs, calls: bridge.calls(), limits: limits, elapsed: elapsed}, nil
+	return &codeModeResult{result: descriptor, logs: logs, calls: bridge.calls(), toolCalls: bridge.toolCallTrace(), limits: limits, elapsed: elapsed}, nil
 }
 
 // codeModeResultSourceName is the name of a result that was stored because it

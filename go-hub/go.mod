@@ -40,6 +40,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/x448/float16 v0.8.4 // indirect
 	go.etcd.io/bbolt v1.4.1 // indirect
 	golang.org/x/crypto v0.56.0 // indirect

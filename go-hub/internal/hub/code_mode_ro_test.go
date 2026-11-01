@@ -57,7 +57,7 @@ func startCodeModeShellHost(t *testing.T, handler func(tool string, args map[str
 	s.mu.Lock()
 	s.agents["shell:fixture"] = &Agent{
 		AgentID: "shell:fixture", Name: "fixture", Kind: "shell", Transport: "long_poll", Status: "online",
-		Meta: map[string]any{"approved": true, "build_version": 400, "enabled": true},
+		Meta: map[string]any{"approved": true, "build_version": 1074, "enabled": true},
 	}
 	s.mu.Unlock()
 	ts := httptest.NewServer(s.Handler())

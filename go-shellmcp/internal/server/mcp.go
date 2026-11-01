@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
 	inspecthost "github.com/megamen32/gptadmin/go-shellmcp/internal/inspect"
@@ -335,18 +336,20 @@ func (s *Server) mcpTools() []map[string]any {
 		},
 		{
 			"name":        "shell_exec",
-			"description": "Execute a shell command on this ShellMCP host; use background=true for local async jobs.",
+			"description": "Prefer argv for direct executable arguments and stdin for multiline scripts. Source is transferred as data, not quoted into Bash. E.g. argv=[python3,-], stdin=<Python code>, or file_editor.create then argv=[interpreter,path]. Avoid Python -c, nested Bash quoting, heredocs and base64. Legacy cmd and background jobs remain supported.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"cmd":         map[string]any{"type": "string"},
+					"cmd":         map[string]any{"type": "string", "description": "Legacy command parsed by the host shell; do not use for literal argv."},
+					"argv":        map[string]any{"type": "array", "minItems": 1, "maxItems": shell.MaxArgvCount, "items": map[string]any{"type": "string"}, "description": "Direct executable and argument array. Quotes, dollar signs, backticks and newlines are literal. Not supported by SSH or Shizuku backends."},
+					"stdin":       map[string]any{"type": "string", "description": "Optional UTF-8 source/data passed directly to process stdin (max 262144 bytes). Example: argv=[python3,-] or [docker,exec,-i,container,ruby,-] with stdin=script. Avoid nested shell quoting, python -c, heredocs and base64 for source code."},
 					"cwd":         map[string]any{"type": []string{"string", "null"}},
 					"timeout":     map[string]any{"type": []string{"integer", "null"}, "description": "Command timeout in seconds; pass 15 for a 15-second timeout. Omit or use null for the executor default."},
 					"env":         map[string]any{"type": []string{"object", "null"}, "additionalProperties": true},
 					"background":  map[string]any{"type": "boolean", "default": false},
 					"run_as_user": map[string]any{"type": []string{"string", "null"}},
 				},
-				"required":             []string{"cmd"},
+				"oneOf":                []any{map[string]any{"required": []string{"cmd"}}, map[string]any{"required": []string{"argv"}}},
 				"additionalProperties": false,
 			},
 		},
@@ -684,13 +687,25 @@ func (s *Server) setMCPEnabled(ref string, enabled bool) error {
 }
 
 func (s *Server) mcpShellExec(ctx context.Context, args map[string]any) (map[string]any, error) {
+	// Validate raw strings before JSON marshaling replaces invalid UTF-8.
+	if raw, exists := args["stdin"]; exists {
+		source, ok := raw.(string)
+		if !ok || len(source) > shell.MaxStdinBytes || strings.ContainsRune(source, '\x00') || !utf8.ValidString(source) {
+			return nil, errors.New("shell_exec stdin must be valid UTF-8 without NUL, up to 262144 bytes")
+		}
+	}
 	var req shell.Request
 	b, _ := json.Marshal(args)
 	if err := json.Unmarshal(b, &req); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(req.Cmd) == "" {
-		return nil, errors.New("shell_exec requires cmd")
+	if _, present := args["cmd"]; present {
+		if _, alsoArgv := args["argv"]; alsoArgv {
+			return nil, errors.New("shell_exec accepts cmd or argv, not both")
+		}
+	}
+	if err := shell.ValidateCommandSpec(req); err != nil {
+		return nil, err
 	}
 	s.applyDefaults(&req)
 	if req.Background {

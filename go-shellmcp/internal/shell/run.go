@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
 )
@@ -24,7 +25,9 @@ const DefaultSpillThresholdBytes int64 = 1024 * 1024
 const DefaultTimeout = 300 * time.Second
 
 type Request struct {
-	Cmd         string            `json:"cmd"`
+	Cmd         string            `json:"cmd,omitempty"`
+	Argv        []string          `json:"argv,omitempty"`
+	Stdin       string            `json:"stdin,omitempty"`
 	TraceID     string            `json:"trace_id,omitempty"`
 	TraceParent string            `json:"traceparent,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
@@ -84,8 +87,8 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	if limitBytes <= 0 {
 		limitBytes = DefaultLimitBytes
 	}
-	if req.Cmd == "" {
-		return Result{ReturnCode: -1, Error: "empty cmd", DurationMS: time.Since(started).Milliseconds()}, errors.New("empty cmd")
+	if err := ValidateCommandSpec(req); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	if err := validateEnvironment(req.Env); err != nil {
 		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
@@ -100,6 +103,13 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 
+	if req.Argv != nil {
+		user, explicit := targetRunUser(req)
+		if useAndroidShizuku(req, user, explicit) {
+			err := errors.New("native argv cannot use Android Shizuku; use a supported direct executor or explicit cmd")
+			return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+		}
+	}
 	cmd, runAsUser := buildCommand(ctx, req)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
@@ -111,6 +121,10 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		env = append(env, k+"="+v)
 	}
 	cmd.Env = env
+	if req.Stdin != "" {
+		// Source/data is passed as standard input; never interpolated into a shell command.
+		cmd.Stdin = strings.NewReader(req.Stdin)
+	}
 	setProcessGroup(cmd)
 
 	spillDir := req.SpillDir
@@ -299,6 +313,55 @@ func commandMentionsSudo(cmd string) bool {
 	return sudoTokenRE.MatchString(cmd)
 }
 
+const MaxArgvCount = 256
+const MaxArgvBytes = 64 << 10
+const MaxStdinBytes = 256 << 10
+
+// ValidateCommandSpec rejects ambiguous and malformed input before a process
+// or background job is created. An argv request is executed directly, without
+// ever being interpolated into a shell source string.
+func ValidateCommandSpec(req Request) error {
+	if len(req.Stdin) > MaxStdinBytes || strings.ContainsRune(req.Stdin, '\x00') || !utf8.ValidString(req.Stdin) {
+		return fmt.Errorf("stdin must be valid UTF-8 without NUL, up to %d bytes", MaxStdinBytes)
+	}
+	if req.Argv != nil {
+		if req.Cmd != "" {
+			return errors.New("shell_exec requires exactly one of cmd or argv")
+		}
+		if len(req.Argv) == 0 || len(req.Argv) > MaxArgvCount {
+			return fmt.Errorf("argv must contain 1..%d elements", MaxArgvCount)
+		}
+		bytes := 0
+		for i, arg := range req.Argv {
+			if strings.ContainsRune(arg, '\x00') || !utf8.ValidString(arg) {
+				return fmt.Errorf("argv[%d] contains NUL or invalid UTF-8", i)
+			}
+			if i == 0 && strings.TrimSpace(arg) == "" {
+				return errors.New("argv[0] must be a nonempty executable")
+			}
+			bytes += len(arg)
+			if bytes > MaxArgvBytes {
+				return fmt.Errorf("argv exceeds %d bytes", MaxArgvBytes)
+			}
+		}
+		return nil
+	}
+	if strings.TrimSpace(req.Cmd) == "" {
+		return errors.New("empty cmd")
+	}
+	if strings.ContainsRune(req.Cmd, '\x00') || !utf8.ValidString(req.Cmd) {
+		return errors.New("cmd contains NUL or invalid UTF-8")
+	}
+	return nil
+}
+
+func requestMentionsSudo(req Request) bool {
+	if req.Argv != nil {
+		return len(req.Argv) > 0 && filepath.Base(req.Argv[0]) == "sudo"
+	}
+	return commandMentionsSudo(req.Cmd)
+}
+
 func targetRunUser(req Request) (string, bool) {
 	if req.RunAsUser != "" {
 		return req.RunAsUser, true
@@ -306,7 +369,7 @@ func targetRunUser(req Request) (string, bool) {
 	if req.User != "" {
 		return req.User, true
 	}
-	if req.DefaultUser != "" && !commandMentionsSudo(req.Cmd) {
+	if req.DefaultUser != "" && !requestMentionsSudo(req) {
 		return req.DefaultUser, false
 	}
 	return "", false
@@ -316,7 +379,7 @@ func ImplicitRootExecutionError(req Request) error {
 	// A system service is often launched as root so it can serve privileged
 	// maintenance requests. Ordinary commands must not silently inherit that
 	// identity and leave root-owned files in a user's workspace.
-	if runtime.GOOS != "windows" && os.Geteuid() == 0 && req.DefaultUser == "" && req.RunAsUser == "" && req.User == "" && !commandMentionsSudo(req.Cmd) {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 && req.DefaultUser == "" && req.RunAsUser == "" && req.User == "" && !requestMentionsSudo(req) {
 		return errors.New("root shellmcp requires SHELLMCP_DEFAULT_USER for ordinary commands; use run_as_user=root or sudo explicitly for privileged commands")
 	}
 	return nil
@@ -339,8 +402,16 @@ func buildCommand(ctx context.Context, req Request) (*exec.Cmd, string) {
 		if len(environmentNames) > 0 {
 			arguments = append(arguments, "--preserve-env="+strings.Join(environmentNames, ","))
 		}
-		arguments = append(arguments, "-u", user, "--", shellName(), shellArg(), req.Cmd)
+		arguments = append(arguments, "-u", user, "--")
+		if req.Argv != nil {
+			arguments = append(arguments, req.Argv...)
+		} else {
+			arguments = append(arguments, shellName(), shellArg(), req.Cmd)
+		}
 		return exec.CommandContext(ctx, "sudo", arguments...), user
+	}
+	if req.Argv != nil {
+		return exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...), ""
 	}
 	return exec.CommandContext(ctx, shellName(), shellArg(), req.Cmd), ""
 }

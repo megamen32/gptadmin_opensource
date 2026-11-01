@@ -27,6 +27,19 @@ func adminPreview(value any) string {
 	return text
 }
 
+// shellArgumentsPreview omits script source from UI task previews. The real
+// arguments remain unchanged in the authorized queue and task records.
+func shellArgumentsPreview(args map[string]any, secrets []string) string {
+	if args == nil {
+		return ""
+	}
+	visible := cloneMap(args)
+	if _, exists := visible["stdin"]; exists {
+		visible["stdin"] = "<stdin source omitted>"
+	}
+	return adminPreview(redactSecretValues(visible, secrets))
+}
+
 func (s *Server) adminJobsDataLocked(page ...int) map[string]any {
 	offset, limit := 0, 200
 	if len(page) == 2 {
@@ -133,7 +146,7 @@ func (s *Server) adminJobsDataLocked(page ...int) map[string]any {
 			}
 			if j := s.shellJobs[id]; j != nil {
 				item["command"] = adminPreview(redactSecretValues(j.Cmd, j.SecretValues))
-				item["arguments_preview"] = adminPreview(redactSecretValues(j.Arguments, j.SecretValues))
+				item["arguments_preview"] = shellArgumentsPreview(j.Arguments, j.SecretValues)
 				item["result_preview"] = adminPreview(redactSecretValues(j.Result, j.SecretValues))
 				item["error_preview"] = adminPreview(redactSecretValues(j.Error, j.SecretValues))
 			}
@@ -233,7 +246,7 @@ func (s *Server) adminJobsForServerLocked(serverID string, offset, limit int) ma
 		}
 		if job := s.shellJobs[id]; job != nil {
 			item["command"] = adminPreview(redactSecretValues(job.Cmd, job.SecretValues))
-			item["arguments_preview"] = adminPreview(redactSecretValues(job.Arguments, job.SecretValues))
+			item["arguments_preview"] = shellArgumentsPreview(job.Arguments, job.SecretValues)
 			item["result_preview"] = adminPreview(redactSecretValues(job.Result, job.SecretValues))
 			item["error_preview"] = adminPreview(redactSecretValues(job.Error, job.SecretValues))
 		}

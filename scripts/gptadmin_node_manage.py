@@ -172,6 +172,9 @@ class UpdateBudget:
         self.cleaning = False
 
     def __enter__(self):
+        self.previous_interrupts = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        for sig in self.previous_interrupts:
+            signal.signal(sig, self.interrupted)
         if self.seconds is not None:
             self.previous = signal.getsignal(signal.SIGALRM)
             signal.signal(signal.SIGALRM, self.expired)
@@ -182,7 +185,15 @@ class UpdateBudget:
     def expired(signum, frame):
         raise RuntimeFailure('native Node update deadline; rollback required')
 
+    @staticmethod
+    def interrupted(signum, frame):
+        raise RuntimeFailure(f'Node update interrupted by {signal.Signals(signum).name}; rollback required')
+
     def cleanup(self):
+        # Preserve the rollback/cancel attempt if the caller sends the same
+        # interrupt again while waiting for cleanup.
+        for sig in self.previous_interrupts:
+            signal.signal(sig, signal.SIG_IGN)
         if self.seconds is not None and not self.cleaning:
             self.cleaning = True
             signal.setitimer(signal.ITIMER_REAL, 80)
@@ -191,6 +202,8 @@ class UpdateBudget:
         if self.seconds is not None:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, self.previous)
+        for sig, previous in self.previous_interrupts.items():
+            signal.signal(sig, previous)
 
 
 def fail(message: str, code: int) -> 'NoReturn':  # type: ignore[valid-type]

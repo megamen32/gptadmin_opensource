@@ -1332,6 +1332,28 @@ class NodeAutoupdateTests(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGALRM),previous)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL)[0],0)
 
+    def test_interrupt_during_drain_cancels_before_any_switch(self):
+        import os, signal
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+                root=Path(d);layout=manager.Layout(opt_root=root/'opt')
+                old=layout.versions_root()/'old-1';old.mkdir(parents=True);manager.switch_current(layout,old)
+                def extract(package,arch,target):target.mkdir();return {'git_commit':'2'*40}
+                for name,value in [('require_root',None),('resolve_instance_name','one'),
+                    ('read_installed_env',{}),('read_admin_token','unit-only'),('origin_from_env','http://unit.invalid'),
+                    ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
+                    ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True)]:
+                    stack.enter_context(patch.object(manager,name,return_value=value))
+                stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+                stack.enter_context(patch.object(manager,'drain_wait_ready',side_effect=lambda *a, **kw: os.kill(os.getpid(),sig)))
+                cancel=stack.enter_context(patch.object(manager,'drain_cancel',return_value=True))
+                restart=stack.enter_context(patch.object(manager,'systemctl'))
+                args=SimpleNamespace(name='one',package='unit',wait_secs=20,require_drain=True,operation_deadline_secs=None)
+                with self.assertRaisesRegex(manager.RuntimeFailure,'interrupted'):
+                    manager.cmd_update(args,layout,manager.Runner())
+                self.assertEqual(manager.current_target(layout),old)
+                restart.assert_not_called();cancel.assert_called_once()
+
     def test_systemctl_timeout_is_catchable_not_uncaught_subprocess_error(self):
         import subprocess
         runner=SimpleNamespace(run=unittest.mock.Mock(side_effect=subprocess.TimeoutExpired('systemctl',45)))

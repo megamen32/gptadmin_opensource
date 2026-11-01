@@ -17,6 +17,18 @@ type Operation = {
 };
 type Positioned = { item: Operation; x: number; width: number; track: number };
 type Lane = { client: string; items: Positioned[]; tracks: number };
+type CompactGroup = { key: string; x: number; outcome: Outcome; items: Operation[] };
+function compactGroups(lane: Lane): CompactGroup[] {
+  const groups = new Map<string, CompactGroup>();
+  for (const { item, x } of lane.items) {
+    const bucket = Math.floor(x / 28);
+    const key = item.outcome + ":" + bucket;
+    const group = groups.get(key) ?? { key, x: bucket * 28, outcome: item.outcome, items: [] };
+    group.items.push(item);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
 type Period = 15 | 60 | 360 | 1440;
 
 const storageKey = "gptadmin:activity:hidden-clients:v1";
@@ -128,6 +140,11 @@ export default function ActivityScreen({ mode = "timeline" }: { mode?: "timeline
   const [query, setQuery] = useState("");
   const [outcome, setOutcome] = useState("all");
   const [layout, setLayout] = useState<"timeline" | "list">(mode === "requests" ? "list" : "timeline");
+  const [parallel, setParallel] = useState(false);
+  const [cluster, setCluster] = useState<Operation[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const [scrollMax, setScrollMax] = useState(0);
   const [live, setLive] = useState(true);
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [jobs, setJobs] = useState<JobEntry[]>([]);
@@ -198,6 +215,7 @@ export default function ActivityScreen({ mode = "timeline" }: { mode?: "timeline
   }, [load, live]);
 
   const loadMore = async () => {
+    setLive(false);
     setMoreLoading(true); setError(null);
     const generation = requestGeneration.current;
     try {
@@ -216,6 +234,24 @@ export default function ActivityScreen({ mode = "timeline" }: { mode?: "timeline
   const width = Math.max(1200, Math.min(7200, period * 24));
   const start = now - period * 60000;
   const lanes = useMemo(() => layoutLanes(operations, width, start, now), [operations, width, start, now]);
+  useEffect(() => {
+    const box = scrollRef.current;
+    if (!box) return;
+    const update = () => {
+      setScrollMax(Math.max(0, box.scrollWidth - box.clientWidth));
+      setScrollLeft(box.scrollLeft);
+    };
+    update();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(box);
+    window.addEventListener("resize", update);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", update); };
+  }, [width, layout, selected, operations.length]);
+  const moveTimeline = (value: number) => {
+    const box = scrollRef.current;
+    if (box) { box.scrollLeft = Math.max(0, Math.min(scrollMax, value)); setScrollLeft(box.scrollLeft); }
+  };
+  useEffect(() => { setCluster([]); }, [period, scope, query, outcome, hidden]);
   const clientChoices = useMemo(() =>
     Object.entries(clients).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
   [clients]);
@@ -285,28 +321,48 @@ export default function ActivityScreen({ mode = "timeline" }: { mode?: "timeline
     <ErrorNotice message={error} />
     <div className="activity-view-header">
       <div className="activity-segment" role="group" aria-label="Вид операций">
-        <button type="button" className={layout === "timeline" ? "chosen" : ""} onClick={() => setLayout("timeline")}>Таймлайн</button>
+        <button type="button" className={layout === "timeline" && !parallel ? "chosen" : ""} aria-pressed={layout === "timeline" && !parallel} onClick={() => { setLayout("timeline"); setParallel(false); }}>Компактно</button>
+        <button type="button" className={layout === "timeline" && parallel ? "chosen" : ""} aria-pressed={layout === "timeline" && parallel} onClick={() => { setLayout("timeline"); setParallel(true); setCluster([]); }}>Параллельные</button>
         <button type="button" className={layout === "list" ? "chosen" : ""} onClick={() => setLayout("list")}>Список</button>
       </div>
       <div className="activity-legend"><span><i className="ok" /> Успешно</span><span><i className="error" /> Ошибка</span><span><i className="running" /> Выполняется</span></div>
     </div>
+    {layout === "timeline" && !parallel && <p className="activity-compact-help">Одна компактная полоса на клиента. Близкие вызовы сгруппированы: нажмите на число, чтобы увидеть каждый. Полные длительности доступны в режиме «Параллельные».</p>}
+    {cluster.length > 0 && <section className="card activity-cluster-detail" aria-label="Операции группы">
+      <div><strong>{cluster.length} операций</strong><button type="button" onClick={() => setCluster([])}>Закрыть группу</button></div>
+      {cluster.map((item) => <button key={item.id} className="activity-cluster-item" type="button" onClick={() => void select(item)}>
+        <time>{timeLabel(item.time)}</time><strong>{item.tool}</strong><span>{item.target}</span>
+      </button>)}
+    </section>}
     <div className={selected ? "activity-content has-detail" : "activity-content"}>
       <section className="card activity-visual">
-        {layout === "timeline" ? <div className="activity-scroll" tabIndex={0} aria-label="Прокручиваемый таймлайн операций">
+        {layout === "timeline" && <div className="activity-scroll-controls" aria-label="Горизонтальная прокрутка">
+          <button type="button" aria-label="Таймлайн влево" disabled={scrollLeft <= 0} onClick={() => moveTimeline(scrollLeft - 400)}>←</button>
+          <input type="range" aria-label="Положение таймлайна" min={0} max={scrollMax} value={scrollLeft} disabled={scrollMax === 0} onChange={(event) => moveTimeline(Number(event.target.value))} />
+          <button type="button" aria-label="Таймлайн вправо" disabled={scrollLeft >= scrollMax} onClick={() => moveTimeline(scrollLeft + 400)}>→</button>
+        </div>}
+        {layout === "timeline" ? <div className="activity-scroll" ref={scrollRef} onScroll={(event) => setScrollLeft(event.currentTarget.scrollLeft)} tabIndex={0} aria-label="Прокручиваемый таймлайн операций">
           <div className="activity-board" style={{ width: width + 192 }}>
             <div className="activity-axis"><div className="activity-axis-client">Источник / клиент</div><div className="activity-axis-ticks" style={{ width }}>
               {Array.from({ length: 7 }, (_, i) => <span key={i} style={{ left: (i / 6 * 100) + "%" }}>{timeLabel(start + (now - start) * i / 6).slice(0, 5)}</span>)}
             </div></div>
-            {lanes.map((lane) => <div className="activity-lane" key={lane.client} style={{ minHeight: 20 + lane.tracks * 32 }}>
+            {lanes.map((lane) => <div className="activity-lane" key={lane.client} style={{ minHeight: parallel ? 20 + lane.tracks * 32 : 96 }}>
               <div className="activity-lane-label"><strong title={lane.client}>{labelClient(lane.client)}</strong><small>{lane.items.length} вызовов</small></div>
               <div className="activity-lane-track" style={{ width }}>
                 {Array.from({ length: 7 }, (_, i) => <div className="activity-gridline" key={i} style={{ left: (i / 6 * 100) + "%" }} />)}
-                {lane.items.map(({ item, x, width: span, track }) => <button
+                {parallel ? lane.items.map(({ item, x, width: span, track }) => <button
                   key={item.id} className={"activity-mark " + item.outcome + (selected?.id === item.id ? " active" : "")}
                   style={{ left: x, top: 9 + track * 32, width: span }} type="button"
                   title={item.tool + " · " + timeLabel(item.time) + " · " + item.target}
                   aria-label={item.tool + " — " + labelClient(item.client) + " — " + timeLabel(item.time)}
-                  onClick={() => void select(item)}>{span > 70 ? item.tool : ""}</button>)}
+                  onClick={() => void select(item)}>{span > 70 ? item.tool : ""}</button>) : compactGroups(lane).map((group) => <button
+                  key={group.key} type="button" className={"activity-mark activity-cluster " + group.outcome}
+                  style={{ left: group.x, top: 8 + (group.outcome === "ok" ? 0 : group.outcome === "error" ? 1 : 2) * 26, width: 24 }}
+                  title={group.items.map((item) => item.tool + " · " + timeLabel(item.time)).join("\n")}
+                  aria-label={group.items.length === 1 ? group.items[0].tool + " — " + labelClient(lane.client) + " — " + timeLabel(group.items[0].time) : group.items.length + " операций — " + labelClient(lane.client)}
+                  onClick={() => { if (group.items.length === 1) { setCluster([]); void select(group.items[0]); } else setCluster(group.items); }}>
+                  {group.items.length > 1 ? group.items.length : "·"}
+                </button>)}
               </div>
             </div>)}
             {!lanes.length && <div className="activity-empty">По текущим фильтрам нет записанных операций.</div>}

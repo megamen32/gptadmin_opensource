@@ -57,3 +57,34 @@ it("shows caller, target, recorded trace and real job details by clicking operat
   expect(await within(detail).findByText(/"stdout": "ok"/)).toBeInTheDocument();
   expect(within(detail).getByText("3.0 с")).toBeInTheDocument();
 });
+
+it("defaults to compact groups, reveals every grouped call and makes parallel layout opt-in", async () => {
+  const crowded = Array.from({ length: 30 }, (_, index) => ({
+    time: when, name: "tool_policy_decision",
+    fields: { client_id: "zai", tool: "tool_" + index, target: "node-100", status: 200 },
+  }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+    new Response(JSON.stringify(String(input).includes("/audit?")
+      ? { events: crowded, total: crowded.length, clients: { zai: crowded.length } }
+      : { recent: [] }), { status: 200 }));
+  const user = userEvent.setup();
+  const { container } = render(<ActivityScreen />);
+  expect(await screen.findByRole("button", { name: "30 операций — zai" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Компактно" })).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector(".activity-lane")).toHaveStyle({ minHeight: "96px" });
+  expect(screen.getByRole("slider", { name: "Положение таймлайна" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Таймлайн вправо" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "30 операций — zai" }));
+  const group = screen.getByRole("region", { name: "Операции группы" });
+  expect(within(group).getAllByRole("button")).toHaveLength(31);
+  await user.click(within(group).getByRole("button", { name: /tool_29/ }));
+  expect(screen.getByRole("complementary", { name: "Детали операции" })).toHaveTextContent("tool_29");
+  await user.click(screen.getByRole("button", { name: "Параллельные" }));
+  expect(container.querySelectorAll(".activity-mark")).toHaveLength(30);
+  expect(container.querySelector(".activity-lane")).toHaveStyle({ minHeight: "980px" });
+  expect(screen.queryByRole("region", { name: "Операции группы" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Компактно" }));
+  expect(container.querySelector(".activity-lane")).toHaveStyle({ minHeight: "96px" });
+  await user.click(screen.getByRole("button", { name: "Список" }));
+  expect(container.querySelectorAll(".activity-request-row")).toHaveLength(30);
+});

@@ -682,6 +682,10 @@ func (s *Server) decodeExec(w http.ResponseWriter, r *http.Request) (shell.Reque
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return req, false
 	}
+	if err := shell.ValidateCommandSpec(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return req, false
+	}
 	s.applyDefaults(&req)
 	req.TraceID = normalizeTraceID(req.TraceID)
 	return req, true
@@ -708,6 +712,9 @@ func (s *Server) applyDefaults(req *shell.Request) {
 // same shell.Result so the JSON response shape is unchanged.
 func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
 	defer func() { _ = s.enforceStorage(nil) }()
+	if s.sshClient != nil && (req.Argv != nil || req.Stdin != "") {
+		return shell.Result{ReturnCode: -1, Error: "native argv and stdin are not supported by the SSH backend; no shell fallback"}
+	}
 	if err := shell.ImplicitRootExecutionError(req); err != nil {
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
@@ -732,6 +739,9 @@ func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
 // "exit") so the SSE / NDJSON response shape is unchanged.
 func (s *Server) runShellStream(ctx context.Context, req shell.Request, emit func(shell.Event)) shell.Result {
 	defer func() { _ = s.enforceStorage(nil) }()
+	if s.sshClient != nil && (req.Argv != nil || req.Stdin != "") {
+		return shell.Result{ReturnCode: -1, Error: "native argv and stdin are not supported by the SSH backend; no shell fallback"}
+	}
 	if err := shell.ImplicitRootExecutionError(req); err != nil {
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
@@ -1277,7 +1287,29 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	if runAsUser == "" {
 		runAsUser, _ = q.Arguments["user"].(string)
 	}
-	return shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
+	req := shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
+	if source, ok := q.Arguments["stdin"].(string); ok {
+		req.Stdin = source
+	}
+	if raw, exists := q.Arguments["argv"]; exists {
+		// Present but malformed argv is represented as a non-nil empty list
+		// so the executor rejects it. Never silently execute q.Cmd instead.
+		req.Argv = []string{}
+		switch items := raw.(type) {
+		case []string:
+			req.Argv = append(req.Argv, items...)
+		case []any:
+			for _, item := range items {
+				value, ok := item.(string)
+				if !ok {
+					req.Argv = []string{}
+					break
+				}
+				req.Argv = append(req.Argv, value)
+			}
+		}
+	}
+	return req
 }
 
 func (s *Server) startCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) bool {

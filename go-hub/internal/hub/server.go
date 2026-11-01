@@ -1833,6 +1833,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/failover", s.requireCtl(s.adminFailover))
 	mux.HandleFunc("/admin/api/jobs", s.requireCtl(s.adminJobs))
 	mux.HandleFunc("/admin/api/tasks/", s.requireCtl(s.adminTaskReceipt))
+	mux.HandleFunc("/admin/api/mcp/tool", s.requireCtl(s.adminMCPTool))
 	mux.HandleFunc("/admin/api/audit", s.requireCtl(s.adminAudit))
 	mux.HandleFunc("/admin/api/console", s.requireCtl(s.adminConsole))
 	mux.HandleFunc("/admin/api/operations", s.requireCtl(s.adminOperations))
@@ -5016,6 +5017,15 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	defer releaseSubmission()
 	callArgs, approvalID := approvalArguments(args)
+	if schema, known := builtInMCPInputSchema(target, toolName); known {
+		if issue := validateMCPToolArguments(schema, callArgs); issue != nil {
+			status := http.StatusBadRequest
+			if issue.Code == "invalid_tool_schema" {
+				status = http.StatusBadGateway
+			}
+			return map[string]any{"status": "failed", "error": issue.metadata()}, status
+		}
+	}
 	if response, blocked := s.approvalGate(r, target, toolName, callArgs, approvalID); blocked {
 		s.auditToolDecision(r, target, toolName, callArgs, "deny", "approval required", response, http.StatusPreconditionRequired)
 		return response, http.StatusPreconditionRequired
@@ -5443,8 +5453,7 @@ func (s *Server) auditToolDecision(r *http.Request, target, toolName string, arg
 	}
 	if r != nil {
 		fields["method"] = r.Method
-		// Audit only known static MCP endpoints, never an arbitrary path
-		// which could contain user-supplied identifiers or credentials.
+		// Record known static routing paths only, never user input or secrets.
 		switch r.URL.Path {
 		case "/mcp", "/mcp-relay/call", "/mcp-relay/call_mcp_tool", "/mcp-prompt/call":
 			fields["endpoint"] = r.URL.Path
@@ -5553,9 +5562,8 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := firstString(req, "target", "server_id", "agent_id")
-	cmd := firstString(req, "cmd", "command")
-	if cmd == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing cmd"})
+	if err := validateShellExecArguments(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
@@ -5569,10 +5577,17 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{
-		"cmd":         cmd,
 		"cwd":         req["cwd"],
 		"timeout":     req["timeout"],
 		"run_as_user": firstString(req, "run_as_user", "user"),
+	}
+	if argv, exists := req["argv"]; exists {
+		args["argv"] = argv
+	} else {
+		args["cmd"] = firstString(req, "cmd", "command")
+	}
+	if source, exists := req["stdin"]; exists {
+		args["stdin"] = source
 	}
 	if raw, ok := req["secret_env"]; ok {
 		args["secret_env"] = raw
@@ -6050,6 +6065,22 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
 	}
+	if toolName == "shell_exec" {
+		if _, hasStdin := args["stdin"]; hasStdin {
+			// Older agents silently discard unknown stdin fields. Refuse before
+			// queuing instead of claiming a source script ran successfully.
+			s.mu.Lock()
+			agent := s.agents["shell:"+server]
+			build := 0
+			if agent != nil {
+				build = intFromAny(agent.Meta["build_version"])
+			}
+			s.mu.Unlock()
+			if build < 1074 {
+				return map[string]any{"server_id": target, "status": "failed", "error": "stdin requires ShellMCP build 1074 or newer on the target host"}
+			}
+		}
+	}
 	job := &shellJob{ID: newID(), Server: server, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
 	if job.FilesystemACL != nil {
 		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
@@ -6057,10 +6088,10 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 		job.FilesystemACL.ArgumentsSHA256, _ = filesystemACLArgumentsDigest(job.Arguments)
 	}
 	if toolName == "shell_exec" {
-		job.Cmd = firstString(args, "cmd", "command")
-		if job.Cmd == "" {
-			return map[string]any{"server_id": target, "status": "failed", "error": "missing cmd"}
+		if err := validateShellExecArguments(args); err != nil {
+			return map[string]any{"server_id": target, "status": "failed", "error": err.Error()}
 		}
+		job.Cmd = firstString(args, "cmd", "command")
 		job.Cwd = firstString(args, "cwd")
 		job.Timeout = intFromAny(args["timeout"])
 		job.Env = mapValue(args["env"])
@@ -6126,7 +6157,7 @@ func hubTools() []map[string]any {
 		{"name": "discover", "description": "List registered targets; query and status filter the compact list", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}}},
 		searchToolDefinition(),
 		{"name": "schema", "description": "Read the exact input schema for one named target tool, or compact target tool summaries. Use search for MCP tool catalog discovery.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"target": map[string]any{"type": "string"}, "tool": map[string]any{"type": "string"}, "detail": toolOutputDetailSchema()}, "required": []string{"target"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}},
-		{"name": "demo", "description": "Run a safe read-only connection check; no shell or credentials", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "demo", "description": "Run a safe read-only connection check; optional probe, iteration and locale metadata are ignored", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"probe": map[string]any{"type": "string"}, "iteration": map[string]any{"type": "integer"}, "locale": map[string]any{"type": "string"}}, "additionalProperties": false}},
 		{
 			"name":         "resource_receipt",
 			"description":  "Read one GPTAdmin MCP resource and return a metadata-only URI, MIME, byte-size, SHA-256, content-count receipt.",
@@ -6162,7 +6193,7 @@ func hubTools() []map[string]any {
 		{
 			"name":         "exec",
 			"title":        "Think in Code",
-			"description":  "JavaScript sandbox for any tool call, including writes and shell: await mcp.call(target, tool, args), for example mcp.call('shell:<host>', 'shell_exec', {cmd}). Do loops, filtering and joins inside the code and return only the final value; that costs far fewer tokens than many separate calls. Find tools with search and exact arguments with schema. No filesystem, environment, network or timer access.",
+			"description":  "Typed MCP tool runner. Prefer search({query,limit}).items (legacy .results remains), then await tools[\"<exact target>\"].tool(args); short aliases work only if unique. For shell use native argv without Bash. For multiline Python/Ruby/Node use mcp.shell(target,[interpreter,\"-\"],{stdin:source}) or file_editor.create followed by argv; never nest code inside shell quotes, heredocs or base64. Raw cmd strings remain for intentional shell syntax. For long work await mcp.tasks.start(target,tool,args), then get/wait/cancel/update by task ID, never resubmit for polling. Tool calls are returned separately with no secret arguments; verbose:true enables diagnostics. Existing mcp.call/files and all profile, approval and read-only rules remain enforced.",
 			"inputSchema":  codeModeInputSchema(),
 			"outputSchema": codeModeOutputSchema(),
 			"annotations":  map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true},
@@ -6174,7 +6205,7 @@ func hubTools() []map[string]any {
 
 func shellTools() []map[string]any {
 	return append([]map[string]any{
-		{"name": "shell_exec", "description": "Run one command as the configured default non-root user; use run_as_user=root only when privileged shell execution is intentional. File reads/edits/checkpoints live on the paired file:<host> target.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}, "description": "Command timeout in seconds; pass 15 for a 15-second timeout. Omit or use null for the executor default."}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "required": []string{"cmd"}}},
+		{"name": "shell_exec", "description": "Run exactly one of cmd (shell source) or argv (direct executable and literal arguments, without Bash parsing) on this ShellMCP host. Use run_as_user=root only when intentionally privileged; the paired file:<host> target handles file operations.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "string", "description": "Legacy shell source"}, "command": map[string]any{"type": "string", "description": "Legacy Hub queue alias for cmd"}, "argv": map[string]any{"type": "array", "minItems": 1, "maxItems": 256, "items": map[string]any{"type": "string"}, "description": "Direct program and literal arguments, no Bash expansion; only on native local ShellMCP agents"}, "stdin": map[string]any{"type": "string", "description": "Multiline source/data sent as process stdin, not placed in shell command; max 262144 UTF-8 bytes, requires ShellMCP build 1074+. Prefer argv=[python3,-], stdin=<source>; for Docker use exec -i. No nested quoting, heredoc or base64."}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}, "description": "Command timeout in seconds; pass 15 for a 15-second timeout. Omit or use null for the executor default."}, "run_as_user": map[string]any{"type": []string{"string", "null"}, "description": "Use root only when intentional"}, "secret_env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Map environment names to opaque secret_ref values"}}, "oneOf": []any{map[string]any{"required": []string{"cmd"}}, map[string]any{"required": []string{"argv"}}, map[string]any{"required": []string{"command"}}}}},
 	}, childMCPToolDefinitions()...)
 }
 

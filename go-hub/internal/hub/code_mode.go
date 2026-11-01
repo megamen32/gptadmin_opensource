@@ -17,9 +17,10 @@ func codeModeInputSchema() map[string]any {
 				"type":        "string",
 				"minLength":   1,
 				"maxLength":   codeModeMaxCodeBytes,
-				"description": "Short async JavaScript body. Top-level await, call/search, mcp.call/search/schema/discover/job/expand and files.* are available. Explicitly return only the chosen result. File helpers call authorized file:<host> MCP tools. No host filesystem, environment, process, network or timers.",
+				"description": "Concise JavaScript body. Prefer typed MCP tools over shell. Search with search({query,limit}).items (legacy .results retained). The Hub validates tool inputSchema before dispatch; invalid arguments return the exact field, expected type and reason. Call await tools[\"<exact target>\"].tool(args); short aliases only if unique. await mcp.shell(\"shell:<host>\", [\"python3\", \"-\"], {stdin:source}) sends multiline code as stdin without Bash quoting; use file_editor.create for durable scripts and argv to run them. Avoid nested quotes, heredocs and base64. Raw cmd strings remain for intentional shell scripts. For long work use await mcp.tasks.start(target,tool,args), do independent work, then mcp.tasks.wait(taskId,{timeout_ms:30000}) once or get/cancel/update; never resubmit to poll. Existing mcp.call/files and profile policies remain. Return concise data; verbose:true adds diagnostics. No direct filesystem, environment, processes, network or timers.",
 			},
 			"context": map[string]any{"type": "string", "description": "Instruction context returned by search when required."},
+			"verbose": map[string]any{"type": "boolean", "default": false, "description": "Include execution timings, limits and empty logs. Default result is compact."},
 			"timeout_ms": map[string]any{
 				"type": "integer", "minimum": 100,
 				"maximum":     int(codeModeMaxTimeout / 1e6),
@@ -52,6 +53,7 @@ func codeModeOutputSchema() map[string]any {
 			"result":     map[string]any{"description": "Exactly the value the script returned."},
 			"logs":       map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{}}, "description": "Structured console.log arguments, included in the combined output budget."},
 			"calls":      map[string]any{"type": "integer", "minimum": 0},
+			"tool_calls": map[string]any{"type": "array", "description": "Called target/tool/status metadata without potentially sensitive arguments; only present when calls were made.", "items": map[string]any{"type": "object"}},
 			"elapsed_ms": map[string]any{"type": "integer", "minimum": 0},
 			"limits": map[string]any{
 				"type": "object",
@@ -106,6 +108,10 @@ func (s *Server) callCodeModeToolMode(r *http.Request, args map[string]any, read
 	if code == "" {
 		return codeModeFailed("invalid_arguments", "code is required", 0), http.StatusBadRequest
 	}
+	verbose, hasVerbose := args["verbose"].(bool)
+	if _, present := args["verbose"]; present && !hasVerbose {
+		return codeModeFailed("invalid_arguments", "verbose must be a boolean", 0), http.StatusBadRequest
+	}
 	limits, err := resolveCodeModeLimits(args)
 	if err != nil {
 		return codeModeFailed("invalid_arguments", err.Error(), 0), http.StatusBadRequest
@@ -122,19 +128,25 @@ func (s *Server) callCodeModeToolMode(r *http.Request, args map[string]any, read
 	if runErr != nil {
 		return codeModeFailedWith(runErr.code, runErr.Error(), runErr.call, runErr.receipt), codeModeStatusFor(runErr.code)
 	}
-	return map[string]any{
-		"status":     "completed",
-		"result":     run.result,
-		"logs":       run.logs,
-		"calls":      run.calls,
-		"elapsed_ms": run.elapsed.Milliseconds(),
-		"limits": map[string]any{
+	// A successful Code Mode run should read like a tool result, not an
+	// execution diagnostic dump. Keep full diagnostics via verbose:true.
+	out := map[string]any{"status": "completed", "result": run.result, "calls": run.calls}
+	if len(run.toolCalls) > 0 {
+		out["tool_calls"] = run.toolCalls
+	}
+	if len(run.logs) > 0 || verbose {
+		out["logs"] = run.logs
+	}
+	if verbose {
+		out["elapsed_ms"] = run.elapsed.Milliseconds()
+		out["limits"] = map[string]any{
 			"timeout_ms":       run.limits.timeout.Milliseconds(),
 			"max_calls":        run.limits.maxCalls,
 			"heap_bytes":       run.limits.heap,
 			"max_output_bytes": run.limits.maxOut,
-		},
-	}, http.StatusOK
+		}
+	}
+	return out, http.StatusOK
 }
 
 func codeModeFailed(code, message string, calls int) map[string]any {

@@ -35,18 +35,85 @@ const __pollMCP = globalThis.__codeModePollCall;
 const __yieldMCP = globalThis.__codeModeYield;
 const __discoverMCP = globalThis.__codeModeDiscover;
 const __schemaMCP = globalThis.__codeModeSchema;
+const __prepareMCP = globalThis.__codeModePrepareTool;
 const __searchMCP = globalThis.__codeModeSearch;
 const __facadeMCP = globalThis.__codeModeFacade;
+const __tasksMCP = globalThis.__codeModeTask;
 const __fileMCP = globalThis.__codeModeFile;
-const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } const id=__startMCP(v); return (async()=>{ await Promise.resolve(); for(;;){ const state=__pollMCP(id); if(state.ready){ if(state.error) throw new Error(state.error); return state.value; } __yieldMCP(); await Promise.resolve(); } })(); };
-const search = (query, opts={}) => (typeof opts.source==='string' || opts.scope==='content') ? __contentMCP('search',query,opts) : __searchMCP(query,opts);
+const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.task === true) { v.__task = true; } if (opts && opts.idempotency_key) { v.idempotency_key = opts.idempotency_key; } if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } const id=__startMCP(v); return (async()=>{ await Promise.resolve(); for(;;){ const state=__pollMCP(id); if(state.ready){ if(state.error) throw new Error(state.error); return state.value; } __yieldMCP(); await Promise.resolve(); } })(); };
+const shell = (target, command, options={}) => {
+  if (typeof target !== 'string' || !target.startsWith('shell:') || target.length <= 6) throw new TypeError('shell target must be shell:<host>');
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('shell options must be an object');
+  const spec = command !== null && typeof command === 'object' && !Array.isArray(command) ? command : {};
+  const opts = {...spec,...options};
+  for (const key of Object.keys(opts)) if (!['argv','cmd','stdin','cwd','timeout','full'].includes(key)) throw new TypeError('unknown shell option: ' + key);
+  const argv = Array.isArray(command) ? command : opts.argv;
+  if ((argv !== undefined && opts.cmd !== undefined) || (typeof command === 'string' && (opts.argv !== undefined || opts.cmd !== undefined)) || (Array.isArray(command) && opts.argv !== undefined)) throw new TypeError('shell accepts exactly one of argv or cmd');
+  let args;
+  if (argv !== undefined) {
+    if (!Array.isArray(argv) || argv.length === 0 || argv.length > 256) throw new TypeError('shell argv must be an array of 1..256 strings');
+    let bytes=0;
+    for (let i=0;i<argv.length;i++){
+      const arg=argv[i];
+      if (typeof arg!=='string' || arg.indexOf('\0')!==-1 || (i===0 && !arg.trim())) throw new TypeError('shell argv contains an invalid argument');
+      bytes+=encodeURIComponent(arg).replace(/%[0-9a-f]{2}/gi,'_').length;
+      if(bytes>65536) throw new TypeError('shell argv exceeds 65536 bytes');
+    }
+    args={argv:argv.slice()};
+  } else {
+    const cmd=typeof command === 'string' ? command : opts.cmd;
+    if (typeof cmd !== 'string' || !cmd.trim() || cmd.length > 65536 || cmd.indexOf('\0') !== -1) throw new TypeError('shell requires a nonempty command of at most 65536 characters without NUL');
+    args={cmd};
+  }
+  if (opts.cwd !== undefined && typeof opts.cwd !== 'string') throw new TypeError('shell cwd must be a string');
+  if (opts.timeout !== undefined && (!Number.isInteger(opts.timeout) || opts.timeout < 1 || opts.timeout > 3600)) throw new TypeError('shell timeout must be 1..3600 seconds');
+  if (opts.full !== undefined && typeof opts.full !== 'boolean') throw new TypeError('shell full must be a boolean');
+  if (opts.stdin !== undefined) {
+    if (typeof opts.stdin !== 'string' || opts.stdin.indexOf('\0') !== -1 || opts.stdin.length > 262144) throw new TypeError('shell stdin must be UTF-8 text without NUL and at most 262144 bytes');
+    args.stdin=opts.stdin;
+  }
+  if (opts.cwd !== undefined) args.cwd=opts.cwd;
+  if (opts.timeout !== undefined) args.timeout=opts.timeout;
+  return call(target,'shell_exec',args).then((result)=>{
+    if (opts.full === true || !result || typeof result !== 'object' || typeof result.returncode !== 'number' || typeof result.stdout !== 'string') return result;
+    const out={ok:result.returncode===0,exit_code:result.returncode,stdout:result.stdout};
+    if (typeof result.stderr === 'string' && result.stderr) out.stderr=result.stderr;
+    for (const key of ['truncated','stdout_truncated','stderr_truncated','timed_out','signal','job_id','task_id','output_uri','resource_uri']) if (Object.prototype.hasOwnProperty.call(result,key)) out[key]=result[key];
+    return out;
+  });
+};
+const search = (query, opts={}) => {
+  const objectQuery = query !== null && typeof query==='object' && !Array.isArray(query);
+  const options = objectQuery ? query : opts;
+  if (options && (typeof options.source==='string' || options.scope==='content')) return __contentMCP('search',objectQuery ? options.query : query,options);
+  const data=__searchMCP(query,opts);
+  if (!data || !Array.isArray(data.results)) return data;
+  const items=data.results.map(item=>{
+    if (typeof item.target!=='string' || typeof item.name!=='string') return item;
+    // Exact runnable path. Several MCP instances may share the same alias.
+    const toolName=item.target==='control:hub' && item.name==='settings' ? 'settings_get' : item.name;
+    return {...item,path:'tools['+JSON.stringify(item.target)+']['+JSON.stringify(toolName)+']'};
+  });
+  // Preserve legacy search JSON size and shape when the entire result is
+  // returned. The OpenCode-style .items alias is readable within the script.
+  data.results=items;
+  Object.defineProperty(data,'items',{value:items,enumerable:false});
+  return data;
+};
 const __contentMCP = globalThis.__codeModeContent;
 const __nativeJSONStringify = JSON.stringify.bind(JSON);
 Object.defineProperty(globalThis, '__codeModeSafeJSON', {value:Object.freeze({stringify:(value,replacer)=>__nativeJSONStringify(value,replacer)}), configurable:false, writable:false});
 globalThis.mcp = Object.freeze({
   discover: (...a) => __discoverMCP(...a),
   schema: (...a) => __schemaMCP(...a),
-  search, call,
+  search, call, shell,
+  tasks: Object.freeze({
+    start: (target,tool,args={},opts={}) => call(target,tool,args,{...opts,task:true}),
+    get: (taskId) => __tasksMCP("get",{taskId}),
+    wait: (taskId,opts={}) => __tasksMCP("wait",{taskId,...opts}),
+    cancel: (taskId) => __tasksMCP("cancel",{taskId}),
+    update: (taskId,inputResponses) => __tasksMCP("update",{taskId,inputResponses}),
+  }),
   job: (id, owner_target) => __facadeMCP('job', {id, owner_target}),
   expand: (id, path='', offset=0, limit=4096) => __facadeMCP('expand', {id, path, offset, limit}),
   files: Object.freeze({
@@ -69,17 +136,75 @@ globalThis.mcp = Object.freeze({
 });
 globalThis.call = call;
 globalThis.search = search;
+// OpenCode-style shorthand. It only resolves names from the caller-visible
+// catalog. Ambiguous aliases fail closed instead of picking a random host.
+const __toolsNormalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+const __toolsCatalog = {promise:null};
+const __toolsAliases = new Map();
+const __toolsResolve = async alias => {
+  if (alias==='hub' || alias==='webhooks' || alias==='control:hub' || alias.startsWith('mcp:') || alias.startsWith('shell:') || alias.startsWith('file:')) return alias;
+  if (__toolsAliases.has(alias)) return __toolsAliases.get(alias);
+  if (!__toolsCatalog.promise) __toolsCatalog.promise=Promise.resolve().then(()=>mcp.discover());
+  const result=await __toolsCatalog.promise;
+  const servers=Array.isArray(result?.servers)?result.servers:[];
+  const separator=alias.lastIndexOf('@');
+  const shortName=separator<0?alias:alias.slice(0,separator);
+  const hostHint=separator<0?'':alias.slice(separator+1);
+  if (!shortName || (separator>=0 && !hostHint)) throw new Error('Invalid tool alias: '+alias);
+  const normalized=__toolsNormalize(shortName);
+  const hint=__toolsNormalize(hostHint);
+  const candidates=servers.filter(s=>{
+    if (typeof s.server_id!=='string') return false;
+    const actual=s.server_id.split(':').pop();
+    if (__toolsNormalize(s.name||'')!==normalized && __toolsNormalize(actual)!==normalized) return false;
+    if (!hint) return true;
+    const parts=s.server_id.split(':');
+    const owner=parts.length>=3?parts[parts.length-2]:'';
+    return __toolsNormalize(owner)===hint || __toolsNormalize(owner).endsWith(hint);
+  });
+  const online=candidates.filter(s=>s.status==='online');
+  const matches=online.length>0?online:candidates;
+  if (matches.length!==1) {
+    const ids=matches.slice(0,8).map(s=>s.server_id).sort();
+    throw new Error(matches.length===0
+      ? 'Unknown or unavailable MCP alias "'+alias+'". Use mcp.discover() for available targets.'
+      : 'Ambiguous MCP alias "'+alias+'": '+ids.join(', ')+'. Use tools["<exact target>"].<tool>(args).');
+  }
+  __toolsAliases.set(alias,matches[0].server_id);
+  return matches[0].server_id;
+};
+const __toolsReserved = new Set(['then','constructor','prototype','__proto__','toJSON','valueOf','toString']);
+const __toolsProxy = alias => new Proxy(Object.create(null), {
+  get(_target,tool) {
+    if (typeof tool!=='string' || __toolsReserved.has(tool) || !tool || tool.length>128 || tool.indexOf('\0')!==-1) return undefined;
+    return async (args={}) => {
+      if (args===null || typeof args!=='object' || Array.isArray(args)) throw new TypeError('tool arguments must be an object');
+      const target=await __toolsResolve(alias);
+      // Validate the authorized MCP inputSchema on the Hub before dispatch.
+      __prepareMCP(target,tool,args);
+      return call(target,tool,args);
+    };
+  }
+});
+globalThis.tools = new Proxy(Object.create(null), {
+  get(_target,alias) {
+    if (typeof alias!=='string' || __toolsReserved.has(alias) || !alias || alias.length>256) return undefined;
+    return __toolsProxy(alias);
+  }
+});
 globalThis.index = mcp.content.index;
 globalThis.read = mcp.content.read;
 globalThis.drop = mcp.content.delete;
 globalThis.__codeModeFileCall = (kind,target,path,opts={}) => __fileMCP(kind,target,path,opts);
 delete globalThis.__codeModeDiscover;
 delete globalThis.__codeModeSchema;
+delete globalThis.__codeModePrepareTool;
 delete globalThis.__codeModeSearch;
 delete globalThis.__codeModeStartCall;
 delete globalThis.__codeModePollCall;
 delete globalThis.__codeModeYield;
 delete globalThis.__codeModeFacade;
+delete globalThis.__codeModeTask;
 delete globalThis.__codeModeFile;
 delete globalThis.__codeModeContent;
 `
@@ -93,17 +218,19 @@ type codeModeBridge struct {
 	limits   codeModeLimits
 	readOnly bool
 
-	mu             sync.Mutex
-	pendingMu      sync.Mutex
-	pendingCalls   map[string]*codeModePendingCall
-	pendingStart   []string
-	pendingNext    uint64
-	pendingClosed  bool
-	pendingWorkers sync.WaitGroup
-	callCount      int
-	logs           []any
-	logBytes       int
-	lastReceipt    map[string]any
+	mu              sync.Mutex
+	pendingMu       sync.Mutex
+	pendingCalls    map[string]*codeModePendingCall
+	pendingStart    []string
+	pendingNext     uint64
+	pendingClosed   bool
+	pendingWorkers  sync.WaitGroup
+	callCount       int
+	logs            []any
+	logBytes        int
+	lastReceipt     map[string]any
+	toolCalls       []map[string]any
+	preparedSchemas map[string]any
 	// origins records every target/tool this run read. A result derived from
 	// the run is bound to all of them, not only to the last call, so a right
 	// that is withdrawn from any of them also withdraws the derived result.
@@ -184,6 +311,28 @@ func (b *codeModeBridge) lastReceiptSnapshot() map[string]any {
 	return cloneMap(b.lastReceipt)
 }
 
+// toolCallTrace returns call metadata for a separate UI timeline. The arguments
+// are intentionally not copied: commands and tokens may contain secrets.
+func (b *codeModeBridge) toolCallTrace() []map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]map[string]any, 0, len(b.toolCalls))
+	for _, call := range b.toolCalls {
+		out = append(out, cloneMap(call))
+	}
+	return out
+}
+
+func (b *codeModeBridge) recordToolCall(target, tool, status string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	path := fmt.Sprintf("tools[%q][%q]", target, tool)
+	if target == "hub" && (tool == "search" || tool == "discover" || tool == "schema") {
+		path = tool
+	}
+	b.toolCalls = append(b.toolCalls, map[string]any{"target": target, "name": tool, "status": status, "path": path})
+}
+
 // recordPartialSource remembers the job of a call that returned only a tail.
 func (b *codeModeBridge) recordPartialSource(jobID, target string) {
 	if jobID == "" {
@@ -216,11 +365,13 @@ func (b *codeModeBridge) fail(code, message string, receipt map[string]any) *cod
 func (b *codeModeBridge) install(ctx *qjs.Context) error {
 	ctx.SetFunc("__codeModeDiscover", b.discover)
 	ctx.SetFunc("__codeModeSchema", b.schema)
+	ctx.SetFunc("__codeModePrepareTool", b.prepareTool)
 	ctx.SetFunc("__codeModeSearch", b.search)
 	ctx.SetFunc("__codeModeStartCall", b.startCall)
 	ctx.SetFunc("__codeModePollCall", b.pollCall)
 	ctx.SetFunc("__codeModeYield", b.yieldCall)
 	ctx.SetFunc("__codeModeFacade", b.facade)
+	ctx.SetFunc("__codeModeTask", b.task)
 	ctx.SetFunc("__codeModeFile", b.file)
 	ctx.SetFunc("__codeModeContent", b.content)
 	ctx.SetFunc("__codeModeLog", b.log)
@@ -285,8 +436,8 @@ func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
 	for k, v := range codeModeObjectArg(this, 1) {
 		args[k] = v
 	}
-	if query := codeModeStringArg(this, 0); query != "" {
-		args["query"] = query
+	if raw := this.Args(); len(raw) > 0 && raw[0] != nil && raw[0].IsString() {
+		args["query"] = raw[0].String()
 	}
 	request := b.request.WithContext(b.ctx)
 	if b.readOnly && firstString(args, "target") != "" && !profileAllowsTarget(request, firstString(args, "target")) {
@@ -299,6 +450,7 @@ func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
 	if firstString(result, "status") == "failed" {
 		return nil, b.fail("search_unavailable", firstString(result, "error"), nil)
 	}
+	b.recordToolCall("hub", "search", "completed")
 	return b.jsonValue(this, result), nil
 }
 
@@ -490,6 +642,7 @@ func (b *codeModeBridge) discover(this *qjs.This) (*qjs.Value, error) {
 		}
 		servers = append(servers, row)
 	}
+	b.recordToolCall("hub", "discover", "completed")
 	return b.jsonValue(this, map[string]any{"servers": servers}), nil
 }
 
@@ -555,6 +708,7 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 			}
 		}
 		payload["tools"] = names
+		b.recordToolCall("hub", "schema", "completed")
 		return b.jsonValue(this, payload), nil
 	}
 	for _, item := range rows {
@@ -565,6 +719,10 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 		payload["tool"] = tool
 		payload["inputSchema"] = definition["inputSchema"]
 		payload["description"] = definition["description"]
+		if schema, exists := definition["inputSchema"]; exists {
+			b.cachePreparedSchema(target, tool, schema)
+		}
+		b.recordToolCall("hub", "schema", "completed")
 		// A schema reference replaces repeated target/tool strings in the next
 		// call; mcp.call({ref, args}) accepts it exactly like execute does.
 		if ref := firstString(result, "call_ref", "operation_id"); ref != "" {
@@ -741,6 +899,7 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	}
 	ref := firstString(args, "ref")
 	indexResult := truthy(args["__indexResult"])
+	asTask := truthy(args["__task"])
 	target := firstString(args, "target", "server_id", "agent_id")
 	tool := firstString(args, "tool", "tool_name", "name")
 
@@ -772,6 +931,19 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	} else if callArgs := mapValue(args["arguments"]); callArgs != nil {
 		resolvedArgs = callArgs
 	}
+	if inputSchema, prepared := b.preparedSchema(target, tool); prepared {
+		if issue := validateMCPToolArguments(inputSchema, schemaBusinessArguments(resolvedArgs)); issue != nil {
+			return nil, b.fail(issue.Code, issue.Error(), map[string]any{"target": target, "tool": tool, "validation": issue.metadata(), "dispatched": false})
+		}
+	}
+	if asTask {
+		if b.readOnly {
+			return nil, b.fail("forbidden", "read-only execution cannot start durable tasks", nil)
+		}
+		if indexResult || !(strings.HasPrefix(target, "shell:") || strings.HasPrefix(target, "mcp:")) {
+			return nil, b.fail("invalid_arguments", "tasks.start requires an executor or child MCP target and cannot index an unfinished result", nil)
+		}
+	}
 	// Forward the optional schema-contract metadata so a strict caller can pass
 	// exactly what mcp.schema advertised.
 	contract := map[string]any{}
@@ -785,8 +957,14 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	defer cancel()
 	callRequest := b.request.WithContext(callCtx)
 
-	response, status := b.dispatch(callRequest, target, tool, resolvedArgs, contract, remaining, firstString(args, "idempotency_key"))
+	response, status := b.dispatchMode(callRequest, target, tool, resolvedArgs, contract, remaining, firstString(args, "idempotency_key"), asTask)
+	if asTask && status >= 200 && status < 300 {
+		if result, ok, taskErr := b.createdTask(callRequest, response, target, tool); ok || taskErr != nil {
+			return result, taskErr
+		}
+	}
 	payload := codeModeCallPayload(response, status, target, tool)
+	b.recordToolCall(target, tool, firstString(payload, "status"))
 	if payload["ok"] != true {
 		// Stop the run on the first non-completing call. The script still sees
 		// the exception, but no further call can succeed.
@@ -794,6 +972,9 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 		// A refused call is a policy refusal, not a runtime fault: it is
 		// reported as forbidden so the caller can tell the two apart.
 		code := firstString(payload, "status")
+		if typed := firstString(mapValue(payload["validation"]), "code"); typed == "invalid_arguments" || typed == "invalid_tool_schema" {
+			code = typed
+		}
 		if intFromAny(payload["http_status"]) == http.StatusForbidden {
 			code = "forbidden"
 		}
@@ -969,6 +1150,10 @@ func codeModeOperationReceipt(response map[string]any, target, tool string, payl
 // dispatch mirrors the ordinary execute path for one nested call, in the same
 // order, so authorization can never be weaker than a direct call.
 func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string, callArgs, contract map[string]any, timeout time.Duration, idempotencyKey string) (map[string]any, int) {
+	return b.dispatchMode(callRequest, target, tool, callArgs, contract, timeout, idempotencyKey, false)
+}
+
+func (b *codeModeBridge) dispatchMode(callRequest *http.Request, target, tool string, callArgs, contract map[string]any, timeout time.Duration, idempotencyKey string, background bool) (map[string]any, int) {
 	if err := authorizeToolAction(callRequest, target, tool, callArgs); err != nil {
 		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}
@@ -976,6 +1161,9 @@ func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string
 		return failure, http.StatusPreconditionRequired
 	}
 	peerArgs := map[string]any{"target": target, "tool": tool, "arguments": callArgs}
+	if background {
+		peerArgs["background"] = true
+	}
 	for k, v := range contract {
 		peerArgs[k] = v
 	}
@@ -1012,7 +1200,7 @@ func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string
 	if response, blocked := b.server.validateSchemaContract(callRequest, selected, contractArgs); blocked {
 		return map[string]any{"server_id": selected, "status": "failed", "response": response}, http.StatusConflict
 	}
-	return b.server.executeMCPTool(callRequest, selected, tool, callArgs, false, timeout, idempotencyKey)
+	return b.server.executeMCPTool(callRequest, selected, tool, callArgs, background, timeout, idempotencyKey)
 }
 
 // codeModeInnerResult returns the nested response as plain JSON data. Some hub
@@ -1051,6 +1239,12 @@ func codeModeCallPayload(response map[string]any, status int, target, tool strin
 	}
 	if detail != "" {
 		payload["detail"] = detail
+	}
+	if failure := mapValue(response["error"]); len(failure) > 0 && terminal != "completed" {
+		if firstString(failure, "code") == "invalid_arguments" || firstString(failure, "code") == "invalid_tool_schema" {
+			payload["validation"] = failure
+			payload["detail"] = firstString(failure, "message")
+		}
 	}
 	if status != 0 && status != http.StatusOK {
 		payload["http_status"] = status

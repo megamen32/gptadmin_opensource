@@ -51,7 +51,8 @@ func TestInstructionContextRequiredBeforePureCode(t *testing.T) {
 		t.Fatalf("missing pre-execution receipt: %v", blocked)
 	}
 	args["context"] = blocked["context"]
-	args["context"] = blocked["context"]
+	// Compact responses omit empty diagnostics; this test asserts bounded logs.
+	args["verbose"] = true
 	out := mapValue(s.appsSDKCallForRequest(r, "exec", args))
 	if mapValue(out["result"])["answer"] != json.Number("42") {
 		t.Fatalf("current context not accepted: %v", out)

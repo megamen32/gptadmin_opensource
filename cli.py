@@ -7740,7 +7740,8 @@ def main():
         root = Path(__file__).resolve().parent
         manager = next((p for p in (root / 'scripts' / 'gptadmin_node_manage.py',
                                    root / 'gptadmin_node_manage.py',
-                                   INSTALL_DIR / 'cli' / 'scripts' / 'gptadmin_node_manage.py')
+                                   INSTALL_DIR / 'cli' / 'scripts' / 'gptadmin_node_manage.py',
+                                   Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py'))
                         if p.is_file()), None)
         if manager is None:
             die('Node manager is missing; install the complete Node or CLI package.')
