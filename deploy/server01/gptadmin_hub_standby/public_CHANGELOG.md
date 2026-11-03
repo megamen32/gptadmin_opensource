@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.34
+
+- Update the unified Node and its executor to GPTAdmin build 1077.
+
 ## 1.0.33
 
 - Preserve both Nodes' task histories during a single-writer handoff.
