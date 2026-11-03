@@ -462,6 +462,11 @@ func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEn
 			cmd.Env = append(cmd.Env, k+"="+os.ExpandEnv(v))
 		}
 	}
+	// A registered MCP's configured OS user is an authority boundary.
+	// Never silently run a child as the ShellMCP parent's (possibly root) UID.
+	if err := applyStdioUser(cmd, agent.User); err != nil {
+		return nil, fmt.Errorf("mcp child %q configured user: %w", agent.Ref, err)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -523,7 +528,10 @@ func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEn
 // Notifications may precede a reply. Server requests cannot be answered by this
 // one-way child adapter, so fail explicitly rather than discarding them.
 func readMatchingStdioResponse(dec *json.Decoder, expectedID any) (rpcResponse, error) {
-	const maxFrames = 64
+	// A busy MCP child may send many legitimate protocol notifications before
+	// its reply. Keep a finite bound for a child that never responds, while
+	// allowing bursts substantially larger than the previous 64-frame limit.
+	const maxFrames = 4096
 	for i := 0; i < maxFrames; i++ {
 		var frame rpcResponse
 		if err := dec.Decode(&frame); err != nil {

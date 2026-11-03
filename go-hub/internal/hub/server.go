@@ -2148,7 +2148,11 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		} else {
-			s.authAudit("ctl_auth_denied", r, map[string]any{"reason": err.Error()})
+			s.authAudit("ctl_auth_denied", r, nodeBearerAuthDeniedAuditFields(err))
+			if nodeBearerUnavailable(err) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrolled writer bearer admission unavailable"})
+				return
+			}
 		}
 		if s.authFailureRateLimited(w, r) {
 			return
@@ -4590,7 +4594,33 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 	parents := make([]Agent, 0, len(s.agents))
 	for _, a := range s.agents {
 		cp := *a
-		parents = append(parents, cp)
+		// The unified node reports its embedded ShellMCP to the local Hub,
+		// not to the writer's legacy registry. Use an authenticated, live
+		// membership route only if it matches the old approved shell identity.
+		// This is a presentation overlay, not a registry or permission write.
+		recovered := false
+		freshCatalog := false
+		if cp.Kind == "virtual_shell" && (cp.Status == "stale" || cp.Status == "offline") &&
+			truthy(cp.Meta["approved"]) {
+			if route, ok := s.membershipRoutes[cp.AgentID]; ok && route.LocalID != "" &&
+				route.LocalID == firstString(cp.Meta, "server_id") {
+				cp.Status = "online"
+				cp.LastSeen = nowFloat()
+				cp.Meta = cloneMap(cp.Meta)
+				cp.Meta["base_url"] = route.URL
+				cp.Meta["membership_transport"] = "authenticated_node_lease"
+				recovered = true
+				freshCatalog = route.CatalogFresh
+			}
+		}
+		// An old child catalog is never made fresh by shell liveness alone.
+		// A complete independently authenticated membership catalog may
+		// accompany the live lease and authorize a matching projection.
+		if recovered && (!freshCatalog || firstString(cp.Meta, "membership_catalog_status") != "complete") {
+			parents = append(parents, *a)
+		} else {
+			parents = append(parents, cp)
+		}
 		agents = append(agents, s.withExposeMetaLocked(cp, r))
 		if strings.HasPrefix(cp.AgentID, "shell:") && supportsPairedFileTarget(cp) {
 			fileAgent := fileAgentForShell(cp)

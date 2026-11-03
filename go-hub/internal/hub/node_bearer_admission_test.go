@@ -116,7 +116,7 @@ func TestNodeBearerAdmissionBindsProofAndNeverRedirects(t *testing.T) {
 	state := member.authState
 	good := nodeBearerAdmission{WriterID: state.WriterID, Generation: state.Generation,
 		AuthorityDigest: state.Digest, TokenDigest: hashNodeSecret(token), Claims: map[string]any{"client_id": "fixture-oauth"}}
-	for _, kind := range []string{"writer", "generation", "authority", "token", "oversized", "trailing", "redirect"} {
+	for _, kind := range []string{"writer", "generation", "authority", "token", "oversized", "trailing", "redirect", "status", "unauthorized", "forbidden"} {
 		t.Run(kind, func(t *testing.T) {
 			proof := good
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +135,15 @@ func TestNodeBearerAdmissionBindsProofAndNeverRedirects(t *testing.T) {
 				case "redirect":
 					http.Redirect(w, r, "http://127.0.0.1:1", http.StatusTemporaryRedirect)
 					return
+				case "status":
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				case "unauthorized":
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				case "forbidden":
+					w.WriteHeader(http.StatusForbidden)
+					return
 				}
 				json.NewEncoder(w).Encode(proof)
 				if kind == "trailing" {
@@ -143,9 +152,21 @@ func TestNodeBearerAdmissionBindsProofAndNeverRedirects(t *testing.T) {
 			}))
 			defer server.Close()
 			member.nodeIdentity.WriterURL = server.URL
-			if _, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token); err == nil || !nodeBearerUnavailable(err) {
+			_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
+			if kind == "unauthorized" || kind == "forbidden" {
+				if err == nil || nodeBearerUnavailable(err) || len(nodeBearerUnavailableAuditFields(err)) != 0 {
+					t.Fatalf("writer %s was not preserved as a genuine authorization denial: %v", kind, err)
+				}
+				return
+			}
+			if err == nil || !nodeBearerUnavailable(err) {
 				t.Fatal("unbound proof admitted or misleading reauthentication", err)
 			}
+			wantReason := "proof_validation"
+			if kind == "redirect" || kind == "status" {
+				wantReason = "writer_status"
+			}
+			assertNodeBearerUnavailableReason(t, err, wantReason)
 		})
 	}
 }
@@ -227,4 +248,125 @@ func TestNodeBearerAdmissionMatchesSanitizedControlSnapshot(t *testing.T) {
 	if _, err := member.verifyJWTForRequest(r, token); err != nil {
 		t.Fatal("writer-private control record broke scoped admission", err)
 	}
+}
+
+func TestCtlAuthReturns503WhenBearerAdmissionIsUnavailable(t *testing.T) {
+	_, member, token, _ := bearerAdmissionNodes(t)
+	writerURL := member.nodeIdentity.WriterURL
+	member.nodeIdentity.WriterURL = "http://127.0.0.1:1"
+	called := false
+	handler := member.requireCtl(func(w http.ResponseWriter, r *http.Request) { called = true })
+	request := func(bearer string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "http://member.example/ctl", nil)
+		r.Header.Set("Authorization", "Bearer "+bearer)
+		return r
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request(token))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable admission status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if called {
+		t.Fatal("handler ran after unavailable bearer admission")
+	}
+	if got := response.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("unavailable admission emitted auth challenge %q", got)
+	}
+	member.nodeIdentity.WriterURL = writerURL
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request("not-a-jwt"))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if got := response.Header().Get("WWW-Authenticate"); got == "" {
+		t.Fatal("invalid bearer missing auth challenge")
+	}
+	if called {
+		t.Fatal("handler ran after invalid bearer")
+	}
+}
+
+func TestNodeBearerUnavailableReasonAuditAllowlist(t *testing.T) {
+	cases := []struct {
+		name        string
+		reason      nodeBearerUnavailableReason
+		want        string
+		unavailable bool
+	}{
+		{"state readiness", nodeBearerReasonState, "state_not_ready", true},
+		{"eight slot capacity", nodeBearerReasonCapacity, "admission_capacity", true},
+		{"timeout", nodeBearerReasonTimeout, "timeout", true},
+		{"transport", nodeBearerReasonTransport, "transport", true},
+		{"writer status", nodeBearerReasonWriterStatus, "writer_status", true},
+		{"proof validation", nodeBearerReasonProof, "proof_validation", true},
+		{"unknown never leaks", nodeBearerUnavailableReason("https://private/token"), "unspecified", true},
+		{"authorization denial has no diagnostic", nodeBearerUnavailableReason("secret"), "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &nodeBearerAdmissionError{unavailable: tc.unavailable, reason: tc.reason}
+			fields := nodeBearerAuthDeniedAuditFields(err)
+			if !tc.unavailable {
+				if _, ok := fields["unavailable_reason"]; ok {
+					t.Fatalf("non-unavailable error emitted diagnostic: %#v", fields)
+				}
+				return
+			}
+			if len(fields) != 1 || fields["unavailable_reason"] != tc.want {
+				t.Fatalf("audit fields = %#v, want unavailable_reason=%q only", fields, tc.want)
+			}
+		})
+	}
+}
+
+func assertNodeBearerUnavailableReason(t *testing.T, err error, want string) {
+	t.Helper()
+	if got, ok := nodeBearerUnavailableReasonCode(err); !ok || got != want {
+		t.Fatalf("unavailable reason = %q, present=%t; want %q", got, ok, want)
+	}
+	fields := nodeBearerUnavailableAuditFields(err)
+	if len(fields) != 1 || fields["unavailable_reason"] != want {
+		t.Fatalf("audit fields = %#v, want unavailable_reason=%q only", fields, want)
+	}
+}
+
+func TestNodeBearerAdmissionClassifiesStateAndCapacity(t *testing.T) {
+	t.Run("state not ready", func(t *testing.T) {
+		_, member, token, _ := bearerAdmissionNodes(t)
+		member.nodeIdentity = nil
+		_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
+		assertNodeBearerUnavailableReason(t, err, "state_not_ready")
+	})
+	t.Run("8-slot capacity", func(t *testing.T) {
+		_, member, token, _ := bearerAdmissionNodes(t)
+		for i := 0; i < cap(member.nodeBearerAdmissionSlots); i++ {
+			member.nodeBearerAdmissionSlots <- struct{}{}
+		}
+		defer func() {
+			for i := 0; i < cap(member.nodeBearerAdmissionSlots); i++ {
+				<-member.nodeBearerAdmissionSlots
+			}
+		}()
+		_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
+		assertNodeBearerUnavailableReason(t, err, "admission_capacity")
+	})
+}
+
+func TestNodeBearerAdmissionClassifiesTimeoutAndTransport(t *testing.T) {
+	t.Run("transport", func(t *testing.T) {
+		_, member, token, _ := bearerAdmissionNodes(t)
+		member.nodeIdentity.WriterURL = "http://127.0.0.1:1"
+		_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
+		assertNodeBearerUnavailableReason(t, err, "transport")
+	})
+	t.Run("timeout", func(t *testing.T) {
+		_, member, token, _ := bearerAdmissionNodes(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(6 * time.Second)
+		}))
+		defer server.Close()
+		member.nodeIdentity.WriterURL = server.URL
+		_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
+		assertNodeBearerUnavailableReason(t, err, "timeout")
+	})
 }

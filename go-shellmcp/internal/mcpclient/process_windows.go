@@ -4,8 +4,17 @@ package mcpclient
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 )
+
+// Windows has no supported in-process identity change for a named MCP user.
+func applyStdioUser(_ *exec.Cmd, username string) error {
+	if username != "" {
+		return fmt.Errorf("configured stdio user %q requires an external OS account launcher on Windows", username)
+	}
+	return nil
+}
 
 func ScopedProcessGroupsSupported() bool { return false }
 

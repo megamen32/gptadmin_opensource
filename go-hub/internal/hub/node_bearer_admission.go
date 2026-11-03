@@ -24,9 +24,51 @@ type nodeBearerAdmission struct {
 	Claims          map[string]any `json:"claims"`
 }
 
+type nodeBearerUnavailableReason string
+
+const (
+	nodeBearerReasonUnspecified  nodeBearerUnavailableReason = "unspecified"
+	nodeBearerReasonState        nodeBearerUnavailableReason = "state_not_ready"
+	nodeBearerReasonCapacity     nodeBearerUnavailableReason = "admission_capacity"
+	nodeBearerReasonTimeout      nodeBearerUnavailableReason = "timeout"
+	nodeBearerReasonTransport    nodeBearerUnavailableReason = "transport"
+	nodeBearerReasonWriterStatus nodeBearerUnavailableReason = "writer_status"
+	nodeBearerReasonProof        nodeBearerUnavailableReason = "proof_validation"
+)
+
 type nodeBearerAdmissionError struct {
 	unavailable     bool
 	offlineEligible bool
+	reason          nodeBearerUnavailableReason
+}
+
+func nodeBearerAuthDeniedAuditFields(err error) map[string]any {
+	if fields := nodeBearerUnavailableAuditFields(err); fields != nil {
+		return fields
+	}
+	return map[string]any{"reason": err.Error()}
+}
+
+func nodeBearerUnavailableAuditFields(err error) map[string]any {
+	reason, ok := nodeBearerUnavailableReasonCode(err)
+	if !ok {
+		return nil
+	}
+	return map[string]any{"unavailable_reason": reason}
+}
+
+func nodeBearerUnavailableReasonCode(err error) (string, bool) {
+	var failure *nodeBearerAdmissionError
+	if !errors.As(err, &failure) || !failure.unavailable {
+		return "", false
+	}
+	switch failure.reason {
+	case nodeBearerReasonState, nodeBearerReasonCapacity, nodeBearerReasonTimeout,
+		nodeBearerReasonTransport, nodeBearerReasonWriterStatus, nodeBearerReasonProof:
+		return string(failure.reason), true
+	default:
+		return string(nodeBearerReasonUnspecified), true
+	}
 }
 
 func (e *nodeBearerAdmissionError) Error() string {
@@ -192,7 +234,9 @@ func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byt
 // shared-signer reader may separately verify a JWT during a transport outage;
 // it never falls back to unsigned claims or another credential/host.
 func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[string]any, error) {
-	unavailable := &nodeBearerAdmissionError{unavailable: true}
+	unavailable := func(reason nodeBearerUnavailableReason) *nodeBearerAdmissionError {
+		return &nodeBearerAdmissionError{unavailable: true, reason: reason}
+	}
 	if !validNodeAdmissionToken(token) {
 		return nil, &nodeBearerAdmissionError{}
 	}
@@ -204,27 +248,27 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 	state := s.authState
 	s.mu.Unlock()
 	if identity.WriterID == "" || identity.WriterID != s.cfg.AuthSourceID || state.WriterID != identity.WriterID || state.Pending || state.Generation == 0 {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonState)
 	}
 	u, err := url.Parse(identity.WriterURL)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonState)
 	}
 	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "::1" || u.Hostname() == "localhost")) {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonState)
 	}
 	select {
 	case s.nodeBearerAdmissionSlots <- struct{}{}:
 		defer func() { <-s.nodeBearerAdmissionSlots }()
 	default:
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonCapacity)
 	}
 	body, _ := json.Marshal(map[string]string{"token": token})
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(identity.WriterURL, "/")+nodeBearerAdmissionPath, bytes.NewReader(body))
 	if err != nil {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonState)
 	}
 	request.Header.Set("Authorization", "Bearer "+identity.NodeKey)
 	request.Header.Set("Content-Type", "application/json")
@@ -236,9 +280,13 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 		var dial *net.OpError
 		connectionUnavailable := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &dial) && dial.Op == "dial")
 		if r.Context().Err() != nil || !connectionUnavailable {
-			return nil, unavailable
+			return nil, unavailable(nodeBearerReasonTransport)
 		}
-		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true}
+		reason := nodeBearerReasonTransport
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = nodeBearerReasonTimeout
+		}
+		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true, reason: reason}
 	}
 	defer response.Body.Close()
 	if response.StatusCode == 401 || response.StatusCode == 403 {
@@ -246,20 +294,20 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 	}
 	if response.StatusCode == http.StatusConflict {
 		// The public writer address can return to this reader after ingress failover.
-		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true}
+		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true, reason: nodeBearerReasonWriterStatus}
 	}
 	if response.StatusCode != 200 {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonWriterStatus)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, nodeBearerAdmissionLimit+1))
 	if err != nil || len(data) > nodeBearerAdmissionLimit {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonProof)
 	}
 	var proof nodeBearerAdmission
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&proof) != nil || decoder.Decode(&struct{}{}) != io.EOF || proof.WriterID != identity.WriterID || proof.Generation != state.Generation || proof.AuthorityDigest != state.Digest || proof.TokenDigest != hashNodeSecret(token) || len(proof.Claims) == 0 {
-		return nil, unavailable
+		return nil, unavailable(nodeBearerReasonProof)
 	}
 	return proof.Claims, nil
 }

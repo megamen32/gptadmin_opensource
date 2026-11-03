@@ -5,9 +5,64 @@ package mcpclient
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"syscall"
 )
+
+// applyStdioUser enforces the registered definition's real OS authority.
+// Setting USER/HOME alone would only impersonate the name while keeping root UID.
+func applyStdioUser(cmd *exec.Cmd, username string) error {
+	if username == "" {
+		return nil
+	}
+	account, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Errorf("lookup %q: %w", username, err)
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid UID for %q: %w", username, err)
+	}
+	gid, err := strconv.ParseUint(account.Gid, 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid GID for %q: %w", username, err)
+	}
+	currentUID := os.Geteuid()
+	if currentUID != 0 && uint64(currentUID) != uid {
+		return fmt.Errorf("cannot start %q (UID %d) from unprivileged UID %d", username, uid, currentUID)
+	}
+	if uint64(currentUID) != uid {
+		memberships, err := account.GroupIds()
+		if err != nil {
+			return fmt.Errorf("groups for %q: %w", username, err)
+		}
+		groups := make([]uint32, 0, len(memberships))
+		for _, id := range memberships {
+			n, err := strconv.ParseUint(id, 10, 32)
+			if err != nil {
+				return fmt.Errorf("invalid supplementary GID for %q: %w", username, err)
+			}
+			groups = append(groups, uint32(n))
+		}
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd.SysProcAttr.Credential = &syscall.Credential{
+			Uid: uint32(uid), Gid: uint32(gid), Groups: groups,
+		}
+	}
+	// Last env assignment wins in os/exec. Resolve user config against its
+	// actual home, not the privileged parent process's home.
+	cmd.Env = append(cmd.Env,
+		"HOME="+account.HomeDir,
+		"USER="+account.Username,
+		"LOGNAME="+account.Username,
+	)
+	return nil
+}
 
 // Scoped stdio stays disabled until its ownership fence cannot signal a reused PGID.
 func ScopedProcessGroupsSupported() bool { return false }
