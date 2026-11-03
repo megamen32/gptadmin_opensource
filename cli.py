@@ -5374,6 +5374,7 @@ def _candidate_task_job_receipt(base: str, task_id: str, *, token: str, host: st
             extra_headers={
                 'MCP-Protocol-Version': '2026-07-28',
                 'Mcp-Method': 'tasks/get',
+                'Mcp-Name': task_id,
                 'Accept': 'application/json',
             },
         )
