@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.35
+
+- Update the unified Node to GPTAdmin build 1078.
+
 ## 1.0.34
 
 - Update the unified Node and its executor to GPTAdmin build 1077.

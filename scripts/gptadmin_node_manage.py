@@ -72,7 +72,7 @@ AUTOUPDATE_MANAGER = Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py')
 AUTOUPDATE_PROBE = Path('/usr/local/lib/gptadmin/gptadmin_node_probe.py')
 AUTOUPDATE_SERVICE = 'gptadmin-node-autoupdate.service'
 AUTOUPDATE_TIMER = 'gptadmin-node-autoupdate.timer'
-AUTOUPDATE_SERVICE_TIMEOUT_SECS = 1300
+AUTOUPDATE_SERVICE_TIMEOUT_SECS = 2400
 AUTOUPDATE_SERVICE_PATH = Path('/etc/systemd/system') / AUTOUPDATE_SERVICE
 AUTOUPDATE_TIMER_PATH = Path('/etc/systemd/system') / AUTOUPDATE_TIMER
 AUTOUPDATE_SERVICE_TEXT = f'''[Unit]
@@ -166,8 +166,8 @@ class RuntimeFailure(RuntimeError):
 class UpdateBudget:
     """Catchable operation deadline with a separate finite rollback allowance."""
     def __init__(self, seconds):
-        if seconds is not None and not 1 <= seconds <= 50:
-            raise UsageError('operation deadline must be between 1 and 50 seconds')
+        if seconds is not None and not 1 <= seconds <= 180:
+            raise UsageError('operation deadline must be between 1 and 180 seconds')
         self.seconds = seconds
         self.cleaning = False
 
@@ -2515,7 +2515,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument('--legacy-public-origins', default=None, metavar='HTTPS-URLS',
                         help='comma-separated explicit legacy issuer/resource origins; empty clears the list')
     update.add_argument('--operation-deadline-secs', type=float, default=None,
-                        help='catchable update deadline (1..50s), plus 80s rollback reserve')
+                        help='catchable update deadline (1..180s), plus 80s rollback reserve')
     update.set_defaults(func=cmd_update)
 
     shellmcp = sub.add_parser('shellmcp', help='manage the standalone Go ShellMCP component')

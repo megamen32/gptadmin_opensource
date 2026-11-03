@@ -28,7 +28,7 @@ STATE = Path('/var/lib/gptadmin-node/autoupdate')
 HELPER_INSTALL_DIR = Path('/usr/local/lib/gptadmin')
 MAX_MANAGED_NODES = 8
 RELEASE_SELECTION_BUDGET_SECS = 90
-NODE_UPDATE_BUDGET_SECS = 145
+NODE_UPDATE_BUDGET_SECS = 275
 UPDATE_FINALIZATION_MARGIN_SECS = 30
 
 
@@ -445,13 +445,15 @@ def main():
                              'verified_instances':results,'reason':'rollback_reserve_unavailable'}
                     record(STATE/'partial-update.json',receipt)
                     print(json.dumps(receipt));return
-                # The manager raises a catchable deadline and retains 80s to
+                # An accepted queue poll may remain open for up to 120s. Wait
+                # longer than that before deciding that drain is busy. The
+                # manager raises a catchable deadline and retains 80s to
                 # roll back. Parent timeout includes an additional 15s margin;
                 # never SIGKILL it at the ordinary operation deadline.
                 record(STATE/'hold.json',{'complete':False,'source':source,
                     'verified_instances':results,'reason':'manager_in_progress','instance':name})
                 try:
-                    result=subprocess.run(['python3',str(MANAGER),'update','--name',name,'--package',str(package),'--wait-secs','20','--require-drain','--operation-deadline-secs','50'],
+                    result=subprocess.run(['python3',str(MANAGER),'update','--name',name,'--package',str(package),'--wait-secs','130','--require-drain','--operation-deadline-secs','180'],
                                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                                           timeout=NODE_UPDATE_BUDGET_SECS)
                 except subprocess.TimeoutExpired:

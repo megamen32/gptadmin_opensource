@@ -30,11 +30,11 @@ def index(**changes):
 class NodeAutoupdateTests(unittest.TestCase):
     def test_update_budget_covers_selection_each_instance_and_rollback(self):
         self.assertEqual(update.RELEASE_SELECTION_BUDGET_SECS,90)
-        self.assertEqual(update.NODE_UPDATE_BUDGET_SECS,145)
+        self.assertEqual(update.NODE_UPDATE_BUDGET_SECS,275)
         self.assertEqual(update.UPDATE_FINALIZATION_MARGIN_SECS,30)
         self.assertEqual(update.RELEASE_SELECTION_BUDGET_SECS+
                          update.NODE_UPDATE_BUDGET_SECS*update.MAX_MANAGED_NODES+
-                         update.UPDATE_FINALIZATION_MARGIN_SECS,1280)
+                         update.UPDATE_FINALIZATION_MARGIN_SECS,2320)
 
     def test_shellmcp_queue_transport_has_no_local_version_endpoint(self):
         with tempfile.TemporaryDirectory() as d:
@@ -719,7 +719,7 @@ class NodeAutoupdateTests(unittest.TestCase):
         unit=manager.AUTOUPDATE_SERVICE_TEXT
         self.assertIn('ProtectSystem=full',unit)
         self.assertIn('ReadWritePaths=/usr/local/lib/gptadmin',unit)
-        self.assertIn('TimeoutStartSec=1300',unit)
+        self.assertIn('TimeoutStartSec=2400',unit)
 
     def test_manual_autoupdate_run_waits_for_the_bounded_service_deadline(self):
         args=manager.build_parser().parse_args(['autoupdate','run'])
