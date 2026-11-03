@@ -78,7 +78,9 @@ func TestNativeArgvKeepsCwdAndNonZeroExit(t *testing.T) {
 	}
 	cwd := t.TempDir()
 	res := Run(context.Background(), Request{Argv: []string{"pwd"}, Cwd: cwd, SpillDir: t.TempDir()}, 4096)
-	if res.ReturnCode != 0 || strings.TrimSpace(res.Stdout) != cwd {
+	wantDir, wantErr := os.Stat(cwd)
+	gotDir, gotErr := os.Stat(strings.TrimSpace(res.Stdout))
+	if res.ReturnCode != 0 || wantErr != nil || gotErr != nil || !os.SameFile(wantDir, gotDir) {
 		t.Fatalf("working directory was lost: %+v", res)
 	}
 	failed := Run(context.Background(), Request{Argv: []string{"sh", "-c", "echo invalid >&2; exit 7"}, SpillDir: t.TempDir()}, 4096)
