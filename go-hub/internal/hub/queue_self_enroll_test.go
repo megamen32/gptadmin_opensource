@@ -69,6 +69,9 @@ func TestQueueSelfEnrollRegistersPendingAgentAndBindsToken(t *testing.T) {
 	if got := s.localExecutorTokens["shell:newpc"]; got != token {
 		t.Fatalf("bound token = %q, want the agent-minted token", got)
 	}
+	if s.localExecutors["shell:newpc"] != nil {
+		t.Fatal("remote self-enrollment must not register an in-process executor")
+	}
 }
 
 func TestQueueSelfEnrollRepollWithBoundToken(t *testing.T) {

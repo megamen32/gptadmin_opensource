@@ -644,7 +644,7 @@ class TestJoin(BaseTempCase):
 
 class TestInputHelpers(unittest.TestCase):
     def test_autoupdate_timer_has_independent_recurring_calendar_trigger(self):
-        self.assertIn('OnCalendar=*-*-* 00,06,12,18:00:00', mgr.AUTOUPDATE_TIMER_TEXT)
+        self.assertIn('OnCalendar=*-*-* *:0/10:00', mgr.AUTOUPDATE_TIMER_TEXT)
         self.assertIn('Persistent=true', mgr.AUTOUPDATE_TIMER_TEXT)
         self.assertNotIn('OnUnitActiveSec=', mgr.AUTOUPDATE_TIMER_TEXT)
 

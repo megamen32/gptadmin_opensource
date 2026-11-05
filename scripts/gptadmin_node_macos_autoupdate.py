@@ -63,6 +63,8 @@ def update():
     if version == installed_version:
         print(json.dumps({'updated':False,'reason':'already_current','build_version':version})); return
     source=prefix
+    identity_path = ROOT / 'config/node-identity.json'
+    identity_before = hashlib.sha256(identity_path.read_bytes()).digest() if identity_path.is_file() else None
     assets=[a for a in release.get('assets',[]) if a.get('name')==f'gptadmin-node-darwin-{arch()}.tar.gz']
     if len(assets)!=1: raise ValueError('Darwin asset missing or ambiguous')
     asset=assets[0]; url=asset.get('browser_download_url','')
@@ -78,7 +80,10 @@ def update():
             print(json.dumps({'updated':False,'reason':'already_current','build_version':version})); return
         manager=Path(__file__).with_name('gptadmin_node_macos_manage.py')
         subprocess.run([sys.executable,str(manager),'install','--package',str(package)],check=True,timeout=300)
-    print(json.dumps({'updated':True,'build_version':version,'identity_preserved':True}))
+    identity_preserved = (hashlib.sha256(identity_path.read_bytes()).digest() == identity_before
+                          if identity_before is not None and identity_path.is_file()
+                          else False if identity_before is not None else None)
+    print(json.dumps({'updated':True,'build_version':version,'identity_preserved':identity_preserved}))
 
 if __name__=='__main__':
     update()

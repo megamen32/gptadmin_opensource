@@ -103,8 +103,8 @@ AUTOUPDATE_TIMER_TEXT = '''[Unit]
 Description=Periodic public GPTAdmin Node updates
 
 [Timer]
-OnCalendar=*-*-* 00,06,12,18:00:00
-RandomizedDelaySec=30min
+OnCalendar=*-*-* *:0/10:00
+RandomizedDelaySec=30s
 Persistent=true
 
 [Install]

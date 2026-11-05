@@ -4023,13 +4023,7 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 		if s.localExecutorTokens == nil {
 			s.localExecutorTokens = map[string]string{}
 		}
-		if s.localExecutors == nil {
-			s.localExecutors = map[string]map[string]string{}
-		}
 		s.localExecutorTokens[agentID] = enrollToken
-		if s.localExecutors[agentID] == nil {
-			s.localExecutors[agentID] = map[string]string{}
-		}
 		status = "awaiting_approval"
 		auditName = "queue_poll_awaiting_approval"
 	}

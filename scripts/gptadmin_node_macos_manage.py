@@ -513,7 +513,7 @@ def cmd_autoupdate(args):
     config.write_text('{"enabled":true}\n'); config.chmod(0o600)
     plist.parent.mkdir(parents=True,exist_ok=True)
     job={'Label':label,'ProgramArguments':[sys.executable,str(Path(__file__).with_name('gptadmin_node_macos_autoupdate.py'))],
-         'StartInterval':86400,'RunAtLoad':False,'StandardOutPath':str(root/'logs/autoupdate.log'),
+         'StartInterval':600,'RunAtLoad':False,'StandardOutPath':str(root/'logs/autoupdate.log'),
          'StandardErrorPath':str(root/'logs/autoupdate.log'),
          'EnvironmentVariables':{'GPTADMIN_NODE_MACOS_ROOT':str(root)}}
     temp=plist.with_suffix('.plist.new');temp.write_bytes(plistlib.dumps(job));temp.chmod(0o600);os.replace(temp,plist)
@@ -521,7 +521,7 @@ def cmd_autoupdate(args):
     subprocess.run(['/bin/launchctl','bootstrap',f'gui/{os.getuid()}',str(plist)],check=True)
     active=subprocess.run(['/bin/launchctl','print',f'gui/{os.getuid()}/{label}'],capture_output=True)
     if active.returncode: raise NodeError('launchd did not load the automatic updater')
-    print(json.dumps({'enabled':True,'interval_seconds':86400,'launchd_loaded':True}))
+    print(json.dumps({'enabled':True,'interval_seconds':600,'launchd_loaded':True}))
 
 
 def main():
