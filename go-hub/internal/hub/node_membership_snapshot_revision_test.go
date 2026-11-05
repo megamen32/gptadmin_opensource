@@ -7,6 +7,41 @@ import (
 	"time"
 )
 
+func TestRejoiningStaleMemberFetchesSnapshotBeforeReady(t *testing.T) {
+	writer, member, _, nodeKey := bearerAdmissionNodes(t)
+	client := &http.Client{Timeout: 5 * time.Second}
+	member.membershipMemberTick(client, true)
+	writer.mu.Lock()
+	writer.oauthClients["late-client"] = oauthClientMetadata{CreatedAt: time.Now().Unix(), ProfileID: "fixture"}
+	err := writer.saveOAuthClientsStateLocked()
+	writer.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := membershipHTTP(writer, http.MethodGet, "/admin/api/nodes/control-snapshot", nodeKey, nil); response.Code != http.StatusOK {
+		t.Fatalf("advance writer snapshot: %d", response.Code)
+	}
+	if member.writerAuthGeneration() >= writer.writerAuthGeneration() {
+		t.Fatal("fixture reader is not stale")
+	}
+	grant := membershipIssueGrant(t, writer, "shell:member-a")
+	joined := membershipJoin(t, writer, grant, member.nodeIdentity.NodeID, nodeKey, "shell:member-a", "http://127.0.0.1:1")
+	if joined["__status"] != http.StatusOK {
+		t.Fatalf("rejoin failed: %v", joined)
+	}
+	member.membershipMemberTick(client, true)
+	if got, want := member.writerAuthGeneration(), writer.writerAuthGeneration(); got != want {
+		t.Fatalf("stale member did not recover snapshot: got %d, want %d", got, want)
+	}
+	member.membershipMemberTick(client, false)
+	writer.membershipMu.Lock()
+	state := writer.membership.Nodes[member.nodeIdentity.NodeID].State
+	writer.membershipMu.Unlock()
+	if state != nodeStateReady {
+		t.Fatalf("rejoined member state = %s, want ready", state)
+	}
+}
+
 func TestControlSnapshotAdvancesAfterOAuthClientMutation(t *testing.T) {
 	writer, member, _, nodeKey := bearerAdmissionNodes(t)
 	read := func() controlSnapshot {

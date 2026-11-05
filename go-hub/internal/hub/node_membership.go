@@ -1367,6 +1367,18 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	response, err := postNodeJSON(client, writer+"/admin/api/nodes/heartbeat",
 		"Bearer "+s.memberNodeKey(), body, nodeMembershipStateLimit)
 	if err != nil {
+		var remote *nodeHTTPError
+		if errors.As(err, &remote) && remote.status == http.StatusConflict {
+			var detail struct {
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal([]byte(remote.detail), &detail) == nil && detail.Detail == "control snapshot not applied locally yet" {
+				// The writer requires a newer snapshot before accepting this
+				// heartbeat. Fetch it over the authenticated member channel;
+				// the next heartbeat can then complete the transition.
+				s.membershipApplyControlSnapshot(client, writer)
+			}
+		}
 		log.Printf("membership heartbeat failed writer=%s err=%v", writer, err)
 		return
 	}
@@ -1599,6 +1611,13 @@ func getNodeJSON(client *http.Client, url, bearer string, limit int) ([]byte, er
 	return doNodeJSON(client, http.MethodGet, url, bearer, nil, limit)
 }
 
+type nodeHTTPError struct {
+	status int
+	detail string
+}
+
+func (e *nodeHTTPError) Error() string { return fmt.Sprintf("status %d: %s", e.status, e.detail) }
+
 func doNodeJSON(client *http.Client, method, url, bearer string, body []byte, limit int) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
@@ -1617,7 +1636,7 @@ func doNodeJSON(client *http.Client, method, url, bearer string, body []byte, li
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 1<<10))
-		return nil, fmt.Errorf("status %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
+		return nil, &nodeHTTPError{status: response.StatusCode, detail: strings.TrimSpace(string(detail))}
 	}
 	return io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 }
