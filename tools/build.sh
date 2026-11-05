@@ -45,6 +45,7 @@ Targets:
   hub        Build/package GPTAdmin hub: build/gptadmin-hub.tar.gz
   node       Build portable Linux Node packages in .tmp/node-packages (see --help)
   shellmcp   Build/package Linux ShellMCP: build/gptadmin-shellmcp.tar.gz
+  macos-client Build only the two macOS ShellMCP client release bundles
   platform   Package install convenience bundles: build/gptadmin-<os>-<arch>.tar.gz
   windows    Cross-build Windows hub + ShellMCP and public/gptadmin-win.zip
   android    Cross-build Android/Termux ShellMCP and build/gptadmin-android-arm64.tar.gz
@@ -121,7 +122,7 @@ need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing command: $1"; 
 step "Check tooling"
 need python3; need tar; need grep; need sed; need awk; need sha256sum
 want_any hub shellmcp all smoke && need curl
-want_any windows android && need go
+want_any windows android macos-client && need go
 want network-tunnel && need go
 want windows && need zip
 want_any all hub platform && need npm
@@ -247,7 +248,11 @@ PY
 }
 
 # Build-info changes affect hub/shellmcp binaries, so any real build bumps once.
-if want_any all cli hub shellmcp platform windows android network-tunnel; then
+if [[ " ${TARGETS[*]} " == *" macos-client "* && "$TAGGED_RELEASE" != "1" ]]; then
+  echo "ERROR: macos-client requires an exact tagged release source; VERSION will not be bumped" >&2
+  exit 2
+fi
+if want_any all cli hub shellmcp macos-client platform windows android network-tunnel; then
   if [[ "$TAGGED_RELEASE" == "1" ]]; then
     build_tagged_release_version
   else
@@ -513,6 +518,7 @@ build_go_shellmcp_cross_platforms() {
   export CGO_ENABLED=0
   local pair goos goarch
   local pairs=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64)
+  [[ "${1:-}" == macos ]] && pairs=(darwin_amd64 darwin_arm64)
   [[ "${1:-}" == matrix ]] && pairs+=(windows_amd64 windows_arm64 android_amd64 android_arm64)
   for pair in "${pairs[@]}"; do
     goos="${pair%%_*}"; goarch="${pair##*_}"
@@ -676,9 +682,13 @@ build_user_release_matrix() {
   emit_release_bundle "android" "x64" "client"
   emit_release_bundle "android" "arm64" "full"
   emit_release_bundle "android" "arm64" "client"
+  write_user_release_matrix
+}
+
+write_user_release_matrix() {
   (
     for file in "$ART_DIR"/gptadmin-{windows,macos,ubuntu,android}-{x64,arm64}-{full,client}.{zip,tar.gz}; do
-      [[ -f "$file" ]] && sha256sum "$file"
+      if [[ -f "$file" ]]; then sha256sum "$file"; fi
     done | sort -k2 > "$ART_DIR/gptadmin-checksums.txt"
   )
   python3 - "$ART_DIR" "$BUILD_VERSION" "$GIT_COMMIT" <<'PY'
@@ -801,6 +811,13 @@ if want all; then
 else
   want cli && build_cli
   if want shellmcp; then build_cli; copy_support_payloads; archive_component_shellmcp; fi
+  if want macos-client; then
+    build_go_shellmcp_cross_platforms macos
+    emit_release_bundle macos x64 client
+    emit_release_bundle macos arm64 client
+    write_user_release_matrix
+    python3 tools/verify_macos_release.py --build-dir "$ART_DIR" --minimum-build 1074
+  fi
   if want hub; then build_cli; build_admin_ui; build_hub_linux; build_hub_cross_platforms; package_hub_platform_binaries; copy_support_payloads; copy_admin_static_payloads; archive_component_hub; fi
   if want platform; then build_cli; build_admin_ui; build_hub_cross_platforms; package_hub_platform_binaries; build_grepmesh_native; copy_support_payloads; copy_admin_static_payloads; archive_platforms; fi
   want windows && build_windows_shellmcp
@@ -809,7 +826,7 @@ else
   want smoke && smoke_linux
 fi
 
-if want_any all cli hub shellmcp platform windows android network-tunnel; then
+if want_any all cli hub shellmcp macos-client platform windows android network-tunnel; then
   step "Generate and verify release provenance manifest"
   python3 tools/generate_sbom.py \
     --root "$REPO_DIR" \

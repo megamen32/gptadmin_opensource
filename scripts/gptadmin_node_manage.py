@@ -103,8 +103,7 @@ AUTOUPDATE_TIMER_TEXT = '''[Unit]
 Description=Periodic public GPTAdmin Node updates
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=6h
+OnCalendar=*-*-* 00,06,12,18:00:00
 RandomizedDelaySec=30min
 Persistent=true
 
@@ -828,6 +827,9 @@ CPUQuota=100%
 TasksMax=128
 IOWeight=10
 Environment=GOMAXPROCS=1
+# Go's soft target leaves room below the cgroup hard limit for non-Go memory
+# and children. MemoryMax remains the hard limit for the entire service.
+Environment=GOMEMLIMIT=160MiB
 TimeoutStartSec=30s
 # SIGTERM stops active groups and preserves receipts (binary contract)
 TimeoutStopSec=120
@@ -2584,6 +2586,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    if sys.platform == 'darwin':
+        manager = Path(__file__).with_name('gptadmin_node_macos_manage.py')
+        if not manager.is_file():
+            fail('macOS Node manager is missing from the complete package.', EX_PREFLIGHT)
+        os.execv(sys.executable, [sys.executable, str(manager), *(argv if argv is not None else sys.argv[1:])])
     parser = build_parser()
     args = parser.parse_args(argv)
     layout = Layout()

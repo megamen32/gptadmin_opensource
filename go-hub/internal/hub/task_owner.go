@@ -114,15 +114,21 @@ func (s *Server) Close() error {
 		}
 	}
 	s.toolSearchMu.Lock()
-	for _, index := range s.toolSearches {
-		index.mu.Lock()
-		if err := index.db.Close(); err != nil && closeErr == nil {
+	s.toolSearchClosed = true
+	var searchMemoryReleases []func()
+	for _, entry := range s.toolSearches {
+		entry.index.mu.Lock()
+		if err := entry.index.db.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}
-		index.mu.Unlock()
+		entry.index.mu.Unlock()
+		searchMemoryReleases = append(searchMemoryReleases, entry.release)
 	}
 	s.toolSearches = nil
 	s.toolSearchMu.Unlock()
+	for _, release := range searchMemoryReleases {
+		release()
+	}
 	s.contentMu.Lock()
 	if s.contentStore != nil {
 		if err := s.contentStore.Close(); err != nil && closeErr == nil {

@@ -40,12 +40,12 @@ const (
 	codeModeMaxTimeout       = 60 * time.Second
 	codeModeDefaultMaxCalls  = 32
 	codeModeMaxCallsCeiling  = 64
-	codeModeDefaultHeapBytes = 64 << 20  // 64 MiB
-	codeModeMaxHeapBytes     = 128 << 20 // 128 MiB
-	codeModeMaxCodeBytes     = 64 << 10  // 64 KiB of script source
-	codeModeDefaultOutBytes  = 16 << 10  // 16 KiB of returned JSON
-	codeModeMaxOutBytes      = 64 << 10  // 64 KiB of returned JSON
-	codeModeDefaultConcur    = 8
+	codeModeDefaultHeapBytes = 32 << 20 // 32 MiB
+	codeModeMaxHeapBytes     = 64 << 20 // 64 MiB
+	codeModeMaxCodeBytes     = 64 << 10 // 64 KiB of script source
+	codeModeDefaultOutBytes  = 16 << 10 // 16 KiB of returned JSON
+	codeModeMaxOutBytes      = 64 << 10 // 64 KiB of returned JSON
+	codeModeDefaultConcur    = 1
 
 	// An object envelope preserves primitive and array results across the
 	// QuickJS module boundary. Logs use the bounded host bridge so they cannot
@@ -195,6 +195,14 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 		return nil, codeModeFailure("busy", "code_mode was cancelled before it started")
 	}
 	defer release()
+	// Charge both the guest heap limit and fixed runtime overhead to the same
+	// bounded envelope used by SQLite FTS catalogs. Guest memory limits alone
+	// do not account for SQLite, native runtime state, stacks, or Go allocations.
+	releaseMemory, ok := s.reserveManagedMemory(int64(limits.heap) + codeModeRuntimeOverhead)
+	if !ok {
+		return nil, codeModeFailure("busy", "managed Hub memory budget is at capacity")
+	}
+	defer releaseMemory()
 
 	// A fresh sandbox per run: no globals, promises, or tool results are shared
 	// between two scripts, and one script cannot observe another's data.

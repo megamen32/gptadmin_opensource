@@ -36,14 +36,34 @@ def main():
                HUB_URL='http://127.0.0.1:1', SSH_HOST='127.0.0.1', SSH_PORT='1',
                SHELLMCP_SELF_REPAIR_DISABLE='1')
 
+    instruction_context = None
+
     def request(path, body=None, authenticated=True, credential=None):
+        nonlocal instruction_context
         headers = {'Content-Type': 'application/json'}
         if authenticated:
             headers['Authorization'] = 'Bearer ' + (credential or token)
+            if instruction_context and credential is None:
+                headers['X-GPTAdmin-Context'] = instruction_context
         req = urllib.request.Request(origin + path, headers=headers,
                                      data=None if body is None else json.dumps(body).encode())
-        with urllib.request.urlopen(req, timeout=20) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 428 or not authenticated or credential is not None:
+                raise
+            failure = json.load(exc)
+            if (failure.get('executed') is not False
+                    or failure.get('error', {}).get('code') != 'instructions_required'
+                    or not failure.get('context') or not failure.get('instructions')):
+                raise
+            instruction_context = failure['context']
+            headers['X-GPTAdmin-Context'] = instruction_context
+            req = urllib.request.Request(origin + path, headers=headers,
+                                         data=None if body is None else json.dumps(body).encode())
+            with urllib.request.urlopen(req, timeout=20) as response:
+                return json.load(response)
 
     with (root / 'runtime.log').open('w') as log:
         proc = subprocess.Popen([str(args.binary.resolve())], env=env, stdout=log, stderr=log)

@@ -104,9 +104,13 @@ jobs:
           (cd go-shellmcp && go test ./...)
           PYTHONPATH=tests python3 -m unittest test_node_autoupdate test_node_release_publisher
 
-      - name: Build both verified Node packages
+      - name: Build both verified Linux Node packages
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
         run: python3 tools/build_node.py --arch amd64 --arch arm64
+
+      - name: Build verified Darwin Node packages
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        run: python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64
 
       - name: Publish immutable Node release for this public source commit
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'

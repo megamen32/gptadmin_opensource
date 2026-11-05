@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 'gptadmin.node-package/v1'
 PAYLOAD = ('cli.py', 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
            'scripts/gptadmin_node_autoupdate.py')
+DARWIN_PAYLOAD = (*PAYLOAD, 'scripts/gptadmin_node_macos_manage.py',
+                  'scripts/gptadmin_node_macos_autoupdate.py')
 SHELLMCP_MAIN = './cmd/shellmcp-go'
 SHELLMCP_SOURCE = 'go-shellmcp'
 PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-relay02.service'
@@ -54,7 +56,7 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> dict:
+def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platform: str = 'linux') -> dict:
     temp_root = ROOT / '.tmp' / 'node-build'
     temp_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f'{arch}-', dir=temp_root) as td:
@@ -68,40 +70,41 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool) -> di
         for package in ('go-hub/internal/hub', 'go-shellmcp/internal/server'):
             flags += f' -X github.com/megamen32/gptadmin/{package}.BuildVersion={version}'
             flags += f' -X github.com/megamen32/gptadmin/{package}.GitCommit={commit}'
-        env = dict(os.environ, CGO_ENABLED='0', GOOS='linux', GOARCH=arch,
+        env = dict(os.environ, CGO_ENABLED='0', GOOS=platform, GOARCH=arch,
                    GOTMPDIR=str(gotmp), TMPDIR=str(gotmp))
         subprocess.run(['go', 'build', '-trimpath', '-ldflags', flags,
                         '-o', str(binary), './cmd/gptadmin-node'],
                        cwd=ROOT / 'go-hub', env=env, check=True)
-        subprocess.run(['go', 'build', '-trimpath', '-ldflags', flags,
-                        '-o', str(shellmcp_binary), SHELLMCP_MAIN],
-                       cwd=ROOT / SHELLMCP_SOURCE, env=env, check=True)
-        proxy_unit = ROOT / PROXY_ROUTE_UNIT_SOURCE
-        if proxy_unit.is_symlink() or not proxy_unit.is_file():
-            raise RuntimeError(f'proxy route systemd unit is missing or unsafe: {PROXY_ROUTE_UNIT_SOURCE}')
-        if proxy_unit.stat().st_size > 256 * 1024:
-            raise RuntimeError('proxy route systemd unit exceeds its package size limit')
-        unit_text = proxy_unit.read_text()
-        if '[Unit]' not in unit_text or '[Service]' not in unit_text or \
-                not any(line.strip() == 'User=admin' for line in unit_text.splitlines()):
-            raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
-        files = {
-            'bin/gptadmin-node': binary,
-            'bin/shellmcp': shellmcp_binary,
-            PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit,
-        }
-        files.update({name: ROOT / name for name in PAYLOAD})
-        files.update(build_admin_ui())
+        files = {'bin/gptadmin-node': binary}
+        if platform == 'linux':
+            subprocess.run(['go', 'build', '-trimpath', '-ldflags', flags,
+                            '-o', str(shellmcp_binary), SHELLMCP_MAIN],
+                           cwd=ROOT / SHELLMCP_SOURCE, env=env, check=True)
+            proxy_unit = ROOT / PROXY_ROUTE_UNIT_SOURCE
+            if proxy_unit.is_symlink() or not proxy_unit.is_file():
+                raise RuntimeError(f'proxy route systemd unit is missing or unsafe: {PROXY_ROUTE_UNIT_SOURCE}')
+            if proxy_unit.stat().st_size > 256 * 1024:
+                raise RuntimeError('proxy route systemd unit exceeds its package size limit')
+            unit_text = proxy_unit.read_text()
+            if '[Unit]' not in unit_text or '[Service]' not in unit_text or \
+                    not any(line.strip() == 'User=admin' for line in unit_text.splitlines()):
+                raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
+            files.update({'bin/shellmcp': shellmcp_binary,
+                          PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit})
+        payload = PAYLOAD if platform == 'linux' else DARWIN_PAYLOAD
+        files.update({name: ROOT / name for name in payload})
+        if platform == 'linux':
+            files.update(build_admin_ui())
         manifest = {
             'schema': SCHEMA, 'git_commit': commit, 'build_version': version,
-            'platform': 'linux', 'arch': arch, 'source_dirty': dirty,
+            'platform': platform, 'arch': arch, 'source_dirty': dirty,
             'files': {name: {'sha256': digest(path), 'size': path.stat().st_size}
                       for name, path in files.items()},
         }
         manifest_path = stage / 'manifest.json'
         manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
         output.mkdir(parents=True, exist_ok=True)
-        archive = output / f'gptadmin-node-linux-{arch}.tar.gz'
+        archive = output / f'gptadmin-node-{platform}-{arch}.tar.gz'
         pending = stage / archive.name
         with tarfile.open(pending, 'w:gz') as tar:
             for name, path in {'manifest.json': manifest_path, **files}.items():
@@ -127,6 +130,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', action='append', choices=['amd64', 'arm64'],
                         help='Repeat for multiple targets; default both')
+    parser.add_argument('--platform', choices=['linux', 'darwin'], default='linux')
+    parser.add_argument('--build-version', type=int, default=None,
+                        help='explicit package version for controlled local QA; release callers use VERSION')
     parser.add_argument('--output', type=Path, default=ROOT / '.tmp' / 'node-packages')
     parser.add_argument('--allow-dirty', action='store_true',
                         help='Development canary only; manifest records source_dirty=true')
@@ -140,8 +146,13 @@ def main() -> None:
     if dirty and not args.allow_dirty:
         parser.error('working tree is dirty; commit first or explicitly build a development canary')
     version = int((ROOT / 'VERSION').read_text().strip())
-    for arch in dict.fromkeys(args.arch or ['amd64', 'arm64']):
-        print(json.dumps(build(arch, output, commit, version, dirty)), flush=True)
+    if args.build_version is not None:
+        if args.build_version < 1:
+            parser.error('--build-version must be positive')
+        version = args.build_version
+    default_arch = 'arm64' if args.platform == 'darwin' else 'amd64'
+    for arch in dict.fromkeys(args.arch or [default_arch]):
+        print(json.dumps(build(arch, output, commit, version, dirty, args.platform)), flush=True)
 
 
 if __name__ == '__main__':

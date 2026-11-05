@@ -126,6 +126,18 @@ def test_cli_bootstrap_runs_without_optional_cryptography_dependency():
     assert result.returncode == 0, result.stderr
 
 
+def test_node_dispatch_runs_without_site_packages_or_optional_python_dependencies():
+    """The real Node CLI dispatch chain uses the Python standard library only."""
+    result = subprocess.run(
+        [sys.executable, "-S", str(ROOT / "cli.py"), "node", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "install" in result.stdout and "status" in result.stdout
+
+
 def test_openapi_schema_exists():
     """OpenAPI schema should be available for Custom GPT import."""
     p = ROOT / "public" / "openapi.yaml"

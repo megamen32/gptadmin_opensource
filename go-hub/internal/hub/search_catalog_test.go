@@ -2,13 +2,207 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func searchRequestForPrincipal(id string) *http.Request {
+	return requestWithAuthClaims(httptest.NewRequest("POST", "/mcp", nil), map[string]any{"sub": id, "client_id": id})
+}
+
+func TestToolSearchCacheBoundsEvictionAndPinsActiveIndexes(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	t.Cleanup(func() { _ = s.Close() })
+	requests := make([]*http.Request, toolSearchCacheEntries)
+	for n := range requests {
+		requests[n] = searchRequestForPrincipal(fmt.Sprintf("principal-%d", n))
+		_, release, err := s.acquireToolSearchForRequest(requests[n])
+		if err != nil {
+			t.Fatalf("acquire principal %d: %v", n, err)
+		}
+		release()
+	}
+	active := make([]func(), 0, toolSearchCacheEntries)
+	for _, r := range requests {
+		_, done, err := s.acquireToolSearchForRequest(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active = append(active, done)
+	}
+	if _, _, err := s.acquireToolSearchForRequest(searchRequestForPrincipal("new-principal")); !errors.Is(err, errToolSearchBusy) {
+		t.Fatalf("expected fail-closed admission while all cached indexes are active, got %v", err)
+	}
+	for _, done := range active {
+		done()
+	}
+	// Touch principal 0 so principal 1 becomes the least recently used.
+	_, release, err := s.acquireToolSearchForRequest(requests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, _, err := s.acquireToolSearchForRequest(searchRequestForPrincipal("new-principal")); err != nil {
+		t.Fatalf("idle LRU eviction failed: %v", err)
+	}
+	if len(s.toolSearches) != toolSearchCacheEntries {
+		t.Fatalf("cache size=%d, want <=%d", len(s.toolSearches), toolSearchCacheEntries)
+	}
+	if _, ok := s.toolSearches[operationPrincipal(requests[0])]; !ok {
+		t.Fatal("recently used principal was evicted")
+	}
+	if _, ok := s.toolSearches[operationPrincipal(requests[1])]; ok {
+		t.Fatal("least-recently-used idle principal was retained")
+	}
+}
+
+func TestToolSearchSQLiteAndCatalogMemoryBounds(t *testing.T) {
+	index, err := newToolSearchIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = index.db.Close() })
+	var pages int
+	if err := index.db.QueryRow("PRAGMA max_page_count").Scan(&pages); err != nil {
+		t.Fatal(err)
+	}
+	if pages > toolSearchSQLiteMaxPages {
+		t.Fatalf("SQLite page limit=%d, want <=%d", pages, toolSearchSQLiteMaxPages)
+	}
+	var filename string
+	if err := index.db.QueryRow("PRAGMA database_list").Scan(new(int), new(string), &filename); err != nil {
+		t.Fatal(err)
+	}
+	if filename != "" {
+		t.Fatalf("FTS database is no longer private in-memory: filename=%q", filename)
+	}
+	if err := index.replaceLocked([]map[string]any{{"description": strings.Repeat("x", int(toolSearchCatalogInputLimit)+1)}}); !errors.Is(err, errToolSearchCatalogTooLarge) {
+		t.Fatalf("oversized catalog was not rejected before indexing: %v", err)
+	}
+	var rows int
+	if err := index.db.QueryRow("SELECT count(*) FROM tool_search").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("oversized catalog partially populated FTS: rows=%d", rows)
+	}
+	if err := index.replaceLocked(make([]map[string]any, toolSearchCatalogRowLimit+1)); !errors.Is(err, errToolSearchCatalogTooLarge) {
+		t.Fatalf("oversized row count was not rejected: %v", err)
+	}
+}
+
+func TestToolSearchAdmissionIsBoundedAndReusable(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	t.Cleanup(func() { _ = s.Close() })
+	var releases []func()
+	for n := 0; n < toolSearchMaxConcurrent; n++ {
+		release, ok := s.admitToolSearch()
+		if !ok {
+			t.Fatalf("admission %d unexpectedly rejected", n)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := s.admitToolSearch(); ok {
+		t.Fatal("overload admission succeeded instead of failing closed")
+	}
+	releases[0]()
+	releases[0]() // release is idempotent
+	if _, ok := s.admitToolSearch(); !ok {
+		t.Fatal("released admission slot was not reusable")
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestToolSearchAndCodeModeShareManagedMemoryBudget(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	t.Cleanup(func() { _ = s.Close() })
+	codeModeReservation := int64(codeModeMaxHeapBytes) + codeModeRuntimeOverhead
+	s.memoryBudget.limit = codeModeReservation + toolSearchOperationBudget + toolSearchIndexBudget - 1
+	releaseCodeMode, ok := s.reserveManagedMemory(codeModeReservation)
+	if !ok {
+		t.Fatal("could not reserve configured maximum Code Mode runtime budget")
+	}
+	r := requestWithAuthClaims(httptest.NewRequest("POST", "/mcp", nil), map[string]any{"sub": "bounded-principal", "client_id": "bounded-client"})
+	result := s.searchToolsForRequest(r, map[string]any{"query": "settings"})
+	if firstString(result, "status") != "failed" || !truthy(result["retry_hint"]) {
+		t.Fatalf("search should fail closed when shared SQLite budget is exhausted: %#v", result)
+	}
+	if len(s.toolSearches) != 0 {
+		t.Fatalf("failed admission allocated a principal index: %d", len(s.toolSearches))
+	}
+	releaseCodeMode()
+	if release, ok := s.reserveManagedMemory(toolSearchOperationBudget + toolSearchIndexBudget); !ok {
+		t.Fatal("failed search or runtime leaked its memory reservation")
+	} else {
+		release()
+	}
+}
+
+func TestToolSearchCloseReleasesIndexesWithoutLockRecursion(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	if _, release, err := s.acquireToolSearchForRequest(searchRequestForPrincipal("close-principal")); err != nil {
+		t.Fatal(err)
+	} else {
+		release()
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.memoryBudget.mu.Lock()
+	used := s.memoryBudget.used
+	s.memoryBudget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("Close leaked managed SQLite reservation: used=%d", used)
+	}
+	if _, _, err := s.acquireToolSearchForRequest(searchRequestForPrincipal("after-close")); !errors.Is(err, errToolSearchClosed) {
+		t.Fatalf("closed server recreated an FTS index: %v", err)
+	}
+}
+
+func TestToolSearchCacheEvictionConcurrentWithActiveQueries(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", ConfigDir: t.TempDir()})
+	t.Cleanup(func() { _ = s.Close() })
+	rows := []map[string]any{{"target": "hub", "name": "needle", "title": "bounded catalog", "description": "principal isolated FTS query"}}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 12)
+	for worker := 0; worker < cap(errCh); worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for iteration := 0; iteration < 30; iteration++ {
+				r := searchRequestForPrincipal(fmt.Sprintf("stress-%d-%d", worker, iteration%7))
+				index, release, err := s.acquireToolSearchForRequest(r)
+				if err != nil {
+					if !errors.Is(err, errToolSearchBusy) {
+						errCh <- err
+					}
+					continue
+				}
+				if _, err = index.search("principal isolated", "", 5, rows); err != nil {
+					errCh <- err
+				}
+				release()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	if len(s.toolSearches) > toolSearchCacheEntries {
+		t.Fatalf("cache escaped entry bound: %d", len(s.toolSearches))
+	}
+}
 
 func TestSQLiteFTSSearchNamesDescriptionsLabelsAndPunctuation(t *testing.T) {
 	index, err := newToolSearchIndex()

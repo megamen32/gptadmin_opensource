@@ -27,16 +27,8 @@ import pwd
 from functools import wraps
 from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
-# The curl bootstrap must run on a stock Python installation.  The signed
-# optional MCP catalogue is the only feature that needs ``cryptography``;
-# defer that dependency so setup/update are not blocked before packages can
-# install their runtime payloads.
-try:
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-except ImportError:  # pragma: no cover - exercised in the installer subprocess
-    InvalidSignature = ValueError
-    Ed25519PublicKey = None
+# Bootstrap and `gptadmin node` stay on stock Python. Optional feature
+# dependencies are imported only when that feature is explicitly invoked.
 try:
     import tomllib
 except Exception:
@@ -3092,13 +3084,15 @@ def _mcp_catalog_canonical_bytes(payload: dict) -> bytes:
 
 def _verify_mcp_catalog_payload(payload: dict) -> None:
     """Fail closed when the bundled capability catalog has been tampered with."""
-
-    if Ed25519PublicKey is None:
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
         raise ValueError(
             'MCP capability catalog verification requires the optional '
             'Python package "cryptography". Install GPTAdmin with its Python '
             'runtime dependencies before using bundled catalog capabilities.'
-        )
+        ) from None
     try:
         public_key = base64.urlsafe_b64decode(MCP_CAPABILITY_CATALOG_PUBLIC_KEY_B64 + '==')
         signature = base64.urlsafe_b64decode(MCP_CAPABILITY_CATALOG_SIGNATURE_B64 + '==')
@@ -7757,7 +7751,7 @@ def main():
     ap.add_argument('--system', action='store_true', help='Use system install paths/services (default when root)')
     sub = ap.add_subparsers(dest='cmd')
 
-    sub.add_parser('node', help='Установить или обновить единый Node (Linux/systemd)')
+    sub.add_parser('node', help='Установить или обновить единый Node (Linux/systemd, macOS/launchd)')
 
     sub.add_parser('version', help='Показать версию и информацию о сборке').set_defaults(func=cmd_version)
     ap_doctor = sub.add_parser('doctor', help='Проверка здоровья: Hub, MCP clients, Tunnel и конфиг')

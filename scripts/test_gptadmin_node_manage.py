@@ -388,6 +388,9 @@ class TestEnvFile(BaseTempCase):
         self.assertIn(f'EnvironmentFile={self.layout.config_root}/%i/gptadmin.env', text)
         self.assertIn(f'ExecStart={self.layout.opt_root}/current/bin/gptadmin-node', text)
         self.assertIn('Description=GPTAdmin Node %i', text)
+        self.assertIn('MemoryMax=256M', text)
+        self.assertIn('MemorySwapMax=0', text)
+        self.assertIn('Environment=GOMEMLIMIT=160MiB', text)
         self.assertIn('KillSignal=SIGTERM', text)
         self.assertIn('TimeoutStopSec=120', text)
         self.assertIn('WantedBy=multi-user.target', text)
@@ -640,6 +643,11 @@ class TestJoin(BaseTempCase):
 
 
 class TestInputHelpers(unittest.TestCase):
+    def test_autoupdate_timer_has_independent_recurring_calendar_trigger(self):
+        self.assertIn('OnCalendar=*-*-* 00,06,12,18:00:00', mgr.AUTOUPDATE_TIMER_TEXT)
+        self.assertIn('Persistent=true', mgr.AUTOUPDATE_TIMER_TEXT)
+        self.assertNotIn('OnUnitActiveSec=', mgr.AUTOUPDATE_TIMER_TEXT)
+
     def test_parse_bind(self):
         self.assertEqual(mgr.parse_bind(None), ('127.0.0.1', 9001))
         self.assertEqual(mgr.parse_bind('0.0.0.0:8080'), ('0.0.0.0', 8080))

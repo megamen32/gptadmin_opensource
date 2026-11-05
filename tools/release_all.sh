@@ -16,6 +16,12 @@
 #   git-private2public, ANDROID_HOME with ndk;27.0.12077973 for android x64.
 set -euo pipefail
 
+# Retired: the historical implementation below rewrites public workflows,
+# builds a different snapshot from the tagged commit, and promotes --latest.
+# The public full-release workflow consumes a tested sanitized commit instead.
+echo 'ERROR: legacy release_all.sh is disabled; use the reviewed public full-release workflow after Node alignment.' >&2
+exit 1
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 

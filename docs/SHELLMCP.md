@@ -34,6 +34,73 @@ The installer:
   - Prints the Hub URL and agent name; connection credentials stay managed by
     the installer and service
 
+### Safely update ShellMCP on macOS (Apple silicon or Intel)
+
+The tagged release pipeline publishes a separate client archive for each Mac
+architecture: `gptadmin-macos-arm64-client.tar.gz` for M1/M-series and
+`gptadmin-macos-x64-client.tar.gz` for Intel. Releases below build 1074 do not
+contain the current stdin/script support. The public release workflow verifies both
+archives are valid Mach-O executables for their named architecture and checks
+the package version, release matrix, and SHA-256 before publication.
+
+These Go executables do not have an Apple Developer ID signature or Apple
+notarization. Go may add an ad hoc signature. A checksum establishes that a
+download matches the release metadata; it is not an Apple signature or an
+independent proof of publisher identity. macOS security policy may block an
+unnotarized executable; follow the device owner's policy before installation.
+
+For an existing installation, first select the matching architecture and a
+published `vN` release whose build is at least 1074. Download and check the
+asset before starting the update:
+
+```bash
+read -r -p 'Published v-build (1074 or newer): ' BUILD
+[[ "$BUILD" =~ ^[0-9]+$ && "$BUILD" -ge 1074 ]] || { echo 'Build must be numeric and at least 1074' >&2; exit 1; }
+ARCH=arm64                         # M1/M-series; use x64 for Intel
+BASE="https://github.com/megamen32/gptadmin_opensource/releases/download/v${BUILD}"
+ASSET="gptadmin-macos-${ARCH}-client.tar.gz"
+curl -fSLo "$ASSET" "$BASE/$ASSET"
+curl -fSLo gptadmin-checksums.txt "$BASE/gptadmin-checksums.txt"
+curl -fSLo gptadmin-release-matrix.json "$BASE/gptadmin-release-matrix.json"
+python3 - "$BUILD" "$ARCH" "$ASSET" <<'PY'
+import hashlib, json, pathlib, sys
+build, arch, name = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+matrix = json.loads(pathlib.Path('gptadmin-release-matrix.json').read_text())
+artifact = next((item for item in matrix['artifacts'] if item['file'] == name), None)
+package = pathlib.Path(name)
+checksum_lines = [line.split() for line in pathlib.Path('gptadmin-checksums.txt').read_text().splitlines()]
+checksums = [parts[0] for parts in checksum_lines if len(parts) == 2 and parts[1].lstrip('*') in (name, 'build/' + name)]
+assert matrix['build_version'] == build and build >= 1074
+assert artifact and artifact['platform'] == 'macos' and artifact['arch'] == arch and artifact['edition'] == 'client'
+assert checksums == [artifact['sha256']]
+assert artifact['sha256'] == hashlib.sha256(package.read_bytes()).hexdigest()
+assert artifact['size'] == package.stat().st_size
+print(f"verified {name}: build {build}, {artifact['arch']}, SHA-256 and size match")
+PY
+tar -tzf "$ASSET"
+tar -xOf "$ASSET" ./README.txt
+```
+
+Proceed only if every download and verification command succeeded. Confirm the
+README says the selected build and architecture, then let GPTAdmin
+perform its transactional ShellMCP-only update. It validates the published
+release matrix digest and size, keeps the existing installation identity and
+credentials, and restarts the existing service:
+
+```bash
+gptadmin update --user --no-hub --shellmcp --pkg-shellmcp "$BASE/$ASSET"
+gptadmin status
+```
+
+For a system-mode installation, run the same update with `sudo gptadmin` and
+`--system` in place of `--user`. Never set `GPTADMIN_UPDATE_SKIP_MANIFEST` for
+this update. Use the matching `vN` release and checksum file from the same
+release; the changing `latest` URL is not a version pin.
+
+The public build and publication procedure, including the Node alignment hold,
+is in [Public CI](./PUBLIC_CI.md). A `node-v...` release is a separate Linux
+Node channel and does not supply these `vN` macOS client assets.
+
 ## Running manually
 
 For a manual agent-only setup, run `gptadmin setup --no-hub --shellmcp` and

@@ -583,7 +583,11 @@ type Server struct {
 
 	mu                            sync.Mutex
 	toolSearchMu                  sync.Mutex
-	toolSearches                  map[string]*toolSearchIndex
+	toolSearches                  map[string]*toolSearchCacheEntry
+	toolSearchClock               uint64
+	toolSearchActive              int
+	toolSearchClosed              bool
+	memoryBudget                  *hubMemoryBudget
 	contentMu                     sync.Mutex
 	contentStore                  *ContentStore
 	authRateMu                    sync.Mutex
@@ -801,7 +805,8 @@ func New(cfg Config) *Server {
 		agentPolicies:     map[string]agentCleanupPolicy{},
 		tombstones:        []agentTombstone{},
 	}
-	s.toolSearches = map[string]*toolSearchIndex{}
+	s.toolSearches = map[string]*toolSearchCacheEntry{}
+	s.memoryBudget = &hubMemoryBudget{limit: hubManagedMemoryBudget}
 	s.nodePeers, s.nodePeersErr = parseNodePeers(cfg.NodePeersJSON)
 	s.meshCore, s.meshCoreErr = meshroute.New(cfg.MeshCoreSocket, cfg.MeshCoreHostID)
 	s.nodePeerClient = newNodePeerClient(cfg.DefaultTimeout + 10*time.Second)

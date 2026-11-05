@@ -14,20 +14,21 @@ MIRROR = SOURCE
 SOURCE_TRAILER = '3' * 40
 
 
-def package(root, arch='amd64', **changes):
-    path = Path(root) / ('gptadmin-node-linux-' + arch + '.tar.gz')
-    blobs = {name: b'local-logic-fixture' for name in release.FILES}
+def package(root, arch='amd64', platform='linux', **changes):
+    path = Path(root) / f'gptadmin-node-{platform}-{arch}.tar.gz'
+    required = release.LINUX_FILES if platform == 'linux' else release.DARWIN_FILES
+    blobs = {name: b'local-logic-fixture' for name in required}
     blobs['bin/gptadmin-node'] = b'\x7fELF-node-fixture'
-    blobs['bin/shellmcp'] = b'\x7fELF-shellmcp-fixture'
-    blobs['systemd/gptadmin-proxy-route-relay02.service'] = (
-        b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
-    ui_asset = 'public/admin/assets/index-a1b2c3.js'
-    ui_css = 'public/admin/assets/index-d4e5f6.css'
-    blobs[ui_asset] = b'js-fixture'
-    blobs[ui_css] = b'css-fixture'
-    blobs[release.UI_INDEX] = (f'<script src="/admin/assets/{ui_asset.rsplit("/", 1)[-1]}"></script>'
-                               f'<link href="/admin/assets/{ui_css.rsplit("/", 1)[-1]}" rel="stylesheet">').encode()
-    manifest = {'schema': 'gptadmin.node-package/v1', 'platform': 'linux', 'arch': arch,
+    if platform == 'linux':
+        blobs['bin/shellmcp'] = b'\x7fELF-shellmcp-fixture'
+        blobs['systemd/gptadmin-proxy-route-relay02.service'] = b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n'
+        ui_asset = 'public/admin/assets/index-a1b2c3.js'; ui_css = 'public/admin/assets/index-d4e5f6.css'
+        blobs[ui_asset] = b'js-fixture'; blobs[ui_css] = b'css-fixture'
+        blobs[release.UI_INDEX] = (f'<script src="/admin/assets/{ui_asset.rsplit("/", 1)[-1]}"></script>'
+                                   f'<link href="/admin/assets/{ui_css.rsplit("/", 1)[-1]}" rel="stylesheet">').encode()
+    else:
+        blobs['bin/gptadmin-node'] = b'\xcf\xfa\xed\xfe\x0c\x00\x00\x01' if arch == 'arm64' else b'\xcf\xfa\xed\xfe\x07\x00\x00\x01'
+    manifest = {'schema': 'gptadmin.node-package/v1', 'platform': platform, 'arch': arch,
                 'git_commit': SOURCE, 'build_version': 123, 'source_dirty': False,
                 'files': {name: {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
                           for name, raw in blobs.items()}}
@@ -46,6 +47,12 @@ def checksum(path):
 
 
 class NodeReleaseTests(unittest.TestCase):
+    def test_platform_file_closures_keep_macos_helpers_out_of_linux(self):
+        self.assertNotIn('scripts/gptadmin_node_macos_manage.py', release.LINUX_FILES)
+        self.assertNotIn('scripts/gptadmin_node_macos_autoupdate.py', release.LINUX_FILES)
+        self.assertIn('scripts/gptadmin_node_macos_manage.py', release.DARWIN_FILES)
+        self.assertIn('scripts/gptadmin_node_macos_autoupdate.py', release.DARWIN_FILES)
+
     def test_product_ci_does_not_duplicate_the_workflow_run_release_publisher(self):
         root=Path(__file__).resolve().parents[1]
         candidates=(root/'.gitpublic/public/.github/workflows/public-ci.yml',
@@ -65,11 +72,17 @@ class NodeReleaseTests(unittest.TestCase):
                          "event == 'push'", "head_branch == 'main'", "ref: ${{ github.event.workflow_run.head_sha }}",
                          '--source "$SOURCE_SHA"', 'contents: write', 'cancel-in-progress: false'):
             with self.subTest(contract=contract):self.assertIn(contract,text)
+        self.assertIn('python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64',text)
 
     def test_both_clean_archives_bind_same_exact_source(self):
         with tempfile.TemporaryDirectory() as d:
             for arch in ('amd64', 'arm64'):
                 self.assertEqual(release.verify_package(package(d, arch), arch, SOURCE)['build_version'],123)
+
+    def test_darwin_archives_are_verified_as_a_distinct_platform_closure(self):
+        with tempfile.TemporaryDirectory() as d:
+            for arch in ('amd64','arm64'):
+                self.assertEqual(release.verify_package(package(d,arch,platform='darwin'),arch,SOURCE,'darwin')['platform'],'darwin')
 
     def test_release_requires_both_new_fixed_components_in_archive_and_manifest(self):
         for missing in ('bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service'):
@@ -133,13 +146,14 @@ class NodeReleaseTests(unittest.TestCase):
     def test_wrong_repository_or_arch_version_skew_never_calls_github(self):
         with tempfile.TemporaryDirectory() as d,patch.object(release,'gh') as gh:
             with self.assertRaises(ValueError):release.publish(d,SOURCE,'private/other')
-            package(d);package(d,'arm64',build_version=124)
+            package(d);package(d,'arm64',build_version=124);package(d,'amd64',platform='darwin');package(d,'arm64',platform='darwin')
             with self.assertRaises(ValueError):release.publish(d,SOURCE,release.REPOSITORY)
             gh.assert_not_called()
 
     def test_release_is_draft_until_all_server_digests_match_and_never_latest(self):
         with tempfile.TemporaryDirectory() as d:
-            packages=[package(d,a) for a in ('amd64','arm64')]
+            packages=[package(d,a) for platform in ('linux','darwin') for a in ('amd64','arm64')]
+            for a in ('amd64','arm64'): package(d,a,platform='darwin')
             tag='node-v123-'+SOURCE[:12];assets=[];calls=[];state={'tag':False}
             def gh(*args):
                 calls.append(args);endpoint=args[1]
@@ -160,17 +174,17 @@ class NodeReleaseTests(unittest.TestCase):
                     p=Path(args[args.index('--input')+1]);asset={'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)}
                     assets.append(asset);return json.dumps(asset).encode()
                 if endpoint.endswith('/releases/1'):
-                    self.assertEqual(len(assets),4);self.assertIn('draft=false',args);self.assertIn('make_latest=false',args)
+                    self.assertEqual(len(assets),8);self.assertIn('draft=false',args);self.assertIn('make_latest=false',args)
                     return json.dumps({'id':1,'tag_name':tag,'draft':False,'assets':assets}).encode()
                 raise AssertionError(endpoint)
             import contextlib
             with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)
-            self.assertIn('PATCH',calls[-1]);self.assertEqual(len(assets),4)
+            self.assertIn('PATCH',calls[-1]);self.assertEqual(len(assets),8)
 
     def test_release_tag_uses_public_mirror_commit_bound_to_exact_source(self):
         import contextlib
         with tempfile.TemporaryDirectory() as d:
-            package(d);package(d,'arm64')
+            package(d);package(d,'arm64');package(d,'amd64',platform='darwin');package(d,'arm64',platform='darwin')
             tag='node-v123-'+SOURCE[:12];state={'tag':False,'assets':[]}
             def gh(*args):
                 endpoint=args[1]
@@ -216,7 +230,7 @@ class NodeReleaseTests(unittest.TestCase):
 
     def test_bad_existing_asset_is_not_overwritten_or_published(self):
         with tempfile.TemporaryDirectory() as d:
-            package(d);package(d,'arm64');tag='node-v123-'+SOURCE[:12]
+            package(d);package(d,'arm64');package(d,'amd64',platform='darwin');package(d,'arm64',platform='darwin');tag='node-v123-'+SOURCE[:12]
             existing={'id':1,'tag_name':tag,'draft':True,'assets':[{'name':'gptadmin-node-linux-amd64.tar.gz','size':1,'digest':'sha256:'+'0'*64}]}
             replies=[json.dumps([{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':MIRROR}}]).encode(),
                      json.dumps({'sha':MIRROR,'message':'ci: publish sanitized source\n\nSource-Commit: '+SOURCE_TRAILER}).encode(),
@@ -228,7 +242,7 @@ class NodeReleaseTests(unittest.TestCase):
 
     def test_foreign_existing_tag_never_creates_or_publishes_a_release(self):
         with tempfile.TemporaryDirectory() as d:
-            package(d);package(d,'arm64');tag='node-v123-'+SOURCE[:12]
+            package(d);package(d,'arm64');package(d,'amd64',platform='darwin');package(d,'arm64',platform='darwin');tag='node-v123-'+SOURCE[:12]
             foreign='3'*40
             refs=[{'ref':'refs/tags/'+tag,'object':{'type':'commit','sha':foreign}}]
             replies=[json.dumps(refs).encode()]
@@ -247,7 +261,7 @@ class NodeReleaseTests(unittest.TestCase):
         # Both real CI failures: missing draft tag route and stale list after POST.
         import contextlib
         with tempfile.TemporaryDirectory() as d:
-            packages=[package(d,a) for a in ('amd64','arm64')]
+            packages=[package(d,a) for a in ('amd64','arm64')]+[package(d,a,platform='darwin') for a in ('amd64','arm64')]
             tag='node-v123-'+SOURCE[:12];state={'tag':False,'assets':[]};calls=[]
             def gh(*args):
                 calls.append(args);endpoint=args[1]
@@ -267,7 +281,7 @@ class NodeReleaseTests(unittest.TestCase):
                     p=Path(args[args.index('--input')+1]);asset={'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+release.digest(p)}
                     state['assets'].append(asset);return json.dumps(asset).encode()
                 if endpoint.endswith('/releases/41'):
-                    self.assertIn('PATCH',args);self.assertEqual(len(state['assets']),4)
+                    self.assertIn('PATCH',args);self.assertEqual(len(state['assets']),8)
                     return json.dumps({'id':41,'tag_name':tag,'draft':False,'assets':state['assets']}).encode()
                 raise AssertionError(endpoint)
             with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)

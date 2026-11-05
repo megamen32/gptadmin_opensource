@@ -3,15 +3,102 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	_ "modernc.org/sqlite"
 )
+
+const (
+	// The managed transient-memory envelope is shared by Code Mode guest heaps,
+	// their fixed runtime overhead, and the per-principal search catalog. This is
+	// an allocation budget for these paths, not a process RSS or cgroup limit.
+	hubManagedMemoryBudget      int64 = 128 << 20
+	codeModeRuntimeOverhead     int64 = 16 << 20
+	toolSearchCacheEntries            = 4
+	toolSearchIndexBudget       int64 = 8 << 20
+	toolSearchCatalogInputLimit int64 = 1 << 20
+	toolSearchCatalogRowLimit         = 2048
+	toolSearchOperationBudget   int64 = 4 << 20
+	toolSearchMaxConcurrent           = 2
+	toolSearchSQLitePageSize          = 4096
+	toolSearchSQLiteMaxPages          = int(toolSearchIndexBudget / toolSearchSQLitePageSize)
+)
+
+var errToolSearchBusy = errors.New("tool search is at its memory/concurrency limit")
+var errToolSearchClosed = errors.New("tool search cache is closed")
+var errToolSearchCatalogTooLarge = errors.New("tool search catalog exceeds its bounded input budget")
+
+type hubMemoryBudget struct {
+	mu    sync.Mutex
+	used  int64
+	limit int64
+}
+
+func (b *hubMemoryBudget) reserve(bytes int64) (func(), bool) {
+	b.mu.Lock()
+	if bytes <= 0 || b.limit <= 0 || bytes > b.limit-b.used {
+		b.mu.Unlock()
+		return nil, false
+	}
+	b.used += bytes
+	b.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			b.used -= bytes
+			b.mu.Unlock()
+		})
+	}, true
+}
+
+func (s *Server) reserveManagedMemory(bytes int64) (func(), bool) {
+	s.toolSearchMu.Lock()
+	defer s.toolSearchMu.Unlock()
+	if s.toolSearchClosed {
+		return nil, false
+	}
+	if s.memoryBudget == nil {
+		s.memoryBudget = &hubMemoryBudget{limit: hubManagedMemoryBudget}
+	}
+	return s.memoryBudget.reserve(bytes)
+}
+
+func (s *Server) admitToolSearch() (func(), bool) {
+	s.toolSearchMu.Lock()
+	if s.toolSearchClosed {
+		s.toolSearchMu.Unlock()
+		return nil, false
+	}
+	if s.toolSearchActive >= toolSearchMaxConcurrent {
+		s.toolSearchMu.Unlock()
+		return nil, false
+	}
+	s.toolSearchActive++
+	s.toolSearchMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.toolSearchMu.Lock()
+			s.toolSearchActive--
+			s.toolSearchMu.Unlock()
+		})
+	}, true
+}
+
+type toolSearchCacheEntry struct {
+	index    *toolSearchIndex
+	active   int
+	lastUsed uint64
+	release  func()
+}
 
 // toolSearchIndex is a local SQLite FTS5 catalog. It indexes built-in schemas,
 // warm registered schemas, and schemas obtained by a bounded explicit-target
@@ -28,6 +115,19 @@ func newToolSearchIndex() (*toolSearchIndex, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	// The database is :memory:, so it has no file-backed mmap. The page count
+	// and cache limits below bound SQLite-owned storage without a mapped-file
+	// allowance that could escape the Go memory admission accounting.
+	for _, pragma := range []string{
+		`PRAGMA page_size=4096`,
+		fmt.Sprintf(`PRAGMA max_page_count=%d`, toolSearchSQLiteMaxPages),
+		`PRAGMA cache_size=256`,
+	} {
+		if _, err = db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("bound SQLite FTS memory: %w", err)
+		}
+	}
 	if _, err = db.Exec(`CREATE VIRTUAL TABLE tool_search USING fts5(target UNINDEXED, name, title, description, labels, settings, tokenize='unicode61 remove_diacritics 2')`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create SQLite FTS5 tool catalog: %w", err)
@@ -35,25 +135,97 @@ func newToolSearchIndex() (*toolSearchIndex, error) {
 	return &toolSearchIndex{db: db}, nil
 }
 
-func (s *Server) toolSearchForRequest(r *http.Request) (*toolSearchIndex, error) {
+func (s *Server) acquireToolSearchForRequest(r *http.Request) (*toolSearchIndex, func(), error) {
 	key := operationPrincipal(r)
 	s.toolSearchMu.Lock()
 	defer s.toolSearchMu.Unlock()
+	if s.toolSearchClosed {
+		return nil, nil, errToolSearchClosed
+	}
 	if s.toolSearches == nil {
-		s.toolSearches = map[string]*toolSearchIndex{}
+		s.toolSearches = map[string]*toolSearchCacheEntry{}
 	}
-	if index := s.toolSearches[key]; index != nil {
-		return index, nil
+	entry := s.toolSearches[key]
+	if entry == nil {
+		for len(s.toolSearches) >= toolSearchCacheEntries {
+			var oldestKey string
+			var oldest *toolSearchCacheEntry
+			for candidateKey, candidate := range s.toolSearches {
+				if candidate.active == 0 && (oldest == nil || candidate.lastUsed < oldest.lastUsed) {
+					oldestKey, oldest = candidateKey, candidate
+				}
+			}
+			if oldest == nil {
+				return nil, nil, errToolSearchBusy
+			}
+			if err := oldest.index.db.Close(); err != nil {
+				return nil, nil, err
+			}
+			oldest.release()
+			delete(s.toolSearches, oldestKey)
+		}
+		releaseMemory, ok := s.memoryBudget.reserve(toolSearchIndexBudget)
+		if !ok {
+			for len(s.toolSearches) > 0 {
+				var oldestKey string
+				var oldest *toolSearchCacheEntry
+				for candidateKey, candidate := range s.toolSearches {
+					if candidate.active == 0 && (oldest == nil || candidate.lastUsed < oldest.lastUsed) {
+						oldestKey, oldest = candidateKey, candidate
+					}
+				}
+				if oldest == nil {
+					return nil, nil, errToolSearchBusy
+				}
+				if err := oldest.index.db.Close(); err != nil {
+					return nil, nil, err
+				}
+				oldest.release()
+				delete(s.toolSearches, oldestKey)
+				releaseMemory, ok = s.memoryBudget.reserve(toolSearchIndexBudget)
+				if ok {
+					break
+				}
+			}
+			if !ok {
+				return nil, nil, errToolSearchBusy
+			}
+		}
+		index, err := newToolSearchIndex()
+		if err != nil {
+			releaseMemory()
+			return nil, nil, err
+		}
+		entry = &toolSearchCacheEntry{index: index, release: releaseMemory}
+		s.toolSearches[key] = entry
 	}
-	index, err := newToolSearchIndex()
-	if err != nil {
-		return nil, err
+	s.toolSearchClock++
+	entry.lastUsed = s.toolSearchClock
+	entry.active++
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			s.toolSearchMu.Lock()
+			entry.active--
+			s.toolSearchMu.Unlock()
+		})
 	}
-	s.toolSearches[key] = index
-	return index, nil
+	return entry.index, release, nil
 }
 
 func (i *toolSearchIndex) replaceLocked(rows []map[string]any) error {
+	if len(rows) > toolSearchCatalogRowLimit {
+		return errToolSearchCatalogTooLarge
+	}
+	var inputBytes int64
+	for _, row := range rows {
+		for _, field := range []string{"target", "name", "title", "description", "labels", "settings"} {
+			inputBytes += int64(len(firstString(row, field)))
+			if inputBytes > toolSearchCatalogInputLimit {
+				return errToolSearchCatalogTooLarge
+			}
+		}
+	}
 	encoded, err := json.Marshal(rows)
 	if err != nil {
 		return err
@@ -168,10 +340,29 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			return map[string]any{"status": "failed", "error": detail}
 		}
 	}
-	index, err := s.toolSearchForRequest(r)
-	if err != nil {
-		return map[string]any{"status": "failed", "error": "SQLite FTS5 index is unavailable"}
+	releaseAdmission, admitted := s.admitToolSearch()
+	if !admitted {
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for !admitted {
+			select {
+			case <-r.Context().Done():
+				return map[string]any{"status": "failed", "error": "search cancelled", "retry_hint": true}
+			case <-deadline.C:
+				return map[string]any{"status": "failed", "error": "search concurrency limit reached", "retry_hint": true}
+			case <-ticker.C:
+				releaseAdmission, admitted = s.admitToolSearch()
+			}
+		}
 	}
+	defer releaseAdmission()
+	releaseOperation, admitted := s.reserveManagedMemory(toolSearchOperationBudget)
+	if !admitted {
+		return map[string]any{"status": "failed", "error": "search memory budget is busy", "retry_hint": true}
+	}
+	defer releaseOperation()
 	// Refresh at most the selected child/root target; unfiltered searches use
 	// warm schema caches and never fan out over network targets.
 	childRows, childCoverage := s.childSearchCatalogForRequest(r, targetFilter)
@@ -189,8 +380,13 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 	rows := []map[string]any{}
 	seen := map[string]bool{}
 	definitions := map[string]map[string]any{}
+	catalogExceeded := false
 	add := func(target string, defs []map[string]any, labels string, settings string) {
 		for _, tool := range toolsForRequest(r, target, defs) {
+			if len(rows) >= toolSearchCatalogRowLimit {
+				catalogExceeded = true
+				return
+			}
 			name := firstString(tool, "name")
 			key := target + "\x00" + name
 			if name == "" || seen[key] {
@@ -232,6 +428,17 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			add(id, controlTools(id), agent.Name+" node MCP child lifecycle", "")
 		}
 	}
+	if catalogExceeded {
+		return map[string]any{"status": "failed", "error": "search catalog exceeds its bounded row budget"}
+	}
+	settingsRow := targetFilter == "" || targetFilter == "control:hub" || targetFilter == "hub"
+	extraSettingsRow := 0
+	if settingsRow {
+		extraSettingsRow = 1
+	}
+	if len(rows)+len(childRows)+len(rootRows)+extraSettingsRow > toolSearchCatalogRowLimit {
+		return map[string]any{"status": "failed", "error": "search catalog exceeds its bounded row budget"}
+	}
 	for _, row := range childRows {
 		target, name := firstString(row, "target"), firstString(row, "name")
 		key := target + "\x00" + name
@@ -257,6 +464,17 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		encoded, _ := json.Marshal(hubSettingsSchema())
 		rows = append(rows, map[string]any{"target": "control:hub", "name": "settings", "title": "Hub settings", "description": "Typed Hub settings schema", "labels": "control configuration persisted settings restart requirements", "settings": string(encoded)})
 	}
+	if len(rows) > toolSearchCatalogRowLimit {
+		return map[string]any{"status": "failed", "error": "search catalog exceeds its bounded row budget"}
+	}
+	// Keep request admission while schemas are assembled, but pin the principal's
+	// SQLite database only during its transaction/query so remote refreshes do
+	// not prevent safe idle-index eviction.
+	index, releaseIndex, err := s.acquireToolSearchForRequest(r)
+	if err != nil {
+		return map[string]any{"status": "failed", "error": "SQLite FTS5 index is unavailable", "retry_hint": errors.Is(err, errToolSearchBusy)}
+	}
+	defer releaseIndex()
 	hits, err := index.search(query, targetFilter, limit*4, rows)
 	if err != nil {
 		return map[string]any{"status": "failed", "error": "invalid or unavailable FTS query"}

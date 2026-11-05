@@ -1,0 +1,115 @@
+name: Publish verified full release
+
+# Manual full release from an exact, tested public main snapshot.
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful Public Product CI push run for this exact public commit
+        required: true
+        type: string
+      private_source:
+        description: Approved full private Source-Commit recorded in the public snapshot
+        required: true
+        type: string
+
+concurrency:
+  group: gptadmin-public-full-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    # A dispatch from a branch or stale main commit must never receive the
+    # repository write token. The first step below also verifies current main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      PRIVATE_SOURCE: ${{ inputs.private_source }}
+      GOMAXPROCS: '2'
+      GOFLAGS: '-p=2'
+      CARGO_BUILD_JOBS: '1'
+      NODE_OPTIONS: '--max-old-space-size=1536'
+    steps:
+      - name: Checkout exact public snapshot
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Require dispatch to target the current trusted main
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android x64 compiler
+        run: |
+          sdkmanager --install 'ndk;27.0.12077973'
+          echo "ANDROID_X86_64_CC=${ANDROID_HOME}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Verify public source, CI, Source-Commit and matching Node release
+        run: |
+          set -euo pipefail
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ && "$PRIVATE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          public_sha="$(git rev-parse HEAD)"
+          test "$public_sha" = "$GITHUB_SHA"
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+          mkdir -p .tmp/full-release-node-evidence
+          gh release download "node-v${version}-${public_sha:0:12}" --repo "$GITHUB_REPOSITORY" --dir .tmp/full-release-node-evidence
+          python3 - "$public_sha" "$PRIVATE_SOURCE" "$version" "$CI_RUN_ID" <<'PY'
+          import pathlib, sys
+          from tools.publish_full_release import verify_ci_and_node
+          verify_ci_and_node('megamen32/gptadmin_opensource', sys.argv[1], sys.argv[2],
+                             int(sys.argv[3]), int(sys.argv[4]), pathlib.Path('.tmp/full-release-node-evidence'))
+          PY
+
+      - name: Build complete release from the verified public snapshot
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          public_sha="$(git rev-parse HEAD)"
+          # Only a local ephemeral tag; the publisher creates a remote tag after all checks.
+          git tag -f "v$version" "$public_sha"
+          TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh
+          python3 tools/verify_release_manifest.py verify --root "$GITHUB_WORKSPACE" --manifest "$GITHUB_WORKSPACE/build/manifest.json"
+          python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
+
+      - name: Check the exact release Ubuntu package through its lifecycle
+        run: tests/e2e/systemd/run-lifecycle.sh build/gptadmin-ubuntu-x64-full.tar.gz
+
+      - name: Publish verified assets without changing latest
+        run: |
+          set -euo pipefail
+          python3 tools/publish_full_release.py \
+            --directory build --node-directory .tmp/full-release-node-evidence \
+            --source "$(git rev-parse HEAD)" --private-source "$PRIVATE_SOURCE" \
+            --version "$(tr -d '[:space:]' < VERSION)" --ci-run "$CI_RUN_ID" \

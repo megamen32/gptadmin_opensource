@@ -133,7 +133,60 @@ jobs:
         '
     - name: Black-box candidate as Custom GPT and native MCP client
       run: "python3 scripts/ci_candidate_contract.py \\\n  --package build/gptadmin-hub.tar.gz \\\n  --local-origin\n"
+  macos-release-packages:
+    name: Verify both macOS ShellMCP release packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout the exact public source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      with:
+        go-version: 1.27.2
+        cache: false
+    - name: Build and verify both macOS client bundles
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        public_sha="$(git rev-parse HEAD)"
+        test "$public_sha" = "$GITHUB_SHA"
+        if [[ "$EVENT_NAME" == push ]]; then
+          python3 - <<'PY'
+        import re, subprocess
+        message = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True)
+        lines = [line.strip() for line in message.splitlines() if line.strip()]
+        trailers = [line for line in lines if line.startswith('Source-Commit:')]
+        assert len(trailers) == 1 and lines[-1] == trailers[0]
+        assert re.fullmatch(r'Source-Commit: [0-9a-f]{40}', trailers[0])
+        PY
+        fi
+        version="$(tr -d '[:space:]' < VERSION)"
+        [[ "$version" =~ ^[0-9]+$ && "$version" -ge 1074 ]]
+        # A disposable local tag satisfies the existing tagged-build contract.
+        # It is never pushed and VERSION remains unchanged.
+        git tag -f "v$version" "$public_sha"
+        TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh macos-client
+        python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
+        python3 - "$public_sha" "$version" <<'PY'
+        import json, pathlib, sys
+        matrix = json.loads(pathlib.Path('build/gptadmin-release-matrix.json').read_text())
+        assert matrix['git_commit'] == sys.argv[1] and matrix['build_version'] == int(sys.argv[2])
+        assert len(matrix['artifacts']) == 2
+        PY
+    - name: Retain verified macOS client bundles
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: gptadmin-macos-shellmcp-${{ github.sha }}
+        path: |
+          build/gptadmin-macos-*-client.tar.gz
+          build/gptadmin-checksums.txt
+          build/gptadmin-release-matrix.json
+        if-no-files-found: error
+        retention-days: 7
   macos-build:
+    needs: macos-release-packages
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -160,6 +213,13 @@ jobs:
         go test ./...
 
         '
+    - name: Download both verified release packages
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: gptadmin-macos-shellmcp-${{ github.sha }}
+        path: .tmp/macos-release
+    - name: Run the exact native release package on macOS
+      run: python3 tools/smoke_macos_release.py --build-dir .tmp/macos-release --version "$(tr -d '[:space:]' < VERSION)" --commit "$GITHUB_SHA"
     - name: Cross-compile Linux artifacts from Mac
       run: 'cd go-hub
 
@@ -229,6 +289,7 @@ jobs:
     - failover-e2e
     - installer-e2e-linux
     - candidate-client-contract
+    - macos-release-packages
     - macos-build
     - windows-shellmcp
     - public-python

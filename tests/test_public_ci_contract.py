@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import yaml
 
@@ -13,7 +14,7 @@ def test_public_product_gate_requires_all_actual_product_jobs():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     gate = workflow['jobs']['ci-gate']
     expected = {'go-unit-tests', 'admin-ui-build', 'failover-e2e',
-                'installer-e2e-linux', 'candidate-client-contract', 'macos-build',
+                'installer-e2e-linux', 'candidate-client-contract', 'macos-release-packages', 'macos-build',
                 'windows-shellmcp', 'public-python'}
     assert set(gate['needs']) == expected
     script = gate['steps'][0]['run']
@@ -48,7 +49,8 @@ def test_public_checks_have_no_secret_input_or_private_checkout():
     candidate = '\n'.join(step.get('run', '') for step in jobs['candidate-client-contract']['steps'])
     assert '--local-origin' in candidate
     assert 'tests/e2e/systemd/run-lifecycle.sh' in candidate
-    assert 'DefaultToken         = ""' in (ROOT / 'bezhook/internal/bezhook/config.go').read_text()
+    token_config = (ROOT / 'bezhook/internal/bezhook/config.go').read_text()
+    assert re.search(r'(?m)^\s*DefaultToken\s*=\s*""\s*(?://.*)?$', token_config)
     assert "FRPC_TOKEN_DEFAULT = os.environ.get('GPTADMIN_FRP_TOKEN', '').strip()" in (ROOT / 'cli.py').read_text()
 
 

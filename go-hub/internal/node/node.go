@@ -17,6 +17,11 @@ import (
 // path, reached over this same listener; no standalone shell service is needed.
 func Run(ctx context.Context, listener net.Listener, cfg hub.Config, executorConfig shell.Config) error {
 	defer listener.Close()
+	closeDiagnostics, err := startDiagnostics()
+	if err != nil {
+		return err
+	}
+	defer closeDiagnostics()
 	if cfg.ShellToken == "" {
 		return fmt.Errorf("SHELL_TOKEN is required for node startup")
 	}

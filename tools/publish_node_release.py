@@ -6,14 +6,19 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import struct
 import tarfile
 import time
 
 REPOSITORY = 'megamen32/gptadmin_opensource'
-FILES = {'bin/gptadmin-node', 'bin/shellmcp',
+LINUX_FILES = {'bin/gptadmin-node', 'bin/shellmcp',
          'systemd/gptadmin-proxy-route-relay02.service', 'cli.py',
          'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
          'scripts/gptadmin_node_autoupdate.py'}
+DARWIN_FILES = {'bin/gptadmin-node', 'cli.py', 'scripts/gptadmin_node_manage.py',
+                'scripts/gptadmin_node_macos_manage.py', 'scripts/gptadmin_node_macos_autoupdate.py',
+                'scripts/gptadmin_node_probe.py', 'scripts/gptadmin_node_autoupdate.py'}
+FILES = LINUX_FILES
 UI_INDEX = 'public/admin/index.html'
 UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
 MAX_MEMBERS = 64
@@ -30,11 +35,12 @@ def digest(path):
     return h.hexdigest()
 
 
-def is_package_file(name):
-    return name in FILES or name == UI_INDEX or bool(UI_ASSET_RE.fullmatch(name))
+def is_package_file(name, platform):
+    files = LINUX_FILES if platform == 'linux' else DARWIN_FILES
+    return name in files or (platform == 'linux' and (name == UI_INDEX or bool(UI_ASSET_RE.fullmatch(name))))
 
 
-def verify_package(path, arch, source):
+def verify_package(path, arch, source, platform='linux'):
     path = Path(path)
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PACKAGE:
         raise ValueError('invalid bounded Node package')
@@ -44,29 +50,31 @@ def verify_package(path, arch, source):
         for member in archive:
             size += member.size
             if (not member.isfile() or member.name in members
-                    or (member.name != 'manifest.json' and not is_package_file(member.name))
+                    or (member.name != 'manifest.json' and not is_package_file(member.name, platform))
                     or size > MAX_PAYLOAD or len(members) >= MAX_MEMBERS):
                 raise ValueError('invalid Node archive closure')
             members[member.name] = member
         listed_members = set(members) - {'manifest.json'}
-        ui_members = listed_members - FILES
-        if (not FILES <= listed_members or UI_INDEX not in ui_members
+        required = LINUX_FILES if platform == 'linux' else DARWIN_FILES
+        ui_members = listed_members - required
+        if (not required <= listed_members or (platform == 'linux' and (UI_INDEX not in ui_members
                 or len(ui_members) < 2
-                or any(not UI_ASSET_RE.fullmatch(name) for name in ui_members - {UI_INDEX})
+                or any(not UI_ASSET_RE.fullmatch(name) for name in ui_members - {UI_INDEX})))
                 or members.get('manifest.json') is None
                 or members['manifest.json'].size > 65536):
             raise ValueError('incomplete Node archive closure')
         manifest = json.load(archive.extractfile(members['manifest.json']))
         if (manifest.get('schema') != 'gptadmin.node-package/v1'
-                or manifest.get('platform') != 'linux' or manifest.get('arch') != arch
+                or manifest.get('platform') != platform or manifest.get('arch') != arch
                 or manifest.get('git_commit') != source or manifest.get('source_dirty') is not False
                 or set(manifest.get('files', {})) != listed_members
                 or type(manifest.get('build_version')) is not int or manifest['build_version'] < 1):
             raise ValueError('Node manifest does not bind accepted source')
-        index_bytes = archive.extractfile(members[UI_INDEX]).read()
-        for name in ui_members - {UI_INDEX}:
-            if name.rsplit('/', 1)[-1].encode() not in index_bytes:
-                raise ValueError('Node UI archive contains an unreferenced asset')
+        if platform == 'linux':
+            index_bytes = archive.extractfile(members[UI_INDEX]).read()
+            for name in ui_members - {UI_INDEX}:
+                if name.rsplit('/', 1)[-1].encode() not in index_bytes:
+                    raise ValueError('Node UI archive contains an unreferenced asset')
         for name in listed_members:
             h = hashlib.sha256()
             with archive.extractfile(members[name]) as stream:
@@ -74,6 +82,16 @@ def verify_package(path, arch, source):
                     h.update(block)
             if manifest['files'][name] != {'sha256': h.hexdigest(), 'size': members[name].size}:
                 raise ValueError('Node payload differs from manifest')
+        binary = archive.extractfile(members['bin/gptadmin-node']).read(8)
+        if platform == 'linux':
+            if not binary.startswith(b'\x7fELF'):
+                raise ValueError('Linux Node package does not contain ELF')
+        else:
+            if binary[:4] == b'\xcf\xfa\xed\xfe': cpu = struct.unpack('<I', binary[4:8])[0]
+            elif binary[:4] == b'\xfe\xed\xfa\xcf': cpu = struct.unpack('>I', binary[4:8])[0]
+            else: raise ValueError('Darwin Node package does not contain Mach-O')
+            expected_cpu = {'arm64': 0x0100000C, 'amd64': 0x01000007}[arch]
+            if cpu != expected_cpu: raise ValueError('Darwin Node Mach-O architecture mismatch')
     checksum = path.with_name(path.name + '.sha256')
     if checksum.is_symlink() or checksum.stat().st_size > 256:
         raise ValueError('invalid Node checksum file')
@@ -159,10 +177,11 @@ def publish(directory, source, repository):
     if repository != REPOSITORY or not re.fullmatch('[0-9a-f]{40}', source):
         raise ValueError('only the approved public source/repository may publish')
     directory = Path(directory).resolve()
-    packages = [directory / ('gptadmin-node-linux-' + arch + '.tar.gz') for arch in ('amd64', 'arm64')]
-    manifests = [verify_package(path, arch, source) for path, arch in zip(packages, ('amd64', 'arm64'))]
-    if manifests[0]['build_version'] != manifests[1]['build_version']:
-        raise ValueError('Node architecture versions disagree')
+    targets = [(platform, arch) for platform in ('linux', 'darwin') for arch in ('amd64', 'arm64')]
+    packages = [directory / f'gptadmin-node-{platform}-{arch}.tar.gz' for platform, arch in targets]
+    manifests = [verify_package(path, arch, source, platform) for path, (platform, arch) in zip(packages, targets)]
+    if len({m['build_version'] for m in manifests}) != 1:
+        raise ValueError('Node platform/architecture versions disagree')
     version = manifests[0]['build_version']
     tag = 'node-v' + str(version) + '-' + source[:12]
     assets = [p for path in packages for p in (path, path.with_name(path.name + '.sha256'))]
@@ -187,7 +206,7 @@ def publish(directory, source, repository):
             '--method', 'POST', '-f', 'tag_name=' + tag, '-f', 'target_commitish=' + mirror_commit,
             '-F', 'draft=true', '-f', 'make_latest=false',
             '-f', 'name=GPTAdmin Node ' + str(version),
-            '-f', 'body=Manifest-verified Linux amd64/arm64 Node binaries. Source: ' + source
+            '-f', 'body=Manifest-verified Linux and macOS amd64/arm64 Node binaries. Source: ' + source
             + '. Public mirror commit: ' + mirror_commit
             + '. Separate Node channel; the full-platform latest release is preserved.'))
     if (type(release.get('id')) is not int or release.get('tag_name') != tag):
