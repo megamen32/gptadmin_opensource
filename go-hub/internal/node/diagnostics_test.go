@@ -12,12 +12,22 @@ import (
 	"testing"
 )
 
+func diagnosticsTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gptdiag-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestDiagnosticsOptInUnixSocketAndPrivateMode(t *testing.T) {
 	t.Setenv(diagnosticsSocketEnv, "")
 	if _, err := startDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := diagnosticsTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +112,7 @@ func TestDiagnosticsRejectsInsecureParentAndExistingSocket(t *testing.T) {
 }
 
 func TestDiagnosticsRemovesOnlyOwnedStaleSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := diagnosticsTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
