@@ -6,6 +6,12 @@ the standby Hub on `:9001`, and keeps a reclaim-aware proxy on `:9101`.
 
 This directory is safe to commit: it contains no live tokens. The generated `config.yaml` used on HAOS is created by `scripts/deploy_haos_hub_standby.sh` from `/etc/gptadmin/gptadmin.env` on the primary server.
 
+For the public Supervisor app, `scripts/export_haos_app_repository.sh` maps the
+Node build number to the immutable app version `1.0.<Node VERSION>`. The app
+image and its embedded Node are built from the exact tested public source. An
+image being published does not establish that Supervisor installed it or that
+automatic app updates are enabled.
+
 Typical deploy from `admin-node-100`:
 
 ```bash

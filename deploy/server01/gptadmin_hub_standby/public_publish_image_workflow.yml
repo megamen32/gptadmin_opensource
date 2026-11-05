@@ -51,7 +51,11 @@ jobs:
               raise SystemExit('SOURCE.json source_ref is not a full public commit')
           if not re.fullmatch(r'\d+\.\d+\.\d+', source['app_version']):
               raise SystemExit('HAOS app version must be numeric semver')
+          node_version = source.get('node_version', '')
+          if not re.fullmatch(r'[1-9][0-9]*', node_version) or source['app_version'] != f'1.0.{node_version}':
+              raise SystemExit('HAOS app version must identify the Node build')
           print(f'version={source["app_version"]}')
+          print(f'node_version={node_version}')
           print(f'source_ref={source_ref}')
           PY
 
@@ -100,6 +104,7 @@ jobs:
       - name: Assemble sanitized ARM64 image context
         env:
           APP_VERSION: ${{ steps.source.outputs.version }}
+          NODE_VERSION: ${{ steps.source.outputs.node_version }}
           SOURCE_REF: ${{ steps.source.outputs.source_ref }}
         run: |
           set -euo pipefail
@@ -116,10 +121,10 @@ jobs:
             gptadmin_hub_standby/gptadmin_frpc_processes.py "$context/"
           cp gptadmin-source/deploy/server01/gptadmin_hub_standby/public_standby_index.html "$context/public/index.html"
           (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
-            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
+            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$NODE_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
             -o "$context/gptadmin_hub" ./cmd/gptadmin-hub)
           (cd gptadmin-source/go-hub && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
-            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$APP_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
+            -ldflags "-X github.com/megamen32/gptadmin/go-hub/internal/hub.BuildVersion=$NODE_VERSION -X github.com/megamen32/gptadmin/go-hub/internal/hub.GitCommit=$SOURCE_REF" \
             -o "$context/gptadmin-node" ./cmd/gptadmin-node)
           archive="frp_${FRP_VERSION}_linux_arm64.tar.gz"
           curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${archive}" -o "$RUNNER_TEMP/$archive"

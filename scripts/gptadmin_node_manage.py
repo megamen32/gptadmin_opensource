@@ -938,6 +938,24 @@ def drain_cancel(origin: str, token: str) -> bool:
     return True
 
 
+def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drain: bool, budget: UpdateBudget) -> bool:
+    """Enter a verified drain, cancelling it if an admission response is lost."""
+    try:
+        active = drain_begin(origin, token)
+        if not active and require_drain:
+            raise RuntimeFailure('automatic update requires the supported drain endpoint')
+        if active:
+            disposition = drain_wait_ready(origin, token, wait_secs)
+            if disposition.get('skipped') and require_drain:
+                raise RuntimeFailure('drain readiness unavailable; automatic update refused')
+        return active
+    except Exception:
+        budget.cleanup()
+        if not drain_cancel(origin, token):
+            raise RuntimeFailure('drain admission failed and cancel is unverified; manual recovery required') from None
+        raise
+
+
 def local_lan_ip(host: str, port: int) -> str | None:
     """Best-effort local source address toward host:port (UDP connect sends no packets)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2055,23 +2073,8 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     unit = layout.unit_instance(name)
     env_path = layout.env_file(name)
     previous_env_text = env_path.read_text() if requested_node_url is not None or requested_legacy_origins is not None else None
-    drain_active = False
-    drain_attempted = False
-    try:
-        drain_attempted = True
-        drain_active = drain_begin(origin, token)
-        if not drain_active and getattr(args, 'require_drain', False):
-            raise RuntimeFailure('automatic update requires the supported drain endpoint')
-        if drain_active:
-            disposition = drain_wait_ready(origin, token, args.wait_secs)
-            if disposition.get('skipped') and getattr(args, 'require_drain', False):
-                raise RuntimeFailure('drain readiness unavailable; automatic update refused')
-    except RuntimeFailure:
-        budget.cleanup()
-        # begin may have been accepted before its response/deadline was lost.
-        if drain_attempted and not drain_cancel(origin, token):
-            raise RuntimeFailure('drain admission failed and cancel is unverified; manual recovery required') from None
-        raise
+    drain_active = prepare_update_drain(origin, token, args.wait_secs,
+                                        getattr(args, 'require_drain', False), budget)
 
     final = None
     env_updated = False

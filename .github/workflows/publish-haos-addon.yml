@@ -82,6 +82,7 @@ jobs:
                       text=True,
                   ).splitlines()
           relevant = (
+              'VERSION',
               'deploy/server01/gptadmin_hub_standby/',
               'go-hub/',
               'go-shellmcp/',

@@ -444,6 +444,28 @@ class TestDrainAndHealthHttp(BaseTempCase):
         with self.assertRaises(mgr.RuntimeFailure):
             mgr.drain_wait_ready(origin, 't', wait_secs=0.25, poll_interval=0.05)
 
+    def test_update_cancels_drain_when_begin_response_times_out(self):
+        class Budget:
+            cleaned = False
+            def cleanup(self):
+                self.cleaned = True
+        budget = Budget()
+        with patch.object(mgr, 'drain_begin', side_effect=TimeoutError('lost response')), \
+             patch.object(mgr, 'drain_cancel', return_value=True) as cancel:
+            with self.assertRaises(TimeoutError):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, budget)
+        self.assertTrue(budget.cleaned)
+        cancel.assert_called_once_with('http://example', 'token')
+
+    def test_update_reports_unverified_drain_cancel_after_timeout(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', side_effect=TimeoutError('lost response')), \
+             patch.object(mgr, 'drain_cancel', return_value=False):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'cancel is unverified'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
     def test_drain_bearer_token_sent(self):
         seen = []
 

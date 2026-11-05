@@ -178,9 +178,13 @@ def test_exporter_creates_only_the_public_allowlist(tmp_path: Path) -> None:
     assert not list(output.rglob("frpc"))
     source = json.loads((output / "SOURCE.json").read_text(encoding="utf-8"))
     public_config = (root / "deploy/server01/gptadmin_hub_standby/public_config.yaml").read_text(encoding="utf-8")
-    version = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', public_config, re.MULTILINE)
+    exported_config = (output / "gptadmin_hub_standby/config.yaml").read_text(encoding="utf-8")
+    version = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', exported_config, re.MULTILINE)
     assert version is not None
     assert source["app_version"] == version.group(1)
+    assert source["node_version"] == (root / "VERSION").read_text().strip()
+    assert source["app_version"] == f'1.0.{source["node_version"]}'
+    assert 'BuildVersion=$NODE_VERSION' in image_workflow
     image = re.search(r'^image:\s*(\S+)\s*$', public_config, re.MULTILINE)
     assert image is not None
     assert source["image"] == image.group(1)

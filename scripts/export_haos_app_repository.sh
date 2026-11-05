@@ -51,23 +51,31 @@ cp "$SRC/gptadmin_failover_config.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_quorum_config.py" "$OUTPUT/gptadmin_hub_standby/"
 cp "$SRC/gptadmin_single_writer.py" "$OUTPUT/gptadmin_hub_standby/"
 
-APP_VERSION=$(python3 - "$SRC/public_config.yaml" <<'PY'
+APP_VERSION=$(python3 - "$ROOT/VERSION" "$OUTPUT/gptadmin_hub_standby/config.yaml" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r'^version:\s*["\']([^"\']+)["\']\s*$', text, re.MULTILINE)
-if not match:
+node_version = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+if not re.fullmatch(r'[1-9][0-9]*', node_version):
+    raise SystemExit("invalid Node build version")
+config = Path(sys.argv[2])
+text = config.read_text(encoding="utf-8")
+version = f"1.0.{node_version}"
+updated, count = re.subn(r'^version:\s*["\'][^"\']+["\']\s*$', f'version: "{version}"', text, count=1, flags=re.MULTILINE)
+if count != 1:
     raise SystemExit("public HAOS app version is missing")
-print(match.group(1))
+config.write_text(updated, encoding="utf-8")
+print(version)
 PY
 )
+NODE_VERSION=${APP_VERSION#1.0.}
 
 cat > "$OUTPUT/SOURCE.json" <<EOF
 {
   "source_ref": "$(printf '%s' "$SOURCE_REF" | sed 's/[\\"]//g')",
   "app_version": "$APP_VERSION",
+  "node_version": "$NODE_VERSION",
   "architecture": "aarch64",
   "image": "ghcr.io/megamen32/gptadmin-haos-addons"
 }
