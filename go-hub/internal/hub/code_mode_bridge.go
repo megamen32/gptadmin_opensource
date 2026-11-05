@@ -1245,6 +1245,16 @@ func codeModeCallPayload(response map[string]any, status int, target, tool strin
 			payload["validation"] = failure
 			payload["detail"] = firstString(failure, "message")
 		}
+		// A peer may have a different instruction signer. Its explicit
+		// no-execution refusal carries the peer's own document and receipt;
+		// retain those so the caller can read it and retry under that gate.
+		if status == http.StatusPreconditionRequired && firstString(failure, "code") == "instructions_required" && response["executed"] == false {
+			for _, key := range []string{"executed", "context", "instructions", "instruction_version", "shared_workflow_version", "profile"} {
+				if value, ok := response[key]; ok {
+					payload[key] = value
+				}
+			}
+		}
 	}
 	if status != 0 && status != http.StatusOK {
 		payload["http_status"] = status

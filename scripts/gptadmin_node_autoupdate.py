@@ -286,7 +286,8 @@ def checksum_from_asset(raw, filename):
 def safely_deferred_for_busy_node(result):
     """A drain timeout is retryable only when the manager verified cancellation."""
     detail = (result.stdout + result.stderr).decode('utf-8', 'replace')
-    return (result.returncode != 0 and 'drain did not reach ready_to_stop' in detail
+    return (result.returncode != 0 and ('drain did not reach ready_to_stop' in detail
+            or 'drain status timed out; cancellation confirmed; retryable' in detail)
             and 'cancel is unverified' not in detail and 'ROLLBACK ALSO FAILED' not in detail)
 
 

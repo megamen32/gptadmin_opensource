@@ -556,6 +556,17 @@ func TestCodeModePreservesPendingApproval(t *testing.T) {
 	}
 }
 
+func TestCodeModePreservesPeerInstructionReceipt(t *testing.T) {
+	response := codeModeCallPayload(map[string]any{
+		"status": "failed", "executed": false,
+		"error":   map[string]any{"code": "instructions_required", "message": "read instructions"},
+		"context": "ic1_receipt", "instructions": "peer instructions", "instruction_version": "v1",
+	}, http.StatusPreconditionRequired, "shell:peer", "shell_exec")
+	if response["executed"] != false || firstString(response, "context") != "ic1_receipt" || firstString(response, "instructions") != "peer instructions" {
+		t.Fatalf("peer instruction receipt lost: %v", response)
+	}
+}
+
 // A still-running receipt is non-terminal: the script must not treat it as data.
 func TestCodeModeNonTerminalReceiptIsNotSuccess(t *testing.T) {
 	for _, status := range []string{"running", "queued"} {

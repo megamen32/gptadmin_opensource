@@ -940,6 +940,7 @@ def drain_cancel(origin: str, token: str) -> bool:
 
 def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drain: bool, budget: UpdateBudget) -> bool:
     """Enter a verified drain, cancelling it if an admission response is lost."""
+    active = False
     try:
         active = drain_begin(origin, token)
         if not active and require_drain:
@@ -949,10 +950,21 @@ def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drai
             if disposition.get('skipped') and require_drain:
                 raise RuntimeFailure('drain readiness unavailable; automatic update refused')
         return active
-    except Exception:
+    except Exception as error:
         budget.cleanup()
         if not drain_cancel(origin, token):
             raise RuntimeFailure('drain admission failed and cancel is unverified; manual recovery required') from None
+        # A confirmed begin finished before cancel. A lost begin response may
+        # still arrive after cancel, so it must retain the existing hold.
+        if active and isinstance(error, TimeoutError):
+            try:
+                status, state = http_json('POST', origin + DRAIN_ENDPOINT, token=token,
+                                          body={'action': 'status'})
+            except (OSError, urllib.error.URLError):
+                raise RuntimeFailure('drain cancel is unverified; manual recovery required') from None
+            if status != 200 or not isinstance(state, dict) or state.get('draining') is not False:
+                raise RuntimeFailure('drain cancel is unverified; manual recovery required') from None
+            raise RuntimeFailure('drain status timed out; cancellation confirmed; retryable') from None
         raise
 
 

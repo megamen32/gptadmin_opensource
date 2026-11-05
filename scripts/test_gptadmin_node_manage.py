@@ -466,6 +466,28 @@ class TestDrainAndHealthHttp(BaseTempCase):
             with self.assertRaisesRegex(mgr.RuntimeFailure, 'cancel is unverified'):
                 mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
 
+    def test_status_timeout_after_confirmed_begin_and_cancel_is_retryable(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', return_value=True), \
+             patch.object(mgr, 'drain_wait_ready', side_effect=TimeoutError('status timed out')), \
+             patch.object(mgr, 'drain_cancel', return_value=True), \
+             patch.object(mgr, 'http_json', return_value=(200, {'draining': False})):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'drain status timed out; cancellation confirmed; retryable'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
+    def test_status_timeout_needs_independent_cancel_readback(self):
+        class Budget:
+            def cleanup(self):
+                pass
+        with patch.object(mgr, 'drain_begin', return_value=True), \
+             patch.object(mgr, 'drain_wait_ready', side_effect=TimeoutError('status timed out')), \
+             patch.object(mgr, 'drain_cancel', return_value=True), \
+             patch.object(mgr, 'http_json', return_value=(200, {'draining': True})):
+            with self.assertRaisesRegex(mgr.RuntimeFailure, 'cancel is unverified'):
+                mgr.prepare_update_drain('http://example', 'token', 1, True, Budget())
+
     def test_drain_bearer_token_sent(self):
         seen = []
 

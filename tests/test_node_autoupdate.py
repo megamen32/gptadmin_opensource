@@ -940,7 +940,11 @@ class NodeAutoupdateTests(unittest.TestCase):
         busy=SimpleNamespace(returncode=4,stdout=b'',stderr=b'drain did not reach ready_to_stop')
         unknown=SimpleNamespace(returncode=4,stdout=b'',stderr=b'drain admission failed; cancel is unverified')
         rollback=SimpleNamespace(returncode=4,stdout=b'',stderr=b'ROLLBACK ALSO FAILED')
+        cancelled=SimpleNamespace(returncode=4,stdout=b'',stderr=b'drain status timed out; cancellation confirmed; retryable')
+        lost_begin=SimpleNamespace(returncode=4,stdout=b'',stderr=b'TimeoutError: timed out')
         self.assertTrue(update.safely_deferred_for_busy_node(busy))
+        self.assertTrue(update.safely_deferred_for_busy_node(cancelled))
+        self.assertFalse(update.safely_deferred_for_busy_node(lost_begin))
         self.assertFalse(update.safely_deferred_for_busy_node(unknown))
         self.assertFalse(update.safely_deferred_for_busy_node(rollback))
 
