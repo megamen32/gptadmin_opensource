@@ -241,6 +241,7 @@ func normalizeTraceID(value string) string {
 }
 
 type Server struct {
+	transfers             binaryTransfers
 	cfg                   Config
 	jobs                  *job.Manager
 	identity              *security.Identity
@@ -444,6 +445,7 @@ func (s *Server) enforceStorage(protected map[string]bool) error {
 // Close releases server resources and active child MCP protocol sessions.
 // Safe to call multiple times and idempotent w.r.t. nil resources.
 func (s *Server) Close() error {
+	s.closeBinaryTransfers()
 	var closeErr error
 	s.healthMu.Lock()
 	s.healthClosed = true

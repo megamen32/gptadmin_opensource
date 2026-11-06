@@ -422,7 +422,7 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			add(id, shellTools(), agent.Name+" shell command", "")
 		}
 		if strings.HasPrefix(id, "file:") {
-			add(id, fileTools(), agent.Name+" files", "")
+			add(id, fileToolsForAgent(agent), agent.Name+" files", "")
 		}
 		if strings.HasPrefix(id, "control:") {
 			add(id, controlTools(id), agent.Name+" node MCP child lifecycle", "")

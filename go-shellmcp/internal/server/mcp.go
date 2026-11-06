@@ -207,7 +207,7 @@ func (s *Server) mcpToolsForContext(ctx context.Context) []map[string]any {
 	if _, active := filesystemACLFromContext(ctx); !active {
 		return s.mcpTools()
 	}
-	allowed := map[string]bool{"system_inspect": true, "file_editor": true, "system_resource_summary": true}
+	allowed := map[string]bool{"system_inspect": true, "file_editor": true, "file_transfer": true, "system_resource_summary": true}
 	tools := s.mcpTools()
 	filtered := make([]map[string]any, 0, len(allowed))
 	for _, tool := range tools {
@@ -301,6 +301,7 @@ func (s *Server) mcpTools() []map[string]any {
 				"required": []string{"action", "path"}, "additionalProperties": false,
 			},
 		},
+		fileTransferToolDefinition(),
 		{
 			"name":        "file_editor",
 			"description": "View and edit text files without shell/sed. view returns current N:hhhh line ids; str_replace changes exact text (or a unique whitespace-equivalent match); on no/multiple match it returns current candidate text with fresh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects all changes if any id is stale; successful edits return a compact diff with fresh ids for the next edit. create creates a new file; delete removes one file. Line ids are N:hhhh and come from editor results (and compatible readers).",
@@ -466,6 +467,8 @@ func (s *Server) callMCPTool(ctx context.Context, name string, args map[string]a
 	case "system_inspect":
 		policy, _ := filesystemScopeFromContext(ctx)
 		return s.mcpSystemInspectWithACL(args, policy)
+	case "file_transfer":
+		return s.mcpFileTransfer(ctx, args)
 	case "file_editor":
 		policy, _ := filesystemScopeFromContext(ctx)
 		return s.mcpFileEditorWithACL(args, policy)

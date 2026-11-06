@@ -139,6 +139,7 @@ type Beat struct {
 	Backend              string           `json:"backend"`
 	OS                   string           `json:"os"`
 	BuildVersion         int              `json:"build_version"`
+	FileTransferVersion  int              `json:"file_transfer_version,omitempty"`
 	FilesystemACLVersion int              `json:"filesystem_acl_version,omitempty"`
 	GitCommit            string           `json:"git_commit"`
 	DefaultUser          string           `json:"default_user,omitempty"`
@@ -243,6 +244,9 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	}
 	if beat.BuildVersion > 0 {
 		q.Set("build_version", fmt.Sprintf("%d", beat.BuildVersion))
+	}
+	if beat.FileTransferVersion > 0 {
+		q.Set("file_transfer_version", fmt.Sprintf("%d", beat.FileTransferVersion))
 	}
 	if beat.FilesystemACLVersion > 0 {
 		q.Set("filesystem_acl_version", fmt.Sprintf("%d", beat.FilesystemACLVersion))
@@ -358,7 +362,7 @@ func NewBeat(id *security.Identity, baseURL, mode string, build int) Beat {
 	if id != nil && id.Name != "" {
 		name = id.Name
 	}
-	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, FilesystemACLVersion: 1, GitCommit: "go-shellmcp"}
+	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, FilesystemACLVersion: 1, FileTransferVersion: 1, GitCommit: "go-shellmcp"}
 	if id != nil {
 		b.ServerID = id.ServerID
 		b.PublicKey = id.PublicKey

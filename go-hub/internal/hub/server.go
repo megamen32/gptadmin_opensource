@@ -3946,6 +3946,9 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 			meta[key] = v
 		}
 	}
+	// Capability absence on a fresh authenticated poll must clear a previous
+	// announcement, including an executor rollback to an older binary.
+	meta["file_transfer_version"] = intFromString(r.URL.Query().Get("file_transfer_version"))
 	for _, key := range []string{"cores", "mem_mb", "build_version", "filesystem_acl_version", "spool_bytes", "storage_bytes", "outbox_depth", "outbox_retry_attempts", "queue_poll_count", "queue_poll_errors", "queue_poll_latency_ms", "outbox_retry_failures", "outbox_delivered", "self_repair_desired"} {
 		if v := intFromString(r.URL.Query().Get(key)); v > 0 {
 			meta[key] = v
@@ -4905,7 +4908,7 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(target, "file:") {
-		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, fileTools())}}), target))
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, s.fileToolsForTarget(target))}}), target))
 		return
 	}
 	s.mu.Lock()
@@ -5091,6 +5094,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		if !capable {
 			return map[string]any{"status": "failed", "error": "filesystem ACL requires an approved executor with filesystem_acl_version 1"}, http.StatusForbidden
 		}
+	}
+	if toolName == "file_transfer" && !s.fileTransferCapable(target) {
+		return map[string]any{"status": "failed", "error": "file_transfer requires an updated executor advertising file_transfer_version 1"}, http.StatusBadRequest
 	}
 	secretValues := []string(nil)
 	if toolName == "shell_exec" {
@@ -6292,6 +6298,7 @@ func searchToolDefinition() map[string]any {
 
 func fileTools() []map[string]any {
 	return []map[string]any{
+		fileTransferToolDefinition(),
 		{"name": "system_inspect", "description": "Read bounded redacted files/directories without shell commands. On a system-mode installation this paired file target runs through the privileged ShellMCP runtime and can inspect root-owned configuration while preserving redaction boundaries.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"read_file", "list_directory"}}, "path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 1048576}}, "required": []string{"action", "path"}, "additionalProperties": false}},
 		{"name": "file_editor", "description": "Primary text file tool. view returns bounded current text with N:hhhh line ids; str_replace changes exact text and on no/multiple match returns current candidate text with fresh N:hhhh line ids so retry needs no reread. batch_edit applies several line-id edits atomically and rejects the whole batch if any id is stale. Successful edits return a compact diff with fresh ids. create/delete are supported. Existing ownership/mode are preserved; privileged system-mode file targets can edit root-owned files without shell/sed/python.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"view", "create", "str_replace", "batch_edit", "delete"}}, "path": map[string]any{"type": "string"}, "content": map[string]any{"type": []string{"string", "null"}}, "old_text": map[string]any{"type": []string{"string", "null"}}, "new_text": map[string]any{"type": []string{"string", "null"}}, "replace_all": map[string]any{"type": "boolean", "default": false}, "raw": map[string]any{"type": "boolean", "default": false, "description": "view: exact selected bytes, original newline endings and line IDs"}, "start_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "end_line": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_bytes": map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 262144}, "operations": map[string]any{"type": []string{"array", "null"}, "maxItems": 50, "items": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"replace", "insert"}}, "start": map[string]any{}, "end": map[string]any{}, "content": map[string]any{"type": "string"}}, "required": []string{"action", "start", "content"}, "additionalProperties": false}}}, "required": []string{"action", "path"}, "additionalProperties": false}},
 		{"name": "file_checkpoint", "description": "Explicit durable filesystem checkpoints using SHA-256 content-addressed gzip storage and manifests. create snapshots files/directories; diff compares to live state; restore automatically creates a restore-safety checkpoint first, so rollback is itself reversible. Use checkpoints at meaningful boundaries, not before every edit. Privileged system-mode file targets preserve owner/group/mode for system files.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"create", "list", "diff", "restore", "delete", "cleanup", "gc"}, "default": "create"}, "path": map[string]any{"type": []string{"string", "null"}}, "paths": map[string]any{"type": []string{"array", "null"}, "items": map[string]any{"type": "string"}}, "checkpoint_id": map[string]any{"type": []string{"string", "null"}}, "name": map[string]any{"type": []string{"string", "null"}}, "ttl_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "default": 30}, "limit": map[string]any{"type": []string{"integer", "null"}, "minimum": 1}, "max_age_days": map[string]any{"type": []string{"integer", "null"}, "minimum": 0}}, "additionalProperties": false}},
@@ -6301,7 +6308,7 @@ func fileTools() []map[string]any {
 
 func fileToolAllowed(name string) bool {
 	switch name {
-	case "system_inspect", "file_editor", "file_checkpoint", "file_backup":
+	case "system_inspect", "file_editor", "file_transfer", "file_checkpoint", "file_backup":
 		return true
 	default:
 		return false
@@ -6314,12 +6321,12 @@ func supportsPairedFileTarget(shell Agent) bool {
 	}
 	// Build 194 introduced the paired file contract. Keep the virtual target
 	// absent for older transports so discovery never advertises dead tools.
-	return intFromAny(shell.Meta["build_version"]) >= 194
+	return intFromAny(shell.Meta["build_version"]) >= 194 || intFromAny(shell.Meta["file_transfer_version"]) >= 1
 }
 
 func fileAgentForShell(shell Agent) Agent {
 	host := strings.TrimPrefix(shell.AgentID, "shell:")
-	meta := map[string]any{"backing_server_id": shell.AgentID, "paired": true}
+	meta := map[string]any{"backing_server_id": shell.AgentID, "paired": true, "file_transfer_version": shell.Meta["file_transfer_version"]}
 	return Agent{AgentID: "file:" + host, Name: "Files: " + host, Kind: "virtual_file", Transport: shell.Transport, Status: shell.Status, LastSeen: shell.LastSeen, Capabilities: []string{"files", "checkpoints"}, Meta: meta}
 }
 
@@ -9080,7 +9087,7 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 		return map[string]any{"tools": shellTools()}, nil
 	}
 	if strings.HasPrefix(agent.AgentID, "file:") {
-		return map[string]any{"tools": fileTools()}, nil
+		return map[string]any{"tools": fileToolsForAgent(agent)}, nil
 	}
 	if strings.HasPrefix(agent.AgentID, "control:") {
 		return map[string]any{"tools": controlTools(agent.AgentID)}, nil
@@ -9165,7 +9172,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, shellTools())}, nil
 	}
 	if strings.HasPrefix(agent.AgentID, "file:") {
-		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, fileTools())}, nil
+		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, fileToolsForAgent(agent))}, nil
 	}
 	if strings.HasPrefix(agent.AgentID, "control:") {
 		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, controlTools(agent.AgentID))}, nil
@@ -10559,7 +10566,7 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 	} else if strings.HasPrefix(target, "shell:") {
 		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
 	} else if strings.HasPrefix(target, "file:") {
-		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": fileTools()}}
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.fileToolsForTarget(target)}}
 	} else {
 		s.mu.Lock()
 		child, exists := s.exposedAgentByIDLocked(target)

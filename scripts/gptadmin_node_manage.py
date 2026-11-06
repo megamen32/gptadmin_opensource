@@ -12,6 +12,9 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
+from contextlib import contextmanager
+import threading
 import hashlib
 import json
 import os
@@ -668,17 +671,62 @@ def next_version_dir(versions_root: Path, git_commit: str) -> Path:
     return versions_root / f'{git_commit}-{number}'
 
 
-def switch_current(layout: Layout, target: Path) -> None:
-    """Atomically repoint <opt>/current at target (symlink + rename, mv -T semantics)."""
-    link = layout.current_link()
-    resolved = Path(os.path.realpath(target))
-    if not resolved.is_dir():
-        raise RuntimeFailure(f'cannot switch current to missing directory {target}')
-    tmp = link.with_name(f'current.new-{os.getpid()}')
-    if tmp.is_symlink() or tmp.exists():
-        tmp.unlink()
-    os.symlink(str(resolved), tmp)
-    os.replace(tmp, link)
+_lifecycle_mutex = threading.RLock()
+_lifecycle_held: set[str] = set()
+
+
+@contextmanager
+def lifecycle_lock(layout: Layout):
+    """Serialize cooperating current-pointer changes, including rollback.
+
+    Reentrant for this process, nonblocking across processes. The shared
+    project release lease is still required; this is not a replacement for it.
+    """
+    key = str(layout.opt_root.resolve())
+    with _lifecycle_mutex:
+        if key in _lifecycle_held:
+            yield
+            return
+        fd = os.open(layout.opt_root / '.lifecycle.lock',
+                     os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise PreflightError('another lifecycle operation holds the current-pointer lock') from None
+            _lifecycle_held.add(key)
+            try:
+                yield
+            finally:
+                _lifecycle_held.remove(key)
+        finally:
+            os.close(fd)
+
+
+def require_current_revision(layout: Layout, expected_revision: str | None) -> None:
+    if expected_revision is None:
+        return
+    if not re.fullmatch(r'[0-9a-f]{40}', expected_revision):
+        raise UsageError('expected revision must be a full lowercase Git commit SHA')
+    current = current_target(layout)
+    actual = (manifest_summary(current) or {}).get('git_commit') if current else None
+    if actual != expected_revision:
+        raise PreflightError(f'current revision changed: expected {expected_revision}, actual {actual!r}')
+
+
+def switch_current(layout: Layout, target: Path, *, expected_revision: str | None = None) -> None:
+    """Compare the installed revision, then atomically replace current under a lock."""
+    with lifecycle_lock(layout):
+        require_current_revision(layout, expected_revision)
+        link = layout.current_link()
+        resolved = Path(os.path.realpath(target))
+        if not resolved.is_dir():
+            raise RuntimeFailure(f'cannot switch current to missing directory {target}')
+        tmp = link.with_name(f'current.new-{os.getpid()}')
+        if tmp.is_symlink() or tmp.exists():
+            tmp.unlink()
+        os.symlink(str(resolved), tmp)
+        os.replace(tmp, link)
 
 
 def current_target(layout: Layout) -> Path | None:
@@ -2038,12 +2086,16 @@ def cmd_ui_publish(args, layout: Layout, runner: Runner) -> None:
 
 
 def cmd_update(args, layout: Layout, runner: Runner) -> None:
-    with UpdateBudget(getattr(args, 'operation_deadline_secs', None)) as budget:
-        return update_with_budget(args, layout, runner, budget)
+    require_root()
+    with lifecycle_lock(layout):
+        with UpdateBudget(getattr(args, 'operation_deadline_secs', None)) as budget:
+            return update_with_budget(args, layout, runner, budget)
 
 
 def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudget) -> None:
     require_root()
+    expected_revision = getattr(args, 'expected_revision', None)
+    require_current_revision(layout, expected_revision)
     name = resolve_instance_name(args.name, layout)
     env = read_installed_env(layout, name)
     requested_node_url = getattr(args, 'node_public_url', None)
@@ -2092,6 +2144,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     env_updated = False
     ui_receipt = None
     try:
+        require_current_revision(layout, expected_revision)
         final = next_version_dir(versions_root, new_commit)
         os.rename(staging, final)
         if requested_node_url is not None or requested_legacy_origins is not None:
@@ -2102,7 +2155,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
                 updated_env['GPTADMIN_LEGACY_PUBLIC_ORIGINS'] = requested_legacy_origins
             write_env_file(env_path, updated_env)
             env_updated = True
-        switch_current(layout, final)
+        switch_current(layout, final, expected_revision=expected_revision)
         systemctl(runner, 'restart', unit)
         wait_healthy(origin, new_commit)
         if name == 'primary' and has_admin_ui:
@@ -2111,14 +2164,24 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
             ui_receipt = publish_admin_ui(ui_source, public_root, ui_manifest['git_commit'])
     except (RuntimeFailure, PreflightError, OSError) as error:
         budget.cleanup()
-        # ANY failure after the switch rolls back to the previous version dir.
+        if current_target(layout) != final:
+            # Never overwrite or restart a newer deployment after a failed CAS.
+            # Cancel only our unchanged runtime's drain, not a peer's runtime.
+            if current_target(layout) == current:
+                if env_updated and previous_env_text is not None:
+                    atomic_write(env_path, previous_env_text, 0o600)
+                if drain_active:
+                    drain_cancel(origin, token)
+            raise RuntimeFailure(f'update aborted before current switch: {error}') from None
+        # Roll back only the candidate we actually installed.
         rollback_note = ''
         try:
+            require_current_revision(layout, new_commit)
             if ui_receipt is not None:
                 restore_admin_ui(ui_receipt, new_commit)
             if env_updated and previous_env_text is not None:
                 atomic_write(env_path, previous_env_text, 0o600)
-            switch_current(layout, current)
+            switch_current(layout, current, expected_revision=new_commit)
             systemctl(runner, 'restart', unit)
             wait_healthy(origin, previous_manifest.get('git_commit') or '')
             if not drain_cancel(origin, token):
@@ -2522,6 +2585,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     update = sub.add_parser('update', help='drain, switch to a new package, verify; auto-rollback on failure')
     update.add_argument('--package', required=True, metavar='TAR.GZ')
+    update.add_argument('--expected-revision', default=None, metavar='SHA',
+                        help='fail closed unless the installed commit still equals this full SHA')
     update.add_argument('--name', default=None, metavar='NAME')
     update.add_argument('--wait-secs', type=float, default=300, metavar='SECS',
                         help='drain ready_to_stop deadline; default 300')

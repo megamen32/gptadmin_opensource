@@ -66,7 +66,7 @@ func filesystemACLForRequest(r *http.Request, target, tool string, args map[stri
 		if profile.ReadRoots == nil || len(*profile.ReadRoots) == 0 {
 			return nil, errors.New("GrepMesh access requires non-empty read_roots")
 		}
-	} else if tool != "file_editor" && tool != "system_inspect" {
+	} else if tool != "file_editor" && tool != "file_transfer" && tool != "system_inspect" {
 		return nil, nil
 	}
 	digest, err := filesystemACLArgumentsDigest(args)

@@ -1200,14 +1200,18 @@ class NodeAutoupdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
             root=Path(d);layout=manager.Layout(opt_root=root/'opt')
             old=layout.versions_root()/'old-1';old.mkdir(parents=True)
+            (old/'manifest.json').write_text(json.dumps({'git_commit':'1'*40}))
             manager.switch_current(layout,old)
             def extract(package,arch,target):
-                target.mkdir();return {'git_commit':'2'*40,'build_version':123}
+                target.mkdir()
+                manifest={'git_commit':'2'*40,'build_version':123}
+                (target/'manifest.json').write_text(json.dumps(manifest))
+                return manifest
             for name,value in [('require_root',None),('resolve_instance_name','one'),
                                ('read_installed_env',{}),('read_admin_token','unit-only'),
                                ('origin_from_env','http://unit.invalid'),('host_arch','amd64'),
                                ('check_disk_floor',None),('verify_elf_binary',None),
-                               ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True),
+                               ('drain_begin',True),
                                ('drain_wait_ready',{'ready_to_stop':True}),('wait_healthy',None)]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
             stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
@@ -1229,16 +1233,20 @@ class NodeAutoupdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
             root=Path(d);layout=manager.Layout(opt_root=root/'opt',config_root=root/'config')
             old=layout.versions_root()/'old-1';old.mkdir(parents=True)
+            (old/'manifest.json').write_text(json.dumps({'git_commit':'1'*40}))
             manager.switch_current(layout,old)
             manager.write_env_file(layout.env_file('one'),{
                 'CTL_TOKEN':'unit-only','PUBLIC_ORIGIN':'https://app.example.test',
                 'GPTADMIN_NODE_PUBLIC_URL':'https://old.example.test'})
             def extract(package,arch,target):
-                target.mkdir();return {'git_commit':'2'*40,'build_version':123}
+                target.mkdir()
+                manifest={'git_commit':'2'*40,'build_version':123}
+                (target/'manifest.json').write_text(json.dumps(manifest))
+                return manifest
             for name,value in [('require_root',None),('resolve_instance_name','one'),
                 ('read_admin_token','unit-only'),('origin_from_env','https://app.example.test'),
                 ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
-                ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True),
+                ('drain_begin',True),
                 ('drain_wait_ready',{'ready_to_stop':True})]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
             stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
@@ -1279,15 +1287,19 @@ class NodeAutoupdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
             root=Path(d);layout=manager.Layout(opt_root=root/'opt',config_root=root/'config')
             old=layout.versions_root()/'old-1';old.mkdir(parents=True);manager.switch_current(layout,old)
+            (old/'manifest.json').write_text(json.dumps({'git_commit':'1'*40}))
             manager.write_env_file(layout.env_file('one'),{
                 'CTL_TOKEN':'unit-only','PUBLIC_ORIGIN':'https://app.example.test',
                 'GPTADMIN_LEGACY_PUBLIC_ORIGINS':'https://existing.example'})
             def extract(package,arch,target):
-                target.mkdir();return {'git_commit':'2'*40,'build_version':123}
+                target.mkdir()
+                manifest={'git_commit':'2'*40,'build_version':123}
+                (target/'manifest.json').write_text(json.dumps(manifest))
+                return manifest
             for name,value in [('require_root',None),('resolve_instance_name','one'),
                 ('read_admin_token','unit-only'),('origin_from_env','https://app.example.test'),
                 ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
-                ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True),
+                ('drain_begin',True),
                 ('drain_wait_ready',{'ready_to_stop':True})]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
             stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))

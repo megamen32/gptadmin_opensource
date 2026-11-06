@@ -362,13 +362,13 @@ func authorizeFilesystemProfileAction(r *http.Request, target, tool string, args
 	if tool == "system_resource_summary" {
 		return nil
 	}
-	if tool != "system_inspect" && tool != "file_editor" {
+	if tool != "system_inspect" && tool != "file_editor" && tool != "file_transfer" {
 		return errors.New("filesystem-bound profile cannot call this tool")
 	}
-	if strings.HasPrefix(target, "shell:") && tool != "system_inspect" && tool != "file_editor" {
+	if strings.HasPrefix(target, "shell:") && tool != "system_inspect" && tool != "file_editor" && tool != "file_transfer" {
 		return errors.New("filesystem-bound profile cannot call this shell tool")
 	}
-	read := tool == "system_inspect" || (tool == "file_editor" && firstString(args, "action") == "view")
+	read := tool == "system_inspect" || (tool == "file_editor" && firstString(args, "action") == "view") || (tool == "file_transfer" && fileTransferReadAction(firstString(args, "action")))
 	if read && profile.ReadRoots == nil {
 		return errors.New("filesystem-bound profile has no read roots")
 	}
@@ -423,6 +423,7 @@ func authorizeReadOnlyIdentityAction(r *http.Request, target, tool string, args 
 //	mcp_manage       list/status/config read; upsert/remove/enable/disable/restart write
 //	system_inspect   read_file/list_directory read only
 var readActionTools = map[string]map[string]bool{
+	"file_transfer":   {"download_begin": true, "download_chunk": true, "download_abort": true},
 	"file_editor":     {"view": true},
 	"file_checkpoint": {"list": true, "diff": true},
 	"file_backup":     {"list": true},
@@ -560,6 +561,8 @@ func readOnlyHubToolAllowed(tool string) bool {
 // readOnlyFileToolAllowed lists the file tools a read-only script may use.
 func readOnlyFileToolAllowed(tool string, args map[string]any) bool {
 	switch tool {
+	case "file_transfer":
+		return fileTransferReadAction(firstString(args, "action"))
 	case "file_editor":
 		return firstString(args, "action") == "view"
 	case "file_checkpoint":
