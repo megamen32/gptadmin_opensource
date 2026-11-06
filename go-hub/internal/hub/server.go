@@ -7651,11 +7651,8 @@ func mcpToolResult(payload any) map[string]any {
 		"content":           []map[string]any{{"type": "text", "text": string(b)}},
 		"structuredContent": payload,
 	}
-	if m, ok := payload.(map[string]any); ok && m["executed"] == false {
-		code := firstString(mapValue(m["error"]), "code")
-		if code == "instructions_required" || code == "instructions_unavailable" || code == "schema_reference_unavailable" {
-			out["isError"] = true
-		}
+	if m, ok := payload.(map[string]any); ok && m["executed"] == false && m["error"] != nil {
+		out["isError"] = true
 	}
 	return out
 }
