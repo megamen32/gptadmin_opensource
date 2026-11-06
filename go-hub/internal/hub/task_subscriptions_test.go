@@ -73,6 +73,41 @@ func TestMCPTaskSubscriptionStreamsCompletion(t *testing.T) {
 	}
 }
 
+func TestMCPSubscriptionAcknowledgesUnsupportedFiltersWithoutTasksCapability(t *testing.T) {
+	s := New(Config{CtlToken: "ctl", DefaultTimeout: 1, PollMaxTimeout: 1})
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := `{"jsonrpc":"2.0","id":"listen-empty","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/mcp", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer ctl")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "subscriptions/listen")
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("not an event stream: %s", response.Header.Get("Content-Type"))
+	}
+	scanner := bufio.NewScanner(response.Body)
+	if !scanner.Scan() || !strings.HasPrefix(scanner.Text(), "data: ") {
+		t.Fatal("missing acknowledgement")
+	}
+	var ack map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(scanner.Text(), "data: ")), &ack); err != nil {
+		t.Fatal(err)
+	}
+	params := mapValue(ack["params"])
+	if ack["method"] != "notifications/subscriptions/acknowledged" || len(mapValue(params["notifications"])) != 0 {
+		t.Fatalf("unsupported filters must be omitted: %v", ack)
+	}
+}
+
 func TestMCPTaskSubscriptionRejectsForeignReceipt(t *testing.T) {
 	profile := AccessProfile{ID: "limited", Version: 7, AccessMode: accessModeFull}
 	s := &Server{accessProfiles: map[string]AccessProfile{"limited": profile}, shellJobs: map[string]*shellJob{

@@ -17,14 +17,15 @@ var taskSubscriptionSlots = make(chan struct{}, 128)
 func (s *Server) serveTaskSubscription(w http.ResponseWriter, r *http.Request, body map[string]any, owner string) {
 	id := body["id"]
 	params := mapValue(body["params"])
-	if !mcpTasksOptedIn(params) {
+	filter := mapValue(params["notifications"])
+	rawValue, hasTasks := filter["taskIds"]
+	if hasTasks && !mcpTasksOptedIn(params) {
 		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32021, "message": "Missing required client capability", "data": map[string]any{"requiredCapabilities": map[string]any{"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}}}}}})
 		return
 	}
-	filter := mapValue(params["notifications"])
-	raw, ok := filter["taskIds"].([]any)
-	if !ok || len(raw) == 0 || len(raw) > 64 || id == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "one to 64 taskIds and a request id are required"}})
+	raw, ok := rawValue.([]any)
+	if id == nil || (hasTasks && (!ok || len(raw) > 64)) {
+		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "request id and at most 64 taskIds are required"}})
 		return
 	}
 	ids := make([]string, 0, len(raw))
@@ -72,7 +73,15 @@ func (s *Server) serveTaskSubscription(w http.ResponseWriter, r *http.Request, b
 		return true
 	}
 	meta := map[string]any{"io.modelcontextprotocol/subscriptionId": id}
-	if !writeEvent(map[string]any{"jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": map[string]any{"notifications": map[string]any{"taskIds": ids}, "_meta": meta}}) {
+	accepted := map[string]any{}
+	if len(ids) > 0 {
+		accepted["taskIds"] = ids
+	}
+	if !writeEvent(map[string]any{"jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": map[string]any{"notifications": accepted, "_meta": meta}}) {
+		return
+	}
+	if len(ids) == 0 {
+		<-r.Context().Done()
 		return
 	}
 	last := make(map[string][]byte)
