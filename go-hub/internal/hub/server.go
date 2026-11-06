@@ -4767,7 +4767,7 @@ func childMCPResponse(raw map[string]any) map[string]any {
 
 func childMCPTools(raw map[string]any) []map[string]any {
 	child := childMCPResponse(raw)
-	items := sliceValue(child["tools"])
+	items := outputRows(child["tools"])
 	tools := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		if tool := mapValue(item); len(tool) > 0 {
