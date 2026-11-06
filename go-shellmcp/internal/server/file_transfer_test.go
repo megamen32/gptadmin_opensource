@@ -14,7 +14,12 @@ import (
 
 func transferTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	dir := t.TempDir()
+	// macOS temporary directories may be reached through /var symlink aliases.
+	// The transfer contract intentionally accepts canonical roots only.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{cfg: Config{InspectRoots: []string{dir}}}
 	t.Cleanup(s.closeBinaryTransfers)
 	return s, dir

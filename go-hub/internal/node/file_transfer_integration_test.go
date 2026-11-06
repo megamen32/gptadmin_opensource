@@ -48,7 +48,12 @@ func findTransfer(value any) map[string]any {
 	return nil
 }
 func TestRealPrivateBinaryTransferThroughHub(t *testing.T) {
-	dir := t.TempDir()
+	// macOS temporary directories may be reached through /var symlink aliases.
+	// The transfer contract intentionally accepts canonical roots only.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := hub.New(hub.Config{ConfigDir: filepath.Join(dir, "hub"), CtlToken: "binary-test-control-token", ShellToken: "binary-test-shell-token", DefaultTimeout: 20 * time.Second})
 	defer router.Close()
 	web := httptest.NewServer(router.Handler())
