@@ -12,7 +12,8 @@ Upload: upload_begin(path,size,sha256), then contiguous upload_chunk calls
 (transfer_id,path,offset,data_base64, optional chunk sha256). upload_status
 returns received, so a lost response is recoverable. Exact chunk retries are
 idempotent. upload_commit verifies size and SHA256 and atomically creates a
-NEW 0600 file without overwriting any destination. The same commit can be
+NEW 0600 file without overwriting any destination. A privileged Node preserves
+the destination directory owner, so the ordinary OS user can read the upload. The same commit can be
 retried while its handle is retained. upload_abort releases the handle only.
 
 Download: download_begin(path) creates a bounded snapshot and returns size,

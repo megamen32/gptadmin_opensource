@@ -329,6 +329,11 @@ func transferCommit(t *binaryTransfer) error {
 		_, err = f.Write(t.data)
 	}
 	if err == nil {
+		// Match file_editor: a privileged Node must leave the new private file
+		// readable by the destination directory's ordinary OS owner.
+		err = applyOpenFileOwnership(f, ownershipFromInfo(t.parentInfo))
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	closeErr := f.Close()
