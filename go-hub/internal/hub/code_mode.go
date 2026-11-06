@@ -19,8 +19,9 @@ func codeModeInputSchema() map[string]any {
 				"maxLength":   codeModeMaxCodeBytes,
 				"description": "Concise JavaScript body. Prefer typed MCP tools over shell. Search with search({query,limit}).items (legacy .results retained). The Hub validates tool inputSchema before dispatch; invalid arguments return the exact field, expected type and reason. Call await tools[\"<exact target>\"].tool(args); short aliases only if unique. await mcp.shell(\"shell:<host>\", [\"python3\", \"-\"], {stdin:source}) sends multiline code as stdin without Bash quoting; use file_editor.create for durable scripts and argv to run them. Avoid nested quotes, heredocs and base64. Raw cmd strings remain for intentional shell scripts. For long work use await mcp.tasks.start(target,tool,args), do independent work, then mcp.tasks.wait(taskId,{timeout_ms:30000}) once or get/cancel/update; never resubmit to poll. Existing mcp.call/files and profile policies remain. Return concise data; verbose:true adds diagnostics. No direct filesystem, environment, processes, network or timers.",
 			},
-			"context": map[string]any{"type": "string", "description": "Instruction context returned by search when required."},
-			"verbose": map[string]any{"type": "boolean", "default": false, "description": "Include execution timings, limits and empty logs. Default result is compact."},
+			"context":                 map[string]any{"type": "string", "description": "Instruction context returned by search when required."},
+			"verbose":                 map[string]any{"type": "boolean", "default": false, "description": "Include execution timings, limits and empty logs. Default result is compact."},
+			"include_partial_results": map[string]any{"type": "boolean", "default": false, "description": "On failure, include bounded redacted receipts for calls already completed; the failure still stops the run."},
 			"timeout_ms": map[string]any{
 				"type": "integer", "minimum": 100,
 				"maximum":     int(codeModeMaxTimeout / 1e6),
@@ -68,9 +69,11 @@ func codeModeOutputSchema() map[string]any {
 			"error": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"code":            map[string]any{"type": "string"},
-					"message":         map[string]any{"type": "string"},
-					"calls_completed": map[string]any{"type": "integer", "minimum": 0},
+					"code":              map[string]any{"type": "string"},
+					"message":           map[string]any{"type": "string"},
+					"calls_completed":   map[string]any{"type": "integer", "minimum": 0},
+					"completed":         map[string]any{"type": "array", "description": "Opt-in bounded redacted receipts of calls completed before failure.", "items": map[string]any{"type": "object"}},
+					"completed_omitted": map[string]any{"type": "integer", "minimum": 0},
 				},
 				"required": []string{"code", "message"},
 			},
@@ -112,6 +115,10 @@ func (s *Server) callCodeModeToolMode(r *http.Request, args map[string]any, read
 	if _, present := args["verbose"]; present && !hasVerbose {
 		return codeModeFailed("invalid_arguments", "verbose must be a boolean", 0), http.StatusBadRequest
 	}
+	includePartial, hasPartial := args["include_partial_results"].(bool)
+	if _, present := args["include_partial_results"]; present && !hasPartial {
+		return codeModeFailed("invalid_arguments", "include_partial_results must be a boolean", 0), http.StatusBadRequest
+	}
 	limits, err := resolveCodeModeLimits(args)
 	if err != nil {
 		return codeModeFailed("invalid_arguments", err.Error(), 0), http.StatusBadRequest
@@ -126,7 +133,14 @@ func (s *Server) callCodeModeToolMode(r *http.Request, args map[string]any, read
 	}
 	run, runErr := s.runCodeMode(r.Context(), r, code, limits)
 	if runErr != nil {
-		return codeModeFailedWith(runErr.code, runErr.Error(), runErr.call, runErr.receipt), codeModeStatusFor(runErr.code)
+		failure := codeModeFailedWith(runErr.code, runErr.Error(), runErr.call, runErr.receipt)
+		if includePartial && len(runErr.completed) > 0 {
+			failure["error"].(map[string]any)["completed"] = runErr.completed
+		}
+		if includePartial && runErr.completedOmitted > 0 {
+			failure["error"].(map[string]any)["completed_omitted"] = runErr.completedOmitted
+		}
+		return failure, codeModeStatusFor(runErr.code)
 	}
 	// A successful Code Mode run should read like a tool result, not an
 	// execution diagnostic dump. Keep full diagnostics via verbose:true.

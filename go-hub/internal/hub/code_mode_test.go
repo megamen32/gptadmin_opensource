@@ -860,3 +860,35 @@ func TestCodeModeReleasesBudgetOnCancel(t *testing.T) {
 	}
 	release()
 }
+
+func TestCodeModeFailurePreservesCompletedReceipts(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	response, status := codeModeRun(t, s, r, map[string]any{"code": "await mcp.call('hub','demo',{}); await mcp.call('shell:missing','shell_exec',{cmd:'true'});", "include_partial_results": true})
+	if status == http.StatusOK || response["status"] != "failed" {
+		t.Fatalf("failure was hidden: %d %#v", status, response)
+	}
+	failure := mapValue(response["error"])
+	completed, ok := failure["completed"].([]map[string]any)
+	if !ok || len(completed) != 1 {
+		t.Fatalf("completed result was lost: %#v", failure)
+	}
+	if firstString(completed[0], "target") != "hub" || firstString(completed[0], "tool") != "demo" {
+		t.Fatalf("wrong receipt: %#v", completed)
+	}
+	if completed[0]["result"] == nil {
+		t.Fatalf("completed receipt has no usable result: %#v", completed[0])
+	}
+}
+
+func TestCodeModeFailureKeepsPartialResultsPrivateByDefault(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	response, status := codeModeRun(t, s, r, map[string]any{"code": "await mcp.call('hub','demo',{}); await mcp.call('shell:missing','shell_exec',{cmd:'true'});"})
+	if status == http.StatusOK {
+		t.Fatal("failure hidden")
+	}
+	if _, ok := mapValue(response["error"])["completed"]; ok {
+		t.Fatal("partial results exposed without opt-in")
+	}
+}

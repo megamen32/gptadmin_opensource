@@ -213,6 +213,13 @@ func (s *Server) cancelTaskLocked(taskID string) {
 	}
 }
 
+func shellTaskOwnedBy(j *shellJob, owner string) bool {
+	if owner == "" || owner == "hub" || owner == "shell:"+j.Server {
+		return true
+	}
+	return j.ToolName == "mcp_call" && owner == "mcp:shell:"+j.Server+":"+firstString(j.Arguments, "ref")
+}
+
 func (s *Server) mcpTaskCancel(taskID, owner string) (any, any) {
 	if taskID == "" {
 		return nil, map[string]any{"code": -32602, "message": "taskId is required"}
@@ -223,7 +230,7 @@ func (s *Server) mcpTaskCancel(taskID, owner string) (any, any) {
 		return nil, taskPersistenceRPCError(err)
 	}
 	if j := s.shellJobs[taskID]; j != nil {
-		if owner != "" && owner != "shell:"+j.Server && owner != "hub" {
+		if !shellTaskOwnedBy(j, owner) {
 			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
 		}
 	} else if j := s.relayJobs[taskID]; j != nil {

@@ -8524,6 +8524,18 @@ func (s *Server) serverMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": headerErr})
 		return
 	}
+	if firstString(body, "method") == "subscriptions/listen" && isMCP20260728Request(r, body) {
+		if !agentOwnerConnectionAllowed(r, agent) {
+			writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": connectionOwnerRPCError()})
+			return
+		}
+		if _, managed := r.Context().Value(connectionContextKey{}).(connectionScope); managed {
+			writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": body["id"], "error": map[string]any{"code": -32601, "message": "managed child connection supports tools only"}})
+			return
+		}
+		s.serveTaskSubscription(w, r, body, agent.AgentID)
+		return
+	}
 	result, rpcErr, noContent := s.agentMCPJSONRPC(r, agent, body)
 	if firstString(body, "method") == "initialize" {
 		if protocol := firstString(mapValue(result), "protocolVersion"); protocol != "" {
@@ -8954,6 +8966,20 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name, args); blocked {
 			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
 		}
+		if mcpTasksOptedIn(params) && isChildMCPAgent(agent) && strings.EqualFold(firstString(agent.Meta, "child_ref"), "GrepMesh") && (name == "search_text" || name == "read_text") {
+			// Reuse the authorized child dispatch and its durable receipt. Do
+			// not synthesize a second task or bypass filesystem policy.
+			meta := mapValue(params["_meta"])
+			key := firstString(meta, "com.gptadmin/idempotencyKey")
+			raw, status := s.executeMCPTool(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, key)
+			if status >= 400 {
+				return mcpToolResult(raw), nil, false
+			}
+			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
+				return taskResult, nil, false
+			}
+			return mcpToolResult(raw), nil, false
+		}
 		if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" {
 			raw := s.callShellToolWithTraceParent(agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
 			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
@@ -9007,11 +9033,14 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if !mcpTasksOptedIn(params) {
 			return nil, map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}, false
 		}
-		result, err := s.mcpTaskGet(firstString(params, "taskId"), agent.AgentID)
+		result, err := s.mcpTaskGetForRequest(r, firstString(params, "taskId"), agent.AgentID)
 		return result, err, false
 	case "tasks/cancel":
 		if !mcpTasksOptedIn(params) {
 			return nil, map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}, false
+		}
+		if _, err := s.mcpTaskGetForRequest(r, firstString(params, "taskId"), agent.AgentID); err != nil {
+			return nil, err, false
 		}
 		result, err := s.mcpTaskCancel(firstString(params, "taskId"), agent.AgentID)
 		return result, err, false
@@ -9467,6 +9496,10 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": id, "error": headerErr})
 		return
 	}
+	if firstString(body, "method") == "subscriptions/listen" && isMCP20260728Request(r, body) {
+		s.serveTaskSubscription(w, r, body, "")
+		return
+	}
 	method := firstString(body, "method")
 	params := mapValue(body["params"])
 	r = requestWithInstructionContext(r, params)
@@ -9677,7 +9710,10 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if !mcpTasksOptedIn(params) {
 			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
 		} else {
-			result, rpcErr = s.mcpTaskCancel(firstString(params, "taskId"), "")
+			_, rpcErr = s.mcpTaskGetForRequest(r, firstString(params, "taskId"), "")
+			if rpcErr == nil {
+				result, rpcErr = s.mcpTaskCancel(firstString(params, "taskId"), "")
+			}
 		}
 	case "tasks/update":
 		if !mcpTasksOptedIn(params) {
@@ -10106,7 +10142,7 @@ func (s *Server) mcpTaskGetForRequest(r *http.Request, taskID, owner string) (an
 		return nil, taskPersistenceRPCError(err)
 	}
 	if j := s.shellJobs[taskID]; j != nil {
-		if owner != "" && owner != "shell:"+j.Server && owner != "hub" {
+		if !shellTaskOwnedBy(j, owner) {
 			s.mu.Unlock()
 			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
 		}

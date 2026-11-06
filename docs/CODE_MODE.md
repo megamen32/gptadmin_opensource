@@ -38,7 +38,7 @@ same request identity, target/tool ACL, schema contract, approval, autonomous
 budget, idempotency and audit path as a normal Hub call. The object form and
 `call(target, tool, args, {index:true})` are supported. A failed, denied,
 pending or nonterminal call stops later calls; receipts are retained and no
-call is automatically replayed. Recursive `exec` is denied.
+call is automatically replayed. Recursive `exec` is denied. For an aggregated read where completed results are useful even when one call stops the run, set `include_partial_results: true` on the outer `exec` call. The failed response then includes bounded, redacted completed-call receipts in `error.completed` and an `error.completed_omitted` count when the output budget is exhausted. The default remains private and the failure remains non-successful; a pending job is reconciled by its exact receipt, never replayed.
 
 The `mcp` facade has `search`, `discover`, `schema`, `job` and `expand` helpers.
 Root Hub tools, registered independent MCP roots and registered child MCP tools

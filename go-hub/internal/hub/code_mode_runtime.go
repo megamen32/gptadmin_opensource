@@ -124,7 +124,9 @@ type codeModeError struct {
 	call int
 	// receipt is the bounded original receipt of the first non-completing call,
 	// preserved so a pending approval or job id is never lost.
-	receipt map[string]any
+	receipt          map[string]any
+	completed        []map[string]any
+	completedOmitted int
 }
 
 func (e *codeModeError) Error() string { return e.detail }
@@ -238,7 +240,8 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 	// caught the exception and returned normally. The original receipt is what
 	// the caller is told.
 	if fatal := bridge.fatalReceipt(); fatal != nil {
-		return nil, &codeModeError{code: fatal.code, detail: fatal.message, call: bridge.calls(), receipt: fatal.receipt}
+		completed, omitted := bridge.completedReceiptSnapshot()
+		return nil, &codeModeError{code: fatal.code, detail: fatal.message, call: bridge.calls(), receipt: fatal.receipt, completed: completed, completedOmitted: omitted}
 	}
 	if evalErr != nil {
 		return nil, bridge.annotate(bridge.classify(evalErr, elapsed))

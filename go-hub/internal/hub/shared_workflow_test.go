@@ -118,3 +118,17 @@ func TestSharedWorkflowMissingNamedProfileNeverDeliversDefault(t *testing.T) {
 func expectedSharedInstructions(profile string) string {
 	return profile + "\n\n<!-- gptadmin-shared-workflow -->\n" + sharedWorkflowInstructions
 }
+
+func TestSharedWorkflowDeploysBeforePR(t *testing.T) {
+	w := strings.ToLower(sharedWorkflowInstructions)
+	for _, banned := range []string{"early draft pr", "mark ready after"} {
+		if strings.Contains(w, banned) {
+			t.Fatalf("stale early-PR wording: %q", banned)
+		}
+	}
+	for _, need := range []string{"only after that scenario passed", "do not ask again", "refs/lhc/release/<project>", "3 minutes"} {
+		if !strings.Contains(w, need) {
+			t.Fatalf("missing rule: %q", need)
+		}
+	}
+}

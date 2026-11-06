@@ -218,19 +218,22 @@ type codeModeBridge struct {
 	limits   codeModeLimits
 	readOnly bool
 
-	mu              sync.Mutex
-	pendingMu       sync.Mutex
-	pendingCalls    map[string]*codeModePendingCall
-	pendingStart    []string
-	pendingNext     uint64
-	pendingClosed   bool
-	pendingWorkers  sync.WaitGroup
-	callCount       int
-	logs            []any
-	logBytes        int
-	lastReceipt     map[string]any
-	toolCalls       []map[string]any
-	preparedSchemas map[string]any
+	mu                    sync.Mutex
+	pendingMu             sync.Mutex
+	pendingCalls          map[string]*codeModePendingCall
+	pendingStart          []string
+	pendingNext           uint64
+	pendingClosed         bool
+	pendingWorkers        sync.WaitGroup
+	callCount             int
+	logs                  []any
+	logBytes              int
+	lastReceipt           map[string]any
+	completedReceipts     []map[string]any
+	completedReceiptBytes int
+	completedOmitted      int
+	toolCalls             []map[string]any
+	preparedSchemas       map[string]any
 	// origins records every target/tool this run read. A result derived from
 	// the run is bound to all of them, not only to the last call, so a right
 	// that is withdrawn from any of them also withdraws the derived result.
@@ -309,6 +312,18 @@ func (b *codeModeBridge) lastReceiptSnapshot() map[string]any {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return cloneMap(b.lastReceipt)
+}
+
+// completedReceiptSnapshot copies bounded evidence under the same lock used
+// by in-flight workers, including when shutdown cannot await every worker.
+func (b *codeModeBridge) completedReceiptSnapshot() ([]map[string]any, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]map[string]any, 0, len(b.completedReceipts))
+	for _, receipt := range b.completedReceipts {
+		out = append(out, cloneMap(receipt))
+	}
+	return out, b.completedOmitted
 }
 
 // toolCallTrace returns call metadata for a separate UI timeline. The arguments
@@ -999,6 +1014,19 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	}
 	b.mu.Lock()
 	b.lastReceipt = receipt
+	// Keep bounded, redacted completed receipts if a later call fails. The
+	// failure remains sticky; these are evidence, not permission to continue.
+	encodedReceipt, receiptErr := json.Marshal(receipt)
+	budget := b.limits.maxOut / 2
+	if budget > 8192 {
+		budget = 8192
+	}
+	if receiptErr == nil && b.completedReceiptBytes+len(encodedReceipt) <= budget {
+		b.completedReceipts = append(b.completedReceipts, cloneMap(receipt))
+		b.completedReceiptBytes += len(encodedReceipt)
+	} else {
+		b.completedOmitted++
+	}
 	b.mu.Unlock()
 	// A tail is not the full log. Remember the job, so the confirmed full
 	// output can be used instead of the tail when this result is stored.
