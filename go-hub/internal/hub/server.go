@@ -4629,6 +4629,20 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 			agents = append(agents, s.withExposeMetaLocked(controlAgentForShell(cp), r))
 		}
 	}
+	// A new node can be explicitly enrolled with its executor identity even
+	// when no legacy ShellMCP record exists. Project only a live membership
+	// route with that owner-granted identity; never replace a pending or
+	// previously approved registry entry, and never persist this projection.
+	for id, route := range s.membershipRoutes {
+		if !strings.HasPrefix(id, "shell:") || route.LocalID == "" || s.agents[id] != nil {
+			continue
+		}
+		member := Agent{AgentID: id, Name: "Shell: " + strings.TrimPrefix(id, "shell:"),
+			Kind: "virtual_shell", Transport: "node", Status: "online", LastSeen: nowFloat(),
+			Capabilities: []string{"shell", "system", "tasks", "logs"},
+			Meta:         map[string]any{"server_id": route.LocalID, "membership_transport": "authenticated_node_lease"}}
+		agents = append(agents, s.withExposeMetaLocked(member, r))
+	}
 	usedSlugs := map[string]bool{}
 	for _, a := range agents {
 		usedSlugs[exposedAgentSlug(a)] = true
@@ -8966,7 +8980,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name, args); blocked {
 			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
 		}
-		if mcpTasksOptedIn(params) && isChildMCPAgent(agent) && strings.EqualFold(firstString(agent.Meta, "child_ref"), "GrepMesh") && (name == "search_text" || name == "read_text") {
+		if mcpTasksOptedIn(params) && isChildMCPAgent(agent) {
 			// Reuse the authorized child dispatch and its durable receipt. Do
 			// not synthesize a second task or bypass filesystem policy.
 			meta := mapValue(params["_meta"])

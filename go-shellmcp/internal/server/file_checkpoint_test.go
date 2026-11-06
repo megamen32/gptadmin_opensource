@@ -74,7 +74,12 @@ func TestFileCheckpointRestoreCreatesReversibleSafetyCheckpoint(t *testing.T) {
 	_ = os.MkdirAll(project, 0o755)
 	a := filepath.Join(project, "a.txt")
 	b := filepath.Join(project, "b.txt")
-	_ = os.WriteFile(a, []byte("baseline\n"), 0o640)
+	if err := os.WriteFile(a, []byte("baseline\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(a, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	s := New(Config{DefaultHome: home, Name: "test-host"})
 	base, err := s.mcpFileCheckpoint(map[string]any{"action": "create", "path": project, "name": "baseline"})
 	if err != nil {

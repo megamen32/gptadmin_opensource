@@ -23,6 +23,9 @@ func TestFileEditorReplaceReturnsFreshIDs(t *testing.T) {
 	if err := os.WriteFile(path, []byte("alpha\nport=80\nomega\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	s := New(Config{DefaultHome: dir})
 
 	result, err := s.mcpFileEditor(map[string]any{"action": "str_replace", "path": path, "old_text": "port=80", "new_text": "port=8080"})

@@ -1291,7 +1291,7 @@ func codeModeCallPayload(response map[string]any, status int, target, tool strin
 		payload["job_id"] = jobID
 	}
 	// A pending approval is a real outcome the script must stop on, not success.
-	for _, key := range []string{"approval_id", "approval_required", "expires_at", "message", "retryable", "owner_target"} {
+	for _, key := range []string{"approval_id", "approval_required", "expires_at", "message", "retryable", "owner_target", "owner_endpoint", "outcome", "retry_policy"} {
 		if value, ok := response[key]; ok {
 			payload[key] = value
 		}

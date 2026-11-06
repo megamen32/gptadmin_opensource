@@ -6,6 +6,9 @@ import os
 import subprocess
 from pathlib import Path
 import json
+import http.client
+import urllib.error
+from io import BytesIO
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +20,78 @@ import gptadmin_node_macos_manage as manager
 
 
 class MacNodeUpdaterTests(unittest.TestCase):
+    def test_incomplete_release_index_is_retried_without_using_partial_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'state.json').write_text(json.dumps({'build_version':1083,'git_commit':'a'*40}))
+            (root/'autoupdate.json').write_text('{"enabled":true}')
+            complete = json.dumps([{'tag_name':'node-v1083-'+('a'*12),'draft':False,'prerelease':False}]).encode()
+            with patch.object(updater, 'ROOT', root), patch.object(updater, 'fetch', side_effect=[http.client.IncompleteRead(b'partial'), complete]) as fetch:
+                updater.update()
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(fetch.call_args_list[0], fetch.call_args_list[1])
+
+    def test_incomplete_release_index_retry_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'state.json').write_text(json.dumps({'build_version':1083,'git_commit':'a'*40}))
+            (root/'autoupdate.json').write_text('{"enabled":true}')
+            with patch.object(updater, 'ROOT', root), patch.object(updater, 'fetch', side_effect=http.client.IncompleteRead(b'partial')) as fetch:
+                with self.assertRaises(http.client.IncompleteRead): updater.update()
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_release_index_does_not_retry_authorization_refusal(self):
+        error = urllib.error.HTTPError(updater.API, 403, 'forbidden', {}, None)
+        with patch.object(updater, 'fetch', side_effect=error) as fetch:
+            with self.assertRaises(urllib.error.HTTPError): updater.release_index()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_rate_limited_api_selects_published_node_feed(self):
+        feed = b'''<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><id>tag:github.com,2008:Repository/1/node-v1083-aaaaaaaaaaaa</id><title>GPTAdmin Node 1083</title></entry>
+          <entry><id>tag:github.com,2008:Repository/1/node-v1084-bbbbbbbbbbbb</id><title>GPTAdmin Node 1084</title></entry>
+        </feed>'''
+        error = urllib.error.HTTPError(updater.API, 403, 'rate limited', {}, BytesIO(b'API rate limit exceeded'))
+        with patch.object(updater, 'fetch', side_effect=[error,feed]):
+            version, release, prefix, fallback = updater.select_public_release()
+        self.assertEqual((version, release['tag_name'], prefix, fallback), (1084, 'node-v1084-bbbbbbbbbbbb', 'bbbbbbbbbbbb', True))
+
+    def test_rate_limit_fallback_requires_exact_published_asset_checksum(self):
+        name = 'gptadmin-node-darwin-amd64.tar.gz'
+        with patch.object(updater, 'fetch', return_value=(b'a'*64+b'  '+name.encode()+b'\n')):
+            self.assertEqual(updater.release_checksum('https://github.com/megamen32/gptadmin_opensource/releases/download/node-v1084-bbbbbbbbbbbb/'+name, name), 'a'*64)
+        with patch.object(updater, 'fetch', return_value=b'a'*64+b'  other.tar.gz\n'):
+            with self.assertRaises(ValueError): updater.release_checksum('https://github.com/megamen32/gptadmin_opensource/releases/download/node-v1084-bbbbbbbbbbbb/'+name, name)
+
+    def test_rate_limit_fallback_rejects_unsafe_feed(self):
+        error = urllib.error.HTTPError(updater.API, 403, 'rate limited', {}, BytesIO(b'API rate limit exceeded'))
+        with patch.object(updater, 'fetch', side_effect=[error,b'<!DOCTYPE feed><feed/>']):
+            with self.assertRaises(ValueError): updater.select_public_release()
+
+    def test_release_selection_does_not_fallback_for_other_403(self):
+        error = urllib.error.HTTPError(updater.API, 403, 'forbidden', {}, BytesIO(b'permission denied'))
+        with patch.object(updater, 'fetch', side_effect=error) as fetch:
+            with self.assertRaises(urllib.error.HTTPError): updater.select_public_release()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_rate_limit_fallback_rejects_ambiguous_newest_version(self):
+        feed = b'''<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><id>tag:github.com,2008:Repository/1/node-v1084-aaaaaaaaaaaa</id><title>GPTAdmin Node 1084</title></entry>
+          <entry><id>tag:github.com,2008:Repository/1/node-v1084-bbbbbbbbbbbb</id><title>GPTAdmin Node 1084</title></entry>
+        </feed>'''
+        error = urllib.error.HTTPError(updater.API, 403, 'rate limited', {}, BytesIO(b'API rate limit exceeded'))
+        with patch.object(updater, 'fetch', side_effect=[error,feed]):
+            with self.assertRaisesRegex(ValueError, 'ambiguous'): updater.select_public_release()
+
+    def test_rate_limit_fallback_checks_full_public_source(self):
+        commit = 'b'*12 + 'c'*28
+        raw = (f'From {commit} Mon Sep 17 00:00:00 2001\nSubject: [PATCH] release\n\n'
+               f'Source-Commit: {"d"*40}\n---\n').encode()
+        with patch.object(updater, 'fetch', return_value=raw):
+            self.assertEqual(updater.release_source('b'*12), commit)
+        with patch.object(updater, 'fetch', return_value=raw):
+            with self.assertRaises(ValueError): updater.release_source('a'*12)
+
     def test_install_reports_prior_node_restore_failure_with_version_readback_context(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

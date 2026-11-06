@@ -291,6 +291,11 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 	conn.pendingMu.Lock()
 	conn.pending[frame.ID] = wait
 	conn.pendingMu.Unlock()
+	defer func() {
+		conn.pendingMu.Lock()
+		delete(conn.pending, frame.ID)
+		conn.pendingMu.Unlock()
+	}()
 	if err := conn.write(frame); err != nil {
 		conn.pendingMu.Lock()
 		delete(conn.pending, frame.ID)
@@ -331,6 +336,8 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 		s.writeNodePeerFailure(w, target, origin, endpoint, body, http.StatusGatewayTimeout,
 			"node connection did not return a receipt before the deadline; execution outcome may be unknown", !readingJob)
 	case <-r.Context().Done():
+		s.writeNodePeerFailure(w, target, origin, endpoint, body, http.StatusGatewayTimeout,
+			"node connection wait was cancelled before a receipt arrived", !readingJob)
 	}
 	return true
 }

@@ -284,3 +284,55 @@ func TestMembershipHeartbeatWithoutLegacyShellNeverPinsUnapprovedIdentity(t *tes
 		t.Fatalf("unapproved legacy shell identity bound by heartbeat %q", actual.LocalID)
 	}
 }
+
+func TestNewGrantedMemberAppearsInSchemaAndDiscovery(t *testing.T) {
+	writer := membershipWriterNode(t, "writer-node")
+	id, key := joinedMember44ForReconcile(t, writer, "stable-shell-id")
+	if got := member44Heartbeat(t, writer, key, "https://node44.example:9001"); got.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d %s", got.Code, got.Body.String())
+	}
+	agent, ok := findAgentForReconcile(visibleMember44ForReconcile(t, writer), "shell:node-44")
+	if !ok || agent.Status != "online" || firstString(agent.Meta, "server_id") != "stable-shell-id" {
+		t.Fatalf("enrolled member absent from discovery: %+v found=%v", agent, ok)
+	}
+	if _, status, detail := writer.selectMCPRelayTarget("shell:node-44"); status != http.StatusOK {
+		t.Fatalf("enrolled member schema target unavailable: %d %s", status, detail)
+	}
+	schema := membershipHTTP(writer, http.MethodPost, "/mcp-relay/tools", "fixture-owner", []byte(`{"target":"shell:node-44"}`))
+	if schema.Code != http.StatusOK || !strings.Contains(schema.Body.String(), `"shell_exec"`) {
+		t.Fatalf("enrolled member schema missing shell_exec: %d %s", schema.Code, schema.Body.String())
+	}
+	writer.mu.Lock()
+	_, persisted := writer.agents["shell:node-44"]
+	writer.mu.Unlock()
+	if persisted {
+		t.Fatal("membership projection must not change the approval registry")
+	}
+	writer.membershipMu.Lock()
+	writer.membership.Nodes[id].LocalID = ""
+	writer.membershipMu.Unlock()
+	writer.rebuildMembershipRoutes()
+	if _, found := findAgentForReconcile(visibleMember44ForReconcile(t, writer), "shell:node-44"); found {
+		t.Fatal("member without an owner-pinned executor identity was exposed")
+	}
+	writer.membershipMu.Lock()
+	writer.membership.Nodes[id].LocalID = "stable-shell-id"
+	writer.membershipMu.Unlock()
+	writer.rebuildMembershipRoutes()
+	writer.mu.Lock()
+	writer.agents["shell:node-44"] = &Agent{AgentID: "shell:node-44", Kind: "virtual_shell", Status: "awaiting_approval", Meta: map[string]any{"approved": false}}
+	writer.mu.Unlock()
+	if agent, found := findAgentForReconcile(visibleMember44ForReconcile(t, writer), "shell:node-44"); !found || agent.Status != "awaiting_approval" {
+		t.Fatalf("pending legacy approval was overwritten: %+v", agent)
+	}
+	writer.mu.Lock()
+	delete(writer.agents, "shell:node-44")
+	writer.mu.Unlock()
+	writer.membershipMu.Lock()
+	writer.membership.Nodes[id].State = nodeStateDisabled
+	writer.membershipMu.Unlock()
+	writer.rebuildMembershipRoutes()
+	if _, found := findAgentForReconcile(visibleMember44ForReconcile(t, writer), "shell:node-44"); found {
+		t.Fatal("disabled member remained discoverable")
+	}
+}
