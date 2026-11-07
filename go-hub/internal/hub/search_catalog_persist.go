@@ -20,6 +20,8 @@ type searchSchemaRecord struct {
 	ChildID       string           `json:"child_id"`
 	ParentID      string           `json:"parent_id"`
 	Fingerprint   string           `json:"fingerprint"`
+	AttemptedAt   time.Time        `json:"attempted_at,omitempty"`
+	Error         string           `json:"error,omitempty"`
 	LoadedAt      time.Time        `json:"loaded_at"`
 	Tools         []map[string]any `json:"tools"`
 }
@@ -52,7 +54,7 @@ func (s *Server) loadSearchSnapshot(kind string) map[string]*childSearchSchemaEn
 		if record.ChildID == "" || record.Fingerprint == "" || record.LoadedAt.IsZero() {
 			continue
 		}
-		out[key] = &childSearchSchemaEntry{catalogDigest: record.CatalogDigest, versioned: record.Versioned, childID: record.ChildID, parentID: record.ParentID, fingerprint: record.Fingerprint, loadedAt: record.LoadedAt, tools: boundedSearchChildTools(record.Tools)}
+		out[key] = &childSearchSchemaEntry{catalogDigest: record.CatalogDigest, versioned: record.Versioned, childID: record.ChildID, parentID: record.ParentID, fingerprint: record.Fingerprint, loadedAt: record.LoadedAt, attemptedAt: record.AttemptedAt, err: record.Error, tools: boundedSearchChildTools(record.Tools)}
 	}
 	return out
 }
@@ -69,7 +71,7 @@ func (s *Server) saveSearchSnapshot(kind string, entries map[string]*childSearch
 		if e.fingerprint == "" || e.loadedAt.IsZero() || len(e.tools) == 0 {
 			continue
 		}
-		snapshot.Entries[key] = searchSchemaRecord{CatalogDigest: e.catalogDigest, Versioned: e.versioned, ChildID: e.childID, ParentID: e.parentID, Fingerprint: e.fingerprint, LoadedAt: e.loadedAt, Tools: e.tools}
+		snapshot.Entries[key] = searchSchemaRecord{CatalogDigest: e.catalogDigest, Versioned: e.versioned, ChildID: e.childID, ParentID: e.parentID, Fingerprint: e.fingerprint, LoadedAt: e.loadedAt, AttemptedAt: e.attemptedAt, Error: e.err, Tools: e.tools}
 	}
 	data, err := json.Marshal(snapshot)
 	if err != nil || len(data) > searchSnapshotLimit {

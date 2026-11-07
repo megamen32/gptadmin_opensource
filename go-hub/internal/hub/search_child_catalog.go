@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// Child tool schemas are expensive to obtain: they travel through the existing
-// durable mcp_tools queue. Keep them outside the per-search FTS transaction and
+// Child tool schemas are read directly from their owners. Keep them outside
+// the per-search FTS transaction and
 // refresh only on a cold entry, descriptor change, or TTL expiry.
 const (
 	childSearchSchemaTTL        = 5 * time.Minute
@@ -25,9 +25,8 @@ const (
 	childSearchDescriptionLimit = 2000
 )
 
-// Every refresh goes through the durable mcp_tools queue. A search starts a
-// refresh for every cold reachable child, but only this many run at once, so a
-// large fleet warms in the background instead of four children per call.
+// Bootstrap and heartbeat refresh cold reachable children with bounded
+// concurrency. No durable execution jobs are created by schema reads.
 var childSearchRefreshSlots = make(chan struct{}, childSearchConcurrency)
 
 // childSearchUnreachable reports a child that cannot answer tools/list now.
@@ -47,6 +46,7 @@ type childSearchSchemaEntry struct {
 	parentID      string
 	fingerprint   string
 	loadedAt      time.Time
+	attemptedAt   time.Time
 	tools         []map[string]any
 	err           string
 	refreshing    bool
@@ -117,6 +117,11 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 	if entry.refreshing {
 		return entry.done
 	}
+	if entry.fingerprint != "" && entry.fingerprint != fingerprint {
+		entry.tools = nil
+		entry.loadedAt, entry.attemptedAt = time.Time{}, time.Time{}
+		entry.err = ""
+	}
 	entry.childID, entry.fingerprint = agent.AgentID, fingerprint
 	entry.refreshing, entry.done = true, make(chan struct{})
 	done := entry.done
@@ -147,11 +152,12 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 		if c.entries[key] == entry {
 			entry.refreshing = false
 			if rootSearchFingerprint(s, agent) == fingerprint {
-				entry.loadedAt, entry.err = time.Now(), failure
+				entry.attemptedAt, entry.err = time.Now(), failure
 				if failure == "" {
+					entry.loadedAt = entry.attemptedAt
 					entry.tools = cloneChildSearchTools(tools)
-					s.saveSearchSnapshot("root", c.entries)
 				}
+				s.saveSearchSnapshot("root", c.entries)
 			}
 		}
 		close(done)
@@ -162,7 +168,7 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 
 func rootSearchFingerprint(s *Server, agent Agent) string {
 	meta := stableChildSearchDescriptor(agent.Meta)
-	data, _ := json.Marshal(map[string]any{"id": agent.AgentID, "name": agent.Name, "kind": agent.Kind, "transport": agent.Transport, "status": agent.Status, "meta": meta})
+	data, _ := json.Marshal(map[string]any{"id": agent.AgentID, "name": agent.Name, "kind": agent.Kind, "transport": agent.Transport, "meta": meta})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -212,7 +218,7 @@ func (s *Server) rootSearchCatalogForRequest(r *http.Request, targetFilter strin
 			key, fingerprint := rootSearchCacheKey(r, agent), rootSearchFingerprint(s, agent)
 			cache.mu.Lock()
 			entry := cache.entries[key]
-			fresh := entry != nil && entry.fingerprint == fingerprint && time.Since(entry.loadedAt) < childSearchSchemaTTL && !entry.loadedAt.IsZero()
+			fresh := childSearchEntryFresh(entry, fingerprint)
 			cache.mu.Unlock()
 			if !fresh && len(waits) < childSearchColdLimit {
 				waits = append(waits, cache.refresh(s, r, agent, key, fingerprint))
@@ -239,7 +245,7 @@ func (s *Server) rootSearchCatalogForRequest(r *http.Request, targetFilter strin
 		cache.mu.Lock()
 		entry := cache.entries[key]
 		if entry != nil && entry.fingerprint == fingerprint && !entry.loadedAt.IsZero() {
-			if time.Since(entry.loadedAt) >= childSearchSchemaTTL {
+			if entry.err != "" || time.Since(entry.loadedAt) >= childSearchSchemaTTL {
 				coverage["stale"] = append(stringSlice(coverage["stale"]), agent.AgentID)
 			}
 			for _, tool := range cloneChildSearchTools(entry.tools) {
@@ -383,6 +389,7 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		entry.tools = nil
 		entry.loadedAt = time.Time{}
 		entry.err = ""
+		entry.attemptedAt = time.Time{}
 		entry.fingerprint = fingerprint
 	}
 	entry.catalogDigest = s.childSearchCatalogDigest(child)
@@ -439,12 +446,13 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		if current == entry {
 			current.refreshing = false
 			if childSearchFingerprint(s, child) == fingerprint && s.childSearchCatalogDigest(child) == generation {
-				current.fingerprint, current.loadedAt = fingerprint, time.Now()
+				current.fingerprint, current.attemptedAt = fingerprint, time.Now()
 				current.err = failure
 				if failure == "" {
+					current.loadedAt = current.attemptedAt
 					current.tools = cloneChildSearchTools(tools)
-					s.saveSearchSnapshot("child", c.entries)
 				}
+				s.saveSearchSnapshot("child", c.entries)
 			}
 		}
 		close(done)
@@ -487,12 +495,19 @@ func boundedSearchChildTools(tools []map[string]any) []map[string]any {
 // A failed read should be retried soon without stampeding a temporarily
 // unreachable host. Valid successful schemas can keep their longer TTL.
 func childSearchEntryFresh(entry *childSearchSchemaEntry, fingerprint string) bool {
-	if entry == nil || entry.fingerprint != fingerprint || entry.loadedAt.IsZero() {
+	if entry == nil || entry.fingerprint != fingerprint {
 		return false
 	}
 	ttl := childSearchSchemaTTL
 	if entry.err != "" {
-		ttl = childSearchErrorTTL
+		attempted := entry.attemptedAt
+		if attempted.IsZero() {
+			attempted = entry.loadedAt
+		}
+		return !attempted.IsZero() && time.Since(attempted) < childSearchErrorTTL
+	}
+	if entry.loadedAt.IsZero() {
+		return false
 	}
 	if entry.err == "" && entry.versioned {
 		return true
@@ -612,8 +627,12 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 			delete(cache.entries, key)
 			entry = nil
 		}
-		if entry != nil && entry.fingerprint == fingerprint && entry.loadedAt.After(time.Time{}) {
+		if entry != nil && entry.fingerprint == fingerprint && !entry.loadedAt.IsZero() {
 			if childSearchUnreachable(child) || entry.err != "" || !childSearchEntryFresh(entry, fingerprint) {
+				if coverage["last_successful_refresh"] == nil {
+					coverage["last_successful_refresh"] = map[string]string{}
+				}
+				coverage["last_successful_refresh"].(map[string]string)[child.AgentID] = entry.loadedAt.UTC().Format(time.RFC3339Nano)
 				coverage["stale"] = append(stringSlice(coverage["stale"]), child.AgentID)
 			}
 			for _, tool := range cloneChildSearchTools(entry.tools) {
@@ -630,7 +649,10 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		} else {
 			coverage["complete"] = false
 			coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
-			if targetFilter == "" || (entry != nil && entry.refreshing) {
+			if entry != nil && entry.err != "" {
+				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
+			}
+			if (entry == nil && targetFilter == "") || (entry != nil && entry.refreshing) {
 				coverage["pending"] = intFromAny(coverage["pending"]) + 1
 			} else {
 				coverage["failed"] = intFromAny(coverage["failed"]) + 1
