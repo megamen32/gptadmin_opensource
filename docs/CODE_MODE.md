@@ -40,7 +40,25 @@ budget, idempotency and audit path as a normal Hub call. The object form and
 pending or nonterminal call stops later calls; receipts are retained and no
 call is automatically replayed. Recursive `exec` is denied. For an aggregated read where completed results are useful even when one call stops the run, set `include_partial_results: true` on the outer `exec` call. The failed response then includes bounded, redacted completed-call receipts in `error.completed` and an `error.completed_omitted` count when the output budget is exhausted. The default remains private and the failure remains non-successful; a pending job is reconciled by its exact receipt, never replayed.
 
-The `mcp` facade has `search`, `discover`, `schema`, `job` and `expand` helpers.
+The `mcp` facade has `search`, `discover`, `inspect`, `schema`, `job` and `expand` helpers.
+
+Use `mcp.inspect(target, tool)` for one exact tool's description and full
+`inputSchema`. It requires a tool name and never returns the target's catalog.
+Repeated inspection of the same tool within one script reuses the schema;
+each call still checks permissions, and the cache ends with that script.
+Optional schema-contract metadata and the existing call reference are retained.
+The upstream MCP may still require one `tools/list` request to obtain its schema;
+this API does not claim a new upstream per-tool protocol.
+
+```javascript
+const spec = await mcp.inspect("hub", "demo");
+const value = await call("hub", "demo", {});
+return {tool: spec.tool, status: value.status};
+```
+
+`mcp.schema(target, tool)` remains compatible, including its names-only mode
+when no tool is supplied.
+
 Root Hub tools, registered independent MCP roots and registered child MCP tools
 are searchable/callable through `mcp.call`; this does not make native ChatGPT
 apps visible inside GPTAdmin. Root MCP schemas refresh on an explicit target

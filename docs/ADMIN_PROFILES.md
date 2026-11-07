@@ -24,6 +24,48 @@ selected set affect subsequent MCP initialization and the startup resource
 without restarting Hub. Instruction text remains guidance only: permissions,
 approvals and authentication are authoritative.
 
+## Stable target bindings and existing profiles
+
+On a profile write, Hub records a `target_identities` binding for each eligible
+target referenced by `allowed_targets`, `tool_rules[].target`, or
+`workspace_refs[].shell_target`. The target must resolve unambiguously to an
+approved executor with both a persisted `server_id` and key fingerprint. The
+binding is a domain-prefixed **full SHA-256 digest**, not the shortened public
+alias. Existing bindings for retained target labels are preserved. Wildcards and
+targets without a resolvable approved identity are not identity-bound.
+
+For an authenticated request, Hub resolves bound labels to the unique current
+canonical target for the same approved identity. The saved labels, client
+bindings and policy fields remain unchanged; the request copy is resolved before
+policy checks. A renamed executor with the same identity can therefore retain
+its grants. A missing or ambiguous match is removed from the request's resolved
+`allowed_targets`; a replacement key does not inherit the old binding. Legacy labels without a
+binding keep their existing name-based behavior; they have not gained identity
+protection merely because the Hub was upgraded.
+
+To upgrade an existing profile without changing its policy:
+
+1. While each intended legacy target still resolves to its approved executor,
+   read `GET /admin/api/access-profiles/<profile-id>` and retain its `ETag`.
+2. Send `PUT` to the same path with that exact `ETag` in `If-Match` and all
+   writable profile fields from the GET unchanged: `id`, `name`,
+   `instruction_set_id`, `access_mode`, `approval_mode`, `allowed_targets`,
+   `allowed_tools`, `tool_rules`, `read_roots`, `write_roots`, and
+   `workspace_refs` as present. PUT replaces the profile representation; do not
+   omit existing policy fields. `target_identities`, `version`, and `updated_at`
+   are node-managed response fields, not writable policy inputs.
+3. Read the profile back and inspect its `target_identities` and policy. The
+   version and ETag advance even for an otherwise unchanged PUT. A `412` means
+   the profile changed: GET the current version and reassess before retrying;
+   a missing `If-Match` returns `428`. `If-Match: *` is for creation, not an
+   unconditional update of an existing profile.
+
+Do not guess a vanished legacy hostname or assign it to a newly discovered
+device. If the old name no longer resolves to the approved identity, the write
+cannot infer the intended binding; leave it unresolved and investigate through
+the normal administration process. Do not directly edit the registry,
+auth-continuity state, or generated identity bindings to perform this upgrade.
+
 ## Fine-grained tool rules
 
 A profile may narrow its `allowed_targets` and `allowed_tools` further with

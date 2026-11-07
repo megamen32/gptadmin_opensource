@@ -35,6 +35,7 @@ const __pollMCP = globalThis.__codeModePollCall;
 const __yieldMCP = globalThis.__codeModeYield;
 const __discoverMCP = globalThis.__codeModeDiscover;
 const __schemaMCP = globalThis.__codeModeSchema;
+const __inspectMCP = globalThis.__codeModeInspect;
 const __prepareMCP = globalThis.__codeModePrepareTool;
 const __searchMCP = globalThis.__codeModeSearch;
 const __facadeMCP = globalThis.__codeModeFacade;
@@ -106,10 +107,12 @@ Object.defineProperty(globalThis, '__codeModeSafeJSON', {value:Object.freeze({st
 globalThis.mcp = Object.freeze({
   discover: (...a) => __discoverMCP(...a),
   schema: (...a) => __schemaMCP(...a),
+  inspect: (target,tool) => __inspectMCP(target,tool),
   search, call, shell,
   tasks: Object.freeze({
     start: (target,tool,args={},opts={}) => call(target,tool,args,{...opts,task:true}),
     get: (taskId) => __tasksMCP("get",{taskId}),
+    result: (taskId) => __tasksMCP("result",{taskId}),
     wait: (taskId,opts={}) => __tasksMCP("wait",{taskId,...opts}),
     cancel: (taskId) => __tasksMCP("cancel",{taskId}),
     update: (taskId,inputResponses) => __tasksMCP("update",{taskId,inputResponses}),
@@ -199,6 +202,7 @@ globalThis.drop = mcp.content.delete;
 globalThis.__codeModeFileCall = (kind,target,path,opts={}) => __fileMCP(kind,target,path,opts);
 delete globalThis.__codeModeDiscover;
 delete globalThis.__codeModeSchema;
+delete globalThis.__codeModeInspect;
 delete globalThis.__codeModePrepareTool;
 delete globalThis.__codeModeSearch;
 delete globalThis.__codeModeStartCall;
@@ -235,6 +239,7 @@ type codeModeBridge struct {
 	completedOmitted      int
 	toolCalls             []map[string]any
 	preparedSchemas       map[string]any
+	inspectedSchemas      map[string]map[string]any
 	// origins records every target/tool this run read. A result derived from
 	// the run is bound to all of them, not only to the last call, so a right
 	// that is withdrawn from any of them also withdraws the derived result.
@@ -381,6 +386,7 @@ func (b *codeModeBridge) fail(code, message string, receipt map[string]any) *cod
 func (b *codeModeBridge) install(ctx *qjs.Context) error {
 	ctx.SetFunc("__codeModeDiscover", b.discover)
 	ctx.SetFunc("__codeModeSchema", b.schema)
+	ctx.SetFunc("__codeModeInspect", b.inspect)
 	ctx.SetFunc("__codeModePrepareTool", b.prepareTool)
 	ctx.SetFunc("__codeModeSearch", b.search)
 	ctx.SetFunc("__codeModeStartCall", b.startCall)
@@ -668,6 +674,16 @@ func (b *codeModeBridge) discover(this *qjs.This) (*qjs.Value, error) {
 // schema returns one tool schema plus the call reference execute understands,
 // or the tool names of one target.
 func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
+	return b.readSchema(this, false)
+}
+
+// inspect is a single-tool view. Repeated reads within this run reuse the
+// authorized schema; no cache survives the sandbox or changes call admission.
+func (b *codeModeBridge) inspect(this *qjs.This) (*qjs.Value, error) {
+	return b.readSchema(this, true)
+}
+
+func (b *codeModeBridge) readSchema(this *qjs.This, inspect bool) (*qjs.Value, error) {
 	if err := b.entry(); err != nil {
 		return nil, err
 	}
@@ -682,6 +698,9 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 		return nil, b.fail("invalid_target", aliasErr.Error(), nil)
 	}
 	tool := codeModeStringArg(this, 1)
+	if inspect && tool == "" {
+		return nil, b.fail("invalid_arguments", "mcp.inspect requires an exact target and tool", nil)
+	}
 	if target == "" {
 		return nil, b.fail("invalid_arguments", "mcp.schema requires a target", nil)
 	}
@@ -689,12 +708,43 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 	// schema contract metadata are exactly what a direct execute would receive.
 	// The run context is applied so an aborted caller stops the schema path.
 	schemaRequest := b.request.WithContext(b.ctx)
+	if inspect {
+		// A script may outlive an administrator's profile change. Refresh its
+		// own binding before either returning a cached schema or reading a new one.
+		if claims, ok := schemaRequest.Context().Value(authClaimsContextKey{}).(map[string]any); ok {
+			schemaRequest = b.server.applyAccessProfileContext(schemaRequest, cloneMap(claims))
+		}
+	}
 	if b.readOnly && !profileAllowsTarget(schemaRequest, target) {
 		return nil, b.fail("forbidden", "access profile denies this target", nil)
 	}
 	schemaArgs := map[string]any{"target": target, "tool": tool, "detail": "compact"}
 	if err := b.server.authorizePublicFacade(schemaRequest, "schema", schemaArgs); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
+	}
+	key := target + "\x00" + tool
+	if inspect {
+		if err := authorizeToolCall(schemaRequest, target, tool); err != nil {
+			return nil, b.fail("forbidden", err.Error(), nil)
+		}
+		if _, status, detail := b.server.selectMCPRelayTarget(target); status != http.StatusOK {
+			return nil, b.fail("invalid_target", detail, nil)
+		}
+		b.server.mu.Lock()
+		agents := targetAgentMap(b.server.publicAgentsLocked(nil))
+		agent, exists := agents[target]
+		identity := fullTargetIdentityFromAgents(target, agents)
+		b.server.mu.Unlock()
+		if exists && !agentOwnerConnectionAllowed(schemaRequest, agent) {
+			return nil, b.fail("forbidden", "connection does not own this target", nil)
+		}
+		key += "\x00" + identity
+		b.mu.Lock()
+		cached := b.inspectedSchemas[key]
+		b.mu.Unlock()
+		if cached != nil {
+			return b.jsonValue(this, cached), nil
+		}
 	}
 	result := mapValue(b.server.appsSDKCallForRequest(schemaRequest, "schema", schemaArgs))
 	if status := firstString(result, "status"); status != "completed" {
@@ -751,6 +801,15 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 		// call; mcp.call({ref, args}) accepts it exactly like execute does.
 		if ref := firstString(result, "call_ref", "operation_id"); ref != "" {
 			payload["ref"] = ref
+		}
+		if inspect {
+			delete(payload, "tools")
+			b.mu.Lock()
+			if b.inspectedSchemas == nil {
+				b.inspectedSchemas = make(map[string]map[string]any)
+			}
+			b.inspectedSchemas[key] = payload
+			b.mu.Unlock()
 		}
 		return b.jsonValue(this, payload), nil
 	}

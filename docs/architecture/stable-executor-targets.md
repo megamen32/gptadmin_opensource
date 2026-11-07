@@ -20,6 +20,27 @@ Old canonical addresses remain valid. Schema, search, direct calls and code-mode
 calls resolve aliases before ACL checks, approvals, routing or reference storage.
 Unknown aliases fail normal target validation; ambiguous aliases fail closed.
 
+## Profile authorization across route changes
+
+The compact alias is a routing hint; authorization bindings use the full
+domain-prefixed SHA-256 digest of the same versioned tuple. On profile PUT, Hub
+pins eligible `allowed_targets`, tool-rule targets and workspace shell targets
+to the identity of an unambiguously resolved, approved executor. Retained
+target labels keep their existing bindings. For each request, bound labels are
+resolved on a profile copy to the unique currently approved canonical target;
+the persisted profile policy and client bindings are not renamed. Missing or
+ambiguous identity matches are removed from the request's resolved
+`allowed_targets`, and a different key cannot inherit the binding. An unbound legacy label continues to use its existing
+name-based behavior; it must not be mistaken for an identity-pinned grant.
+
+Existing profiles gain eligible bindings when resaved through the normal
+authenticated GET and PUT with the returned `ETag` in `If-Match`, retaining all
+writable policy fields. Do this while the original target still resolves to the
+approved identity, then read the profile back. If a legacy name has vanished,
+the Hub cannot infer the intended identity: do not guess it or directly write
+registry or auth-continuity state. The detailed upgrade and conflict handling
+are in [Admin Profiles](../ADMIN_PROFILES.md#stable-target-bindings-and-existing-profiles).
+
 Updating the Hub alone enables compact targets. Preventing hostname-induced
 queue divergence requires updating the executor too, using its existing identity
 directory. Deleting/recreating that directory is identity replacement, not rename;

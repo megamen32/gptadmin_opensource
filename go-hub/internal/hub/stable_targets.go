@@ -10,8 +10,18 @@ import (
 
 // Short IDs are derived from the existing enrolled identity, never the route
 // name. Legacy routes without identity metadata stay canonical until enrolled.
-// ACLs, jobs and approvals continue to use the original canonical addresses.
+// Dispatch, jobs and approvals use canonical addresses. Saved profile grants
+// may bind their addresses to the full identity digest across a rename.
 func shortTargetFromAgents(target string, agents map[string]Agent) string {
+	identity := fullTargetIdentityFromAgents(target, agents)
+	if identity == "" {
+		return target
+	}
+	return identity[:13]
+}
+
+// Authorization uses the full digest; the shortened form is only a route hint.
+func fullTargetIdentityFromAgents(target string, agents map[string]Agent) string {
 	prefix, parent, ref := "", target, ""
 	switch {
 	case strings.HasPrefix(target, "shell:"):
@@ -25,29 +35,29 @@ func shortTargetFromAgents(target string, agents map[string]Agent) string {
 	case strings.HasPrefix(target, "mcp:"):
 		child, ok := agents[target]
 		if !ok {
-			return target
+			return ""
 		}
 		parent = firstString(child.Meta, "parent_server_id")
 		ref = firstString(child.Meta, "child_ref")
 		if parent == "" || ref == "" {
-			return target
+			return ""
 		}
 		prefix = "c"
 	default:
-		return target
+		return ""
 	}
 	host, ok := agents[parent]
 	if !ok {
-		return target
+		return ""
 	}
 	serverID, fingerprint := firstString(host.Meta, "server_id"), firstString(host.Meta, "fingerprint")
 	if serverID == "" || fingerprint == "" {
-		return target
+		return ""
 	}
 	// JSON tuple supplies unambiguous framing; no new identity or alias store.
 	encoded, _ := json.Marshal([]string{"gptadmin-target-v1", prefix, serverID, fingerprint, ref})
 	sum := sha256.Sum256(encoded)
-	return fmt.Sprintf("%s%x", prefix, sum[:6])
+	return fmt.Sprintf("%s%x", prefix, sum[:])
 }
 
 func targetAgentMap(agents []Agent) map[string]Agent {

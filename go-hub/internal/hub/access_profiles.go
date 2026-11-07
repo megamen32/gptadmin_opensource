@@ -44,19 +44,20 @@ type WorkspaceRef struct {
 // managed MCP client. Policy evaluation is intentionally implemented by the
 // later policy worker; this type only carries its stable inputs.
 type AccessProfile struct {
-	ID               string           `json:"id"`
-	Name             string           `json:"name"`
-	InstructionSetID string           `json:"instruction_set_id"`
-	AccessMode       string           `json:"access_mode"`
-	ApprovalMode     string           `json:"approval_mode"`
-	AllowedTargets   []string         `json:"allowed_targets"`
-	AllowedTools     []string         `json:"allowed_tools"`
-	ToolRules        []AccessToolRule `json:"tool_rules,omitempty"`
-	ReadRoots        *[]string        `json:"read_roots,omitempty"`
-	WriteRoots       *[]string        `json:"write_roots,omitempty"`
-	WorkspaceRefs    []WorkspaceRef   `json:"workspace_refs"`
-	Version          int64            `json:"version"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	InstructionSetID string            `json:"instruction_set_id"`
+	AccessMode       string            `json:"access_mode"`
+	ApprovalMode     string            `json:"approval_mode"`
+	AllowedTargets   []string          `json:"allowed_targets"`
+	TargetIdentities map[string]string `json:"target_identities,omitempty"`
+	AllowedTools     []string          `json:"allowed_tools"`
+	ToolRules        []AccessToolRule  `json:"tool_rules,omitempty"`
+	ReadRoots        *[]string         `json:"read_roots,omitempty"`
+	WriteRoots       *[]string         `json:"write_roots,omitempty"`
+	WorkspaceRefs    []WorkspaceRef    `json:"workspace_refs"`
+	Version          int64             `json:"version"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 // AccessToolRule narrows one exact target/tool pair already allowed by the profile.
@@ -116,6 +117,13 @@ func AccessProfileIDFromRequest(r *http.Request) string {
 }
 
 func cloneAccessProfile(profile AccessProfile) AccessProfile {
+	if profile.TargetIdentities != nil {
+		identities := make(map[string]string, len(profile.TargetIdentities))
+		for target, identity := range profile.TargetIdentities {
+			identities[target] = identity
+		}
+		profile.TargetIdentities = identities
+	}
 	profile.AllowedTargets = append([]string(nil), profile.AllowedTargets...)
 	profile.AllowedTools = append([]string(nil), profile.AllowedTools...)
 	profile.WorkspaceRefs = append([]WorkspaceRef(nil), profile.WorkspaceRefs...)
@@ -717,6 +725,7 @@ func (s *Server) adminAccessProfile(w http.ResponseWriter, r *http.Request) {
 			if exists {
 				candidate.Version = current.Version + 1
 			}
+			candidate = s.pinAccessProfileTargets(candidate, current)
 			profiles[id] = candidate
 			saved = cloneAccessProfile(candidate)
 			return nil
@@ -885,5 +894,5 @@ func (s *Server) applyAccessProfileContext(r *http.Request, claims map[string]an
 		return r
 	}
 	claims["profile_id"] = profileID
-	return requestWithAccessProfile(r, profile)
+	return requestWithAccessProfile(r, s.resolveAccessProfileTargets(profile))
 }

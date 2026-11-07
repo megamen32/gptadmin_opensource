@@ -47,7 +47,7 @@ func (b *codeModeBridge) task(this *qjs.This) (*qjs.Value, error) {
 		return nil, b.fail("invalid_arguments", "taskId is required", nil)
 	}
 	switch action {
-	case "get", "wait", "cancel", "update":
+	case "get", "result", "wait", "cancel", "update":
 	default:
 		return nil, b.fail("invalid_arguments", "unknown Tasks action", nil)
 	}
@@ -72,6 +72,13 @@ func (b *codeModeBridge) task(this *qjs.This) (*qjs.Value, error) {
 	if action == "get" {
 		b.recordToolCall("hub", "tasks/get", firstString(task, "status"))
 		return b.jsonValue(this, task), nil
+	}
+	if action == "result" {
+		if firstString(task, "status") != "completed" {
+			return nil, b.fail("task_not_completed", "task result is available only after successful completion", map[string]any{"taskId": id, "status": task["status"]})
+		}
+		b.recordToolCall("hub", "tasks/result", "completed")
+		return b.jsonValue(this, task["result"]), nil
 	}
 	if action == "cancel" || action == "update" {
 		// Reuse native mutation logic only after the native receipt authorization

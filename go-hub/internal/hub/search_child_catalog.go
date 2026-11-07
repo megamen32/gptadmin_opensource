@@ -429,6 +429,8 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 			c.mu.Unlock()
 			return
 		}
+		startedAt := time.Now()
+		observedHealth := s.childProtocolHealthSnapshot(child)
 		response := s.directChildSchemaForRequest(request, child)
 		<-childSearchRefreshSlots
 		var tools []map[string]any
@@ -454,7 +456,11 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 				current.err = failure
 				if failure == "" {
 					current.loadedAt = current.attemptedAt
+					// Preserve when this successful read began as well as when it
+					// completed, so an in-flight failure is not later erased.
+					current.attemptedAt = startedAt
 					current.tools = cloneChildSearchTools(tools)
+					s.recoverChildProtocolHealth(child, startedAt, current.loadedAt, observedHealth)
 				}
 				if persist {
 					s.saveSearchSnapshot("child", c.entries)
@@ -466,6 +472,49 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		c.refreshParent(s, "")
 	}()
 	return done
+}
+
+func (s *Server) childProtocolHealthSnapshot(child Agent) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent := s.agents[firstString(child.Meta, "parent_server_id")]
+	if parent != nil {
+		for _, raw := range sliceValue(parent.Meta["mcp_agents"]) {
+			descriptor := mapValue(raw)
+			if firstString(descriptor, "ref") == firstString(child.Meta, "child_ref") {
+				b, _ := json.Marshal(mapValue(mapValue(descriptor["health"])["protocol"]))
+				return string(b)
+			}
+		}
+	}
+	return ""
+}
+
+// A successful authenticated tools/list is newer evidence than a prior
+// protocol failure. Do not overwrite a concurrent or undated health check.
+func (s *Server) recoverChildProtocolHealth(child Agent, before, succeededAt time.Time, observedHealth string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent := s.agents[firstString(child.Meta, "parent_server_id")]
+	if parent == nil {
+		return
+	}
+	for _, raw := range sliceValue(parent.Meta["mcp_agents"]) {
+		descriptor := mapValue(raw)
+		if firstString(descriptor, "ref") != firstString(child.Meta, "child_ref") {
+			continue
+		}
+		protocol := mapValue(mapValue(descriptor["health"])["protocol"])
+		currentHealth, _ := json.Marshal(protocol)
+		checked, err := time.Parse(time.RFC3339Nano, firstString(protocol, "last_checked_at"))
+		if observedHealth == "" || string(currentHealth) != observedHealth || firstString(protocol, "state") != "failed" || err != nil || !checked.Before(before) {
+			return
+		}
+		protocol["state"] = "ready"
+		protocol["last_checked_at"] = succeededAt.UTC().Format(time.RFC3339Nano)
+		protocol["last_error"] = nil
+		return
+	}
 }
 
 func searchChildToolMaps(value any) []map[string]any {
@@ -565,7 +614,6 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 	}
 	s.mu.Unlock()
 	children := make([]Agent, 0)
-	unreachable := []string{}
 	for _, child := range visible {
 		if !isChildMCPAgent(child) || (targetFilter != "" && targetFilter != child.AgentID && targetFilter != exposedAgentSlug(child) && targetFilter != "child:"+exposedAgentSlug(child)) {
 			continue
@@ -573,12 +621,8 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		if !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
 			continue
 		}
-		if targetFilter == "" && childSearchUnreachable(child) {
-			unreachable = append(unreachable, child.AgentID)
-		}
 		children = append(children, child)
 	}
-	coverage["unreachable"] = unreachable
 	cache := s.childSearchCache()
 	cache.subscribe(s, r)
 	active := map[string]bool{}
@@ -599,6 +643,16 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 		cache.mu.Lock()
 		entry := cache.entries[key]
 		fresh := childSearchEntryFresh(entry, fingerprint) && !s.childSearchGenerationChanged(entry, child)
+		// A heartbeat can replay an older failure after a successful schema
+		// read. A matching fresh snapshot is evidence even after reload.
+		if fresh && entry.err == "" && !entry.refreshing {
+			observed := s.childProtocolHealthSnapshot(child)
+			before := entry.loadedAt
+			if !entry.attemptedAt.IsZero() && entry.attemptedAt.Before(before) {
+				before = entry.attemptedAt
+			}
+			s.recoverChildProtocolHealth(child, before, entry.loadedAt, observed)
+		}
 		cache.mu.Unlock()
 		if targetFilter == "" {
 			continue
@@ -621,7 +675,30 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 			coverage["pending"] = intFromAny(coverage["pending"]) + 1
 		}
 	}
+	// A refresh may have reconciled protocol health while the search waited.
+	// Re-read the projection before computing coverage, including parent status.
+	s.mu.Lock()
+	currentChildren := make(map[string]Agent)
+	for _, child := range s.publicAgentsLocked(r) {
+		if isChildMCPAgent(child) {
+			currentChildren[child.AgentID] = child
+		}
+	}
+	s.mu.Unlock()
+	unreachable := []string{}
+	for i, child := range children {
+		if current, ok := currentChildren[child.AgentID]; ok {
+			children[i] = current
+			if targetFilter == "" && childSearchUnreachable(current) {
+				unreachable = append(unreachable, current.AgentID)
+			}
+		}
+	}
+	coverage["unreachable"] = unreachable
 	for _, child := range children {
+		if _, ok := currentChildren[child.AgentID]; !ok {
+			continue
+		}
 		// Recheck ACL immediately before copying schema into the caller's catalog.
 		if !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
 			continue

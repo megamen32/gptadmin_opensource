@@ -28,6 +28,9 @@ return mcp.tasks.wait('the-returned-task-id', {timeout_ms:30000});
 - `start(target, tool, args, opts)` returns a native Task-shaped receipt quickly.
   Equivalent: `mcp.call(target,tool,args,{task:true})`.
 - `get(taskId)` reads the canonical `tasks/get` receipt once.
+- `result(taskId)` returns the authorized result of a completed task, without
+  repeating its progress envelope. An unfinished task returns
+  `task_not_completed`; use `get` or a bounded `wait` before collecting it.
 - `wait(taskId,{timeout_ms})` performs protocol-cadenced reads within one
   connector call, up to 0..55 seconds and the remaining outer Code Mode budget.
   It returns the current Task if still working. It never resubmits a command.
