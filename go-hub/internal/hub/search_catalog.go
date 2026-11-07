@@ -19,7 +19,9 @@ const (
 	// The managed transient-memory envelope is shared by Code Mode guest heaps,
 	// their fixed runtime overhead, and the per-principal search catalog. This is
 	// an allocation budget for these paths, not a process RSS or cgroup limit.
-	hubManagedMemoryBudget      int64 = 128 << 20
+	// Eight default runtimes reserve 384 MiB; leave room for search catalogs
+	// and operations so restoring concurrency does not merely move the refusal.
+	hubManagedMemoryBudget      int64 = 512 << 20
 	codeModeRuntimeOverhead     int64 = 16 << 20
 	toolSearchCacheEntries            = 4
 	toolSearchIndexBudget       int64 = 8 << 20

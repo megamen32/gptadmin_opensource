@@ -45,7 +45,7 @@ const (
 	codeModeMaxCodeBytes     = 64 << 10 // 64 KiB of script source
 	codeModeDefaultOutBytes  = 16 << 10 // 16 KiB of returned JSON
 	codeModeMaxOutBytes      = 64 << 10 // 64 KiB of returned JSON
-	codeModeDefaultConcur    = 1
+	codeModeDefaultConcur    = 8
 
 	// An object envelope preserves primitive and array results across the
 	// QuickJS module boundary. Logs use the bounded host bridge so they cannot
