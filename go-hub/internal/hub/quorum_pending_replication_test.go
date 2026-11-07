@@ -145,6 +145,23 @@ func TestQuorumPendingInputReplicatesEncryptedAndSurvivesLeaderLoss(t *testing.T
 	if leader.forwardNodePeerCall(peerRec, peerReq, "shell:haos", []byte(`{"target":"shell:haos","tool":"shell_exec"}`)) {
 		t.Fatalf("quorum peer did not use the leader queue: HTTP %d", peerRec.Code)
 	}
+	// Catalog reads must still reach an enrolled executor directly: the schema
+	// caller deliberately never creates durable work in the leader queue.
+	schemaOwner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp-relay/tools" {
+			t.Errorf("unexpected schema path: %s", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "response": map[string]any{"tools": []any{}}})
+	}))
+	defer schemaOwner.Close()
+	leader.nodePeers["shell:haos"] = nodePeerRoute{URL: schemaOwner.URL}
+	schemaReq := httptest.NewRequest(http.MethodPost, "/mcp-relay/tools", nil)
+	schemaReq.Header.Set("Authorization", "Bearer fixture")
+	schemaRec := httptest.NewRecorder()
+	if !leader.forwardNodePeerRequest(schemaRec, schemaReq, "shell:haos", []byte(`{"target":"mcp:shell:haos:sample"}`), "/mcp-relay/tools") || schemaRec.Code != http.StatusOK {
+		t.Fatalf("quorum executor schema incorrectly entered the durable queue: HTTP %d", schemaRec.Code)
+	}
+	leader.nodePeers["shell:haos"] = nodePeerRoute{URL: "http://127.0.0.1:1"}
 	noBearer := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", nil)
 	denied := httptest.NewRecorder()
 	if !leader.forwardNodePeerCall(denied, noBearer, "shell:haos", nil) || denied.Code != http.StatusUnauthorized {

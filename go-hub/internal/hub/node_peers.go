@@ -278,7 +278,8 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	if local {
 		return false
 	}
-	if !readingJob && (endpoint == "/mcp-relay/call" || endpoint == "/mcp-relay/tools" || endpoint == "/mcp") {
+	// Schema reads never create durable tasks and must reach the owner directly.
+	if !readingJob && (endpoint == "/mcp-relay/call" || endpoint == "/mcp") {
 		useQueue, err := s.quorumExecutorUsesLeaderQueue(r.Context(), queueTarget)
 		if err != nil {
 			fail(http.StatusServiceUnavailable, "quorum executor queue is not ready", false)
