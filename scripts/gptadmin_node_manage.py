@@ -60,6 +60,8 @@ DISK_FLOOR_BYTES = 500 * 1024 * 1024
 HEALTH_TIMEOUT_SECS = 30.0
 DRAIN_POLL_INTERVAL_SECS = 2.0
 HTTP_CALL_TIMEOUT_SECS = 5.0
+# Drain snapshots may wait behind durable task-store commits on a busy Hub.
+DRAIN_HTTP_TIMEOUT_SECS = 20.0
 JOIN_HTTP_TIMEOUT_SECS = 15.0
 ELF_MAGIC = b'\x7fELF'
 DEFAULT_BIND = ('127.0.0.1', 9001)
@@ -942,7 +944,7 @@ def wait_healthy(origin: str, expected_commit: str, timeout: float = HEALTH_TIME
 
 def drain_begin(origin: str, token: str) -> bool:
     """Start node drain; returns False (with a warning) for binaries without the endpoint."""
-    status, payload = http_json('POST', origin + DRAIN_ENDPOINT, token=token, body={'action': 'begin'})
+    status, payload = http_json('POST', origin + DRAIN_ENDPOINT, token=token, body={'action': 'begin'}, timeout=DRAIN_HTTP_TIMEOUT_SECS)
     if status == 404:
         print('warning: node does not implement drain (old binary); continuing without drain', file=sys.stderr)
         return False
@@ -960,7 +962,7 @@ def drain_wait_ready(origin: str, token: str, wait_secs: float,
         if remaining <= 0:
             break
         status, payload = http_json('POST', origin + DRAIN_ENDPOINT, token=token,
-                                    body={'action': 'status'}, timeout=HTTP_CALL_TIMEOUT_SECS)
+                                    body={'action': 'status'}, timeout=min(DRAIN_HTTP_TIMEOUT_SECS, max(0.1, remaining)))
         if status == 404:
             print('warning: drain endpoint disappeared; continuing', file=sys.stderr)
             return {'skipped': True}
@@ -974,7 +976,7 @@ def drain_wait_ready(origin: str, token: str, wait_secs: float,
 
 def drain_cancel(origin: str, token: str) -> bool:
     try:
-        status, _ = http_json('POST', origin + DRAIN_ENDPOINT, token=token, body={'action': 'cancel'})
+        status, _ = http_json('POST', origin + DRAIN_ENDPOINT, token=token, body={'action': 'cancel'}, timeout=DRAIN_HTTP_TIMEOUT_SECS)
     except (OSError, urllib.error.URLError) as error:
         print(f'warning: drain cancel unreachable ({type(error).__name__})', file=sys.stderr)
         return False
@@ -1007,7 +1009,7 @@ def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drai
         if active and isinstance(error, TimeoutError):
             try:
                 status, state = http_json('POST', origin + DRAIN_ENDPOINT, token=token,
-                                          body={'action': 'status'})
+                                          body={'action': 'status'}, timeout=DRAIN_HTTP_TIMEOUT_SECS)
             except (OSError, urllib.error.URLError):
                 raise RuntimeFailure('drain cancel is unverified; manual recovery required') from None
             if status != 200 or not isinstance(state, dict) or state.get('draining') is not False:
