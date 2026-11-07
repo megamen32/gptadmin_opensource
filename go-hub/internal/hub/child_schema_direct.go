@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"time"
 )
 
 // DirectChildTools is implemented by the embedded ShellMCP executor. A schema
-// read is not executable work: never enqueue it or reserve a durable task ID.
+// read on a real Node never needs a durable task ID.
 type directChildToolReader interface {
 	DirectChildTools(context.Context, map[string]any) (map[string]any, error)
 }
@@ -18,11 +19,9 @@ type directChildToolReader interface {
 const directChildSchemaTimeout = 8 * time.Second
 
 // directChildSchemaForRequest reads one authorized child schema directly from
-// its owning Node (or the embedded local executor). No legacy queue, outbox,
-// durable Jobs receipt or replay is allowed on this read-only path.
-//
-// Historical child/tools/list receipts continue to be served separately by
-// childSchemaJobForRequest; this function never touches their state.
+// its owning Node (or the embedded local executor). Only an online legacy
+// long-poll owner without a Node route can use the existing same-ID schema
+// transport. Pending legacy receipts are reused, never replayed on timeout.
 func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) map[string]any {
 	target := candidate.AgentID
 	result := map[string]any{"server_id": target, "status": "failed"}
@@ -80,6 +79,13 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 		request := r.Clone(ctx)
 		recorder := httptest.NewRecorder()
 		if !s.forwardNodePeerRequest(recorder, request, parentID, body, "/mcp-relay/tools") {
+			if response, eligible := s.legacyChildSchemaForRequest(request, child); eligible {
+				if isLogicalBrowserAgent(child) && firstString(response, "status") == "completed" {
+					body := mapValue(response["response"])
+					body["tools"] = hideBrowserRetargetTool(searchChildToolMaps(body["tools"]))
+				}
+				return response
+			}
 			return fail("direct child schema transport unavailable")
 		}
 		var reply map[string]any
@@ -100,6 +106,75 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 	result["status"] = "completed"
 	result["response"] = map[string]any{"tools": toolsForRequest(r, child.AgentID, tools)}
 	return result
+}
+
+// Reuse the native mcp_tools receipt/queue for old executors only. All selection
+// and dispatch happens under the existing task mutex, so concurrent cold reads
+// cannot allocate multiple pending jobs for the same authorized connection.
+func (s *Server) legacyChildSchemaForRequest(r *http.Request, child Agent) (map[string]any, bool) {
+	s.mu.Lock()
+	current, exists := s.exposedAgentByIDLocked(child.AgentID)
+	parentID := firstString(current.Meta, "parent_server_id")
+	parent := s.agents[parentID]
+	_, routed := s.nodePeerRouteLocked(parentID)
+	if !exists || !isChildMCPAgent(current) || parent == nil || !truthy(parent.Meta["approved"]) ||
+		parent.Transport != "long_poll" || parent.Status != "online" || s.agentLifecycleStatusLocked(parent.LastSeen) != "online" ||
+		s.localExecutors[parentID] != nil || routed || s.nodeConns.get(parentID) != nil ||
+		r.Context().Err() != nil || !profileAllowsTarget(r, current.AgentID) || !agentOwnerConnectionAllowed(r, current) {
+		s.mu.Unlock()
+		return nil, false
+	}
+	caller := taskCallerFromRequest(r)
+	args := childConnectionArguments(r, current, map[string]any{"ref": firstString(current.Meta, "child_ref")})
+	// A refreshed lease is not a new connection; scope and instance still must
+	// match. Use the existing receipt caller binding (nil is internal/control).
+	delete(args, "_connection_expires_at")
+	id := ""
+	for _, receipt := range s.relayJobs {
+		job := s.shellJobs[receipt.ID]
+		if receipt.AgentID != current.AgentID || receipt.Method != childSchemaMethod || taskTerminal(receipt.Status) ||
+			!(sameTaskCaller(caller, receipt.Caller) || caller == nil && receipt.Caller == nil) ||
+			job == nil || job.ToolName != "mcp_tools" || "shell:"+job.Server != parentID {
+			continue
+		}
+		previousArgs := cloneMap(job.Arguments)
+		delete(previousArgs, "_connection_expires_at")
+		if reflect.DeepEqual(args, previousArgs) {
+			id = receipt.ID
+			break
+		}
+	}
+	if id == "" {
+		id = newID()
+		receipt := &relayJob{ID: id, AgentID: current.AgentID, Caller: caller,
+			CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
+		if err := s.dispatchChildSchemaLocked(r, current, receipt); err != nil {
+			s.mu.Unlock()
+			return taskPersistenceFailure(err), true
+		}
+	}
+	s.mu.Unlock()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		response, found := s.childSchemaJobForRequest(r, id)
+		if !found {
+			return map[string]any{"server_id": child.AgentID, "status": "failed",
+				"error": map[string]any{"code": "child_schema_unavailable", "message": "legacy schema receipt unavailable"}}, true
+		}
+		if taskTerminal(firstString(response, "status")) {
+			return response, true
+		}
+		select {
+		case <-r.Context().Done():
+			// Keep the same pending read-only receipt for the next cold search.
+			// No caller-owned input is replayed and no background waiter survives.
+			response["status"] = "failed"
+			response["error"] = map[string]any{"code": "child_schema_unavailable", "message": "legacy schema pending; reuse existing receipt"}
+			return response, true
+		case <-ticker.C:
+		}
+	}
 }
 
 func validChildToolsArray(value any) bool {
