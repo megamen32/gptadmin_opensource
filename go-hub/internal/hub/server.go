@@ -380,6 +380,7 @@ type agentTombstone struct {
 func intPtr(v int) *int { return &v }
 
 var hubSettingRegistry = []hubSettingDefinition{
+	{Key: "request_ttl_seconds", Type: "integer", Category: "jobs", Title: "Срок запроса", Description: "Максимальное время от постановки запроса, включая очередь и выполнение. После истечения — штатная отмена; история сохраняется. Перезапуск не продлевает срок.", Default: 10800, Minimum: intPtr(60), Maximum: intPtr(604800), Unit: "seconds", RestartRequired: false, Order: 15},
 	{Key: "tool_output_verbose", Type: "boolean", Category: "transport", Title: "Подробные ответы инструментов", Description: "Включать служебные поля и полные обёртки execute/job. По умолчанию выключено; detail=full или compact меняет формат одного ответа без повторного выполнения.", Default: false, RestartRequired: false, Advanced: true, Order: 50},
 	{Key: "mcp_auto_cleanup_enabled", Type: "boolean", Category: "mcp_registry", Title: "Автоочистка stale MCP", Description: "Автоматически удалять stale non-shell MCP по retention policy.", Default: true, RestartRequired: false, Order: 5},
 	{Key: "stale_mcp_retention_days", Type: "integer", Category: "mcp_registry", Title: "Удаление stale MCP", Description: "Удалять stale non-shell MCP из registry после указанного срока.", Default: defaultStaleMCPRetentionDays, Minimum: intPtr(1), Maximum: intPtr(3650), Unit: "days", RestartRequired: false, Order: 10},
@@ -3875,6 +3876,12 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 				if job == nil || job.Status != "queued" {
 					return nil, false, nil
 				}
+				if expired, err := s.expireQueuedRequestLocked(id, job.CreatedAt); err != nil {
+					readError = err
+					return nil, false, err
+				} else if expired {
+					return nil, false, nil
+				}
 				payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
 				if job.FilesystemACL != nil {
 					payload["filesystem_acl"] = job.FilesystemACL
@@ -4331,6 +4338,13 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 			s.relayQueues[agentID] = q[1:]
 			job := s.relayJobs[id]
 			if job == nil || job.Status != "queued" {
+				continue
+			}
+			if expired, err := s.expireQueuedRequestLocked(id, job.CreatedAt); err != nil {
+				s.relayQueues[agentID] = append([]string{id}, s.relayQueues[agentID]...)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task expiration persistence unavailable; retry"})
+				return
+			} else if expired {
 				continue
 			}
 			previousStatus, previousStarted := job.Status, job.StartedAt

@@ -46,7 +46,8 @@ func (s *Server) maintainTaskStateLocked() ([]string, error) {
 		return nil, err
 	}
 	change := s.beginTaskMutationLocked(ids...)
-	expired := s.expireOrphanedShellJobsLocked()
+	expired := s.expireRequestsLocked()
+	expired = append(expired, s.expireOrphanedShellJobsLocked()...)
 	groups := s.refreshTaskGroupsLocked()
 	repaired := s.reconcileSharedTaskRecordsLocked()
 	if len(expired) > 0 || groups > 0 || len(repaired) > 0 {
