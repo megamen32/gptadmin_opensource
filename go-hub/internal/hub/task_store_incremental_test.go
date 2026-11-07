@@ -303,7 +303,7 @@ func TestTaskStoreCommitsRecoveryTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Shell["queued"].Status != "failed" {
-		t.Fatal("recovery transition only exists in memory")
+	if state.Shell["queued"].Status != "queued" || len(state.Shell["queued"].SealedPending) == 0 {
+		t.Fatal("durable pending state lost")
 	}
 }

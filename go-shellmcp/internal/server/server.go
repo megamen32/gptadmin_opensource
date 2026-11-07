@@ -241,6 +241,7 @@ func normalizeTraceID(value string) string {
 }
 
 type Server struct {
+	displayHostname       string
 	transfers             binaryTransfers
 	cfg                   Config
 	jobs                  *job.Manager
@@ -285,6 +286,10 @@ type Server struct {
 }
 
 func New(cfg Config) *Server {
+	displayHostname := cfg.Name
+	if displayHostname == "" {
+		displayHostname, _ = os.Hostname()
+	}
 	var instanceBytes [32]byte
 	connectionInstance := ""
 	if _, err := rand.Read(instanceBytes[:]); err == nil {
@@ -297,6 +302,11 @@ func New(cfg Config) *Server {
 		} else {
 			log.Printf("identity disabled: %v", err)
 		}
+	}
+	// Keep every queue, callback and ACL check on the address persisted with
+	// this key. A changed hostname/config label must not create another queue.
+	if ident != nil && ident.Name != "" {
+		cfg.Name = ident.Name
 	}
 	if cfg.Name == "" {
 		if ident != nil && ident.Name != "" {
@@ -368,6 +378,7 @@ func New(cfg Config) *Server {
 
 	server := &Server{
 		cfg:                cfg,
+		displayHostname:    displayHostname,
 		jobs:               job.New(cfg.LogLimit),
 		identity:           ident,
 		hub:                hc,
@@ -1213,6 +1224,7 @@ func (s *Server) sendHeartbeat(ctx context.Context) {
 
 func (s *Server) newBeat() hub.Beat {
 	beat := hub.NewBeat(s.identity, s.cfg.BaseURL, s.cfg.Mode, parseBuildVersion(BuildVersion))
+	beat.Hostname = s.displayHostname
 	beat.GitCommit = GitCommit
 	beat.DefaultUser = s.cfg.DefaultUser
 	beat.DefaultHome = s.cfg.DefaultHome

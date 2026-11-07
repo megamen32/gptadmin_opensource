@@ -3957,7 +3957,7 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 		"poll_heartbeat":        true,
 		"heartbeat_best_effort": true,
 	}
-	for _, key := range []string{"server_id", "public_key", "fingerprint", "base_url", "os", "git_commit", "default_user", "default_home", "default_cwd", "self_repair_state"} {
+	for _, key := range []string{"server_id", "public_key", "fingerprint", "hostname", "base_url", "os", "git_commit", "default_user", "default_home", "default_cwd", "self_repair_state"} {
 		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
 			meta[key] = v
 		}
@@ -4502,6 +4502,9 @@ func (s *Server) publicServersLockedWithDetail(r *http.Request, detail bool) []m
 	servers := make([]map[string]any, 0, len(agents))
 	for _, a := range agents {
 		server := agentAsServer(a)
+		if hostname := firstString(a.Meta, "hostname"); hostname != "" && strings.HasPrefix(a.AgentID, "shell:") {
+			server["name"] = hostname
+		}
 		if !detail {
 			server = compactServer(server)
 		}
@@ -4840,6 +4843,11 @@ func (s *Server) hubAgentLocked() Agent {
 // an unrelated server.
 func (s *Server) selectMCPRelayTarget(target string) (string, int, string) {
 	target = strings.TrimSpace(target)
+	var aliasErr error
+	target, aliasErr = s.canonicalPublicTarget(target)
+	if aliasErr != nil {
+		return "", http.StatusBadRequest, aliasErr.Error()
+	}
 	if target == "" || target == "default" {
 		return "", http.StatusBadRequest, "Explicit MCP target is required. Call listMcpServers first and pass one returned server_id. There is no default target."
 	}
@@ -4905,12 +4913,16 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 	}
 	var req map[string]any
 	_ = readJSON(r, &req)
-	if err := authorizeFacadeCall(r, "schema", req); err != nil {
+	if err := s.authorizePublicFacade(r, "schema", req); err != nil {
 		s.auditToolDecision(r, firstString(req, "target", "server_id", "agent_id"), "schema", req, "deny", err.Error(), nil, http.StatusForbidden)
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 		return
 	}
 	releaseAuthAdmission(r)
+	if err := s.normalizePublicTargetArgs(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
 	target := firstString(req, "target", "server_id", "agent_id")
 	selectedTarget, status, detail := s.selectMCPRelayTarget(target)
 	if status != http.StatusOK {
@@ -4999,6 +5011,13 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		originalBody.Write(encodedRequest)
 	}
 
+	if err := s.normalizePublicTargetArgs(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	canonicalBody, _ := json.Marshal(req)
+	originalBody.Reset()
+	originalBody.Write(canonicalBody)
 	target := firstString(req, "target", "server_id", "agent_id")
 	toolName := firstString(req, "tool", "tool_name", "name")
 	args := mapValue(req["arguments"])
@@ -5632,6 +5651,10 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := s.normalizePublicTargetArgs(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	target := firstString(req, "target", "server_id", "agent_id")
@@ -6616,6 +6639,10 @@ func (s *Server) adminMCPResourcesList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	if err := s.normalizePublicTargetArgs(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
 	target := firstString(req, "target", "server_id", "agent_id")
 	if target == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "missing target"})
@@ -6639,6 +6666,10 @@ func (s *Server) adminMCPResourceRead(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := s.normalizePublicTargetArgs(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	target := firstString(req, "target", "server_id", "agent_id")
@@ -8708,7 +8739,7 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 	}
 	var authErr error
 	if agent.AgentID == "hub" {
-		authErr = authorizeFacadeCall(r, toolName, args)
+		authErr = s.authorizePublicFacade(r, toolName, args)
 	} else {
 		// The args-aware gate: a rule that names one action must not be
 		// satisfied by the presence of the tool alone.
@@ -8985,7 +9016,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		}
 		var authErr error
 		if agent.AgentID == "hub" {
-			authErr = authorizeFacadeCall(r, name, args)
+			authErr = s.authorizePublicFacade(r, name, args)
 		} else {
 			// The args-aware gate: a rule that names one action must not be
 			// satisfied by the presence of the tool alone.
@@ -9635,7 +9666,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			rpcErr = map[string]any{"code": -32602, "message": "tool name is required"}
 		} else if id := virtualMCPToolID(name); id != "" {
 			rpcErr = map[string]any{"code": -32601, "message": "tool is exposed only by the optional virtual MCP " + id}
-		} else if err := authorizeFacadeCall(r, name, args); err != nil {
+		} else if err := s.authorizePublicFacade(r, name, args); err != nil {
 			s.recordActivationTelemetry("failure")
 			s.auditToolDecision(r, "hub", name, args, "deny", err.Error(), nil, http.StatusForbidden)
 			rpcErr = map[string]any{"code": -32003, "message": err.Error()}
@@ -10378,7 +10409,7 @@ func (s *Server) mcpPromptCall(w http.ResponseWriter, r *http.Request) {
 		"scope":       "gptadmin.read",
 		"access_mode": accessModeReadonly,
 	})
-	if err := authorizeFacadeCall(bridgeRequest, tool, args); err != nil {
+	if err := s.authorizePublicFacade(bridgeRequest, tool, args); err != nil {
 		s.auditToolDecision(bridgeRequest, "bridge", tool, args, "deny", err.Error(), nil, http.StatusForbidden)
 		writeJSON(w, http.StatusForbidden, map[string]any{"status": "failed", "error": err.Error()})
 		return
@@ -10480,6 +10511,9 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 }
 
 func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map[string]any) any {
+	if err := s.normalizePublicTargetArgs(args); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}
+	}
 	if name == "code_exec" {
 		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
 	}
@@ -10523,7 +10557,7 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 		return result
 	}
 	if name == "schema" || name == "list_mcp_tools" || name == "listMcpTools" {
-		if err := authorizeFacadeCall(r, name, args); err != nil {
+		if err := s.authorizePublicFacade(r, name, args); err != nil {
 			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
 		}
 		requestedTarget := firstString(args, "target", "server_id", "agent_id")
@@ -10533,7 +10567,7 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 		return s.appsSDKSchemaForRequest(r, args)
 	}
 	if name == "inspect" || name == "inspect_system" || name == "inspectSystem" {
-		if err := authorizeFacadeCall(r, name, args); err != nil {
+		if err := s.authorizePublicFacade(r, name, args); err != nil {
 			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
 		}
 		target := firstString(args, "target", "server_id", "agent_id")

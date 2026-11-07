@@ -142,6 +142,7 @@ const __toolsNormalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const __toolsCatalog = {promise:null};
 const __toolsAliases = new Map();
 const __toolsResolve = async alias => {
+  if (/^[hcfk][0-9a-f]{12}$/.test(alias)) return alias;
   if (alias==='hub' || alias==='webhooks' || alias==='control:hub' || alias.startsWith('mcp:') || alias.startsWith('shell:') || alias.startsWith('file:')) return alias;
   if (__toolsAliases.has(alias)) return __toolsAliases.get(alias);
   if (!__toolsCatalog.promise) __toolsCatalog.promise=Promise.resolve().then(()=>mcp.discover());
@@ -159,13 +160,13 @@ const __toolsResolve = async alias => {
     if (__toolsNormalize(s.name||'')!==normalized && __toolsNormalize(actual)!==normalized) return false;
     if (!hint) return true;
     const parts=s.server_id.split(':');
-    const owner=parts.length>=3?parts[parts.length-2]:'';
+    const owner=s.host||(parts.length>=3?parts[parts.length-2]:'');
     return __toolsNormalize(owner)===hint || __toolsNormalize(owner).endsWith(hint);
   });
   const online=candidates.filter(s=>s.status==='online');
   const matches=online.length>0?online:candidates;
   if (matches.length!==1) {
-    const ids=matches.slice(0,8).map(s=>s.server_id).sort();
+    const ids=matches.slice(0,8).map(s=>s.server_id+(s.host?' ('+s.host+')':'')).sort();
     throw new Error(matches.length===0
       ? 'Unknown or unavailable MCP alias "'+alias+'". Use mcp.discover() for available targets.'
       : 'Ambiguous MCP alias "'+alias+'": '+ids.join(', ')+'. Use tools["<exact target>"].<tool>(args).');
@@ -455,10 +456,13 @@ func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
 		args["query"] = raw[0].String()
 	}
 	request := b.request.WithContext(b.ctx)
+	if err := b.server.normalizePublicTargetArgs(args); err != nil {
+		return nil, b.fail("invalid_target", err.Error(), nil)
+	}
 	if b.readOnly && firstString(args, "target") != "" && !profileAllowsTarget(request, firstString(args, "target")) {
 		return nil, b.fail("forbidden", "access profile denies this target", nil)
 	}
-	if err := authorizeFacadeCall(request, "search", args); err != nil {
+	if err := b.server.authorizePublicFacade(request, "search", args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
 	result := b.server.searchToolsForRequest(request, args)
@@ -466,7 +470,7 @@ func (b *codeModeBridge) search(this *qjs.This) (*qjs.Value, error) {
 		return nil, b.fail("search_unavailable", firstString(result, "error"), nil)
 	}
 	b.recordToolCall("hub", "search", "completed")
-	return b.jsonValue(this, result), nil
+	return b.jsonValue(this, b.server.compactTargetDescriptors("search", result)), nil
 }
 
 // facade exposes the small read-only Hub receipt facade inside the same
@@ -487,7 +491,7 @@ func (b *codeModeBridge) facade(this *qjs.This) (*qjs.Value, error) {
 	if b.readOnly && name == "job" && (!profileAllowsTarget(request, "hub") || !profileAllowsTool(request, "job")) {
 		return nil, b.fail("forbidden", "access profile denies this facade", nil)
 	}
-	if err := authorizeFacadeCall(request, name, args); err != nil {
+	if err := b.server.authorizePublicFacade(request, name, args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
 	result := mapValue(b.server.appsSDKCallForRequest(request, name, args))
@@ -640,10 +644,10 @@ func (b *codeModeBridge) discover(this *qjs.This) (*qjs.Value, error) {
 	if b.readOnly && !profileAllowsTarget(request, "hub") {
 		return nil, b.fail("forbidden", "access profile denies this target", nil)
 	}
-	if err := authorizeFacadeCall(request, "discover", args); err != nil {
+	if err := b.server.authorizePublicFacade(request, "discover", args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
-	result := mapValue(b.server.appsSDKCallRawForRequest(request, "discover", args))
+	result := mapValue(b.server.compactTargetDescriptors("discover", b.server.appsSDKCallRawForRequest(request, "discover", args)))
 	if firstString(result, "status") == "failed" {
 		return nil, b.fail("discover_unavailable", firstString(result, "error", "detail"), nil)
 	}
@@ -672,6 +676,11 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 		return nil, err
 	}
 	target := codeModeStringArg(this, 0)
+	var aliasErr error
+	target, aliasErr = b.server.canonicalPublicTarget(target)
+	if aliasErr != nil {
+		return nil, b.fail("invalid_target", aliasErr.Error(), nil)
+	}
 	tool := codeModeStringArg(this, 1)
 	if target == "" {
 		return nil, b.fail("invalid_arguments", "mcp.schema requires a target", nil)
@@ -684,7 +693,7 @@ func (b *codeModeBridge) schema(this *qjs.This) (*qjs.Value, error) {
 		return nil, b.fail("forbidden", "access profile denies this target", nil)
 	}
 	schemaArgs := map[string]any{"target": target, "tool": tool, "detail": "compact"}
-	if err := authorizeFacadeCall(schemaRequest, "schema", schemaArgs); err != nil {
+	if err := b.server.authorizePublicFacade(schemaRequest, "schema", schemaArgs); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
 	result := mapValue(b.server.appsSDKCallForRequest(schemaRequest, "schema", schemaArgs))
@@ -915,6 +924,9 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	ref := firstString(args, "ref")
 	indexResult := truthy(args["__indexResult"])
 	asTask := truthy(args["__task"])
+	if err := b.server.normalizePublicTargetArgs(args); err != nil {
+		return nil, b.fail("invalid_target", err.Error(), nil)
+	}
 	target := firstString(args, "target", "server_id", "agent_id")
 	tool := firstString(args, "tool", "tool_name", "name")
 
@@ -1182,6 +1194,11 @@ func (b *codeModeBridge) dispatch(callRequest *http.Request, target, tool string
 }
 
 func (b *codeModeBridge) dispatchMode(callRequest *http.Request, target, tool string, callArgs, contract map[string]any, timeout time.Duration, idempotencyKey string, background bool) (map[string]any, int) {
+	var aliasErr error
+	target, aliasErr = b.server.canonicalPublicTarget(target)
+	if aliasErr != nil {
+		return map[string]any{"status": "failed", "error": aliasErr.Error()}, http.StatusBadRequest
+	}
 	if err := authorizeToolAction(callRequest, target, tool, callArgs); err != nil {
 		return map[string]any{"status": "failed", "error": err.Error()}, http.StatusForbidden
 	}

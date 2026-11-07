@@ -318,7 +318,7 @@ func (s *Server) loadTaskState() error {
 		status := p.Status
 		errVal := p.Error
 		done := p.DoneAt
-		quorumPending := s.cfg.QuorumConfigFile != "" && status == "queued" && p.StartedAt == 0 && len(p.SealedPending) > 0
+		quorumPending := status == "queued" && p.StartedAt == 0 && len(p.SealedPending) > 0
 		if status == "queued" && !alive && !quorumPending {
 			status = "failed"
 			errVal = map[string]any{"code": "hub_restarted_before_dispatch", "message": "Hub restarted before queued shell task was dispatched; task was not replayed"}

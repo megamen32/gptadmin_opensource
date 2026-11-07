@@ -147,13 +147,13 @@ func TestArchitectureTwoHubProcessesHTTP(t *testing.T) {
 	}
 	_ = primary.Wait()
 	liveRecovered := call(standbyClient, standbyURL, http.MethodGet, "/mcp-relay/job/"+queuedID, nil, false)
-	if liveRecovered["status"] != "failed" {
-		t.Fatalf("already-running standby did not notice dead owner: %v", liveRecovered)
+	if liveRecovered["status"] != "queued" {
+		t.Fatalf("already-running standby lost durable queued work: %v", liveRecovered)
 	}
 	_, recoveryURL, recoveryClient := start()
 	recovered := call(recoveryClient, recoveryURL, http.MethodGet, "/mcp-relay/job/"+queuedID, nil, false)
-	if recovered["status"] != "failed" {
-		t.Fatalf("dead-owner task not reconciled: %v", recovered)
+	if recovered["status"] != "queued" {
+		t.Fatalf("dead-owner queued task not retained: %v", recovered)
 	}
 	t.Log("HTTP proof: two live processes, same-key replay, owner-only dispatch, cross-process result, OS-lock recovery after process death")
 }

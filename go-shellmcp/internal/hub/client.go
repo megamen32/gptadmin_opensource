@@ -126,6 +126,7 @@ func configuredRootCAs() *x509.CertPool {
 }
 
 type Beat struct {
+	Hostname             string           `json:"hostname,omitempty"`
 	Name                 string           `json:"name"`
 	ServerID             string           `json:"server_id"`
 	PublicKey            string           `json:"public_key"`
@@ -214,6 +215,7 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	}
 	if beat.ServerID != "" {
 		q.Set("server_id", beat.ServerID)
+		q.Set("hostname", beat.Hostname)
 	}
 	if beat.PublicKey != "" {
 		q.Set("public_key", beat.PublicKey)

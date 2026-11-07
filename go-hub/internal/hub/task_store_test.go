@@ -24,8 +24,8 @@ func TestTaskStateSurvivesRestart(t *testing.T) {
 	if got := s2.shellJobs["done-1"]; got == nil || got.Status != "completed" || mapValue(got.Result)["stdout_path"] != "/tmp/spool/out" {
 		t.Fatalf("completed task not restored: %#v", got)
 	}
-	if got := s2.shellJobs["queued-1"]; got == nil || got.Status != "failed" {
-		t.Fatalf("queued task must fail closed after restart: %#v", got)
+	if got := s2.shellJobs["queued-1"]; got == nil || got.Status != "queued" {
+		t.Fatalf("sealed queued task must survive restart: %#v", got)
 	}
 	if controls := s2.shellControls["host"]; len(controls) != 1 || controls[0].TaskID != "cancel-1" {
 		t.Fatalf("cancel intent not restored: %v", controls)

@@ -295,6 +295,10 @@ func (s *Server) expandOperation(r *http.Request, args map[string]any) map[strin
 }
 
 func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[string]any) any {
+	args = cloneMap(args)
+	if err := s.normalizePublicTargetArgs(args); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}
+	}
 	if name == "code_exec" {
 		return map[string]any{"status": "failed", "error": "code_exec was renamed to exec; use search then exec"}
 	}
@@ -335,7 +339,9 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 
 func (s *Server) presentTokenOutput(r *http.Request, name string, args map[string]any, raw any) (presented any) {
 	r = requestWithInstructionContext(r, args)
-	defer func() { presented = s.presentInstructionContext(r, name, args, presented) }()
+	defer func() {
+		presented = s.presentInstructionContext(r, name, args, s.compactTargetDescriptors(name, presented))
+	}()
 	// Scope a selected schema even in full mode; full means detail, not breadth.
 	if (name == "schema" || name == "list_mcp_tools" || name == "listMcpTools") && firstString(args, "tool") != "" {
 		if value, ok := raw.(map[string]any); ok {

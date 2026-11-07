@@ -143,7 +143,7 @@ func (s *Server) unfinishedExecutionCount() int {
 		ownerID = s.taskOwner.id
 	}
 	for _, job := range s.shellJobs {
-		if job != nil && !taskTerminal(job.Status) && s.drainOwnedLocallyLocked(job.OwnerID, ownerID) {
+		if job != nil && !taskTerminal(job.Status) && s.drainOwnedLocallyLocked(job.OwnerID, ownerID) && !s.durablePendingShellLocked(job) {
 			count++
 		}
 	}

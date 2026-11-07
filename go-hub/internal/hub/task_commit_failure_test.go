@@ -214,8 +214,8 @@ func TestArchitectureStandbyRecoversExitedOwnerWithoutRestart(t *testing.T) {
 	if _, err := standby.maintainTaskStateLocked(); err != nil {
 		t.Fatal(err)
 	}
-	if standby.shellJobs[id].Status != "failed" {
-		t.Fatal("already-running standby left an abandoned queued task")
+	if standby.shellJobs[id].Status != "queued" || !standby.shellJobs[id].quorumPendingUnmaterialized {
+		t.Fatal("already-running standby lost recoverable queued task")
 	}
 }
 

@@ -39,7 +39,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 					ownedHere := s.taskOwner != nil && p.OwnerID != "" && p.OwnerID == s.taskOwner.id
 					if !ownedHere {
 						j.quorumPendingSealed = append([]byte(nil), p.SealedPending...)
-						j.quorumPendingUnmaterialized = s.cfg.QuorumConfigFile != "" && p.Status == "queued" && p.StartedAt == 0 && len(p.SealedPending) > 0
+						j.quorumPendingUnmaterialized = p.Status == "queued" && p.StartedAt == 0 && len(p.SealedPending) > 0
 					}
 					j.RequestKey = p.RequestKey
 					j.ID = p.ID
@@ -108,9 +108,9 @@ func (s *Server) recoverOrphanedTaskLocked(id string) error {
 	if group := s.relayJobs[id]; group != nil && group.Method == "task/group" {
 		return nil
 	}
-	if job := s.shellJobs[id]; job != nil && s.cfg.QuorumConfigFile != "" && job.Status == "queued" && job.StartedAt == 0 && job.quorumPendingUnmaterialized && len(job.quorumPendingSealed) > 0 {
-		// Keep the encrypted input quarantined until a quorum-confirmed leader
-		// can safely recover it; never fail or dispatch it during startup.
+	if job := s.shellJobs[id]; job != nil && job.Status == "queued" && job.StartedAt == 0 && job.quorumPendingUnmaterialized && len(job.quorumPendingSealed) > 0 {
+		// Keep encrypted input quarantined until the queue recovery path verifies
+		// quorum leadership or the old local owner lock. Never replay on read.
 		return nil
 	}
 	owner, status := "", ""

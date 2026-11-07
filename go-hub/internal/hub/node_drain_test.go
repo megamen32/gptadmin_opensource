@@ -112,12 +112,12 @@ func TestNodeDrainRejectsSubmissionsAndKeepsReads(t *testing.T) {
 		t.Fatal("local job was not enqueued")
 	}
 
-	if st := s.NodeDrainStatus(); st.Draining || st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
+	if st := s.NodeDrainStatus(); st.Draining || st.ReadyToStop || st.Counters.UnfinishedExecutions != 0 {
 		t.Fatalf("unexpected pre-drain status: %+v", st)
 	}
 
 	s.EnableNodeDrain("planned update")
-	if st := s.NodeDrainStatus(); !st.Draining || st.Reason != "planned update" || st.ReadyToStop {
+	if st := s.NodeDrainStatus(); !st.Draining || st.Reason != "planned update" || !st.ReadyToStop {
 		t.Fatalf("drain not active after begin: %+v", st)
 	}
 
@@ -175,7 +175,7 @@ func TestNodeDrainReadyToStopWaitsForInFlightSubmission(t *testing.T) {
 	}()
 	// The real submission path holds the gate: in-flight and unfinished work.
 	waitForDrainCondition(t, s, "in-flight submission", func(st NodeDrainStatus) bool { return st.Counters.ActiveSubmissions >= 1 })
-	waitForDrainCondition(t, s, "unfinished execution", func(st NodeDrainStatus) bool { return st.Counters.UnfinishedExecutions >= 1 })
+	waitForDrainCondition(t, s, "durable queued submission", func(st NodeDrainStatus) bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.shellJobs) > 0 })
 	if st := s.NodeDrainStatus(); st.ReadyToStop {
 		t.Fatalf("ready_to_stop true while a submission is in flight: %+v", st)
 	}
@@ -216,7 +216,9 @@ func TestNodeDrainCountersTrackRealLocalJob(t *testing.T) {
 		jobID = id
 	}
 	s.mu.Unlock()
-	st := waitForDrainCondition(t, s, "unfinished local job", func(st NodeDrainStatus) bool { return st.Counters.UnfinishedExecutions >= 1 })
+	st := waitForDrainCondition(t, s, "runtime callbacks", func(st NodeDrainStatus) bool {
+		return st.Counters.ActiveCallbacks == 2 && st.Counters.UnfinishedExecutions == 0
+	})
 	if st.Counters.ActiveCallbacks != 2 || st.Counters.OutboxPending != 3 {
 		t.Fatalf("runtime counters missing from status: %+v", st)
 	}

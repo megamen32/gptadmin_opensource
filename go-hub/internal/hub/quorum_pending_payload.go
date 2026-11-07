@@ -11,7 +11,8 @@ import (
 	"sort"
 )
 
-// Pending executable input is encrypted with the quorum state key before it
+// Pending executable input is encrypted with the quorum state key (quorum)
+// or the installed SecretStore key (local Node) before it
 // enters SQLite or the replicated log. It is retained only while a shell job
 // is known not to have been dispatched. Started and uncertain jobs are never
 // reconstructed for replay.
@@ -27,7 +28,7 @@ type quorumPendingShellInput struct {
 }
 
 func (s *Server) sealPendingShellInput(job *shellJob) (json.RawMessage, error) {
-	if s.cfg.QuorumConfigFile == "" || job == nil || job.Status != "queued" || job.StartedAt != 0 {
+	if s.cfg.ConfigDir == "" || job == nil || job.Status != "queued" || job.StartedAt != 0 {
 		return nil, nil
 	}
 	if job.quorumPendingUnmaterialized {
@@ -36,9 +37,7 @@ func (s *Server) sealPendingShellInput(job *shellJob) (json.RawMessage, error) {
 		}
 		return append(json.RawMessage(nil), job.quorumPendingSealed...), nil
 	}
-	if s.quorumNode == nil {
-		return nil, errors.New("queued quorum input cipher is unavailable")
-	}
+
 	payload := quorumPendingShellInput{Arguments: job.Arguments, Cmd: job.Cmd, Cwd: job.Cwd, Env: job.Env, SecretValues: job.SecretValues, FilesystemACL: job.FilesystemACL}
 	plain, err := json.Marshal(payload)
 	if err != nil {
@@ -48,7 +47,7 @@ func (s *Server) sealPendingShellInput(job *shellJob) (json.RawMessage, error) {
 	if len(job.quorumPendingSealed) > 0 && job.quorumPendingDigest == digest {
 		return append(json.RawMessage(nil), job.quorumPendingSealed...), nil
 	}
-	sealed, err := s.quorumNode.SealExternalValue(quorumPendingShellNamespace, job.ID, 1, plain)
+	sealed, err := s.sealPendingValue(quorumPendingShellNamespace, job.ID, plain)
 	if err != nil {
 		return nil, err
 	}
@@ -57,23 +56,28 @@ func (s *Server) sealPendingShellInput(job *shellJob) (json.RawMessage, error) {
 	return sealed, nil
 }
 
-// recoverQuorumPendingShellLocked claims a bounded page only after the local
-// node proves majority leadership and an up-to-date replicated state. A queued
+// recoverQuorumPendingShellLocked claims a bounded page after quorum leadership
+// verification, or after proving that the local shared-disk owner has exited. A queued
 // record was never dispatched: dispatch durably marks it running before any
 // bytes are delivered. Started and uncertain records are never selected.
 // Callers hold s.mu and must still persist the later dispatch before delivery.
 func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name string) error {
-	if s.quorumNode == nil || s.cfg.QuorumConfigFile == "" {
+	if s.cfg.ConfigDir == "" {
 		return nil
 	}
-	if s.quorumNode.Status().VoterCount < quorumMinimumVoters {
-		return errors.New("quorum voter set is not ready")
-	}
-	if err := s.quorumNode.VerifyLeader(ctx); err != nil {
-		return err
-	}
-	if err := s.taskQuorumReplicaReady(); err != nil {
-		return err
+	if s.cfg.QuorumConfigFile != "" {
+		if s.quorumNode == nil {
+			return errors.New("pending quorum unavailable")
+		}
+		if s.quorumNode.Status().VoterCount < quorumMinimumVoters {
+			return errors.New("quorum voter set is not ready")
+		}
+		if err := s.quorumNode.VerifyLeader(ctx); err != nil {
+			return err
+		}
+		if err := s.taskQuorumReplicaReady(); err != nil {
+			return err
+		}
 	}
 	owner, err := s.ensureTaskOwnerLocked()
 	if err != nil {
@@ -99,8 +103,18 @@ func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name strin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.quorumNode.VerifyLeader(ctx); err != nil {
-			return err
+		if s.cfg.QuorumConfigFile != "" {
+			if err := s.quorumNode.VerifyLeader(ctx); err != nil {
+				return err
+			}
+		} else {
+			alive, err := s.taskOwnerAlive(p.OwnerID)
+			if err != nil {
+				return err
+			}
+			if alive {
+				continue
+			}
 		}
 		if err := s.refreshTaskRecordsLocked(p.ID); err != nil {
 			return err
@@ -109,7 +123,7 @@ func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name strin
 		if job == nil || job.Revision != p.Revision || job.Status != "queued" || job.StartedAt != 0 || !job.quorumPendingUnmaterialized {
 			continue
 		}
-		plain, err := s.quorumNode.OpenExternalValue(quorumPendingShellNamespace, p.ID, 1, p.SealedPending)
+		plain, err := s.openPendingValue(quorumPendingShellNamespace, p.ID, p.SealedPending)
 		if err != nil {
 			return fmt.Errorf("authenticate queued quorum task input: %w", err)
 		}

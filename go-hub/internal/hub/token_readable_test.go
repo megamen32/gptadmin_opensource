@@ -99,7 +99,7 @@ func TestTokenHTTPDiscoveryFiltersAndCompactContract(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &result) != nil || len(outputRows(result["servers"])) != 1 {
 		t.Fatalf("HTTP filters ignored: %s", w.Body.String())
 	}
-	if firstString(mapValue(outputRows(result["servers"])[0]), "server_id") != "shell:unit-test" {
+	if firstString(mapValue(outputRows(result["servers"])[0]), "server_id") != s.shortTarget("shell:unit-test") {
 		t.Fatal("wrong filtered target")
 	}
 }

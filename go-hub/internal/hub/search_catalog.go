@@ -320,6 +320,10 @@ func (i *toolSearchIndex) search(query, target string, limit int, catalog []map[
 }
 
 func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map[string]any {
+	args = cloneMap(args)
+	if err := s.normalizePublicTargetArgs(args); err != nil {
+		return map[string]any{"status": "failed", "error": err.Error()}
+	}
 	query := strings.TrimSpace(firstString(args, "query"))
 	if query == "" || len(query) > 256 {
 		return map[string]any{"status": "failed", "error": "query must contain 1..256 bytes"}
@@ -523,13 +527,13 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		if name == "settings" {
 			callName = "settings_get"
 		}
-		hit["call"] = fmt.Sprintf("await call(%q, %q, %s)", target, callName, compactJSON(callArgsExample(compactSchema)))
+		hit["call"] = fmt.Sprintf("await call(%q, %q, %s)", s.shortTarget(target), callName, compactJSON(callArgsExample(compactSchema)))
 		encoded, _ := json.Marshal(hit)
 		if usedBytes+len(encoded) > maxSearchBytes {
 			stub := cloneMap(hit)
 			delete(stub, "inputSchema")
 			stub["schema_ref"] = map[string]any{"target": target, "tool": callName}
-			stub["schema_hint"] = fmt.Sprintf("await mcp.schema(%q, %q)", target, callName)
+			stub["schema_hint"] = fmt.Sprintf("await mcp.schema(%q, %q)", s.shortTarget(target), callName)
 			stub["schema_included"] = false
 			encoded, _ = json.Marshal(stub)
 			if usedBytes+len(encoded) > maxSearchBytes {
