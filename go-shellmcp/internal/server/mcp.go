@@ -867,6 +867,15 @@ func (s *Server) mcpChildTools(ctx context.Context, args map[string]any) (map[st
 }
 
 func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[string]any, error) {
+	// Queue callbacks have cancellation but no deadline. Give child execution
+	// the configured finite budget before applying any shorter scoped admission
+	// deadline; otherwise HTTP falls back to its discovery/handshake timeout.
+	timeout := time.Duration(s.cfg.ExecTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancelExecution := context.WithTimeout(ctx, timeout)
+	defer cancelExecution()
 	ref, _ := args["ref"].(string)
 	name, _ := args["name"].(string)
 	if strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
