@@ -52,6 +52,23 @@ type httpStatusError struct {
 	err    error
 }
 
+// A tool execution may legitimately outlive the discovery/handshake timeout.
+// Only an explicit caller deadline grants that budget; retain the configured
+// HTTP bound otherwise. Copy the client so other calls and sessions keep their
+// limits, transport, headers policy and cancellation behavior.
+func executionHTTPClient(client *http.Client, ctx context.Context, method string) *http.Client {
+	if method == "tools/call" {
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining > 0 {
+				execution := *client
+				execution.Timeout = remaining
+				return &execution
+			}
+		}
+	}
+	return client
+}
+
 func (e *httpStatusError) Error() string { return e.err.Error() }
 func (e *httpStatusError) Unwrap() error { return e.err }
 
@@ -154,7 +171,7 @@ func (s *streamableSession) rpc(ctx context.Context, payload rpcRequest) (map[st
 	if s.sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", s.sessionID)
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := executionHTTPClient(s.httpClient, ctx, payload.Method).Do(req)
 	if err != nil {
 		return nil, s.sessionID, fmt.Errorf("mcp child %q HTTP: %w", s.agent.Ref, err)
 	}
@@ -323,7 +340,7 @@ func (s *legacySSESession) rpc(ctx context.Context, payload rpcRequest) (map[str
 		return nil, err
 	}
 	setRemoteHeadersResolved(req, s.agent, protocolVersion, s.frozenHeaders)
-	resp, err := s.httpClient.Do(req)
+	resp, err := executionHTTPClient(s.httpClient, ctx, payload.Method).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mcp child %q SSE POST: %w", s.agent.Ref, err)
 	}
