@@ -963,10 +963,12 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	// Only a credential bound to the owner-enrolled local ID may pin its
-	// fingerprint. A legacy registry pin additionally constrains that assertion.
-	if fp := request.LocalFingerprint; fp != "" {
+	// fingerprint. Generic enrollment still permits liveness, but its unapproved
+	// executor metadata must neither be pinned nor exposed as a trusted alias.
+	// A legacy registry pin additionally constrains an authorized assertion.
+	fingerprintAuthorized := request.LocalID != "" && (current.LocalID != "" || legacyIdentityApproved)
+	if fp := request.LocalFingerprint; fp != "" && fingerprintAuthorized {
 		if len(fp) > 128 || strings.TrimSpace(fp) != fp || strings.ContainsAny(fp, "\x00\r\n") ||
-			request.LocalID == "" || (current.LocalID == "" && !legacyIdentityApproved) ||
 			(current.LocalFingerprint != "" && current.LocalFingerprint != fp) ||
 			(legacyFingerprint != "" && legacyFingerprint != fp) {
 			s.membershipMu.Unlock()
@@ -1019,7 +1021,7 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 			changed = true
 		}
 	}
-	if request.LocalFingerprint != "" && current.LocalFingerprint == "" {
+	if fingerprintAuthorized && request.LocalFingerprint != "" && current.LocalFingerprint == "" {
 		current.LocalFingerprint = request.LocalFingerprint
 		changed = true
 	}

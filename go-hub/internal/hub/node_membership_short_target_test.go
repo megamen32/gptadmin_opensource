@@ -51,3 +51,25 @@ func TestMemberLocalFingerprintComesFromPinnedExecutor(t *testing.T) {
 		t.Fatalf("untrusted identity: %q %q %q", name, id, fp)
 	}
 }
+
+// Generic membership authorizes heartbeat, not a public executor identity.
+func TestGenericMembershipHeartbeatDoesNotTrustUnapprovedFingerprint(t *testing.T) {
+	writer := membershipWriterNode(t, "writer-node")
+	id, key := joinedMember44ForReconcile(t, writer, "")
+	for _, localID := range []string{"", "unapproved-executor-id"} {
+		body, _ := json.Marshal(map[string]any{"state": nodeStateReady, "snapshot_revision": writer.writerAuthGeneration(), "local_name": "shell:node-44", "local_id": localID, "local_fingerprint": "unapproved-key"})
+		response := membershipHTTP(writer, http.MethodPost, "/admin/api/nodes/heartbeat", key, body)
+		if response.Code != http.StatusOK {
+			t.Fatalf("generic heartbeat rejected: %d %s", response.Code, response.Body.String())
+		}
+		writer.membershipMu.Lock()
+		member := *writer.membership.Nodes[id]
+		writer.membershipMu.Unlock()
+		if member.LocalID != "" || member.LocalFingerprint != "" {
+			t.Fatalf("unapproved identity pinned: %q %q", member.LocalID, member.LocalFingerprint)
+		}
+		if got := writer.shortTarget("shell:node-44"); got != "shell:node-44" {
+			t.Fatalf("unapproved executor received alias: %s", got)
+		}
+	}
+}
