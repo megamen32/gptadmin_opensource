@@ -1352,10 +1352,14 @@ func (s *Server) refreshAgentLifecycleLocked() int {
 }
 
 func (s *Server) cleanupCandidatesLocked() []map[string]any {
+	return s.registryCleanupCandidatesLocked(false)
+}
+
+func (s *Server) registryCleanupCandidatesLocked(includeShell bool) []map[string]any {
 	globalDays := s.hubSettingIntLocked("stale_mcp_retention_days")
 	items := []map[string]any{}
 	for id, agent := range s.agents {
-		if id == "" || id == "hub" || agent == nil || agent.Kind == "virtual_shell" || agent.Status != "stale" || agent.LastSeen <= 0 {
+		if id == "" || id == "hub" || agent == nil || (!includeShell && agent.Kind == "virtual_shell") || agent.Status != "stale" || agent.LastSeen <= 0 {
 			continue
 		}
 		policy := s.agentPolicies[id]
@@ -1373,6 +1377,11 @@ func (s *Server) cleanupCandidatesLocked() []map[string]any {
 			reason = "never_delete"
 		case eligible:
 			reason = "retention_expired"
+		}
+		if agent.Kind == "virtual_shell" {
+			if blocked := s.shellCleanupBlockerLocked(id); blocked != "" {
+				eligible, reason = false, blocked
+			}
 		}
 		items = append(items, map[string]any{"agent_id": id, "name": agent.Name, "kind": agent.Kind, "status": agent.Status, "last_seen": agent.LastSeen, "age_days": ageDays, "retention_days": days, "eligible": eligible, "reason": reason, "policy": policy})
 	}
@@ -5994,7 +6003,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 		}
 		return map[string]any{"ok": true, "settings": s.hubSettingsLocked(), "revision": revision}, http.StatusOK
 	case "stale_cleanup_preview":
-		items := s.cleanupCandidatesLocked()
+		items := s.registryCleanupCandidatesLocked(true)
 		eligible := 0
 		for _, item := range items {
 			if item["eligible"] == true {
@@ -6004,8 +6013,21 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 		return map[string]any{"candidates": items, "eligible_count": eligible, "total_stale": len(items)}, http.StatusOK
 	case "stale_cleanup_run":
 		removed := []string{}
-		for _, item := range s.cleanupCandidatesLocked() {
-			if item["eligible"] == true {
+		selected := map[string]bool{}
+		if values, exists := args["agent_ids"]; exists {
+			for _, id := range stringSlice(values) {
+				selected[id] = true
+			}
+			if len(selected) == 0 {
+				return map[string]any{"error": "agent_ids must not be empty"}, http.StatusBadRequest
+			}
+		}
+		for _, item := range s.registryCleanupCandidatesLocked(true) {
+			id := firstString(item, "agent_id")
+			if len(selected) > 0 && !selected[id] {
+				continue
+			}
+			if item["eligible"] == true || (selected[id] && item["reason"] == "retention_not_reached") {
 				id := firstString(item, "agent_id")
 				if s.deleteStaleAgentLocked(id, "manual_cleanup") {
 					removed = append(removed, id)
@@ -6225,7 +6247,7 @@ func hubTools() []map[string]any {
 		{"name": "settings_history", "description": "List persisted Hub settings revisions", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "settings_rollback", "description": "Rollback Hub settings to a prior revision", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"revision": map[string]any{"type": "integer", "minimum": 1}}, "required": []string{"revision"}, "additionalProperties": false}},
 		{"name": "stale_cleanup_preview", "description": "Preview stale MCP cleanup candidates and protection reasons", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
-		{"name": "stale_cleanup_run", "description": "Delete currently eligible stale MCP agents and create tombstones", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": "stale_cleanup_run", "description": "Remove stale registrations and keep history/tombstones. Optional exact agent_ids bypass retention age only; protected, live and unfinished executors are never removed.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 100}}, "additionalProperties": false}},
 		{"name": "agent_policy_get", "description": "Read cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}}, "required": []string{"agent_id"}, "additionalProperties": false}},
 		{"name": "agent_policy_set", "description": "Set cleanup protection/retention policy for one agent", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"agent_id": map[string]any{"type": "string"}, "protected": map[string]any{"type": "boolean"}, "never_delete": map[string]any{"type": "boolean"}, "retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650}}, "required": []string{"agent_id"}, "additionalProperties": false}},
 		{"name": "agent_tombstones", "description": "List safe tombstones for auto/manually removed MCP agents", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
