@@ -72,7 +72,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 	} else {
 		// Always address the physical owner. The public logical Browser ID is
 		// not an executable target on node-44.
-		body, err := json.Marshal(map[string]any{"target": "mcp:" + parentID + ":" + ref})
+		body, err := json.Marshal(map[string]any{"target": "mcp:" + parentID + ":" + ref, "detail": "full"})
 		if err != nil {
 			return fail("child schema target invalid")
 		}

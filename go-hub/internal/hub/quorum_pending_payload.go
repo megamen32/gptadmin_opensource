@@ -18,6 +18,12 @@ import (
 // reconstructed for replay.
 const quorumPendingShellNamespace = "queued-shell-input"
 
+// A node-page scan visits historical result payloads while the Hub mutex is held.
+// Seek the queued-status index first; the explicit kind set matches its partial
+// predicate. Sorting is then bounded by pending work, not completed history.
+const pendingShellRecoveryIndex = "INDEXED BY task_records_status"
+const pendingShellRecoveryWhere = "kind IN ('shell','relay') AND kind='shell' AND json_extract(payload,'$.server')=? AND json_extract(payload,'$.status')='queued' AND COALESCE(json_extract(payload,'$.started_at'),0)=0 AND json_type(payload,'$.sealed_pending')='object' AND COALESCE(json_extract(payload,'$.owner_id'),'')<>? ORDER BY json_extract(payload,'$.created_at'),key LIMIT 100"
+
 type quorumPendingShellInput struct {
 	Arguments     map[string]any       `json:"arguments,omitempty"`
 	Cmd           string               `json:"cmd,omitempty"`
@@ -83,8 +89,8 @@ func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name strin
 	if err != nil {
 		return err
 	}
-	where := "kind='shell' AND json_extract(payload,'$.server')=? AND json_extract(payload,'$.status')='queued' AND COALESCE(json_extract(payload,'$.started_at'),0)=0 AND json_type(payload,'$.sealed_pending')='object' AND COALESCE(json_extract(payload,'$.owner_id'),'')<>? ORDER BY json_extract(payload,'$.created_at'),key LIMIT 100"
-	state, err := s.readTaskRecordsSQL(where, false, []any{name, owner})
+	where := pendingShellRecoveryWhere
+	state, err := s.readTaskRecordsSQLIndexed(where, false, pendingShellRecoveryIndex, []any{name, owner})
 	if err != nil {
 		return err
 	}

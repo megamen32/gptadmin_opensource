@@ -613,6 +613,7 @@ func (s *Server) runWebhookJob(jobID string, route WebhookRoute, event any) {
 		if err != nil {
 			job.Status = "failed"
 			job.Error = err.Error()
+			job.Result = result
 		} else {
 			job.Status = "completed"
 			job.Result = result
@@ -667,7 +668,7 @@ func (s *Server) dispatchWebhookActions(route WebhookRoute, event any) (map[stri
 		}
 		result, err := s.dispatchWebhookAction(action, event)
 		if err != nil {
-			return nil, fmt.Errorf("webhook action %d failed: %w", index+1, err)
+			return map[string]any{"failed_action": index + 1, "failure": result}, fmt.Errorf("webhook action %d failed: %w", index+1, err)
 		}
 		results = append(results, result)
 	}
@@ -707,10 +708,10 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 			"timeout": int(timeout / time.Second),
 		}, false, timeout, "")
 		if status >= http.StatusBadRequest {
-			return nil, fmt.Errorf("webhook shell action failed policy with status %d: %v", status, result)
+			return map[string]any{"http_status": status}, fmt.Errorf("webhook shell action failed policy with status %d", status)
 		}
 		if err := validateWebhookShellResult(result); err != nil {
-			return nil, err
+			return webhookSafeShellFailure(result), err
 		}
 		return result, nil
 	case "mcp", "prompt":
@@ -737,12 +738,50 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 		policyRequest := nonAgentWorkflow(requestWithAutomationProfile(nil, "webhook", selectedTarget, action.Tool, action.ApprovalMode))
 		result, resultStatus := s.executeMCPTool(policyRequest, selectedTarget, action.Tool, arguments, false, timeout, "")
 		if resultStatus < http.StatusOK || resultStatus >= http.StatusMultipleChoices {
-			return nil, fmt.Errorf("webhook MCP action failed with status %d: %v", resultStatus, result)
+			return map[string]any{"http_status": resultStatus}, fmt.Errorf("webhook MCP action failed with status %d", resultStatus)
 		}
 		return result, nil
 	default:
 		return nil, fmt.Errorf("unsupported webhook action kind %q", action.Kind)
 	}
+}
+
+// Failure output is untrusted: never copy shell output, command, event or env.
+// Exact static messages are safe to retain even when a process prints secrets.
+func webhookSafeShellFailure(result map[string]any) map[string]any {
+	safe := map[string]any{"output_redacted": true}
+	response := mapValue(result["response"])
+	structured := mapValue(response["structuredContent"])
+	execution := mapValue(structured["result"])
+	if code, err := strconv.Atoi(fmt.Sprint(execution["returncode"])); err == nil {
+		safe["returncode"] = code
+	}
+	allowed := []string{
+		"agent job profile is not allowlisted",
+		"agent job profile file is unavailable or invalid",
+		"agent job profile file mode must be exactly 0600",
+		"agent job profile file must be owned by the execution user",
+		"Agent Herder web settings do not allow this automatic launch; no runtime fallback",
+		"Agent Herder web settings do not allow the selected native model; no model fallback",
+		"health launch token is not configured",
+		"health agent endpoint request failed or returned invalid JSON",
+	}
+	stderr, _ := execution["stderr"].(string)
+	if len(stderr) > 16384 {
+		stderr = stderr[:16384]
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		var object map[string]any
+		_ = json.Unmarshal([]byte(line), &object)
+		jsonError, _ := object["error"].(string)
+		for _, message := range allowed {
+			if line == "RuntimeError: "+message || line == message || jsonError == message {
+				safe["cause"] = message
+				return safe
+			}
+		}
+	}
+	return safe
 }
 
 func validateWebhookShellResult(result map[string]any) error {

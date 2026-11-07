@@ -562,6 +562,11 @@ func (s *Server) readTaskRecordsQuery(where string, metadata bool, ids ...string
 }
 
 func (s *Server) readTaskRecordsSQL(where string, metadata bool, sqlArgs []any, ids ...string) (persistedTaskState, error) {
+	return s.readTaskRecordsSQLIndexed(where, metadata, "", sqlArgs, ids...)
+}
+
+// indexClause is an internal constant, never caller-provided SQL.
+func (s *Server) readTaskRecordsSQLIndexed(where string, metadata bool, indexClause string, sqlArgs []any, ids ...string) (persistedTaskState, error) {
 	state := persistedTaskState{Relay: map[string]persistedRelayTask{}, Shell: map[string]persistedShellTask{}, Idempotency: map[string]persistedIdempotencyEntry{}}
 	read := func(tx *sql.Tx) error {
 		payload := "payload"
@@ -569,7 +574,9 @@ func (s *Server) readTaskRecordsSQL(where string, metadata bool, sqlArgs []any, 
 			payload = `json_object('id',key,'server',json_extract(payload,'$.server'),'agent_id',json_extract(payload,'$.agent_id'),'method',json_extract(payload,'$.method'),'params',json_object('name',json_extract(payload,'$.params.name')),'tool_name',json_extract(payload,'$.tool_name'),'created_at',json_extract(payload,'$.created_at'),'started_at',json_extract(payload,'$.started_at'),'completed_at',done,'status',json_extract(payload,'$.status'))`
 		}
 		query := `SELECT kind,key,` + payload + `,revision FROM task_records`
-		if metadata && strings.Contains(where, "ORDER BY") {
+		if indexClause != "" {
+			query += " " + indexClause
+		} else if metadata && strings.Contains(where, "ORDER BY") {
 			index := "task_records_inventory"
 			if strings.Contains(where, "$.status") {
 				index = "task_records_status"

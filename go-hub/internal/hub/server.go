@@ -9227,11 +9227,21 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		// For ordinary child discovery, ask the owning Node using the original
 		// bearer and the child target, so its policy is independently enforced.
 		if isLogicalBrowserAgent(agent) || firstString(agent.Meta, "owner_profile_id") == "" {
+			s.mu.Lock()
+			local := s.localExecutors[parent] != nil
+			s.mu.Unlock()
+			if local {
+				result := s.directChildSchemaForRequest(r, agent)
+				if firstString(result, "status") != "completed" {
+					return nil, map[string]any{"code": -32000, "message": "child schema owner unavailable", "data": result["error"]}
+				}
+				return mapValue(result["response"]), nil
+			}
 			peerTarget := agent.AgentID
 			if isLogicalBrowserAgent(agent) {
 				peerTarget = "mcp:" + parent + ":" + firstString(agent.Meta, "child_ref")
 			}
-			payload, marshalErr := json.Marshal(map[string]any{"target": peerTarget})
+			payload, marshalErr := json.Marshal(map[string]any{"target": peerTarget, "detail": "full"})
 			if marshalErr != nil {
 				return nil, map[string]any{"code": -32602, "message": "invalid child target"}
 			}
