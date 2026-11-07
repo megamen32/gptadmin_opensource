@@ -3,6 +3,7 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,7 +53,11 @@ func TestColdChildCatalogFailureIsNotComplete(t *testing.T) {
 	s, child, _ := directSchemaFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) })
 	r := httptest.NewRequest("POST", "/mcp", nil)
 	r.Header.Set("Authorization", "Bearer schema-test-token")
+	s.cfg.ConfigDir = t.TempDir()
 	rows, coverage := s.childSearchCatalogForRequest(r, child.AgentID)
+	if _, err := os.Stat(s.searchSnapshotPath("child")); !os.IsNotExist(err) {
+		t.Fatal("cold failure rewrote persistent catalog despite having no successful schema")
+	}
 	if len(rows) != 0 || truthy(coverage["complete"]) {
 		t.Fatalf("cold failure advertised complete catalog: %v", coverage)
 	}

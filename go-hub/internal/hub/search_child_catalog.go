@@ -152,12 +152,15 @@ func (c *registeredRootSchemaCache) refresh(s *Server, r *http.Request, agent Ag
 		if c.entries[key] == entry {
 			entry.refreshing = false
 			if rootSearchFingerprint(s, agent) == fingerprint {
+				persist := failure == "" || (len(entry.tools) > 0 && entry.err != failure)
 				entry.attemptedAt, entry.err = time.Now(), failure
 				if failure == "" {
 					entry.loadedAt = entry.attemptedAt
 					entry.tools = cloneChildSearchTools(tools)
 				}
-				s.saveSearchSnapshot("root", c.entries)
+				if persist {
+					s.saveSearchSnapshot("root", c.entries)
+				}
 			}
 		}
 		close(done)
@@ -446,13 +449,16 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 		if current == entry {
 			current.refreshing = false
 			if childSearchFingerprint(s, child) == fingerprint && s.childSearchCatalogDigest(child) == generation {
+				persist := failure == "" || (len(current.tools) > 0 && current.err != failure)
 				current.fingerprint, current.attemptedAt = fingerprint, time.Now()
 				current.err = failure
 				if failure == "" {
 					current.loadedAt = current.attemptedAt
 					current.tools = cloneChildSearchTools(tools)
 				}
-				s.saveSearchSnapshot("child", c.entries)
+				if persist {
+					s.saveSearchSnapshot("child", c.entries)
+				}
 			}
 		}
 		close(done)
