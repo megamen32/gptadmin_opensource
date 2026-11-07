@@ -961,8 +961,14 @@ def drain_wait_ready(origin: str, token: str, wait_secs: float,
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        status, payload = http_json('POST', origin + DRAIN_ENDPOINT, token=token,
-                                    body={'action': 'status'}, timeout=min(DRAIN_HTTP_TIMEOUT_SECS, max(0.1, remaining)))
+        try:
+            status, payload = http_json('POST', origin + DRAIN_ENDPOINT, token=token,
+                                        body={'action': 'status'}, timeout=min(DRAIN_HTTP_TIMEOUT_SECS, max(0.1, remaining)))
+        except (TimeoutError, urllib.error.URLError):
+            # Status is a read: retry it within the overall drain deadline.
+            # Do not turn one busy snapshot into an uncertain cancel/restart.
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            continue
         if status == 404:
             print('warning: drain endpoint disappeared; continuing', file=sys.stderr)
             return {'skipped': True}
