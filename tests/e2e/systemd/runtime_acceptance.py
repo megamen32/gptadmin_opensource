@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import os
-import socket
 import time
 import urllib.error
 import urllib.parse
@@ -94,38 +93,46 @@ def request(method: str, path: str, bearer: str, payload=None, timeout=20):
 
 def wait_for_shell(bearer: str) -> dict:
     deadline = time.monotonic() + 35
-    expected = os.environ.get("GPTADMIN_ACCEPTANCE_SHELL") or ("shell:" + socket.gethostname())
-    last = None
-    while time.monotonic() < deadline:
-        try:
-            payload = request("GET", "/mcp-relay/servers?detail=full", bearer, timeout=4)
-            rows = payload.get("servers", []) if isinstance(payload, dict) else []
-            online = [row for row in rows if str(row.get("server_id") or "").startswith("shell:") and row.get("status") == "online"]
-            for row in online:
-                if str(row.get("server_id") or "") == expected:
-                    return row
-            if len(online) == 1:
-                return online[0]
-            last = {"expected": expected, "online_shells": [row.get("server_id") for row in online]}
-        except Exception as exc:
-            last = repr(exc)
-        time.sleep(0.5)
-    raise RuntimeError(f"local online ShellMCP target {expected} not found after install: {last!r}")
-
-
-def wait_for_file(shell_id: str, bearer: str) -> dict:
-    expected = "file:" + shell_id.split(":", 1)[1]
-    deadline = time.monotonic() + 35
-    last = None
+    identity = json.loads((ENV_FILE.parent / "shellmcp_identity.json").read_text())
+    identity = identity.get("identity", identity)
+    signed_id = identity.get("server_id")
+    public_key = identity.get("public_key") or identity.get("public_key_b64")
+    if not signed_id or not public_key:
+        raise RuntimeError("local signed ShellMCP identity is unavailable")
     while time.monotonic() < deadline:
         payload = request("GET", "/mcp-relay/servers?detail=full", bearer, timeout=4)
-        rows = payload.get("servers", []) if isinstance(payload, dict) else []
-        for row in rows:
-            if str(row.get("server_id") or "") == expected and row.get("status") == "online":
-                return row
-        last = payload
+        matches = [row for row in payload.get("servers", [])
+                   if row.get("kind") == "virtual_shell" and row.get("status") == "online"
+                   and row.get("meta", {}).get("server_id") == signed_id
+                   and row.get("meta", {}).get("public_key") == public_key]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError("ambiguous local ShellMCP identity")
         time.sleep(0.5)
-    raise RuntimeError(f"paired file target {expected} did not become online: {last!r}")
+    raise RuntimeError("identity-matched local ShellMCP not online after install")
+
+
+def wait_for_file(shell: dict, bearer: str) -> dict:
+    deadline = time.monotonic() + 35
+    while time.monotonic() < deadline:
+        registry = request("GET", "/mcp-relay/agents", bearer, timeout=4)
+        canonical = [row["agent_id"] for row in registry.get("agents", [])
+                     if row.get("kind") == "virtual_shell"
+                     and row.get("meta", {}).get("server_id") == shell["meta"]["server_id"]
+                     and row.get("meta", {}).get("public_key") == shell["meta"]["public_key"]]
+        if len(canonical) != 1:
+            raise RuntimeError("canonical ShellMCP pairing is missing or ambiguous")
+        payload = request("GET", "/mcp-relay/servers?detail=full", bearer, timeout=4)
+        matches = [row for row in payload.get("servers", [])
+                   if row.get("kind") == "virtual_file" and row.get("status") == "online"
+                   and row.get("meta", {}).get("backing_server_id") == canonical[0]]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError("ambiguous paired file target")
+        time.sleep(0.5)
+    raise RuntimeError("paired file target did not become online")
 
 
 def recursive_contains(value, needle: str) -> bool:
@@ -484,7 +491,7 @@ def main() -> int:
         raise RuntimeError("installed OpenAPI contract is incomplete")
     shell = wait_for_shell(bearer)
     shell_id = str(shell["server_id"])
-    file_target = wait_for_file(shell_id, bearer)
+    file_target = wait_for_file(shell, bearer)
     file_id = str(file_target["server_id"])
     custom_gpt_runtime_probe(shell_id, file_id, bearer)
     native_mcp_runtime_probe(shell, file_target, bearer)

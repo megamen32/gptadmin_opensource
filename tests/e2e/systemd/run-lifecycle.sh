@@ -72,7 +72,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-docker build -q -t "$image" "$repo/tests/e2e/systemd" >/dev/null
+docker buildx build --builder "${GPTADMIN_LIFECYCLE_BUILDER:-default}" --load -q -t "$image" "$repo/tests/e2e/systemd" >/dev/null
 docker run -d --name "$name" --privileged --cgroupns=host \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   -v "$repo:/work:ro" \

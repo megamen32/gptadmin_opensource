@@ -76,20 +76,21 @@ type nodeJoinGrant struct {
 }
 
 type nodeMember struct {
-	NodeID       string    `json:"node_id"`
-	KeyHash      string    `json:"key_hash"`
-	Name         string    `json:"name"`
-	Capabilities []string  `json:"capabilities"`
-	Endpoints    []string  `json:"endpoints"`
-	ConnectTo    string    `json:"connect_to,omitempty"`
-	Generation   uint64    `json:"generation"`
-	State        string    `json:"state"`
-	LastSeen     time.Time `json:"last_seen"`
-	LeaseExpires time.Time `json:"lease_expires"`
-	Build        string    `json:"build,omitempty"`
-	SnapshotRev  uint64    `json:"snapshot_revision,omitempty"`
-	LocalID      string    `json:"local_id,omitempty"`
-	CatalogFresh bool      `json:"-"`
+	NodeID           string    `json:"node_id"`
+	KeyHash          string    `json:"key_hash"`
+	Name             string    `json:"name"`
+	Capabilities     []string  `json:"capabilities"`
+	Endpoints        []string  `json:"endpoints"`
+	ConnectTo        string    `json:"connect_to,omitempty"`
+	Generation       uint64    `json:"generation"`
+	State            string    `json:"state"`
+	LastSeen         time.Time `json:"last_seen"`
+	LeaseExpires     time.Time `json:"lease_expires"`
+	Build            string    `json:"build,omitempty"`
+	SnapshotRev      uint64    `json:"snapshot_revision,omitempty"`
+	LocalID          string    `json:"local_id,omitempty"`
+	LocalFingerprint string    `json:"local_fingerprint,omitempty"`
+	CatalogFresh     bool      `json:"-"`
 }
 
 type nodeMembershipState struct {
@@ -423,7 +424,7 @@ func (s *Server) rebuildMembershipRoutes() {
 			endpoint = member.Endpoints[0]
 		}
 		routes[member.Name] = nodePeerRoute{URL: endpoint, ConnectTo: member.ConnectTo,
-			LocalID: member.LocalID, CatalogFresh: member.CatalogFresh}
+			LocalID: member.LocalID, LocalFingerprint: member.LocalFingerprint, CatalogFresh: member.CatalogFresh}
 	}
 	_ = heartbeatWriterID
 	s.membershipRoutes = routes
@@ -834,6 +835,7 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 		Build: strings.TrimSpace(request.Build.GitCommit), LocalID: strings.TrimSpace(request.LocalID)}
 	if previous != nil {
 		member.Generation = previous.Generation + 1
+		member.LocalFingerprint = previous.LocalFingerprint
 	} else {
 		member.Generation = 1
 	}
@@ -905,6 +907,7 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		Endpoint              string          `json:"endpoint,omitempty"`
 		LocalID               string          `json:"local_id,omitempty"`
 		LocalName             string          `json:"local_name,omitempty"`
+		LocalFingerprint      string          `json:"local_fingerprint,omitempty"`
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body must be JSON"})
@@ -931,11 +934,15 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 	// A legacy shell registry entry is authoritative for its own approval.
 	// The member credential alone cannot assert a different shell identity.
 	legacyIdentityApproved := false
+	legacyFingerprint := ""
 	if request.LocalID != "" {
 		s.mu.Lock()
 		old := s.agents[request.LocalName]
 		legacyIdentityApproved = old != nil && old.Kind == "virtual_shell" &&
 			truthy(old.Meta["approved"]) && firstString(old.Meta, "server_id") == request.LocalID
+		if legacyIdentityApproved {
+			legacyFingerprint = firstString(old.Meta, "fingerprint")
+		}
 		s.mu.Unlock()
 	}
 	writerGeneration := s.writerAuthGeneration()
@@ -952,6 +959,18 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 			(current.LocalID != "" && current.LocalID != request.LocalID) {
 			s.membershipMu.Unlock()
 			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor identity not approved"})
+			return
+		}
+	}
+	// Only a credential bound to the owner-enrolled local ID may pin its
+	// fingerprint. A legacy registry pin additionally constrains that assertion.
+	if fp := request.LocalFingerprint; fp != "" {
+		if len(fp) > 128 || strings.TrimSpace(fp) != fp || strings.ContainsAny(fp, "\x00\r\n") ||
+			request.LocalID == "" || (current.LocalID == "" && !legacyIdentityApproved) ||
+			(current.LocalFingerprint != "" && current.LocalFingerprint != fp) ||
+			(legacyFingerprint != "" && legacyFingerprint != fp) {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor fingerprint not approved"})
 			return
 		}
 	}
@@ -999,6 +1018,10 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 			current.Endpoints = []string{newEndpoint}
 			changed = true
 		}
+	}
+	if request.LocalFingerprint != "" && current.LocalFingerprint == "" {
+		current.LocalFingerprint = request.LocalFingerprint
+		changed = true
 	}
 	if current.State != next {
 		current.State = next
@@ -1303,16 +1326,16 @@ func (s *Server) memberNodeKey() string {
 
 // memberLocalExecutorIdentity reads only the node's in-process pinned local
 // executor identity. A registry heartbeat cannot claim another shell identity.
-func (s *Server) memberLocalExecutorIdentity() (string, string) {
+func (s *Server) memberLocalExecutorIdentity() (string, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.localExecutors) != 1 {
-		return "", ""
+		return "", "", ""
 	}
 	for name, identity := range s.localExecutors {
-		return name, strings.TrimSpace(identity["server_id"])
+		return name, strings.TrimSpace(identity["server_id"]), strings.TrimSpace(identity["fingerprint"])
 	}
-	return "", ""
+	return "", "", ""
 }
 
 func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
@@ -1351,11 +1374,11 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	if err != nil {
 		log.Printf("membership executor catalog incomplete: %v", err)
 	}
-	localName, localID := s.memberLocalExecutorIdentity()
+	localName, localID, localFingerprint := s.memberLocalExecutorIdentity()
 	payload := map[string]any{
 		"revision": viewRevision, "state": s.membershipReportedState(), "build": GitCommit,
 		"storage_ok": true, "snapshot_revision": s.writerAuthGeneration(),
-		"endpoint": s.cfg.NodePublicURL, "local_name": localName, "local_id": localID,
+		"endpoint": s.cfg.NodePublicURL, "local_name": localName, "local_id": localID, "local_fingerprint": localFingerprint,
 	}
 	if err != nil {
 		payload["executor_catalog_status"] = "incomplete"

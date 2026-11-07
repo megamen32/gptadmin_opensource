@@ -28,23 +28,24 @@ type persistedIdempotencyEntry struct {
 }
 
 type persistedRelayTask struct {
-	RequestKey   string         `json:"request_key,omitempty"`
-	Revision     int64          `json:"-"`
-	OwnerID      string         `json:"owner_id,omitempty"`
-	Caller       *taskCaller    `json:"caller,omitempty"`
-	ID           string         `json:"id"`
-	AgentID      string         `json:"agent_id,omitempty"`
-	TraceID      string         `json:"trace_id,omitempty"`
-	TraceParent  string         `json:"traceparent,omitempty"`
-	Method       string         `json:"method,omitempty"`
-	CreatedAt    float64        `json:"created_at"`
-	StartedAt    float64        `json:"started_at,omitempty"`
-	DoneAt       float64        `json:"completed_at,omitempty"`
-	Status       string         `json:"status"`
-	Result       map[string]any `json:"result,omitempty"`
-	Error        any            `json:"error,omitempty"`
-	Params       map[string]any `json:"params,omitempty"`
-	ParentTaskID string         `json:"parent_task_id,omitempty"`
+	SealedPending json.RawMessage `json:"sealed_pending,omitempty"`
+	RequestKey    string          `json:"request_key,omitempty"`
+	Revision      int64           `json:"-"`
+	OwnerID       string          `json:"owner_id,omitempty"`
+	Caller        *taskCaller     `json:"caller,omitempty"`
+	ID            string          `json:"id"`
+	AgentID       string          `json:"agent_id,omitempty"`
+	TraceID       string          `json:"trace_id,omitempty"`
+	TraceParent   string          `json:"traceparent,omitempty"`
+	Method        string          `json:"method,omitempty"`
+	CreatedAt     float64         `json:"created_at"`
+	StartedAt     float64         `json:"started_at,omitempty"`
+	DoneAt        float64         `json:"completed_at,omitempty"`
+	Status        string          `json:"status"`
+	Result        map[string]any  `json:"result,omitempty"`
+	Error         any             `json:"error,omitempty"`
+	Params        map[string]any  `json:"params,omitempty"`
+	ParentTaskID  string          `json:"parent_task_id,omitempty"`
 }
 
 type persistedShellTask struct {
@@ -124,7 +125,18 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if j.DoneAt > 0 && j.DoneAt < cutoff {
 			continue
 		}
-		state.Relay[id] = persistedRelayTask{ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: persistableTaskParams(j.Params), CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: j.Result, Error: j.Error, ParentTaskID: j.ParentTaskID}
+		sealed, err := s.sealPendingRelayInput(j)
+		if err != nil {
+			return fmt.Errorf("seal queued relay input: %w", err)
+		}
+		var params map[string]any
+		if j.Method == "task/group" || j.Method == childSchemaMethod {
+			params = persistableTaskParams(j.Params)
+		} else if name, ok := j.Params["name"].(string); ok {
+			// Retain catalog identity for task history, never executable arguments.
+			params = map[string]any{"name": name}
+		}
+		state.Relay[id] = persistedRelayTask{SealedPending: sealed, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: params, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: j.Result, Error: j.Error, ParentTaskID: j.ParentTaskID}
 	}
 	for id, j := range shell {
 		if j == nil {
@@ -305,13 +317,14 @@ func (s *Server) loadTaskState() error {
 		status := p.Status
 		errVal := p.Error
 		done := p.DoneAt
-		if status == "queued" && !alive {
+		pending := status == "queued" && p.StartedAt == 0 && p.DoneAt == 0 && p.Method != "task/group" && p.Method != childSchemaMethod && len(p.SealedPending) > 0
+		if status == "queued" && !alive && !pending {
 			status = "failed"
 			errVal = map[string]any{"code": "hub_restarted_before_dispatch", "message": "Hub restarted before queued relay task was dispatched; task was not replayed"}
 			done = now
 			recoveredIDs = append(recoveredIDs, id)
 		}
-		s.relayJobs[id] = &relayJob{ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ParentTaskID: p.ParentTaskID}
+		s.relayJobs[id] = &relayJob{pendingSealed: append(json.RawMessage(nil), p.SealedPending...), pendingUnmaterialized: pending, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ParentTaskID: p.ParentTaskID}
 	}
 	for id, p := range state.Shell {
 		alive := aliveOwners[p.OwnerID]

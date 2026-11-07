@@ -76,7 +76,13 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 						j = &relayJob{CachedAt: nowFloat()}
 						s.relayJobs[id] = j
 					}
-					*j = relayJob{CachedAt: nowFloat(), ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: p.Params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
+					params := p.Params
+					ownedHere := s.taskOwner != nil && p.OwnerID == s.taskOwner.id
+					if ownedHere && p.Method != "task/group" && p.Method != childSchemaMethod && !j.pendingUnmaterialized {
+						params = j.Params
+					}
+					pending := p.Status == "queued" && p.StartedAt == 0 && p.DoneAt == 0 && len(p.SealedPending) > 0 && !ownedHere
+					*j = relayJob{pendingSealed: append([]byte(nil), p.SealedPending...), pendingUnmaterialized: pending, CachedAt: nowFloat(), ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, AgentID: p.AgentID, TraceID: p.TraceID, TraceParent: p.TraceParent, Method: p.Method, Params: params, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: p.DoneAt, Status: p.Status, Result: p.Result, Error: p.Error, ParentTaskID: p.ParentTaskID}
 				}
 				if j.Method == "task/group" {
 					pending = append(pending, taskGroupChildIDs(j)...)
@@ -111,6 +117,9 @@ func (s *Server) recoverOrphanedTaskLocked(id string) error {
 	if job := s.shellJobs[id]; job != nil && job.Status == "queued" && job.StartedAt == 0 && job.quorumPendingUnmaterialized && len(job.quorumPendingSealed) > 0 {
 		// Keep encrypted input quarantined until the queue recovery path verifies
 		// quorum leadership or the old local owner lock. Never replay on read.
+		return nil
+	}
+	if j := s.relayJobs[id]; j != nil && j.Status == "queued" && j.StartedAt == 0 && j.DoneAt == 0 && j.pendingUnmaterialized && len(j.pendingSealed) > 0 {
 		return nil
 	}
 	owner, status := "", ""

@@ -2211,6 +2211,23 @@ def _server_active_matches_local_shell_identity(server: dict, identity: dict) ->
     return bool(expected_server_id and actual_server_id and expected_server_id == actual_server_id)
 
 
+def _local_shell_approval_target(candidate: dict, identity: dict, agents: list) -> str:
+    """Approval uses a registry address, not the discovery presentation alias."""
+    target = str(candidate.get('server_id') or '')
+    if target.startswith('shell:'):
+        return target
+    matches = [
+        str(agent.get('agent_id') or '') for agent in agents
+        if isinstance(agent, dict)
+        and str(agent.get('agent_id') or '').startswith('shell:')
+        and agent.get('status') == 'awaiting_approval'
+        and _server_matches_local_shell_identity(agent, identity)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError('local ShellMCP canonical approval target is missing or ambiguous')
+    return matches[0]
+
+
 def _approve_pending_response_ok(res: dict) -> bool:
     if not isinstance(res, dict):
         return False
@@ -2347,7 +2364,11 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
     if candidate is None:
         raise RuntimeError('local ShellMCP registration did not appear for cryptographic auto-approval')
 
-    target = str(candidate.get('server_id') or '')
+    agents = []
+    if not str(candidate.get('server_id') or '').startswith('shell:'):
+        registry = http_json('GET', '/mcp-relay/agents', timeout=5.0)
+        agents = registry.get('agents', []) if isinstance(registry, dict) else []
+    target = _local_shell_approval_target(candidate, identity, agents)
     context = _installer_instruction_context(discovered, lambda: http_json(
         'POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}, timeout=5.0,
     ))

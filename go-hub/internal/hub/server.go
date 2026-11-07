@@ -430,24 +430,26 @@ type relayEnrollment struct {
 }
 
 type relayJob struct {
-	CachedAt     float64        `json:"-"`
-	RequestKey   string         `json:"request_key,omitempty"`
-	Revision     int64          `json:"-"`
-	OwnerID      string         `json:"owner_id,omitempty"`
-	Caller       *taskCaller    `json:"caller,omitempty"`
-	ID           string         `json:"id"`
-	AgentID      string         `json:"agent_id,omitempty"`
-	TraceID      string         `json:"trace_id,omitempty"`
-	TraceParent  string         `json:"traceparent,omitempty"`
-	Method       string         `json:"method"`
-	Params       map[string]any `json:"params,omitempty"`
-	CreatedAt    float64        `json:"created_at"`
-	StartedAt    float64        `json:"started_at,omitempty"`
-	DoneAt       float64        `json:"completed_at,omitempty"`
-	Status       string         `json:"status"`
-	Result       map[string]any `json:"result,omitempty"`
-	Error        any            `json:"error,omitempty"`
-	ParentTaskID string         `json:"parent_task_id,omitempty"`
+	pendingSealed         json.RawMessage
+	pendingUnmaterialized bool
+	CachedAt              float64        `json:"-"`
+	RequestKey            string         `json:"request_key,omitempty"`
+	Revision              int64          `json:"-"`
+	OwnerID               string         `json:"owner_id,omitempty"`
+	Caller                *taskCaller    `json:"caller,omitempty"`
+	ID                    string         `json:"id"`
+	AgentID               string         `json:"agent_id,omitempty"`
+	TraceID               string         `json:"trace_id,omitempty"`
+	TraceParent           string         `json:"traceparent,omitempty"`
+	Method                string         `json:"method"`
+	Params                map[string]any `json:"params,omitempty"`
+	CreatedAt             float64        `json:"created_at"`
+	StartedAt             float64        `json:"started_at,omitempty"`
+	DoneAt                float64        `json:"completed_at,omitempty"`
+	Status                string         `json:"status"`
+	Result                map[string]any `json:"result,omitempty"`
+	Error                 any            `json:"error,omitempty"`
+	ParentTaskID          string         `json:"parent_task_id,omitempty"`
 }
 
 type shellControl struct {
@@ -4326,6 +4328,10 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
+		if err := s.recoverPendingRelayLocked(r.Context(), agentID); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "queued relay recovery unavailable; retry"})
+			return
+		}
 		if a := s.agents[agentID]; a != nil {
 			s.markAgentOnlineLocked(a, nowFloat())
 		}
@@ -4337,7 +4343,7 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 			}
 			s.relayQueues[agentID] = q[1:]
 			job := s.relayJobs[id]
-			if job == nil || job.Status != "queued" {
+			if job == nil || job.Status != "queued" || job.StartedAt != 0 || job.pendingUnmaterialized {
 				continue
 			}
 			if expired, err := s.expireQueuedRequestLocked(id, job.CreatedAt); err != nil {
@@ -4669,7 +4675,7 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 		member := Agent{AgentID: id, Name: "Shell: " + strings.TrimPrefix(id, "shell:"),
 			Kind: "virtual_shell", Transport: "node", Status: "online", LastSeen: nowFloat(),
 			Capabilities: []string{"shell", "system", "tasks", "logs"},
-			Meta:         map[string]any{"server_id": route.LocalID, "membership_transport": "authenticated_node_lease"}}
+			Meta:         map[string]any{"server_id": route.LocalID, "fingerprint": route.LocalFingerprint, "membership_transport": "authenticated_node_lease"}}
 		agents = append(agents, s.withExposeMetaLocked(member, r))
 	}
 	usedSlugs := map[string]bool{}
@@ -4962,7 +4968,7 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		s.writeTokenSchema(w, r, req, map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}})
 		return
 	}
-	jobID := s.enqueueRelay(target, "tools/list", nil)
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/list", nil, requestTraceID(r), requestTraceParent(r))
 	if failure := s.relayEnqueueFailure(jobID); failure != nil {
 		writeJSON(w, http.StatusServiceUnavailable, failure)
 		return
@@ -9005,7 +9011,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 			}
 			return result, nil, false
 		}
-		jobID := s.enqueueRelay(agent.AgentID, method, params)
+		jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, method, params, requestTraceID(r), requestTraceParent(r))
 		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 		return result, rpcErr, false
 	case "initialize":
@@ -9013,7 +9019,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		if agent.AgentID == "hub" || strings.HasPrefix(agent.AgentID, "shell:") || strings.HasPrefix(agent.AgentID, "file:") || strings.HasPrefix(agent.AgentID, "control:") || isVirtualMCPAgent(agent) || isChildMCPAgent(agent) {
 			return map[string]any{"protocolVersion": connectionProtocol(firstString(params, "protocolVersion")), "capabilities": map[string]any{"tools": map[string]any{}, "resources": map[string]any{}, "prompts": map[string]any{}}, "serverInfo": map[string]any{"name": "gptadmin-server-" + exposedAgentSlug(agent), "version": BuildVersion}, "instructions": s.startupInstructionsTextForRequest(r)}, nil, false
 		}
-		jobID := s.enqueueRelay(agent.AgentID, method, params)
+		jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, method, params, requestTraceID(r), requestTraceParent(r))
 		result, rpcErr := unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 		return result, rpcErr, false
 	case "notifications/initialized", "notifications/cancelled":
@@ -9129,7 +9135,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		}
 		return result, err, false
 	case "prompts/list":
-		result, err := s.agentPromptsList(agent)
+		result, err := s.agentPromptsList(agent, r)
 		if err == nil {
 			if m, ok := result.(map[string]any); ok {
 				result = mcpCacheableResult(m, 30000, "private")
@@ -9137,7 +9143,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		}
 		return result, err, false
 	case "prompts/get":
-		result, err := s.agentPromptGet(agent, params)
+		result, err := s.agentPromptGet(agent, params, r)
 		if err == nil {
 			if m, ok := result.(map[string]any); ok {
 				result = mcpCacheableResult(m, 5000, "private")
@@ -9170,7 +9176,11 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 	}
 }
 
-func (s *Server) agentToolsList(agent Agent) (any, any) {
+func (s *Server) agentToolsList(agent Agent, requests ...*http.Request) (any, any) {
+	var r *http.Request
+	if len(requests) > 0 {
+		r = requests[0]
+	}
 	if agent.AgentID == "hub" {
 		return map[string]any{"tools": appsSDKTools()}, nil
 	}
@@ -9199,7 +9209,7 @@ func (s *Server) agentToolsList(agent Agent) (any, any) {
 		}
 		return map[string]any{"tools": tools}, nil
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "tools/list", map[string]any{})
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "tools/list", map[string]any{}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
@@ -9254,7 +9264,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, tools)}, nil
 	}
 	if requestAccessMode(r) != accessModeReadonly {
-		return s.agentToolsList(agent)
+		return s.agentToolsList(agent, r)
 	}
 	if agent.AgentID == "hub" {
 		return map[string]any{"tools": withReadOnlyExecTool(r, withoutExecuteFacade(r, appsSDKToolsForRequest(r)))}, nil
@@ -9272,7 +9282,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 		return map[string]any{"tools": toolsForRequest(r, agent.AgentID, controlTools(agent.AgentID))}, nil
 	}
 	if isChildMCPAgent(agent) {
-		result, err := s.agentToolsList(agent)
+		result, err := s.agentToolsList(agent, r)
 		if err != nil {
 			return nil, err
 		}
@@ -9406,7 +9416,7 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 		}
 		return child, nil
 	}
-	jobID := s.enqueueRelayWithTraceParent(agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args}, requestTraceID(r), requestTraceParent(r))
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "tools/call", map[string]any{"name": name, "arguments": args}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
@@ -9430,7 +9440,7 @@ func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 	if !hasCapability(agent, "resources/list") {
 		return map[string]any{"resources": []map[string]any{{"uri": "gptadmin://server/" + agentSlug(agent.AgentID), "name": agent.Name + " card", "mimeType": "application/json"}}}, nil
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "resources/list", map[string]any{})
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "resources/list", map[string]any{}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
@@ -9459,23 +9469,31 @@ func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (an
 		b, _ := json.Marshal(s.agentCard(r, agent))
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}, nil
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "resources/read", map[string]any{"uri": uri})
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "resources/read", map[string]any{"uri": uri}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
-func (s *Server) agentPromptsList(agent Agent) (any, any) {
+func (s *Server) agentPromptsList(agent Agent, requests ...*http.Request) (any, any) {
+	var r *http.Request
+	if len(requests) > 0 {
+		r = requests[0]
+	}
 	if agent.AgentID == "hub" || isVirtualMCPAgent(agent) || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/list") {
 		return map[string]any{"prompts": []any{}}, nil
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "prompts/list", map[string]any{})
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "prompts/list", map[string]any{}, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
-func (s *Server) agentPromptGet(agent Agent, params map[string]any) (any, any) {
+func (s *Server) agentPromptGet(agent Agent, params map[string]any, requests ...*http.Request) (any, any) {
+	var r *http.Request
+	if len(requests) > 0 {
+		r = requests[0]
+	}
 	if agent.AgentID == "hub" || isVirtualMCPAgent(agent) || strings.HasPrefix(agent.AgentID, "shell:") || !hasCapability(agent, "prompts/get") {
 		return nil, map[string]any{"code": -32601, "message": "prompts/get is not supported by this agent"}
 	}
-	jobID := s.enqueueRelay(agent.AgentID, "prompts/get", params)
+	jobID := s.enqueueRelayWithTraceParentForRequest(r, agent.AgentID, "prompts/get", params, requestTraceID(r), requestTraceParent(r))
 	return unwrapMCPUpstream(s.waitRelay(jobID, s.cfg.DefaultTimeout))
 }
 
@@ -10682,7 +10700,7 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 					waitBudget = minDuration(waitBudget, time.Until(deadline))
 				}
 			}
-			jobID := s.enqueueRelay(target, "tools/list", map[string]any{})
+			jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/list", map[string]any{}, requestTraceID(r), requestTraceParent(r))
 			result = s.waitRelay(jobID, waitBudget)
 		}
 	}

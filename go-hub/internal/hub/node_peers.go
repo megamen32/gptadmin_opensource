@@ -19,8 +19,9 @@ type nodePeerRoute struct {
 	URL       string `json:"url"`
 	ConnectTo string `json:"connect_to,omitempty"`
 	// LocalID pins the route to a previously approved shell identity.
-	LocalID      string `json:"-"`
-	CatalogFresh bool   `json:"-"`
+	LocalID          string `json:"-"`
+	LocalFingerprint string `json:"-"`
+	CatalogFresh     bool   `json:"-"`
 }
 
 // One pool per logical origin and physical IP. The standard TLS transport
