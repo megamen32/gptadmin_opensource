@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +41,34 @@ type NodeRuntimeCounters interface {
 
 const nodeDrainRetryDetail = "node is draining; retry after drain completes"
 
+// A permit belongs to one already admitted internal workflow. It carries no
+// authorization; every action still passes its normal policy and ACL checks.
+type nodeSubmissionPermit struct {
+	server   *Server
+	released atomic.Bool
+	once     sync.Once
+	release  func()
+}
+
+func (p *nodeSubmissionPermit) close() {
+	p.once.Do(func() { p.released.Store(true); p.release() })
+}
+
+func (s *Server) beginWorkflowSubmission() (*nodeSubmissionPermit, bool) {
+	release, ok := s.beginNodeSubmission("webhook", "dispatch")
+	if !ok {
+		return nil, false
+	}
+	return &nodeSubmissionPermit{server: s, release: release}, true
+}
+
+func (s *Server) beginPermittedNodeSubmission(target, tool string, permits ...*nodeSubmissionPermit) (func(), bool) {
+	if len(permits) == 1 && permits[0] != nil && permits[0].server == s && !permits[0].released.Load() {
+		return func() {}, true
+	}
+	return s.beginNodeSubmission(target, tool)
+}
+
 // EnableNodeDrain flips the node into draining state. It is idempotent: a
 // second call only updates the reason and never moves the drain start time.
 func (s *Server) EnableNodeDrain(reason string) {
@@ -51,7 +81,7 @@ func (s *Server) EnableNodeDrain(reason string) {
 		gate.SetQueueDraining(true)
 	}
 	if gate, ok := hook.(interface{ SetQueueDrainPending(bool) }); ok {
-		gate.SetQueueDrainPending(s.unfinishedExecutionCount() > 0)
+		gate.SetQueueDrainPending(s.nodeDrainSubmissions > 0 || s.unfinishedExecutionCount() > 0)
 	}
 	if !s.nodeDrainActive {
 		s.nodeDrainActive = true
@@ -85,7 +115,7 @@ func (s *Server) NodeDrainStatus() NodeDrainStatus {
 	hook := s.nodeRuntime
 	s.mu.Unlock()
 	if gate, ok := hook.(interface{ SetQueueDrainPending(bool) }); ok {
-		gate.SetQueueDrainPending(draining && counters.UnfinishedExecutions > 0)
+		gate.SetQueueDrainPending(draining && (submissions > 0 || counters.UnfinishedExecutions > 0))
 	}
 	counters.ActiveCallbacks, counters.OutboxPending = s.nodeRuntimeCounterValues()
 	if draining && s.quorumNode != nil && s.quorumPrivateTLS != nil && !s.quorumNode.Status().Leader {
@@ -125,7 +155,7 @@ func (s *Server) SetNodeRuntimeCounters(counters NodeRuntimeCounters) {
 		gate.SetQueueDraining(s.nodeDrainActive)
 	}
 	if gate, ok := counters.(interface{ SetQueueDrainPending(bool) }); ok {
-		gate.SetQueueDrainPending(s.nodeDrainActive && s.unfinishedExecutionCount() > 0)
+		gate.SetQueueDrainPending(s.nodeDrainActive && (s.nodeDrainSubmissions > 0 || s.unfinishedExecutionCount() > 0))
 	}
 	s.mu.Lock()
 	s.nodeRuntime = counters

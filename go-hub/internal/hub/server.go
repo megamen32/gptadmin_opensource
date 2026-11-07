@@ -5120,7 +5120,7 @@ const (
 	idempotencyKeyMax  = 200
 )
 
-func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string) (map[string]any, int) {
+func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string, permits ...*nodeSubmissionPermit) (map[string]any, int) {
 	if err := authorizeToolAction(r, target, toolName, args); err != nil {
 		var banErr *CodexCallerBanError
 		if errors.As(err, &banErr) {
@@ -5136,7 +5136,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	// Drain admission boundary: new submissions are rejected before any
 	// idempotency reservation or job creation; receipt reads stay available.
-	releaseSubmission, admitted := s.beginNodeSubmission(target, toolName)
+	releaseSubmission, admitted := s.beginPermittedNodeSubmission(target, toolName, permits...)
 	if !admitted {
 		return map[string]any{"detail": nodeDrainRetryDetail, "retryable": true, "owner_target": target}, http.StatusServiceUnavailable
 	}

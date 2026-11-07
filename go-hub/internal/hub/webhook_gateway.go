@@ -264,6 +264,41 @@ func (s *Server) webhookEndpoint(w http.ResponseWriter, r *http.Request) {
 		deliveryKey = sha256Hex(body)
 	}
 	fingerprint := sha256Hex(append([]byte(routeID+"\x00"), body...))
+	// Existing deliveries are receipt reads, including during drain. The
+	// second lookup below still serializes competing new deliveries.
+	writeDuplicate := func() bool {
+		s.mu.Lock()
+		existing := s.webhookDeliveries[routeID+"\x00"+deliveryKey]
+		if existing == nil || s.now().Sub(existing.CreatedAt) > idempotencyTTL {
+			s.mu.Unlock()
+			return false
+		}
+		jobID, matches := existing.JobID, existing.Fingerprint == fingerprint
+		s.mu.Unlock()
+		if !matches {
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "idempotency key was already used for a different event"})
+		} else {
+			writeJSON(w, http.StatusAccepted, map[string]any{"route_id": routeID, "job_id": jobID, "status": "accepted", "duplicate": true})
+		}
+		return true
+	}
+	if writeDuplicate() {
+		return
+	}
+	permit, admitted := s.beginWorkflowSubmission()
+	if !admitted {
+		if writeDuplicate() {
+			return
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": nodeDrainRetryDetail, "retryable": true, "executed": false})
+		return
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			permit.close()
+		}
+	}()
 	s.mu.Lock()
 	now := s.now()
 	for key, delivery := range s.webhookDeliveries {
@@ -290,7 +325,8 @@ func (s *Server) webhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	go s.runWebhookJob(jobID, route, event)
+	handedOff = true
+	go func() { defer permit.close(); s.runWebhookJob(jobID, route, event, permit) }()
 	writeJSON(w, http.StatusAccepted, map[string]any{"route_id": routeID, "job_id": jobID, "status": "accepted"})
 }
 
@@ -583,7 +619,7 @@ func webhookSignatureV2(secret, method, path, timestamp, idempotencyKey string, 
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) runWebhookJob(jobID string, route WebhookRoute, event any) {
+func (s *Server) runWebhookJob(jobID string, route WebhookRoute, event any, permits ...*nodeSubmissionPermit) {
 	s.mu.Lock()
 	job := s.webhookJobs[jobID]
 	if job == nil {
@@ -605,7 +641,7 @@ func (s *Server) runWebhookJob(jobID string, route WebhookRoute, event any) {
 	}
 	s.mu.Unlock()
 
-	result, err := s.dispatchWebhookActions(route, event)
+	result, err := s.dispatchWebhookActions(route, event, permits...)
 	s.mu.Lock()
 	job = s.webhookJobs[jobID]
 	if job != nil {
@@ -656,17 +692,17 @@ func webhookActions(route WebhookRoute) []WebhookAction {
 	return []WebhookAction{route.Action}
 }
 
-func (s *Server) dispatchWebhookActions(route WebhookRoute, event any) (map[string]any, error) {
+func (s *Server) dispatchWebhookActions(route WebhookRoute, event any, permits ...*nodeSubmissionPermit) (map[string]any, error) {
 	actions := webhookActions(route)
 	if len(actions) == 1 && len(route.Actions) == 0 {
-		return s.dispatchWebhookAction(actions[0], event)
+		return s.dispatchWebhookAction(actions[0], event, permits...)
 	}
 	results := make([]map[string]any, 0, len(actions))
 	for index, action := range actions {
 		if index > 0 && action.DelaySeconds > 0 {
 			time.Sleep(time.Duration(action.DelaySeconds * float64(time.Second)))
 		}
-		result, err := s.dispatchWebhookAction(action, event)
+		result, err := s.dispatchWebhookAction(action, event, permits...)
 		if err != nil {
 			return map[string]any{"failed_action": index + 1, "failure": result}, fmt.Errorf("webhook action %d failed: %w", index+1, err)
 		}
@@ -675,7 +711,7 @@ func (s *Server) dispatchWebhookActions(route WebhookRoute, event any) (map[stri
 	return map[string]any{"action_count": len(results), "actions": results}, nil
 }
 
-func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[string]any, error) {
+func (s *Server) dispatchWebhookAction(action WebhookAction, event any, permits ...*nodeSubmissionPermit) (map[string]any, error) {
 	timeout := s.cfg.DefaultTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -706,7 +742,7 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 			"cwd":     cwd,
 			"env":     commandEnv,
 			"timeout": int(timeout / time.Second),
-		}, false, timeout, "")
+		}, false, timeout, "", permits...)
 		if status >= http.StatusBadRequest {
 			return map[string]any{"http_status": status}, fmt.Errorf("webhook shell action failed policy with status %d", status)
 		}
@@ -736,7 +772,7 @@ func (s *Server) dispatchWebhookAction(action WebhookAction, event any) (map[str
 			return nil, fmt.Errorf("webhook target rejected: %s", detail)
 		}
 		policyRequest := nonAgentWorkflow(requestWithAutomationProfile(nil, "webhook", selectedTarget, action.Tool, action.ApprovalMode))
-		result, resultStatus := s.executeMCPTool(policyRequest, selectedTarget, action.Tool, arguments, false, timeout, "")
+		result, resultStatus := s.executeMCPTool(policyRequest, selectedTarget, action.Tool, arguments, false, timeout, "", permits...)
 		if resultStatus < http.StatusOK || resultStatus >= http.StatusMultipleChoices {
 			return map[string]any{"http_status": resultStatus}, fmt.Errorf("webhook MCP action failed with status %d", resultStatus)
 		}

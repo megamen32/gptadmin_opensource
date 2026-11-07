@@ -218,6 +218,10 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 			local = s.localExecutors[queueTarget] != nil
 		}
 	}
+	// Transport, mesh proof, drain admission and receipt ownership all belong
+	// to the enrolled parent executor. Keep the original child target in body
+	// so the destination still authorizes and dispatches that exact child.
+	target = queueTarget
 	route, routed := s.nodePeerRouteLocked(target)
 	approved := local || routed || s.nodeConns.get(target) != nil
 	if a := s.agents[target]; a != nil && truthy(a.Meta["approved"]) {
