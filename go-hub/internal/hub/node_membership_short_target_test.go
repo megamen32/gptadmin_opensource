@@ -73,3 +73,29 @@ func TestGenericMembershipHeartbeatDoesNotTrustUnapprovedFingerprint(t *testing.
 		}
 	}
 }
+
+func TestPinnedFingerprintRejectsReplacementWithoutLocalID(t *testing.T) {
+	writer := membershipWriterNode(t, "writer-node")
+	id, key := joinedMember44ForReconcile(t, writer, "stable-shell-id")
+	heartbeat := func(localID, fp string) int {
+		body, _ := json.Marshal(map[string]any{"state": nodeStateReady, "snapshot_revision": writer.writerAuthGeneration(), "local_name": "shell:node-44", "local_id": localID, "local_fingerprint": fp})
+		return membershipHTTP(writer, http.MethodPost, "/admin/api/nodes/heartbeat", key, body).Code
+	}
+	if got := heartbeat("stable-shell-id", "key-A"); got != 200 {
+		t.Fatalf("initial pin: %d", got)
+	}
+	if got := heartbeat("", "key-B"); got != 403 {
+		t.Fatalf("changed fingerprint without local ID accepted: %d", got)
+	}
+	if got := heartbeat("", ""); got != 200 {
+		t.Fatalf("legacy omitted identity rejected: %d", got)
+	}
+	if got := heartbeat("", "key-A"); got != 200 {
+		t.Fatalf("same pinned fingerprint rejected: %d", got)
+	}
+	writer.membershipMu.Lock()
+	defer writer.membershipMu.Unlock()
+	if writer.membership.Nodes[id].LocalFingerprint != "key-A" {
+		t.Fatal("fingerprint pin changed")
+	}
+}

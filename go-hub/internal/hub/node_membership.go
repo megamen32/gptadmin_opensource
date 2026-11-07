@@ -966,10 +966,17 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 	// fingerprint. Generic enrollment still permits liveness, but its unapproved
 	// executor metadata must neither be pinned nor exposed as a trusted alias.
 	// A legacy registry pin additionally constrains an authorized assertion.
+	// Once pinned, a conflicting fingerprint is forbidden even when the
+	// heartbeat omits its optional local ID. Omitted fingerprints remain valid
+	// for older members and never clear an established pin.
+	if request.LocalFingerprint != "" && current.LocalFingerprint != "" && current.LocalFingerprint != request.LocalFingerprint {
+		s.membershipMu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor fingerprint not approved"})
+		return
+	}
 	fingerprintAuthorized := request.LocalID != "" && (current.LocalID != "" || legacyIdentityApproved)
 	if fp := request.LocalFingerprint; fp != "" && fingerprintAuthorized {
 		if len(fp) > 128 || strings.TrimSpace(fp) != fp || strings.ContainsAny(fp, "\x00\r\n") ||
-			(current.LocalFingerprint != "" && current.LocalFingerprint != fp) ||
 			(legacyFingerprint != "" && legacyFingerprint != fp) {
 			s.membershipMu.Unlock()
 			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "node local executor fingerprint not approved"})
