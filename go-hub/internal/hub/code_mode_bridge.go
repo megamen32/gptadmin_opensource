@@ -130,10 +130,10 @@ globalThis.mcp = Object.freeze({
   }),
   content: Object.freeze({
     index: (text,opts={}) => __contentMCP('index',text,opts),
-    indexSource: (source,opts={}) => __contentMCP('indexSource',source,opts),
+    indexSource: (source,opts={}) => source !== null && typeof source === 'object' && !Array.isArray(source) ? __contentMCP('indexSource',source.source,source) : __contentMCP('indexSource',source,opts),
     status: (source,opts={}) => __contentMCP('status',source,opts),
-    search: (query,opts={}) => __contentMCP('search',query,opts),
-    read: (source,chunk_id,opts={}) => __contentMCP('read',source,{chunk_id,...opts}),
+    search: (query,opts={}) => query !== null && typeof query === 'object' && !Array.isArray(query) ? __contentMCP('search',query.query,query) : __contentMCP('search',query,opts),
+    read: (source,chunk_id,opts={}) => source !== null && typeof source === 'object' && !Array.isArray(source) ? __contentMCP('read',source.source,source) : __contentMCP('read',source,{chunk_id,...opts}),
     delete: (source) => __contentMCP('delete',source,{}),
   }),
 });
