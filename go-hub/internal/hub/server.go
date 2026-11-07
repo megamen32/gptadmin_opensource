@@ -5011,13 +5011,43 @@ func (s *Server) mcpRelayCall(w http.ResponseWriter, r *http.Request) {
 		originalBody.Write(encodedRequest)
 	}
 
+	// Keep canonical calls byte-for-byte intact. The decoded request contains
+	// float64 values, so re-marshalling it can corrupt opaque caller numbers.
+	priorTargets := map[string]string{}
+	for _, key := range []string{"target", "server_id", "agent_id"} {
+		priorTargets[key], _ = req[key].(string)
+	}
 	if err := s.normalizePublicTargetArgs(req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	canonicalBody, _ := json.Marshal(req)
-	originalBody.Reset()
-	originalBody.Write(canonicalBody)
+	var rawFields map[string]json.RawMessage
+	for key, prior := range priorTargets {
+		canonical, ok := req[key].(string)
+		if !ok || canonical == prior {
+			continue
+		}
+		if rawFields == nil {
+			if err := json.Unmarshal(originalBody.Bytes(), &rawFields); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		rawFields[key], _ = json.Marshal(canonical)
+	}
+	if rawFields != nil {
+		// Only routing fields are replaced. RawMessage preserves all numeric
+		// literals, including nested arguments; do not HTML-escape opaque data.
+		var canonicalBody bytes.Buffer
+		encoder := json.NewEncoder(&canonicalBody)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(rawFields); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		originalBody.Reset()
+		originalBody.Write(canonicalBody.Bytes())
+	}
 	target := firstString(req, "target", "server_id", "agent_id")
 	toolName := firstString(req, "tool", "tool_name", "name")
 	args := mapValue(req["arguments"])

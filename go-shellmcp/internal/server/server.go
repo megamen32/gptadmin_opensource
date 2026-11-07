@@ -255,7 +255,7 @@ type Server struct {
 	sshClient             *sshexec.Client
 	childMCP              *mcpclient.Client
 	connectionInstance    string
-	storageLimit          int64
+	storageLimit          atomic.Int64
 	storageProtectedBytes atomic.Int64
 	storageOverflowBytes  atomic.Int64
 	storageEffectiveLimit atomic.Int64
@@ -390,7 +390,6 @@ func New(cfg Config) *Server {
 		sshClient:          sshClient,
 		childMCP:           childMCP,
 		connectionInstance: connectionInstance,
-		storageLimit:       cfg.StorageLimitBytes,
 		callbackCancels:    map[string]context.CancelFunc{},
 		callbackCancelled:  map[string]bool{},
 	}
@@ -404,6 +403,7 @@ func New(cfg Config) *Server {
 			_ = server.enforceStorage(protected)
 		})
 	}
+	server.storageLimit.Store(cfg.StorageLimitBytes)
 	return server
 }
 
@@ -437,8 +437,8 @@ func (s *Server) enforceStorage(protected map[string]bool) error {
 	}
 	var result storagebudget.Result
 	var err error
-	if s.storageLimit > 0 {
-		result, err = storagebudget.EnforceRootsLimit(s.storageRoots(), s.storageLimit, keep)
+	if limit := s.storageLimit.Load(); limit > 0 {
+		result, err = storagebudget.EnforceRootsLimit(s.storageRoots(), limit, keep)
 	} else {
 		result, err = storagebudget.EnforceRoots(s.storageRoots(), keep)
 	}
@@ -661,10 +661,11 @@ func (s *Server) storageStats() shellStorageStats {
 
 func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	stats := s.storageStats()
+	limit := s.storageLimit.Load()
 	writeJSON(w, 200, map[string]any{
 		"component": "shellmcp-go", "build_version": parseBuildVersion(BuildVersion), "jobs": len(s.jobs.List()),
 		"queue_enabled": s.cfg.QueueEnabled, "mode": s.cfg.Mode, "heartbeat": s.cfg.HeartbeatEnabled, "audit_enabled": s.cfg.AuditLog != "",
-		"storage_limited": s.storageLimit > 0, "storage_limit_bytes": s.storageLimit, "storage_bytes": stats.StorageBytes, "spool_bytes": stats.SpoolBytes,
+		"storage_limited": limit > 0, "storage_limit_bytes": limit, "storage_bytes": stats.StorageBytes, "spool_bytes": stats.SpoolBytes,
 		"storage_protected_bytes": s.storageProtectedBytes.Load(), "storage_over_budget_bytes": s.storageOverflowBytes.Load(), "storage_effective_limit_bytes": s.storageEffectiveLimit.Load(),
 		"outbox_depth": stats.OutboxDepth, "outbox_retry_attempts": stats.OutboxRetryAttempts,
 		"queue_poll_count": s.queuePollCount.Load(), "queue_poll_errors": s.queuePollErrors.Load(), "queue_poll_latency_ms": s.queuePollLatencyMS.Load(),
@@ -1475,13 +1476,7 @@ func (s *Server) applyHubRuntimeSettings(v map[string]any) {
 		s.cfg.SpoolRetention = time.Duration(n) * time.Hour
 	}
 	if n := intAny(v["storage_max_mb"]); n >= 0 && n <= 10240 {
-		if n == 0 {
-			s.storageLimit = 0
-			s.cfg.StorageLimitBytes = 0
-		} else {
-			s.storageLimit = int64(n) << 20
-			s.cfg.StorageLimitBytes = s.storageLimit
-		}
+		s.storageLimit.Store(int64(n) << 20)
 		_ = s.enforceStorage(nil)
 	}
 	if n := intAny(v["outbox_backoff_base_seconds"]); n >= 1 && n <= 600 {
