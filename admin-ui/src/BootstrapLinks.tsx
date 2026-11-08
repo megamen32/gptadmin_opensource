@@ -89,7 +89,7 @@ export default function BootstrapLinks() {
       const uncertain = reason instanceof TypeError || (reason instanceof ApiError && reason.status >= 500);
       setCreationUnknown(uncertain);
       setError(uncertain
-        ? "Ответ о создании не получен. Обновите список, чтобы проверить результат перед новой попыткой."
+        ? `${messageFor(reason)} Ответ о создании не получен. Обновите список, чтобы проверить результат перед новой попыткой.`
         : messageFor(reason));
     } finally {
       setBusy(null);
@@ -139,7 +139,7 @@ export default function BootstrapLinks() {
     <div className="content-wrap bootstrap-links">
       <p className="lede bootstrap-intro">Отправьте агенту одну ссылку. По ней он получит инструкции, готовый MCP-клиент и доступ в пределах выбранного профиля.</p>
 
-      {error && <div className="state-panel card state-error" role="alert">{error}</div>}
+      {error && <div className="bootstrap-error" role="alert">{error}</div>}
       {notice && <div className="bootstrap-notice" role="status">{notice}</div>}
 
       <section className="card bootstrap-card" aria-labelledby="bootstrap-create-title">

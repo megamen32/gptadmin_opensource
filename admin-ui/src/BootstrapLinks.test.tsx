@@ -129,6 +129,23 @@ it("requires a refresh after an uncertain creation and never retries the POST au
   expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
+it.each([500, 503])("shows the server reason in a compact alert without replaying an uncertain HTTP %s creation", async (status) => {
+  const reason = "configured LHC instructions must be a regular file";
+  const fetchMock = mockFetch({ post: async () => json({ detail: reason }, status) });
+  render(<BootstrapLinks />);
+  await fillForm();
+  await userEvent.click(screen.getByRole("button", { name: "Создать ссылку" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(reason);
+  expect(alert).toHaveTextContent("Ответ о создании не получен. Обновите список");
+  expect(alert).toHaveClass("bootstrap-error");
+  expect(alert).not.toHaveClass("state-panel");
+  expect(screen.getByRole("button", { name: "Создать ссылку" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Создать ссылку" }));
+  expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
 it("requires an existing profile and rejects an invalid duration before sending", async () => {
   const fetchMock = mockFetch();
   render(<BootstrapLinks />);

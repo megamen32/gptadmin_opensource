@@ -17,6 +17,7 @@
 .bootstrap-form-footer .button { flex-shrink: 0; }
 .bootstrap-issued { border-color: #6d998a; background: #f9fcf7; }
 .bootstrap-notice { padding: 14px 18px; border: 1px solid #a5c3b2; border-radius: 10px; background: #edf6eb; color: #2b5847; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.bootstrap-error { padding: 14px 18px; border: 1px solid #d8b6aa; border-radius: 10px; background: #fff3ed; color: #8f3925; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .bootstrap-expiry { font-size: 12px; line-height: 1.6; color: #4e6b5c; }
 .bootstrap-copy-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .bootstrap-url { margin-top: 20px; }
