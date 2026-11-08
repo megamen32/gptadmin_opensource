@@ -9119,7 +9119,8 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 			return mcpToolResult(raw), nil, false
 		}
 		if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" {
-			raw := s.callShellToolWithTraceParent(agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+			// Bind the durable receipt to the authenticated submitting client.
+			raw := s.callShellToolWithFilesystemACLForRequest(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r), nil, nil)
 			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
 				return taskResult, nil, false
 			}
