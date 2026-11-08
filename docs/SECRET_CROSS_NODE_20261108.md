@@ -21,3 +21,25 @@ separate consistent implementation if changed.
 Acceptance remains pending until the same QA reference succeeds through
 ordinary public GPTAdmin shell_exec on a different physical host after install.
 Unit tests and transport status alone are not this acceptance.
+
+## Live acceptance, 2026-11-08
+
+Delivered1113: Hub100 private26378055953db40ce92d3d0636e2717aa06d7ca4;
+Nodes44/88 sanitizedcaaf31e806a58c60322de965efb3763cec10ee07.
+Public CI42515717701 completed successfully. The same owner-provided QA
+reference returned `QA_SECRET_AVAILABLE` and exit0 through ordinary MCP
+`shell_exec` with `secret_env` on44 (operationop_2c91bfffa4a55e67) and88
+(operationop_befa03c94acb2ba8). No value was printed. Node88 required its
+own current instruction receipt; this was supplied through the normal context
+field without changing authorization. The earlier428 attempts did not execute.
+
+Hub update initially aborted safely on drain. Only the never-dispatched
+child schema receipt6f775da245e100a866eac9913a41f461 was cancelled through
+the authenticated administrative MCP API; native updater then passed drain
+and installed1113 with expected-revision CAS. No business job was replayed.
+
+A separate source-only drain fix recognizes queued child/tools/list under
+the same strict predicate as tools/list (no start/result/error/parent).
+Race TestNodeDrain passes; started/unknown/parent-bound operations still fence.
+This follow-up is NOT in installed1113 and must enter the next normal release.
+Drain counter diagnostics remain tracked separately in B8b0fddc92fcf4feda168.

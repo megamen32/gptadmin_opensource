@@ -277,6 +277,7 @@ func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
 	s := drainTestHub(t, nil)
 	s.mu.Lock()
 	s.relayJobs["catalog"] = &relayJob{ID: "catalog", AgentID: "control:host", Method: "tools/list", Status: "queued", CreatedAt: nowFloat()}
+	s.relayJobs["child-catalog"] = &relayJob{ID: "child-catalog", AgentID: "mcp:shell:host:child", Method: childSchemaMethod, Status: "queued", CreatedAt: nowFloat()}
 	s.mu.Unlock()
 	s.EnableNodeDrain("catalog-only")
 	if st := s.NodeDrainStatus(); !st.ReadyToStop || st.Counters.UnfinishedExecutions != 0 {
@@ -294,6 +295,13 @@ func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
 		{ID: "call", Method: "tools/list", Status: "unknown"},
 		{ID: "call", Method: "tools/list", Status: "queued", StartedAt: nowFloat()},
 		{ID: "call", Method: "tools/list", Status: "queued", Result: map[string]any{"accepted": true}},
+		{ID: "call", Method: childSchemaMethod, Status: "running", StartedAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "unknown"},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", StartedAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", DoneAt: nowFloat()},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", Result: map[string]any{"accepted": true}},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", Error: map[string]any{"code": "failure"}},
+		{ID: "call", Method: childSchemaMethod, Status: "queued", ParentTaskID: "parent"},
 	} {
 		s.mu.Lock()
 		s.relayJobs["call"] = j
@@ -301,6 +309,35 @@ func TestNodeDrainQueuedDiscoveryIsNotAnExecution(t *testing.T) {
 		if st := s.NodeDrainStatus(); st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
 			t.Fatalf("unsafe record not blocking: job=%+v state=%+v", j, st)
 		}
+	}
+}
+
+func TestNodeDrainQueuedChildSchemaWithDurableShell(t *testing.T) {
+	s := drainTestHub(t, nil)
+	s.mu.Lock()
+	owner, err := s.ensureTaskOwnerLocked()
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	id := "child-schema"
+	s.relayJobs[id] = &relayJob{ID: id, OwnerID: owner, Method: childSchemaMethod, Status: "queued", CreatedAt: nowFloat()}
+	s.shellJobs[id] = &shellJob{ID: id, OwnerID: owner, Server: "offline", ToolName: "mcp_tools", Status: "queued", CreatedAt: nowFloat(), Arguments: map[string]any{"ref": "child"}}
+	err = s.saveTaskStateLocked(id)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.EnableNodeDrain("undelivered schema")
+	if st := s.NodeDrainStatus(); !st.ReadyToStop {
+		t.Fatalf("durable schema blocks drain: %+v", st)
+	}
+	s.mu.Lock()
+	s.shellJobs[id].Status = "running"
+	s.shellJobs[id].StartedAt = nowFloat()
+	s.mu.Unlock()
+	if st := s.NodeDrainStatus(); st.ReadyToStop || st.Counters.UnfinishedExecutions != 1 {
+		t.Fatalf("started shell must block drain: %+v", st)
 	}
 }
 

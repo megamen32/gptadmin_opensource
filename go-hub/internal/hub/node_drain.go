@@ -181,7 +181,7 @@ func (s *Server) unfinishedExecutionCount() int {
 		// A never-dispatched schema read has no running executor or business
 		// side effect. Keep its durable receipt, but do not fence deployment
 		// on catalog discovery. Started, unknown and tools/call still fence.
-		queuedDiscovery := job != nil && job.Method == "tools/list" && job.Status == "queued" &&
+		queuedDiscovery := job != nil && (job.Method == "tools/list" || job.Method == childSchemaMethod) && job.Status == "queued" &&
 			job.StartedAt == 0 && job.DoneAt == 0 && job.Result == nil && job.Error == nil && job.ParentTaskID == ""
 		if job != nil && !taskTerminal(job.Status) && !queuedDiscovery && s.drainOwnedLocallyLocked(job.OwnerID, ownerID) {
 			count++
