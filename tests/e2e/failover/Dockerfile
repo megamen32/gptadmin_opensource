@@ -2,6 +2,7 @@ FROM golang:1.26-bookworm AS build
 WORKDIR /src/go-hub
 COPY go-hub/go.mod go-hub/go.sum ./
 COPY go-shellmcp/go.mod go-shellmcp/go.sum ../go-shellmcp/
+COPY go-hub/third_party/qjs/go.mod go-hub/third_party/qjs/go.sum ./third_party/qjs/
 RUN go mod download
 COPY go-hub/ ./
 COPY go-shellmcp/ ../go-shellmcp/
