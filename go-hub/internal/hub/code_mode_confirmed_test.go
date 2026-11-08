@@ -674,3 +674,18 @@ func TestStoredHandleOutlivesTheRun(t *testing.T) {
 		t.Fatalf("the stored handle was not readable in a later run: %d %#v", status, read)
 	}
 }
+
+// Plain multi-megabyte output must reach the storage limit without spending
+// the execution budget encoding every byte as hex. Keep the completed receipt.
+func TestUnstorableResultFastPathBudget(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	got, status := codeModeRun(t, s, r, map[string]any{
+		"code":             "await mcp.call('hub','demo',{}); return 'y'.repeat(3000000);",
+		"max_output_bytes": 4096, "timeout_ms": 5000,
+	})
+	failure := mapValue(got["error"])
+	if status == http.StatusOK || firstString(failure, "code") != "content_storage_limit" || intFromAny(failure["calls_completed"]) != 1 || len(mapValue(failure["receipt"])) == 0 {
+		t.Fatalf("large plain output did not reach storage admission within budget: %d %#v", status, failure)
+	}
+}

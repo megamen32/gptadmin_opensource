@@ -134,7 +134,19 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 	if jobID == "" {
 		return fail(http.StatusBadRequest, "job id is required")
 	}
-	if !profileAllowsTarget(r, target) {
+	// The hint selects transport only. A paired surface grant may reach its
+	// owner, which must validate the persisted original target and caller.
+	transportAllowed := profileAllowsTarget(r, target)
+	if !transportAllowed {
+		s.mu.Lock()
+		for _, surface := range []string{"file:" + name, "control:" + name} {
+			if agent, exists := s.exposedAgentByIDLocked(surface); exists && firstString(agent.Meta, "backing_server_id") == target && profileAllowsTarget(r, surface) {
+				transportAllowed = true
+			}
+		}
+		s.mu.Unlock()
+	}
+	if !transportAllowed {
 		return fail(http.StatusForbidden, "access profile denies the receipt owner target")
 	}
 	s.mu.Lock()
@@ -148,6 +160,20 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 	}
 	job := s.shellJobs[jobID]
 	relay := s.relayJobs[jobID]
+	// Snapshot authorization metadata under the same lock as owner lookup.
+	receiptTarget := target
+	var receiptCaller *taskCaller
+	var receiptACL *filesystemACLPolicy
+	if relay == nil && job != nil {
+		if job.ReceiptTarget != "" {
+			receiptTarget = job.ReceiptTarget
+		}
+		if job.Caller != nil {
+			copy := *job.Caller
+			receiptCaller = &copy
+		}
+		receiptACL = cloneFilesystemACLPolicy(job.FilesystemACL)
+	}
 	jobExists := job != nil || relay != nil
 	owned := job != nil && "shell:"+job.Server == target
 	if relay != nil {
@@ -160,6 +186,13 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 		return fail(http.StatusServiceUnavailable, "task state unavailable")
 	}
 	if jobExists {
+		if relay == nil && job != nil {
+			if !profileAllowsTarget(r, receiptTarget) || s.authorizeTaskReceipt(r, receiptCaller, receiptACL) != nil {
+				return fail(http.StatusForbidden, "task receipt is not available to this MCP client")
+			}
+		} else if !profileAllowsTarget(r, target) {
+			return fail(http.StatusForbidden, "access profile denies the receipt owner target")
+		}
 		// A supplied hint must never override a locally stored job's owner.
 		if !enrolled || !owned {
 			return fail(http.StatusNotFound, "job does not belong to the requested local executor")
@@ -211,16 +244,22 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	queueTarget := target
 	local := s.localExecutors[target] != nil
 	if !local {
-		// A child MCP is owned by its embedded parent executor, even though its
-		// public target ID is distinct from the shell executor ID.
-		if child, ok := s.exposedAgentByIDLocked(target); ok && isChildMCPAgent(child) {
-			queueTarget = firstString(child.Meta, "parent_server_id")
+		// Child MCPs and paired file/control surfaces share their catalogued
+		// shell owner. Resolve ownership from the registry, not the call body.
+		if agent, ok := s.exposedAgentByIDLocked(target); ok {
+			if isChildMCPAgent(agent) {
+				queueTarget = firstString(agent.Meta, "parent_server_id")
+			} else if agent.Kind == "virtual_file" || agent.Kind == "virtual_control" {
+				if backing := firstString(agent.Meta, "backing_server_id"); strings.HasPrefix(backing, "shell:") {
+					queueTarget = backing
+				}
+			}
 			local = s.localExecutors[queueTarget] != nil
 		}
 	}
 	// Transport, mesh proof, drain admission and receipt ownership all belong
-	// to the enrolled parent executor. Keep the original child target in body
-	// so the destination still authorizes and dispatches that exact child.
+	// to the enrolled parent executor. Keep the original public target in body
+	// so the destination still authorizes and dispatches that exact surface.
 	target = queueTarget
 	route, routed := s.nodePeerRouteLocked(target)
 	approved := local || routed || s.nodeConns.get(target) != nil

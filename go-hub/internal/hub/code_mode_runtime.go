@@ -509,7 +509,7 @@ func stringifyCodeModeValue(value *qjs.Value) (string, error) {
 	if serialized.IsUndefined() {
 		return "undefined", nil
 	}
-	if text, ok := codeModeStringHex(ctx, serialized, "hex"); ok {
+	if text, ok := codeModeStringHex(ctx, serialized, "hexIfNeeded"); ok {
 		return text, nil
 	}
 	return serialized.String(), nil

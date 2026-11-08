@@ -49,6 +49,7 @@ type persistedRelayTask struct {
 }
 
 type persistedShellTask struct {
+	ReceiptTarget string          `json:"receipt_target,omitempty"`
 	SealedPending json.RawMessage `json:"sealed_pending,omitempty"`
 	Timeout       int             `json:"timeout,omitempty"`
 	RequestKey    string          `json:"request_key,omitempty"`
@@ -149,7 +150,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if err != nil {
 			return fmt.Errorf("seal queued quorum task input: %w", err)
 		}
-		state.Shell[id] = persistedShellTask{SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: persistableShellResult(j), Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
+		state.Shell[id] = persistedShellTask{ReceiptTarget: j.ReceiptTarget, SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: persistableShellResult(j), Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
 	}
 	nowTime := time.Now()
 	for key, entry := range s.idempotency {
@@ -343,7 +344,7 @@ func (s *Server) loadTaskState() error {
 			done = now
 			recoveredIDs = append(recoveredIDs, id)
 		}
-		s.shellJobs[id] = &shellJob{quorumPendingSealed: append(json.RawMessage(nil), p.SealedPending...), quorumPendingUnmaterialized: quorumPending, Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
+		s.shellJobs[id] = &shellJob{ReceiptTarget: p.ReceiptTarget, quorumPendingSealed: append(json.RawMessage(nil), p.SealedPending...), quorumPendingUnmaterialized: quorumPending, Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
 		if status == "cancelled" && p.StartedAt > 0 && p.Server != "" {
 			s.shellControls[p.Server] = append(s.shellControls[p.Server], shellControl{TaskID: p.ID})
 		}

@@ -8,6 +8,8 @@ import (
 // taskCaller is persisted with each newly submitted result-bearing job. It is
 // transport identity only: callers cannot supply or override it in tool args.
 type taskCaller struct {
+	BrowserSubject string `json:"browser_subject,omitempty"`
+	BrowserBinding string `json:"browser_binding,omitempty"`
 	ClientID       string `json:"client_id,omitempty"`
 	TokenID        string `json:"token_id,omitempty"`
 	Subject        string `json:"subject,omitempty"`
@@ -29,6 +31,10 @@ func taskCallerFromRequest(r *http.Request) *taskCaller {
 		Subject:   firstString(claims, "sub"),
 		ProfileID: AccessProfileIDFromRequest(r),
 	}
+	if guard, browser := r.Context().Value(browserGrepMeshGuardKey{}).(browserGrepMeshGuard); browser {
+		caller.BrowserSubject = guard.subject
+		caller.BrowserBinding = guard.fingerprint
+	}
 	if profile, ok := AccessProfileFromRequest(r); ok {
 		caller.ProfileVersion = int64(profile.Version)
 	}
@@ -40,7 +46,8 @@ func taskCallerFromRequest(r *http.Request) *taskCaller {
 
 func sameTaskCaller(a, b *taskCaller) bool {
 	return a != nil && b != nil && a.ClientID == b.ClientID && a.TokenID == b.TokenID &&
-		a.Subject == b.Subject && a.ProfileID == b.ProfileID && a.ProfileVersion == b.ProfileVersion
+		a.Subject == b.Subject && a.ProfileID == b.ProfileID && a.ProfileVersion == b.ProfileVersion &&
+		a.BrowserSubject == b.BrowserSubject && a.BrowserBinding == b.BrowserBinding
 }
 
 // authorizeTaskReceipt is called before formatting, polling, or acknowledging
@@ -49,6 +56,9 @@ func sameTaskCaller(a, b *taskCaller) bool {
 func (s *Server) authorizeTaskReceipt(r *http.Request, owner *taskCaller, filesystemACL *filesystemACLPolicy) error {
 	if r == nil {
 		return nil // internal worker paths use their existing owner binding
+	}
+	if err := s.revalidateBrowserGrepMeshReceipt(r); err != nil {
+		return err
 	}
 	claims, _ := r.Context().Value(authClaimsContextKey{}).(map[string]any)
 	if len(claims) == 0 {
@@ -90,11 +100,13 @@ func (s *Server) taskReceiptForRequest(r *http.Request, jobID string, detail any
 	relay, shell := s.relayJobs[jobID], s.shellJobs[jobID]
 	var caller *taskCaller
 	var filesystemACL *filesystemACLPolicy
+	receiptTarget := ""
 	if relay != nil && relay.Caller != nil {
 		copy := *relay.Caller
 		caller = &copy
 	}
-	if shell != nil {
+	if relay == nil && shell != nil {
+		receiptTarget = shell.ReceiptTarget
 		if shell.Caller != nil {
 			copy := *shell.Caller
 			caller = &copy
@@ -105,7 +117,7 @@ func (s *Server) taskReceiptForRequest(r *http.Request, jobID string, detail any
 	if relay == nil && shell == nil {
 		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
 	}
-	if s.authorizeTaskReceipt(r, caller, filesystemACL) != nil {
+	if (receiptTarget != "" && !profileAllowsTarget(r, receiptTarget)) || s.authorizeTaskReceipt(r, caller, filesystemACL) != nil {
 		return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
 	}
 	s.mu.Lock()

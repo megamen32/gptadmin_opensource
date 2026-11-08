@@ -31,7 +31,7 @@ def test_canonical_api_http_upgrade_stays_on_canonical_host():
 
 
 def test_bootstrap_location_keeps_secret_url_out_of_logs():
-    text = SCRIPT.read_text()
+    text = SCRIPT.read_text().split("write_final_split() {", 1)[1]
 
     # A dedicated prefix location so regex locations never re-route the
     # secret-bearing path back through the logged default handling.
@@ -57,3 +57,19 @@ def test_bootstrap_location_keeps_secret_url_out_of_logs():
     assert text.count("proxy_pass http://gptadmin_hub_active;") == 2
     assert text.count("proxy_read_timeout 3600s;") == 2
     assert text.count("proxy_buffering off;") == 2
+
+
+def test_acme_bootstrap_secret_path_fails_closed():
+    text = SCRIPT.read_text().split("write_bootstrap_http() {", 1)[1].split("\nNGINX", 1)[0]
+    prefix = "location ^~ /bootstrap/ {"
+    assert prefix in text, "ACME configuration exposes bootstrap URLs to the logged redirect"
+    location = text.split(prefix, 1)[1].split("}", 1)[0]
+    assert "return 503;" in location
+    assert "access_log off;" in location
+    assert "error_log /dev/null crit;" in location
+    assert 'add_header Cache-Control "no-store, private" always;' in location
+    assert 'add_header Referrer-Policy "no-referrer" always;' in location
+    assert "return 30" not in location
+    assert "proxy_pass" not in location
+    assert "$request_uri" not in location
+    assert "location ^~ /.well-known/acme-challenge/ {" in text

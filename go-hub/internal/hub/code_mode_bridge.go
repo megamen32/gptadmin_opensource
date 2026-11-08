@@ -265,6 +265,9 @@ const __hexBridgeMaxJSON = 1048576;
 // Нативная проверка занимает микросекунды даже на мегабайтах текста.
 const __csiLike = /\[[\x5b?0-9;]*[hm]/;
 globalThis.__codeModeStrBytes = Object.freeze({
+  // Input is already serialized exactly once. Plain text crosses directly;
+  // CSI-bearing strings retain full hex protection even above one MiB.
+  hexIfNeeded: (s) => __csiLike.test(s) ? __hexOf(s) : 'xs',
   hex: __hexOf,
   hexify: (v) => {
     const j = __nativeJSONStringify(v);

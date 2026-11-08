@@ -30,6 +30,15 @@ server {
         try_files \$uri =404;
     }
 
+    # Keep capability URLs private even if certificate issuance fails.
+    location ^~ /bootstrap/ {
+        access_log off;
+        error_log /dev/null crit;
+        add_header Cache-Control "no-store, private" always;
+        add_header Referrer-Policy "no-referrer" always;
+        return 503;
+    }
+
     location / {
         return 301 https://$SITE_DOMAIN\$request_uri;
     }

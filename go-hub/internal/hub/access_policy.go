@@ -162,6 +162,14 @@ func authorizeToolCall(r *http.Request, target, toolName string) error {
 	if requestAccessMode(r) != accessModeReadonly {
 		return nil
 	}
+	// GrepMesh reads retain the executor-bound filesystem policy. An unbound
+	// client must not gain arbitrary child tools merely by their read-like name.
+	if strings.HasPrefix(target, "mcp:shell:") && filesystemScopedGrepMeshTarget(target) &&
+		(toolName == "search_text" || toolName == "read_text") {
+		if profile, bound := AccessProfileFromRequest(r); bound && profile.ReadRoots != nil && len(*profile.ReadRoots) > 0 {
+			return nil
+		}
+	}
 	if target == "hub" {
 		switch toolName {
 		case "expand", "listMcpServers", "list_mcp_servers", "listMcpAgents", "list_mcp_agents", "list_pending_servers", "pending", "hub_status", "status", "demo", "resource_receipt", "settings_schema", "settings_get", "settings_history", "stale_cleanup_preview", "agent_policy_get", "agent_tombstones", "handover_status", "diagnose", webhookRoutesListTool, webhookJobGetTool:

@@ -47,6 +47,7 @@ func (s *Server) refreshTaskRecordsLocked(ids ...string) error {
 					j.OwnerID = p.OwnerID
 					j.Caller = p.Caller
 					j.Server = p.Server
+					j.ReceiptTarget = p.ReceiptTarget
 					j.TraceID = p.TraceID
 					j.TraceParent = p.TraceParent
 					j.ToolName = p.ToolName

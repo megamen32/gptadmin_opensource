@@ -459,6 +459,7 @@ type shellControl struct {
 }
 
 type shellJob struct {
+	ReceiptTarget               string `json:"receipt_target,omitempty"`
 	quorumPendingSealed         json.RawMessage
 	quorumPendingDigest         [32]byte
 	quorumPendingUnmaterialized bool
@@ -1790,6 +1791,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/connect/callback", s.browserOAuthCallback)
 	mux.HandleFunc("/secret-input/", s.secretIngress)
 	mux.HandleFunc("/_services/", s.httpServiceEndpoint)
+	mux.HandleFunc(browserGrepMeshPrefix, s.browserGrepMeshEndpoint)
 	mux.HandleFunc("/server/", s.serverMCPEndpoint)
 	// Legacy alias kept for old pinned MCP URLs.
 	mux.HandleFunc("/agent/", s.agentMCPEndpoint)
@@ -5216,7 +5218,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 			if toolName == "control_catalog" {
 				return map[string]any{"server_id": target, "status": "completed", "response": s.controlCatalog(r, target, firstString(args, "section"))}, http.StatusOK
 			}
-			return s.callShellToolWithTraceParentAndSecrets(backing, toolName, s.shellConnectionArguments(r, backing, toolName, args), background, timeout, requestTraceID(r), requestTraceParent(r), nil, durableRequestKey), http.StatusOK
+			return s.callShellToolWithFilesystemACLForRequest(r, target, toolName, s.shellConnectionArguments(r, backing, toolName, args), background, timeout, requestTraceID(r), requestTraceParent(r), nil, nil, durableRequestKey), http.StatusOK
 		}
 		if target == "hub" {
 			resp, status := s.callHubToolForRequest(r, toolName, args)
@@ -6214,6 +6216,9 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 	if strings.HasPrefix(target, "file:") {
 		server = canonicalShellQueueName(strings.TrimPrefix(target, "file:"))
 	}
+	if strings.HasPrefix(target, "control:") {
+		server = canonicalShellQueueName(strings.TrimPrefix(target, "control:"))
+	}
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
 	}
@@ -6233,7 +6238,7 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 			}
 		}
 	}
-	job := &shellJob{ID: newID(), Server: server, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
+	job := &shellJob{ID: newID(), Server: server, ReceiptTarget: target, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
 	if job.FilesystemACL != nil {
 		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
 		job.FilesystemACL.JobID = job.ID
