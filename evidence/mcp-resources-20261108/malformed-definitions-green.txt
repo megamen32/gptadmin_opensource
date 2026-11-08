@@ -1,0 +1,5 @@
+Command: go test -v -count=1 -timeout=30s -run ^TestMCPSchemaResources(RejectMalformedDefinitions|CachedFailureIsStale|SnapshotRegistryGrowthIsPartial|SnapshotFetchAndConcurrencyLimits)$ ./internal/hub
+Exit: 0
+Excerpt from schema-resource-boundaries-green.txt:
+=== RUN   TestMCPSchemaResourcesRejectMalformedDefinitions
+--- PASS: TestMCPSchemaResourcesRejectMalformedDefinitions (0.15s)

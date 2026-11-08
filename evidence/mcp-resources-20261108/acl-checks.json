@@ -1,0 +1,62 @@
+{
+  "bug_id": "M18-RESOURCE-ACL",
+  "base_commit": "7d43d3bafe1409dcb5d8797a229b71bc80b106a7",
+  "branch": "lhc/resource-acl-worker-20261108",
+  "checks": [
+    {
+      "phase": "RED",
+      "command": [
+        "go",
+        "test",
+        "./internal/hub",
+        "-run",
+        "^(TestResourceInventory|TestAgentResourcesRejectDeniedTarget)",
+        "-count=1",
+        "-timeout=120s"
+      ],
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "source_base": "7d43d3bafe1409dcb5d8797a229b71bc80b106a7",
+      "returncode": 1,
+      "seconds": 9.088,
+      "log": "evidence/mcp-resources-20261108/acl-red.txt"
+    },
+    {
+      "phase": "GREEN",
+      "command": [
+        "go",
+        "test",
+        "./internal/hub",
+        "-run",
+        "^(TestResourceInventory|TestAgentResourcesRejectDeniedTarget)",
+        "-count=1",
+        "-timeout=120s"
+      ],
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "returncode": 0,
+      "seconds": 9.088,
+      "log": "evidence/mcp-resources-20261108/acl-green.txt"
+    },
+    {
+      "phase": "RELATED",
+      "command": [
+        "go",
+        "test",
+        "./internal/hub",
+        "-run",
+        "^(TestResourceInventory|TestAgentResourcesRejectDeniedTarget|TestConnectionOwner|TestStartupInstructionsMCPDelivery|TestResourceReceipt|TestAdminMCPResourceReadHonorsTargetPolicy|TestMCPTaskAndResourceReadsRequireBoundCaller)",
+        "-count=1",
+        "-timeout=120s"
+      ],
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "returncode": 0,
+      "seconds": 1.969,
+      "log": "evidence/mcp-resources-20261108/acl-related.txt"
+    }
+  ],
+  "files_sha256": {
+    "go-hub/internal/hub/server.go": "f1e6ce1c44f2319534b2eecd80df47a66b1c7385e38801c18ea5bf6d4e8e593d",
+    "go-hub/internal/hub/mcp_resource_acl.go": "56742219a3a518da8196b723a8d3d454ad26c59ede963dfc981c25749acbcd96",
+    "go-hub/internal/hub/mcp_resource_acl_test.go": "561c0ebb27c9506f605d4596ddfab17e6df87c8d2dd09757b0b0d71e5e0d7c0c"
+  },
+  "scope": "Source and in-process HTTP policy checks; no deployment or real client-picker acceptance."
+}

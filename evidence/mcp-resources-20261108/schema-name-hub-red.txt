@@ -1,0 +1,35 @@
+Command: go test -v -count=1 -timeout=60s -run ^TestChildSchemaNamesValidatedBeforeProfileFilter$ ./internal/hub
+Exit: 1
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/missing
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/non_string
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/empty
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/blank
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/direct/valid
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/missing
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/non_string
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/empty
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/blank
+    child_schema_names_test.go:70: malformed name was hidden by the exact tool profile: status=completed complete=true tools=[]
+=== RUN   TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/valid
+--- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter (2.08s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/missing (0.12s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/non_string (0.10s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/empty (0.13s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/blank (0.08s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/direct/valid (0.11s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/missing (0.32s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/non_string (0.32s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/empty (0.29s)
+    --- FAIL: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/blank (0.29s)
+    --- PASS: TestChildSchemaNamesValidatedBeforeProfileFilter/legacy/valid (0.34s)
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-hub/internal/hub	2.098s
+FAIL

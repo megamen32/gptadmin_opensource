@@ -1,0 +1,24 @@
+Source base: 7d43d3bafe1409dcb5d8797a229b71bc80b106a7
+Command: go test -count=1 -timeout=90s -run ^TestMCPSchemaResources ./internal/hub
+Exit: 1
+--- FAIL: TestMCPSchemaResourcesListingMetadataOnly (0.12s)
+    mcp_schema_resources_test.go:82: resource picker is missing gptadmin://schemas/active
+    mcp_schema_resources_test.go:82: resource picker is missing gptadmin://schemas/active/all
+    mcp_schema_resources_test.go:82: resource picker is missing gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e
+    mcp_schema_resources_test.go:92: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/active"}}}
+--- FAIL: TestMCPSchemaResourcesPreserveFullDefinitions (0.08s)
+    mcp_schema_resources_test.go:107: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e"}}}
+--- FAIL: TestMCPSchemaResourcesReauthorizeWarmedCache (0.08s)
+    mcp_schema_resources_test.go:134: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e"}}}
+--- FAIL: TestMCPSchemaResourcesOwnerConnectionIsolation (0.13s)
+    mcp_schema_resources_test.go:159: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e"}}}
+--- FAIL: TestMCPSchemaResourcesRenameKeepsStableURI (0.11s)
+    mcp_schema_resources_test.go:182: fixture URI absent
+--- FAIL: TestMCPSchemaResourcesBoundedFailureIsHonest (0.19s)
+    --- FAIL: TestMCPSchemaResourcesBoundedFailureIsHonest/unavailable (0.11s)
+        mcp_schema_resources_test.go:205: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e"}}}
+    --- FAIL: TestMCPSchemaResourcesBoundedFailureIsHonest/oversize (0.08s)
+        mcp_schema_resources_test.go:205: resource is not JSON: map[string]interface {}{"contents":[]map[string]interface {}{map[string]interface {}{"mimeType":"text/plain", "text":"unknown GPTAdmin resource", "uri":"gptadmin://schemas/server/cf6018550231528e8173f9d88a0df912aa2778dbb2a2a3a289034e5839bbbff5e"}}}
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-hub/internal/hub	0.722s
+FAIL

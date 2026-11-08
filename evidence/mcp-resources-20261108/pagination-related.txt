@@ -1,0 +1,2 @@
+ok  	github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient	2.084s
+ok  	github.com/megamen32/gptadmin/go-shellmcp/internal/server	3.374s

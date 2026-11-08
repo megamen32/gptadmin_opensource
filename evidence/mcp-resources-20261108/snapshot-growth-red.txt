@@ -1,0 +1,7 @@
+Command: go test -count=1 -timeout=30s -run ^TestMCPSchemaResourcesSnapshotRegistryGrowthIsPartial$ ./internal/hub
+Exit: 1
+--- FAIL: TestMCPSchemaResourcesSnapshotRegistryGrowthIsPartial (0.15s)
+    mcp_schema_resources_test.go:463: registry growth was reported as a full snapshot: status=complete complete=true omitted=1
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-hub/internal/hub	0.166s
+FAIL

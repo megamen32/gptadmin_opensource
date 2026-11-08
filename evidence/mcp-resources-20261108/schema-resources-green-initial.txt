@@ -1,0 +1,3 @@
+Command: go test -count=1 -timeout=120s -run ^(TestMCPSchemaResources|Test.*ChildSchema|TestStartupInstructions|TestResourceReceipt) ./internal/hub
+Exit: 0
+ok  	github.com/megamen32/gptadmin/go-hub/internal/hub	4.495s

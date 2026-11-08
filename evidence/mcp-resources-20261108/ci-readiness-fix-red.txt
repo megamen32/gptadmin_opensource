@@ -1,0 +1,10 @@
+Source: https://github.com/megamen32/gptadmin_opensource/actions/runs/42527999311
+Job: 128875783702
+Original test file SHA256: 1bde50bcc94948fdb794a42f1b86308649504eda60759ed39b0e660945f6f5fe
+Baseline c8 test file is byte-identical to the public failing file.
+Failure excerpt:
+311:Go source regressions and exact Node artifact	Test Hub and ShellMCP before any release	2026-11-08T22:04:07.8741015Z --- FAIL: TestSearchRowsCarryTargetTitle (1.01s)
+312-Go source regressions and exact Node artifact	Test Hub and ShellMCP before any release	2026-11-08T22:04:07.8741561Z     file_transfer_ux_facade_test.go:103: no short file target titled with "transfer-ux-facade" in map[hd3d04d15f031:Shell: transfer-ux-facade]
+421-Go source regressions and exact Node artifact	Test Hub and ShellMCP before any release	2026-11-08T22:04:07.8837563Z FAIL
+422:Go source regressions and exact Node artifact	Test Hub and ShellMCP before any release	2026-11-08T22:04:07.8837753Z FAIL	github.com/megamen32/gptadmin/go-hub/internal/node	94.788s
+423-Go source regressions and exact Node artifact	Test Hub and ShellMCP before any release	2026-11-08T22:04:07.8838055Z FAIL

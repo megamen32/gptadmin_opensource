@@ -1,0 +1,48 @@
+--- FAIL: TestListToolsPaginationPreservesSchemasAndOpaqueCursors (0.01s)
+    --- FAIL: TestListToolsPaginationPreservesSchemasAndOpaqueCursors/legacy (0.00s)
+        pagination_test.go:102: tools/list discarded pages: tools=1 calls=1 error=<nil>
+    --- FAIL: TestListToolsPaginationPreservesSchemasAndOpaqueCursors/empty_scope (0.00s)
+        pagination_test.go:102: tools/list discarded pages: tools=1 calls=1 error=<nil>
+    --- FAIL: TestListToolsPaginationPreservesSchemasAndOpaqueCursors/scoped (0.00s)
+        pagination_test.go:102: tools/list discarded pages: tools=1 calls=1 error=<nil>
+--- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration (0.18s)
+    --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy (0.10s)
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/repeated_cursor (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/page_budget (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=0 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/tool_budget (0.01s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=4096 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/aggregate_byte_budget (0.08s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/malformed_continuation (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/malformed_tool (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/legacy/malformed_cursor (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+    --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped (0.08s)
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/repeated_cursor (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/page_budget (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=0 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/tool_budget (0.01s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=4096 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/aggregate_byte_budget (0.06s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/malformed_continuation (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/malformed_tool (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+        --- FAIL: TestListToolsPaginationRejectsIncompleteEnumeration/scoped/malformed_cursor (0.00s)
+            pagination_test.go:160: incomplete enumeration returned success/partial tools: count=1 error=<nil>
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-shellmcp/internal/mcpclient	0.205s
+--- FAIL: TestChildToolsCompletenessRequiresAllPages (0.01s)
+    --- FAIL: TestChildToolsCompletenessRequiresAllPages/complete (0.00s)
+        mcp_schema_pagination_test.go:71: full bounded catalog did not preserve completeness/allowlist: result=map[ref:pages tools:[]] pages=1
+    --- FAIL: TestChildToolsCompletenessRequiresAllPages/repeated_cursor (0.00s)
+        mcp_schema_pagination_test.go:61: incomplete child catalog returned success: result=map[content:[map[text:Child MCP tools type:text]] resultType:complete structuredContent:map[ref:pages tools:[]]] error=<nil>
+FAIL
+FAIL	github.com/megamen32/gptadmin/go-shellmcp/internal/server	0.023s
+FAIL

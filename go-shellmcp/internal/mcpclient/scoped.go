@@ -265,21 +265,9 @@ func (c *Client) RequestScoped(ctx context.Context, agent supervisor.Agent, scop
 }
 
 func (c *Client) ListToolsScoped(ctx context.Context, agent supervisor.Agent, scope string) ([]map[string]any, error) {
-	result, err := c.RequestScoped(ctx, agent, scope, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
-	}
-	raw, ok := result["tools"].([]any)
-	if !ok {
-		return nil, errors.New("mcp child: tools/list result has no tools array")
-	}
-	out := make([]map[string]any, 0, len(raw))
-	for _, item := range raw {
-		if tool, ok := item.(map[string]any); ok {
-			out = append(out, tool)
-		}
-	}
-	return out, nil
+	return listToolsPages(ctx, func(callCtx context.Context, params map[string]any) (map[string]any, error) {
+		return c.RequestScoped(callCtx, agent, scope, "tools/list", params)
+	})
 }
 
 func (c *Client) CallToolScoped(ctx context.Context, agent supervisor.Agent, name string, arguments map[string]any, scope string) (map[string]any, error) {

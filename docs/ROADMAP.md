@@ -4,10 +4,11 @@ What's built, what's coming, and the open-core split.
 
 ## MCP and context sources — owner priorities, 2026-11-08
 
-Planned, not shipped. Extend the existing GPTAdmin fullcycle; Remote Node
-SSH/Telnet remains paused. Implement in this order:
+The optional schema-resource server implementation is present; release and
+client acceptance remain separate checkpoints in the existing GPTAdmin fullcycle.
+Remote Node SSH/Telnet remains paused. Continue in this order:
 
-1. **Optional active MCP schema resources.** In the same resource picker as
+1. **Optional active MCP schema resources — implemented in source.** In the same resource picker as
    startup instructions and servers, offer a compact active-server/tool index,
    individual server schemas, and an explicitly selected full active-schema
    snapshot. Include input/output schemas, descriptions and tool annotations;
@@ -19,6 +20,10 @@ SSH/Telnet remains paused. Implement in this order:
    **Acceptance:** the real client picker can attach a selected schema; listing
    resources does not fetch every child schema or inject their contents.
    An unauthorized resource cannot be listed or read after access revocation.
+   **Current boundary:** full schemas, bounded discovery/cache, ACL filtering and
+   explicit completeness are implemented. Native catalog/read and installed Node
+   checks are tracked separately from phone-picker attachment; the latter remains
+   open until observed. See [resource contract and limits](MCP_SCHEMA_RESOURCES.md).
 2. **Child context-source federation and selection.** Relay authorized child
    `resources/list`, `resources/templates/list` and `resources/read` with stable,
    collision-free resource URIs. Forward subscriptions/change notifications only

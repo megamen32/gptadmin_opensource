@@ -1,0 +1,22 @@
+Command: go test -v -count=1 -timeout=60s -run ^(TestMCPSchemaResourcesNativeCataloguesAreComplete|TestChildSchemaInvalidUpstreamIsFailure|TestChildSchemaChildOnlyProfileAndExactHint|TestDirectChildSchemaAndExplicitSchemaNoDurableJobs|TestLegacyChildSchemaCompletesThroughSameIDTransport|TestMCPSchemaResourcesPreserveFullDefinitions)$ ./internal/hub
+Exit: 0
+=== RUN   TestDirectChildSchemaAndExplicitSchemaNoDurableJobs
+--- PASS: TestDirectChildSchemaAndExplicitSchemaNoDurableJobs (0.12s)
+=== RUN   TestLegacyChildSchemaCompletesThroughSameIDTransport
+--- PASS: TestLegacyChildSchemaCompletesThroughSameIDTransport (0.22s)
+=== RUN   TestChildSchemaChildOnlyProfileAndExactHint
+--- PASS: TestChildSchemaChildOnlyProfileAndExactHint (0.00s)
+=== RUN   TestChildSchemaInvalidUpstreamIsFailure
+--- PASS: TestChildSchemaInvalidUpstreamIsFailure (0.00s)
+=== RUN   TestMCPSchemaResourcesNativeCataloguesAreComplete
+=== RUN   TestMCPSchemaResourcesNativeCataloguesAreComplete/shell:peer
+=== RUN   TestMCPSchemaResourcesNativeCataloguesAreComplete/file:peer
+=== RUN   TestMCPSchemaResourcesNativeCataloguesAreComplete/control:peer
+--- PASS: TestMCPSchemaResourcesNativeCataloguesAreComplete (0.08s)
+    --- PASS: TestMCPSchemaResourcesNativeCataloguesAreComplete/shell:peer (0.00s)
+    --- PASS: TestMCPSchemaResourcesNativeCataloguesAreComplete/file:peer (0.00s)
+    --- PASS: TestMCPSchemaResourcesNativeCataloguesAreComplete/control:peer (0.00s)
+=== RUN   TestMCPSchemaResourcesPreserveFullDefinitions
+--- PASS: TestMCPSchemaResourcesPreserveFullDefinitions (0.10s)
+PASS
+ok  	github.com/megamen32/gptadmin/go-hub/internal/hub	0.536s

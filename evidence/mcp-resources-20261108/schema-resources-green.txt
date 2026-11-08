@@ -1,0 +1,160 @@
+Command: go test -v -count=1 -timeout=90s -run ^(TestMCPSchemaResources|Test.*ChildSchema|TestStartupInstructions|TestResourceReceipt) ./internal/hub
+Exit: 0
+=== RUN   TestChildSchemaRoutesToNodeBeforeLegacyQueue
+--- PASS: TestChildSchemaRoutesToNodeBeforeLegacyQueue (0.11s)
+=== RUN   TestDirectChildSchemaAndExplicitSchemaNoDurableJobs
+--- PASS: TestDirectChildSchemaAndExplicitSchemaNoDurableJobs (0.09s)
+=== RUN   TestDirectChildSchemaUnavailableNeverQueues
+--- PASS: TestDirectChildSchemaUnavailableNeverQueues (0.13s)
+=== RUN   TestLocalDirectChildSchemaUsesEmbeddedExecutorWithoutJobs
+--- PASS: TestLocalDirectChildSchemaUsesEmbeddedExecutorWithoutJobs (0.15s)
+=== RUN   TestDirectChildSchemaDoesNotExposeDeniedTarget
+--- PASS: TestDirectChildSchemaDoesNotExposeDeniedTarget (0.14s)
+=== RUN   TestLegacyChildSchemaCompletesThroughSameIDTransport
+--- PASS: TestLegacyChildSchemaCompletesThroughSameIDTransport (0.27s)
+=== RUN   TestLegacyChildSchemaTimeoutDeduplicatesConcurrentCaller
+--- PASS: TestLegacyChildSchemaTimeoutDeduplicatesConcurrentCaller (0.35s)
+=== RUN   TestLegacyChildSchemaRoutedFailureNeverQueues
+--- PASS: TestLegacyChildSchemaRoutedFailureNeverQueues (0.08s)
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues/offline
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues/unapproved
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues/nonlegacy
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues/stale
+=== RUN   TestLegacyChildSchemaUnavailableNeverQueues/denied
+--- PASS: TestLegacyChildSchemaUnavailableNeverQueues (0.49s)
+    --- PASS: TestLegacyChildSchemaUnavailableNeverQueues/offline (0.08s)
+    --- PASS: TestLegacyChildSchemaUnavailableNeverQueues/unapproved (0.12s)
+    --- PASS: TestLegacyChildSchemaUnavailableNeverQueues/nonlegacy (0.12s)
+    --- PASS: TestLegacyChildSchemaUnavailableNeverQueues/stale (0.10s)
+    --- PASS: TestLegacyChildSchemaUnavailableNeverQueues/denied (0.07s)
+=== RUN   TestChildSchemaOwnerRealHandlersNoQueue
+2026/11/09 00:07:45 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:45 auth_audit name=ctl_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"127.0.0.1:35687","method":"POST","origin":"","path":"/mcp-relay/tools","raw_query":"","referer":"","remote_addr":"127.0.0.1:27752","user_agent":"Go-http-client/1.1","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:45 ingress request_id=90513257505bb0b067637457268eba54 method=POST path=/mcp-relay/tools status=200 authorization_present=true
+2026/11/09 00:07:45 ingress request_id=bdd4935b4416060f00ff6c0c956324a6 method=POST path=/mcp status=200 authorization_present=true
+--- PASS: TestChildSchemaOwnerRealHandlersNoQueue (0.26s)
+=== RUN   TestChildSchemaForwardRequestsFullDetail
+=== RUN   TestChildSchemaForwardRequestsFullDetail/direct
+=== RUN   TestChildSchemaForwardRequestsFullDetail/agent-tools
+--- PASS: TestChildSchemaForwardRequestsFullDetail (0.21s)
+    --- PASS: TestChildSchemaForwardRequestsFullDetail/direct (0.11s)
+    --- PASS: TestChildSchemaForwardRequestsFullDetail/agent-tools (0.10s)
+=== RUN   TestChildSchemaNativeDispatchUsesParentAndOneID
+--- PASS: TestChildSchemaNativeDispatchUsesParentAndOneID (0.24s)
+=== RUN   TestChildSchemaRecoversExistingUndeliveredID
+--- PASS: TestChildSchemaRecoversExistingUndeliveredID (0.16s)
+=== RUN   TestChildSchemaNeverRecoversBusinessCallOrStartedRead
+=== RUN   TestChildSchemaNeverRecoversBusinessCallOrStartedRead/tools/call
+=== RUN   TestChildSchemaNeverRecoversBusinessCallOrStartedRead/tools/list
+--- PASS: TestChildSchemaNeverRecoversBusinessCallOrStartedRead (0.00s)
+    --- PASS: TestChildSchemaNeverRecoversBusinessCallOrStartedRead/tools/call (0.00s)
+    --- PASS: TestChildSchemaNeverRecoversBusinessCallOrStartedRead/tools/list (0.00s)
+=== RUN   TestChildSchemaChildOnlyProfileAndExactHint
+--- PASS: TestChildSchemaChildOnlyProfileAndExactHint (0.00s)
+=== RUN   TestChildSchemaInvalidUpstreamIsFailure
+--- PASS: TestChildSchemaInvalidUpstreamIsFailure (0.00s)
+=== RUN   TestChildSchemaPreservesCompletedReceiptAcrossRestart
+2026/11/09 00:07:46 registry state loaded path=/tmp/TestChildSchemaPreservesCompletedReceiptAcrossRestart1448318632/001/registry_state.json agents=1 saved_at=1794172066
+--- PASS: TestChildSchemaPreservesCompletedReceiptAcrossRestart (0.26s)
+=== RUN   TestChildSchemaRecoversUndeliveredIDAfterCreatorExit
+2026/11/09 00:07:46 registry state loaded path=/tmp/TestChildSchemaRecoversUndeliveredIDAfterCreatorExit1954786296/001/registry_state.json agents=1 saved_at=1794172066
+--- PASS: TestChildSchemaRecoversUndeliveredIDAfterCreatorExit (0.21s)
+=== RUN   TestChildSchemaAdmissionDeniesBeforeQueue
+--- PASS: TestChildSchemaAdmissionDeniesBeforeQueue (0.00s)
+=== RUN   TestChildSchemaHTTPJobProjectsSameReceipt
+--- PASS: TestChildSchemaHTTPJobProjectsSameReceipt (0.00s)
+=== RUN   TestMCPSchemaResourcesListingMetadataOnly
+--- PASS: TestMCPSchemaResourcesListingMetadataOnly (0.11s)
+=== RUN   TestMCPSchemaResourcesPreserveFullDefinitions
+--- PASS: TestMCPSchemaResourcesPreserveFullDefinitions (0.09s)
+=== RUN   TestMCPSchemaResourcesReauthorizeWarmedCache
+--- PASS: TestMCPSchemaResourcesReauthorizeWarmedCache (0.09s)
+=== RUN   TestMCPSchemaResourcesOwnerConnectionIsolation
+--- PASS: TestMCPSchemaResourcesOwnerConnectionIsolation (0.09s)
+=== RUN   TestMCPSchemaResourcesRenameKeepsStableURI
+--- PASS: TestMCPSchemaResourcesRenameKeepsStableURI (0.12s)
+=== RUN   TestMCPSchemaResourcesBoundedFailureIsHonest
+=== RUN   TestMCPSchemaResourcesBoundedFailureIsHonest/unavailable
+=== RUN   TestMCPSchemaResourcesBoundedFailureIsHonest/oversize
+--- PASS: TestMCPSchemaResourcesBoundedFailureIsHonest (0.35s)
+    --- PASS: TestMCPSchemaResourcesBoundedFailureIsHonest/unavailable (0.12s)
+    --- PASS: TestMCPSchemaResourcesBoundedFailureIsHonest/oversize (0.23s)
+=== RUN   TestMCPSchemaResourcesOlderNodeCompletenessIsUnverified
+--- PASS: TestMCPSchemaResourcesOlderNodeCompletenessIsUnverified (0.09s)
+=== RUN   TestMCPSchemaResourcesCachedFailureIsStale
+--- PASS: TestMCPSchemaResourcesCachedFailureIsStale (0.10s)
+=== RUN   TestMCPSchemaResourcesProtocolRoutes
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//mcp/2025-11-25/resources/list
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=44fd58537ebf1f8bc74ba8c543d6430b method=POST path=/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//mcp/2025-11-25/resources/read
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=2da6d229051d924371bbab67d87dbab7 method=POST path=/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//mcp/2026-07-28/resources/list
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=285c8254556580fbf4b2519dacfa3c08 method=POST path=/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//mcp/2026-07-28/resources/read
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=9f507ae947a028061bf06ed59d35014a method=POST path=/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2025-11-25/resources/list
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=17d12428e9fcc39e064c0a7847fa77ef method=POST path=/server/hub/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2025-11-25/resources/read
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=84c8593e70a0b68d309154dba1da9446 method=POST path=/server/hub/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2026-07-28/resources/list
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=be24b8ee999cc379d64cc8795ab4695c method=POST path=/server/hub/mcp status=200 authorization_present=true
+=== RUN   TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2026-07-28/resources/read
+2026/11/09 00:07:47 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=24\u003e","content_type":"application/json","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:47 ingress request_id=9a65cf8c8517b3b8b93f7a2e6ec71be7 method=POST path=/server/hub/mcp status=200 authorization_present=true
+--- PASS: TestMCPSchemaResourcesProtocolRoutes (0.11s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//mcp/2025-11-25/resources/list (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//mcp/2025-11-25/resources/read (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//mcp/2026-07-28/resources/list (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//mcp/2026-07-28/resources/read (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2025-11-25/resources/list (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2025-11-25/resources/read (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2026-07-28/resources/list (0.00s)
+    --- PASS: TestMCPSchemaResourcesProtocolRoutes//server/hub/mcp/2026-07-28/resources/read (0.00s)
+=== RUN   TestMCPSchemaResourcesDeadlineCancelsUpstream
+--- PASS: TestMCPSchemaResourcesDeadlineCancelsUpstream (0.18s)
+=== RUN   TestMCPSchemaResourcesSnapshotFetchAndConcurrencyLimits
+--- PASS: TestMCPSchemaResourcesSnapshotFetchAndConcurrencyLimits (0.47s)
+=== RUN   TestMCPSchemaResourcesCacheHasCountAndByteBounds
+--- PASS: TestMCPSchemaResourcesCacheHasCountAndByteBounds (0.88s)
+=== RUN   TestMCPSchemaResourcesDoNotPublishHostnameIdentityFallback
+--- PASS: TestMCPSchemaResourcesDoNotPublishHostnameIdentityFallback (0.10s)
+=== RUN   TestMCPSchemaResourcesRejectMalformedDefinitions
+--- PASS: TestMCPSchemaResourcesRejectMalformedDefinitions (0.11s)
+=== RUN   TestNodeDrainQueuedChildSchemaWithDurableShell
+--- PASS: TestNodeDrainQueuedChildSchemaWithDurableShell (0.21s)
+=== RUN   TestConcurrentSearchUsesOnlyEachPrincipalChildSchemaPartition
+2026/11/09 00:07:49 auth_audit name=mcp_auth_denied fields={"authorization":"","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","reason":"missing authorization header","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 auth_audit name=mcp_auth_denied fields={"authorization":"","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","reason":"missing authorization header","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+--- PASS: TestConcurrentSearchUsesOnlyEachPrincipalChildSchemaPartition (0.09s)
+=== RUN   TestResourceReceiptUsesAuthenticatedRequestOrigin
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"oauth_jwt","authorization":"\u003credacted len=348\u003e","content_type":"","host":"receipt.example","jwt_claims":{"aud":"https://receipt.example","client_id":"origin-test","exp":1794175669,"iat":1794172069,"kid":"gptadmin-hs256-v1","resource":"https://receipt.example","scope":"gptadmin.read","sub":"reader"},"method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=b6d06ee29fe506f25be81a1f697c4cc0 method=POST path=/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"oauth_jwt","authorization":"\u003credacted len=348\u003e","content_type":"","host":"receipt.example","jwt_claims":{"aud":"https://receipt.example","client_id":"origin-test","exp":1794175669,"iat":1794172069,"kid":"gptadmin-hs256-v1","resource":"https://receipt.example","scope":"gptadmin.read","sub":"reader"},"method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=276c428388735793b6146e04a942ea31 method=POST path=/mcp status=200 authorization_present=true
+--- PASS: TestResourceReceiptUsesAuthenticatedRequestOrigin (0.00s)
+=== RUN   TestStartupInstructionsDefaultAndOverrides
+--- PASS: TestStartupInstructionsDefaultAndOverrides (0.00s)
+=== RUN   TestStartupInstructionsMCPDelivery
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=28d1bd8787a7b9656b581fca2f3463c2 method=POST path=/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=ad2a2de3fccf4b2dd2fb0de9611be65b method=POST path=/server/hub/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=0f4ce31f6075557dac1e8b961debc6b1 method=POST path=/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=3b6ecb0ac635463673008f1c6c1b05b8 method=POST path=/server/hub/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=90038be72a399a2e25ab02e704da0d1a method=POST path=/mcp status=200 authorization_present=true
+2026/11/09 00:07:49 auth_audit name=mcp_auth_ok fields={"auth_kind":"ctl_token","authorization":"\u003credacted len=10\u003e","content_type":"","host":"example.com","method":"POST","origin":"","path":"/server/hub/mcp","raw_query":"","referer":"","remote_addr":"192.0.2.1:1234","user_agent":"","x_forwarded_for":"","x_real_ip":""}
+2026/11/09 00:07:49 ingress request_id=7ddd96db011ecdcdca8ca66d10ac7de0 method=POST path=/server/hub/mcp status=200 authorization_present=true
+--- PASS: TestStartupInstructionsMCPDelivery (0.00s)
+PASS
+ok  	github.com/megamen32/gptadmin/go-hub/internal/hub	6.373s

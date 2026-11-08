@@ -55,6 +55,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 	ctx, cancel := context.WithTimeout(r.Context(), directChildSchemaTimeout)
 	defer cancel()
 	var tools []map[string]any
+	var enumeration map[string]any
 	if local {
 		reader, ok := runtime.(directChildToolReader)
 		if !ok {
@@ -69,6 +70,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 			return fail("local child schema response invalid")
 		}
 		tools = searchChildToolMaps(structured["tools"])
+		enumeration = schemaEnumerationMetadata(structured)
 	} else {
 		// Always address the physical owner. The public logical Browser ID is
 		// not an executable target on node-44.
@@ -98,13 +100,15 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 			return fail("direct child schema response invalid")
 		}
 		tools = searchChildToolMaps(response["tools"])
+		enumeration = schemaEnumerationMetadata(response)
 	}
 
 	if isLogicalBrowserAgent(child) {
 		tools = hideBrowserRetargetTool(tools)
 	}
 	result["status"] = "completed"
-	result["response"] = map[string]any{"tools": toolsForRequest(r, child.AgentID, tools)}
+	enumeration["tools"] = toolsForRequest(r, child.AgentID, tools)
+	result["response"] = enumeration
 	return result
 }
 
@@ -180,6 +184,17 @@ func (s *Server) legacyChildSchemaForRequest(r *http.Request, child Agent) (map[
 func validChildToolsArray(value any) bool {
 	switch value.(type) {
 	case []any, []map[string]any:
+		for _, raw := range outputRows(value) {
+			tool, ok := raw.(map[string]any)
+			if !ok || len(tool) == 0 {
+				return false
+			}
+			// Validate before profile filtering can hide a malformed definition.
+			name, named := tool["name"].(string)
+			if !named || strings.TrimSpace(name) == "" {
+				return false
+			}
+		}
 		return true
 	}
 	return false

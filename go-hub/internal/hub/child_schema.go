@@ -128,12 +128,12 @@ func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[strin
 		return response, true
 	}
 	upstream := childMCPResponse(shellJobResponse(job))
-	_, list := upstream["tools"].([]any)
-	_, typedList := upstream["tools"].([]map[string]any)
-	if (!list && !typedList) || truthy(upstream["isError"]) || upstream["error"] != nil {
+	if !validChildToolsArray(upstream["tools"]) || truthy(upstream["isError"]) || upstream["error"] != nil {
 		return failure("upstream did not return a successful tools/list response")
 	}
-	response["response"] = map[string]any{"tools": toolsForRequest(r, child.AgentID, childMCPTools(shellJobResponse(job)))}
+	enumeration := schemaEnumerationMetadata(upstream)
+	enumeration["tools"] = toolsForRequest(r, child.AgentID, childMCPTools(shellJobResponse(job)))
+	response["response"] = enumeration
 	return response, true
 }
 

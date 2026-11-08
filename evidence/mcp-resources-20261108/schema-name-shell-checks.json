@@ -1,0 +1,61 @@
+{
+  "stage": "M18L5",
+  "base_revision": "5876af6e75cb6a70dddf5556732b6e38320abf1b",
+  "recorded_utc": "2026-11-08T21:20:21.930901+00:00",
+  "scope": "ShellMCP nonblank string tool.name validation before connector allowlist. Local HTTP MCP fixture invokes actual DirectChildTools/mcpChildTools. No live runtime acceptance.",
+  "runs": [
+    {
+      "phase": "RED",
+      "command": [
+        "go",
+        "test",
+        "./internal/server",
+        "-run",
+        "^TestChildToolsRejectsInvalidNamesBeforeAllowlist$",
+        "-count=1",
+        "-timeout=60s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 1,
+      "wall_seconds": 1.769,
+      "base_revision": "5876af6e75cb6a70dddf5556732b6e38320abf1b"
+    },
+    {
+      "phase": "GREEN",
+      "command": [
+        "go",
+        "test",
+        "./internal/server",
+        "-run",
+        "^TestChildToolsRejectsInvalidNamesBeforeAllowlist$",
+        "-count=1",
+        "-timeout=60s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 0,
+      "wall_seconds": 1.669
+    },
+    {
+      "phase": "RELATED",
+      "command": [
+        "go",
+        "test",
+        "./internal/mcpclient",
+        "./internal/server",
+        "-run",
+        "^(TestListToolsPaginationPreservesSchemasAndOpaqueCursors|TestChildToolsCompletenessRequiresAllPages)$",
+        "-count=1",
+        "-timeout=60s"
+      ],
+      "cwd": "go-shellmcp",
+      "exit_code": 0,
+      "wall_seconds": 0.967
+    }
+  ],
+  "source_sha256": {
+    "go-shellmcp/internal/mcpclient/pagination.go": "b939064d4177a891bf5288e7f0a80ece06f9ef308c008999103b97ace29211ae",
+    "go-shellmcp/internal/server/mcp_schema_name_test.go": "723d674ebfe87e916a211e5136260c68effd3d315ad966b979d2c9922ae6bf70"
+  },
+  "red_observation": "All missing, blank and non-string name rows were silently dropped by ToolAllowlist=[allowed] while schema_complete=true remained.",
+  "green_observation": "The shared pagination collector rejects each malformed name and returns no partial tools. Existing successful pagination and completeness tests still pass."
+}

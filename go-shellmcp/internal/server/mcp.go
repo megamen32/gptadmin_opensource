@@ -863,7 +863,10 @@ func (s *Server) mcpChildTools(ctx context.Context, args map[string]any) (map[st
 		return nil, err
 	}
 	tools = filterChildTools(agent, tools)
-	return mcpText("Child MCP tools", map[string]any{"ref": ref, "tools": tools}), nil
+	return mcpText("Child MCP tools", map[string]any{
+		"ref": ref, "tools": tools,
+		"schema_complete": true, "schema_completeness": "complete",
+	}), nil
 }
 
 func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[string]any, error) {

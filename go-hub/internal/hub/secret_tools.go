@@ -2,6 +2,7 @@ package hub
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -164,6 +165,27 @@ func redactSecretValues(value any, secrets []string) any {
 	case map[string]any:
 		out := make(map[string]any, len(current))
 		for key, item := range current {
+			if key == "stdout_base64" && len(secrets) > 0 {
+				// Binary stdout crosses the same disclosure/persistence boundary
+				// as text. Redact decoded bytes before restoring the encoding.
+				encoded, ok := item.(string)
+				if !ok {
+					continue
+				}
+				raw, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil {
+					// Omit malformed data whose redaction cannot be verified.
+					continue
+				}
+				redacted := redactSecretValues(string(raw), secrets).(string)
+				encoded = base64.StdEncoding.EncodeToString([]byte(redacted))
+				// The encoding itself must also obey the existing literal-secret rule.
+				if redactSecretValues(encoded, secrets).(string) != encoded {
+					continue
+				}
+				out[key] = encoded
+				continue
+			}
 			out[key] = redactSecretValues(item, secrets)
 		}
 		return out

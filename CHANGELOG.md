@@ -8,9 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Optional active MCP schema resources: a compact index, per-server full definitions
+  and an explicitly selected full snapshot, with stable identities, current ACLs,
+  bounded discovery/cache and explicit partial, stale or unavailable status.
 - file_transfer versioned contract 2: stateless stat (with opt-in hash=true SHA-256) and list (sorted, bounded to 1000 entries, optional pattern glob) metadata reads inside the same ACL roots, and upload_replace which atomically replaces an existing file at commit only while its digest still equals expected_sha256 (compare-and-swap without a sidecar file plus mv). The Hub advertises the extended schema only for executors reporting file_transfer_version 2 and rejects the new actions early on older nodes; read-only profiles may use stat and list.
 - shell_exec results now include stdout_base64 whenever the captured stdout tail contains terminal control characters or invalid UTF-8: the JSON string form survives transport byte-exact but terminals visually swallow CSI-style sequences and JSON encoding replaces invalid UTF-8 bytes, so the base64 copy keeps the original bytes verifiable.
 - Public facade search, schema and discover responses now carry target_title next to opaque short target ids, so external bootstrap clients can pick a host without probe calls.
+
+### Fixed
+- Secret redaction also covers stdout_base64 before shell results are returned or persisted.
+- Server inventory resources and direct resource routes enforce current target and
+  personal-connection access instead of exposing the global inventory.
+- Child schema discovery follows bounded `tools/list` pagination and only declares
+  completeness after successful enumeration; malformed definitions cannot disappear
+  through access filtering while retaining a complete marker.
+- Schema cache failures do not extend stale retention beyond the last successful
+  read, and registry changes during a snapshot prevent a false complete result.
 
 ### Changed
 - The Node lifecycle manager can enroll an external member through a private identity file and stdin-only join grant, with an explicit advertised endpoint and connect IP.

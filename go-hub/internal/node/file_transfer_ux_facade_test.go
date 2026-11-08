@@ -99,13 +99,12 @@ func TestSearchRowsCarryTargetTitle(t *testing.T) {
 					found = true
 				}
 			}
-			if !found {
-				t.Fatalf("no short file target titled with %q in %v", name, titles)
+			if found {
+				return
 			}
-			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("search never returned results: %s", raw)
+			t.Fatalf("no short file target titled with %q in %v before catalog deadline; last response: %s", name, titles, raw)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

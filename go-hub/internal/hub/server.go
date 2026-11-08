@@ -576,6 +576,7 @@ type idempotencyEntry struct {
 }
 
 type Server struct {
+	schemaResources      mcpSchemaResourceCache
 	instructionReceiptMu sync.Mutex
 	instructionReceipts  map[string]instructionReceipt
 
@@ -9139,7 +9140,11 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		result, err := s.agentResourcesList(r, agent)
 		if err == nil {
 			if m, ok := result.(map[string]any); ok {
-				result = mcpCacheableResult(m, 30000, "private")
+				ttl := 30000
+				if agent.AgentID == "hub" {
+					ttl = 0
+				}
+				result = mcpCacheableResult(m, ttl, "private")
 			}
 		}
 		return result, err, false
@@ -9151,7 +9156,11 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		result, err := s.agentResourceRead(r, agent, uri)
 		if err == nil {
 			if m, ok := result.(map[string]any); ok {
-				result = mcpCacheableResult(m, 5000, "private")
+				ttl := 5000
+				if isMCPSchemaResourceURI(uri) {
+					ttl = 0
+				}
+				result = mcpCacheableResult(m, ttl, "private")
 			}
 		}
 		return result, err, false
@@ -9457,7 +9466,10 @@ func (s *Server) agentResourcesList(r *http.Request, agent Agent) (any, any) {
 	}
 	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
-		return s.appsSDKResourcesList(), nil
+		return s.appsSDKResourcesListForRequest(r), nil
+	}
+	if !profileAllowsTarget(r, agent.AgentID) {
+		return nil, map[string]any{"code": -32003, "message": "access profile denies this resource target"}
 	}
 	if isVirtualMCPAgent(agent) {
 		return map[string]any{"resources": []any{}}, nil
@@ -9481,7 +9493,11 @@ func (s *Server) agentResourceRead(r *http.Request, agent Agent, uri string) (an
 	}
 	releaseAuthAdmission(r)
 	if agent.AgentID == "hub" {
-		return s.appsSDKResourceRead(r, uri), nil
+		result := s.appsSDKResourceRead(r, uri)
+		return result, schemaResourceRPCError(result)
+	}
+	if !profileAllowsTarget(r, agent.AgentID) {
+		return nil, map[string]any{"code": -32003, "message": "access profile denies this resource target"}
 	}
 	if isVirtualMCPAgent(agent) {
 		return nil, map[string]any{"code": -32601, "message": "resources/read is not supported by this virtual MCP"}
@@ -9856,13 +9872,20 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			s.auditToolDecision(r, "hub", name, callArgs, "allow", "", map[string]any{}, http.StatusOK)
 		}
 	case "resources/list":
-		result = mcpCacheableResult(s.appsSDKResourcesList(), 30000, "private")
+		result = mcpCacheableResult(s.appsSDKResourcesListForRequest(r), 0, "private")
 	case "resources/read":
 		uri := firstString(params, "uri")
 		if uri == "" {
 			rpcErr = map[string]any{"code": -32602, "message": "resource uri is required"}
 		} else {
-			result = mcpCacheableResult(s.appsSDKResourceRead(r, uri), 5000, "private")
+			payload := s.appsSDKResourceRead(r, uri)
+			if rpcErr = schemaResourceRPCError(payload); rpcErr == nil {
+				ttl := 5000
+				if isMCPSchemaResourceURI(uri) {
+					ttl = 0
+				}
+				result = mcpCacheableResult(payload, ttl, "private")
+			}
 		}
 	case "tasks/get":
 		if !mcpTasksOptedIn(params) {
@@ -11017,6 +11040,9 @@ func appsSDKWidgetMeta() map[string]any {
 }
 
 func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any {
+	if isMCPSchemaResourceURI(uri) {
+		return s.schemaResourceRead(r, uri)
+	}
 	if strings.HasPrefix(uri, "gptadmin://task/") {
 		return s.taskOutputResourceRead(r, uri, "")
 	}
@@ -11024,9 +11050,7 @@ func (s *Server) appsSDKResourceRead(r *http.Request, uri string) map[string]any
 		return s.startupInstructionsResourceRead(r, uri)
 	}
 	if uri == "gptadmin://servers" || uri == "gptadmin://agents" {
-		s.mu.Lock()
-		servers := s.publicServersLocked(nil)
-		s.mu.Unlock()
+		servers := s.resourceServersForRequest(r)
 		b, _ := json.Marshal(map[string]any{"servers": servers})
 		return map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(b)}}}
 	}
@@ -11051,7 +11075,7 @@ func (s *Server) appsSDKResourceReceipt(r *http.Request, uri string) map[string]
 	if uri == "" {
 		return failure("invalid_uri", "resource uri is required", 0)
 	}
-	if uri != startupInstructionsResourceURI && uri != "gptadmin://servers" && uri != "gptadmin://agents" && uri != "ui://widget/admin-v3.html" {
+	if uri != startupInstructionsResourceURI && uri != "gptadmin://servers" && uri != "gptadmin://agents" && uri != "ui://widget/admin-v3.html" && !isMCPSchemaResourceURI(uri) {
 		return failure("resource_not_found", "unknown GPTAdmin resource", 0)
 	}
 	contents, ok := s.appsSDKResourceRead(r, uri)["contents"].([]map[string]any)

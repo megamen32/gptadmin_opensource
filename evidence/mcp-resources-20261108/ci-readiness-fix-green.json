@@ -1,0 +1,28 @@
+{
+  "command": [
+    "go",
+    "test",
+    "-json",
+    "-count=20",
+    "-timeout=120s",
+    "-run",
+    "^TestSearchRowsCarryTargetTitle$",
+    "./internal/node"
+  ],
+  "cwd": "go-hub",
+  "exit_code": 0,
+  "wall_seconds": 23.626,
+  "counts": {
+    "run": 20,
+    "pass": 20,
+    "fail": 0,
+    "skip": 0
+  },
+  "readiness_deadline_seconds": 15,
+  "poll_interval_ms": 500,
+  "source_file_sha256": "5fbe818241d7bad9a6a73c25a78b40e479042e9544acaae59b3b2c9b06a46073",
+  "base_revision": "c8deb807698884c4c1ac04ca844e21615662660f",
+  "public_red_run": "https://github.com/megamen32/gptadmin_opensource/actions/runs/42527999311",
+  "full_log": "/home/admin/.cache/gptadmin-roadmap-3c883b42310b/.tmp/schema-final/ci-readiness-fix-count20.jsonl",
+  "failures": []
+}
