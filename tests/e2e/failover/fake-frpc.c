@@ -18,7 +18,8 @@ int main(int argc, char **argv) {
     if (argc != 3 || !path || !runner) return 2;
     char *end;
     long parent = strtol(runner, &end, 10);
-    if (*end || parent <= 1) return 2;
+    /* The Docker entrypoint runner is PID 1 in its private namespace. */
+    if (*end || parent < 1) return 2;
     signal(SIGTERM, stop); signal(SIGINT, stop);
     FILE *f = fopen(path, "w");
     if (!f) return 3;

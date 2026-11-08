@@ -1,10 +1,42 @@
 """Regression checks for failover harness process isolation."""
 
 from pathlib import Path
+import os
+import subprocess
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tests" / "e2e" / "failover" / "run.sh"
+
+
+def test_native_fake_frpc_accepts_container_pid_one_and_cleans_route(tmp_path) -> None:
+    """Docker's entrypoint is PID 1; the native fixture must stay alive for it."""
+    binary = tmp_path / "fake-frpc"
+    subprocess.run(
+        ["cc", "-Wall", "-Wextra", "-Werror", "-O2",
+         str(RUNNER.parent / "fake-frpc.c"), "-o", str(binary)],
+        check=True, timeout=10,
+    )
+    route = tmp_path / "route"
+    proc = subprocess.Popen(
+        [str(binary), "-c", str(tmp_path / "frpc.toml")],
+        env={**os.environ, "E2E_RUNNER_PID": "1", "E2E_ROUTE_FILE": str(route),
+             "E2E_ROUTE_VALUE": "fallback"},
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not route.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert proc.poll() is None, f"fixture rejected PID 1: exit={proc.returncode}"
+        assert route.read_text() == "fallback\n"
+        proc.terminate()
+        assert proc.wait(timeout=2) == 0
+        assert not route.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=2)
 
 
 def test_failover_runner_isolates_process_groups_and_default_ports() -> None:

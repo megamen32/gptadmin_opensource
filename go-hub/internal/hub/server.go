@@ -4961,6 +4961,11 @@ func (s *Server) mcpRelayTools(w http.ResponseWriter, r *http.Request) {
 		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, s.fileToolsForTarget(target))}}), target))
 		return
 	}
+	if strings.HasPrefix(target, "control:") {
+		// Typed control is a built-in surface, not a polling relay owner.
+		s.writeTokenSchema(w, r, req, withActionToolHints(s.withSchemaContractMetadata(map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": toolsForRequest(r, target, controlTools(target))}}), target))
+		return
+	}
 	s.mu.Lock()
 	child, isChild := s.exposedAgentByIDLocked(target)
 	s.mu.Unlock()
@@ -10631,7 +10636,7 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 			return map[string]any{"server_id": firstString(args, "target", "server_id", "agent_id"), "status": "failed", "error": err.Error()}
 		}
 		requestedTarget := firstString(args, "target", "server_id", "agent_id")
-		if requestAccessMode(r) == accessModeReadonly && requestedTarget != "hub" && !strings.HasPrefix(requestedTarget, "shell:") && !strings.HasPrefix(requestedTarget, "file:") {
+		if requestAccessMode(r) == accessModeReadonly && requestedTarget != "hub" && !strings.HasPrefix(requestedTarget, "shell:") && !strings.HasPrefix(requestedTarget, "file:") && !strings.HasPrefix(requestedTarget, "control:") {
 			return map[string]any{"server_id": requestedTarget, "status": "completed", "response": map[string]any{"tools": []map[string]any{}}}
 		}
 		return s.appsSDKSchemaForRequest(r, args)
@@ -10704,6 +10709,10 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": shellTools()}}
 	} else if strings.HasPrefix(target, "file:") {
 		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": s.fileToolsForTarget(target)}}
+	} else if strings.HasPrefix(target, "control:") {
+		// Keep the caller and public surface for the common filtering below;
+		// schema discovery must not enqueue work for a non-polling target.
+		result = map[string]any{"server_id": target, "status": "completed", "response": map[string]any{"tools": controlTools(target)}}
 	} else {
 		s.mu.Lock()
 		child, exists := s.exposedAgentByIDLocked(target)
