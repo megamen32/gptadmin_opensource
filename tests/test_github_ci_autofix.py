@@ -301,7 +301,7 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(payload["project"], "gptadmin-ci-autofix")
             self.assertEqual(payload["recipient"], "me")
             return {"incident_id": "local-test-incident"}
-        with patch.object(ci, "post_json", boundary):
+        with patch.object(ci, "post_json", boundary), patch.object(ci, "get_json", return_value={"lifecycle": {}}):
             ci.notices(self.db, {"notice_token_file": str(token)})
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0][0].endswith("/health/verification"))

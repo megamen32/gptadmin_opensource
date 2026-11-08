@@ -904,6 +904,69 @@ def verify_green(db, snapshots, api=gh, deadline=None):
         save_meta(db, "rest_green_cursor", row["key"])
 
 
+def get_json(url, headers):
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=8) as response:
+        return json.load(response)
+
+
+def source_recovery(db, cfg, event, body, token):
+    """Finish only this recovery through the current source request, never replay UNKNOWN.
+
+    No current lifecycle request means the historical verification flow still owns
+    recovery. SDK intent/receipt state lives beside the existing durable outbox.
+    """
+    base = "https://notify.bezrabotnyi.com"
+    url = base + "/v1/incidents/" + urllib.parse.quote(event["incident_id"], safe="")
+    headers = {"Authorization": "Bearer " + token}
+    database = next(row[2] for row in db.execute("PRAGMA database_list") if row[1] == "main")
+    if not database:
+        raise ValueError("source verification requires durable outbox storage")
+    state = Path(database).parent / "noticeplace-verifier" / event["key"]
+    current = get_json(url, headers)
+    lifecycle = current.get("lifecycle") or {}
+    if not lifecycle.get("request_id"):
+        if (state / "verification.json").exists():
+            raise ValueError("source intent cannot fall back to legacy recovery")
+        return False
+    if "/opt/noticeplace" not in sys.path:
+        sys.path.insert(0, "/opt/noticeplace")
+    from notification_center.consumer_lifecycle import SourceVerifier, VerificationPending
+    binding = {k: body[k] for k in ("project", "source_id", "host_id", "signal_type", "correlation_id")}
+    def owns(group):
+        return all(group.get(k) == v for k, v in binding.items())
+    if not owns(lifecycle.get("group") or {}):
+        raise VerificationPending("current source request is not this CI episode")
+    # Reuse the existing source credential; the server requires its explicit
+    # verifier grant. Never mint credentials or bypass a missing source grant.
+    verifier = SourceVerifier(base, token, body["project"], body["source_id"], body["host_id"], state)
+    def probe(group):
+        # Cached verified_green/outbox evidence is never a new source measurement.
+        call = RestBudget(gh, REST_GREEN_CALLS + 2, 30)
+        remaining = call("rate_limit")["resources"]["core"]["remaining"]
+        if not isinstance(remaining, int) or remaining < 100 + REST_GREEN_CALLS + 12:
+            raise VerificationPending("GitHub reserve unavailable")
+        head = call(f"repos/{event['repo']}/branches/{urllib.parse.quote(event['branch'], safe='')}")["commit"]["sha"]
+        proof = rest_green_proof(event, head, call)
+        return {"observed_state": "healthy" if proof else "unknown",
+                "observed_at": time.time(),
+                "evidence_refs": [proof] if proof else ["github:current-ci-not-proven:" + event["key"]]}
+    verifier.tick(probe, max_checks=1, deadline_seconds=35, accept_group=owns)
+    # A result POST can already have resolved the incident. Do not send a second
+    # legacy verification/recovery; reconcile the durable server receipt instead.
+    current = get_json(url, headers)
+    lifecycle = current.get("lifecycle") or {}
+    receipt = lifecycle.get("last_check_receipt") or {}
+    result = receipt.get("result") or {}
+    if (current.get("state") != "resolved" or not owns(lifecycle.get("group") or {})
+            or result.get("incident_id") != event["incident_id"]
+            or result.get("request_id") != lifecycle.get("request_id")
+            or result.get("generation") != lifecycle.get("generation")
+            or result.get("observed_state") != "healthy"):
+        raise VerificationPending("current CI source check has no healthy receipt")
+    return True
+
+
 def notices(db, cfg):
     token_path = cfg.get("notice_token_file")
     token_env = cfg.get("notice_token_env")
@@ -920,8 +983,12 @@ def notices(db, cfg):
             db.commit()
             event = db.execute("SELECT * FROM events WHERE key=?", (body["correlation_id"],)).fetchone()
             if body["event_type"] == "health.recovered":
-                if not event or not event["incident_id"]:
+                if not event or not event["incident_id"] or event["state"] != "verified_green":
                     break
+                if source_recovery(db, cfg, event, body, token):
+                    db.execute("UPDATE notices SET sent=1 WHERE key=?", (row["key"],))
+                    db.commit()
+                    break  # At most one fresh GitHub source verification per timer.
                 proof = {"observed_state": "healthy", "source_id": body["source_id"],
                          "host_id": body["host_id"], "signal_type": body["signal_type"],
                          "correlation_id": body["correlation_id"], "evidence_refs": body["trace_refs"],
