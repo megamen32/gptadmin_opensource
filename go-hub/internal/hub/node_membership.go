@@ -587,6 +587,8 @@ func (s *Server) nodeMembershipHTTP(w http.ResponseWriter, r *http.Request) {
 		s.nodeMembershipControlSnapshot(w, r)
 	case "/bearer-admission":
 		s.nodeBearerAdmissionHTTP(w, r)
+	case "/secret-resolve":
+		s.nodeSecretResolveHTTP(w, r)
 	case "/disable":
 		s.requireCtl(func(w http.ResponseWriter, r *http.Request) { s.nodeMembershipSetState(w, r, nodeStateDisabled) })(w, r)
 	case "/enable":

@@ -3,6 +3,7 @@ package hub
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -131,6 +132,9 @@ func (s *Server) resolveSecretEnvForRequest(r *http.Request, target string, args
 			return nil, nil, ErrSecretNotFound
 		}
 		value, err := s.secretStore.Resolve(ref, owner)
+		if errors.Is(err, ErrSecretNotFound) {
+			value, err = s.resolveNodeWriterSecret(r, target, ref, args)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
