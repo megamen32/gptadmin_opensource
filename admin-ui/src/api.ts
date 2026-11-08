@@ -911,3 +911,90 @@ export async function getStoredMcpToken(id: string): Promise<TokenResponse> {
 export async function setClientRole(id: string, role: string): Promise<void> {
   await request(`/admin/api/client-roles/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({role}) });
 }
+
+export type BootstrapLink = {
+  id: string;
+  label: string;
+  profile_id: string;
+  client_id: string;
+  token_id: string;
+  created_at: number;
+  expires_at: number;
+  revoked_at: number;
+  status: "active" | "expired" | "revoked";
+};
+
+export type CreateBootstrapLinkRequest = {
+  label: string;
+  profile_id: string;
+  ttl_days: number;
+};
+
+export type CreatedBootstrapLink = {
+  link: BootstrapLink;
+  url: string;
+  prompt: string;
+  download_url: string;
+};
+
+const bootstrapLinksEndpoint = "/admin/api/bootstrap-links";
+
+function parseBootstrapLink(body: unknown): BootstrapLink {
+  const value = asRecord(body, "Сервер вернул некорректную запись временной ссылки.");
+  for (const key of ["id", "label", "profile_id", "client_id", "token_id"]) {
+    if (typeof value[key] !== "string" || !value[key]) throw new ApiError(502, "Сервер вернул неполную запись временной ссылки.");
+  }
+  for (const key of ["created_at", "expires_at", "revoked_at"]) {
+    if (typeof value[key] !== "number" || !Number.isFinite(value[key]) || value[key] < 0) throw new ApiError(502, "Сервер вернул некорректный срок временной ссылки.");
+  }
+  if (!["active", "expired", "revoked"].includes(String(value.status))) throw new ApiError(502, "Сервер вернул неизвестное состояние временной ссылки.");
+  return {
+    id: value.id as string,
+    label: value.label as string,
+    profile_id: value.profile_id as string,
+    client_id: value.client_id as string,
+    token_id: value.token_id as string,
+    created_at: value.created_at as number,
+    expires_at: value.expires_at as number,
+    revoked_at: value.revoked_at as number,
+    status: value.status as BootstrapLink["status"],
+  };
+}
+
+function parseBootstrapURL(value: unknown): string {
+  if (typeof value !== "string") throw new ApiError(502, "Сервер не вернул ссылку подключения.");
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && url.origin === window.location.origin))) throw new Error("invalid scheme");
+    return value;
+  } catch {
+    throw new ApiError(502, "Сервер вернул некорректную ссылку подключения.");
+  }
+}
+
+export async function getBootstrapLinks(): Promise<BootstrapLink[]> {
+  const body = asRecord(await responseJSON(await request(bootstrapLinksEndpoint, { cache: "no-store" })), "Сервер вернул некорректный список временных ссылок.");
+  if (!Array.isArray(body.items)) throw new ApiError(502, "Сервер вернул неполный список временных ссылок.");
+  return body.items.map(parseBootstrapLink);
+}
+
+export async function createBootstrapLink(input: CreateBootstrapLinkRequest): Promise<CreatedBootstrapLink> {
+  const body = asRecord(await responseJSON(await request(bootstrapLinksEndpoint, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  })), "Сервер вернул некорректное подключение.");
+  if (typeof body.prompt !== "string" || !body.prompt.trim()) throw new ApiError(502, "Сервер не вернул сообщение для агента.");
+  return {
+    link: parseBootstrapLink(body.link),
+    url: parseBootstrapURL(body.url),
+    prompt: body.prompt,
+    download_url: parseBootstrapURL(body.download_url),
+  };
+}
+
+export async function revokeBootstrapLink(id: string): Promise<void> {
+  const body = asRecord(await responseJSON(await request(`${bootstrapLinksEndpoint}/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" })), "Сервер не подтвердил отзыв ссылки.");
+  if (body.ok !== true) throw new ApiError(502, "Сервер не подтвердил отзыв ссылки.");
+}

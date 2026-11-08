@@ -1,0 +1,52 @@
+.bootstrap-links { display: grid; gap: 22px; }
+.bootstrap-intro { margin: 0; max-width: 760px; }
+.bootstrap-card { padding: 24px; min-width: 0; }
+.bootstrap-card .card-heading { margin-bottom: 20px; gap: 16px; flex-wrap: wrap; }
+.bootstrap-card h2 { font-size: 26px; letter-spacing: -.03em; }
+.bootstrap-card .section-kicker { margin-bottom: 8px; }
+.bootstrap-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 150px; gap: 16px; border: 0; padding: 0; margin: 0; }
+.bootstrap-field { display: grid; align-content: start; gap: 8px; min-width: 0; font-size: 13px; font-weight: 700; color: #324c4c; }
+.bootstrap-field input, .bootstrap-field select, .bootstrap-field textarea { width: 100%; min-width: 0; border: 1px solid #c9c9bd; border-radius: 8px; padding: 11px 12px; background: #fffdf8; color: #24323a; font: 400 14px/1.5 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif; }
+.bootstrap-field textarea { resize: vertical; min-height: 150px; }
+.bootstrap-field input:focus-visible, .bootstrap-field select:focus-visible, .bootstrap-field textarea:focus-visible { outline: 3px solid #e6b95e; outline-offset: 2px; }
+.bootstrap-field input:disabled, .bootstrap-field select:disabled { opacity: .65; }
+.bootstrap-hint { margin-top: 12px; color: #596966; font-size: 12px; line-height: 1.6; }
+.bootstrap-hint a { text-underline-offset: 3px; font-weight: 700; }
+.bootstrap-form-footer { display: flex; gap: 20px; justify-content: space-between; align-items: center; margin-top: 22px; }
+.bootstrap-form-footer .bootstrap-hint { margin: 0; max-width: 480px; }
+.bootstrap-form-footer .button { flex-shrink: 0; }
+.bootstrap-issued { border-color: #6d998a; background: #f9fcf7; }
+.bootstrap-notice { padding: 14px 18px; border: 1px solid #a5c3b2; border-radius: 10px; background: #edf6eb; color: #2b5847; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.bootstrap-expiry { font-size: 12px; line-height: 1.6; color: #4e6b5c; }
+.bootstrap-copy-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.bootstrap-url { margin-top: 20px; }
+.bootstrap-url input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.bootstrap-count { display: inline-grid; place-items: center; min-width: 30px; height: 30px; padding: 0 8px; border-radius: 50%; color: #52615f; background: #efeee5; font-size: 13px; }
+.bootstrap-empty { padding: 8px 0; color: #596966; font-size: 14px; line-height: 1.6; }
+.bootstrap-table-wrap { overflow-x: auto; max-width: 100%; }
+.bootstrap-table { border-collapse: collapse; width: 100%; min-width: 700px; font-size: 12px; line-height: 1.5; }
+.bootstrap-table th { text-align: left; color: #6b7772; font-size: 11px; font-weight: 700; padding: 0 12px 12px; white-space: nowrap; }
+.bootstrap-table td { padding: 16px 12px; border-top: 1px solid #e4e0d5; vertical-align: middle; overflow-wrap: anywhere; }
+.bootstrap-table th:first-child, .bootstrap-table td:first-child { padding-left: 0; }
+.bootstrap-table th:last-child, .bootstrap-table td:last-child { padding-right: 0; text-align: right; }
+.bootstrap-table td:first-child { max-width: 260px; }
+.bootstrap-table strong { display: block; font-size: 13px; font-weight: 700; }
+.bootstrap-created-at { display: block; margin-top: 4px; color: #738078; font-size: 11px; }
+.bootstrap-table .button { font-size: 12px; min-height: 36px; padding: 8px 12px; }
+.bootstrap-status { display: inline-block; border-radius: 999px; padding: 5px 9px; white-space: nowrap; font-size: 11px; font-weight: 700; }
+.bootstrap-status-active { color: #2e6249; background: #e6f1e4; }
+.bootstrap-status-expired { color: #78603e; background: #f4eddb; }
+.bootstrap-status-revoked { color: #716b66; background: #eeebe6; }
+.bootstrap-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (max-width: 1040px) {
+  .bootstrap-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .bootstrap-ttl { max-width: 180px; }
+}
+@media (max-width: 640px) {
+  .bootstrap-card { padding: 20px 16px; }
+  .bootstrap-fields { grid-template-columns: 1fr; }
+  .bootstrap-ttl { max-width: none; }
+  .bootstrap-form-footer { flex-direction: column; align-items: stretch; gap: 14px; }
+  .bootstrap-copy-row { flex-direction: column; }
+  .bootstrap-card h2 { font-size: 24px; }
+}

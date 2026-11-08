@@ -54,6 +54,17 @@ server {
         try_files \$uri =404;
     }
 
+    # Temporary external-agent bootstrap links carry their access secret in the
+    # URL path. Keep that path out of the access/error logs and answer the
+    # plain-HTTP hop with a non-cacheable redirect (307, not permanent).
+    location ^~ /bootstrap/ {
+        access_log off;
+        error_log /dev/null crit;
+        add_header Cache-Control "no-store, private" always;
+        add_header Referrer-Policy "no-referrer" always;
+        return 307 https://$DOMAIN\$request_uri;
+    }
+
     location ~ ^/(?:mcp(?:\$|-relay/|-prompt/)|server/|agent/|actions/|oauth/|\\.well-known/oauth-|register\$|authorize\$|token\$|connect(?:\$|\\.json\$|/)|artifacts/|heartbeat\$|queue/|tasks/|version\$|healthz\$|api/v1/cloud-os/|secret-input/|_services/|proxy-control/|proxy-agent/) {
         return 308 https://$DOMAIN\$request_uri;
     }
@@ -69,6 +80,28 @@ server {
 
     ssl_certificate     $CERT_DIR/fullchain.pem;
     ssl_certificate_key $CERT_DIR/privkey.pem;
+
+    # Bootstrap links proxy exactly like the MCP/API location below, but their
+    # secret-bearing URL must never reach the access/error logs. (The admission
+    # pause snippet in the canonical vhost is include-per-location for the same
+    # reason: a node-level if/return would fire before location selection.)
+    location ^~ /bootstrap/ {
+        access_log off;
+        error_log /dev/null crit;
+        add_header Cache-Control "no-store, private" always;
+        add_header Referrer-Policy "no-referrer" always;
+        proxy_pass http://gptadmin_hub_active;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
 
     location ~ ^/(?:mcp(?:\$|-relay/|-prompt/)|server/|agent/|actions/|oauth/|\\.well-known/oauth-|register\$|authorize\$|token\$|connect(?:\$|\\.json\$|/)|artifacts/|heartbeat\$|queue/|tasks/|version\$|healthz\$|api/v1/cloud-os/|secret-input/|_services/|proxy-control/|proxy-agent/) {
         proxy_pass http://gptadmin_hub_active;

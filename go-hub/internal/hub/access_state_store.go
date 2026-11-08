@@ -124,13 +124,14 @@ func writeAccessStateJSON(path string, value any, limit int) error {
 // diagnostic JSON and audit encoding of managedMCPToken cannot emit it.
 type storedManagedMCPToken struct {
 	managedMCPToken
-	Value string `json:"token_value,omitempty"`
+	Value           string `json:"token_value,omitempty"`
+	BootstrapDigest string `json:"bootstrap_digest,omitempty"`
 }
 
 func (s managedMCPTokenState) MarshalJSON() ([]byte, error) {
 	tokens := make(map[string]storedManagedMCPToken, len(s.Tokens))
 	for id, record := range s.Tokens {
-		tokens[id] = storedManagedMCPToken{record, record.TokenValue}
+		tokens[id] = storedManagedMCPToken{managedMCPToken: record, Value: record.TokenValue, BootstrapDigest: record.BootstrapDigest}
 	}
 	return json.Marshal(struct {
 		Tokens map[string]storedManagedMCPToken `json:"tokens"`
@@ -146,6 +147,7 @@ func (s *managedMCPTokenState) UnmarshalJSON(data []byte) error {
 	s.Tokens = make(map[string]managedMCPToken, len(stored.Tokens))
 	for id, record := range stored.Tokens {
 		record.managedMCPToken.TokenValue = record.Value
+		record.managedMCPToken.BootstrapDigest = record.BootstrapDigest
 		s.Tokens[id] = record.managedMCPToken
 	}
 	return nil

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +51,7 @@ const (
 	// An object envelope preserves primitive and array results across the
 	// QuickJS module boundary. Logs use the bounded host bridge so they cannot
 	// be silently clipped or dropped.
-	codeModeWrapperPrefix = "const __safeJSON=globalThis.__codeModeSafeJSON;globalThis.console=Object.freeze({log:(...a)=>globalThis.__codeModeLog(__safeJSON.stringify(a,(_,v)=>typeof v==='bigint'?v.toString():v))});const file=target=>{if(!target.startsWith('file:'))target='file:'+target;const f=(kind,path,opts={})=>globalThis.__codeModeFileCall(kind,target,path,opts);for(const k of ['ls','read','create','replace','batchEdit','checkpoint'])f[k]=(path,opts={})=>f(k,path,opts);f.readMany=async(paths,opts={})=>{const rows=[];for(const p of paths)rows.push(await f('read',p,opts));return rows;};f.readAll=async(path,opts={})=>{const cap=opts.max_bytes??2097152;if(!Number.isInteger(cap)||cap<1||cap>8388608)throw Error('readAll max_bytes must be 1..8388608');const parts=[];let start=1,bytes=0,hash='',last;for(;;){const r=await f('read',path,{start_line:start,end_line:start+2499,max_bytes:262144});if(!r.text_exact||!r.source_sha256)throw Error('Exact readAll requires an updated file node');if(r.file_bytes>cap)throw Error('File exceeds readAll byte budget');if(hash&&hash!==r.source_sha256)throw Error('File changed during readAll');hash=r.source_sha256;parts.push(r.text);bytes+=r.bytes;last=r;if(r.line_count===0||r.end_line>=r.line_count)break;if(r.end_line<start)throw Error('A line exceeds the bounded file read size');start=r.end_line+1;}if(bytes!==last.file_bytes)throw Error('Incomplete full-file read');return {path,text:parts.join(''),bytes,file_bytes:bytes,line_count:last.line_count,source_sha256:hash,text_exact:true,truncated:false};};f.index=async(path,opts={})=>{const r=await f.readAll(path,{max_bytes:opts.max_bytes??2097152});const d=await index(r.text,{name:opts.name??path,target,tool:'file_editor'});return {...d,source_sha256:r.source_sha256};};return Object.freeze(f);};export default {value: await (async () => {\n"
+	codeModeWrapperPrefix = "const __safeJSON=globalThis.__codeModeSafeJSON;globalThis.console=Object.freeze({log:(...a)=>globalThis.__codeModeLog('xh:'+globalThis.__codeModeStrBytes.hex(__safeJSON.stringify(a,(_,v)=>typeof v==='bigint'?v.toString():v)))});const file=target=>{if(!target.startsWith('file:'))target='file:'+target;const f=(kind,path,opts={})=>globalThis.__codeModeFileCall(kind,target,path,opts);for(const k of ['ls','read','create','replace','batchEdit','checkpoint'])f[k]=(path,opts={})=>f(k,path,opts);f.readMany=async(paths,opts={})=>{const rows=[];for(const p of paths)rows.push(await f('read',p,opts));return rows;};f.readAll=async(path,opts={})=>{const cap=opts.max_bytes??2097152;if(!Number.isInteger(cap)||cap<1||cap>8388608)throw Error('readAll max_bytes must be 1..8388608');const parts=[];let start=1,bytes=0,hash='',last;for(;;){const r=await f('read',path,{start_line:start,end_line:start+2499,max_bytes:262144});if(!r.text_exact||!r.source_sha256)throw Error('Exact readAll requires an updated file node');if(r.file_bytes>cap)throw Error('File exceeds readAll byte budget');if(hash&&hash!==r.source_sha256)throw Error('File changed during readAll');hash=r.source_sha256;parts.push(r.text);bytes+=r.bytes;last=r;if(r.line_count===0||r.end_line>=r.line_count)break;if(r.end_line<start)throw Error('A line exceeds the bounded file read size');start=r.end_line+1;}if(bytes!==last.file_bytes)throw Error('Incomplete full-file read');return {path,text:parts.join(''),bytes,file_bytes:bytes,line_count:last.line_count,source_sha256:hash,text_exact:true,truncated:false};};f.index=async(path,opts={})=>{const r=await f.readAll(path,{max_bytes:opts.max_bytes??2097152});const d=await index(r.text,{name:opts.name??path,target,tool:'file_editor'});return {...d,source_sha256:r.source_sha256};};return Object.freeze(f);};export default {value: await (async () => {\n"
 	codeModeWrapperSuffix = "\n})()};\n"
 )
 
@@ -498,6 +499,8 @@ func stringifyCodeModeValue(value *qjs.Value) (string, error) {
 	if safeJSON == nil || !safeJSON.IsObject() {
 		return "", errors.New("safe JSON serializer is unavailable")
 	}
+	// Serialize exactly once: getters and toJSON may have side effects.
+	// An encoding fallback must not repeat them or hide the first error.
 	serialized, err := safeJSON.InvokeJS("stringify", value)
 	if err != nil {
 		return "", err
@@ -506,7 +509,52 @@ func stringifyCodeModeValue(value *qjs.Value) (string, error) {
 	if serialized.IsUndefined() {
 		return "undefined", nil
 	}
+	if text, ok := codeModeStringHex(ctx, serialized, "hex"); ok {
+		return text, nil
+	}
 	return serialized.String(), nil
+}
+
+// codeModeStringHex moves one value out of the sandbox through the hex bridge
+// installed by codeModeAPISource. The stock qjs.wasm of fastschema/qjs v0.0.6
+// strips CSI-like byte runs ("[" + optional "?0-9;" parameters + final
+// "h"/"m", with or without a leading ESC) both from strings leaving through
+// JS_ToCString and from ArrayBuffer bytes read through QJS_GetArrayBuffer,
+// silently corrupting shell output, file text and tool results. The hexify
+// method serializes and hex-encodes the value inside the sandbox (hex uses
+// only [0-9a-f], which the filter never touches); the hex method hex-encodes
+// one already-serialized string. Go decodes the hex back to bytes. When the
+// bridge is unavailable or rejects the value, callers fall back to the
+// legacy Value.String path.
+func codeModeStringHex(ctx *qjs.Context, v *qjs.Value, method string) (string, bool) {
+	if ctx == nil || v == nil {
+		return "", false
+	}
+	bridge := ctx.Global().GetPropertyStr("__codeModeStrBytes")
+	if bridge == nil {
+		return "", false
+	}
+	defer bridge.Free()
+	if !bridge.IsObject() {
+		return "", false
+	}
+	hexed, err := bridge.InvokeJS(method, v)
+	if err != nil || hexed == nil {
+		return "", false
+	}
+	defer hexed.Free()
+	encoded := hexed.String()
+	// "xs": сериализованное значение не содержит CSI-подобных прогонов и
+	// безопасно для обычного выхода; "": значение сверх порога моста.
+	if encoded == "" || encoded == "xs" {
+		return "", false
+	}
+	raw, err := hex.DecodeString(encoded)
+	if err != nil {
+		// A filtered or truncated payload fails closed to the legacy path.
+		return "", false
+	}
+	return string(raw), true
 }
 
 func firstLineOfPanic(r any) string {

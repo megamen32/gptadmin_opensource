@@ -62,7 +62,7 @@ func withIngressAudit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracked := &ingressResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(tracked, r)
-		log.Printf("ingress request_id=%s method=%s path=%s status=%d authorization_present=%t", requestTraceID(r), r.Method, r.URL.Path, tracked.status, strings.TrimSpace(r.Header.Get("Authorization")) != "")
+		log.Printf("ingress request_id=%s method=%s path=%s status=%d authorization_present=%t", requestTraceID(r), r.Method, bootstrapAuditPath(r.URL.Path), tracked.status, strings.TrimSpace(r.Header.Get("Authorization")) != "")
 	})
 }
 

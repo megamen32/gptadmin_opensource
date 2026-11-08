@@ -131,6 +131,7 @@ type Config struct {
 	InstructionContextRequired bool
 	InstructionSessionReceipts bool
 	StartupInstructionsFile    string
+	BootstrapLHCPath           string
 	StartupInstructions        string
 	InstructionSetsStateFile   string
 	VirtualMCPStateFile        string
@@ -217,6 +218,7 @@ func FromEnv() Config {
 		InstructionContextRequired: truthyString(env("GPTADMIN_INSTRUCTION_CONTEXT_REQUIRED", "1")),
 		InstructionSessionReceipts: truthyString(env("GPTADMIN_INSTRUCTION_SESSION_RECEIPTS", "1")),
 		StartupInstructionsFile:    env("GPTADMIN_STARTUP_INSTRUCTIONS_FILE", filepath.Join(cfgDir, "startup_instructions.md")),
+		BootstrapLHCPath:           env("GPTADMIN_BOOTSTRAP_LHC_PATH", ""),
 		StartupInstructions:        env("GPTADMIN_STARTUP_INSTRUCTIONS", ""),
 		InstructionSetsStateFile:   env("GPTADMIN_INSTRUCTION_SETS_STATE_FILE", filepath.Join(cfgDir, "instruction_sets_state.json")),
 		VirtualMCPStateFile:        env("GPTADMIN_VIRTUAL_MCP_STATE_FILE", filepath.Join(cfgDir, virtualMCPStateFilename)),
@@ -530,23 +532,25 @@ type oauthCode struct {
 // managedMCPToken is safe to marshal as inventory. TokenValue is serialized
 // only by the private on-disk state envelope and the explicit owner read API.
 type managedMCPToken struct {
-	TokenValue   string   `json:"-"`
-	Role         string   `json:"role,omitempty"`
-	ID           string   `json:"id"`
-	ClientID     string   `json:"client_id"`
-	TokenDigest  string   `json:"token_digest,omitempty"`
-	TokenKind    string   `json:"token_kind,omitempty"`
-	Issuer       string   `json:"issuer,omitempty"`
-	Audience     string   `json:"audience,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	RedirectURIs []string `json:"redirect_uris,omitempty"`
-	Scope        string   `json:"scope"`
-	AccessMode   string   `json:"access_mode,omitempty"`
-	ProfileID    string   `json:"profile_id,omitempty"`
-	IssuedAt     int64    `json:"issued_at"`
-	CreatedAt    int64    `json:"created_at,omitempty"`
-	ExpiresAt    int64    `json:"expires_at"`
-	RevokedAt    int64    `json:"revoked_at,omitempty"`
+	TokenValue      string   `json:"-"`
+	BootstrapDigest string   `json:"-"`
+	BootstrapLabel  string   `json:"bootstrap_label,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	ID              string   `json:"id"`
+	ClientID        string   `json:"client_id"`
+	TokenDigest     string   `json:"token_digest,omitempty"`
+	TokenKind       string   `json:"token_kind,omitempty"`
+	Issuer          string   `json:"issuer,omitempty"`
+	Audience        string   `json:"audience,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	RedirectURIs    []string `json:"redirect_uris,omitempty"`
+	Scope           string   `json:"scope"`
+	AccessMode      string   `json:"access_mode,omitempty"`
+	ProfileID       string   `json:"profile_id,omitempty"`
+	IssuedAt        int64    `json:"issued_at"`
+	CreatedAt       int64    `json:"created_at,omitempty"`
+	ExpiresAt       int64    `json:"expires_at"`
+	RevokedAt       int64    `json:"revoked_at,omitempty"`
 }
 
 type managedMCPTokenState struct {
@@ -1811,6 +1815,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/handover", s.requireCtl(s.adminHandover))
 	mux.HandleFunc("/admin/api/virtual-mcps", s.requireCtl(s.adminVirtualMCPEndpoint))
 	mux.HandleFunc("/admin/api/virtual-mcps/", s.requireCtl(s.adminVirtualMCPEndpoint))
+	mux.HandleFunc("/bootstrap/", bootstrapNoStore(s.externalBootstrap))
+	mux.HandleFunc("/admin/api/bootstrap-links", bootstrapNoStore(s.requireCtl(s.adminBootstrapLinks)))
+	mux.HandleFunc("/admin/api/bootstrap-links/", bootstrapNoStore(s.requireCtl(s.adminBootstrapLinks)))
 	mux.HandleFunc("/admin/api/mcp/issue-token", s.requireCtl(s.trackAccessOperation(s.adminMCPIssueToken)))
 	mux.HandleFunc("/admin/api/mcp/tokens/", s.requireCtl(s.trackAccessOperation(s.adminMCPTokenAction)))
 	mux.HandleFunc("/admin/api/access-profiles", s.requireCtl(s.adminAccessProfiles))
@@ -11213,6 +11220,20 @@ func (s *Server) verifyManagedMCPToken(token string) (map[string]any, bool) {
 	if record.TokenKind != "durable" || record.RevokedAt != 0 {
 		return nil, false
 	}
+	// Bootstrap grants always expire and remain profile-bound, including when
+	// ordinary bearer lifecycle checks are relaxed for compatibility.
+	if record.BootstrapDigest != "" {
+		if record.ExpiresAt <= s.now().Unix() || record.ProfileID == "" {
+			return nil, false
+		}
+		profiles, err := s.accessProfilesSnapshot()
+		if err != nil {
+			return nil, false
+		}
+		if _, exists := profiles[record.ProfileID]; !exists {
+			return nil, false
+		}
+	}
 	if s.effectiveBearerSecurityProfile().EnforceTokenLifecycle && record.ExpiresAt > 0 && !s.now().Before(time.Unix(record.ExpiresAt, 0)) {
 		return nil, false
 	}
@@ -11286,14 +11307,14 @@ func (s *Server) requestForAudit(r *http.Request) map[string]any {
 	}
 	fields := map[string]any{
 		"method":          r.Method,
-		"path":            r.URL.Path,
+		"path":            bootstrapAuditPath(r.URL.Path),
 		"raw_query":       queryForAudit(r.URL.RawQuery),
 		"host":            r.Host,
 		"remote_addr":     r.RemoteAddr,
 		"x_forwarded_for": r.Header.Get("X-Forwarded-For"),
 		"x_real_ip":       r.Header.Get("X-Real-IP"),
 		"user_agent":      r.UserAgent(),
-		"referer":         r.Referer(),
+		"referer":         bootstrapAuditReferer(r.Referer()),
 		"origin":          r.Header.Get("Origin"),
 		"content_type":    r.Header.Get("Content-Type"),
 	}

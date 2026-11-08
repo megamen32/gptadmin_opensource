@@ -4,9 +4,9 @@ package hub
 //
 // Every function here re-enters the ordinary Hub dispatch path with the
 // caller's own *http.Request, in the same order execute uses:
-//	authorizeToolCall -> selectMCPRelayTarget -> validateSchemaContract
-//	-> executeMCPTool (connection owner, admission drain, approval,
-//	   bounded autonomy, idempotency keys, audit)
+//      authorizeToolCall -> selectMCPRelayTarget -> validateSchemaContract
+//      -> executeMCPTool (connection owner, admission drain, approval,
+//         bounded autonomy, idempotency keys, audit)
 // so a script can never reach a tool, target or effect the caller could not
 // reach directly.
 //
@@ -15,6 +15,7 @@ package hub
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,6 +106,16 @@ const __contentMCP = globalThis.__codeModeContent;
 const __nativeJSONStringify = JSON.stringify.bind(JSON);
 Object.defineProperty(globalThis, '__codeModeSafeJSON', {value:Object.freeze({stringify:(value,replacer)=>__nativeJSONStringify(value,replacer)}), configurable:false, writable:false});
 globalThis.mcp = Object.freeze({
+  // text: byte-exact transport helpers. Some AI client pipelines filter
+  // CSI-like byte runs ("[" + optional "?0-9;" + final "h"/"m") out of plain
+  // tool output before the model sees it, which silently corrupts source
+  // code, ANSI text and binary-ish payloads. hex()/hexify() return [0-9a-f]
+  // strings that no such filter touches; decode them locally for byte-exact
+  // data. Prefer them over raw cat/sed when the text must survive intact.
+  text: Object.freeze({
+    hex: (s) => __hexOf(String(s)),
+    hexify: (v) => __hexOf(__nativeJSONStringify(v)),
+  }),
   discover: (...a) => __discoverMCP(...a),
   schema: (...a) => __schemaMCP(...a),
   inspect: (target,tool) => __inspectMCP(target,tool),
@@ -200,6 +211,67 @@ globalThis.index = mcp.content.index;
 globalThis.read = mcp.content.read;
 globalThis.drop = mcp.content.delete;
 globalThis.__codeModeFileCall = (kind,target,path,opts={}) => __fileMCP(kind,target,path,opts);
+// Hex bridge out of the sandbox. The stock qjs.wasm of fastschema/qjs v0.0.6
+// strips CSI-like byte runs ("[" + optional "?0-9;" parameters + final "h"/"m",
+// with or without a leading ESC) both from strings leaving through
+// JS_ToCString and from ArrayBuffer bytes read through QJS_GetArrayBuffer,
+// which silently corrupts shell output, file text and tool results. A hex
+// string uses only [0-9a-f], which the filter never touches, so the text
+// crosses intact and Go decodes it back to bytes.
+const __utf8Bytes = (s) => {
+  const n = s.length;
+  if (n === 0) return new Uint8Array(0);
+  let ascii = true;
+  for (let i = 0; i < n; i++) { if (s.charCodeAt(i) > 0x7f) { ascii = false; break; } }
+  if (ascii) {
+    const buf = new Uint8Array(n);
+    for (let i = 0; i < n; i++) buf[i] = s.charCodeAt(i);
+    return buf;
+  }
+  const buf = new Uint8Array(n * 4);
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    let c = s.charCodeAt(i);
+    if (c < 0x80) { buf[j++] = c; }
+    else if (c < 0x800) { buf[j++] = 0xc0|(c>>>6); buf[j++] = 0x80|(c&0x3f); }
+    else if (c >= 0xd800 && c <= 0xdbff && i+1 < n) {
+      const d = s.charCodeAt(i+1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        c = 0x10000 + ((c-0xd800)<<10) + (d-0xdc00);
+        buf[j++] = 0xf0|(c>>>18); buf[j++] = 0x80|((c>>>12)&0x3f); buf[j++] = 0x80|((c>>>6)&0x3f); buf[j++] = 0x80|(c&0x3f);
+        i++;
+      } else { buf[j++]=0xef; buf[j++]=0xbf; buf[j++]=0xbd; }
+    } else if (c >= 0xd800 && c <= 0xdfff) { buf[j++]=0xef; buf[j++]=0xbf; buf[j++]=0xbd; }
+    else { buf[j++]=0xe0|(c>>>12); buf[j++]=0x80|((c>>>6)&0x3f); buf[j++]=0x80|(c&0x3f); }
+  }
+  return buf.subarray(0, j);
+};
+const __hexDigits = '0123456789abcdef';
+const __hexOf = (s) => {
+  const b = __utf8Bytes(s);
+  const n = b.length;
+  const parts = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = b[i];
+    parts[i] = __hexDigits[v >> 4] + __hexDigits[v & 15];
+  }
+  return parts.join('');
+};
+// Порог: сверх него hex-кодирование в WASM не успевает в 30-секундном бюджете
+// exec, и bridge возвращает пустую строку (вызывающая сторона откатывается на
+// прежний путь).
+const __hexBridgeMaxJSON = 1048576;
+// Детектор съедаемых байтовых прогонов: "[" + опц. "?0-9;" + финал "h"/"m".
+// Нативная проверка занимает микросекунды даже на мегабайтах текста.
+const __csiLike = /\[[\x5b?0-9;]*[hm]/;
+globalThis.__codeModeStrBytes = Object.freeze({
+  hex: __hexOf,
+  hexify: (v) => {
+    const j = __nativeJSONStringify(v);
+    if (j.length > __hexBridgeMaxJSON) return '';
+    return __csiLike.test(j) ? __hexOf(j) : 'xs';
+  },
+});
 delete globalThis.__codeModeDiscover;
 delete globalThis.__codeModeSchema;
 delete globalThis.__codeModeInspect;
@@ -403,12 +475,35 @@ func (b *codeModeBridge) install(ctx *qjs.Context) error {
 	return nil
 }
 
+// codeModeHexPrefix marks a hex-encoded bridge payload. A raw console.log
+// argument is always serialized JSON and therefore starts with "[", so the
+// marker cannot collide with user data.
+const codeModeHexPrefix = "xh:"
+
+// codeModeLogPayload decodes one console.log argument. The prelude sends the
+// serialized arguments through the hex bridge (prefixed with codeModeHexPrefix)
+// because the stock qjs.wasm filters CSI-like byte runs out of plain strings;
+// a payload without the marker falls back to Value.String as-is.
+func codeModeLogPayload(v *qjs.Value) string {
+	if v == nil || v.IsUndefined() || v.IsNull() {
+		return ""
+	}
+	text := v.String()
+	if !strings.HasPrefix(text, codeModeHexPrefix) {
+		return text
+	}
+	if raw, err := hex.DecodeString(text[len(codeModeHexPrefix):]); err == nil {
+		return string(raw)
+	}
+	return text
+}
+
 func (b *codeModeBridge) log(this *qjs.This) (*qjs.Value, error) {
 	args := this.Args()
 	if len(args) == 0 || args[0] == nil || args[0].IsUndefined() || args[0].IsNull() {
 		return nil, b.fail("invalid_log", "console.log could not serialize its arguments", nil)
 	}
-	encoded := args[0].String()
+	encoded := codeModeLogPayload(args[0])
 	var values []any
 	if json.Unmarshal([]byte(encoded), &values) != nil {
 		return nil, b.fail("invalid_log", "console.log arguments must be JSON serializable", nil)

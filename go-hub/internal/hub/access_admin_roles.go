@@ -50,7 +50,7 @@ func (s *Server) clientHTTPPathAllowed(r *http.Request) bool {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/admin/api/access-profiles"):
 		tool = "access_profiles"
-	case strings.HasPrefix(r.URL.Path, "/admin/api/client"), strings.HasPrefix(r.URL.Path, "/admin/api/mcp/tokens/"), r.URL.Path == "/admin/api/mcp/issue-token":
+	case strings.HasPrefix(r.URL.Path, "/admin/api/client"), strings.HasPrefix(r.URL.Path, "/admin/api/mcp/tokens/"), r.URL.Path == "/admin/api/mcp/issue-token", r.URL.Path == "/admin/api/bootstrap-links", strings.HasPrefix(r.URL.Path, "/admin/api/bootstrap-links/"):
 		tool = "access_clients"
 	case r.URL.Path == "/admin/api/operations":
 		tool = "operations"
