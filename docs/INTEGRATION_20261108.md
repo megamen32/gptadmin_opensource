@@ -28,3 +28,10 @@ selective integration; 048e9dc6 combines unrelated UX changes and has a known
 pagination regression. No broad cherry-pick or worktree deletion is authorized
 by this checkpoint. Main contains the reviewed current QJS, browser ownership,
 typed receipts, schema queue and bootstrap fixes.
+
+Final ToDo acceptance: Hub100 installed 1111 / 296e5087d2e8786044970162819d4fd8a230b4cc
+through the native drain/update path. Public MCP returned the control schema
+immediately and read the ToDo card after restart. Card updated to version 3 and
+reread. Temporary QA bearer revoked after acceptance. Public CI for artifact
+source e434cea7c07e0aaa3816f2b345cc4ac874a34ccd succeeded (run 42490354417).
+This verifies the changed catalogue/ToDo path, not completion of the whole fleet.
