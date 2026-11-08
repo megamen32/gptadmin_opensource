@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +24,13 @@ import (
 const transferFileLimit = 16 << 20
 const transferChunkLimit = 32 << 10
 const transferSlots = 4
+const transferListLimit = 1000
 const transferTTL = 15 * time.Minute
 
 type binaryTransfer struct {
 	path, owner, direction, digest string
+	expected                       string
+	replace                        bool
 	size, received                 int64
 	data                           []byte
 	parent                         *os.Root
@@ -50,6 +54,9 @@ type transferArgs struct {
 	Offset   int64  `json:"offset"`
 	Data     string `json:"data_base64"`
 	MaxBytes int    `json:"max_bytes"`
+	Pattern  string `json:"pattern"`
+	Expected string `json:"expected_sha256"`
+	Hash     bool   `json:"hash"`
 }
 
 // A transfer handle is not an authorization grant. Every operation rechecks
@@ -106,10 +113,15 @@ func (s *Server) closeBinaryTransfers() {
 	}
 }
 func (s *Server) transferReceipt(id string, t *binaryTransfer) map[string]any {
-	return map[string]any{"transfer_id": id, "path": t.path, "direction": t.direction,
+	receipt := map[string]any{"transfer_id": id, "path": t.path, "direction": t.direction,
 		"size": t.size, "sha256": t.digest, "received": t.received, "completed": t.completed,
 		"chunk_bytes": transferChunkLimit, "expires_at": t.expires.UTC().Format(time.RFC3339),
 		"resume": "transport reconnect only; node restart requires a new transfer"}
+	if t.replace {
+		receipt["replace"] = true
+		receipt["expected_sha256"] = t.expected
+	}
+	return receipt
 }
 func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[string]any, error) {
 	var req transferArgs
@@ -121,13 +133,19 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 		return nil, err
 	}
 	switch req.Action {
-	case "upload_begin", "upload_chunk", "upload_status", "upload_commit", "upload_abort",
-		"download_begin", "download_chunk", "download_abort":
+	case "upload_begin", "upload_replace", "upload_chunk", "upload_status", "upload_commit", "upload_abort",
+		"download_begin", "download_chunk", "download_abort", "stat", "list":
 	default:
 		return nil, errors.New("unknown file_transfer action")
 	}
 	read := transferReadAction(req.Action)
 	policy, owner := s.transferScope(ctx)
+	switch req.Action {
+	case "stat":
+		return s.transferStat(policy, req)
+	case "list":
+		return s.transferList(policy, req)
+	}
 	root, rel, err := transferOpen(policy, req.Path, !read)
 	if err != nil {
 		return nil, err
@@ -144,7 +162,7 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 	if s.transfers.items == nil {
 		s.transfers.items = make(map[string]*binaryTransfer)
 	}
-	if req.Action == "upload_begin" || req.Action == "download_begin" {
+	if req.Action == "upload_begin" || req.Action == "upload_replace" || req.Action == "download_begin" {
 		if len(s.transfers.items) >= transferSlots {
 			return nil, errors.New("file transfer capacity reached; abort unused transfers or wait for expiry")
 		}
@@ -188,7 +206,22 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 			if e != nil || len(digest) != sha256.Size || req.SHA256 != strings.ToLower(req.SHA256) {
 				return nil, errors.New("upload requires lowercase SHA-256")
 			}
-			if _, e := root.Lstat(rel); !errors.Is(e, os.ErrNotExist) {
+			if req.Action == "upload_replace" {
+				// Replace mode: the destination must exist now and match the
+				// caller's expected_sha256 digest; commit re-verifies it.
+				if ed, ee := hex.DecodeString(req.Expected); ee != nil || len(ed) != sha256.Size || req.Expected != strings.ToLower(req.Expected) {
+					return nil, errors.New("upload_replace requires lowercase expected_sha256")
+				}
+				current, ee := transferDestinationDigest(root, rel)
+				if ee != nil {
+					return nil, ee
+				}
+				if current != req.Expected {
+					return nil, errors.New("expected_sha256 does not match the current destination")
+				}
+				t.replace = true
+				t.expected = req.Expected
+			} else if _, e := root.Lstat(rel); !errors.Is(e, os.ErrNotExist) {
 				return nil, errors.New("destination already exists or cannot be checked")
 			}
 			parent, e := root.OpenRoot(filepath.Dir(rel))
@@ -278,6 +311,15 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 		if e != nil || !os.SameFile(t.parentInfo, current) {
 			return nil, errors.New("destination parent changed")
 		}
+		if t.replace {
+			now, e := transferDestinationDigest(root, rel)
+			if e != nil {
+				return nil, e
+			}
+			if now != t.expected {
+				return nil, errors.New("destination changed since upload_replace began")
+			}
+		}
 		if e = transferCommit(t); e != nil {
 			return nil, e
 		}
@@ -347,7 +389,11 @@ func transferCommit(t *binaryTransfer) error {
 	if err != nil || !current.Mode().IsRegular() || !os.SameFile(before, current) {
 		return errors.New("temporary upload file changed")
 	}
-	if err = t.parent.Link(temp, t.name); err != nil {
+	if t.replace {
+		if err = t.parent.Rename(temp, t.name); err != nil {
+			return fmt.Errorf("atomic replace failed: %w", err)
+		}
+	} else if err = t.parent.Link(temp, t.name); err != nil {
 		return fmt.Errorf("atomic create failed (destination must not exist): %w", err)
 	}
 	// Linking publishes already-fsynced contents. Directory sync support differs
@@ -359,16 +405,159 @@ func transferCommit(t *binaryTransfer) error {
 	return nil
 }
 
+// transferDestinationDigest reads a regular file through the open root and
+// returns its SHA-256, refusing destinations that change while being read.
+func transferDestinationDigest(root *os.Root, rel string) (string, error) {
+	before, e := root.Lstat(rel)
+	if e != nil {
+		return "", e
+	}
+	if !before.Mode().IsRegular() || before.Size() > transferFileLimit {
+		return "", errors.New("upload_replace requires a regular destination of at most 16 MiB")
+	}
+	f, e := transferOpenRead(root, rel)
+	if e != nil {
+		return "", e
+	}
+	info, e := f.Stat()
+	if e != nil || !info.Mode().IsRegular() || !os.SameFile(before, info) {
+		f.Close()
+		return "", errors.New("destination changed while opening")
+	}
+	data, e := io.ReadAll(io.LimitReader(f, transferFileLimit+1))
+	after, se := f.Stat()
+	f.Close()
+	if e != nil {
+		return "", e
+	}
+	if se != nil || len(data) > transferFileLimit || int64(len(data)) != info.Size() || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		return "", errors.New("destination changed while reading")
+	}
+	return transferDigest(data), nil
+}
+
+// Stateless metadata reads share the transfer policy without consuming a
+// transfer slot: stat describes one path, list enumerates one directory.
+func (s *Server) transferStat(policy *fsacl.Policy, req transferArgs) (map[string]any, error) {
+	if !filepath.IsAbs(req.Path) || filepath.Clean(req.Path) != req.Path {
+		return nil, errors.New("file_transfer requires a clean absolute path without traversal")
+	}
+	root, rel, err := policy.Open(req.Path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if err = fsacl.RejectSymlinkComponents(root, rel); err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	entry := map[string]any{"path": req.Path, "name": filepath.Base(rel), "is_dir": info.IsDir(),
+		"is_regular": info.Mode().IsRegular(), "mode": info.Mode().String(),
+		"size": info.Size(), "mtime": info.ModTime().UTC().Format(time.RFC3339Nano)}
+	if req.Hash && info.Mode().IsRegular() {
+		if info.Size() > transferFileLimit {
+			return nil, errors.New("stat hash requires a regular file of at most 16 MiB")
+		}
+		digest, err := transferDestinationDigest(root, rel)
+		if err != nil {
+			return nil, err
+		}
+		entry["sha256"] = digest
+	}
+	return mcpText("Private file transfer operation completed.", map[string]any{"transfer": entry}), nil
+}
+
+func (s *Server) transferList(policy *fsacl.Policy, req transferArgs) (map[string]any, error) {
+	if req.Pattern != "" {
+		if len(req.Pattern) > 256 {
+			return nil, errors.New("pattern must be at most 256 bytes")
+		}
+		if _, err := filepath.Match(req.Pattern, "probe"); err != nil {
+			return nil, errors.New("pattern is not a valid glob")
+		}
+	}
+	if !filepath.IsAbs(req.Path) || filepath.Clean(req.Path) != req.Path {
+		return nil, errors.New("file_transfer requires a clean absolute path without traversal")
+	}
+	root, rel, err := policy.Open(req.Path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if err = fsacl.RejectSymlinkComponents(root, rel); err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("list requires a directory")
+	}
+	dir, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries := []map[string]any{}
+	truncated := false
+	entryName := func(m map[string]any) string {
+		n, _ := m["name"].(string)
+		return n
+	}
+	for {
+		batch, err := dir.ReadDir(64)
+		for _, e := range batch {
+			if req.Pattern != "" {
+				matched, me := filepath.Match(req.Pattern, e.Name())
+				if me != nil || !matched {
+					continue
+				}
+			}
+			if len(entries) >= transferListLimit {
+				truncated = true
+				break
+			}
+			entry := map[string]any{"name": e.Name(), "is_dir": e.IsDir()}
+			if fi, ie := e.Info(); ie == nil && fi.Mode().IsRegular() {
+				entry["size"] = fi.Size()
+			}
+			entries = append(entries, entry)
+		}
+		if truncated || err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entryName(entries[i]) < entryName(entries[j]) })
+	transfer := map[string]any{"path": req.Path, "entries": entries, "count": len(entries)}
+	if truncated {
+		transfer["truncated"] = true
+	}
+	if req.Pattern != "" {
+		transfer["pattern"] = req.Pattern
+	}
+	return mcpText("Private file transfer operation completed.", map[string]any{"transfer": transfer}), nil
+}
+
 func fileTransferToolDefinition() map[string]any {
-	return map[string]any{"name": "file_transfer", "description": "Private binary file exchange through existing authenticated MCP, without public URLs. Paths must stay in configured roots. 16 MiB per file, four transfers per node, 32 KiB chunks, 15-minute TTL. Upload begin declares size and SHA256; chunk retries are idempotent; commit atomically creates a NEW file (never overwrites). Download begin snapshots and hashes the file. Resume after transport loss using transfer_id and offsets, not after node restart. Abort to release memory. Binary data is base64; do not print it into chat.",
+	return map[string]any{"name": "file_transfer", "description": "Private binary file exchange through existing authenticated MCP, without public URLs. Paths must stay in configured roots. 16 MiB per file, four transfers per node, 32 KiB chunks, 15-minute TTL. Upload begin declares size and SHA256; chunk retries are idempotent; commit atomically creates a NEW file (never overwrites). upload_replace instead atomically replaces an existing file at commit, and only while its digest still equals expected_sha256. Download begin snapshots and hashes the file. stat and list are stateless metadata reads within the same roots; stat can hash with hash=true. Resume after transport loss using transfer_id and offsets, not after node restart. Abort to release memory. Binary data is base64; do not print it into chat.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
-			"action":      map[string]any{"type": "string", "enum": []string{"upload_begin", "upload_chunk", "upload_status", "upload_commit", "upload_abort", "download_begin", "download_chunk", "download_abort"}},
-			"path":        map[string]any{"type": "string"},
-			"transfer_id": map[string]any{"type": "string"},
-			"size":        map[string]any{"type": "integer", "minimum": 0, "maximum": transferFileLimit},
-			"sha256":      map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"},
-			"offset":      map[string]any{"type": "integer", "minimum": 0, "maximum": transferFileLimit},
-			"data_base64": map[string]any{"type": "string", "maxLength": base64.StdEncoding.EncodedLen(transferChunkLimit)},
-			"max_bytes":   map[string]any{"type": "integer", "minimum": 1, "maximum": transferChunkLimit},
+			"action":          map[string]any{"type": "string", "enum": []string{"upload_begin", "upload_replace", "upload_chunk", "upload_status", "upload_commit", "upload_abort", "download_begin", "download_chunk", "download_abort", "stat", "list"}},
+			"path":            map[string]any{"type": "string"},
+			"transfer_id":     map[string]any{"type": "string"},
+			"size":            map[string]any{"type": "integer", "minimum": 0, "maximum": transferFileLimit},
+			"sha256":          map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"},
+			"expected_sha256": map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "upload_replace: current destination digest; commit aborts when it no longer matches"},
+			"pattern":         map[string]any{"type": "string", "maxLength": 256, "description": "list: glob matched against entry names"},
+			"hash":            map[string]any{"type": "boolean", "description": "stat: include sha256 of a regular file"},
+			"offset":          map[string]any{"type": "integer", "minimum": 0, "maximum": transferFileLimit},
+			"data_base64":     map[string]any{"type": "string", "maxLength": base64.StdEncoding.EncodedLen(transferChunkLimit)},
+			"max_bytes":       map[string]any{"type": "integer", "minimum": 1, "maximum": transferChunkLimit},
 		}, "required": []string{"action", "path"}, "additionalProperties": false}}
 }

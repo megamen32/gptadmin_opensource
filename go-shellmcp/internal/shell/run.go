@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,20 +43,40 @@ type Request struct {
 }
 
 type Result struct {
-	ReturnCode  int      `json:"returncode"`
-	Stdout      string   `json:"stdout"`
-	Stderr      string   `json:"stderr"`
-	Error       string   `json:"error,omitempty"`
-	TimedOut    bool     `json:"timed_out,omitempty"`
-	DurationMS  int64    `json:"duration_ms"`
-	Cwd         string   `json:"cwd_effective,omitempty"`
-	RunAsUser   string   `json:"run_as_user,omitempty"`
-	Spilled     bool     `json:"_spilled,omitempty"`
-	StdoutPath  string   `json:"stdout_path,omitempty"`
-	StderrPath  string   `json:"stderr_path,omitempty"`
-	StdoutBytes int64    `json:"stdout_bytes,omitempty"`
-	StderrBytes int64    `json:"stderr_bytes,omitempty"`
-	Files       []string `json:"files,omitempty"`
+	ReturnCode   int      `json:"returncode"`
+	Stdout       string   `json:"stdout"`
+	Stderr       string   `json:"stderr"`
+	Error        string   `json:"error,omitempty"`
+	TimedOut     bool     `json:"timed_out,omitempty"`
+	DurationMS   int64    `json:"duration_ms"`
+	Cwd          string   `json:"cwd_effective,omitempty"`
+	RunAsUser    string   `json:"run_as_user,omitempty"`
+	Spilled      bool     `json:"_spilled,omitempty"`
+	StdoutPath   string   `json:"stdout_path,omitempty"`
+	StderrPath   string   `json:"stderr_path,omitempty"`
+	StdoutBytes  int64    `json:"stdout_bytes,omitempty"`
+	StderrBytes  int64    `json:"stderr_bytes,omitempty"`
+	StdoutBase64 string   `json:"stdout_base64,omitempty"`
+	Files        []string `json:"files,omitempty"`
+}
+
+// stdoutTailRawBytes reports whether the captured stdout tail needs an
+// exact byte copy alongside its JSON string form. Terminal control characters
+// (including CSI-style escape sequences) survive JSON transport but are
+// visually swallowed by terminals rendering the string, and invalid UTF-8
+// bytes are replaced by U+FFFD during JSON string encoding; the base64 copy
+// keeps the original bytes verifiable.
+func stdoutTailRawBytes(tail string) ([]byte, bool) {
+	if !utf8.ValidString(tail) {
+		return []byte(tail), true
+	}
+	for i := 0; i < len(tail); i++ {
+		b := tail[i]
+		if (b < 0x20 && b != '\n' && b != '\r' && b != '\t') || b == 0x7f {
+			return []byte(tail), true
+		}
+	}
+	return nil, false
 }
 
 type Event struct {
@@ -188,6 +209,9 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		cwd = abs
 	}
 	res := Result{ReturnCode: rc, Stdout: stdout.Tail(), Stderr: stderr.Tail(), StdoutBytes: stdout.Total(), StderrBytes: stderr.Total(), DurationMS: time.Since(started).Milliseconds(), Cwd: cwd, RunAsUser: runAsUser}
+	if raw, include := stdoutTailRawBytes(res.Stdout); include {
+		res.StdoutBase64 = base64.StdEncoding.EncodeToString(raw)
+	}
 	stdoutSpilled := stdout.Spilled()
 	stderrSpilled := stderr.Spilled()
 	_ = stdout.Close()

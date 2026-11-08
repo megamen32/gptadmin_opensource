@@ -1,6 +1,6 @@
 # Private binary transfer
 
-The file_transfer MCP tool uses the existing authenticated GPTAdmin connection.
+The file_transfer MCP MCP tool uses the existing authenticated GPTAdmin connection.
 No public download links, SSH keys, new tokens or expanded filesystem rights
 are created.
 
@@ -16,22 +16,43 @@ NEW 0600 file without overwriting any destination. A privileged Node preserves
 the destination directory owner, so the ordinary OS user can read the upload. The same commit can be
 retried while its handle is retained. upload_abort releases the handle only.
 
+Replace (file_transfer_version 2): upload_replace(path,size,sha256,expected_sha256)
+opens a replace-mode upload against an EXISTING regular file of at most 16 MiB.
+The begin fails unless the current destination digest equals expected_sha256.
+Chunks and status behave exactly like an upload. upload_commit re-reads and
+re-hashes the destination and aborts with "destination changed since
+upload_replace began" when it no longer matches expected_sha256; only then does
+it publish through a fsynced private temporary file and an atomic rename over
+the destination. This gives edit workflows a compare-and-swap primitive without
+a sidecar file plus mv.
+
 Download: download_begin(path) creates a bounded snapshot and returns size,
 sha256 and expires_at. download_chunk accepts transfer_id,path,offset,max_bytes
 (up to 32768), returning data_base64, chunk_sha256, next_offset and eof.
 Verify each chunk and the reconstructed full hash, then download_abort.
 
+Metadata (file_transfer_version 2): stat(path[,hash]) is a stateless read that
+returns name, size, mode, mtime, is_dir and is_regular within the same roots;
+hash=true additionally returns the SHA-256 of a regular file of at most 16 MiB.
+list(path[,pattern]) enumerates one directory (sorted, at most 1000 entries,
+truncated=true when cut) and accepts a glob matched against entry names.
+Neither consumes a transfer slot. Read-only profiles may use stat and list.
+
 Resume covers transport disconnections, not a Node restart. Transfer buffers
 are not persisted. Commit uses a random exclusive private temporary file,
-fsync and an atomic no-replace hard link in the destination directory, which
-must support hard links. Normal paths remove temporary files. A crash during
-commit can leave a private .gptadmin-transfer-*.tmp file.
+fsync and an atomic no-replace hard link (upload) or rename (upload_replace) in
+the destination directory, which must support them. Normal paths remove
+temporary files. A crash during commit can leave a private
+.gptadmin-transfer-*.tmp file.
 
 Every call rechecks canonical allowed roots, symlinks, exact path, direction
-and signed profile identity/version. Read-only profiles cannot upload.
-Write-only roots do not grant downloads. Legacy nodes neither advertise nor
-accept the tool until they declare file_transfer_version=1 in their signed
-heartbeat. Unscoped node-owner calls use existing InspectRoots.
+and signed profile identity/version. Read-only profiles cannot upload or
+replace. Write-only roots do not grant downloads or metadata reads. Legacy
+nodes neither advertise nor accept the tool until they declare
+file_transfer_version=1 in their signed heartbeat; stat, list and
+upload_replace additionally require file_transfer_version=2, and the Hub
+rejects them early with an explicit error on older executors. Unscoped
+node-owner calls use existing InspectRoots.
 
 Transfer data is exact and unredacted. Keep base64 inside tool orchestration,
 not chat, and obey secret/data-sharing policies. This is a bounded initial

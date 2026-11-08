@@ -5156,7 +5156,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	defer releaseSubmission()
 	callArgs, approvalID := approvalArguments(args)
-	if schema, known := builtInMCPInputSchema(target, toolName); known {
+	if schema, known := s.builtInInputSchemaForTarget(target, toolName); known {
 		if issue := validateMCPToolArguments(schema, callArgs); issue != nil {
 			status := http.StatusBadRequest
 			if issue.Code == "invalid_tool_schema" {
@@ -5189,6 +5189,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	if toolName == "file_transfer" && !s.fileTransferCapable(target) {
 		return map[string]any{"status": "failed", "error": "file_transfer requires an updated executor advertising file_transfer_version 1"}, http.StatusBadRequest
+	}
+	if toolName == "file_transfer" && v2TransferAction(firstString(args, "action")) && s.fileTransferVersion(target) < 2 {
+		return map[string]any{"status": "failed", "error": "file_transfer action requires an executor advertising file_transfer_version 2"}, http.StatusBadRequest
 	}
 	secretValues := []string(nil)
 	if toolName == "shell_exec" {

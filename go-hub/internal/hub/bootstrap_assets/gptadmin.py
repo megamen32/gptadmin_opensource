@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MODERN = "2026-07-28"
 LEGACY = "2025-11-25"
 MAX_RESPONSE = 16 * 1024 * 1024
@@ -542,7 +542,7 @@ def build_parser():
     parser.add_argument("--timeout", type=float, default=60, help="HTTP timeout, секунды")
     parser.add_argument("--legacy", action="store_true", help="Явный режим MCP 2025-11-25")
     parser.add_argument("--context", dest="instruction_context", help="Явный instruction receipt для exec и его wrappers")
-    parser.add_argument("--data", action="store_true", help="Вывести structuredContent вместо полного результата")
+    parser.add_argument("--data", action="store_true", help="Вывести structuredContent вместо полного результата; допускается до или после подкоманды")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("bootstrap", help="Скачать конфигурацию и инструкции (права 0600)").add_argument("url", help="Ссылка или - для чтения ссылки из stdin")
     sub.add_parser("discover", help="Информация и инструкции MCP-сервера")
@@ -646,7 +646,15 @@ def dispatch(client, args):
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    # --data is a pure output-mode flag: accept it both before and after the
+    # subcommand, because argparse subparsers reset global defaults.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    force_data = "--data" in raw
+    if force_data:
+        raw = [a for a in raw if a != "--data"]
+    args = build_parser().parse_args(raw)
+    if force_data:
+        args.data = True
     secrets = []
     try:
         if args.timeout <= 0 or args.timeout > 600:

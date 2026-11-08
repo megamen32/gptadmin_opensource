@@ -140,7 +140,13 @@ func (s *Server) compactTargetDescriptors(name string, value any) any {
 	case "schema", "list_mcp_tools", "listMcpTools":
 		out = cloneMap(out)
 		if id := firstString(out, "server_id"); id != "" {
-			out["server_id"] = shortTarget(id)
+			short := shortTarget(id)
+			out["server_id"] = short
+			if short != id {
+				if agent, ok := agents[id]; ok && agent.Name != "" {
+					out["target_title"] = agent.Name
+				}
+			}
 		}
 	case "discover", "list_mcp_servers", "listMcpServers":
 		out = cloneMap(out)
@@ -148,7 +154,13 @@ func (s *Server) compactTargetDescriptors(name string, value any) any {
 		for _, v := range outputRows(out["servers"]) {
 			row := cloneMap(mapValue(v))
 			id := firstString(row, "server_id")
-			row["server_id"] = shortTarget(id)
+			short := shortTarget(id)
+			row["server_id"] = short
+			if short != id {
+				if agent, ok := agents[id]; ok && agent.Name != "" {
+					row["target_title"] = agent.Name
+				}
+			}
 			if strings.HasPrefix(id, "mcp:") {
 				parts := strings.Split(id, ":")
 				if len(parts) >= 3 {
@@ -164,7 +176,13 @@ func (s *Server) compactTargetDescriptors(name string, value any) any {
 		for _, v := range outputRows(out["results"]) {
 			row := cloneMap(mapValue(v))
 			if id := firstString(row, "target"); id != "" {
-				row["target"] = shortTarget(id)
+				short := shortTarget(id)
+				row["target"] = short
+				if short != id {
+					if agent, ok := agents[id]; ok && agent.Name != "" {
+						row["target_title"] = agent.Name
+					}
+				}
 			}
 			if ref := mapValue(row["schema_ref"]); len(ref) > 0 {
 				ref = cloneMap(ref)

@@ -142,6 +142,24 @@ func builtInMCPInputSchema(target, toolName string) (any, bool) {
 	return nil, false
 }
 
+// builtInInputSchemaForTarget resolves the validation schema through the
+// target's advertised capability version, so a file_transfer_version 2
+// executor accepts stat/list/upload_replace while a v1 executor keeps the
+// narrower contract. Targets without a registered executor keep the static
+// lookup and its dispatch-time capability rejection.
+func (s *Server) builtInInputSchemaForTarget(target, toolName string) (any, bool) {
+	if strings.HasPrefix(target, "file:") {
+		for _, definition := range s.fileToolsForTarget(target) {
+			if firstString(definition, "name") == toolName {
+				schema, exists := definition["inputSchema"]
+				return schema, exists
+			}
+		}
+		return nil, false
+	}
+	return builtInMCPInputSchema(target, toolName)
+}
+
 func schemaBusinessArguments(args map[string]any) map[string]any {
 	clean := cloneMap(args)
 	delete(clean, "approval_id")

@@ -431,7 +431,7 @@ func authorizeReadOnlyIdentityAction(r *http.Request, target, tool string, args 
 //	mcp_manage       list/status/config read; upsert/remove/enable/disable/restart write
 //	system_inspect   read_file/list_directory read only
 var readActionTools = map[string]map[string]bool{
-	"file_transfer":   {"download_begin": true, "download_chunk": true, "download_abort": true},
+	"file_transfer":   {"download_begin": true, "download_chunk": true, "download_abort": true, "stat": true, "list": true},
 	"file_editor":     {"view": true},
 	"file_checkpoint": {"list": true, "diff": true},
 	"file_backup":     {"list": true},

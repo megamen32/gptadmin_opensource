@@ -364,7 +364,7 @@ func NewBeat(id *security.Identity, baseURL, mode string, build int) Beat {
 	if id != nil && id.Name != "" {
 		name = id.Name
 	}
-	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, FilesystemACLVersion: 1, FileTransferVersion: 1, GitCommit: "go-shellmcp"}
+	b := Beat{Name: name, BaseURL: baseURL, Cores: info.Cores, MemMB: info.MemMB, Time: time.Now().Unix(), Mode: mode, TransportRole: "shellmcp_transport_layer", Backend: "local", OS: info.OS, BuildVersion: build, FilesystemACLVersion: 1, FileTransferVersion: 2, GitCommit: "go-shellmcp"}
 	if id != nil {
 		b.ServerID = id.ServerID
 		b.PublicKey = id.PublicKey

@@ -46,7 +46,7 @@ func (b *codeModeBridge) prepareTool(this *qjs.This) (*qjs.Value, error) {
 	}
 	schema, found := b.preparedSchema(target, tool)
 	if !found {
-		if static, known := builtInMCPInputSchema(target, tool); known {
+		if static, known := b.server.builtInInputSchemaForTarget(target, tool); known {
 			schema = static
 		} else {
 			result := mapValue(b.server.appsSDKSchemaForRequest(request, map[string]any{"target": target}))
