@@ -2,6 +2,53 @@
 
 What's built, what's coming, and the open-core split.
 
+## MCP and context sources — owner priorities, 2026-11-08
+
+Planned, not shipped. Extend the existing GPTAdmin fullcycle; Remote Node
+SSH/Telnet remains paused. Implement in this order:
+
+1. **Optional active MCP schema resources.** In the same resource picker as
+   startup instructions and servers, offer a compact active-server/tool index,
+   individual server schemas, and an explicitly selected full active-schema
+   snapshot. Include input/output schemas, descriptions and tool annotations;
+   use stable server identity, not mutable hostnames. Filter both listing and
+   reading by the caller's current profile/ACL. Advertise metadata in
+   `resources/list`; fetch content on `resources/read`, with bounded cached
+   discovery, freshness/version/size and explicit partial/unavailable status.
+   Never fan out unboundedly or silently truncate a supposedly complete schema.
+   **Acceptance:** the real client picker can attach a selected schema; listing
+   resources does not fetch every child schema or inject their contents.
+   An unauthorized resource cannot be listed or read after access revocation.
+2. **Child context-source federation and selection.** Relay authorized child
+   `resources/list`, `resources/templates/list` and `resources/read` with stable,
+   collision-free resource URIs. Forward subscriptions/change notifications only
+   when negotiated and supported. Add source selection to profiles and connection
+   creation, with per-link overrides restricted to the profile's permissions.
+   Preserve provenance and distinguish external resource text from trusted
+   policy. Client-side attachment remains client-controlled; a server preference
+   cannot force a client to add text to its model context.
+   **Acceptance:** two children with identical original URIs remain distinct;
+   selected sources survive reconnect/update and access revocation takes effect.
+3. **Broader modern MCP support (owner shorthand: “MCP 2.0”).** Maintain an
+   implemented/missing matrix against dated protocol versions and negotiated
+   extensions, starting with 2026-07-28. Cover resource/template discovery,
+   pagination, notifications, caching, structured tool results/output schemas,
+   task lifecycle/cancellation/expiry/restart and modern/legacy transport
+   compatibility. Audit current implementations before adding duplicates.
+   **Acceptance:** missing behavior gets RED → fix → GREEN and a real supported
+   client check; document unsupported combinations without claiming blanket
+   “2.0 compliance”. Measure initial context size and on-demand schema cost.
+
+MCP resources are **application-driven**: the host may use explicit selection,
+heuristics or model selection. Publishing a resource does not itself put its
+contents in every prompt; once attached, its contents can consume context tokens.
+A resource containing a tool schema is documentation, not tool registration or
+an execution grant. Keep GPTAdmin's compact execution facade.
+
+Specification references checked 2026-11-08:
+[Resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources),
+[Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools).
+
 ## Status today
 
 ### ✅ Built and working
