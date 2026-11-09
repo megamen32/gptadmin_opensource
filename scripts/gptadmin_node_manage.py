@@ -870,16 +870,25 @@ ExecStart={layout.opt_root}/current/bin/gptadmin-node
 Restart=on-failure
 RestartSec=3
 # Measured Node fleet budget: ~10-40 MiB working set, one CPU, no swap.
-MemoryHigh=128M
-MemoryMax=256M
+# The cgroup holds the Node process together with its enrolled MCP readers
+# (codex app-server ~150-170 MiB RSS) and any child a queued command spawns,
+# so the budget must cover the whole unit, not the Go process alone.
+# Fleet incident inc_328f10cc837045a483589e03f11ca681: with MemoryHigh=128M
+# the unit went over the soft limit, the kernel reclaimed under the Go runtime,
+# its threads parked in D on mem_cgroup_handle_over_high and the peer endpoints
+# stopped answering HTTP (curl 28) although TCP was still accepted.
+# GOMEMLIMIT must stay clearly below MemoryHigh, otherwise Go keeps growing
+# the heap into the cgroup throttle instead of collecting in time.
+MemoryHigh=768M
+MemoryMax=1536M
 MemorySwapMax=0
 CPUQuota=100%
-TasksMax=128
+TasksMax=512
 IOWeight=10
 Environment=GOMAXPROCS=1
-# Go's soft target leaves room below the cgroup hard limit for non-Go memory
+# Go's soft target leaves room below the cgroup soft limit for non-Go memory
 # and children. MemoryMax remains the hard limit for the entire service.
-Environment=GOMEMLIMIT=160MiB
+Environment=GOMEMLIMIT=640MiB
 TimeoutStartSec=30s
 # SIGTERM stops active groups and preserves receipts (binary contract)
 TimeoutStopSec=120
