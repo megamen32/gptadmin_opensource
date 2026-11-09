@@ -604,6 +604,12 @@ func readOnlyControlToolAllowed(tool string, args map[string]any) bool {
 func readOnlyExecToolAllowed(r *http.Request, target, tool string, args map[string]any) bool {
 	switch {
 	case target == "hub":
+		// Own identity is safe only with the exact untargeted whoami action.
+		// Target/tool ACLs and the caller identity gate still run first.
+		if tool == "access_clients" && len(args) == 1 {
+			action, valid := args["action"].(string)
+			return valid && action == "whoami"
+		}
 		return readOnlyHubToolAllowed(tool)
 	case target == "control:hub":
 		return tool == "control_catalog" || readOnlyHubToolAllowed(tool)

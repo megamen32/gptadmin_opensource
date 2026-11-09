@@ -88,3 +88,11 @@ client operations during an actual controlled primary outage before relying on
 the cluster.
 
 For credentials issued before a public-origin migration, set `legacy_public_origins` to the explicit previous HTTPS origins. Leave it empty for a new installation. The list is used for issuer and resource validation; it does not disable authentication or permit arbitrary origins.
+
+## Auth snapshot budget
+
+`auth_snapshot_max_bytes` sets the byte limit for replicated authorization snapshots.
+It defaults to `1048576` (1 MiB) and accepts positive integers up to `10485760`
+(10 MiB), matching the native Node limit. Existing options that omit this field
+use the new 1 MiB default without rewriting the saved options. Restart the app
+after changing this setting.

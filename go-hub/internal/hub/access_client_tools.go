@@ -21,7 +21,7 @@ func (s *Server) callAccessClientTool(r *http.Request, name string, args map[str
 	action, id := firstString(args, "action"), firstString(args, "id")
 	if name == "access_clients" && action == "whoami" {
 		claims, _ := r.Context().Value(authClaimsContextKey{}).(map[string]any)
-		return map[string]any{"client_id": firstString(claims, "client_id"), "token_id": firstString(claims, "jti"), "admin": s.requestHasAdminRole(r), "access_mode": requestAccessMode(r)}, 200
+		return map[string]any{"client_id": firstString(claims, "client_id"), "token_id": firstString(claims, "jti"), "admin": s.requestHasAdminRole(r), "access_mode": requestAccessMode(r), "profile_id": AccessProfileIDFromRequest(r)}, 200
 	}
 	if strings.ContainsAny(id, "/\\") {
 		return map[string]any{"detail": "id must be one identifier"}, 400

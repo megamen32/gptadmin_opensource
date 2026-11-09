@@ -32,6 +32,7 @@ options:
   quorum_enabled: false
   hub_host: "0.0.0.0"
   hub_port: 9001
+  auth_snapshot_max_bytes: 1048576
   legacy_public_origins: []
   oauth_allowed_redirects: []
   public_origin: "__PUBLIC_ORIGIN__"
@@ -67,6 +68,7 @@ schema:
   quorum_enabled: bool
   hub_host: str
   hub_port: int
+  auth_snapshot_max_bytes: int(1,10485760)?
   legacy_public_origins:
     - url
   oauth_allowed_redirects:

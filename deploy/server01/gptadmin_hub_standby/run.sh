@@ -4,6 +4,16 @@ set -euo pipefail
 OPTS=/data/options.json
 jqr(){ jq -r "$1 // empty" "$OPTS"; }
 
+# Older Supervisor options omit this field. Bound the value before any startup effects.
+GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES="$(jq -er '
+  def invalid: error("auth_snapshot_max_bytes must be an integer between 1 and 10485760");
+  (if .auth_snapshot_max_bytes == null then 1048576 else .auth_snapshot_max_bytes end) |
+  if type != "number" then invalid
+  elif . != floor or . < 1 or . > 10485760 then invalid
+  else . end
+' "$OPTS")"
+export GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES
+
 mkdir -p /data/config /data/outputs /opt/gptadmin/build /opt/gptadmin/public
 INTERNAL_SECRETS=/data/config/internal-secrets.json
 python3 /usr/local/bin/gptadmin_failover_config.py --ensure-internal-secrets "$INTERNAL_SECRETS"
