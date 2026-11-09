@@ -296,6 +296,9 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 		delete(conn.pending, frame.ID)
 		conn.pendingMu.Unlock()
 	}()
+	// The owner reauthorizes, including callbacks to this writer. Do not
+	// retain the generation gate while waiting on the live connection.
+	releaseAuthAdmission(r)
 	if err := conn.write(frame); err != nil {
 		conn.pendingMu.Lock()
 		delete(conn.pending, frame.ID)
