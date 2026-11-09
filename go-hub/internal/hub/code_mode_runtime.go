@@ -363,7 +363,7 @@ func (s *Server) saveCodeModeResult(r *http.Request, bridge *codeModeBridge, dec
 		"read":       map[string]any{"call": "mcp.content.read", "args": map[string]any{"source": source.ID, "chunk_id": 1}},
 		"search":     map[string]any{"call": "mcp.content.search", "args": map[string]any{"source": source.ID, "query": "<term>"}},
 		"index":      map[string]any{"call": "mcp.content.indexSource", "args": map[string]any{"source": source.ID}},
-		"note":       "The result did not fit the output budget and was stored in full. It was not re-run. Read it with mcp.content.read, find something in it with mcp.content.search (the first search builds the index), or build the index now with mcp.content.indexSource.",
+		"note":       "The result did not fit the output budget and was stored in full. It was not re-run. Unindexed exec results may be reclaimed oldest-first under storage pressure; indexSource retains this result until its expiry. Read it with mcp.content.read, find something in it with mcp.content.search (the first search builds the index), or build the index now with mcp.content.indexSource.",
 	}, nil
 }
 

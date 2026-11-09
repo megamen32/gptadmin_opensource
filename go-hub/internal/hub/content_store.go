@@ -241,20 +241,67 @@ func (s *ContentStore) storeFormatted(principal, name, origin, format, text stri
 	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources WHERE principal=?`, principal).Scan(&total, &count); err != nil {
 		return out, err
 	}
-	if total+int64(len(b)) > s.limits.MaxTotalBytes {
-		return out, errors.New("principal content byte limit reached")
-	}
-	if count >= s.limits.MaxSources {
-		return out, errors.New("principal content source limit reached")
-	}
 	// Bound all principals together as well as each principal separately.
 	var globalBytes int64
 	var globalCount int
 	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources`).Scan(&globalBytes, &globalCount); err != nil {
 		return out, err
 	}
+	needsSpace := func() bool {
+		return total+int64(len(b)) > s.limits.MaxTotalBytes || count >= s.limits.MaxSources ||
+			globalBytes+int64(len(b)) > 128<<20 || globalCount >= 1000
+	}
+	var reclaim []string
+	if !eager && name == codeModeResultSourceName && needsSpace() {
+		// Oversized exec results are an automatic bounded cache. A full cache
+		// must not prevent the next successful tool call from returning its
+		// result. Only reclaim this principal's oldest automatic, unindexed
+		// results. Explicit sources and results retained by indexing survive.
+		rows, queryErr := tx.Query(`SELECT id,bytes FROM content_sources WHERE principal=? AND name=? AND indexed=0 ORDER BY created,rowid`, principal, codeModeResultSourceName)
+		if queryErr != nil {
+			return out, queryErr
+		}
+		for needsSpace() && rows.Next() {
+			var sourceID string
+			var sourceBytes int64
+			if err = rows.Scan(&sourceID, &sourceBytes); err != nil {
+				rows.Close()
+				return out, err
+			}
+			reclaim = append(reclaim, sourceID)
+			total -= sourceBytes
+			count--
+			globalBytes -= sourceBytes
+			globalCount--
+		}
+		err = rows.Err()
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return out, err
+		}
+	}
+	if total+int64(len(b)) > s.limits.MaxTotalBytes {
+		return out, errors.New("principal content byte limit reached")
+	}
+	if count >= s.limits.MaxSources {
+		return out, errors.New("principal content source limit reached")
+	}
 	if globalBytes+int64(len(b)) > 128<<20 || globalCount >= 1000 {
 		return out, errors.New("global content storage limit reached")
+	}
+	// Reclamation and insertion commit together. An admission or write failure
+	// cannot lose a previous result, and no other principal can be reclaimed.
+	for _, sourceID := range reclaim {
+		for _, table := range []string{"content_fts", "content_chunks"} {
+			if _, err = tx.Exec("DELETE FROM "+table+" WHERE source_id=? AND principal=?", sourceID, principal); err != nil {
+				return out, err
+			}
+		}
+		if _, err = tx.Exec("DELETE FROM content_sources WHERE id=? AND principal=?", sourceID, principal); err != nil {
+			return out, err
+		}
 	}
 	expires := now.Add(s.limits.TTL)
 	if _, err = tx.Exec(`INSERT INTO content_sources(id,principal,name,origin,format,bytes,chunks,created,expires,indexed,complete) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, principal, name, origin, format, len(b), len(chunks), now.Unix(), expires.Unix(), eager, complete); err != nil {
