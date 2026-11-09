@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -76,21 +77,22 @@ type nodeJoinGrant struct {
 }
 
 type nodeMember struct {
-	NodeID           string    `json:"node_id"`
-	KeyHash          string    `json:"key_hash"`
-	Name             string    `json:"name"`
-	Capabilities     []string  `json:"capabilities"`
-	Endpoints        []string  `json:"endpoints"`
-	ConnectTo        string    `json:"connect_to,omitempty"`
-	Generation       uint64    `json:"generation"`
-	State            string    `json:"state"`
-	LastSeen         time.Time `json:"last_seen"`
-	LeaseExpires     time.Time `json:"lease_expires"`
-	Build            string    `json:"build,omitempty"`
-	SnapshotRev      uint64    `json:"snapshot_revision,omitempty"`
-	LocalID          string    `json:"local_id,omitempty"`
-	LocalFingerprint string    `json:"local_fingerprint,omitempty"`
-	CatalogFresh     bool      `json:"-"`
+	NodeID           string         `json:"node_id"`
+	KeyHash          string         `json:"key_hash"`
+	Name             string         `json:"name"`
+	Capabilities     []string       `json:"capabilities"`
+	Endpoints        []string       `json:"endpoints"`
+	ConnectTo        string         `json:"connect_to,omitempty"`
+	Generation       uint64         `json:"generation"`
+	State            string         `json:"state"`
+	LastSeen         time.Time      `json:"last_seen"`
+	LeaseExpires     time.Time      `json:"lease_expires"`
+	Build            string         `json:"build,omitempty"`
+	SnapshotRev      uint64         `json:"snapshot_revision,omitempty"`
+	LocalID          string         `json:"local_id,omitempty"`
+	LocalFingerprint string         `json:"local_fingerprint,omitempty"`
+	ExecutorMeta     map[string]any `json:"executor_meta,omitempty"`
+	CatalogFresh     bool           `json:"-"`
 }
 
 type nodeMembershipState struct {
@@ -406,6 +408,7 @@ func (s *Server) rebuildMembershipRoutes() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	routes := map[string]nodePeerRoute{}
+	routeMeta := map[string]map[string]any{}
 	for _, member := range nodes {
 		if member == nil || member.NodeID == s.authLocalID || member.NodeID == s.selfNodeIDLocked() {
 			continue
@@ -425,9 +428,13 @@ func (s *Server) rebuildMembershipRoutes() {
 		}
 		routes[member.Name] = nodePeerRoute{URL: endpoint, ConnectTo: member.ConnectTo,
 			LocalID: member.LocalID, LocalFingerprint: member.LocalFingerprint, CatalogFresh: member.CatalogFresh}
+		if len(member.ExecutorMeta) > 0 {
+			routeMeta[member.Name] = member.ExecutorMeta
+		}
 	}
 	_ = heartbeatWriterID
 	s.membershipRoutes = routes
+	s.membershipRouteMeta = routeMeta
 }
 
 // writerHeartbeatContextLocked returns the writer identity and URL the local
@@ -910,6 +917,7 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		LocalID               string          `json:"local_id,omitempty"`
 		LocalName             string          `json:"local_name,omitempty"`
 		LocalFingerprint      string          `json:"local_fingerprint,omitempty"`
+		ExecutorMeta          map[string]any  `json:"executor_meta,omitempty"`
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "heartbeat body must be JSON"})
@@ -926,6 +934,11 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 	catalog, catalogErr := decodeNodeExecutorCatalog(request.ExecutorCatalog)
 	if catalogErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": catalogErr.Error()})
+		return
+	}
+	executorMeta, metaErr := validateNodeExecutorMeta(request.ExecutorMeta)
+	if metaErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": metaErr.Error()})
 		return
 	}
 	reported := strings.TrimSpace(request.State)
@@ -1044,6 +1057,18 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		current.Build = strings.TrimSpace(request.Build)
 	}
 	current.SnapshotRev = request.SnapshotRev
+	// Capability absence inside an explicitly present executor_meta must
+	// clear a previous announcement, mirroring the queue-poll contract for
+	// rollback. An OLD node binary omits the field entirely; that must never
+	// clear capability keys advertised through the legacy queue enrollment.
+	if fingerprintAuthorized && executorMeta != nil {
+		oldMetaJSON, _ := json.Marshal(current.ExecutorMeta)
+		newMetaJSON, _ := json.Marshal(executorMeta)
+		if !bytes.Equal(oldMetaJSON, newMetaJSON) {
+			current.ExecutorMeta = executorMeta
+			changed = true
+		}
+	}
 	if changed {
 		s.membership.Revision++
 	}
@@ -1065,6 +1090,12 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		var err error
 		catalogChanged, err = s.applyNodeExecutorCatalog(member, catalog)
 		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
+			return
+		}
+	}
+	if executorMeta != nil {
+		if _, err := s.applyNodeExecutorMeta(member, executorMeta, fingerprintAuthorized); err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]any{"detail": err.Error()})
 			return
 		}
@@ -1335,6 +1366,139 @@ func (s *Server) memberNodeKey() string {
 	return s.nodeIdentity.NodeKey
 }
 
+// nodeExecutorMetaIntKeys and nodeExecutorMetaStringKeys whitelist the
+// executor capability fields a member may mirror to the writer. The set
+// mirrors the legacy queue-poll announcement so paired file targets and
+// capability gates observe the same fields for remote executors.
+var nodeExecutorMetaIntKeys = []string{"build_version", "file_transfer_version", "filesystem_acl_version", "cores", "mem_mb"}
+
+var nodeExecutorMetaStringKeys = []string{"git_commit", "os", "hostname", "backend", "mode", "default_user", "default_home", "default_cwd"}
+
+var nodeExecutorMetaKeys = append(append([]string{}, nodeExecutorMetaIntKeys...), nodeExecutorMetaStringKeys...)
+
+// validateNodeExecutorMeta bounds the heartbeat capability announcement to
+// whitelisted scalar fields before it is stored or projected.
+func validateNodeExecutorMeta(meta map[string]any) (map[string]any, error) {
+	if meta == nil {
+		return nil, nil
+	}
+	if len(meta) > len(nodeExecutorMetaKeys) {
+		return nil, errors.New("executor meta key limit exceeded")
+	}
+	allowed := map[string]bool{}
+	for _, key := range nodeExecutorMetaKeys {
+		allowed[key] = true
+	}
+	intKeys := map[string]bool{}
+	for _, key := range nodeExecutorMetaIntKeys {
+		intKeys[key] = true
+	}
+	out := map[string]any{}
+	for key, value := range meta {
+		if !allowed[key] {
+			return nil, fmt.Errorf("executor meta key not allowed: %s", key)
+		}
+		if intKeys[key] {
+			number, ok := value.(float64)
+			if !ok || number != math.Trunc(number) || number < 0 || number > 1e9 {
+				return nil, fmt.Errorf("executor meta integer expected for %s", key)
+			}
+			out[key] = int(number)
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || len(text) > 256 || strings.ContainsAny(text, "\x00\r\n") {
+			return nil, fmt.Errorf("executor meta string limit exceeded for %s", key)
+		}
+		out[key] = text
+	}
+	return out, nil
+}
+
+// memberLocalExecutorMeta reads the pinned local executor's advertised
+// capability meta. Only whitelisted bounded fields leave the node.
+func (s *Server) memberLocalExecutorMeta() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.localExecutors) != 1 {
+		return nil
+	}
+	for name := range s.localExecutors {
+		agent := s.agents[name]
+		if agent == nil || !truthyAny(agent.Meta["approved"]) {
+			return nil
+		}
+		meta := map[string]any{}
+		for _, key := range nodeExecutorMetaIntKeys {
+			if v := agent.Meta[key]; v != nil {
+				meta[key] = v
+			}
+		}
+		for _, key := range nodeExecutorMetaStringKeys {
+			if v := agent.Meta[key]; v != nil {
+				meta[key] = v
+			}
+		}
+		if len(meta) == 0 {
+			return nil
+		}
+		return meta
+	}
+	return nil
+}
+
+// applyNodeExecutorMeta mirrors a member's explicitly advertised executor
+// capability meta into an existing approved registry parent, following the
+// same contract as the legacy queue-poll announcement: keys absent from the
+// announcement are cleared, so an executor downgrade withdraws the paired
+// file target. Heartbeats that omit the executor_meta field entirely (older
+// node binaries) never touch the parent's capability keys. Members without a
+// registry parent keep their capability meta on the membership route
+// instead; this is not an error.
+func (s *Server) applyNodeExecutorMeta(member *nodeMember, meta map[string]any, identityBound bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipMu.Lock()
+	defer s.membershipMu.Unlock()
+	current := s.membership.Nodes[member.NodeID]
+	if current == nil || current.KeyHash != member.KeyHash || current.Name != member.Name || current.State == nodeStateDisabled {
+		return false, errors.New("executor meta member no longer authorized")
+	}
+	parent := s.agents[member.Name]
+	if parent == nil || !truthyAny(parent.Meta["approved"]) || parent.Status == "awaiting_approval" || s.localExecutors[member.Name] != nil {
+		return false, nil
+	}
+	if member.LocalID != "" && firstString(parent.Meta, "server_id") != member.LocalID {
+		return false, errors.New("executor meta parent identity mismatch")
+	}
+	if !identityBound {
+		return false, nil
+	}
+	next := map[string]any{}
+	for k, v := range parent.Meta {
+		next[k] = v
+	}
+	for _, key := range nodeExecutorMetaKeys {
+		if v, ok := meta[key]; ok {
+			next[key] = v
+		} else {
+			delete(next, key)
+		}
+	}
+	oldJSON, _ := json.Marshal(parent.Meta)
+	newJSON, _ := json.Marshal(next)
+	if bytes.Equal(oldJSON, newJSON) {
+		return false, nil
+	}
+	oldMeta := parent.Meta
+	parent.Meta = next
+	if err := s.saveRegistryStateLocked(); err != nil {
+		parent.Meta = oldMeta
+		return false, err
+	}
+	return true, nil
+}
+
 // memberLocalExecutorIdentity reads only the node's in-process pinned local
 // executor identity. A registry heartbeat cannot claim another shell identity.
 func (s *Server) memberLocalExecutorIdentity() (string, string, string) {
@@ -1386,10 +1550,14 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 		log.Printf("membership executor catalog incomplete: %v", err)
 	}
 	localName, localID, localFingerprint := s.memberLocalExecutorIdentity()
+	executorMeta := s.memberLocalExecutorMeta()
 	payload := map[string]any{
 		"revision": viewRevision, "state": s.membershipReportedState(), "build": GitCommit,
 		"storage_ok": true, "snapshot_revision": s.writerAuthGeneration(),
 		"endpoint": s.cfg.NodePublicURL, "local_name": localName, "local_id": localID, "local_fingerprint": localFingerprint,
+	}
+	if executorMeta != nil {
+		payload["executor_meta"] = executorMeta
 	}
 	if err != nil {
 		payload["executor_catalog_status"] = "incomplete"

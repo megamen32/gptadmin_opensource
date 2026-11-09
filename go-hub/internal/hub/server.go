@@ -645,6 +645,7 @@ type Server struct {
 	membership                    *nodeMembershipState
 	membershipView                *nodeMembershipView
 	membershipRoutes              map[string]nodePeerRoute
+	membershipRouteMeta           map[string]map[string]any
 	authMu                        sync.RWMutex
 	authState                     authSnapshotState
 	authInitialized               bool
@@ -4686,7 +4687,13 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 			Kind: "virtual_shell", Transport: "node", Status: "online", LastSeen: nowFloat(),
 			Capabilities: []string{"shell", "system", "tasks", "logs"},
 			Meta:         map[string]any{"server_id": route.LocalID, "fingerprint": route.LocalFingerprint, "membership_transport": "authenticated_node_lease"}}
+		for key, value := range s.membershipRouteMeta[id] {
+			member.Meta[key] = value
+		}
 		agents = append(agents, s.withExposeMetaLocked(member, r))
+		if supportsPairedFileTarget(member) {
+			agents = append(agents, s.withExposeMetaLocked(fileAgentForShell(member), r))
+		}
 	}
 	usedSlugs := map[string]bool{}
 	for _, a := range agents {

@@ -711,8 +711,8 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_generated_node_unit_has_the_measured_finite_service_budget(self):
         unit=manager.render_unit_template(manager.Layout())
-        for line in ('MemoryHigh=128M','MemoryMax=256M','MemorySwapMax=0',
-                     'CPUQuota=100%','TasksMax=128','IOWeight=10','Environment=GOMAXPROCS=1'):
+        for line in ('MemoryHigh=768M','MemoryMax=1536M','MemorySwapMax=0',
+                     'CPUQuota=100%','TasksMax=512','IOWeight=10','Environment=GOMAXPROCS=1'):
             with self.subTest(line=line):self.assertIn(line,unit)
 
     def test_autoupdate_service_can_refresh_helpers_under_protect_system(self):

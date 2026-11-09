@@ -55,11 +55,16 @@ func (s *Server) fileTransferVersion(target string) int {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	agent := s.agents["shell:"+strings.TrimPrefix(target, "file:")]
-	if agent == nil {
-		return 0
+	name := "shell:" + strings.TrimPrefix(target, "file:")
+	if agent := s.agents[name]; agent != nil {
+		return intFromAny(agent.Meta["file_transfer_version"])
 	}
-	return intFromAny(agent.Meta["file_transfer_version"])
+	// Route-only members carry their executor capability meta on the
+	// membership route; the registry parent may not exist for them.
+	if meta, ok := s.membershipRouteMeta[name]; ok {
+		return intFromAny(meta["file_transfer_version"])
+	}
+	return 0
 }
 
 func (s *Server) fileTransferCapable(target string) bool {
