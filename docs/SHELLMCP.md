@@ -1,5 +1,13 @@
 # ShellMCP
 
+> **Status (2026-11-09).** A standalone `shellmcp.service` is a legacy deployment
+> form. The supported form is one unified `gptadmin-node` per host — hub,
+> executor and child-MCP management in a single process (`go-hub/cmd/gptadmin-node`)
+> — while the Go runtime in `go-shellmcp/` lives on as the node's embedded
+> executor library. Migrate remaining standalone services per the fullcycle
+> plan; see [UNIFIED_NODE_ARCHITECTURE.md](UNIFIED_NODE_ARCHITECTURE.md) and
+> [NODE_PUBLIC_AUTOUPDATE.md](NODE_PUBLIC_AUTOUPDATE.md).
+
 ShellMCP is the agent that runs on each target machine. It registers with the
 hub, executes commands locally, and returns real output.
 

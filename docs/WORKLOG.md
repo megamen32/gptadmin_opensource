@@ -48,6 +48,17 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
 ## Entries
 
+## 2026-11-09 - Retire leftover standalone ShellMCP on node-100 - completed
+
+- Milestone: fullcycle fleet migration (M8L2 pattern, node-100 follow-up)
+- Owner: `Z.ai (gptadmin improvement session)`
+- Scope: runtime state of node-100 plus one documentation note; no code change.
+- Baseline / red evidence: `shellmcp.service` (PID 1535867, restarted 2026-11-09 03:53 MSK by the paired file_transfer v2 upgrade) kept running after the unified node had taken over the shell target: a live `shell_exec` cgroup resolved to `gptadmin-hub.service` (gptadmin-node PID 2643246), the agent registration carried the node identity (server_id `bd0bf8c4…`, build 1118, file_transfer_version 2), and the old process held no child MCPs and no established connections.
+- Change: `systemctl stop shellmcp.service` (unit already disabled; S21 autostart timer disabled; `ROOTD_AUTO_UPDATE=0`). Added a legacy-status note to `docs/SHELLMCP.md` pointing to the unified node and `docs/UNIFIED_NODE_ARCHITECTURE.md`.
+- Verification: after the stop — `shell_exec` still executes under `gptadmin-hub.service`; hub `/version` reports 1118/df79da77 `ok`; child MCPs (agent-herder, AgentBrowser, fileshare, container-use) keep their PIDs; `file_transfer stat` works; agent `admin-node-100` online with queue polls continuing through the node (poll count rising, latency 83 ms).
+- Delivery: this entry plus the `docs/SHELLMCP.md` note, committed and pushed to `main`.
+- Next: migrate remaining standalone hosts in their planned windows (fullcycle M11 Mac M1, M12 Mac Mini, M13 remaining fleet, M16 legacy cleanup).
+
 ## 2026-07-27 - GPTADMIN connector authorization durability - active
 
 - Milestone: `S0.1` / `S0.5` / GPTADMIN interactive-client acceptance
