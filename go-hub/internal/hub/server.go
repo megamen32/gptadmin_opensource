@@ -5315,9 +5315,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 				if !capable {
 					return map[string]any{"status": "failed", "error": "filesystem ACL requires an approved executor with filesystem_acl_version 1"}, http.StatusForbidden
 				}
-				return s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, childACL, durableRequestKey), http.StatusOK
+				return s.callShellToolWithReceiptTargetForRequest(r, parent, target, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, childACL, durableRequestKey), http.StatusOK
 			}
-			return s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, nil, durableRequestKey), http.StatusOK
+			return s.callShellToolWithReceiptTargetForRequest(r, parent, target, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, nil, durableRequestKey), http.StatusOK
 		}
 		jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
 		if failure := s.relayEnqueueFailure(jobID); failure != nil {
@@ -6259,6 +6259,10 @@ func (s *Server) callShellToolWithFilesystemACL(target, toolName string, args ma
 }
 
 func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, filesystemACL *filesystemACLPolicy, requestKeys ...string) map[string]any {
+	return s.callShellToolWithReceiptTargetForRequest(r, target, target, toolName, args, background, timeout, traceID, traceParent, secretValues, filesystemACL, requestKeys...)
+}
+
+func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, target, receiptTarget, toolName string, args map[string]any, background bool, timeout time.Duration, traceID, traceParent string, secretValues []string, filesystemACL *filesystemACLPolicy, requestKeys ...string) map[string]any {
 	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
 	if strings.HasPrefix(target, "file:") {
 		server = canonicalShellQueueName(strings.TrimPrefix(target, "file:"))
@@ -6298,7 +6302,7 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 			}
 		}
 	}
-	job := &shellJob{ID: newID(), Server: server, ReceiptTarget: target, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
+	job := &shellJob{ID: newID(), Server: server, ReceiptTarget: receiptTarget, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
 	if job.FilesystemACL != nil {
 		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
 		job.FilesystemACL.JobID = job.ID

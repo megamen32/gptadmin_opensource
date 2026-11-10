@@ -146,9 +146,6 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 		}
 		s.mu.Unlock()
 	}
-	if !transportAllowed {
-		return fail(http.StatusForbidden, "access profile denies the receipt owner target")
-	}
 	s.mu.Lock()
 	err := s.refreshTaskRecordsLocked(jobID)
 	local := s.localExecutors[target] != nil
@@ -198,6 +195,9 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 			return fail(http.StatusNotFound, "job does not belong to the requested local executor")
 		}
 		return false
+	}
+	if !transportAllowed {
+		return fail(http.StatusForbidden, "access profile denies the receipt owner target")
 	}
 	if local {
 		return fail(http.StatusNotFound, "unknown job at requested owner")
