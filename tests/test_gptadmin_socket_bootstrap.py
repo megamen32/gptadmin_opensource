@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import signal
 import socket
 import subprocess
@@ -591,7 +592,16 @@ def _lease_fixture(tmp_path, **overrides):
     return args, state
 
 
-def test_release_lease_accepts_live_v1_document_and_refuses_the_gates(tmp_path, monkeypatch):
+@pytest.fixture
+def local_release_lease_owner(monkeypatch):
+    # The deployment account is host-specific. Unit fixtures use the real
+    # owner of their temporary files; secure_regular still checks UID/mode.
+    current_user = pwd.getpwuid(os.getuid())
+    monkeypatch.setattr(bootstrap, "pwd", SimpleNamespace(getpwnam=lambda _name: current_user))
+
+
+def test_release_lease_accepts_live_v1_document_and_refuses_the_gates(
+        tmp_path, monkeypatch, local_release_lease_owner):
     args, state = _lease_fixture(tmp_path)
     monkeypatch.setattr(bootstrap, "RELEASE_LEASE_STATE", state)
     accepted = bootstrap.validate_release_lease(args, minimum_remaining_seconds=600)
@@ -641,7 +651,8 @@ def test_release_lease_accepts_live_v1_document_and_refuses_the_gates(tmp_path, 
         bootstrap.validate_release_lease(invented, minimum_remaining_seconds=0)
 
 
-def test_renewed_recovery_lease_is_recorded_without_token(tmp_path, monkeypatch):
+def test_renewed_recovery_lease_is_recorded_without_token(
+        tmp_path, monkeypatch, local_release_lease_owner):
     original_owner = {"hostId": "admin-node-100", "harness": "opencode",
                       "nativeSessionId": "ses-lease"}
     renewed, state = _lease_fixture(tmp_path, fence=8, token="renewed-lease-token", receipt_id="lease-new")

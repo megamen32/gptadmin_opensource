@@ -221,7 +221,9 @@ def main():
             job_id = receipt.get('job_id')
             if not job_id:
                 break
-            value = api.result_data(client.call_tool('job', {'id': job_id, 'owner_target': target, 'detail': 'full'}))
+            # Both public targets execute on this one QA shell. A child MCP
+            # target is not a valid receipt owner in the ordinary Hub API.
+            value = api.result_data(client.call_tool('job', {'id': job_id, 'owner_target': shell_target, 'detail': 'full'}))
             if value.get('status') in ('completed', 'failed', 'cancelled', 'error'):
                 break
             time.sleep(0.1)
