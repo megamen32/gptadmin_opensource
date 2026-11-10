@@ -147,6 +147,10 @@ func (l *Logger) writeEvent(typ string, fields map[string]any, durable bool) err
 	}
 	if durable {
 		l.preserve = true
+		if err := l.verifyDurablePath(); err != nil {
+			l.mu.Unlock()
+			return err
+		}
 	}
 	if !l.preserve && l.maxBytes > 0 {
 		if info, err := l.file.Stat(); err == nil && info.Size() >= l.maxBytes {
@@ -164,11 +168,32 @@ func (l *Logger) writeEvent(typ string, fields map[string]any, durable bool) err
 			l.mu.Unlock()
 			return err
 		}
+		if err := l.verifyDurablePath(); err != nil {
+			l.mu.Unlock()
+			return err
+		}
 	}
 	callback := l.afterWrite
 	l.mu.Unlock()
 	if callback != nil {
 		callback()
+	}
+	return nil
+}
+
+// Called under mu. Fsync on a deleted or renamed inode succeeds, but no longer
+// proves an addressable audit record. Never reopen, replace or replay silently.
+func (l *Logger) verifyDurablePath() error {
+	opened, err := l.file.Stat()
+	if err != nil {
+		return fmt.Errorf("audit descriptor unavailable: %w", err)
+	}
+	named, err := os.Stat(l.path)
+	if err != nil {
+		return fmt.Errorf("audit pathname unavailable: %w", err)
+	}
+	if !os.SameFile(opened, named) {
+		return fmt.Errorf("audit pathname no longer names the open journal")
 	}
 	return nil
 }

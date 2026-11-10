@@ -48,8 +48,18 @@ func TestServerOwnedDisposableDataSharesOneBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if total > 100 {
-		t.Fatalf("ShellMCP-owned bytes=%d want <=100", total)
+	// Spills, pending receipts and the open audit are mandatory (120 bytes).
+	// Retain them over budget and reclaim only the disposable backup.
+	if total != 120 || s.storageOverflowBytes.Load() != 20 {
+		t.Fatalf("mandatory bytes=%d overflow=%d, want 120 and 20", total, s.storageOverflowBytes.Load())
+	}
+	for _, path := range paths[:3] {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("mandatory data removed %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("disposable backup was not reclaimed: %v", err)
 	}
 	if _, err := os.Stat(unrelated); err != nil {
 		t.Fatalf("unrelated sibling log was removed: %v", err)

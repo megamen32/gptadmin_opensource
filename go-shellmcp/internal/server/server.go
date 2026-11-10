@@ -441,11 +441,11 @@ func (s *Server) storageRoots() []string {
 // Spills may be referenced by a pending receipt or a delivered receipt still in
 // Hub history. Without a reference index neither age nor budget proves them disposable.
 func (s *Server) enforceStorage(protected map[string]bool) error {
-	keep := make(map[string]bool, len(protected)+2)
+	keep := make(map[string]bool, len(protected)+3)
 	for path, yes := range protected {
 		keep[path] = yes
 	}
-	for _, path := range []string{s.cfg.SpillDir, s.cfg.OutboxDir} {
+	for _, path := range []string{s.cfg.SpillDir, s.cfg.OutboxDir, s.cfg.AuditLog} {
 		if strings.TrimSpace(path) != "" {
 			keep[path] = true
 		}

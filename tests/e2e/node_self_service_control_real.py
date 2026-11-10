@@ -105,6 +105,7 @@ def main():
         'SHELLMCP_AUDIT_LOG': str(root / 'executor-audit.jsonl'),
         'GPTADMIN_AUDIT_STATE_FILE': str(root / 'hub-audit.jsonl'),
         'SHELLMCP_SELF_REPAIR_DISABLE': '1', 'ROOTD_AUTO_UPDATE': '0',
+        'LOG_LIMIT_B': '4096',  # bound the inline tail of the real 2 MiB spill probe
         'MCP_RELAY_POLL_MAX_TIMEOUT': '2', 'GOMAXPROCS': '2',
     }
     env_file = root / 'environment'
@@ -435,6 +436,107 @@ def main():
             time.sleep(0.1)
         raise AssertionError('Hub did not confirm validated QA client claims')
 
+    def storage_runtime_audit_probe():
+        # The previous five checks stay independent of quota pressure. Produce
+        # a real receipt-backed stdout spill, then let ordinary queue/heartbeat
+        # responses deliver the admin setting; never call executor internals.
+        before_pid = pid()
+        spilled = exec_shell("/usr/bin/python3 -c 'import sys; sys.stdout.write(\"S\" * (2 * 1024 * 1024))'")
+        assert succeeded(spilled), 'real stdout spill command failed'
+        paths = [Path(value) for value in values(spilled, 'stdout_path') if isinstance(value, str)]
+        paths = [path for path in paths if path.is_relative_to(root / 'spool') and path.is_file()]
+        assert paths, 'real shell receipt did not reference a mandatory stdout spill'
+        spool = paths[0]
+        spool_stat = spool.stat()
+        assert spool_stat.st_size > 1024 * 1024, 'mandatory spool data does not exceed the requested budget'
+        spool_hash = hashlib.sha256(spool.read_bytes()).hexdigest()
+        audit_path = root / 'executor-audit.jsonl'
+        baseline = audit_path.stat()
+        baseline_data = audit_path.read_bytes()
+        detail = {'setting': 'shell_storage_max_mb', 'requested_mb': 1,
+                  'spool_path': str(spool), 'spool_bytes': spool_stat.st_size,
+                  'spool_sha256': spool_hash, 'pid_before': before_pid}
+        evidence['storage_runtime_audit'] = detail
+
+        def snapshot(process_pid):
+            result = {'pid': process_pid, 'path': None, 'fds': []}
+            if audit_path.exists():
+                info = audit_path.stat()
+                result['path'] = {'device': info.st_dev, 'inode': info.st_ino,
+                                  'size': info.st_size, 'nlink': info.st_nlink}
+            for fd in (Path('/proc') / str(process_pid) / 'fd').iterdir():
+                try:
+                    link, info = os.readlink(fd), fd.stat()
+                except (FileNotFoundError, PermissionError):
+                    continue
+                if link in (str(audit_path), str(audit_path) + ' (deleted)') or \
+                        (info.st_dev, info.st_ino) == (baseline.st_dev, baseline.st_ino):
+                    result['fds'].append({'fd': int(fd.name), 'link': link, 'device': info.st_dev,
+                                          'inode': info.st_ino, 'size': info.st_size, 'nlink': info.st_nlink})
+            return result
+
+        def require_live(value):
+            current = value['path']
+            assert current is not None, 'runtime storage cleanup unlinked the mandatory audit path'
+            assert (current['device'], current['inode']) == (baseline.st_dev, baseline.st_ino), \
+                'runtime storage cleanup replaced the original audit inode'
+            assert value['fds'] and all(fd['nlink'] > 0 and not fd['link'].endswith(' (deleted)')
+                                         for fd in value['fds']), 'executor audit FD is deleted or unavailable'
+
+        def settings(value=None):
+            request = urllib.request.Request(origin + '/admin/api/settings',
+                headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+                method='GET' if value is None else 'PUT',
+                data=None if value is None else json.dumps(value).encode())
+            with opener.open(request, timeout=5) as response:
+                return json.load(response)
+
+        def wait_for_apply(process_pid):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                journal = run('journalctl', '--unit=' + unit, '_PID=' + str(process_pid),
+                              '--no-pager', '-n', '80', '-o', 'cat', check=False).stdout
+                lines = [line for line in journal.splitlines() if 'storage mandatory data retained:' in line
+                         and 'limit_bytes=1048576 ' in line]
+                if lines:
+                    return lines[-1]
+                time.sleep(0.2)
+            raise AssertionError('real executor did not apply the 1 MiB runtime limit to mandatory spool')
+
+        detail['before_apply'] = snapshot(before_pid)
+        require_live(detail['before_apply'])
+        settings({'shell_storage_max_mb': 1})
+        readback = settings()['settings']['shell_storage_max_mb']
+        assert readback == 1, 'QA Hub settings API did not retain the 1 MiB value'
+        detail['settings_readback_mb'] = readback
+        detail['apply_observation'] = wait_for_apply(before_pid)
+        detail['after_apply'] = snapshot(before_pid)
+        require_live(detail['after_apply'])
+        grew = exec_shell('printf NODE_AUDIT_AFTER_RUNTIME_LIMIT')
+        assert succeeded(grew) and 'NODE_AUDIT_AFTER_RUNTIME_LIMIT' in json.dumps(grew), grew
+        detail['after_growth'] = snapshot(before_pid)
+        require_live(detail['after_growth'])
+        assert detail['after_growth']['path']['size'] > baseline.st_size, 'audit did not grow after runtime apply'
+        assert audit_path.read_bytes().startswith(baseline_data), 'runtime apply lost original audit bytes'
+        before_restart = audit_path.read_bytes()
+        # The native QA driver owns this restart, outside the Node cgroup.
+        run('systemctl', 'restart', unit)
+        connect()
+        after_pid = pid()
+        assert after_pid > 0 and after_pid != before_pid, 'QA storage probe did not restart its Node'
+        detail['pid_after_restart'] = after_pid
+        detail['restart_apply_observation'] = wait_for_apply(after_pid)
+        resumed = exec_shell('printf NODE_AUDIT_AFTER_QUOTA_RESTART')
+        assert succeeded(resumed) and 'NODE_AUDIT_AFTER_QUOTA_RESTART' in json.dumps(resumed), resumed
+        detail['after_restart'] = snapshot(after_pid)
+        require_live(detail['after_restart'])
+        assert audit_path.read_bytes().startswith(before_restart), 'restart lost pre-restart audit records'
+        assert detail['after_restart']['path']['size'] > len(before_restart), 'audit stopped growing after restart'
+        assert spool.stat().st_ino == spool_stat.st_ino and hashlib.sha256(spool.read_bytes()).hexdigest() == spool_hash, \
+            'mandatory stdout spill was removed or changed by the runtime limit'
+        assert audit_secrets_clean(), 'runtime quota audit contains a QA credential or secret sentinel'
+        return detail
+
     try:
         start_node()
         connect()
@@ -454,6 +556,7 @@ def main():
         check('terminal_write_owned_cat_input_allowed', write_input_probe)
         check('readonly_and_foreign_owned_stop_allowed', allow_probe)
         check('detached_restart_fresh_MCP_and_durable_audit', maintenance_probe)
+        check('runtime_storage_limit_preserves_audit_inode_and_restart', storage_runtime_audit_probe)
     except Exception as exc:
         evidence['setup_error'] = redact(type(exc).__name__ + ': ' + str(exc))[:2500]
     finally:
@@ -466,7 +569,7 @@ def main():
         (root / 'journal.log').write_text(redact(journal))
         env_file.unlink(missing_ok=True)
         no_audit_secrets = audit_secrets_clean()
-        evidence['result'] = 'PASS' if (not evidence.get('setup_error') and len(evidence['checks']) == 5
+        evidence['result'] = 'PASS' if (not evidence.get('setup_error') and len(evidence['checks']) == 6
                                        and all(row['result'] == 'PASS' for row in evidence['checks'])
                                        and no_audit_secrets
                                        and all(state == 'inactive' for state in evidence['cleanup'].values())) else 'FAIL'
