@@ -4,8 +4,8 @@ const finder = create_app_config({
 	title: 'Finder',
 	resizable: true,
 
-	width: 760,
-	height: 480,
+	width: 900,
+	height: 560,
 });
 
 const terminal = create_app_config({
@@ -20,8 +20,8 @@ const browser = create_app_config({
 	title: 'Browser',
 	resizable: true,
 
-	width: 720,
-	height: 480,
+	width: 900,
+	height: 600,
 });
 
 const computers = create_app_config({
@@ -58,19 +58,11 @@ const calendar = create_app_config({
 });
 
 const vscode = create_app_config({
-	title: 'VSCode',
+	title: 'Editor',
 	resizable: true,
 
 	height: 600,
-	width: 800,
-});
-
-const viewSource = create_app_config({
-	title: `View Source`,
-	resizable: true,
-
-	should_open_window: false,
-	external_action: () => window.open('https://github.com/puruvj/macos-web', '_blank'),
+	width: 900,
 });
 
 export const apps_config = {
@@ -83,6 +75,4 @@ export const apps_config = {
 	calculator,
 	calendar,
 	vscode,
-
-	'view-source': viewSource,
 };

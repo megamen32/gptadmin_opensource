@@ -23,9 +23,9 @@ Bootstrap сверяет SHA-256 клиента с manifest, проверяет 
 Credential не печатается. Секретную ссылку и конфигурацию нельзя включать
 в Git, отчёты или публичные артефакты. Не включайте `curl -v`.
 
-Инструкция содержит текущие правила профиля, Last Human Commit, Entity
-Finder и регистрации. Прочитайте её полностью и выполните указанный там
-первый шаг. Скачивание само не регистрирует агента и не запускает работу.
+Инструкция содержит текущие правила профиля, Last Human Commit, обнаружение
+проекта через реально доступные MCP-инструменты и условную регистрацию в
+Agent Herder. Скачивание само не регистрирует агента и не запускает работу.
 
 Для запуска без секретной ссылки в аргументах процесса сохраните ссылку
 в защищённый файл с правами 0600 и используйте stdin:
@@ -47,7 +47,7 @@ python3 gptadmin.py --config /tmp/session/.gptadmin.json --timeout 90 discover
 ## Поиск, схемы и вызовы
 
 ```sh
-python3 gptadmin.py search "Entity Finder"
+python3 gptadmin.py search "find_paths"
 python3 gptadmin.py search shell_exec --target shell:admin-node-100
 python3 gptadmin.py schema shell:admin-node-100 shell_exec
 python3 gptadmin.py call shell:admin-node-100 shell_exec --arguments @args.json

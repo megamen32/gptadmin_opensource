@@ -76,6 +76,21 @@ func bootstrapCreate(t *testing.T, s *Server) (map[string]any, string, string) {
 	return result, u.Path, id
 }
 
+func TestExternalBootstrapNeverRequiresMissingEntityFinder(t *testing.T) {
+	s, _ := bootstrapTestServer(t)
+	created, path, _ := bootstrapCreate(t, s)
+	prompt, _ := created["prompt"].(string)
+	doc := bootstrapRequest(t, s, "GET", path, "", nil).Body.String()
+	if strings.Contains(prompt, "Entity Finder") || strings.Contains(doc, "Entity Finder") {
+		t.Fatal("bootstrap still instructs users to find an unavailable Entity Finder")
+	}
+	for _, text := range []string{"discover", "search", "Agent Herder", "Если доступен"} {
+		if !strings.Contains(doc, text) && !strings.Contains(prompt, text) {
+			t.Fatalf("bootstrap is missing working discovery/fallback instruction %q", text)
+		}
+	}
+}
+
 func TestExternalBootstrapLifecycle(t *testing.T) {
 	s, cfg := bootstrapTestServer(t)
 	created, path, id := bootstrapCreate(t, s)
@@ -96,7 +111,7 @@ func TestExternalBootstrapLifecycle(t *testing.T) {
 	if !strings.Contains(doc, bootstrapLHCFixture) {
 		t.Fatal("full native LHC text is missing")
 	}
-	for _, text := range []string{"Current profile instructions.", "Entity Finder", "Last Human Commit", "worktree", "gptadmin.py"} {
+	for _, text := range []string{"Current profile instructions.", "discover", "find_paths", "Last Human Commit", "worktree", "gptadmin.py"} {
 		if !strings.Contains(doc, text) {
 			t.Fatalf("missing instruction %q", text)
 		}
@@ -270,7 +285,7 @@ func TestBootstrapWorkflowUsesConfiguredActivePackage(t *testing.T) {
 	if workflow.meta["version"] != "9.99.99" {
 		t.Fatalf("active package change not observed: %#v", workflow.meta)
 	}
-	for _, path := range []string{"", "relative/path", root, filepath.Join(root, "missing")} {
+	for _, path := range []string{"", "relative/path", filepath.Join(root, "missing")} {
 		if _, err := loadBootstrapWorkflow(path); err == nil {
 			t.Fatalf("accepted incomplete LHC source %q", path)
 		}
@@ -282,6 +297,87 @@ func TestBootstrapWorkflowUsesConfiguredActivePackage(t *testing.T) {
 		}
 		if _, err := loadBootstrapWorkflow(invalid); err == nil {
 			t.Fatalf("accepted invalid LHC (%d bytes)", len(data))
+		}
+	}
+}
+
+func TestExternalBootstrapFollowsNewestInstalledLHC(t *testing.T) {
+	s, _ := bootstrapTestServer(t)
+	root := t.TempDir()
+	install := func(version string) {
+		t.Helper()
+		path := filepath.Join(root, version)
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "AGENTS.md"), []byte("# Last Human Commit installed "+version), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	install("1.17.2")
+	s.cfg.BootstrapLHCPath = root
+	_, path, _ := bootstrapCreate(t, s)
+	check := func(version string) {
+		t.Helper()
+		w := bootstrapRequest(t, s, "GET", path, "", nil)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "installed "+version) {
+			t.Fatalf("same bootstrap link did not load LHC %s: %d %s", version, w.Code, w.Body.String())
+		}
+		w = bootstrapRequest(t, s, "GET", path+"/manifest.json", "", nil)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), version) {
+			t.Fatalf("manifest did not match LHC %s: %d %s", version, w.Code, w.Body.String())
+		}
+	}
+	check("1.17.2")
+	install("1.18.1")
+	check("1.18.1")
+	if err := os.RemoveAll(filepath.Join(root, "1.18.1")); err != nil {
+		t.Fatal(err)
+	}
+	check("1.17.2")
+}
+
+func TestBootstrapLatestSourceFailsClosedOnIncompleteUpdate(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "1.18.1")
+	if err := os.Mkdir(old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "AGENTS.md"), []byte("valid version"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "1.19.0"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadBootstrapWorkflow(root); err == nil {
+		t.Fatal("published older LHC while newest version was incomplete")
+	}
+}
+
+func TestBootstrapConfiguredVersionPathSurvivesPrune(t *testing.T) {
+	root := t.TempDir()
+	for _, version := range []string{"1.17.2", "1.18.1", "1.18.10"} {
+		path := filepath.Join(root, version)
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "AGENTS.md"), []byte("installed "+version), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldPath := filepath.Join(root, "1.17.2")
+	for _, action := range []string{"before-prune", "after-prune"} {
+		workflow, err := loadBootstrapWorkflow(oldPath)
+		if err != nil {
+			t.Fatal(action, err)
+		}
+		if workflow.meta["version"] != "1.18.10" {
+			t.Fatalf("%s: got %v", action, workflow.meta["version"])
+		}
+		if action == "before-prune" {
+			if err := os.RemoveAll(oldPath); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }

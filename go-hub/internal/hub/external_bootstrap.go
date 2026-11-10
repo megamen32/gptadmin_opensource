@@ -186,7 +186,7 @@ func (s *Server) adminBootstrapLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	linkURL := strings.TrimRight(record.Issuer, "/") + "/bootstrap/" + record.ID + "." + secretText
-	prompt := "Прочитай инструкцию по ссылке " + linkURL + " и следуй ей. Скачай готовый клиент, сначала выполни Entity Finder и регистрацию по инструкции, затем выполняй мою задачу: "
+	prompt := "Прочитай инструкцию по ссылке " + linkURL + " и следуй ей. Скачай готовый клиент, определи проект через discover/search, при наличии Agent Herder зарегистрируй область работы по инструкции, затем выполняй мою задачу: "
 	s.authAudit("bootstrap_issued", r, map[string]any{"token_id": record.ID, "profile_id": record.ProfileID, "expires_at": record.ExpiresAt})
 	writeJSON(w, 201, map[string]any{"link": bootstrapLinkView(record, s.now().Unix()), "url": linkURL, "prompt": prompt, "download_url": linkURL + "/client.py"})
 }
@@ -315,11 +315,67 @@ func (s *Server) bootstrapDocuments(r *http.Request, profile AccessProfile) (Ins
 	return doc, workflow, err
 }
 
-// The configured path names the active native package explicitly. A cache's
-// highest version is not evidence of the active installation after a rollback.
+// A configured version directory or active symlink remains explicit. A
+// configured versions root resolves the newest installed release each request.
+func parseBootstrapVersion(name string) ([3]uint64, bool) {
+	var version [3]uint64
+	parts := strings.Split(name, ".")
+	if len(parts) != 3 {
+		return version, false
+	}
+	for i, part := range parts {
+		n, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || part == "" {
+			return version, false
+		}
+		version[i] = n
+	}
+	return version, true
+}
+
+func latestBootstrapVersionDir(root string) (string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", errors.New("configured LHC installation unavailable")
+	}
+	var best [3]uint64
+	bestName := ""
+	for _, entry := range entries {
+		// Ignore symlinks and unrelated directories inside the cache.
+		if !entry.IsDir() {
+			continue
+		}
+		version, valid := parseBootstrapVersion(entry.Name())
+		if !valid {
+			continue
+		}
+		newer := bestName == ""
+		for i := range version {
+			if version[i] == best[i] {
+				continue
+			}
+			newer = version[i] > best[i]
+			break
+		}
+		if newer {
+			best, bestName = version, entry.Name()
+		}
+	}
+	if bestName == "" {
+		return "", errors.New("configured LHC installation unavailable")
+	}
+	return filepath.Join(root, bestName), nil
+}
+
 func loadBootstrapWorkflow(root string) (bootstrapWorkflow, error) {
 	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
 		return bootstrapWorkflow{}, errors.New("active LHC installation is not configured")
+	}
+	// Legacy configuration referenced a literal package version. Resolve its
+	// parent instead, even if that version has been pruned by the updater.
+	// A named active symlink or AGENTS.md path remains an explicit pin.
+	if _, versioned := parseBootstrapVersion(filepath.Base(root)); versioned {
+		root = filepath.Dir(root)
 	}
 	path, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -332,6 +388,15 @@ func loadBootstrapWorkflow(root string) (bootstrapWorkflow, error) {
 	version := "configured"
 	packagePath := filepath.Dir(path)
 	if info.IsDir() {
+		if _, statErr := os.Stat(filepath.Join(path, "AGENTS.md")); errors.Is(statErr, os.ErrNotExist) {
+			// A versions root has no AGENTS.md. Do not cache its selection.
+			path, err = latestBootstrapVersionDir(path)
+			if err != nil {
+				return bootstrapWorkflow{}, err
+			}
+		} else if statErr != nil {
+			return bootstrapWorkflow{}, errors.New("configured LHC instructions unavailable")
+		}
 		packagePath = path
 		version = filepath.Base(path)
 		path = filepath.Join(path, "AGENTS.md")

@@ -21,19 +21,40 @@
 
 	function seen(computer: CloudComputer): string {
 		if (typeof computer.last_seen === 'number' && computer.last_seen > 0) {
-			return new Date(computer.last_seen * 1000).toLocaleString();
+			return new Date(computer.last_seen * 1000).toLocaleTimeString();
 		}
 		if (typeof computer.last_seen === 'string' && computer.last_seen) return computer.last_seen;
 		return '—';
 	}
 
+	function mem(computer: CloudComputer): string {
+		const mb = computer.mem_mb ?? 0;
+		if (mb <= 0) return '—';
+		if (mb >= 1024) return `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB RAM`;
+		return `${mb} MB RAM`;
+	}
+
+	function disk(computer: CloudComputer): string {
+		const b = computer.storage_bytes ?? 0;
+		if (b <= 0) return '';
+		if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(1)} GB disk`;
+		if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(0)} MB disk`;
+		return `${(b / 1024).toFixed(0)} KB disk`;
+	}
+
+	function cores(computer: CloudComputer): string {
+		const c = computer.cores ?? 0;
+		return c > 0 ? `${c} cores` : '';
+	}
+
 	const online = $derived(computers.filter((c) => c.status === 'online').length);
+	const total_ram = $derived(computers.reduce((sum, c) => sum + (c.mem_mb ?? 0), 0));
 </script>
 
 <section class="computers">
 	<header class="titlebar app-window-drag-handle">
 		<h1>Computers</h1>
-		<span class="count">{computers.length} total · {online} online</span>
+		<span class="count">{computers.length} machines · {online} online · {(total_ram / 1024).toFixed(0)} GB total</span>
 	</header>
 
 	<div class="body">
@@ -49,15 +70,22 @@
 					<div class="row-1">
 						<span class="dot" class:on={computer.status === 'online'}></span>
 						<span class="name">{computer.name}</span>
-						<span class="kind" class:node={computer.kind === 'node'}>{computer.kind === 'node' ? 'node' : 'agent'}</span>
+						{#if computer.build}
+							<span class="build">node {computer.build}</span>
+						{/if}
 					</div>
 					<div class="row-2">
 						<span class="os">{computer.os || 'unknown os'}</span>
 					</div>
 					<div class="row-3">
-						{#each computer.capabilities as cap (cap)}
-							<span class="chip">{cap}</span>
-						{/each}
+						<span class="metric">{cores(computer)}</span>
+						<span class="metric">{mem(computer)}</span>
+						{#if disk(computer)}
+							<span class="metric">{disk(computer)}</span>
+						{/if}
+						{#if computer.gpu}
+							<span class="metric gpu">{computer.gpu}</span>
+						{/if}
 						<span class="seen">seen {seen(computer)}</span>
 					</div>
 				</article>
@@ -143,6 +171,10 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+	.build {
+		font-size: 0.62rem;
+		color: #6e6e73;
+	}
 	.dot {
 		width: 0.55rem;
 		height: 0.55rem;
@@ -152,18 +184,6 @@
 	}
 	.dot.on {
 		background-color: #30d158;
-	}
-	.kind {
-		font-size: 0.62rem;
-		color: #6e6e73;
-		border: 0.2px solid #0002;
-		padding: 0 0.3rem;
-		border-radius: 0.3rem;
-		text-transform: uppercase;
-	}
-	.kind.node {
-		color: #0066cc;
-		border-color: #0066cc44;
 	}
 
 	.row-2 {
@@ -177,16 +197,20 @@
 	.row-3 {
 		display: flex;
 		align-items: center;
-		gap: 0.3rem;
+		gap: 0.35rem;
 		margin-top: 0.3rem;
 		flex-wrap: wrap;
 	}
-	.chip {
-		background-color: hsla(211, 100%, 55%, 0.12);
-		color: #0066cc;
+	.metric {
+		background-color: hsla(211, 100%, 55%, 0.1);
+		color: #0055aa;
 		border-radius: 0.3rem;
 		font-size: 0.62rem;
-		padding: 0 0.3rem;
+		padding: 0.04rem 0.35rem;
+	}
+	.metric.gpu {
+		background-color: hsla(105, 100%, 40%, 0.12);
+		color: #1e8e3e;
 	}
 	.seen {
 		color: #98989d;

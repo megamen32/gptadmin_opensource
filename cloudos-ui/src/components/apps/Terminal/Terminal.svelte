@@ -36,7 +36,7 @@
 	});
 
 	function prompt(): string {
-		return `${computer?.name ?? 'cloudos'} ${'~'} %`;
+		return `${computer?.name ?? 'cloudos'} ~ %`;
 	}
 
 	async function run() {
@@ -72,7 +72,9 @@
 
 <section class="terminal">
 	<header class="titlebar app-window-drag-handle">
-		<select bind:value={selected} aria-label="Terminal computer" disabled={computers.length === 0}>
+		<span class="title">Terminal</span>
+		<span class="status" class:ok={!!selected}>{selected ? computer?.name : 'offline'}</span>
+		<select bind:value={selected} aria-label="Terminal computer" disabled={computers.length === 0} class="computer-select">
 			{#if computers.length === 0}
 				<option value="">No online nodes</option>
 			{/if}
@@ -80,7 +82,6 @@
 				<option value={c.id}>{c.name}</option>
 			{/each}
 		</select>
-		<span class="status" class:ok={!!selected}>{selected ? 'online' : 'offline'}</span>
 	</header>
 
 	<div class="screen" bind:this={scroll_el}>
@@ -109,103 +110,117 @@
 		display: grid;
 		grid-template-rows: auto 1fr auto;
 
-		background-color: #1d1f21ee;
+		background-color: #1d1f21;
 		border-radius: inherit;
 		color: #e8e8e8;
-		font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-		font-size: 0.8rem;
+		overflow: hidden;
 	}
 
 	.titlebar {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.75rem;
-		padding: 0.4rem 0.75rem;
-
-		background-color: #3a3a3cd0;
-		backdrop-filter: blur(10px);
-		border-bottom: 0.2px solid #0006;
+		gap: 0.6rem;
+		padding: 0.35rem 0.7rem;
+		background-color: hsla(0, 0%, 92%, 0.7);
+		border-bottom: 0.2px solid #0002;
+		color: #1d1d1f;
 	}
 
-	.titlebar select {
-		background-color: #2c2c2e;
-		color: #e8e8e8;
-		border: 0.2px solid #ffffff2e;
-		border-radius: 0.35rem;
-		padding: 0.15rem 0.4rem;
-		font-size: 0.75rem;
-		min-width: 0;
+	.title {
+		font-size: 0.82rem;
+		font-weight: 600;
 	}
 
 	.status {
 		font-size: 0.65rem;
 		color: #98989d;
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: right;
 	}
 	.status.ok {
-		color: #30d158;
+		color: #1e8e3e;
+	}
+
+	.computer-select {
+		background-color: #fff;
+		color: #1d1d1f;
+		border: 0.2px solid #0002;
+		border-radius: 0.35rem;
+		padding: 0.15rem 0.4rem;
+		font-size: 0.72rem;
+		max-width: 11rem;
+		flex: none;
 	}
 
 	.screen {
 		overflow-y: auto;
-		padding: 0.6rem 0.75rem;
+		padding: 0.5rem 0.75rem;
+		font-family: ui-monospace, Menlo, monospace;
+		font-size: 0.72rem;
+		line-height: 1.4;
 		scrollbar-width: thin;
-		scrollbar-color: #ffffff33 transparent;
 	}
 
 	.line {
-		margin: 0 0 0.15rem;
+		margin: 0;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
 	.line.in {
-		color: #7ee787;
+		color: #7ecbff;
+	}
+	.line.out {
+		color: #e8e8e8;
 	}
 	.line.err {
-		color: #ff6961;
+		color: #ff7b72;
 	}
 	.line.info {
-		color: #98989d;
+		color: #8b949e;
 	}
 
 	.input-row {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		padding: 0.4rem 0.75rem 0.55rem;
+		padding: 0.4rem 0.75rem;
+		background-color: #121316;
+		border-top: 0.2px solid #0006;
 	}
 
 	.prompt {
-		color: #7ee787;
-		white-space: nowrap;
+		font-family: ui-monospace, Menlo, monospace;
+		font-size: 0.72rem;
+		color: #7ecbff;
+		flex: none;
 	}
 
 	.input-row input {
 		flex: 1;
 		min-width: 0;
-		background: transparent;
+		background-color: transparent;
 		border: none;
 		outline: none;
 		color: #e8e8e8;
-		font: inherit;
-		caret-color: #7ee787;
-	}
-	.input-row input:disabled {
-		opacity: 0.5;
+		font-family: ui-monospace, Menlo, monospace;
+		font-size: 0.72rem;
+		caret-color: #7ecbff;
 	}
 
 	.spinner {
 		width: 0.7rem;
 		height: 0.7rem;
+		border: 2px solid #444;
+		border-top-color: #7ecbff;
 		border-radius: 50%;
-		border: 2px solid #ffffff33;
-		border-top-color: #7ee787;
 		animation: spin 0.8s linear infinite;
+		flex: none;
 	}
-
 	@keyframes spin {
-		to {
-			transform: rotate(360deg);
-		}
+		to { transform: rotate(360deg); }
 	}
 </style>
