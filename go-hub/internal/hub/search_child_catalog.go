@@ -20,7 +20,7 @@ const (
 	childSearchColdLimit        = 4
 	childSearchWarmLimit        = 96
 	childSearchConcurrency      = 6
-	childSearchRefreshWait      = 4 * time.Second
+	childSearchRefreshWait      = 750 * time.Millisecond
 	childSearchSchemaLimit      = 16 << 10
 	childSearchDescriptionLimit = 2000
 )
@@ -446,6 +446,8 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 				failure = "child schema refresh did not complete"
 			}
 		}
+		var pendingSnapshot searchSchemaSnapshot
+		var persistSnapshot bool
 		c.mu.Lock()
 		current := c.entries[key]
 		if current == entry {
@@ -463,12 +465,20 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 					s.recoverChildProtocolHealth(child, startedAt, current.loadedAt, observedHealth)
 				}
 				if persist {
-					s.saveSearchSnapshot("child", c.entries)
+					// Snapshot the value records under the lock; the marshal,
+					// fsync and rename happen after release.
+					pendingSnapshot = buildSearchSnapshot(c.entries)
+					persistSnapshot = true
 				}
 			}
 		}
-		close(done)
 		c.mu.Unlock()
+		if persistSnapshot {
+			// Persist before signalling done: subscribers treat done as proof the
+			// refreshed catalog is durable across a restart.
+			s.writeSearchSnapshot("child", pendingSnapshot)
+		}
+		close(done)
 		c.refreshParent(s, "")
 	}()
 	return done
@@ -658,21 +668,25 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 			continue
 		} // Query path is cache-only; bootstrap/heartbeat own refresh.
 		if !fresh && len(refreshes) < childSearchWarmLimit {
-			refreshes = append(refreshes, refresh{cache.startChildSearchRefresh(s, r, child, key, fingerprint)})
+			if done := cache.startChildSearchRefresh(s, r, child, key, fingerprint); done != nil {
+				refreshes = append(refreshes, refresh{done})
+			} else {
+				coverage["complete"] = false
+				coverage["failure_reasons"].(map[string]string)[child.AgentID] = "child schema refresh capacity is busy"
+			}
 		} else if !fresh {
 			coverage["complete"] = false
-			coverage["pending"] = intFromAny(coverage["pending"]) + 1
-			coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
+			coverage["failure_reasons"].(map[string]string)[child.AgentID] = "child schema refresh admission limit reached"
 		}
 	}
 	waitCtx, cancelWait := context.WithTimeout(r.Context(), childSearchRefreshWait)
 	defer cancelWait()
+waitRefreshes:
 	for _, item := range refreshes {
 		select {
 		case <-item.done:
 		case <-waitCtx.Done():
-			coverage["complete"] = false
-			coverage["pending"] = intFromAny(coverage["pending"]) + 1
+			break waitRefreshes
 		}
 	}
 	// A refresh may have reconciled protocol health while the search waited.
@@ -689,7 +703,7 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 	for i, child := range children {
 		if current, ok := currentChildren[child.AgentID]; ok {
 			children[i] = current
-			if targetFilter == "" && childSearchUnreachable(current) {
+			if childSearchUnreachable(current) && !containsString(unreachable, current.AgentID) {
 				unreachable = append(unreachable, current.AgentID)
 			}
 		}
@@ -710,8 +724,9 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 			delete(cache.entries, key)
 			entry = nil
 		}
+		terminallyUnreachable := childSearchUnreachable(child)
 		if entry != nil && entry.fingerprint == fingerprint && !entry.loadedAt.IsZero() {
-			if childSearchUnreachable(child) || entry.err != "" || !childSearchEntryFresh(entry, fingerprint) {
+			if terminallyUnreachable || entry.err != "" || !childSearchEntryFresh(entry, fingerprint) {
 				if coverage["last_successful_refresh"] == nil {
 					coverage["last_successful_refresh"] = map[string]string{}
 				}
@@ -726,20 +741,40 @@ func (s *Server) childSearchCatalogForRequest(r *http.Request, targetFilter stri
 			}
 			if entry.err != "" {
 				coverage["failed"] = intFromAny(coverage["failed"]) + 1
+				if !containsString(stringSlice(coverage["unreachable"]), child.AgentID) {
+					coverage["unreachable"] = append(stringSlice(coverage["unreachable"]), child.AgentID)
+				}
+				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
+			}
+			cache.mu.Unlock()
+			continue
+		}
+
+		// A completed failure or an offline child is terminal evidence for this
+		// search. It is unavailable, not still loading; keep the rest of the
+		// reachable catalog complete and do not ask the client to poll again.
+		failedRead := entry != nil && entry.err != "" && !entry.refreshing
+		if terminallyUnreachable || failedRead {
+			if !containsString(stringSlice(coverage["unreachable"]), child.AgentID) {
 				coverage["unreachable"] = append(stringSlice(coverage["unreachable"]), child.AgentID)
-				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
 			}
-		} else {
-			coverage["complete"] = false
-			coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
-			if entry != nil && entry.err != "" {
-				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
-			}
-			if (entry == nil && targetFilter == "") || (entry != nil && entry.refreshing) {
-				coverage["pending"] = intFromAny(coverage["pending"]) + 1
-			} else {
+			if failedRead {
+				coverage["complete"] = false
 				coverage["failed"] = intFromAny(coverage["failed"]) + 1
+				coverage["failure_reasons"].(map[string]string)[child.AgentID] = entry.err
 			}
+			cache.mu.Unlock()
+			continue
+		}
+
+		coverage["complete"] = false
+		if !containsString(stringSlice(coverage["missing"]), child.AgentID) {
+			coverage["missing"] = append(stringSlice(coverage["missing"]), child.AgentID)
+		}
+		if (entry == nil && targetFilter == "") || (entry != nil && entry.refreshing) {
+			coverage["pending"] = intFromAny(coverage["pending"]) + 1
+		} else {
+			coverage["failed"] = intFromAny(coverage["failed"]) + 1
 		}
 		cache.mu.Unlock()
 	}

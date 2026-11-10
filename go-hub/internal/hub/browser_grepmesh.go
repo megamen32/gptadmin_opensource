@@ -14,6 +14,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -264,12 +265,23 @@ func (s *Server) authenticateBrowserGrepMesh(r *http.Request) (*http.Request, br
 		ReadRoots: append([]string(nil), (*profile.ReadRoots)...), AllowedTargets: targets,
 	}
 	guard := browserGrepMeshGuard{subject: subject, cookie: cookie, fingerprint: session.AuthzFingerprint}
+	// Admission just fully verified this authority; seed the stale-limit window.
+	browserGrepMeshVerified.Store(guard.fingerprint, time.Now())
 	delegated = delegated.WithContext(context.WithValue(delegated.Context(), browserGrepMeshGuardKey{}, guard))
 	return delegated, session, nil
 }
 
 // Native Tasks invokes this before each receipt, including every SSE update.
-// An open subscription cannot outlive its SSO login, token, binding or profile.
+// An open subscription cannot outlive its SSO login, token, binding or profile:
+// every receipt re-verifies, and a definitive rejection (revoked login, token,
+// binding, profile, or a changed fingerprint) fails the receipt immediately.
+// Only a Hub that is itself too busy to answer — commonly this search's own
+// task fan-out — may defer a re-verification, never beyond the stale limit
+// counted from the last successful verification (seeded at admission).
+var browserGrepMeshVerified sync.Map // fingerprint -> time.Time of last full verification
+
+const browserGrepMeshReceiptStaleLimit = 120 * time.Second
+
 func (s *Server) revalidateBrowserGrepMeshReceipt(r *http.Request) error {
 	if r == nil {
 		return nil
@@ -278,13 +290,29 @@ func (s *Server) revalidateBrowserGrepMeshReceipt(r *http.Request) error {
 	if !browser {
 		return nil
 	}
+	now := time.Now()
 	request := r.Clone(r.Context())
 	request.Header = make(http.Header)
 	request.Header.Set("Cookie", guard.cookie)
 	_, session, err := s.authenticateBrowserGrepMesh(request)
-	if err != nil || session.AuthzFingerprint != guard.fingerprint {
+	if err != nil {
+		var failure *browserGrepMeshError
+		if errors.As(err, &failure) && failure.status == http.StatusServiceUnavailable {
+			// Keep the healthy task alive across a transient Hub stall: the
+			// delegated call was fully verified at admission, and the stale
+			// limit below bounds how long verification can be deferred.
+			if verified, ok := browserGrepMeshVerified.Load(guard.fingerprint); ok &&
+				now.Sub(verified.(time.Time)) < browserGrepMeshReceiptStaleLimit {
+				return nil
+			}
+			return errors.New("browser authorization could not be re-verified")
+		}
 		return errors.New("browser authorization changed")
 	}
+	if session.AuthzFingerprint != guard.fingerprint {
+		return errors.New("browser authorization changed")
+	}
+	browserGrepMeshVerified.Store(guard.fingerprint, now)
 	return nil
 }
 

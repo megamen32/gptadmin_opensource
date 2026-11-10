@@ -346,6 +346,9 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			return map[string]any{"status": "failed", "error": detail}
 		}
 	}
+	// Authentication and target admission are complete. Capacity waits and
+	// schema discovery keep the request's profile snapshot, not its auth gate.
+	releaseAuthAdmission(r)
 	releaseAdmission, admitted := s.admitToolSearch()
 	if !admitted {
 		deadline := time.NewTimer(2 * time.Second)

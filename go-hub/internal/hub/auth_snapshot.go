@@ -293,28 +293,35 @@ func (s *Server) authSnapshotGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Keep the generation coherent through authentication and local fallback
+		// selection. Dispatchers release this one-shot gate before executor,
+		// search or stream waits; the final defer covers errors and local writes.
+		// The hub mutex protects only the state copy, never the handler.
 		s.authMu.RLock()
 		var once sync.Once
 		release := func() { once.Do(s.authMu.RUnlock) }
 		defer release()
 		r = r.WithContext(context.WithValue(r.Context(), authAdmissionReleaseKey{}, release))
 		s.mu.Lock()
+		initialized := s.authInitialized
+		state := s.authState
+		s.mu.Unlock()
 		var err error
-		if !s.authInitialized || s.authState.Pending || s.authState.Generation == 0 {
+		if !initialized || state.Pending || state.Generation == 0 {
 			err = errors.New("auth snapshot is not ready")
 		} else {
-			if s.effectiveAuthMode() == "reader" && s.authState.WriterID != s.cfg.AuthSourceID {
+			if s.effectiveAuthMode() == "reader" && state.WriterID != s.cfg.AuthSourceID {
 				err = errors.New("auth source differs from enrolled writer")
 			} else {
 				var bundle authSnapshot
-				bundle, err = s.readAuthSlot(s.authState)
-				if err == nil && s.effectiveAuthMode() == "reader" && authSnapshotDigest(bundle) != s.authState.Digest {
+				bundle, err = s.readAuthSlot(state)
+				if err == nil && s.effectiveAuthMode() == "reader" && authSnapshotDigest(bundle) != state.Digest {
 					err = errors.New("auth generation was modified outside snapshot apply")
 				}
 			}
 		}
-		s.mu.Unlock()
 		if err != nil {
+			release()
 			writeJSON(w, 503, map[string]any{"detail": err.Error()})
 			return
 		}

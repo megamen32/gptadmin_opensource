@@ -29,10 +29,13 @@ func selfEnrollMux(s *Server) *http.ServeMux {
 
 func selfEnrollPoll(t *testing.T, ts *httptest.Server, name, token string) (*http.Response, map[string]any) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/queue/"+name+"?timeout=1", nil)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/queue/"+name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	query := req.URL.Query()
+	query.Set("timeout", "1")
+	req.URL.RawQuery = query.Encode()
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -44,6 +47,44 @@ func selfEnrollPoll(t *testing.T, ts *httptest.Server, name, token string) (*htt
 	var body map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	return resp, body
+}
+
+func TestSelfEnrollPollPreservesQueryAndSetsTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		queue string
+		want  map[string]string
+	}{
+		{name: "plain", queue: "localpc"},
+		{name: "existing_query", queue: "localpc?os=linux&public_key=pub&fingerprint=fp",
+			want: map[string]string{"os": "linux", "public_key": "pub", "fingerprint": "fp"}},
+		{name: "existing_timeout", queue: "localpc?fingerprint=fp&label=a%26b&timeout=55&timeout=99",
+			want: map[string]string{"fingerprint": "fp", "label": "a&b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan *http.Request, 1)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("{}"))
+			}))
+			defer ts.Close()
+			selfEnrollPoll(t, ts, tc.queue, "")
+			request := <-requests
+			if request.Method != http.MethodGet || request.URL.Path != "/queue/localpc" {
+				t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
+			}
+			query := request.URL.Query()
+			for key, want := range tc.want {
+				if got := query.Get(key); got != want {
+					t.Errorf("query %s = %q, want %q; URL: %s", key, got, want, request.URL)
+				}
+			}
+			if values := query["timeout"]; len(values) != 1 || values[0] != "1" {
+				t.Errorf("timeout values = %q, want one separate value 1; URL: %s", values, request.URL)
+			}
+		})
+	}
 }
 
 func TestQueueSelfEnrollRegistersPendingAgentAndBindsToken(t *testing.T) {

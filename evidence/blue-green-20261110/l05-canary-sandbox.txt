@@ -1,0 +1,15 @@
+{"event": "instruction_receipt_already_held", "wall": "07:14:47"}
+{"event": "switch_begin", "from": "46ed7af3-blue-1", "to": "46ed7af3-green-1", "wall": "07:14:49"}
+{"begin_seconds": 0.0, "counters": {"active_callbacks": 2, "active_submissions": 0, "outbox_pending": 0, "unfinished_executions": 1}, "event": "handoff_ready", "lease": true, "wall": "07:14:49"}
+{"event": "probe_opened_while_fenced", "marker": "bgcanary-cross-switch-1794284089", "wall": "07:14:50"}
+{"event": "instruction_context_refreshed", "instruction_bytes": 4741, "wall": "07:14:55"}
+{"event": "cross_boundary_accepted", "job_id": "bbba6a745fbaf72416fa059a3037f06f", "wall": "07:14:55"}
+{"event": "cross_boundary_receipt", "job_id": "bbba6a745fbaf72416fa059a3037f06f", "wall": "07:14:56"}
+{"build": "1130", "event": "switch_done", "version": "46ed7af387b7f81f03c98cf2ca772ca7e83faf5c", "wall": "07:14:56"}
+{"event": "rollback_begin", "from": "46ed7af3-green-1", "to": "46ed7af3-blue-1", "wall": "07:15:00"}
+{"begin_seconds": 0.4, "counters": {"active_callbacks": 2, "active_submissions": 1, "outbox_pending": 0, "unfinished_executions": 1}, "event": "handoff_ready", "lease": true, "wall": "07:15:00"}
+{"event": "probe_opened_while_fenced", "marker": "bgcanary-cross-rollback-1794284100", "wall": "07:15:01"}
+{"event": "cross_boundary_accepted", "job_id": "eb5de68ed93812f5f68e840b163579de", "wall": "07:15:05"}
+{"event": "cross_boundary_receipt", "job_id": "eb5de68ed93812f5f68e840b163579de", "wall": "07:15:06"}
+{"build": "1130", "event": "rollback_done", "version": "46ed7af387b7f81f03c98cf2ca772ca7e83faf5c", "wall": "07:15:06"}
+{"summary": {"counts": {"cross_boundary": 2, "healthz": 22, "task": 22, "version": 22}, "errors": [], "max_switch_latency_secs": 0.0, "phases": [{"commit": "46ed7af387b7f81f03c98cf2ca772ca7e83faf5c", "from": "46ed7af3-blue-1", "phase": "switch", "to": "46ed7af3-green-1"}, {"commit": "46ed7af387b7f81f03c98cf2ca772ca7e83faf5c", "from": "46ed7af3-green-1", "phase": "rollback", "to": "46ed7af3-blue-1"}]}}

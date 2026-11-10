@@ -172,15 +172,19 @@ func (w *nodeAdmissionAuthWriter) Write(data []byte) (int, error) {
 }
 
 func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byte, int) {
-	// Node endpoints bypass the general generation gate for bootstrap. Hold
-	// it explicitly here, and use ordinary MCP authentication on the writer.
+	// Node endpoints bypass the general generation gate for bootstrap. Verify
+	// admission against a coherent generation copy WITHOUT holding the gate:
+	// authMu.RLock previously spanned both slot reads and mcpAuth, so one slow
+	// admission stalled authority writers and queued sibling admissions
+	// behind it during fan-out. Slot files are double-buffered; the state is
+	// copied under a brief RLock and re-verified after authentication.
 	s.authMu.RLock()
-	defer s.authMu.RUnlock()
 	s.mu.Lock()
 	state := s.authState
-	bundle, readErr := s.readAuthSlot(state)
 	initialized := s.authInitialized
 	s.mu.Unlock()
+	s.authMu.RUnlock()
+	bundle, readErr := s.readAuthSlot(state)
 	if !initialized || state.Pending || state.Generation == 0 || readErr != nil {
 		return nil, http.StatusServiceUnavailable
 	}
@@ -209,9 +213,15 @@ func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byt
 	if len(claims) == 0 {
 		return nil, http.StatusUnauthorized
 	}
+	s.authMu.RLock()
 	s.mu.Lock()
-	current, currentErr := s.readAuthSlot(state)
+	latest := s.authState
 	s.mu.Unlock()
+	s.authMu.RUnlock()
+	if latest.Generation != state.Generation || latest.Digest != state.Digest {
+		return nil, http.StatusServiceUnavailable
+	}
+	current, currentErr := s.readAuthSlot(latest)
 	if currentErr != nil {
 		return nil, http.StatusServiceUnavailable
 	}

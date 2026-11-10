@@ -8,13 +8,14 @@ import (
 // taskCaller is persisted with each newly submitted result-bearing job. It is
 // transport identity only: callers cannot supply or override it in tool args.
 type taskCaller struct {
-	BrowserSubject string `json:"browser_subject,omitempty"`
-	BrowserBinding string `json:"browser_binding,omitempty"`
-	ClientID       string `json:"client_id,omitempty"`
-	TokenID        string `json:"token_id,omitempty"`
-	Subject        string `json:"subject,omitempty"`
-	ProfileID      string `json:"profile_id,omitempty"`
-	ProfileVersion int64  `json:"profile_version,omitempty"`
+	CallerOrigin   *executionOrigin `json:"caller_origin,omitempty"`
+	BrowserSubject string           `json:"browser_subject,omitempty"`
+	BrowserBinding string           `json:"browser_binding,omitempty"`
+	ClientID       string           `json:"client_id,omitempty"`
+	TokenID        string           `json:"token_id,omitempty"`
+	Subject        string           `json:"subject,omitempty"`
+	ProfileID      string           `json:"profile_id,omitempty"`
+	ProfileVersion int64            `json:"profile_version,omitempty"`
 }
 
 func taskCallerFromRequest(r *http.Request) *taskCaller {
@@ -41,6 +42,7 @@ func taskCallerFromRequest(r *http.Request) *taskCaller {
 	if caller.ClientID == "" && caller.TokenID == "" && caller.Subject == "" {
 		return nil
 	}
+	caller.CallerOrigin = captureExecutionOrigin(r, caller)
 	return caller
 }
 

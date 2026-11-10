@@ -156,6 +156,33 @@ func TestTaskStoreAtomicRollback(t *testing.T) {
 	}
 }
 
+func TestPersistedTaskResultsAreBoundedWithoutChangingLiveResults(t *testing.T) {
+	large := map[string]any{"transcript": strings.Repeat("x", persistedResultLimit+1)}
+	bounded, err := boundPersistedMapResult(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded["persisted_result_truncated"] != true {
+		t.Fatalf("oversized relay result was not marked as truncated: %#v", bounded)
+	}
+	if len(large["transcript"].(string)) != persistedResultLimit+1 {
+		t.Fatal("bounding the durable copy mutated the live result")
+	}
+
+	boundedShell, err := boundPersistedResult(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, ok := boundedShell.(map[string]any)
+	if !ok || marker["persisted_result_truncated"] != true {
+		t.Fatalf("oversized shell result was not marked as truncated: %#v", boundedShell)
+	}
+
+	if _, err := boundPersistedResult(map[string]any{"bad": make(chan int)}); err == nil {
+		t.Fatal("unserializable result must fail instead of being silently truncated")
+	}
+}
+
 func TestTaskStoreCorruptMigrationIsRetryable(t *testing.T) {
 	dir := t.TempDir()
 	s := &Server{cfg: Config{ConfigDir: dir}}

@@ -225,6 +225,10 @@ func TestStreamableHTTPReinitializesAfterSessionNotFound(t *testing.T) {
 	var initializes atomic.Int32
 	var rejected atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		var req rpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
@@ -232,6 +236,11 @@ func TestStreamableHTTPReinitializesAfterSessionNotFound(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
 		case "initialize":
+			if sessionID := r.Header.Get("Mcp-Session-Id"); sessionID != "" {
+				t.Errorf("initialize retained expired session %q", sessionID)
+				http.Error(w, "expired session", http.StatusNotFound)
+				return
+			}
 			count := initializes.Add(1)
 			w.Header().Set("Mcp-Session-Id", fmt.Sprintf("session-%d", count))
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}}})

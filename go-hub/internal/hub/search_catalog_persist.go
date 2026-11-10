@@ -59,19 +59,30 @@ func (s *Server) loadSearchSnapshot(kind string) map[string]*childSearchSchemaEn
 	return out
 }
 
-// Called with the cache lock held. Only opaque principal hashes and bounded
-// schemas are persisted, never request headers, claims, cookies or credentials.
-func (s *Server) saveSearchSnapshot(kind string, entries map[string]*childSearchSchemaEntry) {
-	path := s.searchSnapshotPath(kind)
-	if path == "" {
-		return
-	}
+// Only opaque principal hashes and bounded schemas are persisted, never
+// request headers, claims, cookies or credentials. buildSearchSnapshot copies
+// the value records while the cache lock is held; writeSearchSnapshot does the
+// marshal, fsync and rename without the lock so a large catalog cannot stall
+// schema reads.
+func buildSearchSnapshot(entries map[string]*childSearchSchemaEntry) searchSchemaSnapshot {
 	snapshot := searchSchemaSnapshot{Version: 1, Entries: map[string]searchSchemaRecord{}}
 	for key, e := range entries {
 		if e.fingerprint == "" || e.loadedAt.IsZero() || len(e.tools) == 0 {
 			continue
 		}
 		snapshot.Entries[key] = searchSchemaRecord{CatalogDigest: e.catalogDigest, Versioned: e.versioned, ChildID: e.childID, ParentID: e.parentID, Fingerprint: e.fingerprint, LoadedAt: e.loadedAt, AttemptedAt: e.attemptedAt, Error: e.err, Tools: e.tools}
+	}
+	return snapshot
+}
+
+func (s *Server) saveSearchSnapshot(kind string, entries map[string]*childSearchSchemaEntry) {
+	s.writeSearchSnapshot(kind, buildSearchSnapshot(entries))
+}
+
+func (s *Server) writeSearchSnapshot(kind string, snapshot searchSchemaSnapshot) {
+	path := s.searchSnapshotPath(kind)
+	if path == "" {
+		return
 	}
 	data, err := json.Marshal(snapshot)
 	if err != nil || len(data) > searchSnapshotLimit {

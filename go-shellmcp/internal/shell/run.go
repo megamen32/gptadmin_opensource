@@ -40,6 +40,7 @@ type Request struct {
 	User        string            `json:"user,omitempty"`
 	DefaultUser string            `json:"-"`
 	DefaultCwd  string            `json:"-"`
+	OnStarted   func(int) error   `json:"-"`
 }
 
 type Result struct {
@@ -114,6 +115,9 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	if err := validateEnvironment(req.Env); err != nil {
 		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
+	if err := checkSelfServiceControl(req); err != nil {
+		return Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	}
 	timeout := DefaultTimeout
 	if req.Timeout > 0 {
 		timeout = time.Duration(req.Timeout) * time.Second
@@ -174,6 +178,10 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 	if err := cmd.Start(); err != nil {
 		res := Result{ReturnCode: -1, Error: err.Error(), DurationMS: time.Since(started).Milliseconds()}
 		return res, err
+	}
+	var startAuditErr error
+	if req.OnStarted != nil {
+		startAuditErr = req.OnStarted(cmd.Process.Pid)
 	}
 
 	// exec.CommandContext terminates only the immediate process. Watch the
@@ -249,6 +257,9 @@ func runInternal(ctx context.Context, req Request, limitBytes int64, emit func(E
 		}
 	} else if waitErr != nil && rc == -1 {
 		res.Error = waitErr.Error()
+	}
+	if startAuditErr != nil {
+		res.Error = strings.TrimSpace(res.Error + "; process started; execution audit write failed")
 	}
 	if emit != nil {
 		b, _ := json.Marshal(res)

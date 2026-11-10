@@ -221,3 +221,56 @@ func TestDirectChildSearchErrorCacheExpiresQuickly(t *testing.T) {
 		t.Fatal("successful schema lost its normal five-minute cache")
 	}
 }
+
+func TestColdFailedChildRefreshIsUnreachableWithoutRetry(t *testing.T) {
+	s, child := childSchemaFixture(t, t.TempDir())
+	r := requestWithAuthClaims(httptest.NewRequest(http.MethodPost, "/mcp", nil), map[string]any{
+		"sub": "cold-failed-child", "client_id": "cold-failed-child",
+		"scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull,
+	})
+	cache := s.childSearchCache()
+	key := childSearchCacheKey(r, child)
+	cache.mu.Lock()
+	cache.entries[key] = &childSearchSchemaEntry{
+		childID: child.AgentID, parentID: "shell:fixture",
+		fingerprint: childSearchFingerprint(s, child), attemptedAt: time.Now(),
+		err: "owner returned a terminal tools/list failure",
+	}
+	cache.mu.Unlock()
+
+	_, coverage := s.childSearchCatalogForRequest(r, "")
+	if truthy(coverage["complete"]) || firstString(coverage, "status") != "incomplete" {
+		t.Fatalf("terminal failure advertised complete coverage: %#v", coverage)
+	}
+	if intFromAny(coverage["failed"]) != 1 || intFromAny(coverage["pending"]) != 0 {
+		t.Fatalf("terminal failure counts are wrong: %#v", coverage)
+	}
+	if len(stringSlice(coverage["missing"])) != 0 || !containsString(stringSlice(coverage["unreachable"]), child.AgentID) {
+		t.Fatalf("terminal failure was presented as loading: %#v", coverage)
+	}
+	if _, ok := coverage["retry_hint"]; ok {
+		t.Fatalf("terminal failure got a retry hint: %#v", coverage)
+	}
+}
+
+func TestOfflineChildWithoutCacheIsUnreachableNotPending(t *testing.T) {
+	s, _, _ := directSchemaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("offline child unexpectedly received a schema request")
+	})
+	s.mu.Lock()
+	s.agents["shell:peer"].Status = "offline"
+	s.mu.Unlock()
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set("Authorization", "Bearer schema-test-token")
+
+	_, coverage := s.childSearchCatalogForRequest(r, "")
+	if !truthy(coverage["complete"]) || intFromAny(coverage["pending"]) != 0 || intFromAny(coverage["failed"]) != 0 {
+		t.Fatalf("offline child made search look incomplete: %#v", coverage)
+	}
+	if len(stringSlice(coverage["missing"])) != 0 || len(stringSlice(coverage["unreachable"])) != 1 {
+		t.Fatalf("offline child was presented as missing/loading: %#v", coverage)
+	}
+	if _, ok := coverage["retry_hint"]; ok {
+		t.Fatalf("offline child got a retry hint: %#v", coverage)
+	}
+}

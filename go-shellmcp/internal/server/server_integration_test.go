@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
 )
 
 // signRequestForTest produces an in-memory ed25519 keypair and signs a
@@ -150,7 +151,16 @@ func TestAuditLogReceivesExecStartAndEnd(t *testing.T) {
 	s := New(Config{Token: "t", AuditLog: logPath, LogLimit: 8192, ExecTimeout: 5, SpillDir: t.TempDir()})
 	defer s.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewBufferString(`{"cmd":"printf audited"}`))
+	const command = "AUDIT_CREDENTIAL=AUDIT_LEGACY_INLINE_SECRET_179 printf audited"
+	body, err := json.Marshal(map[string]any{
+		"cmd": command, "stdin": "AUDIT_LEGACY_STDIN_SECRET_179",
+		"env": map[string]string{"AUDIT_ENV": "AUDIT_LEGACY_ENV_SECRET_179"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := executionCommandHash(shell.Request{Cmd: command})
+	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer t")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
@@ -161,6 +171,11 @@ func TestAuditLogReceivesExecStartAndEnd(t *testing.T) {
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read audit log: %v", err)
+	}
+	for _, secret := range []string{"AUDIT_LEGACY_INLINE_SECRET_179", "AUDIT_LEGACY_STDIN_SECRET_179", "AUDIT_LEGACY_ENV_SECRET_179"} {
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("audit log leaked execution input: %s", secret)
+		}
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	if len(lines) < 2 {
@@ -174,13 +189,15 @@ func TestAuditLogReceivesExecStartAndEnd(t *testing.T) {
 		}
 		if rec["type"] == "exec_start" {
 			sawStart = true
-			// cmd field should be the first token, not the full cmd.
-			if got, _ := rec["cmd"].(string); got != "printf" {
-				t.Fatalf("expected cmd field 'printf', got %v", rec["cmd"])
-			}
 		}
 		if rec["type"] == "exec_end" {
 			sawEnd = true
+		}
+		if rec["type"] == "exec_start" || rec["type"] == "exec_end" {
+			// Labels never derive from command text or inline assignments.
+			if rec["cmd"] != "command" || rec["command_sha256"] != wantHash {
+				t.Fatalf("expected safe label and command digest, got %v", rec)
+			}
 		}
 	}
 	if !sawStart {

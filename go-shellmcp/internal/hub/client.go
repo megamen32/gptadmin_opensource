@@ -161,6 +161,7 @@ type Beat struct {
 }
 
 type QueueJob struct {
+	ExecutionOrigin map[string]any    `json:"execution_origin,omitempty"`
 	ID              string            `json:"id"`
 	TraceID         string            `json:"trace_id,omitempty"`
 	TraceParent     string            `json:"traceparent,omitempty"`

@@ -30,12 +30,24 @@ func main() {
 			executor.OutboxDir = filepath.Join(executor.SpillDir, "outbox")
 		}
 	}
-	listener, err := net.Listen("tcp", cfg.Addr)
+	listener, activated, err := hub.AdoptSystemdTCPListener()
 	if err != nil {
 		log.Fatal(err)
 	}
+	if !activated {
+		listener, err = net.Listen("tcp", cfg.Addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	log.Printf("gptadmin-node listening addr=%s", listener.Addr())
-	if err := node.Run(ctx, listener, cfg, executor); err != nil {
+	var runErr error
+	if activated {
+		runErr = node.RunActivated(ctx, listener, cfg, executor)
+	} else {
+		runErr = node.Run(ctx, listener, cfg, executor)
+	}
+	if err := runErr; err != nil {
 		log.Fatal(err)
 	}
 }

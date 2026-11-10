@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
@@ -24,14 +25,53 @@ type remoteSession interface {
 }
 
 type streamableSession struct {
+	// mu serializes session lifecycle decisions (initialize, reset, close)
+	// only. Individual JSON-RPC POSTs run concurrently: streamable HTTP
+	// correlates requests by Mcp-Session-Id, and holding a lock across the
+	// whole round-trip serialized every caller behind the slowest child call
+	// (one long GrepMesh search made the per-host fan-out sequential).
 	mu              sync.Mutex
 	httpClient      *http.Client
 	agent           supervisor.Agent
+	sessionID       atomic.Value // string
+	protocolVersion atomic.Value // string
+	nextID          atomic.Int64
+	initialized     atomic.Bool
+	frozenHeaders   bool
+	generation      uint64 // guarded by mu, including across reused session IDs
+	closed          bool   // prevents an admitted waiter from reopening an evicted session
+}
+
+type streamableRequestState struct {
+	generation      uint64
 	sessionID       string
 	protocolVersion string
-	nextID          int64
-	initialized     bool
-	frozenHeaders   bool
+}
+
+type streamableCallError struct {
+	generation uint64
+	err        error
+}
+
+func (e *streamableCallError) Error() string { return e.err.Error() }
+func (e *streamableCallError) Unwrap() error { return e.err }
+
+func (s *streamableSession) sessionIDString() string {
+	if v := s.sessionID.Load(); v != nil {
+		if id, ok := v.(string); ok {
+			return id
+		}
+	}
+	return ""
+}
+
+func (s *streamableSession) protocolVersionString() string {
+	if v := s.protocolVersion.Load(); v != nil {
+		if p, ok := v.(string); ok {
+			return p
+		}
+	}
+	return ""
 }
 
 type legacySSESession struct {
@@ -85,7 +125,9 @@ func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, meth
 		} else {
 			switch agent.Transport {
 			case "streamable-http":
-				session = &streamableSession{httpClient: c.HTTP, agent: agent, protocolVersion: protocolVersion, frozenHeaders: c.frozenHeaders}
+				streamable := &streamableSession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
+				streamable.protocolVersion.Store(protocolVersion)
+				session = streamable
 			case "sse":
 				session = &legacySSESession{httpClient: c.HTTP, agent: agent, frozenHeaders: c.frozenHeaders}
 			default:
@@ -98,15 +140,29 @@ func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, meth
 	c.mu.Unlock()
 	result, err := session.call(ctx, method, params)
 	if err != nil {
-		c.mu.Lock()
-		if c.remote[agent.Ref] == session {
-			if c.remoteClosing == nil {
-				c.remoteClosing = make(map[string]bool)
+		closeSession := session.close
+		var failed *streamableCallError
+		if streamable, ok := session.(*streamableSession); ok && errors.As(err, &failed) {
+			// Keep the generation check and eviction atomic with recovery. An
+			// error from an old request must not close its replacement session.
+			streamable.mu.Lock()
+			defer streamable.mu.Unlock()
+			if streamable.generation != failed.generation {
+				return result, err
 			}
-			c.remoteClosing[agent.Ref] = true
+			closeSession = streamable.closeLocked
 		}
+		c.mu.Lock()
+		if c.remote[agent.Ref] != session || c.remoteClosing[agent.Ref] {
+			c.mu.Unlock()
+			return result, err
+		}
+		if c.remoteClosing == nil {
+			c.remoteClosing = make(map[string]bool)
+		}
+		c.remoteClosing[agent.Ref] = true
 		c.mu.Unlock()
-		cleanupErr := session.close()
+		cleanupErr := closeSession()
 		c.mu.Lock()
 		if c.remote[agent.Ref] == session {
 			if cleanupErr == nil {
@@ -121,65 +177,98 @@ func (c *Client) remoteSession(ctx context.Context, agent supervisor.Agent, meth
 }
 
 func (s *streamableSession) call(ctx context.Context, method string, params any) (map[string]any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
-		if !s.initialized {
-			if err := s.initialize(ctx); err != nil {
-				return nil, err
-			}
+		state, err := s.ensureInitialized(ctx)
+		if err != nil {
+			return nil, &streamableCallError{generation: state.generation, err: err}
 		}
-		s.nextID++
-		result, _, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", ID: s.nextID, Method: method, Params: params})
+		id := s.nextID.Add(1)
+		result, _, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}, state)
 		var statusErr *httpStatusError
-		if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound && s.sessionID != "" && attempt == 0 && (!s.frozenHeaders || s.agent.ConnectionMode == "stateless") {
-			s.reset()
+		if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound && state.sessionID != "" && attempt == 0 && (!s.frozenHeaders || s.agent.ConnectionMode == "stateless") {
+			s.beginReinitialize(state)
+			// A sibling may already have recovered; retry through its generation.
 			continue
+		}
+		if err != nil {
+			err = &streamableCallError{generation: state.generation, err: err}
 		}
 		return result, err
 	}
 	return nil, fmt.Errorf("mcp child %q session recovery failed", s.agent.Ref)
 }
 
+// ensureInitialized returns one coherent request snapshot. Only the handshake
+// holds mu across network IO; ordinary round-trips use the snapshot concurrently.
+func (s *streamableSession) ensureInitialized(ctx context.Context) (streamableRequestState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.requestStateLocked(), errors.New("mcp remote session is closed")
+	}
+	if !s.initialized.Load() {
+		if err := s.initialize(ctx); err != nil {
+			return s.requestStateLocked(), err
+		}
+	}
+	return s.requestStateLocked(), nil
+}
+
+func (s *streamableSession) requestStateLocked() streamableRequestState {
+	return streamableRequestState{s.generation, s.sessionIDString(), s.protocolVersionString()}
+}
+
+// Invalidate only the generation that actually returned 404. Concurrent callers
+// reuse an in-progress or completed replacement instead of resetting it again.
+func (s *streamableSession) beginReinitialize(state streamableRequestState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed && s.generation == state.generation && s.sessionIDString() == state.sessionID {
+		s.reset()
+	}
+}
+
 func (s *streamableSession) initialize(ctx context.Context) error {
-	s.nextID++
-	result, sessionID, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", ID: s.nextID, Method: "initialize", Params: initializeParams()})
+	s.reset()
+	id := s.nextID.Add(1)
+	result, sessionID, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", ID: id, Method: "initialize", Params: initializeParams()}, s.requestStateLocked())
 	if err != nil {
 		return err
 	}
 	if negotiated, ok := result["protocolVersion"].(string); ok && strings.TrimSpace(negotiated) != "" {
-		s.protocolVersion = negotiated
+		s.protocolVersion.Store(negotiated)
 	}
-	s.sessionID = sessionID
-	if _, _, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized", Params: map[string]any{}}); err != nil {
+	s.sessionID.Store(sessionID)
+	if _, _, err := s.rpc(ctx, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized", Params: map[string]any{}}, s.requestStateLocked()); err != nil {
 		return err
 	}
-	s.initialized = true
+	s.initialized.Store(true)
 	return nil
 }
 
-func (s *streamableSession) rpc(ctx context.Context, payload rpcRequest) (map[string]any, string, error) {
+func (s *streamableSession) rpc(ctx context.Context, payload rpcRequest, state streamableRequestState) (map[string]any, string, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, s.sessionID, err
+		return nil, state.sessionID, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.agent.URL, bytes.NewReader(body))
 	if err != nil {
-		return nil, s.sessionID, err
+		return nil, state.sessionID, err
 	}
-	setRemoteHeadersResolved(req, s.agent, s.protocolVersion, s.frozenHeaders)
-	if s.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", s.sessionID)
+	setRemoteHeadersResolved(req, s.agent, state.protocolVersion, s.frozenHeaders)
+	if state.sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", state.sessionID)
 	}
 	resp, err := executionHTTPClient(s.httpClient, ctx, payload.Method).Do(req)
 	if err != nil {
-		return nil, s.sessionID, fmt.Errorf("mcp child %q HTTP: %w", s.agent.Ref, err)
+		return nil, state.sessionID, fmt.Errorf("mcp child %q HTTP: %w", s.agent.Ref, err)
 	}
 	defer resp.Body.Close()
-	sessionID := s.sessionID
+	sessionID := state.sessionID
 	if header := resp.Header.Get("Mcp-Session-Id"); header != "" {
 		sessionID = header
-		s.sessionID = header
+		// Only initialize publishes the returned ID. A late ordinary response
+		// cannot overwrite the current generation with its old session header.
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
@@ -199,15 +288,21 @@ func (s *streamableSession) rpc(ctx context.Context, payload rpcRequest) (map[st
 }
 
 func (s *streamableSession) reset() {
-	s.sessionID = ""
-	s.protocolVersion = protocolVersion
-	s.initialized = false
+	s.generation++
+	s.sessionID.Store("")
+	s.protocolVersion.Store(protocolVersion)
+	s.initialized.Store(false)
 }
 
 func (s *streamableSession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessionID == "" {
+	return s.closeLocked()
+}
+
+func (s *streamableSession) closeLocked() error {
+	s.closed = true
+	if s.sessionIDString() == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -216,8 +311,8 @@ func (s *streamableSession) close() error {
 	if err != nil {
 		return err
 	}
-	setRemoteHeadersResolved(req, s.agent, s.protocolVersion, s.frozenHeaders)
-	req.Header.Set("Mcp-Session-Id", s.sessionID)
+	setRemoteHeadersResolved(req, s.agent, s.protocolVersionString(), s.frozenHeaders)
+	req.Header.Set("Mcp-Session-Id", s.sessionIDString())
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err

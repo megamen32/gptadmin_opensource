@@ -45,6 +45,7 @@ type Logger struct {
 	path       string
 	maxBytes   int64
 	closed     bool
+	preserve   bool
 	afterWrite func()
 }
 
@@ -74,7 +75,7 @@ func NewWithLimit(path string, maxBytes int64) (*Logger, error) {
 			return &Logger{}, fmt.Errorf("audit: create parent dir %q: %w", dir, err)
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return &Logger{}, fmt.Errorf("audit: open %q: %w", path, err)
 	}
@@ -103,39 +104,73 @@ func (l *Logger) SetAfterWrite(callback func()) {
 // ts and type are added automatically; caller-supplied fields can
 // override them if absolutely necessary but doing so is discouraged.
 func (l *Logger) Event(typ string, fields map[string]any) {
-	if l == nil || l.enc == nil {
-		return
-	}
-	if fields == nil {
-		fields = map[string]any{}
-	}
-	fields["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
-	fields["type"] = typ
+	_ = l.writeEvent(typ, fields, false)
+}
 
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
+// Preserve prevents in-place rotation from discarding durable execution history.
+// The server's existing storage hook protects this file as mandatory data.
+func (l *Logger) Preserve() {
+	if l == nil {
 		return
 	}
-	if l.maxBytes > 0 {
+	l.mu.Lock()
+	l.preserve = true
+	l.mu.Unlock()
+}
+
+// EventDurable returns only after the record has been written and fsynced. A
+// disabled, failed or closed logger is an error, never a successful no-op.
+func (l *Logger) EventDurable(typ string, fields map[string]any) error {
+	return l.writeEvent(typ, fields, true)
+}
+
+func (l *Logger) writeEvent(typ string, fields map[string]any, durable bool) error {
+	if l == nil {
+		if durable {
+			return fmt.Errorf("audit is unavailable")
+		}
+		return nil
+	}
+	record := make(map[string]any, len(fields)+2)
+	for k, v := range fields {
+		record[k] = v
+	}
+	record["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+	record["type"] = typ
+	l.mu.Lock()
+	if l.closed || l.enc == nil {
+		l.mu.Unlock()
+		if durable {
+			return fmt.Errorf("audit is unavailable or closed")
+		}
+		return nil
+	}
+	if durable {
+		l.preserve = true
+	}
+	if !l.preserve && l.maxBytes > 0 {
 		if info, err := l.file.Stat(); err == nil && info.Size() >= l.maxBytes {
 			if err := l.file.Truncate(0); err == nil {
 				_, _ = l.file.Seek(0, io.SeekStart)
 			}
 		}
 	}
-	if err := l.enc.Encode(fields); err != nil {
-		// Best-effort: drop the record silently rather than crashing
-		// the calling request path. Callers needing delivery
-		// guarantees should layer their own retry around Event.
+	if err := l.enc.Encode(record); err != nil {
 		l.mu.Unlock()
-		return
+		return err
+	}
+	if durable {
+		if err := l.file.Sync(); err != nil {
+			l.mu.Unlock()
+			return err
+		}
 	}
 	callback := l.afterWrite
 	l.mu.Unlock()
 	if callback != nil {
 		callback()
 	}
+	return nil
 }
 
 // Close flushes and closes the underlying file. Calling Close on a

@@ -712,11 +712,16 @@ func (s *Server) mcpShellExec(ctx context.Context, args map[string]any) (map[str
 	}
 	s.applyDefaults(&req)
 	if req.Background {
+		var err error
+		req, err = s.prepareExecutionAudit(ctx, req)
+		if err != nil {
+			return nil, err
+		}
 		j := s.jobs.Start(req)
 		payload := map[string]any{"status": "running", "job_id": j.ID, "server": s.cfg.Name, "started_at": j.StartedAt}
 		return mcpText("Shell command continues in background.", payload), nil
 	}
-	res := shell.Run(ctx, req, s.cfg.LogLimit)
+	res := s.runShell(ctx, req)
 	payload := map[string]any{"server": s.cfg.Name, "result": res}
 	return mcpText("shell_exec completed", payload), nil
 }
@@ -912,6 +917,12 @@ func (s *Server) mcpChildCall(ctx context.Context, args map[string]any) (map[str
 		return nil, err
 	}
 	defer cancel()
+	if err := validatePTYServiceControl(agent, name, arguments, shell.CheckSelfServiceControl); err != nil {
+		return nil, err
+	}
+	if err := s.auditChildInvocation(callCtx, ref, name, arguments, scope); err != nil {
+		return nil, err
+	}
 	result, err := s.childMCP.CallToolScopedWithMeta(callCtx, agent, name, arguments, meta, scope)
 	if err != nil {
 		return nil, err

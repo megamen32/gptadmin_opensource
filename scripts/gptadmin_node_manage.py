@@ -30,11 +30,13 @@ import string
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from enum import Enum
 
 PACKAGE_SCHEMA = 'gptadmin.node-package/v1'
 IDENTITY_SCHEMA = 'gptadmin.node-identity/v1'
@@ -63,9 +65,12 @@ HTTP_CALL_TIMEOUT_SECS = 5.0
 # Drain snapshots may wait behind durable task-store commits on a busy Hub.
 DRAIN_HTTP_TIMEOUT_SECS = 20.0
 JOIN_HTTP_TIMEOUT_SECS = 15.0
+SOCKET_STOP_TIMEOUT_SECS = 120.0
+SOCKET_START_TIMEOUT_SECS = 45.0
 ELF_MAGIC = b'\x7fELF'
 DEFAULT_BIND = ('127.0.0.1', 9001)
 DRAIN_ENDPOINT = '/admin/api/node/drain'
+HANDOFF_ENDPOINT = '/admin/api/node/handoff'
 JOIN_ENDPOINT = '/admin/api/nodes/join'
 GRANT_ENDPOINT = '/admin/api/nodes/grant'
 NODES_ENDPOINT = '/admin/api/nodes'
@@ -120,6 +125,33 @@ PRIMARY_BASE_ENV_FILE = Path('/etc/gptadmin/gptadmin.env')
 PRIMARY_BINARY = Path('/opt/gptadmin/bin/gptadmin-node')
 PRIMARY_SERVICE = 'gptadmin-hub.service'
 PRIMARY_DROPIN = Path('/etc/systemd/system/gptadmin-hub.service.d/zzzzzz-node-autoupdate.conf')
+PRIMARY_SOCKET_DROPIN = Path('/etc/systemd/system/gptadmin-hub.service.d/zzzzzz-primary-socket.conf')
+PRIMARY_SOCKET_UNIT = 'gptadmin-hub.socket'
+SOCKET_UNIT_PATH = Path('/etc/systemd/system') / PRIMARY_SOCKET_UNIT
+RELEASE_RECEIPT_SCHEMA = 'gptadmin.node-release/v1'
+PRIMARY_SOCKET_UNIT_TEXT = '''[Unit]
+Description=Canonical GPTAdmin Hub primary listener
+
+[Socket]
+Service=gptadmin-hub.service
+ListenStream=127.0.0.1:9001
+Backlog=4096
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target
+'''
+
+
+class ReleasePhase(str, Enum):
+    STAGED = 'staged'
+    CANARY = 'canary'
+    HANDOFF = 'handoff'
+    SWITCHING = 'switching'
+    STARTING = 'starting'
+    COMMITTED = 'committed'
+    ROLLED_BACK = 'rolled-back'
+    MANUAL_REQUIRED = 'manual-required'
 
 EX_OK, EX_USAGE, EX_PREFLIGHT, EX_RUNTIME = 0, 2, 3, 4
 
@@ -253,6 +285,12 @@ class Layout:
 
     def current_link(self) -> Path:
         return self.opt_root / 'current'
+
+    def previous_link(self) -> Path:
+        return self.opt_root / 'previous'
+
+    def release_receipt(self, name: str = 'primary') -> Path:
+        return self.state(name) / 'release-receipt.json'
 
     def shellmcp_versions_root(self) -> Path:
         return self.shellmcp_opt_root / 'versions'
@@ -738,6 +776,502 @@ def current_target(layout: Layout) -> Path | None:
     resolved = Path(os.path.realpath(link))
     return resolved if resolved.is_dir() else None
 
+
+
+def atomic_link(path: Path, target: Path | None, *, remove: bool = False,
+                versions_root: Path | None = None) -> None:
+    path = Path(path)
+    root = Path(versions_root or path.parent / 'versions').resolve()
+    if path.parent.resolve() != root.parent or path.name not in ('current', 'previous'):
+        raise PreflightError('release slot link is outside the managed release root')
+    if target is None:
+        if not remove:
+            raise PreflightError('release slot removal must be explicit')
+        path.unlink(missing_ok=True)
+        return
+    resolved = Path(os.path.realpath(target))
+    if not resolved.is_dir() or resolved.parent.resolve() != root:
+        raise PreflightError('release slot target is outside the immutable versions root')
+    tmp = path.with_name(path.name + f'.new-{os.getpid()}')
+    tmp.unlink(missing_ok=True)
+    os.symlink(str(resolved), tmp)
+    os.replace(tmp, path)
+
+def release_slots(layout: Layout) -> dict:
+    current = current_target(layout)
+    previous = None
+    if layout.previous_link().is_symlink():
+        previous = Path(os.path.realpath(layout.previous_link()))
+        if not previous.is_dir() or previous.parent != layout.versions_root():
+            raise PreflightError('previous release slot is unsafe')
+    return {'current': current, 'previous': previous}
+
+
+def write_release_receipt(layout: Layout, receipt: dict) -> None:
+    atomic_write(layout.release_receipt('primary'), json.dumps(
+        {'schema': RELEASE_RECEIPT_SCHEMA, **receipt, 'updated_at': utc_now_iso()},
+        sort_keys=True, indent=2) + '\n', 0o600)
+
+
+_RELEASE_TRANSITIONS = {
+    'staged': {'canary', 'manual-required'},
+    'canary': {'handoff', 'rolled-back', 'manual-required'},
+    'handoff': {'switching', 'rolled-back', 'manual-required'},
+    'switching': {'starting', 'rolled-back', 'manual-required'},
+    'starting': {'committed', 'rolled-back', 'manual-required'},
+}
+
+
+def transition_release(layout: Layout, phase: str, **fields) -> dict:
+    previous = None
+    path = layout.release_receipt('primary')
+    if path.is_file():
+        previous = json.loads(path.read_text()).get('phase')
+    if previous is not None and phase not in _RELEASE_TRANSITIONS.get(previous, set()):
+        raise PreflightError(f'invalid release phase transition {previous!r} -> {phase!r}')
+    receipt = {'phase': phase, **fields}
+    write_release_receipt(layout, receipt)
+    return receipt
+
+
+
+def _manifest_for_dir(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    return manifest_summary(path) or {}
+
+
+def _runtime_snapshot(layout: Layout, runner, env: dict | None, token: str | None) -> dict:
+    identity = service_identity(runner, PRIMARY_SERVICE)
+    result = dict(identity)
+    pid = result.get('pid', 0)
+    result.update({'executable': '', 'version': None, 'handoff': None})
+    if pid:
+        try:
+            result['executable'] = os.path.realpath(f'/proc/{pid}/exe')
+        except OSError:
+            pass
+    if env:
+        origin = origin_from_env(env)
+        try:
+            status, payload = http_json('GET', origin + '/version', timeout=HTTP_CALL_TIMEOUT_SECS)
+            if status == 200 and isinstance(payload, dict):
+                result['version'] = payload
+        except (OSError, urllib.error.URLError):
+            pass
+        if token:
+            try:
+                status, payload = http_json('GET', origin + HANDOFF_ENDPOINT, token=token,
+                                            timeout=HTTP_CALL_TIMEOUT_SECS)
+                if status == 200 and isinstance(payload, dict):
+                    result['handoff'] = payload
+            except (OSError, urllib.error.URLError):
+                pass
+    return result
+
+
+def _runtime_matches(runtime: dict, commit: str, version_dir: Path | None = None) -> bool:
+    version = runtime.get('version') or {}
+    if not runtime.get('active') or version.get('git_commit') != commit:
+        return False
+    handoff = runtime.get('handoff') or {}
+    if handoff.get('socket_inherited') is not True:
+        return False
+    if version_dir is not None:
+        expected = os.path.realpath(version_dir / 'bin' / 'gptadmin-node')
+        if runtime.get('executable') != expected:
+            return False
+    return True
+
+
+def _rollback_incomplete_release(layout: Layout, runner, receipt: dict,
+                                 env: dict, token: str, reason: str) -> dict:
+    previous = layout.versions_root() / str(receipt.get('previous_dir', ''))
+    previous_commit = str(receipt.get('previous_commit', ''))
+    if not previous.is_dir() or not re.fullmatch(r'[0-9a-f]{40}', previous_commit):
+        raise RuntimeFailure('incomplete release has no verified previous slot')
+    current = current_target(layout)
+    if current != previous:
+        switch_current(layout, previous, expected_revision=(
+            _manifest_for_dir(current).get('git_commit') if current else None))
+    systemctl(runner, 'stop', PRIMARY_SERVICE, check=False, timeout=SOCKET_STOP_TIMEOUT_SECS)
+    systemctl(runner, 'start', PRIMARY_SERVICE, timeout=SOCKET_START_TIMEOUT_SECS)
+    wait_healthy(origin_from_env(env), previous_commit)
+    verify_inherited_socket(runner, origin_from_env(env), token,
+                            expected_commit=previous_commit, expected_dir=previous)
+    atomic_link(layout.previous_link(), previous, versions_root=layout.versions_root())
+    write_release_receipt(layout, {**receipt, 'phase': 'rolled-back',
+                                   'reconciled': True, 'reconcile_reason': reason})
+    return {'recovered': True, 'action': 'rollback', 'phase': 'rolled-back'}
+
+
+
+def reconcile_release(layout: Layout, runner, env: dict | None = None,
+                      token: str | None = None) -> dict:
+    path = layout.release_receipt('primary')
+    if not path.is_file():
+        return {'recovered': False, 'reason': 'no-receipt'}
+    receipt = json.loads(path.read_text())
+    if receipt.get('schema') != RELEASE_RECEIPT_SCHEMA:
+        raise PreflightError('unsupported release receipt')
+    phase = receipt.get('phase')
+    if phase in ('committed', 'rolled-back'):
+        return {'recovered': False, 'action': phase, 'phase': phase}
+    if phase == 'manual-required':
+        raise RuntimeFailure('previous release requires manual recovery')
+    if phase not in ('staged', 'canary', 'handoff', 'switching', 'starting'):
+        raise RuntimeFailure(f'unknown incomplete release phase {phase!r}')
+    if not env or not token or not socket_unit_ready(runner):
+        return {'recovered': False, 'action': 'manual-required', 'phase': phase}
+
+    previous = layout.versions_root() / str(receipt.get('previous_dir', ''))
+    target = layout.versions_root() / str(receipt.get('target_dir', ''))
+    previous_commit = str(receipt.get('previous_commit', ''))
+    target_commit = str(receipt.get('target_commit', ''))
+    current = current_target(layout)
+    runtime = _runtime_snapshot(layout, runner, env, token)
+
+    if current == target and re.fullmatch(r'[0-9a-f]{40}', target_commit):
+        if not _runtime_matches(runtime, target_commit, target):
+            try:
+                systemctl(runner, 'stop', PRIMARY_SERVICE, check=False,
+                          timeout=SOCKET_STOP_TIMEOUT_SECS)
+                systemctl(runner, 'start', PRIMARY_SERVICE,
+                          timeout=SOCKET_START_TIMEOUT_SECS)
+                wait_healthy(origin_from_env(env), target_commit)
+                runtime = verify_inherited_socket(
+                    runner, origin_from_env(env), token,
+                    expected_commit=target_commit, expected_dir=target)
+            except (OSError, RuntimeFailure, PreflightError, urllib.error.URLError) as error:
+                return _rollback_incomplete_release(layout, runner, receipt, env, token,
+                                                    f'target recovery failed: {error}')
+        write_release_receipt(layout, {**receipt, 'phase': 'committed',
+                                       'reconciled': True, 'runtime': runtime})
+        return {'recovered': True, 'action': 'finish', 'phase': 'committed'}
+
+    if current == previous and re.fullmatch(r'[0-9a-f]{40}', previous_commit):
+        if not _runtime_matches(runtime, previous_commit, previous):
+            return _rollback_incomplete_release(layout, runner, receipt, env, token,
+                                                'restore previous writer')
+        write_release_receipt(layout, {**receipt, 'phase': 'rolled-back',
+                                       'reconciled': True,
+                                       'reconcile_reason': 'pointer never left previous slot'})
+        return {'recovered': True, 'action': 'rollback', 'phase': 'rolled-back'}
+
+    write_release_receipt(layout, {**receipt, 'phase': 'manual-required',
+                                   'reconciled': True,
+                                   'reconcile_reason': 'current pointer does not match receipt slots'})
+    raise RuntimeFailure('incomplete release current pointer is ambiguous')
+
+
+def reconcile_stale_artifacts(layout: Layout, runner=None, env: dict | None = None,
+                              token: str | None = None,
+                              *, max_age_seconds: int = 3600) -> dict:
+    """Archive only proven superseded updater state and orphan staging dirs."""
+    now = time.time()
+    removed = []
+    receipt_path = layout.release_receipt('primary')
+    active_phases = {'staged', 'canary', 'handoff', 'switching', 'starting'}
+    if receipt_path.is_file():
+        try:
+            if json.loads(receipt_path.read_text()).get('phase') in active_phases:
+                return {'removed': [], 'reason': 'deployment-active'}
+        except (OSError, ValueError):
+            return {'removed': [], 'reason': 'receipt-unreadable'}
+
+    current = current_target(layout)
+    current_manifest = _manifest_for_dir(current)
+    live_commit = str(current_manifest.get('git_commit', ''))
+    live_build = current_manifest.get('build_version')
+    if runner is not None and env and token:
+        runtime = _runtime_snapshot(layout, runner, env, token)
+        if not _runtime_matches(runtime, live_commit, current):
+            return {'removed': [], 'reason': 'live-runtime-unverified'}
+
+    for entry in layout.versions_root().glob('.staging-*'):
+        if entry.is_dir() and now - entry.stat().st_mtime > max_age_seconds:
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+
+    hold = layout.state('autoupdate') / 'hold.json'
+    if hold.is_file() and now - hold.stat().st_mtime > max_age_seconds:
+        try:
+            record = json.loads(hold.read_text())
+        except (OSError, ValueError):
+            record = None
+        source = str(record.get('source', '')) if isinstance(record, dict) else ''
+        held_builds = []
+        if re.fullmatch(r'[0-9a-f]{40}', source):
+            for candidate in layout.versions_root().glob(source + '-*'):
+                manifest = _manifest_for_dir(candidate)
+                if isinstance(manifest.get('build_version'), int):
+                    held_builds.append(manifest['build_version'])
+        known_reason = isinstance(record, dict) and record.get('reason') in {
+            'manager_update_failed_review_required', 'manager_cleanup_unverified',
+            'verified_runtime_but_helper_refresh_failed', 'manager_in_progress'}
+        same_instance = isinstance(record, dict) and record.get('instance', 'primary') == 'primary'
+        strictly_newer = (re.fullmatch(r'[0-9a-f]{40}', live_commit) is not None
+                          and source and source != live_commit
+                          and isinstance(live_build, int) and held_builds
+                          and live_build > max(held_builds))
+        if known_reason and same_instance and strictly_newer:
+            archive = hold.with_name('hold.archived-' + str(int(now)) + '.json')
+            os.replace(hold, archive)
+            removed.append(str(archive))
+    return {'removed': removed}
+
+
+def canary_environment(env: dict, root: Path, port: int) -> dict:
+    secret = secrets.token_hex(32)
+    origin = f'http://127.0.0.1:{port}'
+    state = root / 'state'
+    home = root / 'home'
+    home.mkdir(mode=0o700, parents=True)
+    return {
+        'PATH': '/usr/bin:/bin', 'HOME': str(home), 'LANG': 'C.UTF-8',
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'GPTADMIN_HUB_HOST': '127.0.0.1', 'GPTADMIN_HUB_PORT': str(port),
+        'GPTADMIN_CONFIG_DIR': str(root / 'config'), 'GPTADMIN_ROOT': str(root),
+        'CTL_TOKEN': secret, 'SHELL_TOKEN': secret,
+        'PUBLIC_ORIGIN': origin, 'MCP_RESOURCE': origin,
+        'GPTADMIN_AUTH_MODE': 'writer', 'GPTADMIN_NODE_PEERS': '{}',
+        'SHELL_NAME': 'gptadmin-isolated-canary',
+        'SHELL_IDENTITY_DIR': str(state / 'identity'),
+        'SHELL_SPOOL_DIR': str(state / 'spool'),
+        'SHELL_OUTBOX_DIR': str(state / 'outbox'),
+        'SHELL_DEFAULT_USER': pwd.getpwuid(os.geteuid()).pw_name,
+        'SHELL_DEFAULT_HOME': str(home), 'SHELL_DEFAULT_CWD': str(home),
+        'SHELLMCP_SELF_REPAIR_DISABLE': '1', 'ROOTD_AUTO_UPDATE': '0',
+    }
+
+
+def sanitize_canary_result(result: dict) -> dict:
+    return {'ok': bool(result.get('ok')), 'version': result.get('version'),
+            'handoff_capable': bool(result.get('handoff_capable'))}
+
+def canary_candidate(candidate: Path, expected_commit: str, env: dict) -> dict:
+    """Run a real candidate in a private root with synthetic credentials only."""
+    base = Path('/tmp/opencode')
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix='gptadmin-node-canary-', dir=base))
+    process = None
+    try:
+        (root / 'config').mkdir(mode=0o700)
+        (root / 'state').mkdir(mode=0o700)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        child = canary_environment(env, root, port)
+        process = subprocess.Popen([str(candidate / 'bin' / 'gptadmin-node')], env=child,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+        version = wait_healthy(f'http://127.0.0.1:{port}', expected_commit, timeout=15)
+        status, payload = http_json('GET', f'http://127.0.0.1:{port}' + HANDOFF_ENDPOINT,
+                                    token=child['CTL_TOKEN'], timeout=HTTP_CALL_TIMEOUT_SECS)
+        if status != 412 or not isinstance(payload, dict):
+            raise PreflightError('candidate does not expose the socket handoff capability')
+        return sanitize_canary_result({'ok': True, 'version': version.get('git_commit'),
+                                       'handoff_capable': True})
+    except (OSError, RuntimeFailure, PreflightError, urllib.error.URLError) as error:
+        raise PreflightError(f'isolated candidate canary failed: {error}') from None
+    finally:
+        if process is not None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def socket_unit_ready(runner) -> bool:
+    active = runner.run(['systemctl', 'is-active', PRIMARY_SOCKET_UNIT], timeout=5)
+    if active.returncode != 0 or active.stdout.strip() != 'active':
+        return False
+    listening = runner.run(['systemctl', 'show', PRIMARY_SOCKET_UNIT, '-p', 'Listen', '--value'], timeout=5)
+    return listening.returncode == 0 and '127.0.0.1:9001' in listening.stdout
+
+
+def socket_activation_enabled(runner, origin: str | None = None,
+                              token: str | None = None) -> bool:
+    if not socket_unit_ready(runner) or not origin or not token:
+        return False
+    try:
+        status, payload = http_json('GET', origin + HANDOFF_ENDPOINT, token=token,
+                                    timeout=HTTP_CALL_TIMEOUT_SECS)
+    except (OSError, urllib.error.URLError):
+        return False
+    return (status == 200 and isinstance(payload, dict)
+            and payload.get('socket_inherited') is True
+            and payload.get('state') == 'idle')
+
+
+def writer_handoff(origin: str, token: str, operation_id: str,
+                   wait_seconds: int = 75, lease_seconds: int = 120) -> dict:
+    """Begin the terminal handoff exactly once; a lost response is unknown.
+
+    begin fences the writer by pausing the shared listener and returns ready
+    immediately: systemd's socket backlog queues new connections for the
+    successor, the graceful stop finishes in-flight work, and durable queued
+    work is recovered from the shared task store. wait_seconds is retained
+    for API compatibility; ready never depends on drain counters (the
+    executor shares this listener, so they cannot reach zero while paused).
+    """
+    body = {'action': 'begin', 'operation_id': operation_id,
+            'wait_seconds': wait_seconds, 'lease_seconds': lease_seconds}
+    try:
+        status, payload = http_json('POST', origin + HANDOFF_ENDPOINT, token=token,
+                                    body=body, timeout=max(DRAIN_HTTP_TIMEOUT_SECS,
+                                                           wait_seconds + 5))
+    except (OSError, urllib.error.URLError) as error:
+        raise RuntimeFailure('writer handoff outcome unknown; restart the current writer before retry') from error
+    if not 200 <= status < 300 or not isinstance(payload, dict):
+        raise RuntimeFailure(f'writer handoff failed: HTTP {status}')
+    if (payload.get('ready') is not True or payload.get('state') != 'ready'
+            or payload.get('operation_id') != operation_id
+            or payload.get('socket_inherited') is not True):
+        raise RuntimeFailure('writer handoff did not return the exact ready operation')
+    if not re.fullmatch(r'[0-9a-f]{32}', str(payload.get('lease_id', ''))):
+        raise RuntimeFailure('writer handoff lease receipt is missing')
+    return payload
+
+
+def service_identity(runner, unit: str) -> dict:
+    result = runner.run(['systemctl', 'show', unit, '-p', 'MainPID', '-p', 'ActiveState'], timeout=5)
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    pid = int(fields.get('MainPID', '0') or 0)
+    executable = ''
+    if pid:
+        try:
+            executable = os.path.realpath(f'/proc/{pid}/exe')
+        except OSError:
+            pass
+    return {'pid': pid, 'active': fields.get('ActiveState') == 'active',
+            'executable': executable}
+
+
+def verify_inherited_socket(runner, origin: str, token: str,
+                            expected_commit: str | None = None,
+                            expected_dir: Path | None = None) -> dict:
+    identity = service_identity(runner, PRIMARY_SERVICE)
+    pid = identity['pid']
+    if not identity.get('active') or not pid:
+        raise PreflightError('primary writer has no active MainPID')
+    if not socket_unit_ready(runner):
+        raise PreflightError('canonical primary socket unit is not active and listening')
+    if expected_dir is not None:
+        expected_executable = os.path.realpath(expected_dir / 'bin' / 'gptadmin-node')
+        if identity.get('executable') != expected_executable:
+            raise PreflightError('primary writer executable does not match current slot')
+    status, handoff = http_json('GET', origin + HANDOFF_ENDPOINT, token=token,
+                                timeout=HTTP_CALL_TIMEOUT_SECS)
+    if status != 200 or not isinstance(handoff, dict) or handoff.get('socket_inherited') is not True:
+        raise PreflightError('primary writer did not confirm inherited socket capability')
+    status, version = http_json('GET', origin + '/version', timeout=HTTP_CALL_TIMEOUT_SECS)
+    if status != 200 or not isinstance(version, dict):
+        raise PreflightError('primary writer version is unavailable')
+    if expected_commit and version.get('git_commit') != expected_commit:
+        raise PreflightError('primary writer commit does not match expected release')
+    return {'pid': pid, 'socket_unit': PRIMARY_SOCKET_UNIT,
+            'executable': identity.get('executable'),
+            'git_commit': version.get('git_commit'), 'handoff': handoff}
+
+
+def update_primary_socket_controller(layout: Layout, runner, *, staging: Path,
+                                     manifest: dict, env: dict, token: str,
+                                     expected_revision: str | None = None) -> dict:
+    """Socket-primary release state machine. Caller owns lifecycle_lock."""
+    origin = origin_from_env(env)
+    if not socket_activation_enabled(runner, origin, token):
+        raise PreflightError('primary writer is not running through the canonical socket')
+    reconcile_stale_artifacts(layout, runner, env, token)
+    recovered = reconcile_release(layout, runner, env, token)
+    if recovered.get('action') == 'manual-required':
+        raise RuntimeFailure('previous release requires manual recovery')
+    require_current_revision(layout, expected_revision)
+    current = current_target(layout)
+    if current is None:
+        raise PreflightError('primary release requires a current version')
+    previous_manifest = _manifest_for_dir(current)
+    previous_commit = str(previous_manifest.get('git_commit', ''))
+    target_commit = str(manifest.get('git_commit', ''))
+    if not re.fullmatch(r'[0-9a-f]{40}', previous_commit) or not re.fullmatch(r'[0-9a-f]{40}', target_commit):
+        raise PreflightError('release commits are not canonical full SHA values')
+    final = next_version_dir(layout.versions_root(), target_commit)
+    os.rename(staging, final)
+    write_release_receipt(layout, {'phase': 'staged', 'previous_dir': current.name,
+                                   'previous_commit': previous_commit,
+                                   'target_dir': final.name, 'target_commit': target_commit})
+    switched = False
+    operation_id = 'node-release:' + target_commit
+    try:
+        transition_release(layout, 'canary', previous_dir=current.name,
+                           previous_commit=previous_commit,
+                           target_dir=final.name, target_commit=target_commit)
+        canary = canary_candidate(final, target_commit, env)
+        handoff = writer_handoff(origin, token, operation_id=operation_id,
+                                 wait_seconds=75, lease_seconds=120)
+        transition_release(layout, 'handoff', previous_dir=current.name,
+                           previous_commit=previous_commit,
+                           target_dir=final.name, target_commit=target_commit,
+                           handoff=handoff, canary=canary)
+        atomic_link(layout.previous_link(), current, versions_root=layout.versions_root())
+        transition_release(layout, 'switching', previous_dir=current.name,
+                           previous_commit=previous_commit,
+                           target_dir=final.name, target_commit=target_commit,
+                           handoff=handoff, canary=canary)
+        switch_current(layout, final, expected_revision=previous_commit)
+        switched = True
+        transition_release(layout, 'starting', previous_dir=current.name,
+                           previous_commit=previous_commit,
+                           target_dir=final.name, target_commit=target_commit,
+                           handoff=handoff, canary=canary)
+        systemctl(runner, 'stop', PRIMARY_SERVICE, timeout=SOCKET_STOP_TIMEOUT_SECS)
+        systemctl(runner, 'start', PRIMARY_SERVICE, timeout=SOCKET_START_TIMEOUT_SECS)
+        version = wait_healthy(origin, target_commit)
+        inherited = verify_inherited_socket(runner, origin, token,
+                                            expected_commit=target_commit,
+                                            expected_dir=final)
+        transition_release(layout, 'committed', previous_dir=current.name,
+                           previous_commit=previous_commit,
+                           target_dir=final.name, target_commit=target_commit,
+                           canary=canary, handoff=handoff,
+                           runtime={'version': version, 'inherited': inherited})
+        return {'ok': True, 'mode': 'socket-primary', 'version_dir': final.name,
+                'previous_dir': current.name, 'git_commit': target_commit}
+    except (OSError, RuntimeFailure, PreflightError, urllib.error.URLError) as error:
+        try:
+            if switched or current_target(layout) != current:
+                active = current_target(layout)
+                active_commit = _manifest_for_dir(active).get('git_commit') if active else None
+                switch_current(layout, current, expected_revision=active_commit)
+            # Restarting the same previous writer is also the safe recovery for
+            # a lost handoff response: PID 1 keeps the public socket queued.
+            systemctl(runner, 'stop', PRIMARY_SERVICE, check=False,
+                      timeout=SOCKET_STOP_TIMEOUT_SECS)
+            systemctl(runner, 'start', PRIMARY_SERVICE,
+                      timeout=SOCKET_START_TIMEOUT_SECS)
+            wait_healthy(origin, previous_commit)
+            verify_inherited_socket(runner, origin, token,
+                                    expected_commit=previous_commit,
+                                    expected_dir=current)
+            atomic_link(layout.previous_link(), current,
+                        versions_root=layout.versions_root())
+            transition_release(layout, 'rolled-back', previous_dir=current.name,
+                               previous_commit=previous_commit,
+                               target_dir=final.name, target_commit=target_commit,
+                               error=str(error))
+        except (OSError, RuntimeFailure, PreflightError, urllib.error.URLError) as rollback_error:
+            transition_release(layout, 'manual-required', previous_dir=current.name,
+                               previous_commit=previous_commit,
+                               target_dir=final.name, target_commit=target_commit,
+                               error=str(error), rollback_error=str(rollback_error))
+            raise RuntimeFailure(f'primary release and rollback failed: {rollback_error}') from None
+        raise RuntimeFailure(f'primary release rolled back: {error}') from None
 
 def select_rollback_dir(versions_root: Path, current: Path | None, explicit: str | None) -> Path:
     """--to picks a named version dir; otherwise the most recently used other version."""
@@ -2145,6 +2679,14 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     if has_admin_ui:
         verify_ui_payload(staging)
 
+    # Canonical socket-primary releases never enter the ordinary drain path.
+    if name == 'primary' and SOCKET_UNIT_PATH.is_file() and socket_activation_enabled(runner, origin, token):
+        result = update_primary_socket_controller(layout, runner, staging=staging,
+                                                   manifest=manifest, env=env, token=token,
+                                                   expected_revision=expected_revision)
+        print(json.dumps(result, sort_keys=True))
+        return
+
     # Existing primary installs also need lifecycle migration. Reload before
     # drain/restart so stopping the old process cannot invoke legacy HA hooks.
     if name == 'primary':
@@ -2460,17 +3002,39 @@ def prepare_primary_node(layout: Layout, runner: Runner) -> None:
     prepare_primary_dropin()
 
 
+
 def prepare_primary_dropin() -> None:
-    """Migrate only the known primary Node lifecycle override."""
-    legacy_dropin_text = '[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n'
-    # Unified Node owns its lifecycle; inherited legacy hooks operate a different
-    # binary and local standby. Clear them in the highest-priority Node drop-in.
-    dropin_text = ('[Unit]\nOnFailure=\n\n[Service]\n'
-                   'ExecStop=\nExecStopPost=\nExecStartPost=\n'
-                   'ExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n')
-    if PRIMARY_DROPIN.exists() and PRIMARY_DROPIN.read_text() not in (legacy_dropin_text, dropin_text):
+    """Preserve the established lifecycle hardening; socket migration is explicit."""
+    dropin = ('[Unit]\nOnFailure=\n\n[Service]\nExecStop=\nExecStopPost=\n'
+              'ExecStartPost=\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n')
+    legacy = '[Service]\nExecStart=\nExecStart=/opt/gptadmin-node/current/bin/gptadmin-node\n'
+    if PRIMARY_DROPIN.exists() and PRIMARY_DROPIN.read_text() not in (legacy, dropin):
         raise PreflightError('primary auto-update service drop-in already has different contents')
-    atomic_write(PRIMARY_DROPIN, dropin_text, 0o644)
+    atomic_write(PRIMARY_DROPIN, dropin, 0o644)
+
+def install_primary_socket_activation(runner) -> None:
+    """Install only new canonical primary socket artifacts."""
+    socket_dropin = ('[Unit]\nRequires=gptadmin-hub.socket\nAfter=gptadmin-hub.socket\n'
+                     '\n[Service]\n'
+                     '# The socket owns the port across the swap; the stop may use the\n'
+                     '# whole graceful shutdown (in-flight long-polls up to 55s) without\n'
+                     '# a client-visible error. KillMode=mixed keeps systemd from\n'
+                     '# SIGTERMing running command children directly — the executor\n'
+                     '# grace (GPTADMIN_SHUTDOWN_GRACE_SECS) finishes them instead.\n'
+                     'KillMode=mixed\n'
+                     'Environment=GPTADMIN_SHUTDOWN_GRACE_SECS=70\n'
+                     'TimeoutStopSec=75\n')
+    socket_dropin_path = PRIMARY_SOCKET_DROPIN
+    if PRIMARY_DROPIN.parent != Path('/etc/systemd/system/gptadmin-hub.service.d'):
+        socket_dropin_path = PRIMARY_DROPIN.parent / PRIMARY_SOCKET_DROPIN.name
+    atomic_write(socket_dropin_path, socket_dropin, 0o644)
+    socket_path = SOCKET_UNIT_PATH
+    if PRIMARY_DROPIN.parent != Path('/etc/systemd/system/gptadmin-hub.service.d'):
+        socket_path = PRIMARY_DROPIN.parent.parent / PRIMARY_SOCKET_UNIT
+    if socket_path.exists() and socket_path.read_text() != PRIMARY_SOCKET_UNIT_TEXT:
+        raise PreflightError('canonical socket template drift')
+    atomic_write(socket_path, PRIMARY_SOCKET_UNIT_TEXT, 0o644)
+    systemctl(runner, 'daemon-reload')
 
 
 def read_primary_effective_env() -> dict:
@@ -2566,6 +3130,29 @@ def cmd_autoupdate(args, layout: Layout, runner: Runner) -> None:
                       'minimum_build_version': config['minimum_build_version']}, sort_keys=True))
 
 
+def cmd_socket_prepare(_args, layout: Layout, runner) -> None:
+    """Install the canonical socket/drop-in without starting or stopping it."""
+    require_root()
+    env = read_installed_env(layout, 'primary')
+    token = env.get('CTL_TOKEN', '').strip()
+    if not token:
+        raise PreflightError('primary CTL_TOKEN is required for socket migration')
+    origin = origin_from_env(env)
+    status, payload = http_json('GET', origin + HANDOFF_ENDPOINT, token=token,
+                                timeout=HTTP_CALL_TIMEOUT_SECS)
+    if status == 200 and isinstance(payload, dict) and payload.get('socket_inherited') is True:
+        capable = True
+    elif status == 412 and isinstance(payload, dict):
+        capable = 'activated listener' in str(payload.get('detail', ''))
+    else:
+        capable = False
+    if not capable:
+        raise PreflightError('running primary binary does not expose socket handoff capability')
+    install_primary_socket_activation(runner)
+    print(json.dumps({'prepared': True, 'socket': PRIMARY_SOCKET_UNIT,
+                      'started': False, 'origin': origin}, sort_keys=True))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2599,6 +3186,9 @@ def build_parser() -> argparse.ArgumentParser:
     ui_publish = sub.add_parser('ui-publish', help='publish the current package UI atomically; no Hub restart')
     ui_publish.add_argument('--name', default='primary', metavar='NAME')
     ui_publish.set_defaults(func=cmd_ui_publish)
+
+    socket_prepare = sub.add_parser('socket-prepare', help='install canonical primary socket artifacts without switching traffic')
+    socket_prepare.set_defaults(func=cmd_socket_prepare)
 
     update = sub.add_parser('update', help='drain, switch to a new package, verify; auto-rollback on failure')
     update.add_argument('--package', required=True, metavar='TAR.GZ')

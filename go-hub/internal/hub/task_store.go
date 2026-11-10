@@ -130,6 +130,10 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if err != nil {
 			return fmt.Errorf("seal queued relay input: %w", err)
 		}
+		relayResult, err := boundPersistedMapResult(j.Result)
+		if err != nil {
+			return fmt.Errorf("bound relay result: %w", err)
+		}
 		var params map[string]any
 		if j.Method == "task/group" || j.Method == childSchemaMethod {
 			params = persistableTaskParams(j.Params)
@@ -137,7 +141,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 			// Retain catalog identity for task history, never executable arguments.
 			params = map[string]any{"name": name}
 		}
-		state.Relay[id] = persistedRelayTask{SealedPending: sealed, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: params, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: j.Result, Error: j.Error, ParentTaskID: j.ParentTaskID}
+		state.Relay[id] = persistedRelayTask{SealedPending: sealed, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, AgentID: j.AgentID, TraceID: j.TraceID, TraceParent: j.TraceParent, Method: j.Method, Params: params, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: relayResult, Error: j.Error, ParentTaskID: j.ParentTaskID}
 	}
 	for id, j := range shell {
 		if j == nil {
@@ -150,7 +154,11 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if err != nil {
 			return fmt.Errorf("seal queued quorum task input: %w", err)
 		}
-		state.Shell[id] = persistedShellTask{ReceiptTarget: j.ReceiptTarget, SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: persistableShellResult(j), Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
+		shellResult, err := boundPersistedResult(compactPersistedOutput(redactSecretValues(j.Result, j.SecretValues)))
+		if err != nil {
+			return fmt.Errorf("bound shell result: %w", err)
+		}
+		state.Shell[id] = persistedShellTask{ReceiptTarget: j.ReceiptTarget, SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: shellResult, Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
 	}
 	nowTime := time.Now()
 	for key, entry := range s.idempotency {
@@ -243,6 +251,43 @@ func persistableTaskParams(params map[string]any) map[string]any {
 
 func persistableShellResult(j *shellJob) any {
 	return compactPersistedOutput(redactSecretValues(j.Result, j.SecretValues))
+}
+
+// persistedResultLimit bounds the payload written to the task store. Live
+// responses and in-memory receipts keep the full result; only the durable
+// copy of pathological multi-megabyte outputs is replaced by a marker so one
+// agent transcript cannot dominate SQLite write amplification. Marshal errors
+// still propagate so unserializable state keeps failing the transaction.
+const persistedResultLimit = 1 << 20
+
+func boundPersistedResult(value any) (any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) <= persistedResultLimit {
+		return value, nil
+	}
+	return map[string]any{"persisted_result_truncated": true,
+		"reason": "result exceeds the 1 MiB durable copy limit"}, nil
+}
+
+func boundPersistedMapResult(value map[string]any) (map[string]any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) <= persistedResultLimit {
+		return value, nil
+	}
+	return map[string]any{"persisted_result_truncated": true,
+		"reason": "result exceeds the 1 MiB durable copy limit"}, nil
 }
 
 func compactPersistedOutput(value any) any {

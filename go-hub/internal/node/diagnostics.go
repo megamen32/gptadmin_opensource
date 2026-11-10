@@ -21,6 +21,7 @@ import (
 const diagnosticsSocketEnv = "GPTADMIN_NODE_DIAGNOSTICS_SOCKET"
 const maxHeapProfileBytes = 16 << 20
 const minProfileInterval = 30 * time.Second
+const minGoroutineProfileInterval = 2 * time.Second
 
 // startDiagnostics is opt-in. The socket is private to the process owner and
 // lives only for the Node lifecycle. No diagnostics are written to logs.
@@ -118,6 +119,8 @@ func removeStaleDiagnosticsSocket(path string) error {
 
 func diagnosticsHandler() http.Handler {
 	mux := http.NewServeMux()
+	var goroutineMu sync.Mutex
+	var lastGoroutine time.Time
 	var profileMu sync.Mutex
 	var lastProfile time.Time
 	mux.HandleFunc("GET /debug/pprof/heap", func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +138,27 @@ func diagnosticsHandler() http.Handler {
 		}
 		if body.exceeded {
 			http.Error(w, "heap profile exceeds 16 MiB limit", http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(body.Bytes())
+	})
+	mux.HandleFunc("GET /debug/pprof/goroutine", func(w http.ResponseWriter, r *http.Request) {
+		goroutineMu.Lock()
+		defer goroutineMu.Unlock()
+		if !lastGoroutine.IsZero() && time.Since(lastGoroutine) < minGoroutineProfileInterval {
+			http.Error(w, "goroutine profile rate limited", http.StatusTooManyRequests)
+			return
+		}
+		lastGoroutine = time.Now()
+		var body cappedBuffer
+		if err := pprof.Lookup("goroutine").WriteTo(&body, 1); err != nil && !body.exceeded {
+			http.Error(w, "goroutine profile unavailable", http.StatusInternalServerError)
+			return
+		}
+		if body.exceeded {
+			http.Error(w, "goroutine profile exceeds 16 MiB limit", http.StatusRequestEntityTooLarge)
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")

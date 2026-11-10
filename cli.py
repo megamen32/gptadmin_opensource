@@ -172,6 +172,25 @@ MCP_CAPABILITY_CATALOG = (
     },
 )
 
+# Source registration for a child whose executable is delivered separately.
+# Keep this outside the detached catalog until the release signer publishes a
+# new signature.  The entry is intentionally metadata-only: this slice does
+# not install or start chrome-profile-manager.
+MCP_SOURCE_CONFIG_CAPABILITIES = (
+    {
+        'id': 'chrome-profile-manager',
+        'version': '1.0.0',
+        'provenance': 'source-config:chrome-profile-manager',
+        'child_ref': 'chrome-profile-manager',
+        'transport': 'stdio',
+        'scopes': ['browser.profile.manage'],
+        'network_needs': ['local Chrome profile and DevTools process access'],
+        'risk_level': 'high',
+        'maintenance_owner': 'Chrome Profile Manager',
+        'tools': [],
+    },
+)
+
 if IS_MACOS:
     SERVICES_DIR = USER_HOME / 'Library' / 'LaunchAgents' if IS_USER_INSTALL else Path('/Library/LaunchDaemons')
     LOG_DIR = USER_HOME / 'Library' / 'Logs' / 'gptadmin' if IS_USER_INSTALL else Path('/var/log/gptadmin')
@@ -3149,16 +3168,36 @@ def _mcp_catalog_definition(catalog_id: str) -> dict | None:
     die(f'unknown MCP capability catalog id: {catalog_id}')
 
 
+def _mcp_source_config_definition(source_config_id: str) -> dict | None:
+    """Return metadata for a separately delivered child entry.
+
+    Source-config definitions deliberately do not participate in the detached
+    catalog signature. They remain explicit registration metadata until a
+    release signer adds them to the immutable bundled catalog.
+    """
+    if not source_config_id:
+        return None
+    for definition in MCP_SOURCE_CONFIG_CAPABILITIES:
+        if definition['id'] == source_config_id:
+            return dict(definition)
+    die(f'unknown MCP source config id: {source_config_id}')
+
+
 def cmd_mcp_catalog(args):
     """Display curated capabilities before an operator activates one."""
     payload = _mcp_catalog_payload()
     if getattr(args, 'json', False):
+        payload['source_config_definitions'] = [dict(item) for item in MCP_SOURCE_CONFIG_CAPABILITIES]
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     print(f"Catalog: {payload['catalog_version']} ({payload['source']})")
     for definition in payload['definitions']:
         print(f"{definition['id']}\t{definition['version']}\t{definition['risk_level']}\t{definition['provenance']}")
         print(f"  scopes={','.join(definition['scopes'])} tools={','.join(definition['tools'])}")
+        print(f"  network_needs={'; '.join(definition['network_needs']) or 'none'} owner={definition['maintenance_owner']}")
+    for definition in MCP_SOURCE_CONFIG_CAPABILITIES:
+        print(f"{definition['id']}	{definition['version']}	{definition['risk_level']}	{definition['provenance']} (source-config)")
+        print(f"  scopes={','.join(definition['scopes'])} tools={','.join(definition['tools']) or 'child advertises at runtime'}")
         print(f"  network_needs={'; '.join(definition['network_needs']) or 'none'} owner={definition['maintenance_owner']}")
     print(f"  signature={payload['signature']['algorithm']} verified digest={payload['catalog_digest_sha256']}")
 
@@ -3238,6 +3277,7 @@ def _mcp_extract_tail_options(args):
         '--run-as-user': 'run_as_user',
         '--hub-url': 'hub_url',
         '--catalog-id': 'catalog_id',
+        '--source-config-id': 'source_config_id',
     }
     while i < len(tail):
         item = tail[i]
@@ -3281,9 +3321,14 @@ def cmd_mcp_add(args):
     _mcp_extract_tail_options(args)
     catalog_id = getattr(args, 'catalog_id', None) or ''
     catalog_definition = _mcp_catalog_definition(catalog_id)
-    if catalog_definition:
-        print('Curated capability requested:')
-        print(json.dumps(catalog_definition, ensure_ascii=False, indent=2))
+    source_config_id = getattr(args, 'source_config_id', None) or ''
+    source_definition = _mcp_source_config_definition(source_config_id)
+    if catalog_definition and source_definition:
+        die('choose either --catalog-id or --source-config-id, not both')
+    selected_definition = catalog_definition or source_definition
+    if selected_definition:
+        print('Capability metadata requested:')
+        print(json.dumps(selected_definition, ensure_ascii=False, indent=2))
         if getattr(args, 'install', False) and not getattr(args, 'accept_capability', False):
             die('curated MCP activation requires --accept-capability after reviewing the catalog definition')
     # Validate the requested executable before touching persistent/global config.
@@ -3337,6 +3382,12 @@ def cmd_mcp_add(args):
         servers[args.name]['catalog_id'] = catalog_definition['id']
         servers[args.name]['catalog_version'] = catalog_definition['version']
         servers[args.name]['catalog_provenance'] = catalog_definition['provenance']
+    if source_definition:
+        servers[args.name]['source_config_id'] = source_definition['id']
+        servers[args.name]['source_config_version'] = source_definition['version']
+        servers[args.name]['source_config_provenance'] = source_definition['provenance']
+        servers[args.name]['source_child_ref'] = source_definition['child_ref']
+        servers[args.name]['source_transport'] = source_definition['transport']
     _mcp_save(cfg)
     agent_config = _mcp_write_agent_config(args.name, cfg)
     print(f'Added MCP server {args.name}')
@@ -7999,6 +8050,7 @@ def main():
     ap_mcp_add.add_argument('--run-as-user')
     ap_mcp_add.add_argument('--hub-url')
     ap_mcp_add.add_argument('--catalog-id', help='Bind this server to a curated capability definition')
+    ap_mcp_add.add_argument('--source-config-id', help='Bind this child to separately delivered source-config metadata')
     ap_mcp_add.add_argument('--accept-capability', action='store_true', help='Acknowledge the displayed catalog scope/risk before install')
     ap_mcp_add.add_argument('--disabled', action='store_true')
     ap_mcp_add.add_argument('--force', action='store_true')

@@ -94,6 +94,13 @@ type Config struct {
 	// queued shell/child MCP operation before returning a durable job handle.
 	// Tool/command timeout remains an independent argument.
 	ActionSyncWait time.Duration
+
+	// ShutdownGrace bounds the graceful HTTP shutdown after ctx cancel
+	// (SIGTERM). The primary writer raises it above the longest in-flight
+	// long-poll (shell_queue_long_poll_seconds, default 55s) so a planned
+	// socket-handoff stop finishes active requests instead of resetting them
+	// into client-visible errors. Zero keeps the legacy 10s.
+	ShutdownGrace time.Duration
 	// SchemaContractValidation makes schema version/digest admission an explicit
 	// opt-in. It stays false by default so relay calls never depend on metadata.
 	SchemaContractValidation bool
@@ -164,6 +171,10 @@ func FromEnv() Config {
 	defTimeout := secondsEnv("MCP_RELAY_DEFAULT_TIMEOUT", 30)
 	pollTimeout := secondsEnv("MCP_RELAY_POLL_MAX_TIMEOUT", 55)
 	actionSyncWaitMS := positiveIntEnv("GPTADMIN_ACTION_SYNC_WAIT_MS", 2000)
+	shutdownGrace := secondsEnv("GPTADMIN_SHUTDOWN_GRACE_SECS", 10)
+	if shutdownGrace < 5 || shutdownGrace > 120 {
+		shutdownGrace = 10
+	}
 	secretTTL := secondsEnv("GPTADMIN_SECRET_INGRESS_TTL", 15*60)
 	if secretTTL < 60 || secretTTL > 3600 {
 		secretTTL = 15 * 60
@@ -193,6 +204,7 @@ func FromEnv() Config {
 		DefaultTimeout:             time.Duration(defTimeout) * time.Second,
 		PollMaxTimeout:             time.Duration(pollTimeout) * time.Second,
 		ActionSyncWait:             time.Duration(actionSyncWaitMS) * time.Millisecond,
+		ShutdownGrace:              time.Duration(shutdownGrace) * time.Second,
 		SchemaContractValidation:   truthyString(env("GPTADMIN_SCHEMA_CONTRACT_VALIDATION", "0")),
 		OutputDir:                  env("GPTADMIN_OUTPUT_DIR", filepath.Join(cfgDir, "outputs")),
 		PublicOrigin:               normalizePublicURL(env("PUBLIC_ORIGIN", "")),
@@ -708,6 +720,7 @@ type Server struct {
 	nodeDrainSince       time.Time
 	nodeDrainSubmissions int
 	nodeRuntime          NodeRuntimeCounters
+	handoff              *nodeHandoff
 }
 
 func New(cfg Config) *Server {
@@ -1690,6 +1703,7 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 	defer s.stopMembershipLoops()
 	handler := s.Handler()
 	srv := &http.Server{Addr: s.cfg.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	s.setNodeHandoffHTTPServer(srv)
 	defer srv.Close()
 	done := make(chan error, 2)
 	var privateSrv *http.Server
@@ -1711,7 +1725,11 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		grace := s.cfg.ShutdownGrace
+		if grace <= 0 {
+			grace = 10 * time.Second
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
 		if privateSrv != nil {
 			if err := privateSrv.Shutdown(shutdownCtx); err != nil {
@@ -1731,6 +1749,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/nodes", s.nodeMembershipHTTP)
 	mux.HandleFunc("/admin/api/nodes/", s.nodeMembershipHTTP)
 	mux.HandleFunc("/admin/api/node/drain", s.requireCtl(s.nodeDrainHTTP))
+	mux.HandleFunc("/admin/api/node/handoff", s.requireCtl(s.nodeHandoffHTTP))
 	mux.HandleFunc("/admin/api/agents/connect-info", s.requireCtl(s.trackAccessOperation(s.adminAgentConnectInfo)))
 	mux.HandleFunc("/version", s.version)
 	mux.HandleFunc("/healthz", s.healthz)
@@ -3842,6 +3861,8 @@ func shellQueueResponseLimit(r *http.Request) int {
 }
 
 func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name string) {
+	// Executor authentication precedes dispatch; idle polls must not pin auth.
+	releaseAuthAdmission(r)
 	timeout := boundedQueryDuration(r, "timeout", s.shellQueuePollMaxLocked())
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
@@ -3903,6 +3924,7 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 					return nil, false, nil
 				}
 				payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+				payload["execution_origin"] = executionOriginForCaller(job.Caller)
 				if job.FilesystemACL != nil {
 					payload["filesystem_acl"] = job.FilesystemACL
 				}
@@ -4341,6 +4363,8 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The relay credential is verified; release before an empty queue waits.
+	releaseAuthAdmission(r)
 	timeout := boundedQueryDuration(r, "timeout", s.shellQueuePollMaxLocked())
 	deadline := time.Now().Add(timeout)
 	s.mu.Lock()
@@ -5293,7 +5317,7 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 				}
 				return s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, childACL, durableRequestKey), http.StatusOK
 			}
-			return s.callShellToolWithTraceParentAndSecrets(parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, durableRequestKey), http.StatusOK
+			return s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childArgs, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, nil, durableRequestKey), http.StatusOK
 		}
 		jobID := s.enqueueRelayWithTraceParentForRequest(r, target, "tools/call", map[string]any{"name": toolName, "arguments": args}, requestTraceID(r), requestTraceParent(r), durableRequestKey)
 		if failure := s.relayEnqueueFailure(jobID); failure != nil {
@@ -6261,6 +6285,19 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 			}
 		}
 	}
+	if !background {
+		// Synchronous callers must not spend their whole tool timeout queued
+		// behind a shell that stopped polling: its queue has no reader, so
+		// the job cannot start. Background submissions keep the durable
+		// queue behaviour for shells that may return.
+		if agent := s.shellQueueAgentState(target); agent != nil {
+			switch strings.ToLower(agent.Status) {
+			case "stale", "offline", "failed", "disabled", "awaiting_approval":
+				return map[string]any{"server_id": target, "status": "failed",
+					"error": "shell agent " + target + " is " + agent.Status + " and has no active queue poller; retry when the host returns"}
+			}
+		}
+	}
 	job := &shellJob{ID: newID(), Server: server, ReceiptTarget: target, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
 	if job.FilesystemACL != nil {
 		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
@@ -6330,6 +6367,21 @@ func (s *Server) callShellToolWithFilesystemACLForRequest(r *http.Request, targe
 		}
 		waitCond(s.cond, minDuration(remaining, 500*time.Millisecond))
 	}
+}
+
+// shellQueueAgentState reads the live registration of a queue-owning agent
+// (shell:/file:/control:) for fail-fast admission decisions.
+func (s *Server) shellQueueAgentState(target string) *Agent {
+	if target == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.agents[target]; a != nil {
+		cp := *a
+		return &cp
+	}
+	return nil
 }
 
 func hubTools() []map[string]any {
@@ -8555,6 +8607,13 @@ func compactSlug(v string) string {
 	return strings.ReplaceAll(agentSlug(v), "-", "")
 }
 
+// resolveExposedAgent maps one relay slug to exactly one exposed agent.
+// Bare agent names are shared by child MCPs across hosts (every mesh member
+// runs a child literally named "grepmesh"), so a name-only match must never
+// beat the assigned slug, and among name matches a child whose parent shell
+// is live wins over one on a shell that stopped polling. Map iteration order
+// must not decide routing: without this, /server/<name>/mcp randomly lands
+// on a dead shell's queue and the caller stalls for the full tool timeout.
 func (s *Server) resolveExposedAgent(slug string) (Agent, bool) {
 	slug, _ = url.PathUnescape(strings.Trim(slug, "/"))
 	slug = strings.TrimSpace(slug)
@@ -8565,19 +8624,66 @@ func (s *Server) resolveExposedAgent(slug string) (Agent, bool) {
 	wantCompact := compactSlug(slug)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	type slugCandidate struct {
+		agent Agent
+		score int
+	}
+	var exact, byName []slugCandidate
 	for _, a := range s.publicAgentsLocked(nil) {
-		aliases := []string{a.AgentID, a.Name, exposedAgentSlug(a), agentSlug(a.AgentID), agentSlug(a.Name), compactSlug(a.AgentID), compactSlug(a.Name)}
-		if isChildMCPAgent(a) {
-			qualifiedSlug := agentSlug(firstString(a.Meta, "parent_server_id")) + "-" + agentSlug(firstString(a.Meta, "child_ref"))
-			aliases = append(aliases, qualifiedSlug)
+		if strings.EqualFold(slug, a.AgentID) || want == agentSlug(a.AgentID) || wantCompact == compactSlug(a.AgentID) {
+			exact = append(exact, slugCandidate{a, 100})
+			continue
 		}
-		for _, alias := range aliases {
-			if strings.EqualFold(slug, alias) || want == agentSlug(alias) || wantCompact == compactSlug(alias) {
-				return a, true
+		if assigned := exposedAgentSlug(a); assigned != "" && (strings.EqualFold(slug, assigned) || want == agentSlug(assigned)) {
+			exact = append(exact, slugCandidate{a, 90})
+			continue
+		}
+		if isChildMCPAgent(a) {
+			qualified := agentSlug(firstString(a.Meta, "parent_server_id")) + "-" + agentSlug(firstString(a.Meta, "child_ref"))
+			if qualified != "" && (strings.EqualFold(slug, qualified) || want == qualified || wantCompact == compactSlug(qualified)) {
+				exact = append(exact, slugCandidate{a, 80})
+				continue
 			}
 		}
+		if strings.EqualFold(slug, a.Name) || want == agentSlug(a.Name) || wantCompact == compactSlug(a.Name) {
+			byName = append(byName, slugCandidate{a, s.slugLivenessScore(a)})
+		}
 	}
-	return Agent{}, false
+	pick := func(list []slugCandidate) (Agent, bool) {
+		if len(list) == 0 {
+			return Agent{}, false
+		}
+		best := list[0]
+		for _, c := range list[1:] {
+			if c.score > best.score || (c.score == best.score && c.agent.AgentID < best.agent.AgentID) {
+				best = c
+			}
+		}
+		return best.agent, true
+	}
+	if a, ok := pick(exact); ok {
+		return a, true
+	}
+	return pick(byName)
+}
+
+// slugLivenessScore prefers a child whose parent shell is currently polling;
+// standalone agents score by their own status.
+func (s *Server) slugLivenessScore(a Agent) int {
+	if !isChildMCPAgent(a) {
+		if strings.EqualFold(a.Status, "online") {
+			return 40
+		}
+		return 10
+	}
+	parent := s.agents[firstString(a.Meta, "parent_server_id")]
+	if parent == nil {
+		return 10
+	}
+	if strings.EqualFold(parent.Status, "online") {
+		return 40
+	}
+	return 10
 }
 
 func (s *Server) agentCopiesLocked() []Agent {
@@ -9457,9 +9563,9 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 			if isLogicalBrowserAgent(agent) {
 				return nil, map[string]any{"code": -32000, "message": "Browser owner Node is unavailable"}
 			}
-			raw = s.callShellToolWithTraceParent(parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
+			raw = s.callShellToolWithFilesystemACLForRequest(r, parent, "mcp_call", childConnectionArguments(r, agent, map[string]any{
 				"ref": ref, "name": name, "arguments": args,
-			}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r))
+			}), false, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r), nil, nil)
 		}
 		if firstString(raw, "status") == "failed" || truthy(raw["background"]) {
 			return unwrapMCPUpstream(raw)

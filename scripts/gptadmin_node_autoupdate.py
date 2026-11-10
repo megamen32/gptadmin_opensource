@@ -32,6 +32,18 @@ NODE_UPDATE_BUDGET_SECS = 275
 UPDATE_FINALIZATION_MARGIN_SECS = 30
 
 
+def select_update_mode(manager, name, runner=None):
+    """Only a live inherited primary socket gets the queued writer path."""
+    if name != 'primary':
+        return 'legacy-drain'
+    runner = runner or manager.Runner()
+    env = manager.read_installed_env(manager.DEFAULT_LAYOUT, name)
+    token = manager.read_admin_token(manager.DEFAULT_LAYOUT, name, env)
+    origin = manager.origin_from_env(env)
+    return ('socket-primary' if manager.socket_activation_enabled(runner, origin, token)
+            else 'legacy-drain')
+
+
 def record(path, value):
     """Durable intent/disposition before mutation; no power-loss rearming."""
     temp=path.with_name(path.name+'.new-'+str(os.getpid()))
@@ -379,12 +391,17 @@ def main():
     fd = os.open(STATE/'update.lock', os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if (STATE/'hold.json').exists():
-            raise RuntimeError('previous manager failure requires verified recovery before automatic retry')
         import importlib.util
         spec = importlib.util.spec_from_file_location('node_manager', MANAGER)
         manager = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(manager)
+        if (STATE/'hold.json').exists() and 'primary' in names:
+            env = manager.read_installed_env(manager.DEFAULT_LAYOUT, 'primary')
+            token = manager.read_admin_token(manager.DEFAULT_LAYOUT, 'primary', env)
+            manager.reconcile_stale_artifacts(manager.DEFAULT_LAYOUT, manager.Runner(), env, token,
+                                              max_age_seconds=0)
+        if (STATE/'hold.json').exists():
+            raise RuntimeError('previous manager failure requires verified recovery before automatic retry')
         # Shared code/current is changed only when all active instances have
         # been explicitly enrolled. No hidden update of another owner's node.
         units = subprocess.check_output(['systemctl','list-units','gptadmin-node@*.service',
@@ -454,7 +471,10 @@ def main():
                 record(STATE/'hold.json',{'complete':False,'source':source,
                     'verified_instances':results,'reason':'manager_in_progress','instance':name})
                 try:
-                    result=subprocess.run(['python3',str(MANAGER),'update','--name',name,'--package',str(package),'--wait-secs','130','--require-drain','--operation-deadline-secs','180'],
+                    update_argv=['python3',str(MANAGER),'update','--name',name,'--package',str(package),
+                                 '--expected-revision',live_versions[name]['git_commit'],
+                                 '--wait-secs','130','--require-drain','--operation-deadline-secs','180']
+                    result=subprocess.run(update_argv,
                                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                                           timeout=NODE_UPDATE_BUDGET_SECS)
                 except subprocess.TimeoutExpired:

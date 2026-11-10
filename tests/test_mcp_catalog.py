@@ -63,6 +63,63 @@ def test_catalog_signature_rejects_tampered_definition() -> None:
         cli._verify_mcp_catalog_payload(tampered)
 
 
+def test_chrome_profile_manager_source_config_is_outside_signed_catalog() -> None:
+    """Separate child metadata must not be presented as detached-signed data."""
+
+    payload = cli._mcp_catalog_payload()
+    assert "chrome-profile-manager" not in {item["id"] for item in payload["definitions"]}
+    definition = cli._mcp_source_config_definition("chrome-profile-manager")
+    assert definition == {
+        "id": "chrome-profile-manager",
+        "version": "1.0.0",
+        "provenance": "source-config:chrome-profile-manager",
+        "child_ref": "chrome-profile-manager",
+        "transport": "stdio",
+        "scopes": ["browser.profile.manage"],
+        "network_needs": ["local Chrome profile and DevTools process access"],
+        "risk_level": "high",
+        "maintenance_owner": "Chrome Profile Manager",
+        "tools": [],
+    }
+    assert payload["signature"]["verified"] is True
+
+
+def test_chrome_profile_manager_source_config_registration_persists_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(cli, "need_root", lambda: None)
+    config_file = tmp_path / "mcp.json"
+    monkeypatch.setattr(cli, "MCP_CONFIG_FILE", config_file)
+    monkeypatch.setattr(cli, "MCP_SUPERVISOR_CONFIG", tmp_path / "mcp-supervisor.json")
+    args = argparse.Namespace(
+        name="chrome-profile-manager",
+        command="chrome-profile-manager",
+        args=[],
+        url=None,
+        stdio_format="auto",
+        cwd=None,
+        env=[],
+        disabled=False,
+        force=False,
+        install=False,
+        status=False,
+        agent_id=None,
+        run_as_user=None,
+        hub_url=None,
+        catalog_id=None,
+        source_config_id="chrome-profile-manager",
+        accept_capability=False,
+    )
+
+    cli.cmd_mcp_add(args)
+    saved = cli._json_read(config_file, {})["mcpServers"]["chrome-profile-manager"]
+    assert saved["source_config_id"] == "chrome-profile-manager"
+    assert saved["source_config_version"] == "1.0.0"
+    assert saved["source_config_provenance"] == "source-config:chrome-profile-manager"
+    assert saved["source_child_ref"] == "chrome-profile-manager"
+    assert "catalog_id" not in saved
+
+
 def test_curated_mcp_install_requires_explicit_capability_acceptance(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A catalog-bound install must not activate without explicit acceptance."""
 

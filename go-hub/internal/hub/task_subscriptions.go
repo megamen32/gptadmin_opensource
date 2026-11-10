@@ -46,6 +46,9 @@ func (s *Server) serveTaskSubscription(w http.ResponseWriter, r *http.Request, b
 		seen[taskID] = true
 		ids = append(ids, taskID)
 	}
+	// Task access has been checked. Neither the initial network write nor the
+	// long-lived listener may retain the authentication generation gate.
+	releaseAuthAdmission(r)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32603, "message": "streaming is unavailable"}})

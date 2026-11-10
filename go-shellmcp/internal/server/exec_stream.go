@@ -22,12 +22,14 @@ func (s *Server) execStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cmdField := firstToken(req.Cmd)
+	cmdField := safeExecutionLabel(req)
+	commandHash := executionCommandHash(req)
 	s.auditLog.Event(audit.ExecStart, map[string]any{
-		"cmd":        cmdField,
-		"user":       req.RunAsUser,
-		"background": req.Background,
-		"transport":  "sse",
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"transport":      "sse",
 	})
 
 	flusher, _ := w.(http.Flusher)
@@ -56,15 +58,16 @@ func (s *Server) execStream(w http.ResponseWriter, r *http.Request) {
 	res := s.runShellStream(r.Context(), req, emit)
 	elapsedMS := time.Since(startTime).Milliseconds()
 	endFields := map[string]any{
-		"cmd":         cmdField,
-		"user":        req.RunAsUser,
-		"background":  req.Background,
-		"return_code": res.ReturnCode,
-		"elapsed_ms":  elapsedMS,
-		"transport":   "sse",
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"return_code":    res.ReturnCode,
+		"elapsed_ms":     elapsedMS,
+		"transport":      "sse",
 	}
 	if res.Error != "" {
-		endFields["error"] = res.Error
+		endFields["error"] = "execution_error"
 	}
 	s.auditLog.Event(audit.ExecEnd, endFields)
 }

@@ -41,15 +41,36 @@ func (s *Server) beginCallback(id string, acceptedPoll bool) (context.Context, f
 	}, true
 }
 
-// StopCallbacks cancels owned command groups and waits for their durable
-// results before the node closes its local router. No new callback may start.
+// StopCallbacks fences new callbacks and waits for durable results before
+// the node closes its local router. With ShutdownGrace set (planned stops),
+// already-running commands may finish inside the grace window; only the
+// stragglers are cancelled. The legacy behavior (no grace) cancels at once.
 func (s *Server) StopCallbacks() {
 	s.callbackMu.Lock()
 	s.callbackClosed = true
-	for _, cancel := range s.callbackCancels {
-		cancel()
+	grace := s.cfg.ShutdownGrace
+	if grace <= 0 {
+		for _, cancel := range s.callbackCancels {
+			cancel()
+		}
 	}
 	s.callbackMu.Unlock()
+	if grace > 0 {
+		finished := make(chan struct{})
+		go func() {
+			s.callbackWG.Wait()
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-time.After(grace):
+			s.callbackMu.Lock()
+			for _, cancel := range s.callbackCancels {
+				cancel()
+			}
+			s.callbackMu.Unlock()
+		}
+	}
 	s.callbackWG.Wait()
 }
 

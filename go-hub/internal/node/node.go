@@ -16,6 +16,14 @@ import (
 // Run owns listener. The existing durable queue remains the sole execution
 // path, reached over this same listener; no standalone shell service is needed.
 func Run(ctx context.Context, listener net.Listener, cfg hub.Config, executorConfig shell.Config) error {
+	return run(ctx, listener, false, cfg, executorConfig)
+}
+
+func RunActivated(ctx context.Context, listener net.Listener, cfg hub.Config, executorConfig shell.Config) error {
+	return run(ctx, listener, true, cfg, executorConfig)
+}
+
+func run(ctx context.Context, listener net.Listener, activated bool, cfg hub.Config, executorConfig shell.Config) error {
 	defer listener.Close()
 	closeDiagnostics, err := startDiagnostics()
 	if err != nil {
@@ -70,6 +78,9 @@ func Run(ctx context.Context, listener net.Listener, cfg hub.Config, executorCon
 	}
 	router := hub.New(cfg)
 	defer router.Close()
+	if activated {
+		listener = router.EnableNodeHandoff(listener)
+	}
 	if err := router.RegisterLocalExecutor(name, identity, executorConfig.Token); err != nil {
 		return err
 	}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Canonical GPTAdmin Hub primary listener
+
+[Socket]
+Service=gptadmin-hub.service
+ListenStream=127.0.0.1:9001
+Backlog=4096
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

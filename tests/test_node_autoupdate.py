@@ -440,6 +440,15 @@ class NodeAutoupdateTests(unittest.TestCase):
             (ui/'assets').mkdir();(ui/'assets/a.js').write_text('ui')
 
             def fake_go_build(argv, **kwargs):
+                if argv[1:3] == ['version', '-m']:
+                    command = ('github.com/megamen32/gptadmin/go-hub/cmd/gptadmin-node'
+                               if str(argv[-1]).endswith('gptadmin-node')
+                               else 'github.com/megamen32/gptadmin/go-shellmcp/cmd/shellmcp-go')
+                    return SimpleNamespace(returncode=0, stdout=(
+                        'fixture: go1.26\n'
+                        f'\tpath\t{command}\n'
+                        '\tbuild\tGOOS=linux\n'
+                        '\tbuild\tGOARCH=amd64\n'), stderr='')
                 binary=Path(argv[argv.index('-o')+1])
                 binary.write_bytes(b'\x7fELF'+argv[-1].encode())
                 return SimpleNamespace(returncode=0,stdout='',stderr='')
@@ -448,12 +457,15 @@ class NodeAutoupdateTests(unittest.TestCase):
                  patch.object(node_builder,'build_admin_ui',return_value={
                      'public/admin/index.html':ui/'index.html',
                      'public/admin/assets/a.js':ui/'assets/a.js'}), \
+                 patch.object(node_builder,'probe_node_binary',return_value={
+                     'git_commit':'a'*40,'build_version':'1033','handoff_capable':True}), \
                  patch.object(node_builder.subprocess,'run',side_effect=fake_go_build) as go_build:
                 result=node_builder.build('amd64',root/'.tmp/packages','a'*40,1033,False)
 
-            self.assertEqual(go_build.call_count,2)
-            calls=[c.kwargs['cwd'] for c in go_build.call_args_list]
-            self.assertEqual(calls,[root/'go-hub',root/'go-shellmcp'])
+            builds=[c for c in go_build.call_args_list if c.args[0][1]=='build']
+            self.assertEqual(len(builds),2)
+            self.assertEqual([c.kwargs['cwd'] for c in builds],[root/'go-hub',root/'go-shellmcp'])
+            self.assertEqual(sum(c.args[0][1:3]==['version','-m'] for c in go_build.call_args_list),2)
             archive=Path(result['path'])
             with tarfile.open(archive,'r:gz') as package:
                 manifest=json.load(package.extractfile('manifest.json'))

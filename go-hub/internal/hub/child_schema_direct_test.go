@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func directSchemaFixture(t *testing.T, remote http.HandlerFunc) (*Server, Agent, *atomic.Int32) {
@@ -158,5 +160,57 @@ func TestDirectChildSchemaDoesNotExposeDeniedTarget(t *testing.T) {
 	if firstString(got, "status") != "failed" || calls.Load() != 0 ||
 		!strings.Contains(firstString(mapValue(got["error"]), "message"), "denied") {
 		t.Fatalf("denied schema was contacted or revealed: %#v", got)
+	}
+}
+
+func TestTargetedChildSearchReturnsWhileSlowSchemaWarmsInBackground(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	s, child, _ := directSchemaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		startOnce.Do(func() { close(started) })
+		<-release
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "completed", "response": map[string]any{"tools": []any{
+				map[string]any{"name": "slow_warm_tool", "description": "warmed after the first response", "inputSchema": map[string]any{"type": "object"}},
+			}},
+		})
+	})
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set("Authorization", "Bearer schema-test-token")
+	startedAt := time.Now()
+	rows, coverage := s.childSearchCatalogForRequest(r, child.AgentID)
+	elapsed := time.Since(startedAt)
+	if elapsed > 2*time.Second || childSearchRefreshWait > time.Second {
+		close(release)
+		t.Fatalf("targeted cold search waited too long: elapsed=%s configured=%s", elapsed, childSearchRefreshWait)
+	}
+	select {
+	case <-started:
+	default:
+		close(release)
+		t.Fatal("cold schema refresh did not start")
+	}
+	if len(rows) != 0 || truthy(coverage["complete"]) || intFromAny(coverage["pending"]) != 1 {
+		close(release)
+		t.Fatalf("cold response did not report exactly one real in-flight refresh: rows=%v coverage=%v", rows, coverage)
+	}
+	close(release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		cache := s.childSearchCache()
+		cache.mu.Lock()
+		entry := cache.entries[childSearchCacheKey(r, child)]
+		ready := entry != nil && !entry.refreshing && !entry.loadedAt.IsZero()
+		cache.mu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rows, coverage = s.childSearchCatalogForRequest(r, child.AgentID)
+	if len(rows) != 1 || !truthy(coverage["complete"]) || firstString(rows[0], "name") != "slow_warm_tool" {
+		t.Fatalf("background refresh did not warm the next search: rows=%v coverage=%v", rows, coverage)
 	}
 }

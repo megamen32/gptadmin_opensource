@@ -68,17 +68,24 @@ type Config struct {
 	NonceTTL                 time.Duration
 	PreserveFileMetadata     bool
 	PreserveMetadataMaxFiles int
-	MCPConfig                string
-	PollInterval             time.Duration
-	QueueRetry               time.Duration
-	SpoolRetention           time.Duration
-	OutboxBackoffBase        time.Duration
-	OutboxBackoffCap         time.Duration
-	SSHHost                  string
-	SSHPort                  int
-	SSHUser                  string
-	SSHPassword              string
-	SSHKeyPath               string
+
+	// ShutdownGrace bounds how long a planned stop waits for already-running
+	// commands to finish before cancelling them (GPTADMIN_SHUTDOWN_GRACE_SECS;
+	// 0 keeps the legacy immediate-cancel behavior). The primary writer sets
+	// it so a socket-activated blue/green swap completes in-flight tasks
+	// instead of returning cancelled receipts to clients.
+	ShutdownGrace     time.Duration
+	MCPConfig         string
+	PollInterval      time.Duration
+	QueueRetry        time.Duration
+	SpoolRetention    time.Duration
+	OutboxBackoffBase time.Duration
+	OutboxBackoffCap  time.Duration
+	SSHHost           string
+	SSHPort           int
+	SSHUser           string
+	SSHPassword       string
+	SSHKeyPath        string
 }
 
 func FromEnv() Config {
@@ -132,7 +139,7 @@ func FromEnv() Config {
 	if sshKeyPath == "" {
 		sshKeyPath = os.Getenv("SSH_KEY")
 	}
-	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), HubDNSServer: env("SHELLMCP_HUB_DNS_SERVER", ""), HubResolveTo: env("SHELLMCP_HUB_RESOLVE_TO", ""), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: queueEnabled, QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, InspectRoots: inspectRoots, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, QueueRetry: queueRetry, SpoolRetention: spoolRetention, OutboxBackoffBase: outboxBase, OutboxBackoffCap: outboxCap, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath}
+	return Config{Addr: host + ":" + port, Token: env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "srv_secret")), LogLimit: limit, ExecTimeout: timeout, SpillDir: spill, Name: name, BaseURL: baseURL, HubURL: strings.TrimRight(env("HUB_URL", ""), "/"), HubDNSServer: env("SHELLMCP_HUB_DNS_SERVER", ""), HubResolveTo: env("SHELLMCP_HUB_RESOLVE_TO", ""), IdentityDir: env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), HeartbeatEnabled: truthy(env("SHELL_HEARTBEAT", env("SHELLMCP_HEARTBEAT", "0"))), HeartbeatInterval: normalizeHeartbeatInterval(hbInt), QueueEnabled: queueEnabled, QueueTimeout: qTimeout, Mode: mode, OutboxDir: outbox, DefaultUser: defaultUser, DefaultHome: defaultHome, DefaultCwd: defaultCwd, InspectRoots: inspectRoots, HubPublicKeyFile: env("HUB_PUBLIC_KEY_FILE", filepath.Join(env("SHELL_IDENTITY_DIR", env("SHELLMCP_IDENTITY_DIR", "/etc/gptadmin")), "hub_ed25519.pub")), HubPublicKey: env("HUB_PUBLIC_KEY", ""), AuditLog: auditLogPath, NonceTTL: nonceTTL, PreserveFileMetadata: preserve, PreserveMetadataMaxFiles: preserveMax, MCPConfig: mcpConfig, PollInterval: pollInterval, QueueRetry: queueRetry, SpoolRetention: spoolRetention, OutboxBackoffBase: outboxBase, OutboxBackoffCap: outboxCap, SSHHost: sshHost, SSHPort: sshPort, SSHUser: sshUser, SSHPassword: sshPassword, SSHKeyPath: sshKeyPath, ShutdownGrace: parseSecondsEnvWithDefault("GPTADMIN_SHUTDOWN_GRACE_SECS", 0)}
 }
 
 func appendUniquePath(paths []string, value string) []string {
@@ -241,8 +248,10 @@ func normalizeTraceID(value string) string {
 }
 
 type Server struct {
-	displayHostname       string
-	transfers             binaryTransfers
+	displayHostname string
+	transfers       binaryTransfers
+	// The five Hub-updated queue/spool/backoff fields are guarded by
+	// callbackMu; all other configuration stays immutable after New.
 	cfg                   Config
 	jobs                  *job.Manager
 	identity              *security.Identity
@@ -286,6 +295,9 @@ type Server struct {
 }
 
 func New(cfg Config) *Server {
+	if cfg.AuditLog == "" && cfg.IdentityDir != "" {
+		cfg.AuditLog = filepath.Join(cfg.IdentityDir, "execution-audit.jsonl")
+	}
 	displayHostname := cfg.Name
 	if displayHostname == "" {
 		displayHostname, _ = os.Hostname()
@@ -329,6 +341,9 @@ func New(cfg Config) *Server {
 	}
 	if auditErr != nil {
 		log.Printf("audit logger disabled: %v", auditErr)
+	}
+	if cfg.AuditLog != "" {
+		auditLog.Preserve()
 	}
 
 	nonces := security.NewNonceCache(cfg.NonceTTL)
@@ -733,6 +748,11 @@ func (s *Server) runShell(ctx context.Context, req shell.Request) shell.Result {
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
 	if s.sshClient == nil {
+		var err error
+		req, err = s.prepareExecutionAudit(ctx, req)
+		if err != nil {
+			return shell.Result{ReturnCode: -1, Error: err.Error()}
+		}
 		return shell.Run(ctx, req, s.cfg.LogLimit)
 	}
 	timeout := time.Duration(req.Timeout) * time.Second
@@ -760,6 +780,11 @@ func (s *Server) runShellStream(ctx context.Context, req shell.Request, emit fun
 		return shell.Result{ReturnCode: -1, Error: err.Error()}
 	}
 	if s.sshClient == nil {
+		var err error
+		req, err = s.prepareExecutionAudit(ctx, req)
+		if err != nil {
+			return shell.Result{ReturnCode: -1, Error: err.Error()}
+		}
 		return shell.RunLive(ctx, req, s.cfg.LogLimit, emit)
 	}
 	timeout := time.Duration(req.Timeout) * time.Second
@@ -826,14 +851,22 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cmdField := firstToken(req.Cmd)
+	cmdField := safeExecutionLabel(req)
+	commandHash := executionCommandHash(req)
 	startFields := map[string]any{
-		"cmd":        cmdField,
-		"user":       req.RunAsUser,
-		"background": req.Background,
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
 	}
 	s.auditLog.Event(audit.ExecStart, startFields)
 	if req.Background {
+		var auditErr error
+		req, auditErr = s.prepareExecutionAudit(r.Context(), req)
+		if auditErr != nil {
+			writeJSON(w, 500, map[string]any{"error": auditErr.Error()})
+			return
+		}
 		j := s.jobs.Start(req)
 		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID})
 		return
@@ -864,16 +897,17 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		status = 500
 	}
 	endFields := map[string]any{
-		"cmd":          cmdField,
-		"user":         req.RunAsUser,
-		"background":   false,
-		"return_code":  res.ReturnCode,
-		"elapsed_ms":   elapsedMS,
-		"restored":     restored,
-		"failed_files": failed,
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     false,
+		"return_code":    res.ReturnCode,
+		"elapsed_ms":     elapsedMS,
+		"restored":       restored,
+		"failed_files":   failed,
 	}
 	if res.Error != "" {
-		endFields["error"] = res.Error
+		endFields["error"] = "execution_error"
 	}
 	s.auditLog.Event(audit.ExecEnd, endFields)
 	writeJSON(w, status, res)
@@ -896,6 +930,12 @@ func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
 	req.TraceID = normalizeTraceID(req.TraceID)
 	jobID := body.JobID
 	if jobID == "" {
+		var auditErr error
+		req, auditErr = s.prepareExecutionAudit(r.Context(), req)
+		if auditErr != nil {
+			writeJSON(w, 500, map[string]any{"error": auditErr.Error()})
+			return
+		}
 		j := s.jobs.Start(req)
 		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID, "delivery": "local_job"})
 		return
@@ -915,12 +955,14 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cmdField := firstToken(req.Cmd)
+	cmdField := safeExecutionLabel(req)
+	commandHash := executionCommandHash(req)
 	s.auditLog.Event(audit.ExecStart, map[string]any{
-		"cmd":        cmdField,
-		"user":       req.RunAsUser,
-		"background": req.Background,
-		"transport":  "ndjson",
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"transport":      "ndjson",
 	})
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
@@ -939,15 +981,16 @@ func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	res := s.runShellStream(r.Context(), req, emit)
 	elapsedMS := time.Since(startTime).Milliseconds()
 	endFields := map[string]any{
-		"cmd":         cmdField,
-		"user":        req.RunAsUser,
-		"background":  req.Background,
-		"return_code": res.ReturnCode,
-		"elapsed_ms":  elapsedMS,
-		"transport":   "ndjson",
+		"cmd":            cmdField,
+		"command_sha256": commandHash,
+		"user":           req.RunAsUser,
+		"background":     req.Background,
+		"return_code":    res.ReturnCode,
+		"elapsed_ms":     elapsedMS,
+		"transport":      "ndjson",
 	}
 	if res.Error != "" {
-		endFields["error"] = res.Error
+		endFields["error"] = "execution_error"
 	}
 	s.auditLog.Event(audit.ExecEnd, endFields)
 }
@@ -1263,7 +1306,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 			continue
 		}
 		pollStarted := time.Now()
-		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.cfg.QueueTimeout)
+		q, ok, err := s.hub.PollQueue(ctx, s.newBeat(), s.queueTimeout())
 		s.queuePollCount.Add(1)
 		s.queuePollLatencyMS.Store(time.Since(pollStarted).Milliseconds())
 		if err != nil {
@@ -1296,11 +1339,11 @@ func (s *Server) queueLoop(ctx context.Context) {
 				continue
 			}
 			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				s.startCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
+				s.startCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL, q.ExecutionOrigin)
 			} else {
 				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 				s.applyDefaults(&req)
-				s.startCallbackJob(q.ID, req, true)
+				s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin)
 			}
 		}
 		s.endQueuePoll()
@@ -1337,11 +1380,12 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	return req
 }
 
-func (s *Server) startCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) bool {
+func (s *Server) startCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL, origin ...map[string]any) bool {
 	runCtx, finish, ok := s.beginCallback(jobID, true)
 	if !ok {
 		return false
 	}
+	runCtx = withExecutionTask(runCtx, jobID, traceID, origin...)
 	go func() { defer finish(); s.runCallbackTool(runCtx, jobID, traceID, traceParent, name, args, queueACL) }()
 	return true
 }
@@ -1417,17 +1461,19 @@ func (s *Server) cancelCallbackJob(jobID string) {
 	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "status": "cancel_requested"})
 }
 
-func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool) bool {
+func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool, origin ...map[string]any) bool {
 	runCtx, finish, ok := s.beginCallback(jobID, acceptedPoll)
 	if !ok {
 		return false
 	}
+	runCtx = withExecutionTask(runCtx, jobID, req.TraceID, origin...)
 	go func() { defer finish(); s.runCallbackJob(runCtx, jobID, req) }()
 	return true
 }
 
 func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.Request) {
 	req.TraceID = normalizeTraceID(req.TraceID)
+	runCtx = withExecutionTask(runCtx, jobID, req.TraceID)
 	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
 	res := s.runShell(runCtx, req)
 	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})
@@ -1446,14 +1492,24 @@ func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.
 // Outbox retry tuning. Mirrors the Python shellmcp exponential-backoff
 // hint so a flapping hub cannot cause a tight retry loop.
 
+func (s *Server) queueTimeout() int {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	return s.cfg.QueueTimeout
+}
+
 func (s *Server) queueRetry() time.Duration {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
 	if s.cfg.QueueRetry > 0 {
 		return s.cfg.QueueRetry
 	}
 	return 5 * time.Second
 }
 func (s *Server) computeOutboxBackoff(attempts int) time.Duration {
+	s.callbackMu.Lock()
 	base, cap := s.cfg.OutboxBackoffBase, s.cfg.OutboxBackoffCap
+	s.callbackMu.Unlock()
 	if base <= 0 {
 		base = 5 * time.Second
 	}
@@ -1466,6 +1522,9 @@ func (s *Server) applyHubRuntimeSettings(v map[string]any) {
 	if len(v) == 0 {
 		return
 	}
+	// Publish one coherent update. Reuse the executor's short state lock,
+	// releasing it before cleanup, self-repair or any network operation.
+	s.callbackMu.Lock()
 	if n := intAny(v["queue_long_poll_seconds"]); n >= 5 && n <= 120 {
 		s.cfg.QueueTimeout = n
 	}
@@ -1475,10 +1534,6 @@ func (s *Server) applyHubRuntimeSettings(v map[string]any) {
 	if n := intAny(v["spool_retention_hours"]); n >= 1 && n <= 2160 {
 		s.cfg.SpoolRetention = time.Duration(n) * time.Hour
 	}
-	if n := intAny(v["storage_max_mb"]); n >= 0 && n <= 10240 {
-		s.storageLimit.Store(int64(n) << 20)
-		_ = s.enforceStorage(nil)
-	}
 	if n := intAny(v["outbox_backoff_base_seconds"]); n >= 1 && n <= 600 {
 		s.cfg.OutboxBackoffBase = time.Duration(n) * time.Second
 	}
@@ -1487,6 +1542,11 @@ func (s *Server) applyHubRuntimeSettings(v map[string]any) {
 	}
 	if s.cfg.OutboxBackoffCap < s.cfg.OutboxBackoffBase {
 		s.cfg.OutboxBackoffCap = s.cfg.OutboxBackoffBase
+	}
+	s.callbackMu.Unlock()
+	if n := intAny(v["storage_max_mb"]); n >= 0 && n <= 10240 {
+		s.storageLimit.Store(int64(n) << 20)
+		_ = s.enforceStorage(nil)
 	}
 	if enabled, ok := v["self_repair_enabled"].(bool); ok {
 		s.selfRepairPolicySeen.Store(true)
