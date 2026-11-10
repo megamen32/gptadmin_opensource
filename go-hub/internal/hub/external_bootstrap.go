@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,8 +317,8 @@ func (s *Server) bootstrapDocuments(r *http.Request, profile AccessProfile) (Ins
 	return doc, workflow, err
 }
 
-// A configured version directory or active symlink remains explicit. A
-// configured versions root resolves the newest installed release each request.
+const bootstrapLHCName = "last-human-commit"
+
 func parseBootstrapVersion(name string) ([3]uint64, bool) {
 	var version [3]uint64
 	parts := strings.Split(name, ".")
@@ -333,49 +335,143 @@ func parseBootstrapVersion(name string) ([3]uint64, bool) {
 	return version, true
 }
 
-func latestBootstrapVersionDir(root string) (string, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", errors.New("configured LHC installation unavailable")
-	}
-	var best [3]uint64
-	bestName := ""
+type bootstrapVersionDir struct {
+	name    string
+	version [3]uint64
+}
+
+func bootstrapVersionDirs(entries []os.DirEntry) []bootstrapVersionDir {
+	var versions []bootstrapVersionDir
 	for _, entry := range entries {
-		// Ignore symlinks and unrelated directories inside the cache.
 		if !entry.IsDir() {
 			continue
 		}
-		version, valid := parseBootstrapVersion(entry.Name())
-		if !valid {
-			continue
+		if version, valid := parseBootstrapVersion(entry.Name()); valid {
+			versions = append(versions, bootstrapVersionDir{entry.Name(), version})
 		}
-		newer := bestName == ""
-		for i := range version {
-			if version[i] == best[i] {
-				continue
+	}
+	sort.SliceStable(versions, func(i, j int) bool {
+		return slices.Compare(versions[i].version[:], versions[j].version[:]) > 0
+	})
+	return versions
+}
+
+func bootstrapCodexHome(root string) (home, market string) {
+	marketPath := filepath.Dir(root)
+	cache := filepath.Dir(marketPath)
+	plugins := filepath.Dir(cache)
+	if filepath.Base(root) != bootstrapLHCName || filepath.Base(cache) != "cache" || filepath.Base(plugins) != "plugins" {
+		return "", ""
+	}
+	return filepath.Dir(plugins), filepath.Base(marketPath)
+}
+
+// Open each real directory under the configured Codex home. The package
+// handle keeps manifest and document reads together across checkout renames.
+func openBootstrapDirs(root *os.Root, names ...string) *os.Root {
+	current := root
+	for _, name := range names {
+		info, err := current.Lstat(name)
+		var next *os.Root
+		if err == nil && info.IsDir() {
+			next, _ = current.OpenRoot(name)
+		}
+		if current != root {
+			current.Close()
+		}
+		if next == nil {
+			return nil
+		}
+		if opened, err := next.Stat("."); err != nil || !os.SameFile(info, opened) {
+			next.Close()
+			return nil
+		}
+		current = next
+	}
+	return current
+}
+
+func loadCodexBootstrapRelease(pkg *os.Root, installedVersion string) (bootstrapWorkflow, [3]uint64) {
+	manifestDir := openBootstrapDirs(pkg, ".codex-plugin")
+	if manifestDir == nil {
+		return bootstrapWorkflow{}, [3]uint64{}
+	}
+	defer manifestDir.Close()
+	manifest, err := readBootstrapText("plugin.json", manifestDir.Lstat, manifestDir.Open, 64*1024)
+	var meta struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err != nil || json.Unmarshal(manifest, &meta) != nil || meta.Name != bootstrapLHCName ||
+		(installedVersion != "" && installedVersion != meta.Version) {
+		return bootstrapWorkflow{}, [3]uint64{}
+	}
+	version, valid := parseBootstrapVersion(meta.Version)
+	if !valid {
+		return bootstrapWorkflow{}, [3]uint64{}
+	}
+	data, err := readBootstrapText("AGENTS.md", pkg.Lstat, pkg.Open, 256*1024)
+	if err != nil {
+		return bootstrapWorkflow{}, [3]uint64{}
+	}
+	path := filepath.Join(pkg.Name(), "AGENTS.md")
+	return makeBootstrapWorkflow(path, pkg.Name(), meta.Version, data), version
+}
+
+func loadCodexBootstrapWorkflow(home, market string) (bootstrapWorkflow, error) {
+	codex, err := os.OpenRoot(home)
+	if err != nil {
+		return bootstrapWorkflow{}, errors.New("configured LHC installation unavailable")
+	}
+	defer codex.Close()
+	var published bootstrapWorkflow
+	var publishedVersion [3]uint64
+	if pkg := openBootstrapDirs(codex, ".tmp", "marketplaces", market, "plugins", bootstrapLHCName); pkg != nil {
+		published, publishedVersion = loadCodexBootstrapRelease(pkg, "")
+		pkg.Close()
+	}
+	if cache := openBootstrapDirs(codex, "plugins", "cache", market, bootstrapLHCName); cache != nil {
+		defer cache.Close()
+		entries, _ := fs.ReadDir(cache.FS(), ".")
+		for _, candidate := range bootstrapVersionDirs(entries) {
+			if published.meta != nil && slices.Compare(candidate.version[:], publishedVersion[:]) < 0 {
+				break
 			}
-			newer = version[i] > best[i]
-			break
-		}
-		if newer {
-			best, bestName = version, entry.Name()
+			if pkg := openBootstrapDirs(cache, candidate.name); pkg != nil {
+				installed, _ := loadCodexBootstrapRelease(pkg, candidate.name)
+				pkg.Close()
+				if installed.meta != nil {
+					return installed, nil
+				}
+			}
 		}
 	}
-	if bestName == "" {
-		return "", errors.New("configured LHC installation unavailable")
+	if published.meta != nil {
+		return published, nil
 	}
-	return filepath.Join(root, bestName), nil
+	return bootstrapWorkflow{}, errors.New("no complete configured LHC release available")
 }
 
 func loadBootstrapWorkflow(root string) (bootstrapWorkflow, error) {
 	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
 		return bootstrapWorkflow{}, errors.New("active LHC installation is not configured")
 	}
-	// Legacy configuration referenced a literal package version. Resolve its
-	// parent instead, even if that version has been pruned by the updater.
-	// A named active symlink or AGENTS.md path remains an explicit pin.
-	if _, versioned := parseBootstrapVersion(filepath.Base(root)); versioned {
-		root = filepath.Dir(root)
+	// Recognize legacy version paths before resolving symlinks: the updater
+	// may already have pruned them. Nonversioned file and active pins stay explicit.
+	versionDir := root
+	if filepath.Base(root) == "AGENTS.md" {
+		versionDir = filepath.Dir(root)
+	}
+	_, versioned := parseBootstrapVersion(filepath.Base(versionDir))
+	if versioned {
+		root = filepath.Dir(versionDir)
+	}
+	if home, market := bootstrapCodexHome(root); home != "" {
+		// The exact native cache root is a versions directory, even with
+		// a stray AGENTS.md. A configured symlink is still explicit.
+		if info, _ := os.Lstat(filepath.Clean(root)); info == nil || info.IsDir() {
+			return loadCodexBootstrapWorkflow(home, market)
+		}
 	}
 	path, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -389,11 +485,13 @@ func loadBootstrapWorkflow(root string) (bootstrapWorkflow, error) {
 	packagePath := filepath.Dir(path)
 	if info.IsDir() {
 		if _, statErr := os.Stat(filepath.Join(path, "AGENTS.md")); errors.Is(statErr, os.ErrNotExist) {
-			// A versions root has no AGENTS.md. Do not cache its selection.
-			path, err = latestBootstrapVersionDir(path)
-			if err != nil {
-				return bootstrapWorkflow{}, err
+			// An ordinary versions root keeps its fail-closed newest-only policy.
+			entries, err := os.ReadDir(path)
+			versions := bootstrapVersionDirs(entries)
+			if err != nil || len(versions) == 0 {
+				return bootstrapWorkflow{}, errors.New("configured LHC installation unavailable")
 			}
+			path = filepath.Join(path, versions[0].name)
 		} else if statErr != nil {
 			return bootstrapWorkflow{}, errors.New("configured LHC instructions unavailable")
 		}
@@ -401,23 +499,36 @@ func loadBootstrapWorkflow(root string) (bootstrapWorkflow, error) {
 		version = filepath.Base(path)
 		path = filepath.Join(path, "AGENTS.md")
 	}
-	info, err = os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return bootstrapWorkflow{}, errors.New("configured LHC instructions must be a regular file")
-	}
-	f, err := os.Open(path)
+	data, err := readBootstrapText(path, os.Stat, os.Open, 256*1024)
 	if err != nil {
-		return bootstrapWorkflow{}, errors.New("configured LHC instructions unavailable")
+		return bootstrapWorkflow{}, err
+	}
+	return makeBootstrapWorkflow(path, packagePath, version, data), nil
+}
+
+func readBootstrapText(path string, stat func(string) (os.FileInfo, error), open func(string) (*os.File, error), limit int64) ([]byte, error) {
+	info, err := stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("configured LHC instructions must be a regular file")
+	}
+	f, err := open(path)
+	if err != nil {
+		return nil, errors.New("configured LHC instructions unavailable")
 	}
 	defer f.Close()
-	info, err = f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return bootstrapWorkflow{}, errors.New("configured LHC instructions must be a regular file")
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil, errors.New("configured LHC instructions unavailable")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, 256*1024+1))
-	if err != nil || len(data) == 0 || len(data) > 256*1024 || !utf8.Valid(data) {
-		return bootstrapWorkflow{}, errors.New("configured LHC instructions invalid or too large")
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > limit || !utf8.Valid(data) {
+		return nil, errors.New("configured LHC instructions invalid or too large")
 	}
+	return data, nil
+}
+
+func makeBootstrapWorkflow(path, packagePath, version string, data []byte) bootstrapWorkflow {
 	sha := sha256.Sum256(data)
-	return bootstrapWorkflow{text: fmt.Sprintf("Источник LHC: %s. Корень пакета: %s. Версия пакета: %s. SHA-256: %s.\n\n%s", path, packagePath, version, hex.EncodeToString(sha[:]), data), meta: map[string]any{"source_path": path, "package_path": packagePath, "version": version, "sha256": hex.EncodeToString(sha[:]), "bytes": len(data)}}, nil
+	hash := hex.EncodeToString(sha[:])
+	return bootstrapWorkflow{text: fmt.Sprintf("Источник LHC: %s. Корень пакета: %s. Версия пакета: %s. SHA-256: %s.\n\n%s", path, packagePath, version, hash, data), meta: map[string]any{"source_path": path, "package_path": packagePath, "version": version, "sha256": hash, "bytes": len(data)}}
 }

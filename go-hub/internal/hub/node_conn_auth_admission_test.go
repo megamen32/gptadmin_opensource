@@ -15,8 +15,10 @@ import (
 )
 
 // A forwarded call must not retain the writer's generation read lock while
-// the owner calls back to that writer for bearer admission. An intervening
-// snapshot writer makes the nested RLock wait behind the first request.
+// the owner calls back to that writer for bearer admission. Dispatchers
+// release the one-shot admission gate before executor, search or stream
+// waits, so a delegated bearer admission never queues behind the forwarded
+// request, only behind short readers.
 func TestNodeConnReleasesAuthAdmissionBeforeWriterCallback(t *testing.T) {
 	writer, member, token, _ := bearerAdmissionNodes(t)
 	if _, err := member.verifyJWT(token); err == nil {
@@ -117,6 +119,19 @@ func TestNodeConnReleasesAuthAdmissionBeforeWriterCallback(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
+		// The merged gate stays coherent-held through authentication and
+		// local fallback selection, and dispatchers release the one-shot
+		// gate before executor, search or stream waits: forwardOverNodeConn
+		// itself releases before the live-connection wait. Mirror that
+		// dispatch release here, then the request must no longer pin the
+		// admission: this is exactly the pin the old gate held for the
+		// whole request and stalled snapshot writers behind.
+		releaseAuthAdmission(r)
+		if !writer.authMu.TryLock() {
+			t.Error("forwarded request still pins the auth admission gate after the dispatch release")
+		} else {
+			writer.authMu.Unlock()
+		}
 		close(admitted)
 		select {
 		case <-dispatch:
@@ -142,15 +157,20 @@ func TestNodeConnReleasesAuthAdmissionBeforeWriterCallback(t *testing.T) {
 		t.Fatal("writer never admitted the original request")
 	}
 
+	// The gate no longer pins anything for the request lifetime, so a
+	// stand-in reader owns the RLock the old admission used to hold; the
+	// exclusive snapshot writer queues behind it exactly as it queued
+	// behind the request before the release fix.
+	writer.authMu.RLock()
 	snapshotDone = make(chan struct{})
 	go func() {
 		writer.authMu.Lock()
 		writer.authMu.Unlock()
 		close(snapshotDone)
 	}()
-	// The admitted handler still owns an RLock. TryRLock therefore fails
-	// only once the exclusive snapshot writer is pending, not because of
-	// a guessed scheduling delay. Yield so that writer can enter Lock.
+	// TryRLock fails only once the exclusive snapshot writer is pending,
+	// not because of a guessed scheduling delay. Yield so the writer can
+	// enter Lock.
 	for {
 		select {
 		case <-ctx.Done():
@@ -163,6 +183,10 @@ func TestNodeConnReleasesAuthAdmissionBeforeWriterCallback(t *testing.T) {
 		writer.authMu.RUnlock()
 		runtime.Gosched()
 	}
+	// The stand-in reader finishes while the forwarded request is still
+	// blocked on dispatch: a delegated bearer admission only ever waits
+	// for these short readers, never for the request itself.
+	writer.authMu.RUnlock()
 	close(dispatch)
 
 	select {
@@ -188,7 +212,7 @@ func TestNodeConnReleasesAuthAdmissionBeforeWriterCallback(t *testing.T) {
 	}
 }
 
-func TestNodeConnUnavailableKeepsAuthAdmissionForFallback(t *testing.T) {
+func TestNodeConnUnavailableDoesNotPinAuthAdmissionForFallback(t *testing.T) {
 	for _, closed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "missing", true: "closed"}[closed], func(t *testing.T) {
 			writer := nodeConnWriterNode(t, "writer-node")
@@ -198,13 +222,21 @@ func TestNodeConnUnavailableKeepsAuthAdmissionForFallback(t *testing.T) {
 				writer.nodeConns.put(conn)
 			}
 			handler := writer.authSnapshotGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Dispatchers release the one-shot admission gate before the
+				// live-connection wait; forwardOverNodeConn does that internally
+				// on the sent path, and the unavailable connection bails earlier,
+				// so mirror the dispatch release explicitly.
+				releaseAuthAdmission(r)
 				if writer.forwardOverNodeConn(w, r, "shell:member-a", "https://unreachable.invalid",
 					[]byte(`{}`), "/mcp-relay/call", false) {
 					t.Error("unavailable live connection consumed the fallback")
 				}
-				if writer.authMu.TryLock() {
+				// An unsent fallback must not re-pin the released gate for the
+				// response lifetime.
+				if !writer.authMu.TryLock() {
+					t.Error("unsent fallback re-pinned the auth admission gate")
+				} else {
 					writer.authMu.Unlock()
-					t.Error("unsent fallback lost the auth admission gate")
 				}
 				w.WriteHeader(http.StatusNoContent)
 			}))

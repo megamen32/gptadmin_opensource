@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -272,6 +273,10 @@ func TestBootstrapWorkflowUsesConfiguredActivePackage(t *testing.T) {
 	if workflow.meta["version"] != "1.17.1" || workflow.meta["sha256"] != hex.EncodeToString(wantHash[:]) || !strings.Contains(workflow.text, "full 1.17.1") || strings.Contains(workflow.text, "9.99.99") {
 		t.Fatalf("wrong active package: %#v", workflow)
 	}
+	filePin, err := loadBootstrapWorkflow(filepath.Join(active, "AGENTS.md"))
+	if err != nil || filePin.meta["version"] != "configured" || filePin.meta["sha256"] != hex.EncodeToString(wantHash[:]) {
+		t.Fatalf("the explicit file under active did not stay pinned: %#v, %v", filePin.meta, err)
+	}
 	if err := os.Remove(active); err != nil {
 		t.Fatal(err)
 	}
@@ -379,6 +384,159 @@ func TestBootstrapConfiguredVersionPathSurvivesPrune(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func writeBootstrapPackage(t *testing.T, dir, name, version, doc string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".codex-plugin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(map[string]string{"name": name, "version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".codex-plugin", "plugin.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if doc != "" {
+		if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(doc), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func checkBootstrapRelease(t *testing.T, s *Server, grant, dir, version, doc string, originalConfig []byte) {
+	t.Helper()
+	for _, suffix := range []string{"", "/instructions.md"} {
+		w := bootstrapRequest(t, s, "GET", grant+suffix, "", nil)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), doc) {
+			t.Errorf("instructions %q for LHC %s: HTTP %d or wrong document", suffix, version, w.Code)
+		}
+	}
+	manifest := bootstrapRequest(t, s, "GET", grant+"/manifest.json", "", nil)
+	client := bootstrapRequest(t, s, "GET", grant+"/client.py", "", nil)
+	config := bootstrapRequest(t, s, "GET", grant+"/config.json", "", nil)
+	if config.Code != http.StatusOK || !bytes.Equal(config.Body.Bytes(), originalConfig) {
+		t.Errorf("configuration for same grant with LHC %s: HTTP %d or changed credential", version, config.Code)
+	}
+	if client.Code != http.StatusOK || client.Body.Len() == 0 || !strings.Contains(client.Header().Get("Content-Disposition"), "gptadmin.py") {
+		t.Errorf("client for LHC %s: HTTP %d or missing download", version, client.Code)
+	}
+	var got struct {
+		ClientSHA   string `json:"client_sha256"`
+		ClientBytes int    `json:"client_bytes"`
+		LHC         struct {
+			Version string `json:"version"`
+			Source  string `json:"source_path"`
+			Package string `json:"package_path"`
+			SHA     string `json:"sha256"`
+			Bytes   int    `json:"bytes"`
+		} `json:"lhc"`
+	}
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("manifest for LHC %s: HTTP %d", version, manifest.Code)
+	}
+	if err := json.Unmarshal(manifest.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	docHash, clientHash := sha256.Sum256([]byte(doc)), sha256.Sum256(client.Body.Bytes())
+	if got.LHC.Version != version || got.LHC.Source != filepath.Join(dir, "AGENTS.md") || got.LHC.Package != dir ||
+		got.LHC.SHA != hex.EncodeToString(docHash[:]) || got.LHC.Bytes != len(doc) {
+		t.Fatalf("manifest LHC does not describe %s at %s: %+v", version, dir, got.LHC)
+	}
+	if got.ClientSHA != hex.EncodeToString(clientHash[:]) || got.ClientBytes != client.Body.Len() {
+		t.Fatal("manifest does not describe the downloaded client")
+	}
+}
+
+func TestExternalBootstrapLegacyFileTracksInstalledLHC(t *testing.T) {
+	s, _ := bootstrapTestServer(t)
+	root := filepath.Join(t.TempDir(), ".codex", "plugins", "cache", "megamen32-plugins", "last-human-commit")
+	old := filepath.Join(root, "1.18.1")
+	writeBootstrapPackage(t, old, "last-human-commit", "1.18.1", bootstrapLHCFixture)
+	s.cfg.BootstrapLHCPath = filepath.Join(old, "AGENTS.md")
+	_, grant, _ := bootstrapCreate(t, s)
+	config := bootstrapRequest(t, s, "GET", grant+"/config.json", "", nil)
+	if config.Code != http.StatusOK {
+		t.Fatalf("initial config: HTTP %d", config.Code)
+	}
+
+	installed := filepath.Join(root, "1.22.1")
+	doc := bootstrapLHCFixture + "\nCurrent 1.22.1 release.\n"
+	writeBootstrapPackage(t, installed, "last-human-commit", "1.22.1", doc)
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	checkBootstrapRelease(t, s, grant, installed, "1.22.1", doc, config.Body.Bytes())
+
+	installed = filepath.Join(root, "1.22.10")
+	doc = bootstrapLHCFixture + "\nCurrent 1.22.10 release.\n"
+	writeBootstrapPackage(t, installed, "last-human-commit", "1.22.10", doc)
+	checkBootstrapRelease(t, s, grant, installed, "1.22.10", doc, config.Body.Bytes())
+}
+
+func TestExternalBootstrapFollowsNativeCodexMarketplace(t *testing.T) {
+	s, _ := bootstrapTestServer(t)
+	home := filepath.Join(t.TempDir(), ".codex")
+	cache := filepath.Join(home, "plugins", "cache", "megamen32-plugins", "last-human-commit")
+	marketplaces := filepath.Join(home, ".tmp", "marketplaces")
+	marketplace := filepath.Join(marketplaces, "megamen32-plugins", "plugins", "last-human-commit")
+	old := filepath.Join(cache, "1.22.1")
+	oldDoc := bootstrapLHCFixture + "\nPublished 1.22.1 release.\n"
+	writeBootstrapPackage(t, old, "last-human-commit", "1.22.1", oldDoc)
+	writeBootstrapPackage(t, marketplace, "last-human-commit", "1.22.1", oldDoc)
+	s.cfg.BootstrapLHCPath = cache
+	_, grant, _ := bootstrapCreate(t, s)
+	config := bootstrapRequest(t, s, "GET", grant+"/config.json", "", nil)
+	if config.Code != http.StatusOK {
+		t.Fatalf("initial config: HTTP %d", config.Code)
+	}
+
+	if err := os.RemoveAll(cache); err != nil {
+		t.Fatal(err)
+	}
+	checkBootstrapRelease(t, s, grant, marketplace, "1.22.1", oldDoc, config.Body.Bytes())
+	staged := filepath.Join(cache, "1.24.0")
+	writeBootstrapPackage(t, staged, "last-human-commit", "1.24.0", "")
+	if err := os.WriteFile(filepath.Join(cache, "AGENTS.md"), []byte("stray file at the versions root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checkBootstrapRelease(t, s, grant, marketplace, "1.22.1", oldDoc, config.Body.Bytes())
+
+	// The marketplace checkout is replaced independently of the runtime cache.
+	newDoc := bootstrapLHCFixture + "\nPublished 1.23.0 release.\n"
+	next := filepath.Join(t.TempDir(), "last-human-commit")
+	writeBootstrapPackage(t, next, "last-human-commit", "1.23.0", newDoc)
+	if err := os.Rename(marketplace, filepath.Join(t.TempDir(), "previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, marketplace); err != nil {
+		t.Fatal(err)
+	}
+	checkBootstrapRelease(t, s, grant, marketplace, "1.23.0", newDoc, config.Body.Bytes())
+
+	stagedDoc := bootstrapLHCFixture + "\nInstalled 1.24.0 release.\n"
+	writeBootstrapPackage(t, staged, "last-human-commit", "1.24.0", stagedDoc)
+	checkBootstrapRelease(t, s, grant, staged, "1.24.0", stagedDoc, config.Body.Bytes())
+
+	writeBootstrapPackage(t, marketplace, "another-plugin", "9.0.0", "wrong plugin")
+	otherMarket := filepath.Join(marketplaces, "other-market", "plugins", "last-human-commit")
+	writeBootstrapPackage(t, otherMarket, "last-human-commit", "9.0.0", "wrong marketplace")
+	checkBootstrapRelease(t, s, grant, staged, "1.24.0", stagedDoc, config.Body.Bytes())
+	if err := os.RemoveAll(cache); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "/manifest.json", "/client.py", "/config.json"} {
+		w := bootstrapRequest(t, s, "GET", grant+suffix, "", nil)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s accepted an unrelated package: HTTP %d", suffix, w.Code)
+		}
+	}
+	writeBootstrapPackage(t, marketplace, "last-human-commit", "1.23.0", newDoc)
+	s.cfg.BootstrapLHCPath = filepath.Join(home, "other-plugins", "cache", "megamen32-plugins", "last-human-commit")
+	if w := bootstrapRequest(t, s, "GET", grant+"/manifest.json", "", nil); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("a lookalike cache path enabled marketplace discovery: HTTP %d", w.Code)
 	}
 }
 

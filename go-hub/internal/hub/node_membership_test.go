@@ -22,6 +22,21 @@ func membershipWriterNode(t *testing.T, name string) *Server {
 	dir := t.TempDir()
 	t.Setenv("GPTADMIN_AUTH_MODE", "writer")
 	t.Setenv("GPTADMIN_CONFIG_DIR", dir)
+	// FromEnv inherits the operator environment: PtyMcp shells run as hub
+	// children, so `go test` launched from them sees production values. A
+	// leaked GPTADMIN_NODE_PUBLIC_URL makes member heartbeats advertise the
+	// hub origin, the origin-change guard rejects the 127.0.0.1 fixture
+	// endpoints (403 "member origin change requires owner enrollment") and
+	// every membership/bearer round-trip test cascades. The operator env also
+	// carries GPTADMIN_RELAX_AUTH_CHECKS=1, which flips the bearer profile to
+	// `custom` (no expiry/issuer/kid checks) and lets fixtures admit expired
+	// writer bearers. Neutralize both families to stay hermetic on the hub
+	// host; env() treats set-empty as unset, restoring defaults.
+	t.Setenv("GPTADMIN_NODE_PUBLIC_URL", "")
+	t.Setenv("PUBLIC_ORIGIN", "")
+	t.Setenv("GPTADMIN_LEGACY_PUBLIC_ORIGINS", "")
+	t.Setenv("GPTADMIN_RELAX_AUTH_CHECKS", "")
+	t.Setenv("GPTADMIN_SECURITY_MODE", "")
 	cfg := FromEnv()
 	cfg.CtlToken = "fixture-owner"
 	cfg.OAuthClientSecret = "fixture-signing"
@@ -52,6 +67,18 @@ func membershipMemberNode(t *testing.T, name, writerURL, writerID string) (*Serv
 	}
 	t.Setenv("GPTADMIN_AUTH_MODE", "reader")
 	t.Setenv("GPTADMIN_CONFIG_DIR", dir)
+	// FromEnv inherits the operator environment: PtyMcp shells run as hub
+	// children, so `go test` launched from them sees production values. A
+	// leaked GPTADMIN_NODE_PUBLIC_URL makes member heartbeats advertise the
+	// hub origin, the origin-change guard rejects the 127.0.0.1 fixture
+	// endpoints (403 "member origin change requires owner enrollment") and
+	// every membership/bearer round-trip test cascades. Neutralize the
+	// advertised-origin family to keep fixtures hermetic on the hub host.
+	t.Setenv("GPTADMIN_NODE_PUBLIC_URL", "")
+	t.Setenv("PUBLIC_ORIGIN", "")
+	t.Setenv("GPTADMIN_LEGACY_PUBLIC_ORIGINS", "")
+	t.Setenv("GPTADMIN_RELAX_AUTH_CHECKS", "")
+	t.Setenv("GPTADMIN_SECURITY_MODE", "")
 	cfg := FromEnv()
 	cfg.NodeIdentityFile = filepath.Join(dir, "node-identity.json")
 	cfg.CtlToken = "member-owner"
@@ -360,6 +387,12 @@ func TestMeshSummaryModes(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GPTADMIN_AUTH_MODE", "reader")
 	t.Setenv("GPTADMIN_CONFIG_DIR", dir)
+	// Hermetic against operator env (PtyMcp shells inherit hub env vars).
+	t.Setenv("GPTADMIN_NODE_PUBLIC_URL", "")
+	t.Setenv("PUBLIC_ORIGIN", "")
+	t.Setenv("GPTADMIN_LEGACY_PUBLIC_ORIGINS", "")
+	t.Setenv("GPTADMIN_RELAX_AUTH_CHECKS", "")
+	t.Setenv("GPTADMIN_SECURITY_MODE", "")
 	cfg := FromEnv()
 	cfg.NodePeersJSON = `{"shell:nodeB":"https://node-b.example"}`
 	cfg.CtlToken = "standalone-owner"
