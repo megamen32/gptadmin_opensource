@@ -4717,11 +4717,14 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 		member := Agent{AgentID: id, Name: "Shell: " + strings.TrimPrefix(id, "shell:"),
 			Kind: "virtual_shell", Transport: "node", Status: "online", LastSeen: nowFloat(),
 			Capabilities: []string{"shell", "system", "tasks", "logs"},
-			Meta:         map[string]any{"server_id": route.LocalID, "fingerprint": route.LocalFingerprint, "membership_transport": "authenticated_node_lease"}}
+			Meta:         map[string]any{"approved": true, "server_id": route.LocalID, "fingerprint": route.LocalFingerprint, "membership_transport": "authenticated_node_lease"}}
 		for key, value := range s.membershipRouteMeta[id] {
 			member.Meta[key] = value
 		}
 		agents = append(agents, s.withExposeMetaLocked(member, r))
+		if route.CatalogFresh && firstString(member.Meta, "membership_catalog_status") == "complete" {
+			parents = append(parents, member)
+		}
 		if supportsPairedFileTarget(member) {
 			agents = append(agents, s.withExposeMetaLocked(fileAgentForShell(member), r))
 		}
@@ -4731,12 +4734,17 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 		usedSlugs[exposedAgentSlug(a)] = true
 	}
 	childReferenceCounts := map[string]int{}
+	childLiveReferenceCounts := map[string]int{}
 	for _, parent := range parents {
 		if !strings.HasPrefix(parent.AgentID, "shell:") {
 			continue
 		}
 		for _, child := range childMCPAgents(parent) {
-			childReferenceCounts[agentSlug(firstString(child.Meta, "child_ref"))]++
+			ref := agentSlug(firstString(child.Meta, "child_ref"))
+			childReferenceCounts[ref]++
+			if child.Status == "online" {
+				childLiveReferenceCounts[ref]++
+			}
 		}
 	}
 	for _, parent := range parents {
@@ -4752,7 +4760,12 @@ func (s *Server) publicAgentsLocked(r *http.Request) []Agent {
 			if slug == "" {
 				continue
 			}
-			if childReferenceCounts[slug] > 1 || usedSlugs[slug] {
+			// When a stale legacy parent and a freshly enrolled Node report
+			// the same child ref, reserve the bare slug for the sole live
+			// child. The old qualified URL remains readable as a stale
+			// diagnostic, while the configured public URL reaches the live Node.
+			preferBareLive := child.Status == "online" && childLiveReferenceCounts[slug] == 1 && !usedSlugs[slug]
+			if !preferBareLive && (childReferenceCounts[slug] > 1 || usedSlugs[slug]) {
 				slug = agentSlug(parent.AgentID) + "-" + slug
 			}
 			if usedSlugs[slug] {

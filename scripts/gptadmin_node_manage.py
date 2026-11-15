@@ -1405,19 +1405,29 @@ Restart=on-failure
 RestartSec=3
 # Measured Node fleet budget: ~10-40 MiB working set, one CPU, no swap.
 # The cgroup holds the Node process together with its enrolled MCP readers
-# (codex app-server ~150-170 MiB RSS) and any child a queued command spawns,
-# so the budget must cover the whole unit, not the Go process alone.
+# and any child a queued command spawns, so the budget must cover the whole
+# unit, not the Go process alone.
 # Fleet incident inc_328f10cc837045a483589e03f11ca681: with MemoryHigh=128M
 # the unit went over the soft limit, the kernel reclaimed under the Go runtime,
 # its threads parked in D on mem_cgroup_handle_over_high and the peer endpoints
 # stopped answering HTTP (curl 28) although TCP was still accepted.
+# Fleet incident inc_5c970f384c434be694086fee29c66087: the profile-scoped
+# Chrome bridge MCP (origin/main e1a25541) added several Chrome processes
+# (~100-250 MiB RSS each) next to the codex app-server reader, so the real
+# working set of the unit grew to ~850 MiB while MemoryHigh was still 768M.
+# The same throttle parked the Node threads in D on mem_cgroup_handle_over_high
+# again: /healthz answered only after ~4s and / never answered, which made the
+# peer endpoint quorum88-node.bezrabotnyi.com fail with curl 28 on every route.
 # GOMEMLIMIT must stay clearly below MemoryHigh, otherwise Go keeps growing
 # the heap into the cgroup throttle instead of collecting in time.
-MemoryHigh=768M
-MemoryMax=1536M
+# MemoryHigh is sized for the measured reader fleet (Node + codex app-server +
+# Chrome bridge sessions) with headroom for growth; MemoryMax remains the
+# hard limit for the entire service.
+MemoryHigh=3072M
+MemoryMax=6144M
 MemorySwapMax=0
 CPUQuota=100%
-TasksMax=512
+TasksMax=1024
 IOWeight=10
 Environment=GOMAXPROCS=1
 # Go's soft target leaves room below the cgroup soft limit for non-Go memory

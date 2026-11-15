@@ -26,7 +26,9 @@ PAYLOAD = ('cli.py', 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_p
 DARWIN_PAYLOAD = (*PAYLOAD, 'scripts/gptadmin_node_macos_manage.py',
                   'scripts/gptadmin_node_macos_autoupdate.py')
 SHELLMCP_MAIN = './cmd/shellmcp-go'
+BRIDGE_MAIN = './cmd/gptadmin-mcp-bridge'
 SHELLMCP_SOURCE = 'go-shellmcp'
+BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
 PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-relay02.service'
 PROXY_ROUTE_UNIT_PACKAGE_PATH = 'systemd/gptadmin-proxy-route-relay02.service'
 
@@ -182,6 +184,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
         binary = stage / 'bin' / 'gptadmin-node'
         binary.parent.mkdir()
         shellmcp_binary = stage / 'bin' / 'shellmcp'
+        bridge_binary = stage / BRIDGE_PACKAGE_FILE
         gotmp = stage / 'go-tmp'
         gotmp.mkdir()
         flags = '-s -w'
@@ -196,9 +199,15 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
         verify_go_binary_metadata(binary,
                                   command_path='github.com/megamen32/gptadmin/go-hub/cmd/gptadmin-node',
                                   goos=platform, goarch=arch)
+        subprocess.run(['go', 'build', '-buildvcs=false', '-trimpath', '-ldflags', flags,
+                        '-o', str(bridge_binary), BRIDGE_MAIN],
+                       cwd=ROOT / SHELLMCP_SOURCE, env=env, check=True)
+        verify_go_binary_metadata(bridge_binary,
+                                  command_path='github.com/megamen32/gptadmin/go-shellmcp/cmd/gptadmin-mcp-bridge',
+                                  goos=platform, goarch=arch)
         if platform == 'linux' and arch == native_arch():
             probe_node_binary(binary, commit=commit, version=version)
-        files = {'bin/gptadmin-node': binary}
+        files = {'bin/gptadmin-node': binary, BRIDGE_PACKAGE_FILE: bridge_binary}
         if platform == 'linux':
             subprocess.run(['go', 'build', '-buildvcs=false', '-trimpath', '-ldflags', flags,
                             '-o', str(shellmcp_binary), SHELLMCP_MAIN],
@@ -237,7 +246,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
                 info = tar.gettarinfo(str(path), arcname=name)
                 info.uid = info.gid = 0
                 info.uname = info.gname = ''
-                info.mode = 0o755 if name in ('bin/gptadmin-node', 'bin/shellmcp') else 0o644
+                info.mode = 0o755 if name in ('bin/gptadmin-node', 'bin/shellmcp', BRIDGE_PACKAGE_FILE) else 0o644
                 with path.open('rb') as stream:
                     tar.addfile(info, stream)
         # Output is constrained to the project .tmp tree, on the same filesystem

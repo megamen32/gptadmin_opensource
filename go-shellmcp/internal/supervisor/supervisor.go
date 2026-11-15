@@ -53,6 +53,11 @@ type Agent struct {
 	// Transport selects how the child MCP is reached. Local processes use
 	// "stdio"; remote servers use "streamable-http" or "sse".
 	Transport string `json:"transport,omitempty"`
+	// ProtocolVersion selects the child stdio wire contract. Empty and
+	// "legacy" preserve initialize/initialized behavior; "2026-07-28" uses
+	// server/discover and request-scoped MCP metadata. Remote transports
+	// negotiate their protocol independently.
+	ProtocolVersion string `json:"protocol_version,omitempty"`
 	// ConnectionMode permits audited stateless sharing; empty defaults to session isolation.
 	ConnectionMode string `json:"connection_mode,omitempty"`
 	// OwnerProfileID fences a personal upstream credential to one verified Hub
@@ -279,6 +284,7 @@ func normalizeAgent(agent Agent) Agent {
 		agent.Name = agent.Ref
 	}
 	agent.Transport = strings.ToLower(strings.TrimSpace(agent.Transport))
+	agent.ProtocolVersion = strings.TrimSpace(agent.ProtocolVersion)
 	if agent.Transport == "" {
 		agent.Transport = transportFor(agent.Command, agent.URL)
 	}
@@ -301,6 +307,9 @@ func validateAgent(agent Agent) error {
 	case "stdio":
 		if strings.TrimSpace(agent.Command) == "" {
 			return errors.New("supervisor: stdio agent command is required")
+		}
+		if agent.ProtocolVersion != "" && agent.ProtocolVersion != "legacy" && agent.ProtocolVersion != "2026-07-28" {
+			return fmt.Errorf("supervisor: unsupported stdio protocol version %q", agent.ProtocolVersion)
 		}
 	case "streamable-http", "sse":
 		if strings.TrimSpace(agent.URL) == "" {

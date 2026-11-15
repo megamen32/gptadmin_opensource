@@ -16,7 +16,10 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 )
 
-const protocolVersion = "2025-03-26"
+const (
+	protocolVersion       = "2025-03-26"
+	modernProtocolVersion = "2026-07-28"
+)
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -70,21 +73,23 @@ type RuntimeStatus struct {
 }
 
 type stdioClient struct {
-	grouped       bool
-	terminateOnce sync.Once
-	terminationMu sync.Mutex
-	mu            sync.Mutex
-	stateMu       sync.Mutex
-	cmd           *exec.Cmd
-	stdin         io.WriteCloser
-	enc           *json.Encoder
-	dec           *json.Decoder
-	stderr        boundedBuffer
-	nextID        int64
-	startedAt     time.Time
-	exitedAt      time.Time
-	exitCode      int
-	done          chan struct{}
+	grouped          bool
+	terminateOnce    sync.Once
+	terminationMu    sync.Mutex
+	mu               sync.Mutex
+	stateMu          sync.Mutex
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	enc              *json.Encoder
+	dec              *json.Decoder
+	stderr           boundedBuffer
+	nextID           int64
+	startedAt        time.Time
+	exitedAt         time.Time
+	exitCode         int
+	initializeResult map[string]any
+	modern           bool
+	done             chan struct{}
 }
 
 func New() *Client {
@@ -268,6 +273,37 @@ func (c *Client) CallTool(ctx context.Context, agent supervisor.Agent, name stri
 	return c.session(ctx, agent, "tools/call", map[string]any{"name": name, "arguments": arguments})
 }
 
+// Request forwards one JSON-RPC request through the configured child transport.
+func (c *Client) Request(ctx context.Context, agent supervisor.Agent, method string, params any) (map[string]any, error) {
+	if strings.TrimSpace(method) == "" {
+		return nil, errors.New("mcp child: method is required")
+	}
+	return c.session(ctx, agent, method, params)
+}
+
+// Notify sends a JSON-RPC notification to a local stdio child without waiting.
+func (c *Client) Notify(ctx context.Context, agent supervisor.Agent, method string, params any) error {
+	if agent.Transport != "stdio" {
+		return fmt.Errorf("mcp child %q notifications only support stdio transport", agent.Ref)
+	}
+	session, err := c.getStdio(ctx, agent)
+	if err != nil {
+		return err
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	requestParams := params
+	if session.modern {
+		requestParams = modernRequestParams(params)
+	}
+	return session.enc.Encode(rpcRequest{JSONRPC: "2.0", Method: method, Params: requestParams})
+}
+
 func (c *Client) session(ctx context.Context, agent supervisor.Agent, method string, params any) (map[string]any, error) {
 	if !agent.Enabled {
 		return nil, fmt.Errorf("mcp child %q is disabled", agent.Ref)
@@ -294,8 +330,17 @@ func (c *Client) stdioSession(ctx context.Context, agent supervisor.Agent, metho
 		return nil, ctx.Err()
 	default:
 	}
+	requestParams := params
+	if session.modern {
+		requestParams = modernRequestParams(params)
+	}
 	session.nextID++
 	id := session.nextID
+	if method == "initialize" && session.initializeResult != nil {
+		result := cloneMap(session.initializeResult)
+		session.mu.Unlock()
+		return result, nil
+	}
 	requestDone := make(chan struct{})
 	go func() {
 		select {
@@ -304,7 +349,7 @@ func (c *Client) stdioSession(ctx context.Context, agent supervisor.Agent, metho
 		case <-requestDone:
 		}
 	}()
-	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: requestParams}); err != nil {
 		close(requestDone)
 		session.mu.Unlock()
 		c.closeIfCurrent(agent.Ref, session)
@@ -463,7 +508,7 @@ func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEn
 	if err != nil {
 		return nil, err
 	}
-	session := &stdioClient{grouped: grouped, cmd: cmd, stdin: stdin, enc: json.NewEncoder(stdin), dec: json.NewDecoder(stdout), nextID: 1, startedAt: time.Now(), done: make(chan struct{})}
+	session := &stdioClient{grouped: grouped, cmd: cmd, stdin: stdin, enc: json.NewEncoder(stdin), dec: json.NewDecoder(stdout), nextID: 1, startedAt: time.Now(), done: make(chan struct{}), modern: agent.ProtocolVersion == modernProtocolVersion}
 	cmd.Stderr = &session.stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("mcp child %q start: %w", agent.Ref, err)
@@ -489,7 +534,13 @@ func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEn
 		}
 	}()
 	defer close(initDone)
-	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: 1, Method: "initialize", Params: map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "shellmcp-go", "version": "1"}}}); err != nil {
+	handshakeMethod := "initialize"
+	handshakeParams := any(map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "shellmcp-go", "version": "1"}})
+	if session.modern {
+		handshakeMethod = "server/discover"
+		handshakeParams = modernRequestParams(nil)
+	}
+	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: 1, Method: handshakeMethod, Params: handshakeParams}); err != nil {
 		session.terminate()
 		<-session.done
 		return session, err
@@ -505,12 +556,61 @@ func startStdioEnvironment(ctx context.Context, agent supervisor.Agent, frozenEn
 		<-session.done
 		return session, fmt.Errorf("mcp child %q initialize: %s", agent.Ref, initRes.Error.Message)
 	}
+	if session.modern && !modernDiscoverySupports(initRes.Result) {
+		session.terminate()
+		<-session.done
+		return session, fmt.Errorf("mcp child %q discovery did not advertise protocol %s", agent.Ref, modernProtocolVersion)
+	}
+	if session.modern {
+		session.initializeResult = cloneMap(initRes.Result)
+		return session, nil
+	}
 	if err := session.enc.Encode(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized", Params: map[string]any{}}); err != nil {
 		session.terminate()
 		<-session.done
 		return session, err
 	}
+	session.initializeResult = cloneMap(initRes.Result)
 	return session, nil
+}
+
+func modernRequestParams(params any) map[string]any {
+	result := map[string]any{}
+	if input, ok := params.(map[string]any); ok && input != nil {
+		for key, value := range input {
+			result[key] = value
+		}
+	}
+	result["_meta"] = map[string]any{
+		"io.modelcontextprotocol/protocolVersion":    modernProtocolVersion,
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+		"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "shellmcp-go", "version": "1"},
+	}
+	return result
+}
+
+func modernDiscoverySupports(result map[string]any) bool {
+	versions, ok := result["supportedVersions"].([]any)
+	if !ok {
+		return false
+	}
+	for _, version := range versions {
+		if version == modernProtocolVersion {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 // Notifications may precede a reply. Server requests cannot be answered by this

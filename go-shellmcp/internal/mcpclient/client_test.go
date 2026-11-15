@@ -398,6 +398,58 @@ done
 	}
 }
 
+func TestModernStdioListAndCallUsesDiscoveryMetadata(t *testing.T) {
+	dir := t.TempDir()
+	requests := filepath.Join(dir, "requests")
+	script := filepath.Join(dir, "modern-child.sh")
+	body := `#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$REQUESTS_FILE"
+  case "$line" in
+    *'"method":"initialize"'*) exit 97 ;;
+    *'"method":"server/discover"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}}}}' ;;
+    *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}' ;;
+    *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"modern-stdio-ok"}]}}' ;;
+  esac
+done
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agent := supervisor.Agent{
+		Ref:             "modern-local",
+		Transport:       "stdio",
+		Command:         script,
+		Env:             map[string]string{"REQUESTS_FILE": requests},
+		ProtocolVersion: "2026-07-28",
+		Enabled:         true,
+	}
+	c := New()
+	defer c.CloseAll()
+	tools, err := c.ListTools(context.Background(), agent)
+	if err != nil || len(tools) != 1 || fmt.Sprint(tools[0]["name"]) != "echo" {
+		t.Fatalf("tools=%#v err=%v", tools, err)
+	}
+	result, err := c.CallTool(context.Background(), agent, "echo", nil)
+	if err != nil || !strings.Contains(fmt.Sprint(result["content"]), "modern-stdio-ok") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	data, err := os.ReadFile(requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("requests=%q", lines)
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "io.modelcontextprotocol/protocolVersion") ||
+			!strings.Contains(line, "io.modelcontextprotocol/clientCapabilities") {
+			t.Fatalf("modern request lacks required metadata: %s", line)
+		}
+	}
+}
+
 func TestDisabledAgentRejected(t *testing.T) {
 	_, err := New().ListTools(context.Background(), supervisor.Agent{Ref: "off", Transport: "streamable-http", URL: "http://127.0.0.1", Enabled: false})
 	if err == nil {

@@ -210,6 +210,52 @@ func TestMembershipExecutorCatalogRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMembershipExecutorCatalogRouteOnlyProjection(t *testing.T) {
+	writer := membershipWriterNode(t, "writer")
+	ws := httptest.NewServer(writer.Handler())
+	defer ws.Close()
+	writer.cfg.NodePublicURL = ws.URL
+	writer.ensureWriterSelfEntry()
+	member, nodeID, key := membershipMemberNode(t, "peer", ws.URL, "")
+	ms := httptest.NewServer(member.Handler())
+	defer ms.Close()
+	grant := membershipIssueGrant(t, writer, "shell:peer")
+	body, _ := json.Marshal(nodeJoinRequest{NodeID: nodeID, NodeKey: key, Name: "shell:peer",
+		Endpoints: []string{ms.URL}, Build: nodeJoinBuild{GitCommit: "test-commit"}, LocalID: "peer-identity"})
+	joinedResponse := membershipHTTP(writer, http.MethodPost, "/admin/api/nodes/join", grant, body)
+	if joinedResponse.Code != http.StatusOK {
+		t.Fatalf("route-only join failed: %d %s", joinedResponse.Code, joinedResponse.Body.String())
+	}
+	member.mu.Lock()
+	member.agents["shell:peer"].Meta["mcp_agents"] = []any{map[string]any{
+		"ref": "VibeMacMiniLocal", "name": "Vibe MCP - Mac mini", "enabled": true,
+		"transport": "streamable-http", "catalog_digest": "v1",
+	}}
+	member.mu.Unlock()
+	client := &http.Client{Timeout: 5 * time.Second}
+	member.membershipMemberTick(client, true)
+	member.membershipMemberTick(client, true)
+
+	writer.mu.Lock()
+	_, persisted := writer.agents["shell:peer"]
+	agents := writer.publicAgentsLocked(httptest.NewRequest(http.MethodGet, "/mcp-relay/servers", nil))
+	writer.mu.Unlock()
+	if persisted {
+		t.Fatal("route-only catalog created a legacy registry parent")
+	}
+	child, ok := findAgentForReconcile(agents, "mcp:shell:peer:VibeMacMiniLocal")
+	if !ok || child.Status != "online" || exposedAgentSlug(child) != "vibemacminilocal" {
+		t.Fatalf("route-only child was not exposed live: %+v found=%v", child, ok)
+	}
+	writer.mu.Lock()
+	route := writer.membershipRoutes["shell:peer"]
+	meta := cloneMap(writer.membershipRouteMeta["shell:peer"])
+	writer.mu.Unlock()
+	if !route.CatalogFresh || firstString(meta, "membership_catalog_status") != "complete" || len(sliceValue(meta["mcp_agents"])) != 1 {
+		t.Fatalf("route-only catalog was not retained on the live route: route=%+v meta=%v", route, meta)
+	}
+}
+
 func TestMembershipIncompleteCatalogSearchCoverage(t *testing.T) {
 	s := membershipWriterNode(t, "writer")
 	s.agents["shell:peer"] = &Agent{AgentID: "shell:peer", Kind: "virtual_shell", Status: "online", Meta: map[string]any{"approved": true, "membership_catalog_status": "incomplete", "mcp_agents": []any{}}}

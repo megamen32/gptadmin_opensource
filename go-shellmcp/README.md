@@ -137,6 +137,28 @@ Example `mcp_manage` arguments:
 }
 ```
 
+For a child that implements the stateless MCP 2026-07-28 wire contract, set
+`protocol_version` explicitly:
+
+```json
+{
+  "action": "upsert",
+  "config": {
+    "ref": "herder-native",
+    "transport": "stdio",
+    "command": "/path/to/herder_native_stdio",
+    "protocol_version": "2026-07-28",
+    "enabled": true
+  }
+}
+```
+
+This policy makes ShellMCP start the child with `server/discover` and attach
+`io.modelcontextprotocol/protocolVersion`, `clientCapabilities`, and `clientInfo`
+under `params._meta` on each request. Existing definitions with no
+`protocol_version` keep the legacy `initialize` / `notifications/initialized`
+handshake. The registry rejects unsupported stdio protocol values instead of
+silently downgrading a modern child.
 Stdio sessions are persistent and serialized per `ref`. Updating, disabling,
 removing, or restarting a definition closes the actual protocol session.
 Enable only changes persistent desired state; the process starts lazily on the

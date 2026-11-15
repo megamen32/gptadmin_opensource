@@ -81,3 +81,28 @@ func TestChildSlugQualifiedEndpointRequiresAuthentication(t *testing.T) {
 		t.Fatalf("Unauthenticated qualified endpoint status=%d, want=%d", response.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestFreshRouteOnlyChildOwnsBareSlugOverStaleLegacyChild(t *testing.T) {
+	server := createChildSlugTestServer("mac-mini-2012.lan")
+	server.mu.Lock()
+	server.agents["shell:mac-mini-2012.lan"].Status = "stale"
+	server.membershipRoutes["shell:mac-mini-node"] = nodePeerRoute{URL: "https://node.example", LocalID: "new-id", CatalogFresh: true}
+	server.membershipRouteMeta["shell:mac-mini-node"] = map[string]any{
+		"mcp_agents":                []any{map[string]any{"ref": "AgentBrowser", "name": "Browser mac-mini-node", "enabled": true, "transport": "streamable-http"}},
+		"membership_catalog_status": "complete",
+	}
+	agents := server.publicAgentsLocked(nil)
+	server.mu.Unlock()
+	live, ok := findAgentForReconcile(agents, "mcp:shell:mac-mini-node:AgentBrowser")
+	if !ok || exposedAgentSlug(live) != "agentbrowser" {
+		t.Fatalf("fresh route-only child did not get bare slug: %+v found=%v", live, ok)
+	}
+	stale, ok := findAgentForReconcile(agents, "mcp:shell:mac-mini-2012.lan:AgentBrowser")
+	if !ok || exposedAgentSlug(stale) != "shell-mac-mini-2012-lan-agentbrowser" {
+		t.Fatalf("stale child lost qualified diagnostic slug: %+v found=%v", stale, ok)
+	}
+	resolved, ok := server.resolveExposedAgent("agentbrowser")
+	if !ok || resolved.AgentID != live.AgentID {
+		t.Fatalf("bare slug resolves to stale child: %+v found=%v", resolved, ok)
+	}
+}

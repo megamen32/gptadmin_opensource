@@ -77,22 +77,24 @@ type nodeJoinGrant struct {
 }
 
 type nodeMember struct {
-	NodeID           string         `json:"node_id"`
-	KeyHash          string         `json:"key_hash"`
-	Name             string         `json:"name"`
-	Capabilities     []string       `json:"capabilities"`
-	Endpoints        []string       `json:"endpoints"`
-	ConnectTo        string         `json:"connect_to,omitempty"`
-	Generation       uint64         `json:"generation"`
-	State            string         `json:"state"`
-	LastSeen         time.Time      `json:"last_seen"`
-	LeaseExpires     time.Time      `json:"lease_expires"`
-	Build            string         `json:"build,omitempty"`
-	SnapshotRev      uint64         `json:"snapshot_revision,omitempty"`
-	LocalID          string         `json:"local_id,omitempty"`
-	LocalFingerprint string         `json:"local_fingerprint,omitempty"`
-	ExecutorMeta     map[string]any `json:"executor_meta,omitempty"`
-	CatalogFresh     bool           `json:"-"`
+	NodeID             string                   `json:"node_id"`
+	KeyHash            string                   `json:"key_hash"`
+	Name               string                   `json:"name"`
+	Capabilities       []string                 `json:"capabilities"`
+	Endpoints          []string                 `json:"endpoints"`
+	ConnectTo          string                   `json:"connect_to,omitempty"`
+	Generation         uint64                   `json:"generation"`
+	State              string                   `json:"state"`
+	LastSeen           time.Time                `json:"last_seen"`
+	LeaseExpires       time.Time                `json:"lease_expires"`
+	Build              string                   `json:"build,omitempty"`
+	SnapshotRev        uint64                   `json:"snapshot_revision,omitempty"`
+	LocalID            string                   `json:"local_id,omitempty"`
+	LocalFingerprint   string                   `json:"local_fingerprint,omitempty"`
+	ExecutorMeta       map[string]any           `json:"executor_meta,omitempty"`
+	ExecutorCatalog    []nodeExecutorDescriptor `json:"executor_catalog,omitempty"`
+	ExecutorCatalogSet bool                     `json:"executor_catalog_set,omitempty"`
+	CatalogFresh       bool                     `json:"-"`
 }
 
 type nodeMembershipState struct {
@@ -428,8 +430,20 @@ func (s *Server) rebuildMembershipRoutes() {
 		}
 		routes[member.Name] = nodePeerRoute{URL: endpoint, ConnectTo: member.ConnectTo,
 			LocalID: member.LocalID, LocalFingerprint: member.LocalFingerprint, CatalogFresh: member.CatalogFresh}
-		if len(member.ExecutorMeta) > 0 {
-			routeMeta[member.Name] = member.ExecutorMeta
+		if len(member.ExecutorMeta) > 0 || member.ExecutorCatalogSet {
+			meta := cloneMap(member.ExecutorMeta)
+			if member.ExecutorCatalogSet {
+				// A route-only catalog is accepted only from the authenticated
+				// membership heartbeat. Keep it hidden after restart or an
+				// incomplete heartbeat until a fresh complete catalog arrives.
+				meta["membership_catalog_status"] = "incomplete"
+				delete(meta, "mcp_agents")
+				if member.CatalogFresh {
+					meta["mcp_agents"] = nodeExecutorCatalogMaps(member.ExecutorCatalog)
+					meta["membership_catalog_status"] = "complete"
+				}
+			}
+			routeMeta[member.Name] = meta
 		}
 	}
 	_ = heartbeatWriterID

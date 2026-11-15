@@ -161,11 +161,27 @@ func TestManager_RejectsInvalidTransportConfiguration(t *testing.T) {
 		{Ref: "missing-command", Transport: "stdio", Enabled: true},
 		{Ref: "missing-url", Transport: "streamable-http", Enabled: true},
 		{Ref: "unknown", Transport: "websocket", URL: "https://example.test", Enabled: true},
+		{Ref: "unknown-protocol", Transport: "stdio", Command: "example", ProtocolVersion: "2025-11-25", Enabled: true},
 	}
 	for _, agent := range invalid {
 		if err := m.Upsert(agent); err == nil {
 			t.Fatalf("expected invalid agent to fail: %#v", agent)
 		}
+	}
+}
+
+func TestManager_PreservesModernProtocolPolicy(t *testing.T) {
+	m := NewPersistent(nil, filepath.Join(t.TempDir(), "agents.json"))
+	agent := Agent{Ref: "modern", Transport: "stdio", Command: "example", ProtocolVersion: "2026-07-28", Enabled: true}
+	if err := m.Upsert(agent); err != nil {
+		t.Fatalf("Upsert modern agent: %v", err)
+	}
+	loaded, err := m.Agent("modern")
+	if err != nil {
+		t.Fatalf("Agent: %v", err)
+	}
+	if loaded.ProtocolVersion != "2026-07-28" {
+		t.Fatalf("protocol version=%q", loaded.ProtocolVersion)
 	}
 }
 

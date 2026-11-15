@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"Chrome Profile Extension Bridge","version":"1.0.0","permissions":["management","nativeMessaging"],"background":{"service_worker":"background.js"},"action":{"default_popup":"popup.html"}}

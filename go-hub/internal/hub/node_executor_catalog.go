@@ -146,6 +146,39 @@ func (s *Server) applyNodeExecutorCatalog(member *nodeMember, items []nodeExecut
 	member = current
 
 	parent := s.agents[member.Name]
+	if parent == nil && s.localExecutors[member.Name] == nil {
+		// A membership-only Node has no legacy registry parent to hold its
+		// catalog. The join grant and pinned LocalID are the owner fence;
+		// only owner-free descriptors can cross this route because there is
+		// no existing profile-to-child mapping to authorize a personal MCP.
+		if member.LocalID == "" {
+			return false, nil
+		}
+		for _, item := range items {
+			if item.OwnerProfileID != "" {
+				return false, errors.New("route-only executor catalog cannot claim an owner profile")
+			}
+		}
+		oldJSON, _ := json.Marshal(member.ExecutorCatalog)
+		newJSON, _ := json.Marshal(items)
+		changed := !member.ExecutorCatalogSet || !bytes.Equal(oldJSON, newJSON) || (items == nil && member.CatalogFresh)
+		member.ExecutorCatalogSet = true
+		if items != nil {
+			member.ExecutorCatalog = append([]nodeExecutorDescriptor(nil), items...)
+			member.CatalogFresh = true
+		} else {
+			// Preserve the last known descriptors for diagnostics, but make
+			// the catalog unavailable until a complete heartbeat returns.
+			member.CatalogFresh = false
+		}
+		if !changed {
+			return false, nil
+		}
+		if err := s.persistMembershipStateLocked(s.membership); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if parent == nil || !truthyAny(parent.Meta["approved"]) || parent.Status == "awaiting_approval" || s.localExecutors[member.Name] != nil {
 		return false, errors.New("executor catalog requires an existing approved remote parent")
 	}

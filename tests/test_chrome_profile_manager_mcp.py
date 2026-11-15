@@ -44,6 +44,23 @@ def test_missing_posix_primitives_keeps_discovery_but_refuses_writes(tmp_path, m
         manager.install('controlled', 'unused', None)
 
 
+def test_helper_backup_refuses_browser_profile_directories(tmp_path, monkeypatch):
+    root = tmp_path / 'chrome'; root.mkdir()
+    (root / 'Local State').write_text(json.dumps({'profile': {'info_cache': {'Default': {'name': 'QA'}}}}))
+    profile = root / 'Default'; profile.mkdir()
+    manager = ProfileManager(tmp_path / 'state', roots=[root])
+    class Browser:
+        def unpacked_details(self, profile_id, extension_id):
+            return {'id': extension_id, 'version': '1.0', 'location': 'UNPACKED', 'path': str(profile)}
+    monkeypatch.setattr(manager, '_profile_helper', lambda profile_id: Browser())
+    monkeypatch.setattr(cpm, 'bridge_call', lambda *args: {'id': 'a' * 32, 'version': '1.0', 'enabled': True})
+    def forbidden_copy(*args):
+        pytest.fail('browser profile data must not be copied')
+    monkeypatch.setattr(cpm, 'copy_artifact', forbidden_copy)
+    with pytest.raises(ProfileManagerError, match='overlaps browser profile'):
+        manager.helper_backup('default', 'a' * 32, '1.0')
+
+
 def test_darwin_gate_requires_posix_primitives_and_windows_stays_closed(monkeypatch):
     monkeypatch.setattr(cpm.platform, 'system', lambda: 'Darwin')
     assert cpm.platform_lifecycle_status()[0] is True
@@ -750,3 +767,189 @@ def test_real_mcp_stdio_consumer(tmp_path):
         assert request(19, 'tools/call', {'name':'profile_backup', 'arguments':{'profile_id':'controlled', 'extension_id':ident_b, 'expected_version':'5.0'}})['structuredContent']['extension_id'] == ident_b
     finally:
         server.stdin.close(); server.wait(timeout=10)
+def test_bridge_rejects_unpaired_profile(tmp_path, monkeypatch):
+    from chrome_profile_manager_mcp import bridge_call, ProfileManagerError
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(ProfileManagerError):
+        bridge_call("missing", "list")
+
+
+def test_bridge_rejects_public_registry(tmp_path, monkeypatch):
+    from chrome_profile_manager_mcp import bridge_call, ProfileManagerError
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "gptadmin-extension-bridge"
+    config.mkdir()
+    bindings = config / "bindings.json"
+    bindings.write_text('{}')
+    bindings.chmod(0o644)
+    with pytest.raises(ProfileManagerError, match="unsafe bridge registry"):
+        bridge_call("default", "list")
+
+
+def test_bridge_rejects_same_origin_for_two_profiles(tmp_path, monkeypatch):
+    from chrome_profile_manager_mcp import bridge_call, ProfileManagerError
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "gptadmin-extension-bridge"
+    config.mkdir()
+    origin = "chrome-extension://" + "a" * 32 + "/"
+    for name, data in (("bindings.json", {"Default": origin, "Profile 1": origin}), ("profiles.json", {})):
+        path = config / name
+        path.write_text(json.dumps(data))
+        path.chmod(0o600)
+    with pytest.raises(ProfileManagerError, match="ambiguous bridge binding"):
+        bridge_call("Profile 1", "list")
+
+
+def test_bridge_cannot_disable_itself(tmp_path, monkeypatch):
+    from chrome_profile_manager_mcp import bridge_call, ProfileManagerError
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "gptadmin-extension-bridge"
+    config.mkdir()
+    ext_id = "a" * 32
+    origin = "chrome-extension://" + ext_id + "/"
+    for name, data in (("bindings.json", {"Default": origin}), ("profiles.json", {origin: "b" * 64})):
+        path = config / name
+        path.write_text(json.dumps(data))
+        path.chmod(0o600)
+    with pytest.raises(ProfileManagerError, match="cannot disable its own bridge"):
+        bridge_call("Default", "disable", ext_id)
+
+
+def test_bridge_reports_unknown_native_outcome(tmp_path, monkeypatch):
+    import secrets
+    import socket
+    import struct
+    import threading
+    from chrome_profile_manager_mcp import bridge_call, ProfileManagerError
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "gptadmin-extension-bridge"
+    config.mkdir(mode=0o700)
+    origin = "chrome-extension://" + "a" * 32 + "/"
+    secret = secrets.token_hex(32)
+    for name, data in (("bindings.json", {"Default": origin}), ("profiles.json", {origin: secret})):
+        path = config / name
+        path.write_text(json.dumps(data))
+        path.chmod(0o600)
+    sockdir = Path("/tmp") / ("gptadmin-extension-%d" % os.getuid())
+    sockdir.mkdir(mode=0o700, exist_ok=True)
+    endpoint = sockdir / (secret[:32] + ".sock")
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(endpoint))
+    server.listen(1)
+    def respond():
+        with server.accept()[0] as conn:
+            conn.recv(4096)
+            data = json.dumps({"error": "native response timed out", "outcome": "unknown"}).encode()
+            conn.sendall(struct.pack("=I", len(data)) + data)
+    worker = threading.Thread(target=respond)
+    worker.start()
+    try:
+        with pytest.raises(ProfileManagerError, match="outcome unknown"):
+            bridge_call("Default", "disable", "c" * 32)
+    finally:
+        worker.join(timeout=2)
+        server.close()
+        endpoint.unlink(missing_ok=True)
+
+@pytest.mark.parametrize('before_override', [
+    {},
+    {'profile_id': 'another-profile'},
+    {'mode': 'managed'},
+])
+@pytest.mark.parametrize('binding_fails', [False, True])
+@pytest.mark.parametrize('layout,phase,loaded,expected', [
+    ('missing', 'filesystem_unknown', '1', 'restored'),
+    ('missing', 'filesystem_unknown', '2', 'ambiguous'),
+    ('missing', 'reload_unknown', '1', 'ambiguous'),
+    ('missing_tampered', 'filesystem_unknown', '1', 'ambiguous'),
+    ('target', 'filesystem_unknown', '1', 'restored'),
+    ('target', 'reload_unknown', '2', 'completed'),
+    ('target', 'reload_unknown', '1', 'ambiguous'),
+    ('tampered', 'filesystem_unknown', '1', 'ambiguous'),
+    ('restored', 'filesystem_unknown', '1', 'restored'),
+    ('cleaned', 'reload_unknown', '2', 'completed'),
+])
+def test_helper_reconcile_interrupted_update(tmp_path, monkeypatch, layout, phase, loaded, expected, before_override, binding_fails):
+    manager = ProfileManager(tmp_path / 'state', roots=[])
+    extension_id = 'a' * 32
+    owner = 'owner'
+    monkeypatch.setattr(manager, '_helper_owner', lambda profile_id: owner)
+    active = manager.state_dir / 'helper-extensions' / owner / extension_id / 'extension'
+    previous = active.parent / ('previous-' + 'f' * 32)
+    previous.mkdir(parents=True)
+    (previous / 'artifact').write_text('before')
+    before_digest = content_hash(previous)
+    if layout == 'missing_tampered':
+        (previous / 'artifact').write_text('tampered backup')
+    if not layout.startswith('missing'):
+        active.mkdir()
+        (active / 'artifact').write_text('other' if layout == 'tampered' else 'before' if layout == 'restored' else 'target')
+    if layout in ('restored', 'cleaned'):
+        (previous / 'artifact').unlink()
+        previous.rmdir()
+    target_dir = tmp_path / 'target'; target_dir.mkdir()
+    (target_dir / 'artifact').write_text('target')
+    target = {'extension_id': extension_id, 'version': '2', 'digest': content_hash(target_dir), 'name': 'x'}
+    before = {'extension_id': extension_id, 'version': '1', 'digest': before_digest, 'name': 'x'}
+    stages = {'old': before, 'new': target}
+    monkeypatch.setattr(manager, '_stage', lambda stage_id: stages[stage_id])
+    backups = manager.state_dir / 'helper-backups' / owner
+    backups.mkdir(parents=True)
+    saved = {'profile_id': 'default', 'mode': 'helper', 'backup_id': 'b'*32, 'stage_id': 'old', **before, 'readback': 'verified'}
+    saved.update(before_override)
+    (backups / ('b'*32 + '.json')).write_text(json.dumps({'stage_id': 'old', **before}))
+    journal = backups / (extension_id + '.pending.json')
+    journal.write_text(json.dumps({'extension_id': extension_id, 'before': saved, 'target_stage_id': 'new', 'phase': phase, 'previous': previous.name}))
+    class Browser:
+        def __init__(self):
+            self.bind_calls = []
+        def _bind(self, profile_id):
+            self.bind_calls.append(profile_id)
+            if binding_fails:
+                raise RuntimeError('profile binding rejected')
+        def unpacked_details(self, profile_id, ext):
+            if not active.exists():
+                raise RuntimeError('getExtensionInfo cannot read missing path')
+            return {'id': ext, 'version': loaded, 'path': str(active)}
+        def reload(self, *args, **kwargs): pytest.fail('reconcile must not reload')
+    def bound_helper(profile_id):
+        assert profile_id == 'default'
+        return Browser()
+    bridge_calls = []
+    def bound_bridge(profile_id, method, ext):
+        bridge_calls.append((profile_id, method, ext))
+        assert (profile_id, method, ext) == ('default', 'get', extension_id)
+        return {'id': extension_id, 'version': loaded, 'enabled': True}
+    browser = Browser()
+    monkeypatch.setattr(manager, '_profile_helper', lambda profile_id: browser)
+    monkeypatch.setattr(cpm, 'bridge_call', bound_bridge)
+    if expected == 'ambiguous' or before_override or binding_fails:
+        active_before = content_hash(active) if active.exists() else None
+        previous_before = content_hash(previous) if previous.exists() else None
+        journal_before = journal.read_bytes()
+        with pytest.raises(ProfileManagerError, match='reconcil'):
+            manager.helper_reconcile('default', extension_id)
+        assert journal.exists()
+        assert browser.bind_calls == ([] if before_override else ['default'])
+        assert bridge_calls == ([] if before_override or binding_fails else [('default', 'get', extension_id)])
+        assert journal.read_bytes() == journal_before
+        assert (content_hash(active) if active.exists() else None) == active_before
+        assert (content_hash(previous) if previous.exists() else None) == previous_before
+    else:
+        assert manager.helper_reconcile('default', extension_id)['outcome'] == expected
+        assert browser.bind_calls == ['default']
+        assert content_hash(active) == (before_digest if expected == 'restored' else target['digest'])
+        assert (active / 'artifact').read_text() == ('before' if expected == 'restored' else 'target')
+        assert not journal.exists()
+
+
+def test_helper_rollback_rejects_backup_of_another_extension(tmp_path, monkeypatch):
+    manager = ProfileManager(tmp_path / 'state', roots=[])
+    monkeypatch.setattr(manager, '_helper_owner', lambda profile_id: 'owner')
+    stage = {'extension_id': 'b'*32, 'version': '1', 'digest': 'd', 'name': 'x'}
+    monkeypatch.setattr(manager, '_stage', lambda stage_id: stage)
+    monkeypatch.setattr(manager, 'helper_update', lambda *args: pytest.fail('wrong extension must not be updated'))
+    backups = manager.state_dir / 'helper-backups' / 'owner'; backups.mkdir(parents=True)
+    (backups / ('c'*32 + '.json')).write_text(json.dumps({'stage_id': 'old', **stage}))
+    with pytest.raises(ProfileManagerError, match='extension'):
+        manager.helper_rollback('default', 'a'*32, 'c'*32, '2')

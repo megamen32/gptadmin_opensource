@@ -27,6 +27,8 @@ import queue
 import uuid
 import stat
 import copy
+import socket
+import struct
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,72 @@ from typing import Any
 
 class ProfileManagerError(RuntimeError):
     pass
+
+
+def bridge_call(profile_id: str, method: str, extension_id: str | None = None) -> Any:
+    """Call a previously paired native bridge without exposing its capability."""
+    if not isinstance(profile_id, str) or not profile_id or len(profile_id) > 128 or any(ord(ch) < 32 or ord(ch) == 127 for ch in profile_id):
+        raise ProfileManagerError("invalid profile identifier")
+    if method not in {"list", "get", "enable", "disable"}:
+        raise ProfileManagerError("unsupported bridge operation")
+    if method != "list" and not re.fullmatch(r"[a-p]{32}", extension_id or ""):
+        raise ProfileManagerError("invalid extension id")
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "gptadmin-extension-bridge"
+    def read_private(name):
+        path = config_dir / name
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise ProfileManagerError("unsafe bridge registry")
+            return json.load(stream)
+    try:
+        bindings = read_private("bindings.json")
+        registry = read_private("profiles.json")
+        if not isinstance(bindings, dict) or not isinstance(registry, dict):
+            raise ProfileManagerError("invalid bridge registry")
+        origin = bindings[profile_id]
+        if not isinstance(origin, str) or not re.fullmatch(r"chrome-extension://[a-p]{32}/", origin):
+            raise ProfileManagerError("invalid bridge binding")
+        if method == "disable" and extension_id == origin[len("chrome-extension://"):-1]:
+            raise ProfileManagerError("cannot disable its own bridge")
+        if sum(value == origin for value in bindings.values()) != 1:
+            raise ProfileManagerError("ambiguous bridge binding")
+        secret = registry[origin]
+        if not isinstance(secret, str) or not re.fullmatch(r"[a-f0-9]{64}", secret):
+            raise ProfileManagerError("invalid bridge capability")
+        path = f"/tmp/gptadmin-extension-{os.getuid()}/{secret[:32]}.sock"
+        request = json.dumps({"secret": secret, "method": method, "extension_id": extension_id}, separators=(",", ":")).encode()
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(30)
+            conn.connect(path)
+            conn.sendall(struct.pack("=I", len(request)) + request)
+            def read_exact(n):
+                chunks = bytearray()
+                while len(chunks) < n:
+                    data = conn.recv(n - len(chunks))
+                    if not data: raise ProfileManagerError("bridge disconnected; outcome unknown")
+                    chunks.extend(data)
+                return bytes(chunks)
+            length = struct.unpack("=I", read_exact(4))[0]
+            if length > 1024 * 1024: raise ProfileManagerError("bridge response too large")
+            response = json.loads(read_exact(length))
+        if not isinstance(response, dict): raise ProfileManagerError("invalid bridge response")
+        if response.get("outcome") == "unknown":
+            raise ProfileManagerError("bridge operation outcome unknown; read back before retry")
+        if "error" in response: raise ProfileManagerError("Chrome rejected bridge operation: " + str(response["error"]))
+        if "result" not in response: raise ProfileManagerError("invalid bridge response")
+        result = response["result"]
+        if method == "list" and not isinstance(result, list):
+            raise ProfileManagerError("invalid bridge list response")
+        if method != "list":
+            if not isinstance(result, dict) or result.get("id") != extension_id:
+                raise ProfileManagerError("bridge readback mismatch; outcome unknown")
+            if method in {"enable", "disable"} and result.get("enabled") is not (method == "enable"):
+                raise ProfileManagerError("bridge state mismatch; outcome unknown")
+        return result
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ProfileManagerError("bridge unavailable or operation outcome unknown") from exc
 
 
 def platform_lifecycle_status() -> tuple[bool, str]:
@@ -62,7 +130,7 @@ def require_lifecycle_platform() -> None:
 def backend_configuration() -> dict[str, Any]:
     """Report configuration evidence only; never claim a running Chrome."""
     entry = os.environ.get("CHROME_DEVTOOLS_MCP_ENTRY", "")
-    result = {"package_metadata": "not_configured", "node": "present" if shutil.which("node") else "missing", "runtime": "not_probed"}
+    result = {"package_metadata": "not_configured", "node": "present" if shutil.which("node") else "missing", "runtime": "not_probed", "readback_adapter": "derived_pinned_1.12.0_cache_fix"}
     if not entry: return result
     try:
         path = Path(entry).resolve(strict=True)
@@ -284,7 +352,12 @@ def copy_artifact(root: Path, relative: str, destination: Path) -> None:
 
 
 class Backend:
-    """Fixed official MCP child; no caller-provided command or external endpoint."""
+    """Run a derived 1.12.0 MCP: refresh CdpExtension objects on every CDP list.
+
+    The private temporary package is copied from the configured installation.
+    Its bundled Puppeteer file must match the exact pinned SHA-256 before the
+    single cache patch is applied; the original installation is never modified.
+    """
     def __init__(self, root: Path):
         require_lifecycle_platform()
         entry = os.environ.get("CHROME_DEVTOOLS_MCP_ENTRY", "")
@@ -292,14 +365,40 @@ class Backend:
         try:
             if not path or path.name != "chrome-devtools-mcp.js": raise ValueError()
             info = json.loads((path.parents[3] / "package.json").read_text())
-            if info.get("name") != "chrome-devtools-mcp" or info.get("version") != "1.12.0": raise ValueError()
+            if info.get("name") != "chrome-devtools-mcp" or info.get("version") != "1.12.0" or info.get("dependencies", {}): raise ValueError()
         except (ValueError, OSError, IndexError, TypeError, AttributeError) as exc:
             raise ProfileManagerError("official chrome-devtools-mcp 1.12.0 unavailable") from exc
+        bundle = path.parents[1] / "third_party/index.js"
+        old = b"""            if (this.#extensions.has(currExtension.id)) {
+                extensionsMap.set(currExtension.id, this.#extensions.get(currExtension.id));
+            }
+            else {
+                const newExtension = new CdpExtension(currExtension.id, currExtension.version, currExtension.name, currExtension.path, currExtension.enabled, this, this.logger);
+                extensionsMap.set(currExtension.id, newExtension);
+            }"""
+        new = b"""            const newExtension = new CdpExtension(currExtension.id, currExtension.version, currExtension.name, currExtension.path, currExtension.enabled, this, this.logger);
+            extensionsMap.set(currExtension.id, newExtension);"""
+        try:
+            source = bundle.read_bytes()
+            if hashlib.sha256(source).hexdigest() != "e1752f75684b672362dc3ae77a399407c509b76471fca08f967fc44fe2cb267b" or source.count(old) != 1:
+                raise ValueError("unexpected bundle")
+            self.package_stage = tempfile.TemporaryDirectory(prefix="gptadmin-chrome-mcp-")
+            package = path.parents[3]
+            staged = Path(self.package_stage.name) / "node_modules" / package.name
+            staged.parent.mkdir()
+            shutil.copytree(package, staged)
+            (staged / bundle.relative_to(package)).write_bytes(source.replace(old, new, 1))
+            derived_entry = staged / path.relative_to(package)
+        except (OSError, ValueError) as exc:
+            if hasattr(self, "package_stage"): self.package_stage.cleanup()
+            raise ProfileManagerError("chrome-devtools-mcp 1.12.0 bundle mismatch or staging failed") from exc
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        cmd = ["node", str(path), "--headless", "--categoryExtensions", "--experimentalStructuredContent", "--no-usage-statistics", "--userDataDir=" + str(root / "chrome"), "--filesystemRoot=" + str(root)]
+        cmd = ["node", str(derived_entry), "--headless", "--categoryExtensions", "--experimentalStructuredContent", "--no-usage-statistics", "--userDataDir=" + str(root / "chrome"), "--filesystemRoot=" + str(root)]
         try:
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
-        except OSError as exc: raise ProfileManagerError("backend could not start") from exc
+        except OSError as exc:
+            self.package_stage.cleanup()
+            raise ProfileManagerError("backend could not start") from exc
         self.messages = queue.Queue(); self.seq = 0
         def reader():
             for line in self.proc.stdout:
@@ -341,6 +440,7 @@ class Backend:
             self.proc.terminate()
             try: self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired: self.proc.kill(); self.proc.wait()
+        self.package_stage.cleanup()
 
 
 class ProfileManager:
@@ -358,6 +458,8 @@ class ProfileManager:
         self.backend_locks = {}
         self._deferred_restore = set()
         self._restoring = False
+        self.helpers = {}
+        self.helper_verified = False
 
     def _default_roots(self) -> list[str]:
         configured = os.environ.get("CHROME_PROFILE_ROOTS", "")
@@ -392,7 +494,7 @@ class ProfileManager:
         else: controlled_reason = "runtime_verified" if verified else "runtime_" + runtime
         return {"platform": platform.system(), "backend": backend, "modes": {
             "controlled": {"available": bool(supported and eligible and verified), "eligible_to_attempt": eligible, "reason": controlled_reason},
-            "helper": {"available": False, "reason": "not_implemented"},
+            "helper": {"available": False, "reason": "current_availability_not_probed", "reload_verified_this_session": self.helper_verified},
             "policy": {"available": False, "reason": "not_implemented"},
             "unmanaged_unavailable": {"available": False, "reason": "ordinary_profiles_not_managed"},
         }}
@@ -421,7 +523,7 @@ class ProfileManager:
         finally:
             Path(name).unlink(missing_ok=True)
 
-    def _discovered(self) -> list[dict[str, str]]:
+    def _discovered(self, include_root=False) -> list[dict[str, str]]:
         result = []
         candidates = []
         for configured_root in self.roots:
@@ -446,13 +548,339 @@ class ProfileManager:
                     continue
                 profile_id = "default" if directory == "Default" else directory
                 active = os.path.lexists(root / "SingletonLock")
-                result.append({
+                record = {
                     "profile_id": profile_id,
                     "name": str(info.get("name") or profile_id),
                     "mode": "unmanaged_unavailable",
                     "reason": "ordinary_profile_active" if active else "ordinary_profile",
-                })
+                }
+                if include_root: record['_root'] = str(root.resolve())
+                result.append(record)
         return result
+
+    def _profile_helper(self, profile_id):
+        # Resolve aliases against every discovered profile, not just paired ones.
+        profiles = self._discovered(include_root=True)
+        matches = [p for p in profiles if p['profile_id'] == profile_id]
+        if len(matches) != 1:
+            raise ProfileManagerError('profile identifier missing or ambiguous')
+        selected = matches[0]
+        root = selected['_root']
+        same_root = [p for p in profiles if p['_root'] == root]
+        if sum(p['name'] == selected['name'] for p in same_root) != 1:
+            raise ProfileManagerError('profile name ambiguous')
+        config = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'gptadmin-extension-bridge'
+        def private_json(filename):
+            fd = os.open(config / filename, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, encoding='utf-8') as stream:
+                st = os.fstat(stream.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                    raise ValueError('unsafe registry')
+                result = json.load(stream)
+                if not isinstance(result, dict): raise ValueError('invalid registry')
+                return result
+        try:
+            bindings, roots = private_json('bindings.json'), private_json('roots.json')
+            if roots.get(profile_id) != root: raise ValueError('root mismatch')
+            origin = bindings[profile_id]
+            if not isinstance(origin, str) or not re.fullmatch(r'chrome-extension://[a-p]{32}/', origin): raise ValueError('invalid origin')
+            if sum(value == origin for value in bindings.values()) != 1: raise ValueError('duplicate origin')
+            pairs = {}
+            for p in same_root:
+                alias = p['profile_id']
+                if roots.get(alias) != root or alias not in bindings: continue
+                value = bindings[alias]
+                if not isinstance(value, str) or not re.fullmatch(r'chrome-extension://[a-p]{32}/', value): raise ValueError('invalid origin')
+                pairs[alias] = (p['name'], value[19:-1])
+            # Do not use a previously cached connection after registry changes.
+            cached = self.helpers.get(root)
+            if cached and cached[0] != pairs:
+                if all(pairs.get(key) == value for key, value in cached[0].items()):
+                    if len({value[0] for value in pairs.values()}) != len(pairs) or len({value[1] for value in pairs.values()}) != len(pairs):
+                        raise ValueError('ambiguous profiles')
+                    cached[1]._profiles = dict(pairs)
+                    self.helpers[root] = cached = (pairs, cached[1])
+                else:
+                    cached[1].close()
+                    del self.helpers[root]
+                    cached = None
+            if cached is None:
+                port_file = Path(root) / 'DevToolsActivePort'
+                fd = os.open(port_file, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(fd, encoding='ascii') as stream:
+                    st = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                        raise ValueError('unsafe debug port file')
+                    if st.st_mode & 0o022:
+                        try:
+                            os.fchmod(fd, 0o600)
+                        except OSError as exc:
+                            raise ValueError('unsafe debug port file') from exc
+                        st = os.fstat(fd)
+                        if st.st_mode & 0o022:
+                            raise ValueError('unsafe debug port file')
+                    lines = stream.read(512).splitlines()
+                if len(lines) != 2 or not lines[0].isdigit() or not 1 <= int(lines[0]) <= 65535 or not re.fullmatch(r'/devtools/browser/[A-Za-z0-9-]+', lines[1]): raise ValueError('invalid debug port file')
+                from chrome_profile_helper import ChromeProfileHelper
+                helper = ChromeProfileHelper('ws://127.0.0.1:' + lines[0] + lines[1], pairs)
+                self.helpers[root] = (pairs, helper)
+            else: helper = cached[1]
+            return helper
+        except (OSError, ValueError, KeyError, ImportError) as exc:
+            raise ProfileManagerError('profile helper configuration or dependency unavailable') from exc
+        except RuntimeError as exc:
+            raise ProfileManagerError(str(exc)) from None
+
+    def helper_reload(self, profile_id, extension_id, expected_current_version, expected_version):
+        try:
+            result = self._profile_helper(profile_id).reload(profile_id, extension_id, expected_version, expected_current_version=expected_current_version)
+        except RuntimeError as exc:
+            raise ProfileManagerError(str(exc)) from None
+        self.helper_verified = True
+        return {'profile_id': profile_id, 'mode': 'helper', 'extension': result, 'readback': 'verified'}
+
+    def helper_stage(self, profile_id, source_path, extension_id, version, digest):
+        # Verify the requested profile before returning its staged artifact.
+        # Immutable stages are shared; this call does not reserve them to a profile.
+        try:
+            self._profile_helper(profile_id)._bind(profile_id)
+        except RuntimeError as exc:
+            raise ProfileManagerError(str(exc)) from None
+        return {'profile_id': profile_id, 'mode': 'helper', **self.stage(source_path, extension_id, version, digest)}
+
+    def _helper_owner(self, profile_id):
+        profiles = [p for p in self._discovered(include_root=True) if p['profile_id'] == profile_id]
+        if len(profiles) != 1: raise ProfileManagerError('profile identifier missing or ambiguous')
+        return hashlib.sha256((profiles[0]['_root'] + '\0' + profile_id).encode()).hexdigest()
+
+    @contextmanager
+    def _helper_lock(self, profile_id):
+        require_lifecycle_platform()
+        owner = self._helper_owner(profile_id)
+        directory = self.state_dir / 'helper-backups' / owner
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(directory / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'r+') as lock:
+            st = os.fstat(lock.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                raise ProfileManagerError('unsafe helper lock')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try: yield owner, directory
+            finally: fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def helper_prepare(self, profile_id, stage_id):
+        """Prepare a profile-owned path for a subsequent explicit installation."""
+        with self._helper_lock(profile_id) as (owner, _):
+            helper = self._profile_helper(profile_id)
+            entries = helper.list_extensions(profile_id)
+            target = self._stage(stage_id)
+            if any(item.get('id') == target['extension_id'] for item in entries):
+                raise ProfileManagerError('extension already installed')
+            parent = self.state_dir / 'helper-extensions' / owner / target['extension_id']
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            active = parent / 'extension'
+            if active.exists() or active.is_symlink(): raise ProfileManagerError('managed extension path already exists')
+            temporary = parent / ('candidate-' + uuid.uuid4().hex)
+            try:
+                shutil.copytree(self.stage_dir / stage_id / 'content', temporary)
+                if content_hash(temporary) != target['digest']: raise ProfileManagerError('candidate integrity failure')
+                temporary.chmod(0o700)
+                for item in temporary.rglob('*'):
+                    if item.is_dir(): item.chmod(0o700)
+                os.replace(temporary, active)
+                self._sync_directory(parent)
+            finally:
+                if temporary.exists(): shutil.rmtree(temporary)
+            return {'profile_id': profile_id, 'mode': 'helper', 'extension_id': target['extension_id'], 'version': target['version'], 'path': str(active), 'installed': False}
+
+    def helper_update(self, profile_id, stage_id, expected_version):
+        target = self._stage(stage_id)
+        extension_id = target['extension_id']
+        if target['version'] == expected_version: raise ProfileManagerError('update requires a distinct version')
+        # The snapshot is independent and is verified again while holding the mutation lock.
+        owner = self._helper_owner(profile_id)
+        active = self.state_dir / 'helper-extensions' / owner / extension_id / 'extension'
+        helper = self._profile_helper(profile_id)
+        info = helper.unpacked_details(profile_id, extension_id)
+        if active.is_symlink() or not active.is_dir() or Path(info['path']).resolve() != active.resolve():
+            raise ProfileManagerError('extension is not installed from its profile-owned managed directory')
+        saved = self.helper_backup(profile_id, extension_id, expected_version)
+        with self._helper_lock(profile_id) as (locked_owner, backups):
+            if locked_owner != owner: raise ProfileManagerError('profile changed during update')
+            journal = backups / (extension_id + '.pending.json')
+            if os.path.lexists(journal): raise ProfileManagerError('pending helper operation requires reconciliation')
+            helper = self._profile_helper(profile_id)
+            info = helper.unpacked_details(profile_id, extension_id)
+            before = bridge_call(profile_id, 'get', extension_id)
+            if active.is_symlink() or Path(info['path']).resolve() != active.resolve() or info['version'] != expected_version or before.get('version') != expected_version or before.get('enabled') is not True or content_hash(active) != saved['digest']:
+                raise ProfileManagerError('extension changed during update precondition')
+            if self._stage(stage_id) != target: raise ProfileManagerError('stage integrity failure')
+            parent = active.parent
+            candidate = parent / ('candidate-' + uuid.uuid4().hex)
+            previous = parent / ('previous-' + uuid.uuid4().hex)
+            try:
+                shutil.copytree(self.stage_dir / stage_id / 'content', candidate)
+                if content_hash(candidate) != target['digest']: raise ProfileManagerError('candidate integrity failure')
+                candidate.chmod(0o700)
+                for item in candidate.rglob('*'):
+                    if item.is_dir(): item.chmod(0o700)
+                record = {'extension_id': extension_id, 'before': saved, 'target_stage_id': stage_id, 'phase': 'filesystem_unknown', 'previous': previous.name}
+                self._atomic_json(journal, record)
+                os.replace(active, previous)
+                os.replace(candidate, active)
+                self._sync_directory(parent)
+                record['phase'] = 'reload_unknown'
+                self._atomic_json(journal, record)
+                helper.reload(profile_id, extension_id, target['version'], expected_current_version=expected_version)
+                if content_hash(active) != target['digest']: raise ProfileManagerError('updated artifact integrity failure')
+                previous.chmod(0o700)
+                for item in previous.rglob('*'):
+                    if item.is_dir(): item.chmod(0o700)
+                shutil.rmtree(previous); self._sync_directory(parent)
+                journal.unlink(); self._sync_directory(backups)
+                return {'profile_id': profile_id, 'mode': 'helper', 'extension_id': extension_id, 'version': target['version'], 'digest': target['digest'], 'backup_id': saved['backup_id'], 'readback': 'verified'}
+            except RuntimeError as exc:
+                raise ProfileManagerError(str(exc)) from None
+            except OSError as exc:
+                raise ProfileManagerError('helper update failed (OS error ' + str(exc.errno) + '); inspect pending operation before retry') from exc
+            finally:
+                if candidate.exists(): shutil.rmtree(candidate)
+
+    def helper_reconcile(self, profile_id, extension_id):
+        if not re.fullmatch(r'[a-p]{32}', extension_id or ''): raise ProfileManagerError('invalid extension id')
+        with self._helper_lock(profile_id) as (owner, backups):
+            journal = backups / (extension_id + '.pending.json')
+            try:
+                record = json.loads(journal.read_text(encoding='utf-8'))
+                before = record['before']
+                if before.get('profile_id') != profile_id or before.get('mode') != 'helper': raise ValueError()
+                backup_id = before['backup_id']
+                if not re.fullmatch(r'[0-9a-f]{32}', backup_id): raise ValueError()
+                backup = json.loads((backups / (backup_id + '.json')).read_text(encoding='utf-8'))
+                old = self._stage(backup['stage_id'])
+                target = self._stage(record['target_stage_id'])
+                previous_name = record['previous']
+                if (record['extension_id'] != extension_id or old['extension_id'] != extension_id
+                    or target['extension_id'] != extension_id or backup != {**old, 'stage_id': backup['stage_id']}
+                    or any(before.get(k) != v for k, v in backup.items())
+                    or old['version'] == target['version']
+                    or not re.fullmatch(r'previous-[0-9a-f]{32}', previous_name)
+                    or record['phase'] not in ('filesystem_unknown', 'reload_unknown')): raise ValueError()
+                active = self.state_dir / 'helper-extensions' / owner / extension_id / 'extension'
+                previous = active.parent / previous_name
+                def digest(path):
+                    if not os.path.lexists(path): return None
+                    if path.is_symlink() or not path.is_dir(): raise ValueError()
+                    return content_hash(path)
+                active_hash, previous_hash = digest(active), digest(previous)
+                helper = self._profile_helper(profile_id)
+                helper._bind(profile_id)
+                loaded = bridge_call(profile_id, 'get', extension_id)
+                if loaded.get('id') != extension_id or loaded.get('enabled') is not True: raise ValueError()
+                if active_hash is not None:
+                    info = helper.unpacked_details(profile_id, extension_id)
+                    if (info.get('id') != extension_id or Path(info['path']).resolve() != active.resolve()
+                        or loaded.get('version') != info.get('version')): raise ValueError()
+                if (record['phase'] == 'filesystem_unknown' and loaded.get('version') == old['version']
+                    and active_hash in (None, old['digest'], target['digest'])
+                    and previous_hash in (None, old['digest'])
+                    and (active_hash == old['digest'] or previous_hash == old['digest'])):
+                    if active_hash != old['digest']:
+                        if active_hash is not None:
+                            displaced = active.parent / ('candidate-' + uuid.uuid4().hex)
+                            os.replace(active, displaced)
+                        else: displaced = None
+                        os.replace(previous, active)
+                        self._sync_directory(active.parent)
+                        if displaced is not None: shutil.rmtree(displaced)
+                    outcome = 'restored'
+                elif (record['phase'] == 'reload_unknown' and loaded.get('version') == target['version']
+                      and active_hash == target['digest'] and previous_hash in (None, old['digest'])):
+                    outcome = 'completed'
+                else: raise ValueError()
+                if previous.exists(): shutil.rmtree(previous)
+                self._sync_directory(active.parent)
+                journal.unlink(); self._sync_directory(backups)
+                return {'profile_id': profile_id, 'extension_id': extension_id, 'outcome': outcome, 'version': loaded['version'], 'backup_id': backup_id}
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                raise ProfileManagerError('helper reconciliation unavailable or ambiguous; pending operation retained') from exc
+
+    def helper_rollback(self, profile_id, extension_id, backup_id, expected_version):
+        if not re.fullmatch(r'[a-p]{32}', extension_id or ''): raise ProfileManagerError('invalid extension id')
+        if not re.fullmatch(r'[0-9a-f]{32}', backup_id): raise ProfileManagerError('invalid backup id')
+        owner = self._helper_owner(profile_id)
+        path = self.state_dir / 'helper-backups' / owner / (backup_id + '.json')
+        try:
+            record = json.loads(path.read_text(encoding='utf-8'))
+            target = self._stage(record['stage_id'])
+            if record != {**target, 'stage_id': record['stage_id']}: raise ValueError()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ProfileManagerError('backup unavailable or invalid') from exc
+        if record['extension_id'] != extension_id: raise ProfileManagerError('backup extension id mismatch')
+        return self.helper_update(profile_id, record['stage_id'], expected_version)
+
+    def helper_backup(self, profile_id, extension_id, expected_version):
+        require_lifecycle_platform()
+        profiles = [p for p in self._discovered(include_root=True) if p['profile_id'] == profile_id]
+        if len(profiles) != 1: raise ProfileManagerError('profile identifier missing or ambiguous')
+        root = profiles[0]['_root']
+        owner = hashlib.sha256((root + '\0' + profile_id).encode()).hexdigest()
+        backups = self.state_dir / 'helper-backups' / owner
+        backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_fd = os.open(backups / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, 'r+') as lock:
+            st = os.fstat(lock.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077: raise ProfileManagerError('unsafe helper lock')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                if not re.fullmatch(r'[a-p]{32}', extension_id or ''): raise ProfileManagerError('invalid extension id')
+                if os.path.lexists(backups / (extension_id + '.pending.json')): raise ProfileManagerError('pending helper operation requires reconciliation')
+                helper = self._profile_helper(profile_id)
+                info = helper.unpacked_details(profile_id, extension_id)
+                before = bridge_call(profile_id, 'get', extension_id)
+                if info['version'] != expected_version or before.get('version') != expected_version or before.get('enabled') is not True:
+                    raise ProfileManagerError('extension version or enabled-state precondition failed')
+                source = Path(info['path'])
+                if not source.is_absolute() or source.is_symlink(): raise ProfileManagerError('unsafe extension directory')
+                source = source.resolve(strict=True)
+                if source == Path(source.anchor) or source == Path.home().resolve() or not source.is_dir() or source.stat().st_uid != os.getuid():
+                    raise ProfileManagerError('unsafe extension directory')
+                for profile in self._discovered(include_root=True):
+                    browser_root = Path(profile['_root']).resolve()
+                    if source == browser_root or source in browser_root.parents or browser_root in source.parents:
+                        raise ProfileManagerError('extension directory overlaps browser profile data')
+                with tempfile.TemporaryDirectory(prefix='.snapshot-', dir=self.artifact_dir) as temporary:
+                    temporary = Path(temporary)
+                    copy_artifact(source.parent, source.name, temporary / 'first')
+                    copy_artifact(source.parent, source.name, temporary / 'second')
+                    digest = content_hash(temporary / 'first')
+                    if content_hash(temporary / 'second') != digest: raise ProfileManagerError('extension changed during backup')
+                    manifest = json.loads((temporary / 'first' / 'manifest.json').read_text(encoding='utf-8'))
+                    identity, version = extension_identity(manifest)
+                    if identity != extension_id or version != expected_version: raise ProfileManagerError('extension identity or version mismatch')
+                    after_info = helper.unpacked_details(profile_id, extension_id)
+                    after = bridge_call(profile_id, 'get', extension_id)
+                    current_profiles = [p for p in self._discovered(include_root=True) if p['profile_id'] == profile_id]
+                    if current_profiles != profiles or info != after_info or after.get('version') != expected_version or after.get('enabled') is not True:
+                        raise ProfileManagerError('extension changed during backup')
+                    staged = self.stage(str((temporary / 'first').relative_to(self.artifact_dir)), extension_id, expected_version, digest)
+                backup_id = uuid.uuid4().hex
+                record = {key: staged[key] for key in ('stage_id', 'extension_id', 'version', 'digest', 'name')}
+                self._atomic_json(backups / (backup_id + '.json'), record)
+                return {'profile_id': profile_id, 'mode': 'helper', 'backup_id': backup_id, **record, 'readback': 'verified'}
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ProfileManagerError('extension backup unavailable or unsafe') from exc
+            except RuntimeError as exc:
+                raise ProfileManagerError(str(exc)) from None
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def paired_call(self, profile_id, method, extension_id=None):
+        try:
+            self._profile_helper(profile_id)._bind(profile_id)
+        except RuntimeError as exc:
+            raise ProfileManagerError(str(exc)) from None
+        return bridge_call(profile_id, method, extension_id)
 
     def profile_list(self) -> list[dict[str, Any]]:
         controlled = []
@@ -789,6 +1217,9 @@ class ProfileManager:
             return {"profile_id":profile_id, **result, "readback":"verified"}
 
     def close(self):
+        for _, helper in self.helpers.values(): helper.close()
+        self.helpers.clear()
+        self.helper_verified = False
         for backend in self.backends.values(): backend.close()
         for lock in self.backend_locks.values(): lock.close()
         self.backends.clear(); self.backend_locks.clear()
@@ -796,6 +1227,16 @@ class ProfileManager:
 
 
 TOOLS = [
+    {"name": "profile_helper_prepare", "description": "Prepare a profile-owned directory from an immutable stage; does not install it", "inputSchema": {"type": "object", "required": ["profile_id", "stage_id"], "properties": {"profile_id": {"type": "string"}, "stage_id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_update", "description": "Update an extension installed from its profile-owned directory, backing up and verifying loaded version", "inputSchema": {"type": "object", "required": ["profile_id", "stage_id", "expected_version"], "properties": {"profile_id": {"type": "string"}, "stage_id": {"type": "string"}, "expected_version": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_reconcile", "description": "Reconcile a pending helper operation without repeating reload", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_rollback", "description": "Restore an artifact backup of a profile-owned extension and verify the loaded version", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id", "backup_id", "expected_version"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}, "backup_id": {"type": "string"}, "expected_version": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_backup", "description": "Back up a verified unpacked extension artifact from a paired profile, excluding profile and extension storage", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id", "expected_version"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}, "expected_version": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_stage", "description": "Validate and stage an immutable artifact for a verified paired existing profile", "inputSchema": {"type": "object", "required": ["profile_id", "source_path", "extension_id", "version", "digest"], "properties": {"profile_id": {"type": "string"}, "source_path": {"type": "string"}, "extension_id": {"type": "string"}, "version": {"type": "string"}, "digest": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_helper_reload", "description": "Reload in a paired existing profile using its explicitly authorized Chrome debugging channel; verify loaded version", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id", "expected_current_version", "expected_version"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}, "expected_current_version": {"type": "string"}, "expected_version": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_extensions_list", "description": "List extensions in a paired existing profile", "inputSchema": {"type": "object", "required": ["profile_id"], "properties": {"profile_id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_extension_get", "description": "Read an extension in a paired existing profile", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "profile_extension_set_enabled", "description": "Enable or disable an extension in a paired existing profile and return Chrome readback", "inputSchema": {"type": "object", "required": ["profile_id", "extension_id", "enabled"], "properties": {"profile_id": {"type": "string"}, "extension_id": {"type": "string"}, "enabled": {"type": "boolean"}}, "additionalProperties": False}},
     {"name": "profile_list", "description": "List profile names and report controlled, helper, policy and unmanaged availability; backend configuration is not runtime proof", "inputSchema": {"type": "object", "additionalProperties": False}},
     {"name": "profile_stage", "description": "Stage content from a relative path under the manager artifacts directory; verify hash, key-derived identity and version", "inputSchema": {"type": "object", "required": ["profile_id", "source_path", "extension_id", "version", "digest"], "properties": {"profile_id": {"type": "string"}, "source_path": {"type": "string"}, "extension_id": {"type": "string"}, "version": {"type": "string"}, "digest": {"type": "string"}}, "additionalProperties": False}},
     {"name": "profile_install", "description": "Install a staged controlled profile with CAS", "inputSchema": {"type": "object", "required": ["profile_id", "stage_id"], "properties": {"profile_id": {"type": "string"}, "stage_id": {"type": "string"}, "expected_version": {"type": ["string", "null"]}}, "additionalProperties": False}},
@@ -828,7 +1269,28 @@ def main() -> None:
                 _reply(request.get("id"), {"tools": TOOLS})
             elif method == "tools/call":
                 params = request.get("params") or {}; name = params.get("name"); args = params.get("arguments") or {}
-                if name == "profile_list":
+                if name == "profile_helper_prepare":
+                    value = manager.helper_prepare(str(args['profile_id']), str(args['stage_id']))
+                elif name == "profile_helper_update":
+                    value = manager.helper_update(str(args['profile_id']), str(args['stage_id']), str(args['expected_version']))
+                elif name == "profile_helper_reconcile":
+                    value = manager.helper_reconcile(str(args['profile_id']), str(args['extension_id']))
+                elif name == "profile_helper_rollback":
+                    value = manager.helper_rollback(str(args['profile_id']), str(args['extension_id']), str(args['backup_id']), str(args['expected_version']))
+                elif name == "profile_helper_backup":
+                    value = manager.helper_backup(str(args['profile_id']), str(args['extension_id']), str(args['expected_version']))
+                elif name == "profile_helper_stage":
+                    value = manager.helper_stage(str(args['profile_id']), str(args['source_path']), str(args['extension_id']), str(args['version']), str(args['digest']))
+                elif name == "profile_helper_reload":
+                    value = manager.helper_reload(str(args['profile_id']), str(args['extension_id']), str(args['expected_current_version']), str(args['expected_version']))
+                elif name == "profile_extensions_list":
+                    value = {"extensions": manager.paired_call(str(args["profile_id"]), "list")}
+                elif name == "profile_extension_get":
+                    value = {"extension": manager.paired_call(str(args["profile_id"]), "get", str(args["extension_id"]))}
+                elif name == "profile_extension_set_enabled":
+                    if not isinstance(args["enabled"], bool): raise ProfileManagerError("enabled must be boolean")
+                    value = {"extension": manager.paired_call(str(args["profile_id"]), "enable" if args["enabled"] else "disable", str(args["extension_id"]))}
+                elif name == "profile_list":
                     value = {"profiles": manager.profile_list(), "capabilities": manager.capabilities()}
                 elif name == "profile_stage":
                     value = manager.profile_stage(str(args["profile_id"]), str(args["source_path"]), str(args["extension_id"]), str(args["version"]), str(args["digest"]))
