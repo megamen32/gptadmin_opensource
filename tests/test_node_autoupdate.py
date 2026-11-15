@@ -443,7 +443,9 @@ class NodeAutoupdateTests(unittest.TestCase):
                 if argv[1:3] == ['version', '-m']:
                     command = ('github.com/megamen32/gptadmin/go-hub/cmd/gptadmin-node'
                                if str(argv[-1]).endswith('gptadmin-node')
-                               else 'github.com/megamen32/gptadmin/go-shellmcp/cmd/shellmcp-go')
+                               else ('github.com/megamen32/gptadmin/go-shellmcp/cmd/gptadmin-mcp-bridge'
+                                     if str(argv[-1]).endswith('gptadmin-mcp-bridge')
+                                     else 'github.com/megamen32/gptadmin/go-shellmcp/cmd/shellmcp-go'))
                     return SimpleNamespace(returncode=0, stdout=(
                         'fixture: go1.26\n'
                         f'\tpath\t{command}\n'
@@ -463,13 +465,14 @@ class NodeAutoupdateTests(unittest.TestCase):
                 result=node_builder.build('amd64',root/'.tmp/packages','a'*40,1033,False)
 
             builds=[c for c in go_build.call_args_list if c.args[0][1]=='build']
-            self.assertEqual(len(builds),2)
-            self.assertEqual([c.kwargs['cwd'] for c in builds],[root/'go-hub',root/'go-shellmcp'])
-            self.assertEqual(sum(c.args[0][1:3]==['version','-m'] for c in go_build.call_args_list),2)
+            self.assertEqual(len(builds),3)
+            self.assertEqual([c.kwargs['cwd'] for c in builds],
+                             [root/'go-hub',root/'go-shellmcp',root/'go-shellmcp'])
+            self.assertEqual(sum(c.args[0][1:3]==['version','-m'] for c in go_build.call_args_list),3)
             archive=Path(result['path'])
             with tarfile.open(archive,'r:gz') as package:
                 manifest=json.load(package.extractfile('manifest.json'))
-                expected={'bin/gptadmin-node','bin/shellmcp',
+                expected={'bin/gptadmin-node','bin/shellmcp',node_builder.BRIDGE_PACKAGE_FILE,
                           node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH,
                           'public/admin/index.html','public/admin/assets/a.js',*node_builder.PAYLOAD}
                 self.assertEqual(set(manifest['files']),expected)
@@ -481,6 +484,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                     self.assertEqual(meta,{'sha256':hashlib.sha256(body).hexdigest(),'size':len(body)})
                 self.assertEqual(package.getmember('bin/gptadmin-node').mode,0o755)
                 self.assertEqual(package.getmember('bin/shellmcp').mode,0o755)
+                self.assertEqual(package.getmember(node_builder.BRIDGE_PACKAGE_FILE).mode,0o755)
                 self.assertEqual(package.getmember(node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH).mode,0o644)
 
     def test_node_builder_packages_the_built_admin_ui_under_public_admin(self):
