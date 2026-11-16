@@ -438,6 +438,47 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
 		}
 		return b.jsonValue(this, map[string]any{"source": source, "chunk_id": chunkID, "text": value}), nil
+	case "readAll":
+		// Universal full-result read over the existing principal-scoped content
+		// store. No re-run, no homemade per-tool chunk loop, no partial success.
+		source := arg
+		meta, e := store.Source(principal, source)
+		if e != nil || !b.contentSourceAllowed(meta) {
+			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
+		}
+		cap := 2 << 20
+		if raw, ok := opts["max_bytes"]; ok {
+			n, valid := int64FromAny(raw)
+			if !valid || n < 1 || n > 8<<20 {
+				return nil, b.fail("invalid_arguments", "readAll max_bytes must be 1..8388608", nil)
+			}
+			cap = int(n)
+		}
+		if meta.Bytes > int64(cap) {
+			return nil, b.fail("output_too_large", "source exceeds the readAll byte budget; read individual chunks or raise max_bytes", nil)
+		}
+		if !meta.Complete && !truthy(opts["allow_partial"]) {
+			return nil, b.fail("content_incomplete", "source is explicitly incomplete; pass allow_partial:true to inspect it", nil)
+		}
+		var text strings.Builder
+		text.Grow(int(meta.Bytes))
+		for id := 1; id <= meta.Chunks; id++ {
+			if err := b.ctx.Err(); err != nil {
+				return nil, b.fail("cancelled", "content read was cancelled", nil)
+			}
+			part, readErr := store.Read(principal, source, id, 0, 0, true)
+			if readErr != nil {
+				return nil, b.fail("content_unavailable", "a content chunk is missing or expired", nil)
+			}
+			text.WriteString(part)
+			if int64(text.Len()) > meta.Bytes {
+				return nil, b.fail("content_incomplete", "source exceeded its declared byte length", nil)
+			}
+		}
+		if int64(text.Len()) != meta.Bytes {
+			return nil, b.fail("content_incomplete", "full source bytes could not be reconstructed", nil)
+		}
+		return b.jsonValue(this, map[string]any{"source": source, "text": text.String(), "bytes": meta.Bytes, "chunks": meta.Chunks, "format": meta.Format, "complete": meta.Complete}), nil
 	case "delete":
 		if b.readOnly {
 			return nil, b.fail("forbidden", "read-only execution cannot delete content sources", nil)

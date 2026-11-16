@@ -42,7 +42,7 @@ const __searchMCP = globalThis.__codeModeSearch;
 const __facadeMCP = globalThis.__codeModeFacade;
 const __tasksMCP = globalThis.__codeModeTask;
 const __fileMCP = globalThis.__codeModeFile;
-const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.task === true) { v.__task = true; } if (opts && opts.idempotency_key) { v.idempotency_key = opts.idempotency_key; } if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } const id=__startMCP(v); return (async()=>{ await Promise.resolve(); for(;;){ const state=__pollMCP(id); if(state.ready){ if(state.error) throw new Error(state.error); return state.value; } __yieldMCP(); await Promise.resolve(); } })(); };
+const call = (target, tool, args={}, opts={}) => { const v = typeof target === 'object' ? {...target} : {target, tool, args}; if (opts && opts.task === true) { v.__task = true; } if (opts && opts.idempotency_key) { v.idempotency_key = opts.idempotency_key; } if (opts && opts.index === true) { v.__indexResult = true; v.__indexText = opts.text || ''; v.__indexName = opts.name || ''; } if (opts && opts.allowPartial === true) { v.__indexAllowPartial = true; } if (v.index === true) { v.__indexResult = true; v.__indexText = v.text || ''; v.__indexName = v.name || ''; delete v.index; } if (v.allowPartial === true) { v.__indexAllowPartial = true; delete v.allowPartial; } const id=__startMCP(v); return (async()=>{ await Promise.resolve(); for(;;){ const state=__pollMCP(id); if(state.ready){ if(state.error){ const e=state.validation?new TypeError(state.error):new Error(state.error); if(state.validation){e.code='invalid_arguments';e.validation=state.validation;} throw e;} return state.value; } __yieldMCP(); await Promise.resolve(); } })(); };
 const shell = (target, command, options={}) => {
   if (typeof target !== 'string' || !target.startsWith('shell:') || target.length <= 6) throw new TypeError('shell target must be shell:<host>');
   if (options === null || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('shell options must be an object');
@@ -122,6 +122,7 @@ globalThis.mcp = Object.freeze({
   search, call, shell,
   tasks: Object.freeze({
     start: (target,tool,args={},opts={}) => call(target,tool,args,{...opts,task:true}),
+    list: (opts={}) => __tasksMCP("list",opts),
     get: (taskId) => __tasksMCP("get",{taskId}),
     result: (taskId) => __tasksMCP("result",{taskId}),
     wait: (taskId,opts={}) => __tasksMCP("wait",{taskId,...opts}),
@@ -145,6 +146,7 @@ globalThis.mcp = Object.freeze({
     status: (source,opts={}) => __contentMCP('status',source,opts),
     search: (query,opts={}) => query !== null && typeof query === 'object' && !Array.isArray(query) ? __contentMCP('search',query.query,query) : __contentMCP('search',query,opts),
     read: (source,chunk_id,opts={}) => source !== null && typeof source === 'object' && !Array.isArray(source) ? __contentMCP('read',source.source,source) : __contentMCP('read',source,{chunk_id,...opts}),
+    readAll: (source,opts={}) => __contentMCP('readAll',source,opts),
     delete: (source) => __contentMCP('delete',source,{}),
   }),
 });
@@ -196,7 +198,8 @@ const __toolsProxy = alias => new Proxy(Object.create(null), {
       if (args===null || typeof args!=='object' || Array.isArray(args)) throw new TypeError('tool arguments must be an object');
       const target=await __toolsResolve(alias);
       // Validate the authorized MCP inputSchema on the Hub before dispatch.
-      __prepareMCP(target,tool,args);
+      const invalid=__prepareMCP(target,tool,args);
+      if(invalid){const e=new TypeError(invalid.message);e.code='invalid_arguments';e.validation=invalid;throw e;}
       return call(target,tool,args);
     };
   }
@@ -315,6 +318,11 @@ type codeModeBridge struct {
 	toolCalls             []map[string]any
 	preparedSchemas       map[string]any
 	inspectedSchemas      map[string]map[string]any
+	preflightCount        int
+
+	lastValidation       *mcpArgumentError
+	lastValidationTarget string
+	lastValidationTool   string
 	// origins records every target/tool this run read. A result derived from
 	// the run is bound to all of them, not only to the last call, so a right
 	// that is withdrawn from any of them also withdraws the derived result.
@@ -980,6 +988,10 @@ func (b *codeModeBridge) pollCall(this *qjs.This) (*qjs.Value, error) {
 		value, err := task.value, task.err
 		b.pendingMu.Unlock()
 		if err != nil {
+			var invalid *recoverableMCPValidationError
+			if errors.As(err, &invalid) {
+				return b.jsonValue(this, map[string]any{"ready": true, "error": err.Error(), "validation": invalid.issue.metadata()}), nil
+			}
 			return b.jsonValue(this, map[string]any{"ready": true, "error": err.Error()}), nil
 		}
 		return b.jsonValue(this, map[string]any{"ready": true, "value": value}), nil
@@ -1115,8 +1127,18 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	} else if callArgs := mapValue(args["arguments"]); callArgs != nil {
 		resolvedArgs = callArgs
 	}
-	if inputSchema, prepared := b.preparedSchema(target, tool); prepared {
+	inputSchema, prepared := b.preparedSchema(target, tool)
+	if !prepared {
+		inputSchema, prepared = builtInMCPInputSchema(target, tool)
+	}
+	if prepared {
 		if issue := validateMCPToolArguments(inputSchema, schemaBusinessArguments(resolvedArgs)); issue != nil {
+			if issue.Code == "invalid_arguments" {
+				// No dispatch, approval, job or side effect occurred. Allow the
+				// model to repair the arguments within this same Code Mode run.
+				b.recordValidation(target, tool, issue)
+				return nil, &recoverableMCPValidationError{issue: issue}
+			}
 			return nil, b.fail(issue.Code, issue.Error(), map[string]any{"target": target, "tool": tool, "validation": issue.metadata(), "dispatched": false})
 		}
 	}

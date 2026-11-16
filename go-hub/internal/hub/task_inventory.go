@@ -109,10 +109,10 @@ func (s *Server) shellTaskPageLocked(server string, offset, limit int) (map[stri
 func taskInventoryItems(state persistedTaskState) []map[string]any {
 	items := make([]map[string]any, 0, len(state.Relay)+len(state.Shell))
 	for _, j := range state.Relay {
-		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server_id": j.AgentID, "kind": "mcp_relay", "method": j.Method, "tool_name": firstString(j.Params, "name"), "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server_id": j.AgentID, "kind": "mcp_relay", "trace_id": j.TraceID, "method": j.Method, "tool_name": firstString(j.Params, "name"), "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
 	}
 	for _, j := range state.Shell {
-		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server": j.Server, "server_id": "shell:" + j.Server, "kind": "shell", "tool_name": j.ToolName, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
+		items = append(items, map[string]any{"job_id": j.ID, "task_id": j.ID, "server": j.Server, "server_id": "shell:" + j.Server, "kind": "shell", "trace_id": j.TraceID, "tool_name": j.ToolName, "status": j.Status, "created_at": j.CreatedAt, "started_at": j.StartedAt, "completed_at": j.DoneAt})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		a, b := items[i]["created_at"].(float64), items[j]["created_at"].(float64)
@@ -130,6 +130,20 @@ func (s *Server) taskMetadataPage(where string, args []any, offset, limit int) (
 		predicate += " AND (" + where + ")"
 	}
 	return s.readTaskRecordsSQL(predicate+" ORDER BY json_extract(payload,'$.created_at') DESC,key DESC LIMIT ? OFFSET ?", true, append(append([]any(nil), args...), limit, offset))
+}
+
+func (s *Server) taskMetadataPageAfter(where string, args []any, cursor *taskListCursor, limit int) (persistedTaskState, error) {
+	predicate := "kind IN ('shell','relay')"
+	queryArgs := append([]any(nil), args...)
+	if where != "" {
+		predicate += " AND (" + where + ")"
+	}
+	if cursor != nil {
+		predicate += " AND (json_extract(payload,'$.created_at') < ? OR (json_extract(payload,'$.created_at') = ? AND key < ?))"
+		queryArgs = append(queryArgs, cursor.CreatedAt, cursor.CreatedAt, cursor.TaskID)
+	}
+	queryArgs = append(queryArgs, limit)
+	return s.readTaskRecordsSQL(predicate+" ORDER BY json_extract(payload,'$.created_at') DESC,key DESC LIMIT ?", true, queryArgs)
 }
 
 func (s *Server) taskHistoryCountsLocked() (int, map[string]int, error) {

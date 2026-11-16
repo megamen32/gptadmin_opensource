@@ -29,11 +29,23 @@ func (b *codeModeBridge) preparedSchema(target, tool string) (any, bool) {
 // It reads the caller-authorized MCP schema and checks full JSON Schema types
 // before dispatch. It does NOT create a task or put an operation on a queue.
 func (b *codeModeBridge) prepareTool(this *qjs.This) (*qjs.Value, error) {
-	if err := b.entry(); err != nil {
-		return nil, err
+	// Preflight is a read, not another tool dispatch. It must not consume
+	// an extra call from the execution budget.
+	if fatal := b.fatalReceipt(); fatal != nil {
+		return nil, codeModeFailure("run_stopped", fatal.message)
+	}
+	if err := b.ctx.Err(); err != nil {
+		return nil, codeModeFailure("cancelled", err.Error())
 	}
 	if _, err := b.remaining(); err != nil {
 		return nil, err
+	}
+	b.mu.Lock()
+	b.preflightCount++
+	count := b.preflightCount
+	b.mu.Unlock()
+	if count > b.limits.maxCalls*2 {
+		return nil, b.fail("call_limit_exceeded", "too many schema validation attempts in one script", nil)
 	}
 	target, tool := codeModeStringArg(this, 0), codeModeStringArg(this, 1)
 	args := codeModeObjectArg(this, 2)
@@ -67,12 +79,13 @@ func (b *codeModeBridge) prepareTool(this *qjs.This) (*qjs.Value, error) {
 		b.cachePreparedSchema(target, tool, schema)
 	}
 	if issue := validateMCPToolArguments(schema, schemaBusinessArguments(args)); issue != nil {
-		status := http.StatusBadRequest
-		if issue.Code == "invalid_tool_schema" {
-			status = http.StatusBadGateway
+		if issue.Code == "invalid_arguments" {
+			// No MCP operation started: the model may fix this locally.
+			b.recordValidation(target, tool, issue)
+			return b.jsonValue(this, issue.metadata()), nil
 		}
 		return nil, b.fail(issue.Code, issue.Error(), map[string]any{
-			"target": target, "tool": tool, "http_status": status,
+			"target": target, "tool": tool, "http_status": http.StatusBadGateway,
 			"validation": issue.metadata(), "dispatched": false,
 		})
 	}

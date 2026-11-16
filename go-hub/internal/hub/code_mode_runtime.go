@@ -245,6 +245,9 @@ func (s *Server) runCodeMode(ctx context.Context, r *http.Request, code string, 
 		return nil, &codeModeError{code: fatal.code, detail: fatal.message, call: bridge.calls(), receipt: fatal.receipt, completed: completed, completedOmitted: omitted}
 	}
 	if evalErr != nil {
+		if issue := bridge.uncaughtValidation(evalErr); issue != nil {
+			return nil, issue
+		}
 		return nil, bridge.annotate(bridge.classify(evalErr, elapsed))
 	}
 	// The envelope is decoded before the output budget is applied: an oversized
@@ -361,6 +364,7 @@ func (s *Server) saveCodeModeResult(r *http.Request, bridge *codeModeBridge, dec
 		"expires_at": source.ExpiresAt.UTC().Format(time.RFC3339),
 		"origin":     contentOriginDescription(source.Origin),
 		"read":       map[string]any{"call": "mcp.content.read", "args": map[string]any{"source": source.ID, "chunk_id": 1}},
+		"read_all":   map[string]any{"call": "mcp.content.readAll", "args": map[string]any{"source": source.ID, "max_bytes": source.Bytes}},
 		"search":     map[string]any{"call": "mcp.content.search", "args": map[string]any{"source": source.ID, "query": "<term>"}},
 		"index":      map[string]any{"call": "mcp.content.indexSource", "args": map[string]any{"source": source.ID}},
 		"note":       "The result did not fit the output budget and was stored in full. It was not re-run. Unindexed exec results may be reclaimed oldest-first under storage pressure; indexSource retains this result until its expiry. Read it with mcp.content.read, find something in it with mcp.content.search (the first search builds the index), or build the index now with mcp.content.indexSource.",

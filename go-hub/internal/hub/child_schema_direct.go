@@ -2,7 +2,12 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -25,15 +30,33 @@ const directChildSchemaTimeout = 8 * time.Second
 func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) map[string]any {
 	target := candidate.AgentID
 	result := map[string]any{"server_id": target, "status": "failed"}
-	fail := func(reason string) map[string]any {
-		result["error"] = map[string]any{"code": "child_schema_unavailable", "message": reason}
+	// Preserve only fixed-category diagnostics. Never serialize upstream error text,
+	// bodies, connection arguments or credentials into client receipts or logs.
+	fail := func(message, stage, reasonCode string, upstreamStatus int) map[string]any {
+		var nonce [12]byte
+		correlation := "unavailable"
+		if _, err := rand.Read(nonce[:]); err == nil {
+			correlation = hex.EncodeToString(nonce[:])
+		}
+		diagnostic := map[string]any{
+			"stage": stage, "reason_code": reasonCode, "correlation_id": correlation,
+		}
+		if upstreamStatus >= 100 && upstreamStatus <= 599 {
+			diagnostic["upstream_status"] = upstreamStatus
+		}
+		result["error"] = map[string]any{
+			"code": "child_schema_unavailable", "message": message,
+			"diagnostic": diagnostic,
+		}
+		log.Printf("child_schema_failure correlation_id=%s stage=%s reason_code=%s upstream_status=%d",
+			correlation, stage, reasonCode, upstreamStatus)
 		return result
 	}
 	if r == nil || r.Context().Err() != nil {
-		return fail("schema request unavailable")
+		return fail("schema request unavailable", "request", "unavailable", 0)
 	}
 	if !profileAllowsTarget(r, target) || !agentOwnerConnectionAllowed(r, candidate) {
-		return fail("child schema access denied")
+		return fail("child schema access denied", "authorization", "access_denied", 0)
 	}
 
 	s.mu.Lock()
@@ -46,10 +69,10 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 	runtime := s.nodeRuntime
 	s.mu.Unlock()
 	if !exists || !isChildMCPAgent(child) || !approved || !strings.HasPrefix(parentID, "shell:") || ref == "" {
-		return fail("child schema owner unavailable")
+		return fail("child schema owner unavailable", "owner_lookup", "metadata_unavailable", 0)
 	}
 	if !profileAllowsTarget(r, child.AgentID) || !agentOwnerConnectionAllowed(r, child) {
-		return fail("child schema access denied")
+		return fail("child schema access denied", "authorization", "access_denied", 0)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), directChildSchemaTimeout)
@@ -59,15 +82,15 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 	if local {
 		reader, ok := runtime.(directChildToolReader)
 		if !ok {
-			return fail("local child schema reader unavailable")
+			return fail("local child schema reader unavailable", "local_reader", "reader_unavailable", 0)
 		}
 		payload, err := reader.DirectChildTools(ctx, childConnectionArguments(r, child, map[string]any{"ref": ref}))
 		if err != nil {
-			return fail("local child schema reader failed")
+			return fail("local child schema reader failed", "local_reader", childSchemaLocalReason(err), 0)
 		}
 		structured := mapValue(payload["structuredContent"])
 		if !validChildToolsArray(structured["tools"]) || truthy(payload["isError"]) {
-			return fail("local child schema response invalid")
+			return fail("local child schema response invalid", "response_validation", "invalid_tools", 0)
 		}
 		tools = searchChildToolMaps(structured["tools"])
 		enumeration = schemaEnumerationMetadata(structured)
@@ -76,7 +99,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 		// not an executable target on node-44.
 		body, err := json.Marshal(map[string]any{"target": "mcp:" + parentID + ":" + ref, "detail": "full"})
 		if err != nil {
-			return fail("child schema target invalid")
+			return fail("child schema target invalid", "owner_lookup", "invalid_target", 0)
 		}
 		request := r.Clone(ctx)
 		recorder := httptest.NewRecorder()
@@ -88,16 +111,26 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 				}
 				return response
 			}
-			return fail("direct child schema transport unavailable")
+			reason := "transport_unavailable"
+			if ctx.Err() != nil {
+				reason = childSchemaLocalReason(ctx.Err())
+			}
+			return fail("direct child schema transport unavailable", "remote_owner", reason, 0)
 		}
-		var reply map[string]any
-		if recorder.Code >= http.StatusBadRequest || json.Unmarshal(recorder.Body.Bytes(), &reply) != nil ||
-			firstString(reply, "status") != "completed" {
-			return fail("direct child schema owner unavailable")
+		if recorder.Code >= http.StatusBadRequest {
+			return fail("direct child schema owner unavailable", "remote_owner",
+				childSchemaRemoteHTTPReason(recorder.Code), recorder.Code)
+		}
+		reply, parsed := childSchemaParseOwnerReply(recorder.Body.Bytes())
+		if !parsed {
+			return fail("direct child schema owner unavailable", "remote_owner", "malformed_response", recorder.Code)
+		}
+		if firstString(reply, "status") != "completed" {
+			return fail("direct child schema owner unavailable", "remote_owner", "owner_status_unavailable", recorder.Code)
 		}
 		response := mapValue(reply["response"])
 		if !validChildToolsArray(response["tools"]) {
-			return fail("direct child schema response invalid")
+			return fail("direct child schema response invalid", "response_validation", "invalid_tools", recorder.Code)
 		}
 		tools = searchChildToolMaps(response["tools"])
 		enumeration = schemaEnumerationMetadata(response)
@@ -198,4 +231,47 @@ func validChildToolsArray(value any) bool {
 		return true
 	}
 	return false
+}
+
+// childSchemaLocalReason translates a trusted Go error into a fixed diagnostic
+// category; arbitrary error text must remain unknown and never be logged.
+func childSchemaLocalReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return "timeout"
+	}
+	// Match the exact stable error emitted by the stdio frame reader. Do not
+	// infer this cause from substrings in an untrusted upstream error message.
+	if err != nil && err.Error() == "mcp child: too many notifications before response" {
+		return "notification_limit"
+	}
+	return "unknown"
+}
+
+// childSchemaRemoteHTTPReason never reflects the upstream body or error text.
+func childSchemaRemoteHTTPReason(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "owner_denied"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return "timeout"
+	default:
+		return "upstream_http_failure"
+	}
+}
+
+// childSchemaParseOwnerReply validates JSON without surfacing parser errors:
+// they may include fragments of the upstream body or other sensitive data.
+func childSchemaParseOwnerReply(body []byte) (map[string]any, bool) {
+	var reply map[string]any
+	if json.Unmarshal(body, &reply) != nil {
+		return nil, false
+	}
+	return reply, true
 }

@@ -326,6 +326,13 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 	if err := s.normalizePublicTargetArgs(args); err != nil {
 		return map[string]any{"status": "failed", "error": err.Error()}
 	}
+	detail := firstString(args, "detail")
+	if detail == "" {
+		detail = "compact"
+	}
+	if detail != "compact" && detail != "full" {
+		return map[string]any{"status": "failed", "error": "detail must be compact or full"}
+	}
 	query := strings.TrimSpace(firstString(args, "query"))
 	if query == "" || len(query) > 256 {
 		return map[string]any{"status": "failed", "error": "query must contain 1..256 bytes"}
@@ -489,7 +496,10 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 		return map[string]any{"status": "failed", "error": "invalid or unavailable FTS query"}
 	}
 	out := make([]map[string]any, 0, limit)
-	const maxSearchBytes = 32 << 10
+	maxSearchBytes := 8 << 10
+	if detail == "full" {
+		maxSearchBytes = 32 << 10
+	}
 	usedBytes := 0
 	var schemaRefs []string
 	omitted := 0
@@ -527,12 +537,25 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 			continue
 		}
 		compactSchema := compactSearchInputSchema(schema, 0)
-		hit["inputSchema"] = compactSchema
 		callName := name
 		if name == "settings" {
 			callName = "settings_get"
 		}
-		hit["call"] = fmt.Sprintf("await call(%q, %q, %s)", s.shortTarget(target), callName, compactJSON(callArgsExample(compactSchema)))
+		hit["path"] = fmt.Sprintf("tools[%q][%q]", target, callName)
+		if detail == "full" {
+			hit["inputSchema"] = compactSchema
+			hit["call"] = fmt.Sprintf("await call(%q, %q, %s)", s.shortTarget(target), callName, compactJSON(callArgsExample(compactSchema)))
+		} else {
+			if desc := firstString(hit, "description"); len(desc) > 180 {
+				hit["description"] = string(utf8Prefix([]byte(desc), 180))
+			}
+			delete(hit, "labels")
+			delete(hit, "settings")
+			hit["schema_ref"] = map[string]any{"target": target, "tool": callName}
+			if needed := stringSlice(mapValue(schema)["required"]); len(needed) > 0 {
+				hit["required"] = needed
+			}
+		}
 		encoded, _ := json.Marshal(hit)
 		if usedBytes+len(encoded) > maxSearchBytes {
 			stub := cloneMap(hit)
@@ -564,6 +587,18 @@ func (s *Server) searchToolsForRequest(r *http.Request, args map[string]any) map
 	}
 	if omitted > 0 {
 		childCoverage["omitted_matches"] = omitted
+	}
+	if detail == "compact" {
+		// Keep search uncertainty visible, but do not flood the AI context
+		// with failures from unrelated servers. Use detail=full to debug.
+		summary := map[string]any{"status": childCoverage["status"], "complete": childCoverage["complete"], "pending": childCoverage["pending"], "failed": childCoverage["failed"], "search_schema_complete": childCoverage["search_schema_complete"]}
+		if hint := firstString(childCoverage, "retry_hint"); hint != "" {
+			summary["retry_hint"] = hint
+		}
+		if omitted > 0 {
+			summary["omitted_matches"] = omitted
+		}
+		childCoverage = summary
 	}
 	return map[string]any{"status": "completed", "query": query, "results": out, "coverage": childCoverage}
 }

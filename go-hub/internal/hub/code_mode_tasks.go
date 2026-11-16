@@ -42,6 +42,19 @@ func (b *codeModeBridge) task(this *qjs.This) (*qjs.Value, error) {
 	}
 	action := codeModeStringArg(this, 0)
 	args := codeModeObjectArg(this, 1)
+	if action == "list" {
+		limit := intFromAny(args["limit"])
+		if limit == 0 {
+			limit = 10
+		}
+		request := b.request.WithContext(b.ctx)
+		rows, listErr := b.server.listOwnedTasksForRequest(request, limit, firstString(args, "cursor"))
+		if listErr != nil {
+			return nil, b.fail("task_list_unavailable", listErr.Error(), nil)
+		}
+		b.recordToolCall("hub", "tasks/list", "completed")
+		return b.jsonValue(this, rows), nil
+	}
 	id := firstString(args, "taskId")
 	if id == "" || len(id) > 256 {
 		return nil, b.fail("invalid_arguments", "taskId is required", nil)

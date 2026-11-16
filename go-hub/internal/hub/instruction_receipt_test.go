@@ -17,12 +17,12 @@ func TestInstructionReceiptSuppressesRepeatAndTokenEcho(t *testing.T) {
 	s, r, _ := instructionFixture(t)
 	s.cfg.InstructionSessionReceipts = true
 	first := instructionDiscovery(t, s, r)
-	if first["instructions"] == nil {
-		t.Fatal("first delivery must carry the instructions")
+	if first["instructions"] == nil || firstString(first, "instructions_status") != "delivered" {
+		t.Fatal("first delivery must carry the instructions and delivery state")
 	}
 	again := mapValue(s.appsSDKCallForRequest(r, "search", map[string]any{"query": "status"}))
-	if again["instructions"] != nil || again["context"] != nil {
-		t.Fatalf("instructions repeated for a connection that already received them: %v", again)
+	if again["instructions"] != nil || again["context"] != nil || firstString(again, "instructions_status") != "current" {
+		t.Fatalf("instructions repeated or delivery state disappeared for a connection that already received them: %v", again)
 	}
 	out := mapValue(s.appsSDKCallForRequest(r, "exec", map[string]any{"code": "return {answer:42};"}))
 	if out["executed"] == false || out["error"] != nil {

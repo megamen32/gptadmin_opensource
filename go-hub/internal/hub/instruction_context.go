@@ -308,6 +308,7 @@ func (s *Server) instructionFailure(r *http.Request) map[string]any {
 		if err == nil {
 			fail["context"] = token
 			fail["instructions"] = set.Content
+			fail["instructions_status"] = "delivered"
 			fail["instruction_version"] = set.Version
 			fail["shared_workflow_version"] = instructionSetVersion(sharedWorkflowInstructions)
 			s.rememberInstructionReceipt(r, set)
@@ -424,12 +425,20 @@ func (s *Server) presentInstructionContext(r *http.Request, name string, args ma
 		}
 		out["context"] = token
 		out["instructions"] = set.Content
+		out["instructions_status"] = "delivered"
 		out["instruction_version"] = set.Version
 		out["shared_workflow_version"] = instructionSetVersion(sharedWorkflowInstructions)
 		s.rememberInstructionReceipt(r, set)
 		if profile != "" {
 			out["profile"] = profile
 		}
+	}
+	if s.hasInstructionReceipt(r) && out["instructions_status"] == nil {
+		// A delivery receipt belongs to the current authenticated principal
+		// and effective document digest. Tell the model that the same profile
+		// instructions remain current without repeatedly sending their text.
+		out["instructions_status"] = "current"
+		out["instruction_version"] = set.Version
 	}
 	if selected {
 		s.bindInstructionContext(ref, token)

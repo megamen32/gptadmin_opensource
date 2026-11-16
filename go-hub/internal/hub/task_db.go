@@ -571,7 +571,7 @@ func (s *Server) readTaskRecordsSQLIndexed(where string, metadata bool, indexCla
 	read := func(tx *sql.Tx) error {
 		payload := "payload"
 		if metadata {
-			payload = `json_object('id',key,'server',json_extract(payload,'$.server'),'agent_id',json_extract(payload,'$.agent_id'),'method',json_extract(payload,'$.method'),'params',json_object('name',json_extract(payload,'$.params.name')),'tool_name',json_extract(payload,'$.tool_name'),'created_at',json_extract(payload,'$.created_at'),'started_at',json_extract(payload,'$.started_at'),'completed_at',done,'status',json_extract(payload,'$.status'))`
+			payload = `json_object('id',key,'server',json_extract(payload,'$.server'),'agent_id',json_extract(payload,'$.agent_id'),'trace_id',json_extract(payload,'$.trace_id'),'method',json_extract(payload,'$.method'),'params',json_object('name',json_extract(payload,'$.params.name')),'tool_name',json_extract(payload,'$.tool_name'),'created_at',json_extract(payload,'$.created_at'),'started_at',json_extract(payload,'$.started_at'),'completed_at',done,'status',json_extract(payload,'$.status'))`
 		}
 		query := `SELECT kind,key,` + payload + `,revision FROM task_records`
 		if indexClause != "" {

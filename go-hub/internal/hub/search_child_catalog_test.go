@@ -184,7 +184,7 @@ func TestSearchFailedChildRefreshIsReportedAsUnreachable(t *testing.T) {
 	}
 	cache.mu.Unlock()
 
-	result := s.searchToolsForRequest(r, map[string]any{"query": "fixture tool"})
+	result := s.searchToolsForRequest(r, map[string]any{"query": "fixture tool", "detail": "full"})
 	coverage := mapValue(result["coverage"])
 	if !truthy(coverage["complete"]) || firstString(coverage, "status") != "complete" {
 		t.Fatalf("unreachable child made reachable search coverage incomplete: %#v", coverage)
