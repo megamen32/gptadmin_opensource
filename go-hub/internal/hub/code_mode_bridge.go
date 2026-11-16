@@ -1129,7 +1129,7 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	}
 	inputSchema, prepared := b.preparedSchema(target, tool)
 	if !prepared {
-		inputSchema, prepared = builtInMCPInputSchema(target, tool)
+		inputSchema, prepared = b.server.builtInInputSchemaForTarget(target, tool)
 	}
 	if prepared {
 		if issue := validateMCPToolArguments(inputSchema, schemaBusinessArguments(resolvedArgs)); issue != nil {
