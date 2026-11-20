@@ -58,6 +58,7 @@ Env:
   FORCE=1 CLEAN=1 SKIP_TESTS=1 REBUILD_ON_REQ_CHANGE=1
   TAGGED_RELEASE=1 RELEASE_TAG=vN RELEASE_COMMIT=<full-commit-sha>
   GPTADMIN_HUB_DARWIN_ARM64=/path/gptadmin_hub GPTADMIN_HUB_DARWIN_AMD64=/path/gptadmin_hub
+  ANDROID_ARM64_CC=/path/to/ndk/bin/aarch64-linux-android24-clang (or place it on PATH)
 EOF
 }
 
@@ -512,6 +513,19 @@ archive_platforms() {
   make_platform_archive darwin amd64 darwin_amd64
 }
 
+build_android_arm64_client() {
+  local cc=${ANDROID_ARM64_CC:-aarch64-linux-android24-clang}
+  if [[ -z "${ANDROID_ARM64_CC:-}" && -n "${ANDROID_X86_64_CC:-}" ]]; then
+    cc="$(dirname "$ANDROID_X86_64_CC")/aarch64-linux-android24-clang"
+  fi
+  command -v "$cc" >/dev/null || {
+    echo "ERROR: set ANDROID_ARM64_CC to the Android NDK compiler for ARM64" >&2
+    return 1
+  }
+  # Android supplies DNS through Bionic. A pure Go resolver tries localhost.
+  CGO_ENABLED=1 CC="$cc" GOOS=android GOARCH=arm64 go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "$1" ./cmd/shellmcp-go
+}
+
 build_go_shellmcp_cross_platforms() {
   step "Cross-build Go ShellMCP platform binaries"
   pushd go-shellmcp > /dev/null
@@ -523,7 +537,9 @@ build_go_shellmcp_cross_platforms() {
   for pair in "${pairs[@]}"; do
     goos="${pair%%_*}"; goarch="${pair##*_}"
     mkdir -p "../$ART_DIR/go-shellmcp/$pair"
-    if [[ "$pair" == android_amd64 ]]; then
+    if [[ "$pair" == android_arm64 ]]; then
+      build_android_arm64_client "../$ART_DIR/go-shellmcp/$pair/shellmcp-go"
+    elif [[ "$pair" == android_amd64 ]]; then
       [[ -n "${ANDROID_X86_64_CC:-}" ]] || { echo "ERROR: Android x64 requires ANDROID_X86_64_CC from the Android NDK" >&2; exit 1; }
       CGO_ENABLED=1 CC="$ANDROID_X86_64_CC" GOOS="$goos" GOARCH="$goarch" go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "../$ART_DIR/go-shellmcp/$pair/shellmcp-go" ./cmd/shellmcp-go
     else
@@ -575,8 +591,7 @@ build_android_shellmcp() {
   step "Cross-build Android/Termux ShellMCP"
   mkdir -p "$ART_DIR/android-arm64/bin"
   pushd go-shellmcp >/dev/null
-  export CGO_ENABLED=0
-  GOOS=android GOARCH=arm64 go build "${GO_SHELLMCP_LDFLAGS[@]}" -o "../$ART_DIR/android-arm64/bin/shellmcp" ./cmd/shellmcp-go
+  build_android_arm64_client "../$ART_DIR/android-arm64/bin/shellmcp"
   popd >/dev/null
   chmod 755 "$ART_DIR/android-arm64/bin/shellmcp"
   cp -f deploy/install_android.sh "$ART_DIR/android-arm64/install_android.sh"

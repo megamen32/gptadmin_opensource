@@ -53,30 +53,35 @@ def running(command, cwd, env=None):
                 raise RuntimeError(f"{cwd.name} failed to stop")
 
 
-class Node:
-    def __init__(self, root, name, port, public_url, signer, reader=False):
+class Executor:
+    def __init__(self, root, name):
         self.directory = root / name
         self.directory.mkdir(mode=0o700)
         self.name = name
         self.target = "shell:" + name
         self.expected = []
-        self.origin = f"http://127.0.0.1:{port}"
-        self.control = secrets.token_urlsafe(32)
         self.env = dict(PATH=os.environ["PATH"], HOME=str(self.directory),
                         SSL_CERT_FILE=str(root / "cert.pem"), NO_PROXY="*",
-                        GPTADMIN_CONFIG_DIR=str(self.directory), GPTADMIN_ROOT=str(self.directory),
-                        GPTADMIN_ENV_FILE=str(self.directory / "no.env"),
-                        GPTADMIN_HUB_HOST="127.0.0.1", GPTADMIN_HUB_PORT=str(port),
-                        GPTADMIN_AUTH_MODE="reader" if reader else "writer",
-                        GPTADMIN_NODE_PUBLIC_URL=self.origin if reader else public_url,
-                        PUBLIC_ORIGIN=public_url, MCP_RESOURCE=public_url + "/mcp",
-                        OAUTH_CLIENT_SECRET=signer, CTL_TOKEN=self.control,
-                        SHELL_TOKEN=secrets.token_urlsafe(32), SHELL_NAME=name,
+                        SHELL_NAME=name,
                         SHELL_IDENTITY_DIR=str(self.directory), SHELL_SPOOL_DIR=str(self.directory / "spool"),
                         SHELL_DEFAULT_USER=pwd.getpwuid(os.getuid()).pw_name,
                         SHELL_DEFAULT_HOME=str(self.directory), SHELL_DEFAULT_CWD=str(self.directory),
                         SHELLMCP_MCP_CONFIG=str(self.directory / "no-children.json"))
         (self.directory / "executor-name").write_text(name)
+
+
+class Node(Executor):
+    def __init__(self, root, name, port, public_url, signer, reader=False):
+        super().__init__(root, name)
+        self.origin = f"http://127.0.0.1:{port}"
+        self.control = secrets.token_urlsafe(32)
+        self.env.update(GPTADMIN_CONFIG_DIR=str(self.directory), GPTADMIN_ROOT=str(self.directory),
+                        GPTADMIN_ENV_FILE=str(self.directory / "no.env"),
+                        GPTADMIN_HUB_HOST="127.0.0.1", GPTADMIN_HUB_PORT=str(port),
+                        GPTADMIN_AUTH_MODE="reader" if reader else "writer",
+                        GPTADMIN_NODE_PUBLIC_URL=self.origin if reader else public_url,
+                        PUBLIC_ORIGIN=public_url, MCP_RESOURCE=public_url + "/mcp",
+                        OAUTH_CLIENT_SECRET=signer, CTL_TOKEN=self.control, SHELL_TOKEN=secrets.token_urlsafe(32))
 
     def admin(self, path, body=None):
         status, value = http_json("GET" if body is None else "POST", self.origin + path,
@@ -111,6 +116,29 @@ def enroll(writer, member):
     joined = perform_join(writer.origin, grant["grant"], member.directory / "node-identity.json",
                           member.name, [member.origin], None, None)
     member.env["GPTADMIN_AUTH_SOURCE_ID"] = joined["writer_id"]
+
+
+async def approve_polling_executor(writer, executor, process):
+    def registration(status):
+        return next((row for row in writer.admin("/servers")["servers"]
+                     if row["server_id"] == executor.target and row["status"] == status), None)
+
+    pending = await wait_for(f"{executor.name} pending approval", process, lambda: registration("awaiting_approval"))
+    identity = json.loads((executor.directory / "shellmcp_identity.json").read_text())
+    if (pending["mode"] != "long_poll" or pending["meta"].get("poll_heartbeat") is not True
+            or pending["meta"].get("fingerprint") != identity["fingerprint"]):
+        raise RuntimeError("pending registration does not match the standalone polling executor")
+    context = writer.admin("/mcp-relay/servers").get("context", "")
+    approval = writer.admin("/mcp-relay/call", {
+        "target": "hub", "tool": "approve_pending_server", "arguments": {"server_id": executor.target},
+        "context": context, "detail": "full"})
+    receipt = approval["response"]
+    if receipt.get("ok") is not True or receipt.get("server_id") != executor.target:
+        raise RuntimeError("Hub did not approve the pending standalone executor")
+    online = await wait_for(f"{executor.name} online", process, lambda: registration("online"))
+    if online["meta"].get("approved") is not True:
+        raise RuntimeError("standalone executor has no approval in the registry")
+    print(f"{executor.name}: long_poll identity matched, awaiting_approval -> online", flush=True)
 
 
 def enable_https(root, port, writer_port):
@@ -198,7 +226,7 @@ async def execute(session, context, phase, node):
     node.expected.append(nonce)
     if (node.directory / "invocations").read_text().splitlines() != node.expected:
         raise RuntimeError(f"{phase} {node.name}: command executed on the wrong node or more than once")
-    print(f"{phase}: {node.name} returned fresh stdout and executed once", flush=True)
+    print(f"{phase}: {node.target} stdout={receipt['stdout']!r} returncode=0 marker_count=1", flush=True)
 
 
 async def task_call(session, context, code):
@@ -226,14 +254,15 @@ async def check_writer_receipt(session, context, writer, task_id, marker, phase)
           "returncode=0 disk_entries=1", flush=True)
 
 
-async def run(binary, root):
+async def run(binary, shell_binary, root):
     client_port, writer_port, former_port, other_port = loopback_ports(4)
     origin = f"https://localhost:{client_port}"
     signer = secrets.token_urlsafe(32)
     writer = Node(root, "node44", writer_port, origin, signer)
     former = Node(root, "node100", former_port, origin, signer, reader=True)
     other = Node(root, "node88", other_port, origin, signer, reader=True)
-    nodes = (writer, former, other)
+    polling = Executor(root, "termux-poller")
+    executors = (writer, former, other, polling)
     # Keep 100's physical executor and on-disk state when enrolling it under 44.
     with running([binary], former.directory, {**former.env, "GPTADMIN_AUTH_MODE": "writer"}) as initial:
         previous_writer_id = await wait_for("100 as the initial writer", initial, former.writer_id)
@@ -263,6 +292,13 @@ async def run(binary, root):
 
         await wait_for("writer HTTPS ingress", proxy, https_ready)
         check_reader_route(origin, cert, reader_env, "127.0.0.1", "verified writer HTTPS")
+        connect = writer.admin("/admin/api/agents/connect-info")
+        if connect["hub_url"] != origin or not connect["shell_token"]:
+            raise RuntimeError("unexpected standalone executor connection details")
+        polling.env.update(HUB_URL=origin, SHELLMCP_TOKEN=connect["shell_token"], SHELLMCP_MODE="long_poll",
+                           SHELLMCP_QUEUE="1", SHELLMCP_HEARTBEAT="0", SHELLMCP_SELF_REPAIR_DISABLE="1")
+        shell_process = stack.enter_context(running([shell_binary], polling.directory, polling.env))
+        await approve_polling_executor(writer, polling, shell_process)
         issued = writer.admin("/admin/api/mcp/issue-token", {
             "client_id": "member-outage", "role": "client", "access_mode": "full", "ttl_days": 1})
         assert issued["role"] == "client" and issued["access_token"] != writer.control
@@ -291,7 +327,7 @@ async def run(binary, root):
 
         token = issued["access_token"]
         async with mcp_client(origin, tls, token, writer.target) as (session, context):
-            for node in nodes:
+            for node in executors:
                 await execute(session, context, "before outage", node)
             marker = secrets.token_hex(12)
             record = """printf '%s\\n' "$1" >> receipt-invocations && printf '%s ' "$1" && cat executor-name"""
@@ -310,15 +346,15 @@ async def run(binary, root):
             # The writer expires the 90-second member lease on its 30-second heartbeat tick.
             await wait_for("44 to withdraw the route to 100", writer_process, lambda: routes_match(False), timeout=140)
             print("node44 withdrew the route to node100; node88 remains ready", flush=True)
-            async with mcp_client(origin, tls, token, writer.target) as (fresh, fresh_context):
+            async with mcp_client(origin, tls, token, polling.target) as (fresh, fresh_context):
                 await check_writer_receipt(fresh, fresh_context, writer, task_id, marker, "fresh client after expiry")
-                for node in (writer, other):
+                for node in (writer, other, polling):
                     await execute(fresh, fresh_context, "fresh client, node100 offline", node)
 
             restarted = stack.enter_context(running([binary], former.directory, former.env))
             await wait_for("restored node100 route at 44", restarted, routes_match)
             print("node44 restored the route to node100", flush=True)
-            for node in nodes:
+            for node in executors:
                 await execute(session, context, "original client after recovery", node)
             async with mcp_client(origin, tls, token, writer.target) as (fresh, fresh_context):
                 await check_writer_receipt(fresh, fresh_context, writer, task_id, marker, "fresh client after recovery")
@@ -327,5 +363,10 @@ async def run(binary, root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--shell-binary", type=Path,
+                        help="standalone gptadmin-shellmcp (defaults to the Node binary's directory)")
+    args = parser.parse_args()
+    binary = args.binary.resolve(strict=True)
+    shell_binary = (args.shell_binary or binary.with_name("gptadmin-shellmcp")).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="gptadmin-member-outage-") as directory:
-        asyncio.run(run(parser.parse_args().binary.resolve(), Path(directory)))
+        asyncio.run(run(binary, shell_binary, Path(directory)))

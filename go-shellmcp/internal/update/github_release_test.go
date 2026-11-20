@@ -19,11 +19,20 @@ import (
 )
 
 func TestGitHubAssetNameMatrix(t *testing.T) {
-	cases := []struct{ os, arch, want string }{{"linux", "amd64", "gptadmin-ubuntu-x64-client.tar.gz"}, {"linux", "arm64", "gptadmin-ubuntu-arm64-client.tar.gz"}, {"darwin", "amd64", "gptadmin-macos-x64-client.tar.gz"}, {"darwin", "arm64", "gptadmin-macos-arm64-client.tar.gz"}, {"windows", "amd64", "gptadmin-windows-x64-client.zip"}, {"windows", "arm64", "gptadmin-windows-arm64-client.zip"}}
+	cases := []struct{ os, arch, want string }{
+		{"linux", "amd64", "gptadmin-ubuntu-x64-client.tar.gz"},
+		{"linux", "arm64", "gptadmin-ubuntu-arm64-client.tar.gz"},
+		{"darwin", "amd64", "gptadmin-macos-x64-client.tar.gz"},
+		{"darwin", "arm64", "gptadmin-macos-arm64-client.tar.gz"},
+		{"windows", "amd64", "gptadmin-windows-x64-client.zip"},
+		{"windows", "arm64", "gptadmin-windows-arm64-client.zip"},
+		{"android", "amd64", "gptadmin-android-x64-client.tar.gz"},
+		{"android", "arm64", "gptadmin-android-arm64-client.tar.gz"},
+	}
 	for _, tc := range cases {
 		got, err := GitHubAssetName(tc.os, tc.arch)
 		if err != nil || got != tc.want {
-			t.Fatalf("%s/%s got=%q err=%v want=%q", tc.os, tc.arch, got, err, tc.want)
+			t.Errorf("%s/%s got=%q err=%v want=%q", tc.os, tc.arch, got, err, tc.want)
 		}
 	}
 }

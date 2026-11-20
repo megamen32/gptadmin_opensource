@@ -53,6 +53,8 @@ func GitHubAssetName(goos, goarch string) (string, error) {
 	switch goos {
 	case "linux":
 		return "gptadmin-ubuntu-" + arch + "-client.tar.gz", nil
+	case "android":
+		return "gptadmin-android-" + arch + "-client.tar.gz", nil
 	case "darwin":
 		return "gptadmin-macos-" + arch + "-client.tar.gz", nil
 	case "windows":

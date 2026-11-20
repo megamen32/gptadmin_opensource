@@ -173,15 +173,32 @@ func TestManagedBridgeDeleteClosesSessionButKeepsChild(t *testing.T) {
 		t.Fatalf("initialized notification status=%d", notification.StatusCode)
 	}
 	notification.Body.Close()
-	if data, _ := os.ReadFile(initializedPath); strings.Count(string(data), "initialized") != 1 {
-		t.Fatalf("downstream initialized notification was duplicated upstream: %q", data)
-	}
 
 	listed := bridgePost(t, url, "Bearer owner", sessionID, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}})
+	defer listed.Body.Close()
 	if listed.StatusCode != http.StatusOK {
 		t.Fatalf("tools/list status=%d", listed.StatusCode)
 	}
-	listed.Body.Close()
+	var reply struct {
+		Result struct {
+			Tools []struct{ Name string }
+		}
+	}
+	if err := json.NewDecoder(listed.Body).Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if tools := reply.Result.Tools; len(tools) != 1 || tools[0].Name != "echo" {
+		t.Fatalf("unexpected tools/list result: %+v", tools)
+	}
+
+	// The child processes stdin in order, so its tools/list reply follows the marker write.
+	data, err := os.ReadFile(initializedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), "initialized"); count != 1 {
+		t.Fatalf("child recorded %d initialized notifications, want 1", count)
+	}
 
 	deleted := bridgeDelete(t, url, "Bearer owner", sessionID)
 	if deleted.StatusCode != http.StatusNoContent {

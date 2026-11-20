@@ -55,6 +55,13 @@ jobs:
         path: .tmp/node-packages/gptadmin-node-linux-*.tar.gz*
         if-no-files-found: error
         retention-days: 1
+    - name: Verify the Android ARM64 client uses the system DNS resolver
+      run: |
+        export ANDROID_ARM64_CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+        bash tools/build.sh android
+        tar -xOzf build/gptadmin-android-arm64.tar.gz bin/shellmcp > "$RUNNER_TEMP/android-shellmcp"
+        go version -m "$RUNNER_TEMP/android-shellmcp" | grep -Fx $'\tbuild\tCGO_ENABLED=1'
+        readelf --wide --dyn-syms "$RUNNER_TEMP/android-shellmcp" | grep -F 'getaddrinfo@LIBC'
   admin-ui-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -100,8 +107,11 @@ jobs:
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
     - name: Run failover Docker black-box suite
       run: docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-container-exit --exit-code-from failover-e2e
-    - name: Test reader TLS routing and MCP reconnection during a member outage
-      run: docker compose -f tests/e2e/failover/docker-compose.yml run --rm -T failover-e2e python3 /src/tests/e2e/node/member_outage_run.py /usr/local/bin/gptadmin-node
+    - name: Test reader TLS routing and fresh MCP calls to Node and standalone ShellMCP during a member outage
+      run: >-
+        docker compose -f tests/e2e/failover/docker-compose.yml run --rm -T failover-e2e
+        python3 /src/tests/e2e/node/member_outage_run.py /usr/local/bin/gptadmin-node
+        --shell-binary /usr/local/bin/gptadmin-shellmcp
   installer-e2e-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30

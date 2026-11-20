@@ -168,7 +168,13 @@ set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
+export TMPDIR=${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}
 mkdir -p "${SHELLMCP_SPOOL_DIR:-$HOME/.local/share/gptadmin/spool}" "$HOME/.local/share/gptadmin/logs"
+# Termux:Boot and the device boot service can both reach this launcher.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$HOME/.local/share/gptadmin/shellmcp.lock"
+  flock -n 9
+fi
 if command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock || true; fi
 exec gptadmin-shellmcp >>"$HOME/.local/share/gptadmin/logs/shellmcp.log" 2>&1
 RUN

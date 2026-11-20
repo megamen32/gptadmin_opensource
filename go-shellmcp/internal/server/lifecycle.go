@@ -6,12 +6,25 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/update"
 )
+
+type updateLaunch struct {
+	binary  string // File replaced by the updater.
+	program string // Program passed to exec after replacement.
+	argv    []string
+}
+
+func directUpdateLaunch() (updateLaunch, error) {
+	exe, err := os.Executable()
+	return updateLaunch{binary: exe, program: exe, argv: os.Args}, err
+}
 
 // startUpdateLoop, when configured, builds an updater from environment
 // variables and runs it in a goroutine. ctx cancellation triggers a clean
@@ -33,12 +46,12 @@ func (s *Server) startUpdateLoop(ctx context.Context) {
 		if !cfg.AutoUpdate || cfg.ManifestURL == "" {
 			return
 		}
-		exe, err := os.Executable()
+		launch, err := currentUpdateLaunch()
 		if err != nil {
 			log.Printf("update: executable: %v", err)
 			return
 		}
-		upd, err := update.New(cfg, parseBuildVersion(BuildVersion), exe)
+		upd, err := update.New(cfg, parseBuildVersion(BuildVersion), launch.binary)
 		if err != nil {
 			log.Printf("update: init failed: %v", err)
 			return
@@ -135,14 +148,17 @@ func (s *Server) triggerGitHubSelfRepair(desired int, repo string) {
 	go func() {
 		defer s.selfRepairBusy.Store(false)
 		s.selfRepairState.Store("updating")
-		exe, err := os.Executable()
+		launch, err := currentUpdateLaunch()
 		if err != nil {
+			if runtime.GOOS == "android" {
+				s.selfRepairState.Store("failed")
+			}
 			log.Printf("self-repair: executable: %v", err)
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), update.SelfRepairTimeout())
 		defer cancel()
-		result, err := update.ApplyGitHubRelease(ctx, update.GitHubReleaseConfig{Repo: repo, DesiredBuild: desired, CurrentBuild: parseBuildVersion(BuildVersion), CurrentExe: exe})
+		result, err := update.ApplyGitHubRelease(ctx, update.GitHubReleaseConfig{Repo: repo, DesiredBuild: desired, CurrentBuild: parseBuildVersion(BuildVersion), CurrentExe: launch.binary})
 		if err != nil {
 			s.selfRepairState.Store("failed")
 			log.Printf("self-repair: GitHub v%d failed: %v", desired, err)
@@ -153,7 +169,7 @@ func (s *Server) triggerGitHubSelfRepair(desired int, repo string) {
 		}
 		if result.NeedsHelper {
 			s.selfRepairState.Store("staged")
-			if err := update.ScheduleWindowsReplace(exe, result.StagedPath, os.Args[1:]); err != nil {
+			if err := update.ScheduleWindowsReplace(launch.binary, result.StagedPath, os.Args[1:]); err != nil {
 				s.selfRepairState.Store("failed")
 				log.Printf("self-repair: windows helper failed: %v", err)
 				return
@@ -166,6 +182,12 @@ func (s *Server) triggerGitHubSelfRepair(desired int, repo string) {
 		s.selfRepairState.Store("applied")
 		log.Printf("self-repair: applied GitHub release v%d asset=%s sha256=%s", desired, result.Asset, result.ArchiveSHA)
 		time.Sleep(250 * time.Millisecond)
+		if runtime.GOOS == "android" {
+			// Termux:Boot and nohup can launch the agent without a supervisor.
+			if err := syscall.Exec(launch.program, launch.argv, os.Environ()); err != nil {
+				log.Printf("self-repair: exec updated Android binary: %v", err)
+			}
+		}
 		os.Exit(0)
 	}()
 }
