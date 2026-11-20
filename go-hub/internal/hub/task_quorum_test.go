@@ -100,3 +100,35 @@ func TestTaskQuorumHistoricalReplayRequiresMatchingChain(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskQuorumHistoricalReplayAllowsIdenticalCallbackRetry(t *testing.T) {
+	s := New(Config{ConfigDir: t.TempDir(), QuorumConfigFile: "fixture"})
+	defer s.Close()
+	s.quorumClusterID = "cluster"
+	makeMutation := func(revision uint64) quorum.Mutation {
+		row, err := json.Marshal(quorumTaskRecordRow{
+			Kind: "shell", Key: "job", Updated: float64(revision),
+			Payload: []byte(`{"id":"job","status":"queued"}`), Revision: int64(revision),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return quorum.Mutation{
+			Namespace: "task_records/shell", Key: "job", External: true,
+			Record: quorum.Record{Revision: revision, Value: row},
+		}
+	}
+	first, second := makeMutation(1), makeMutation(2)
+	if err := s.applyTaskQuorumMutations(1, 1, []quorum.Mutation{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applyTaskQuorumMutations(2, 2, []quorum.Mutation{second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applyTaskQuorumMutations(1, 1, []quorum.Mutation{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applyTaskQuorumMutations(2, 2, []quorum.Mutation{second}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -41,11 +41,12 @@ from enum import Enum
 PACKAGE_SCHEMA = 'gptadmin.node-package/v1'
 IDENTITY_SCHEMA = 'gptadmin.node-identity/v1'
 SHELLMCP_PACKAGE_FILE = 'bin/shellmcp'
+BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
 PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-relay02.service'
-REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, PROXY_ROUTE_PACKAGE_FILE)
+REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE, PROXY_ROUTE_PACKAGE_FILE)
 FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
     'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
-    'scripts/gptadmin_node_autoupdate.py'))
+    'scripts/gptadmin_node_autoupdate.py', 'public/secret-input/index.html'))
 ADMIN_UI_INDEX = 'public/admin/index.html'
 ADMIN_UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
 SHELLMCP_SERVICE = 'gptadmin-shellmcp-go.service'
@@ -615,7 +616,7 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             with tar.extractfile(members[name]) as source, open(target, 'wb') as out:
                 shutil.copyfileobj(source, out)
-            os.chmod(target, 0o755 if name in ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE) else 0o644)
+            os.chmod(target, 0o755 if name in ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE) else 0o644)
     return manifest
 
 

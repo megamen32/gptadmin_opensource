@@ -100,6 +100,8 @@ jobs:
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
     - name: Run failover Docker black-box suite
       run: docker compose -f tests/e2e/failover/docker-compose.yml up --build --abort-on-container-exit --exit-code-from failover-e2e
+    - name: Test reader TLS routing and MCP reconnection during a member outage
+      run: docker compose -f tests/e2e/failover/docker-compose.yml run --rm -T failover-e2e python3 /src/tests/e2e/node/member_outage_run.py /usr/local/bin/gptadmin-node
   installer-e2e-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30

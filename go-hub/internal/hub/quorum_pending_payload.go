@@ -71,7 +71,11 @@ func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name strin
 	if s.cfg.ConfigDir == "" {
 		return nil
 	}
-	if s.cfg.QuorumConfigFile != "" {
+	// A configured quorum path can remain in a shared env snapshot after a
+	// failed staged start. Only an actually initialized quorum node must fence
+	// local recovery; ordinary controller mode must recover its admitted queue
+	// through the local owner path.
+	if s.quorumNode != nil {
 		if s.quorumNode == nil {
 			return errors.New("pending quorum unavailable")
 		}
@@ -109,7 +113,7 @@ func (s *Server) recoverQuorumPendingShellLocked(ctx context.Context, name strin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if s.cfg.QuorumConfigFile != "" {
+		if s.quorumNode != nil {
 			if err := s.quorumNode.VerifyLeader(ctx); err != nil {
 				return err
 			}

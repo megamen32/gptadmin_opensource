@@ -491,6 +491,24 @@ func (n *Node) OpenExternalValue(namespace, key string, revision uint64, value [
 	return append([]byte(nil), opened.Record.Value...), nil
 }
 
+// OpenExternalValueWithKey opens a sealed quorum value without starting a
+// Raft node. It is used by the ordinary controller to recover queued inputs
+// after a staged quorum shutdown; it does not grant quorum authority.
+func OpenExternalValueWithKey(stateKeyFile, clusterID, namespace, key string, revision uint64, value []byte) ([]byte, error) {
+	aead, err := loadStateAEAD(stateKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := openMutation(aead, clusterID, Mutation{
+		Namespace: namespace, Key: key, External: true,
+		Record: Record{Revision: revision, Value: value},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return opened.Record.Value, nil
+}
+
 // MarkExternalStateReconciled clears the fail-closed application marker only
 // after the caller has verified its durable replica through the applied index.
 func (n *Node) MarkExternalStateReconciled() {

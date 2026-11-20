@@ -27,7 +27,8 @@ SCHEMA = 'gptadmin.node-package/v1'
 DEFAULT_LABEL = 'com.gptadmin.node'
 REQUIRED = ('bin/gptadmin-node', 'cli.py', 'scripts/gptadmin_node_manage.py',
             'scripts/gptadmin_node_macos_manage.py', 'scripts/gptadmin_node_probe.py',
-            'scripts/gptadmin_node_autoupdate.py', 'scripts/gptadmin_node_macos_autoupdate.py')
+            'scripts/gptadmin_node_autoupdate.py', 'scripts/gptadmin_node_macos_autoupdate.py',
+            'public/secret-input/index.html')
 
 
 class NodeError(RuntimeError):

@@ -60,6 +60,7 @@ def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + '
     files = payload if payload is not None else {
         'bin/gptadmin-node': ELF_PAYLOAD,
         'bin/shellmcp': ELF_PAYLOAD,
+        'bin/gptadmin-mcp-bridge': ELF_PAYLOAD,
         'systemd/gptadmin-proxy-route-relay02.service': b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\n',
         'cli.py': b'# cli payload\n',
         'scripts/gptadmin_node_manage.py': b'# manager payload\n',
@@ -67,6 +68,7 @@ def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + '
         'scripts/gptadmin_node_autoupdate.py': b'# autoupdate payload\n',
         'public/admin/index.html': b'<script src=\"assets/app.js\"></script>',
         'public/admin/assets/app.js': b'// asset fixture',
+        'public/secret-input/index.html': b'<form method="post"><input type="password" name="value"></form>',
     }
     manifest = {
         'schema': mgr.PACKAGE_SCHEMA, 'git_commit': commit, 'build_version': version,
@@ -129,6 +131,9 @@ class TestPackageVerification(BaseTempCase):
         self.assertEqual(os.stat(dest / 'bin' / 'gptadmin-node').st_mode & 0o777, 0o755)
         self.assertEqual(os.stat(dest / 'cli.py').st_mode & 0o777, 0o644)
         mgr.verify_elf_binary(dest / 'bin' / 'gptadmin-node')
+        for name in ('bin/gptadmin-node', 'bin/shellmcp', 'bin/gptadmin-mcp-bridge'):
+            self.assertEqual(os.stat(dest / name).st_mode & 0o777, 0o755)
+            mgr.verify_elf_binary(dest / name)
 
     def test_tampered_digest_fails_before_extraction(self):
         def tamper(manifest):
@@ -172,6 +177,12 @@ class TestPackageVerification(BaseTempCase):
         package = make_package(self.tmp, manifest_mutator=mutate)
         with self.assertRaises(mgr.PreflightError):
             mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+
+    def test_unapproved_member_rejected(self):
+        package = make_package(self.tmp, extra_members=[('bin/unapproved', b'nope')])
+        with self.assertRaises(mgr.PreflightError):
+            mgr.verify_and_extract(package, 'amd64', self.tmp / 'dest')
+        self.assertFalse((self.tmp / 'dest').exists())
 
     def test_unsafe_member_name_rejected(self):
         package = make_package(self.tmp, extra_members=[('../evil', b'pwn')])

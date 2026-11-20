@@ -4,12 +4,16 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+
+	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 )
 
 // Local queues reuse the installed secret store's AES-GCM key. Domain and
 // immutable task ID are authenticated; ciphertext cannot move between tasks.
 func (s *Server) sealPendingValue(namespace, id string, plain []byte) (json.RawMessage, error) {
-	if s.cfg.QuorumConfigFile != "" {
+	if s.quorumNode != nil {
 		if s.quorumNode == nil {
 			return nil, errors.New("pending quorum cipher unavailable")
 		}
@@ -30,11 +34,34 @@ func (s *Server) sealPendingValue(namespace, id string, plain []byte) (json.RawM
 	}{1, nonce, a.Seal(nil, nonce, plain, []byte("gptadmin/local-pending/v1/"+namespace+"/"+id))})
 }
 func (s *Server) openPendingValue(namespace, id string, sealed json.RawMessage) ([]byte, error) {
-	if s.cfg.QuorumConfigFile != "" {
-		if s.quorumNode == nil {
-			return nil, errors.New("pending quorum cipher unavailable")
-		}
+	if s.quorumNode != nil {
 		return s.quorumNode.OpenExternalValue(namespace, id, 1, sealed)
+	}
+	if s.cfg.QuorumConfigFile != "" {
+		configBytes, err := os.ReadFile(s.cfg.QuorumConfigFile)
+		if err != nil {
+			configBytes, err = os.ReadFile(filepath.Join(s.cfg.ConfigDir, "quorum", "quorum.json"))
+		}
+		if err == nil {
+			var config quorum.Config
+			if json.Unmarshal(configBytes, &config) == nil {
+				if opened, openErr := quorum.OpenExternalValueWithKey(config.StateKeyFile, config.ClusterID, namespace, id, 1, sealed); openErr == nil {
+					return opened, nil
+				}
+			}
+		}
+	}
+	// A queued envelope created during a staged quorum can outlive the
+	// quorum process itself. Try the durable quorum key before interpreting it
+	// as a local AES-GCM envelope; failure falls through to the normal local
+	// cipher path.
+	if configBytes, err := os.ReadFile(filepath.Join(s.cfg.ConfigDir, "quorum", "quorum.json")); err == nil {
+		var config quorum.Config
+		if json.Unmarshal(configBytes, &config) == nil {
+			if opened, err := quorum.OpenExternalValueWithKey(config.StateKeyFile, config.ClusterID, namespace, id, 1, sealed); err == nil {
+				return opened, nil
+			}
+		}
 	}
 	if s.secretStore == nil || s.secretStoreErr != nil {
 		return nil, errors.New("pending local cipher unavailable")

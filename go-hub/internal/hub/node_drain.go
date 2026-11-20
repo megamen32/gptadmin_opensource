@@ -55,7 +55,13 @@ func (p *nodeSubmissionPermit) close() {
 }
 
 func (s *Server) beginWorkflowSubmission() (*nodeSubmissionPermit, bool) {
-	release, ok := s.beginNodeSubmission("webhook", "dispatch")
+	return s.beginNodeSubmissionPermit("webhook", "dispatch")
+}
+
+// A direct request holds one admission across approval and task persistence.
+// Nested dispatch reuses that admission instead of racing a second drain check.
+func (s *Server) beginNodeSubmissionPermit(target, tool string) (*nodeSubmissionPermit, bool) {
+	release, ok := s.beginNodeSubmission(target, tool)
 	if !ok {
 		return nil, false
 	}

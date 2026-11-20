@@ -31,6 +31,7 @@ SHELLMCP_SOURCE = 'go-shellmcp'
 BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
 PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-relay02.service'
 PROXY_ROUTE_UNIT_PACKAGE_PATH = 'systemd/gptadmin-proxy-route-relay02.service'
+SECRET_INPUT_PAGE = 'public/secret-input/index.html'
 
 
 def build_admin_ui() -> dict[str, Path]:
@@ -228,6 +229,10 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
                           PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit})
         payload = PAYLOAD if platform == 'linux' else DARWIN_PAYLOAD
         files.update({name: ROOT / name for name in payload})
+        secret_page = ROOT / SECRET_INPUT_PAGE
+        if secret_page.is_symlink() or not secret_page.is_file():
+            raise RuntimeError('secret input HTML page is missing or unsafe')
+        files[SECRET_INPUT_PAGE] = secret_page
         if platform == 'linux':
             files.update(build_admin_ui())
         manifest = {

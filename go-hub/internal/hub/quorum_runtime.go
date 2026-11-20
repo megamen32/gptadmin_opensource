@@ -158,6 +158,22 @@ func (s *Server) taskQuorumReplicaReady() error {
 	return nil
 }
 
+// taskQuorumBaselineReady is the pre-voter admission fence. A node may be
+// promoted only after its local SQLite baseline and authority rows are
+// approved for this cluster; it need not already be a Raft voter (that is
+// the promotion operation itself).
+func (s *Server) taskQuorumBaselineReady() bool {
+	if s.quorumNode == nil {
+		return false
+	}
+	var clusterID string
+	var baselineReady, authorityReady int
+	err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT cluster_id,baseline_ready,authority_ready FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &baselineReady, &authorityReady)
+	})
+	return err == nil && clusterID == s.quorumClusterID && baselineReady == 1 && authorityReady == 1
+}
+
 // quorumVoterPromotionLoop completes interrupted promotions only for enrolled
 // ready members whose public TLS health reports the expected cluster identity.
 // The Raft transport independently verifies each peer's enrolled node-key hash.
@@ -268,14 +284,15 @@ func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
 	}
 	defer response.Body.Close()
 	var status struct {
-		NodeID       string `json:"node_id"`
-		ClusterID    string `json:"cluster_id"`
-		ReplicaReady bool   `json:"replica_ready"`
+		NodeID        string `json:"node_id"`
+		ClusterID     string `json:"cluster_id"`
+		ReplicaReady  bool   `json:"replica_ready"`
+		BaselineReady bool   `json:"baseline_ready"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&status) != nil {
 		return false
 	}
-	return status.NodeID == peer.ID && status.ClusterID == s.quorumClusterID && status.ReplicaReady
+	return status.NodeID == peer.ID && status.ClusterID == s.quorumClusterID && (status.ReplicaReady || status.BaselineReady)
 }
 
 func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {

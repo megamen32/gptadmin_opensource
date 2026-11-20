@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"sync"
 
@@ -114,6 +115,7 @@ func (s *stateMachine) Apply(entry *raft.Log) interface{} {
 	}
 	if s.onApply != nil {
 		if err := s.onApply(entry.Index, cmd.ExternalSequence, cmd.Mutations); err != nil {
+			log.Printf("quorum external apply failed raft_index=%d external_sequence=%d: %v", entry.Index, cmd.ExternalSequence, err)
 			for _, mutation := range cmd.Mutations {
 				if mutation.External {
 					s.applyErr = err

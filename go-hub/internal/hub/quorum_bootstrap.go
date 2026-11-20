@@ -15,7 +15,7 @@ import (
 	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 )
 
-const quorumSeedBatchBytes = 4 << 20
+const quorumSeedBatchBytes = 7 << 20
 const quorumSeedMaxRowBytes = 8 << 20
 
 // quorumBootstrapLoop seeds the existing durable task store exactly once,
@@ -73,10 +73,34 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 	if err := s.withTaskDatabase(func(*taskTransaction) error { return nil }); err != nil {
 		return err
 	}
+	var taskChainSequence uint64
+	var taskRowCount int64
+	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+		if err := tx.QueryRow(`SELECT COALESCE(sequence,0) FROM task_quorum_chain WHERE id=1`).Scan(&taskChainSequence); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return tx.QueryRow(`SELECT (SELECT count(*) FROM task_records) + (SELECT count(*) FROM task_controls) + (SELECT count(*) FROM task_requests)`).Scan(&taskRowCount)
+	}); err != nil {
+		return err
+	}
+	if taskChainSequence == 0 {
+		taskChainSequence = 1
+	}
+	if taskRowCount == 0 {
+		taskRowCount = 1
+	}
 	digest := sha256.New()
+	var baselineChainDigest [32]byte
 	counts := map[string]int64{"task_records": 0, "task_controls": 0, "task_requests": 0}
 	batch := make([]quorum.Mutation, 0, 32)
 	batchBytes := 0
+	batchNumber := s.quorumNode.ExternalAppliedIndex()
+	baselineBatchCount := uint64(0)
+	seenRows := int64(0)
+	s.taskQuorumBaselineSeeding.Store(true)
+	s.taskQuorumInitialTaskReplay.Store(true)
+	defer s.taskQuorumBaselineSeeding.Store(false)
+	defer s.taskQuorumInitialTaskReplay.Store(false)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -87,6 +111,13 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 		if err := s.quorumNode.ApplyBatch(ctx, batch); err != nil {
 			return err
 		}
+		batchNumber++
+		baselineBatchCount++
+		batchDigest, err := quorumBatchDigest(batch)
+		if err != nil {
+			return err
+		}
+		baselineChainDigest = taskQuorumChainStep(baselineChainDigest, batchNumber, batchDigest)
 		for _, mutation := range batch {
 			counts[mutation.Namespace]++
 			encoded, err := json.Marshal(mutation)
@@ -115,6 +146,12 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 		}
 		batch = append(batch, mutation)
 		batchBytes += len(encoded)
+		seenRows++
+		if baselineBatchCount+1 < taskChainSequence && seenRows*int64(taskChainSequence) >= taskRowCount*int64(baselineBatchCount+1) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -241,6 +278,35 @@ WHERE r.key>? ORDER BY r.key LIMIT 32`, lastKeyCursor)
 	if err := flush(); err != nil {
 		return err
 	}
+	taskChainSequence = batchNumber
+	if err := s.withTaskDatabase(func(t *taskTransaction) error {
+		_, err := t.tx.Exec(`UPDATE task_quorum_chain SET sequence=?,digest=? WHERE id=1`, taskChainSequence, baselineChainDigest[:])
+		return err
+	}); err != nil {
+		return err
+	}
+	s.taskQuorumInitialTaskReplay.Store(false)
+	// Historical task rows are replayed through the external FSM before the
+	// authority baseline may append the next external sequence. ApplyBatch
+	// waits for Raft commit, but a replay callback can legitimately return
+	// before the FSM has caught up to the SQLite chain head. Starting authority
+	// writes in that window would advance SQLite at (for example) sequence 22
+	// while Raft still proposes sequence 8, permanently fencing readiness.
+	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT sequence FROM task_quorum_chain WHERE id=1`).Scan(&taskChainSequence)
+	}); err != nil {
+		return err
+	}
+	for s.quorumNode.ExternalAppliedIndex() < taskChainSequence {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 	if err := s.seedQuorumAuthorityBaseline(ctx); err != nil {
 		return fmt.Errorf("seed quorum authority state: %w", err)
 	}
@@ -251,11 +317,15 @@ WHERE r.key>? ORDER BY r.key LIMIT 32`, lastKeyCursor)
 		"requests":          counts["task_requests"],
 		"sha256":            hex.EncodeToString(digest.Sum(nil)),
 		"authority_domains": quorumRequiredAuthorityDomains,
+		"chain_sequence":    taskChainSequence,
+		"chain_digest":      hex.EncodeToString(baselineChainDigest[:]),
 	})
 	if err != nil {
 		return err
 	}
-	return s.quorumNode.ApplyRecord(ctx, "cluster_meta", "task_baseline", quorum.Record{Revision: 1, Value: manifest})
+	err = s.quorumNode.ApplyRecord(ctx, "cluster_meta", "task_baseline", quorum.Record{Revision: 1, Value: manifest})
+	s.taskQuorumBaselineSeeding.Store(false)
+	return err
 }
 
 var quorumRequiredAuthorityDomains = []string{

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,9 @@ func quorumBatchDigest(mutations []quorum.Mutation) ([32]byte, error) {
 func (s *Server) commitTaskQuorumChanges(t *taskTransaction) error {
 	if s.taskQuorumApplying.Load() || s.quorumNode == nil || len(t.quorumChanges) == 0 {
 		return nil
+	}
+	if s.taskQuorumBaselineSeeding.Load() && t.quorumAuthorityChanges == 0 {
+		return errors.New("quorum bootstrap is still materializing authority state")
 	}
 	mutations := make([]quorum.Mutation, 0, len(t.quorumChanges))
 	for _, mutation := range t.quorumChanges {
@@ -198,6 +202,8 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			var baseline struct {
 				ClusterID        string   `json:"cluster_id"`
 				AuthorityDomains []string `json:"authority_domains"`
+				ChainSequence    uint64   `json:"chain_sequence"`
+				ChainDigest      string   `json:"chain_digest"`
 			}
 			if err := json.Unmarshal(mutation.Record.Value, &baseline); err != nil {
 				return err
@@ -207,6 +213,9 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			}
 			if len(baseline.AuthorityDomains) != len(quorumRequiredAuthorityRecords) {
 				return errors.New("task quorum baseline is missing an authoritative state domain")
+			}
+			if baseline.ChainSequence == 0 || len(baseline.ChainDigest) != sha256.Size*2 {
+				return errors.New("task quorum baseline is missing its chain checkpoint")
 			}
 			seenDomains := make(map[string]bool, len(baseline.AuthorityDomains))
 			for _, domain := range baseline.AuthorityDomains {
@@ -219,6 +228,9 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			baselineReady = true
 		}
 	}
+	if s.taskQuorumInitialTaskReplay.Load() && len(external) > 0 {
+		return nil
+	}
 	if len(external) == 0 && !baselineReady {
 		return nil
 	}
@@ -228,88 +240,123 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 	}
 	s.taskQuorumApplying.Store(true)
 	defer s.taskQuorumApplying.Store(false)
-	return s.withTaskDatabase(func(t *taskTransaction) error {
-		if len(external) > 0 {
-			var clusterID string
-			var previousSequence uint64
-			err := t.tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &previousSequence)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-			if clusterID != "" && clusterID != s.quorumClusterID {
-				return errors.New("task quorum database belongs to a different cluster")
-			}
-			if externalSequence < previousSequence {
-				_, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
-				return err
-			}
-			if externalSequence == previousSequence {
-				s.taskQuorumReplayMu.Lock()
-				replaying := s.taskQuorumReplay.target != 0
-				s.taskQuorumReplayMu.Unlock()
-				if replaying {
-					complete, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
+	applyDatabase := func() error {
+		return s.withTaskDatabase(func(t *taskTransaction) error {
+			if len(external) > 0 {
+				var clusterID string
+				var previousSequence uint64
+				err := t.tx.QueryRow(`SELECT cluster_id,applied_index FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &previousSequence)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if clusterID != "" && clusterID != s.quorumClusterID {
+					return errors.New("task quorum database belongs to a different cluster")
+				}
+				if externalSequence < previousSequence {
+					_, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
+					return err
+				}
+				if externalSequence == previousSequence {
+					s.taskQuorumReplayMu.Lock()
+					replaying := s.taskQuorumReplay.target != 0
+					s.taskQuorumReplayMu.Unlock()
+					if replaying {
+						complete, err := s.verifyTaskQuorumHistoricalReplay(t.tx, externalSequence, previousSequence, externalDigest)
+						if err != nil {
+							return err
+						}
+						if !complete {
+							return errors.New("task quorum replay is incomplete")
+						}
+					}
+					matches, err := taskQuorumBatchMatches(t.tx, external)
 					if err != nil {
 						return err
 					}
-					if !complete {
-						return errors.New("task quorum replay is incomplete")
+					if matches {
+						// SQLite may report an ambiguous COMMIT after the durable
+						// transaction actually landed. Reconcile only the identical
+						// committed sequence; never replay a different batch.
+						return nil
+					}
+					return errors.New("task quorum sequence already committed with different local state")
+				}
+				if externalSequence != previousSequence+1 {
+					return fmt.Errorf("task quorum replica sequence gap: local=%d incoming=%d", previousSequence, externalSequence)
+				}
+			}
+			if len(external) > 0 {
+				if err := taskQuorumChainAdvance(t.tx, externalSequence, externalDigest); err != nil {
+					return err
+				}
+			}
+			for _, mutation := range external {
+				if err := applyTaskQuorumMutation(t.tx, mutation); err != nil {
+					return err
+				}
+			}
+			authorityChanges := 0
+			for _, mutation := range external {
+				if taskQuorumAuthorityNamespace(mutation.Namespace) {
+					authorityChanges++
+				}
+			}
+			if baselineReady {
+				var checkpoint struct {
+					ChainSequence uint64 `json:"chain_sequence"`
+					ChainDigest   string `json:"chain_digest"`
+				}
+				for _, mutation := range mutations {
+					if mutation.Namespace == "cluster_meta" && mutation.Key == "task_baseline" {
+						if err := json.Unmarshal(mutation.Record.Value, &checkpoint); err != nil {
+							return err
+						}
 					}
 				}
-				matches, err := taskQuorumBatchMatches(t.tx, external)
-				if err != nil {
+				chainDigest, err := hex.DecodeString(checkpoint.ChainDigest)
+				if err != nil || len(chainDigest) != sha256.Size || checkpoint.ChainSequence == 0 {
+					return errors.New("task quorum baseline chain checkpoint is invalid")
+				}
+				var currentChain uint64
+				if err := t.tx.QueryRow(`SELECT sequence FROM task_quorum_chain WHERE id=1`).Scan(&currentChain); err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return err
 				}
-				if matches {
-					// SQLite may report an ambiguous COMMIT after the durable
-					// transaction actually landed. Reconcile only the identical
-					// committed sequence; never replay a different batch.
-					return nil
+				if currentChain < checkpoint.ChainSequence {
+					if _, err := t.tx.Exec(`UPDATE task_quorum_chain SET sequence=?,digest=? WHERE id=1`, checkpoint.ChainSequence, chainDigest); err != nil {
+						return err
+					}
 				}
-				return errors.New("task quorum sequence already committed with different local state")
-			}
-			if externalSequence != previousSequence+1 {
-				return fmt.Errorf("task quorum replica sequence gap: local=%d incoming=%d", previousSequence, externalSequence)
-			}
-		}
-		if len(external) > 0 {
-			if err := taskQuorumChainAdvance(t.tx, externalSequence, externalDigest); err != nil {
+				for domain, key := range quorumRequiredAuthorityRecords {
+					var count int
+					if err := t.tx.QueryRow(`SELECT count(*) FROM task_quorum_authority WHERE namespace=? AND row_key=?`, "authority/"+domain, key).Scan(&count); err != nil {
+						return err
+					}
+					if count != 1 {
+						baselineAuthorityReady = false
+						break
+					}
+				}
+				if !baselineAuthorityReady {
+					return errors.New("task quorum baseline is missing replicated authority rows")
+				}
+				// Each node still has a separate local materialization fence; this bit
+				// asserts only that every authoritative row is majority committed.
+				_, err = t.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,baseline_ready,authority_ready) VALUES(1,?,1,1) ON CONFLICT(id) DO UPDATE SET cluster_id=excluded.cluster_id,baseline_ready=1,authority_ready=1`, s.quorumClusterID)
 				return err
 			}
-		}
-		for _, mutation := range external {
-			if err := applyTaskQuorumMutation(t.tx, mutation); err != nil {
-				return err
-			}
-		}
-		authorityChanges := 0
-		for _, mutation := range external {
-			if taskQuorumAuthorityNamespace(mutation.Namespace) {
-				authorityChanges++
-			}
-		}
-		if baselineReady {
-			for domain, key := range quorumRequiredAuthorityRecords {
-				var count int
-				if err := t.tx.QueryRow(`SELECT count(*) FROM task_quorum_authority WHERE namespace=? AND row_key=?`, "authority/"+domain, key).Scan(&count); err != nil {
-					return err
-				}
-				if count != 1 {
-					baselineAuthorityReady = false
-					break
-				}
-			}
-			if !baselineAuthorityReady {
-				return errors.New("task quorum baseline is missing replicated authority rows")
-			}
-			// Each node still has a separate local materialization fence; this bit
-			// asserts only that every authoritative row is majority committed.
-			_, err := t.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,baseline_ready,authority_ready) VALUES(1,?,1,1) ON CONFLICT(id) DO UPDATE SET cluster_id=excluded.cluster_id,baseline_ready=1,authority_ready=1`, s.quorumClusterID)
+			_, err := t.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,applied_index,authority_revision) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET cluster_id=excluded.cluster_id,applied_index=excluded.applied_index,authority_revision=task_quorum_meta.authority_revision+excluded.authority_revision`, s.quorumClusterID, externalSequence, authorityChanges)
 			return err
+		})
+	}
+	var applyErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		applyErr = applyDatabase()
+		if applyErr == nil || !strings.Contains(applyErr.Error(), "database is locked") {
+			break
 		}
-		_, err := t.tx.Exec(`INSERT INTO task_quorum_meta(id,cluster_id,applied_index,authority_revision) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET cluster_id=excluded.cluster_id,applied_index=excluded.applied_index,authority_revision=task_quorum_meta.authority_revision+excluded.authority_revision`, s.quorumClusterID, externalSequence, authorityChanges)
-		return err
-	})
+		time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
+	}
+	return applyErr
 }
 
 func taskQuorumBatchMatches(tx *sql.Tx, mutations []quorum.Mutation) (bool, error) {

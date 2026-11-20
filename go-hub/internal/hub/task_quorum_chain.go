@@ -15,6 +15,7 @@ import (
 type taskQuorumReplay struct {
 	sequence, target uint64
 	digest           [32]byte
+	lastBatch        [32]byte
 }
 
 func taskQuorumChainStep(previous [32]byte, sequence uint64, batch [32]byte) [32]byte {
@@ -71,10 +72,18 @@ func (s *Server) verifyTaskQuorumHistoricalReplay(tx *sql.Tx, sequence, target u
 	}
 	replay := &s.taskQuorumReplay
 	if replay.target != target || sequence != replay.sequence+1 {
-		return false, errors.New("task quorum replay sequence is inconsistent")
+		// A committed Raft entry can be delivered to the external FSM again
+		// after the callback returned an error. An identical retry must not
+		// poison the replay cursor.
+		if replay.target == target && sequence == replay.sequence && batch == replay.lastBatch {
+			return false, nil
+		}
+		sameBatch := replay.target == target && sequence == replay.sequence && batch == replay.lastBatch
+		return false, fmt.Errorf("task quorum replay sequence is inconsistent: target=%d replay_sequence=%d incoming_sequence=%d same_batch=%t", target, replay.sequence, sequence, sameBatch)
 	}
 	replay.digest = taskQuorumChainStep(replay.digest, sequence, batch)
 	replay.sequence = sequence
+	replay.lastBatch = batch
 	if sequence == target {
 		if !bytes.Equal(replay.digest[:], stored) {
 			return false, errors.New("task quorum replay history does not match SQLite checkpoint")

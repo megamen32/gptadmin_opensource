@@ -184,6 +184,12 @@ func (s *Server) readQuorumAuthorityImage() (quorumAuthorityImage, error) {
 }
 
 func (s *Server) materializeQuorumAuthority(values map[string]json.RawMessage) error {
+	return s.materializeAuthorityValues(values, s.promoteQuorumMembership)
+}
+
+// materializeAuthorityValues shares domain validation with the offline role transfer.
+// The caller owns the auth generation gate and provides an explicit membership transition.
+func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, promote func(*nodeMembershipState) error) error {
 	var named instructionSetsState
 	if err := json.Unmarshal(values["instruction_sets_named/current"], &named); err != nil {
 		return fmt.Errorf("decode named instruction state: %w", err)
@@ -339,7 +345,7 @@ func (s *Server) materializeQuorumAuthority(values map[string]json.RawMessage) e
 	if err := json.Unmarshal(values["membership/writer"], &membership); err != nil {
 		return fmt.Errorf("decode membership state: %w", err)
 	}
-	if err := s.promoteQuorumMembership(membership); err != nil {
+	if err := promote(membership); err != nil {
 		return err
 	}
 	return nil

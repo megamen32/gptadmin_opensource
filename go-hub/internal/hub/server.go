@@ -643,6 +643,8 @@ type Server struct {
 	quorumAuthorityActiveWriter   atomic.Bool
 	taskQuorumPending             map[[32]byte]uint64
 	taskQuorumApplying            atomic.Bool
+	taskQuorumBaselineSeeding     atomic.Bool
+	taskQuorumInitialTaskReplay   atomic.Bool
 	nodePeerClient                *http.Client
 	nodePeerPinnedClients         map[nodePeerRoute]*http.Client
 	nodeBearerAdmissionClient     *http.Client
@@ -2108,10 +2110,11 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		status := s.quorumNode.Status()
 		if err := s.quorumNode.VerifyLeader(r.Context()); err != nil {
 			replicaReady := s.taskQuorumReplicaReady() == nil
+			baselineReady := s.taskQuorumBaselineReady()
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "follower", "leader_id": status.LeaderID,
 				"node_id": status.NodeID, "cluster_id": status.ClusterID,
-				"voter_count": status.VoterCount, "replica_ready": replicaReady,
+				"voter_count": status.VoterCount, "replica_ready": replicaReady, "baseline_ready": baselineReady,
 				"applied_index": s.quorumNode.ExternalAppliedIndex(),
 			})
 			return
@@ -2120,7 +2123,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "leader", "detail": "quorum authority state is not ready",
 				"node_id": status.NodeID, "cluster_id": status.ClusterID,
-				"voter_count": status.VoterCount, "replica_ready": false,
+				"voter_count": status.VoterCount, "replica_ready": false, "baseline_ready": s.taskQuorumBaselineReady(),
 				"applied_index": s.quorumNode.ExternalAppliedIndex(),
 			})
 			return
@@ -2129,7 +2132,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "leader", "detail": "quorum Hub state is not ready",
 				"node_id": status.NodeID, "cluster_id": status.ClusterID,
-				"voter_count": status.VoterCount, "replica_ready": s.taskQuorumReplicaReady() == nil,
+				"voter_count": status.VoterCount, "replica_ready": s.taskQuorumReplicaReady() == nil, "baseline_ready": s.taskQuorumBaselineReady(),
 				"applied_index": s.quorumNode.ExternalAppliedIndex(),
 			})
 			return
@@ -3872,6 +3875,7 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 		return
 	}
 	if err := s.recoverQuorumPendingShellLocked(r.Context(), name); err != nil {
+		log.Printf("queued shell recovery failed server=%s: %v", name, err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "queued quorum task recovery unavailable; retry"})
 		return
 	}
@@ -8955,6 +8959,12 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 		writeJSON(w, http.StatusPreconditionRequired, failure)
 		return
 	}
+	permit, admitted := s.beginNodeSubmissionPermit(agent.AgentID, toolName)
+	if !admitted {
+		s.writeNodeDrainFailure(w, r.URL.Path, nil, agent.AgentID, "")
+		return
+	}
+	defer permit.close()
 	callArgs, approvalID := approvalArguments(args)
 	if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, toolName, callArgs, approvalID); blocked {
 		writeJSON(w, http.StatusPreconditionRequired, approvalResponse)
@@ -8964,7 +8974,7 @@ func (s *Server) serverActionToolCall(w http.ResponseWriter, r *http.Request, ag
 		writeJSON(w, http.StatusTooManyRequests, budgetResponse)
 		return
 	}
-	result, rpcErr := s.agentToolCall(r, agent, toolName, callArgs)
+	result, rpcErr := s.agentToolCall(r, agent, toolName, callArgs, permit)
 	if rpcErr != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"server_id": agent.AgentID, "tool_name": toolName, "status": "failed", "error": rpcErr})
 		return
@@ -9235,6 +9245,11 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 		} else if failure := s.requireInstructionContext(r, agent.AgentID, name); failure != nil {
 			return mcpToolResult(failure), nil, false
 		}
+		permit, admitted := s.beginNodeSubmissionPermit(agent.AgentID, name)
+		if !admitted {
+			return nil, map[string]any{"code": -32000, "message": nodeDrainRetryDetail, "data": map[string]any{"retryable": true, "owner_target": agent.AgentID}}, false
+		}
+		defer permit.close()
 		callArgs, approvalID := approvalArguments(args)
 		if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, name, callArgs, approvalID); blocked {
 			if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" && firstString(approvalResponse, "status") == "approval_required" {
@@ -9250,7 +9265,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 			// not synthesize a second task or bypass filesystem policy.
 			meta := mapValue(params["_meta"])
 			key := firstString(meta, "com.gptadmin/idempotencyKey")
-			raw, status := s.executeMCPTool(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, key)
+			raw, status := s.executeMCPTool(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, key, permit)
 			if status >= 400 {
 				return mcpToolResult(raw), nil, false
 			}
@@ -9266,7 +9281,7 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 				return taskResult, nil, false
 			}
 		}
-		result, err := s.agentToolCall(r, agent, name, callArgs)
+		result, err := s.agentToolCall(r, agent, name, callArgs, permit)
 		if err == nil {
 			if taskResult := s.mcpTaskResultFromPayload(result, params); taskResult != nil {
 				return taskResult, nil, false
@@ -9468,7 +9483,7 @@ func (s *Server) agentToolsListForRequest(r *http.Request, agent Agent) (any, an
 	return map[string]any{"tools": []map[string]any{}}, nil
 }
 
-func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any) (any, any) {
+func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args map[string]any, permits ...*nodeSubmissionPermit) (any, any) {
 	if agent.AgentID == "hub" && (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") {
 		var err error
 		args, err = s.resolveExecutionReference(r, args)
@@ -9490,6 +9505,11 @@ func (s *Server) agentToolCall(r *http.Request, agent Agent, name string, args m
 	if !agentOwnerConnectionAllowed(r, agent) || s.authorizeMCPConnectionOwner(r, agent.AgentID, name, args) != nil {
 		return nil, connectionOwnerRPCError()
 	}
+	releaseSubmission, admitted := s.beginPermittedNodeSubmission(agent.AgentID, name, permits...)
+	if !admitted {
+		return nil, map[string]any{"code": -32000, "message": nodeDrainRetryDetail, "data": map[string]any{"retryable": true, "owner_target": agent.AgentID}}
+	}
+	defer releaseSubmission()
 	if agent.AgentID != "hub" {
 		releaseAuthAdmission(r)
 	}
