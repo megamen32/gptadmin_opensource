@@ -11,6 +11,7 @@ import urllib.error
 from types import SimpleNamespace
 from contextlib import ExitStack
 from unittest.mock import patch
+from node_update_fixture import staged_update_package
 from scripts import gptadmin_node_autoupdate as update
 from scripts import gptadmin_node_manage as manager
 from tools import build_node as node_builder
@@ -635,7 +636,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 ('drain_begin',True),('drain_wait_ready',{'ready_to_stop':True}),('wait_healthy',None),
                 ('drain_cancel',True)]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
-            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             stack.enter_context(patch.object(manager,'PRIMARY_DROPIN',root/'primary.conf'))
             stack.enter_context(patch.object(manager,'systemctl'))
             budget=SimpleNamespace(cleanup=unittest.mock.Mock())
@@ -682,7 +683,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                     ('drain_cancel',True)]:
                     stack.enter_context(patch.object(manager,name,return_value=value))
                 stack.enter_context(patch.object(manager,'PRIMARY_DROPIN',dropin))
-                stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+                stack.enter_context(staged_update_package(extract))
                 stack.enter_context(patch.object(manager,'systemctl',side_effect=service))
                 drain=stack.enter_context(patch.object(manager,'drain_begin',return_value=True))
                 args=SimpleNamespace(name='primary',package='candidate.tar.gz',wait_secs=20,
@@ -1238,7 +1239,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                                ('drain_begin',True),
                                ('drain_wait_ready',{'ready_to_stop':True}),('wait_healthy',None)]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
-            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             cancel=stack.enter_context(patch.object(manager,'drain_cancel',return_value=True))
             states=[]
             def restart(runner,*args):
@@ -1273,7 +1274,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 ('drain_begin',True),
                 ('drain_wait_ready',{'ready_to_stop':True})]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
-            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             stack.enter_context(patch.object(manager,'systemctl'))
             healthy=stack.enter_context(patch.object(manager,'wait_healthy',side_effect=[
                 manager.RuntimeFailure('new node URL failed'),None]))
@@ -1326,7 +1327,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 ('drain_begin',True),
                 ('drain_wait_ready',{'ready_to_stop':True})]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
-            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             stack.enter_context(patch.object(manager,'systemctl'))
             observed=[]
             def check_health(origin,sha):
@@ -1351,7 +1352,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
                 ('manifest_summary',{'git_commit':'1'*40})]:
                 stack.enter_context(patch.object(manager,name,return_value=value))
-            stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             stack.enter_context(patch.object(manager,'drain_begin',side_effect=manager.RuntimeFailure('lost begin response')))
             cancel=stack.enter_context(patch.object(manager,'drain_cancel',return_value=True))
             restart=stack.enter_context(patch.object(manager,'systemctl'))
@@ -1384,7 +1385,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                     ('host_arch','amd64'),('check_disk_floor',None),('verify_elf_binary',None),
                     ('manifest_summary',{'git_commit':'1'*40}),('drain_begin',True)]:
                     stack.enter_context(patch.object(manager,name,return_value=value))
-                stack.enter_context(patch.object(manager,'verify_and_extract',side_effect=extract))
+                stack.enter_context(staged_update_package(extract))
                 stack.enter_context(patch.object(manager,'drain_wait_ready',side_effect=lambda *a, **kw: os.kill(os.getpid(),sig)))
                 cancel=stack.enter_context(patch.object(manager,'drain_cancel',return_value=True))
                 restart=stack.enter_context(patch.object(manager,'systemctl'))

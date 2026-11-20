@@ -9,6 +9,7 @@ from unittest.mock import patch
 from contextlib import ExitStack
 from types import SimpleNamespace
 
+from node_update_fixture import staged_update_package
 from scripts import gptadmin_node_manage as node
 
 
@@ -84,7 +85,7 @@ with node.lifecycle_lock(node.Layout(opt_root=Path(sys.argv[1]))):
                                 ("prepare_update_drain", True), ("wait_healthy", None),
                                 ("drain_cancel", True)):
                 stack.enter_context(patch.object(node, name, return_value=value))
-            stack.enter_context(patch.object(node, "verify_and_extract", side_effect=extract))
+            stack.enter_context(staged_update_package(extract))
             stack.enter_context(patch.object(node, "switch_current", side_effect=interrupt_after_switch))
             restart = stack.enter_context(patch.object(node, "systemctl"))
             with self.assertRaisesRegex(node.RuntimeFailure, "rolled back"):
