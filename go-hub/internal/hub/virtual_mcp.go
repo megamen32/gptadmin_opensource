@@ -74,6 +74,13 @@ func (s *Server) saveVirtualMCPStateLocked() error {
 	if err := s.commitQuorumAuthorityState("virtual_mcp", "current", state); err != nil {
 		return fmt.Errorf("commit quorum virtual MCP state: %w", err)
 	}
+	return writeVirtualMCPState(path, state)
+}
+
+func writeVirtualMCPState(path string, state virtualMCPState) error {
+	if path == "" {
+		return nil
+	}
 	b, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

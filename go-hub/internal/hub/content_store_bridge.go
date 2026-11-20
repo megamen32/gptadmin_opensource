@@ -55,6 +55,7 @@ func (s *Server) contentStoreForExec() (*ContentStore, error) {
 			return nil, err
 		}
 	}
+	store.ownerID = s.localReadbackOwnerID
 	s.contentStore = store
 	return store, nil
 }
@@ -335,6 +336,27 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 	if principal == "" {
 		return nil, b.fail("unauthenticated", "content store requires an authenticated caller", nil)
 	}
+	source := arg
+	if kind == "search" || source == "" {
+		source = firstString(opts, "source")
+	}
+	if kind == "status" || kind == "read" || kind == "readAll" || kind == "indexSource" || (kind == "search" && source != "") {
+		reply := b.server.lookupOwner(b.request.WithContext(b.ctx), ownerRead{Action: kind, ID: source, Hint: lookupHint(opts), Opts: opts, Query: arg})
+		if reply.Failure != nil {
+			// A retryable owner outage refers to the caller's original handle.
+			// Keep denied or unknown content out of search error receipts.
+			if !reply.Failure.Retryable {
+				source = ""
+			}
+			return nil, b.lookupError(reply.Failure, source)
+		}
+		for _, origin := range contentOriginList(reply.Origin) {
+			if target, tool, ok := strings.Cut(origin, contentOriginSeparator); ok {
+				b.recordOrigin(target, tool)
+			}
+		}
+		return b.jsonValue(this, reply.Value), nil
+	}
 	store, err := b.server.contentStoreForExec()
 	if err != nil {
 		return nil, b.fail("content_store_unavailable", "opt-in content store is unavailable", nil)
@@ -362,123 +384,22 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 			return nil, b.fail("content_index_failed", e.Error(), nil)
 		}
 		return b.jsonValue(this, meta), nil
-	case "indexSource":
-		// Building the search index of a source the caller may already read is
-		// a cache build, not a change to the user's data. It is allowed in a
-		// read-only run; the origin permission of the source is still
-		// re-checked, exactly as for a read or a search.
-		source := arg
-		if source == "" {
-			source = firstString(opts, "source")
-		}
-		if source == "" {
-			return nil, b.fail("invalid_arguments", "indexSource requires a source id", nil)
-		}
-		meta, e := store.Source(principal, source)
-		if e != nil || !b.contentSourceAllowed(meta) {
-			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
-		}
-		// Building the index of a stored source never re-reads the source tool
-		// and never re-runs the operation that produced it.
-		indexed, e := store.IndexSource(principal, source)
-		if e != nil {
-			return nil, b.fail("content_index_failed", e.Error(), nil)
-		}
-		return b.jsonValue(this, contentSourceStatusMap(store, principal, indexed)), nil
-	case "status":
-		source := arg
-		if source == "" {
-			source = firstString(opts, "source")
-		}
-		if source == "" {
-			return nil, b.fail("invalid_arguments", "status requires a source id", nil)
-		}
-		meta, e := store.Source(principal, source)
-		if e != nil || !b.contentSourceAllowed(meta) {
-			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
-		}
-		return b.jsonValue(this, contentSourceStatusMap(store, principal, meta)), nil
 	case "search":
-		source := firstString(opts, "source")
-		limit := intFromAny(opts["limit"])
+		sources, e := store.Sources(principal)
+		if e != nil {
+			return nil, b.fail("content_search_failed", "content search failed", nil)
+		}
 		var allowed []string
-		if source != "" {
-			meta, e := store.Source(principal, source)
-			if e != nil || !b.contentSourceAllowed(meta) {
-				return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
-			}
-			allowed = []string{source}
-		} else {
-			sources, e := store.Sources(principal)
-			if e != nil {
-				return nil, b.fail("content_search_failed", "content search failed", nil)
-			}
-			for _, meta := range sources {
-				if b.contentSourceAllowed(meta) {
-					allowed = append(allowed, meta.ID)
-				}
+		for _, meta := range sources {
+			if b.contentSourceAllowed(meta) {
+				allowed = append(allowed, meta.ID)
 			}
 		}
-		hits, e := store.SearchSources(principal, allowed, arg, limit)
+		hits, e := store.SearchSources(principal, allowed, arg, intFromAny(opts["limit"]))
 		if e != nil {
 			return nil, b.fail("content_search_failed", "content search failed", nil)
 		}
 		return b.jsonValue(this, map[string]any{"hits": hits, "count": len(hits)}), nil
-	case "read":
-		source := arg
-		meta, e := store.Source(principal, source)
-		if e != nil {
-			return nil, b.fail("content_unavailable", "content source is unavailable or expired", nil)
-		}
-		allowed := b.contentSourceAllowed(meta)
-		chunkID := intFromAny(opts["chunk_id"])
-		before, after := intFromAny(opts["before"]), intFromAny(opts["after"])
-		value, e := store.Read(principal, source, chunkID, before, after, allowed)
-		if e != nil {
-			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
-		}
-		return b.jsonValue(this, map[string]any{"source": source, "chunk_id": chunkID, "text": value}), nil
-	case "readAll":
-		// Universal full-result read over the existing principal-scoped content
-		// store. No re-run, no homemade per-tool chunk loop, no partial success.
-		source := arg
-		meta, e := store.Source(principal, source)
-		if e != nil || !b.contentSourceAllowed(meta) {
-			return nil, b.fail("content_unavailable", "content source is unavailable or its origin permission changed", nil)
-		}
-		cap := 2 << 20
-		if raw, ok := opts["max_bytes"]; ok {
-			n, valid := int64FromAny(raw)
-			if !valid || n < 1 || n > 8<<20 {
-				return nil, b.fail("invalid_arguments", "readAll max_bytes must be 1..8388608", nil)
-			}
-			cap = int(n)
-		}
-		if meta.Bytes > int64(cap) {
-			return nil, b.fail("output_too_large", "source exceeds the readAll byte budget; read individual chunks or raise max_bytes", nil)
-		}
-		if !meta.Complete && !truthy(opts["allow_partial"]) {
-			return nil, b.fail("content_incomplete", "source is explicitly incomplete; pass allow_partial:true to inspect it", nil)
-		}
-		var text strings.Builder
-		text.Grow(int(meta.Bytes))
-		for id := 1; id <= meta.Chunks; id++ {
-			if err := b.ctx.Err(); err != nil {
-				return nil, b.fail("cancelled", "content read was cancelled", nil)
-			}
-			part, readErr := store.Read(principal, source, id, 0, 0, true)
-			if readErr != nil {
-				return nil, b.fail("content_unavailable", "a content chunk is missing or expired", nil)
-			}
-			text.WriteString(part)
-			if int64(text.Len()) > meta.Bytes {
-				return nil, b.fail("content_incomplete", "source exceeded its declared byte length", nil)
-			}
-		}
-		if int64(text.Len()) != meta.Bytes {
-			return nil, b.fail("content_incomplete", "full source bytes could not be reconstructed", nil)
-		}
-		return b.jsonValue(this, map[string]any{"source": source, "text": text.String(), "bytes": meta.Bytes, "chunks": meta.Chunks, "format": meta.Format, "complete": meta.Complete}), nil
 	case "delete":
 		if b.readOnly {
 			return nil, b.fail("forbidden", "read-only execution cannot delete content sources", nil)
@@ -490,4 +411,67 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 	default:
 		return nil, b.fail("invalid_arguments", "unknown content helper", nil)
 	}
+}
+
+// readContentSource operates on one already-authorized source at its physical owner.
+func (b *codeModeBridge) readContentSource(store *ContentStore, meta ContentSource, q ownerRead) (any, *lookupFailure) {
+	principal, source, opts := operationPrincipal(b.request), meta.ID, q.Opts
+	switch q.Action {
+	case "indexSource":
+		indexed, err := store.IndexSource(principal, source)
+		if err != nil {
+			return nil, &readOffline
+		}
+		return contentSourceStatusMap(store, principal, indexed), nil
+	case "status":
+		return contentSourceStatusMap(store, principal, meta), nil
+	case "search":
+		hits, err := store.SearchSources(principal, []string{source}, q.Query, intFromAny(opts["limit"]))
+		if err != nil {
+			return nil, &lookupFailure{"content_search_failed", "content search failed", false}
+		}
+		return map[string]any{"hits": hits, "count": len(hits)}, nil
+	case "read":
+		chunk := intFromAny(opts["chunk_id"])
+		value, err := store.Read(principal, source, chunk, intFromAny(opts["before"]), intFromAny(opts["after"]), true)
+		if err != nil {
+			return nil, &lookupFailure{"content_unavailable", "content chunk is unavailable", false}
+		}
+		return map[string]any{"source": source, "chunk_id": chunk, "text": value}, nil
+	case "readAll":
+		cap := 2 << 20
+		if raw, ok := opts["max_bytes"]; ok {
+			n, valid := int64FromAny(raw)
+			if !valid || n < 1 || n > 8<<20 {
+				return nil, &lookupFailure{"invalid_arguments", "readAll max_bytes must be 1..8388608", false}
+			}
+			cap = int(n)
+		}
+		if meta.Bytes > int64(cap) {
+			return nil, &lookupFailure{"output_too_large", "source exceeds the readAll byte budget; read individual chunks or raise max_bytes", false}
+		}
+		if !meta.Complete && !truthy(opts["allow_partial"]) {
+			return nil, &lookupFailure{"content_incomplete", "source is explicitly incomplete; pass allow_partial:true to inspect it", false}
+		}
+		var text strings.Builder
+		text.Grow(int(meta.Bytes))
+		for id := 1; id <= meta.Chunks; id++ {
+			if err := b.ctx.Err(); err != nil {
+				return nil, &lookupFailure{"cancelled", "content read was cancelled", false}
+			}
+			part, readErr := store.Read(principal, source, id, 0, 0, true)
+			if readErr != nil {
+				return nil, &lookupFailure{"content_unavailable", "a content chunk is missing or expired", false}
+			}
+			text.WriteString(part)
+			if int64(text.Len()) > meta.Bytes {
+				return nil, &lookupFailure{"content_incomplete", "source exceeded its declared byte length", false}
+			}
+		}
+		if int64(text.Len()) != meta.Bytes {
+			return nil, &lookupFailure{"content_incomplete", "full source bytes could not be reconstructed", false}
+		}
+		return map[string]any{"source": source, "text": text.String(), "bytes": meta.Bytes, "chunks": meta.Chunks, "format": meta.Format, "complete": meta.Complete}, nil
+	}
+	return nil, &readInvalid
 }

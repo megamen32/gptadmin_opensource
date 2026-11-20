@@ -3,6 +3,7 @@ package hub
 import (
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // taskCaller is persisted with each newly submitted result-bearing job. It is
@@ -66,8 +67,12 @@ func (s *Server) authorizeTaskReceipt(r *http.Request, owner *taskCaller, filesy
 	if len(claims) == 0 {
 		return nil
 	}
+	authority := s
+	if view, ok := r.Context().Value(ownerReadAuthorityKey{}).(*Server); ok {
+		authority = view
+	}
 	profile, bound := AccessProfileFromRequest(r)
-	if s.requestHasAdminRole(r) && !bound {
+	if authority.requestHasAdminRole(r) && !bound {
 		return nil // unscoped administrators retain the operator history view
 	}
 	caller := taskCallerFromRequest(r)
@@ -78,7 +83,7 @@ func (s *Server) authorizeTaskReceipt(r *http.Request, owner *taskCaller, filesy
 		if !bound || profile.ID != owner.ProfileID || profile.Version != owner.ProfileVersion {
 			return errors.New("task receipt profile is stale")
 		}
-		profiles, err := s.accessProfilesSnapshot()
+		profiles, err := authority.accessProfilesSnapshot()
 		if err != nil {
 			return errors.New("task receipt profile state is unavailable")
 		}
@@ -129,6 +134,19 @@ func (s *Server) taskReceiptForRequest(r *http.Request, jobID string, detail any
 		if s.relayJobs[jobID] != relay {
 			s.mu.Unlock()
 			return map[string]any{"status": "failed", "error": "unknown job", "job_id": jobID}, false
+		}
+		if relay.Method == childSchemaMethod || (relay.Method == "tools/list" && strings.HasPrefix(relay.AgentID, "mcp:shell:")) {
+			child, exists := s.exposedAgentByIDLocked(relay.AgentID)
+			if !exists || !profileAllowsTarget(r, relay.AgentID) || !agentOwnerConnectionAllowed(r, child) {
+				s.mu.Unlock()
+				return nil, false
+			}
+			item, found := s.inspectChildSchemaLocked(r, jobID, false)
+			s.mu.Unlock()
+			if !found {
+				return nil, false
+			}
+			return s.withSchemaContractMetadata(item), true
 		}
 		response = relayJobResponse(relay)
 	} else if s.shellJobs[jobID] != shell {

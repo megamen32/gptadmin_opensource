@@ -68,8 +68,27 @@ func waitForDrainCondition(t *testing.T, s *Server, what string, cond func(NodeD
 	}
 }
 
+// dispatchLocalJob performs the executor poll that hands the queued job over.
+// The Hub refuses a receipt for a task that was never dispatched, so a test
+// that reports an executor result must first take the job from the queue.
+func dispatchLocalJob(t *testing.T, s *Server, jobID string) {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/queue/local?timeout=1&server_id=local-id&public_key=local-key&fingerprint=local-fingerprint", nil)
+	r.Header.Set("Authorization", "Bearer "+strings.Repeat("l", 32))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("executor poll rejected: %d %s", w.Code, w.Body.String())
+	}
+	var job map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &job); err != nil || firstString(job, "id") != jobID {
+		t.Fatalf("executor did not receive the queued job: %s", w.Body.String())
+	}
+}
+
 func completeLocalJob(t *testing.T, s *Server, jobID string) {
 	t.Helper()
+	dispatchLocalJob(t, s, jobID)
 	r := httptest.NewRequest(http.MethodPost, "/queue/local/result", strings.NewReader(`{"id":"`+jobID+`","result":{"return_code":0,"stdout":"done"}}`))
 	r.Header.Set("Authorization", "Bearer "+strings.Repeat("l", 32))
 	w := httptest.NewRecorder()

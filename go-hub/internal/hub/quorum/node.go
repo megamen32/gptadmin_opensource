@@ -127,6 +127,30 @@ func OpenWithExternalState(input Config, apply func(index, externalSequence uint
 	if err != nil {
 		return nil, fmt.Errorf("quorum: inspect durable state: %w", err)
 	}
+	// Pin the control format in the stable store as well. A misplaced copy
+	// of raft.db alone must never replay owner-local entries on a task store.
+	const formatKey = "gptadmin-hub-storage-v1"
+	pinned, readErr := store.Get([]byte(formatKey))
+	if readErr != nil && !errors.Is(readErr, raftboltdb.ErrKeyNotFound) {
+		return nil, readErr
+	}
+	if c.Mode == OwnerLocal {
+		want := []byte(OwnerLocal + "\x00" + c.ClusterID)
+		switch {
+		case readErr == nil:
+			if string(pinned) != string(want) {
+				return nil, errors.New("quorum: control log identity mismatch")
+			}
+		case hasState:
+			return nil, errors.New("quorum: cannot open preexisting unmarked Raft history in owner_local")
+		default:
+			if err = store.Set([]byte(formatKey), want); err != nil {
+				return nil, err
+			}
+		}
+	} else if readErr == nil {
+		return nil, errors.New("quorum: cannot replay owner_local storage as replicated")
+	}
 	if !hasState && c.Bootstrap {
 		configuration := raft.Configuration{Servers: make([]raft.Server, 0, len(c.Peers))}
 		for _, peer := range c.Peers {
@@ -164,10 +188,24 @@ func OpenWithExternalState(input Config, apply func(index, externalSequence uint
 				}
 				decoded[i] = mutation
 			}
+			if c.Mode == OwnerLocal {
+				for _, m := range decoded {
+					if err := ValidateControlMutation(m, c.ClusterID); err != nil {
+						return err
+					}
+				}
+			}
 			return apply(index, externalSequence, decoded)
 		}
 	}
 	fsm := newStateMachine(c.ClusterID, stateApply, externalSnapshot, c.ExternalSnapshotMaxBytes)
+	fsm.controlOnly = c.Mode == OwnerLocal
+	if fsm.controlOnly {
+		fsm.controlOwners = make(map[string]bool, len(c.Peers))
+		for _, p := range c.Peers {
+			fsm.controlOwners[p.ID] = true
+		}
+	}
 	r, err := raft.NewRaft(config, fsm, store, store, snapshots, transport)
 	if err != nil {
 		return nil, fmt.Errorf("quorum: start Raft: %w", err)
@@ -197,6 +235,9 @@ func (n *Node) Status() Status {
 		CommitIndex: n.raft.CommitIndex(), AppliedIndex: n.raft.AppliedIndex(),
 	}
 }
+
+// CurrentTerm identifies an election term even when this node wins again.
+func (n *Node) CurrentTerm() uint64 { return n.raft.CurrentTerm() }
 
 func (n *Node) BootstrapperID() string { return n.config.BootstrapperID }
 
@@ -346,6 +387,15 @@ func (n *Node) ApplyRecord(ctx context.Context, namespace, key string, record Re
 func (n *Node) ApplyBatch(ctx context.Context, mutations []Mutation) error {
 	if len(mutations) == 0 {
 		return errors.New("quorum: mutation batch is empty")
+	}
+	if n.config.Mode == OwnerLocal {
+		// One external record per proposal bounds encryption and FSM memory.
+		if len(mutations) != 1 {
+			return errors.New("quorum: owner_local proposals carry one record")
+		}
+		if err := ValidateControlMutation(mutations[0], n.config.ClusterID); err != nil {
+			return err
+		}
 	}
 	mutations = append([]Mutation(nil), mutations...)
 	hasExternal := false

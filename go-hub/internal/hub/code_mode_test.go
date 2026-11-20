@@ -161,7 +161,7 @@ func TestExecAliasesRootMCPAndOptInContentAcrossRuns(t *testing.T) {
 	}
 	other := requestWithAuthClaims(r, map[string]any{"sub": "different-principal", "client_id": "different-principal", "scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull})
 	denied, status := codeModeRun(t, s, other, map[string]any{"code": `return await mcp.content.read(` + fmt.Sprintf("%q", source) + `,1);`})
-	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "history_unavailable" {
 		t.Fatalf("source crossed principal boundary: %d %#v", status, denied)
 	}
 }
@@ -183,7 +183,7 @@ func TestContentSearchRevalidatesOriginBeforeReturningSnippets(t *testing.T) {
 	quoted, _ := json.Marshal(source.ID)
 	code := `return await mcp.content.search('UNIQUE_PRIVATE_MARKER',{source:` + string(quoted) + `});`
 	denied, status := codeModeRun(t, s, r, map[string]any{"code": code})
-	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "history_unavailable" {
 		t.Fatalf("owner connection check was skipped for content search: %d %#v", status, denied)
 	}
 	encoded, _ := json.Marshal(denied)
@@ -225,7 +225,7 @@ func TestContentSearchRechecksDisabledRegisteredRoot(t *testing.T) {
 	root.Meta["enabled"] = false
 	s.mu.Unlock()
 	denied, status := codeModeRun(t, s, r, map[string]any{"code": code})
-	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+	if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "history_unavailable" {
 		t.Fatalf("disabled registered root source remained readable: %d %#v", status, denied)
 	}
 	all, status := codeModeRun(t, s, r, map[string]any{"code": "return await mcp.content.search('ROOT_PRIVATE_MARKER');"})

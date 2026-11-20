@@ -112,6 +112,8 @@ jobs:
         docker compose -f tests/e2e/failover/docker-compose.yml run --rm -T failover-e2e
         python3 /src/tests/e2e/node/member_outage_run.py /usr/local/bin/gptadmin-node
         --shell-binary /usr/local/bin/gptadmin-shellmcp
+    - name: Test owner-local history, polling and minority fencing through public quorum ingress
+      run: make test-quorum-failover
   installer-e2e-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30

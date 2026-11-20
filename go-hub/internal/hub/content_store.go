@@ -50,8 +50,9 @@ func (l ContentLimits) normalized() ContentLimits {
 
 // ContentStore exists only after an explicit OpenContentStore call.
 type ContentStore struct {
-	db     *sql.DB
-	limits ContentLimits
+	db      *sql.DB
+	limits  ContentLimits
+	ownerID func() string
 }
 
 type ContentSource struct {
@@ -191,6 +192,15 @@ func (s *ContentStore) storeFormatted(principal, name, origin, format, text stri
 		return out, err
 	}
 	id := hex.EncodeToString(idb)
+	if s.ownerID != nil {
+		if owner := s.ownerID(); owner != "" {
+			var err error
+			id, err = encodeOwnerHandle("content", owner, id)
+			if err != nil {
+				return out, err
+			}
+		}
+	}
 	const chunkMax = 4000
 	type chunk struct {
 		id, start, end int

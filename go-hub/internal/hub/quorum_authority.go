@@ -29,68 +29,71 @@ func (s *Server) ensureQuorumAuthorityMaterialized(ctx context.Context) error {
 		s.quorumAuthorityActiveWriter.Store(false)
 		return err
 	}
-	status := node.Status()
-	s.quorumAuthorityActiveWriter.Store(false)
 	s.quorumAuthorityLoadMu.Lock()
 	defer s.quorumAuthorityLoadMu.Unlock()
-	if s.quorumAuthorityLoadedLeader == status.NodeID {
-		var loadedRevision uint64
-		if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
-			return tx.QueryRow(`SELECT authority_revision FROM task_quorum_meta WHERE id=1`).Scan(&loadedRevision)
-		}); err == nil && loadedRevision == s.quorumAuthorityLoadedRevision {
-			s.quorumAuthorityActiveWriter.Store(true)
+	status := node.Status()
+	term := node.CurrentTerm()
+	if !status.Leader {
+		s.quorumAuthorityActiveWriter.Store(false)
+		return errors.New("quorum leadership changed before materialization")
+	}
+	if s.quorumAuthorityActiveWriter.Load() && s.quorumAuthorityTerm.Load() == term && s.quorumAuthorityLoadedLeader == status.NodeID {
+		var revision uint64
+		if err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
+			return tx.QueryRow(`SELECT authority_revision FROM task_quorum_meta WHERE id=1`).Scan(&revision)
+		}); err == nil && revision == s.quorumAuthorityLoadedRevision {
 			return nil
 		}
 	}
 
-	// Fence admitted auth mutations before reading the committed image, not
-	// merely while applying it. Otherwise an acknowledged refresh can commit
-	// after the read and then be replaced by this older image.
-	if err := func() error {
-		s.authMu.Lock()
-		defer s.authMu.Unlock()
-		image, err := s.readQuorumAuthorityImage()
+	// Leadership can precede local application of the previous term's log.
+	// ReadRecord includes a Raft barrier before returning the baseline.
+	marker, found, err := node.ReadRecord(ctx, "cluster_meta", "task_baseline")
+	if err != nil || !found || marker.Deleted {
+		s.quorumAuthorityActiveWriter.Store(false)
 		if err != nil {
 			return err
 		}
-		if image.AppliedIndex != node.ExternalAppliedIndex() {
-			return errors.New("quorum authority snapshot is behind the committed task state")
-		}
-		decoded := make(map[string]json.RawMessage, len(image.Values))
-		for domain, key := range quorumRequiredAuthorityRecords {
-			name := domain + "/" + key
-			payload, ok := image.Values[name]
-			if !ok {
-				return fmt.Errorf("quorum authority snapshot is missing %s", name)
-			}
-			decoded[name] = payload
-		}
-		previousApplying := s.taskQuorumApplying.Swap(true)
-		defer s.taskQuorumApplying.Store(previousApplying)
-		return s.materializeQuorumAuthority(decoded)
-	}(); err != nil {
+		return errors.New("quorum task and authority baseline is not ready")
+	}
+	// Drain admitted auth mutations before reading the image. Other domain
+	// owners may hold locks needed for projection, so their proposals fail
+	// promptly while promotion holds the write gate.
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.quorumAuthorityWrites.Lock()
+	defer s.quorumAuthorityWrites.Unlock()
+	s.quorumAuthorityActiveWriter.Store(false)
+	s.quorumAuthorityLoadedLeader = ""
+
+	image, err := s.readQuorumAuthorityImage()
+	if err != nil {
+		return err
+	}
+	if image.AppliedIndex != node.ExternalAppliedIndex() {
+		return errors.New("quorum authority snapshot is behind the committed task state")
+	}
+	s.quorumAuthorityTerm.Store(term)
+	if err := s.materializeQuorumAuthority(image.Values); err != nil {
+		return err
+	}
+	revision, err := s.persistQuorumPromotionIdentity(image.AuthorityRevision)
+	if err != nil {
 		return err
 	}
 	if err := node.VerifyLeader(ctx); err != nil {
 		return err
 	}
-	if err := s.persistQuorumPromotionIdentity(); err != nil {
+	if node.CurrentTerm() != term {
+		return errors.New("quorum leadership changed while materializing authority")
+	}
+	if err := s.withQuorumReadDatabase(func(tx *sql.Tx) error { return checkQuorumAuthorityRevision(tx, revision) }); err != nil {
 		return err
 	}
-	if err := node.VerifyLeader(ctx); err != nil {
-		return err
-	}
-	var finalRevision uint64
-	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
-		return tx.QueryRow(`SELECT authority_revision FROM task_quorum_meta WHERE id=1`).Scan(&finalRevision)
-	}); err != nil {
-		return err
-	}
-	if node.ExternalAppliedIndex() == 0 || !node.Status().Leader {
-		return errors.New("quorum leadership changed while authority state was materialized")
-	}
-	s.quorumAuthorityLoadedRevision = finalRevision
-	s.quorumAuthorityLoadedLeader = node.Status().NodeID
+	// Cache only the image we installed plus our committed identity changes.
+	// A later replicated revision must pass through materialization itself.
+	s.quorumAuthorityLoadedRevision = revision
+	s.quorumAuthorityLoadedLeader = status.NodeID
 	s.quorumAuthorityActiveWriter.Store(true)
 	return nil
 }
@@ -100,65 +103,85 @@ func (s *Server) effectiveAuthMode() string {
 		return s.cfg.AuthMode
 	}
 	status := s.quorumNode.Status()
-	if status.Leader && s.quorumAuthorityActiveWriter.Load() {
+	if status.Leader && s.quorumAuthorityActiveWriter.Load() && s.quorumAuthorityTerm.Load() == s.quorumNode.CurrentTerm() {
 		return "writer"
 	}
 	return "reader"
 }
 
-func (s *Server) persistQuorumPromotionIdentity() error {
-	s.authMu.RLock()
+// The caller owns the auth and authority write gates. Keep each domain within
+// its existing Raft entry budget. Admission opens only after both identities
+// have committed against the installed image and its own revision advances.
+func (s *Server) persistQuorumPromotionIdentity(expected uint64) (uint64, error) {
 	s.mu.Lock()
 	if !s.authInitialized {
 		s.mu.Unlock()
-		s.authMu.RUnlock()
-		return errors.New("auth continuity is not initialized")
+		return 0, errors.New("auth continuity is not initialized")
 	}
 	bundle, err := s.readAuthSlot(s.authState)
 	s.mu.Unlock()
-	s.authMu.RUnlock()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := s.commitQuorumAuthorityState("auth", "bundle", bundle); err != nil {
-		return err
-	}
-	s.membershipMu.Lock()
-	if s.membership == nil {
-		s.membershipMu.Unlock()
-		return errors.New("promoted membership is unavailable")
-	}
-	err = s.persistMembershipStateLocked(s.membership)
-	s.membershipMu.Unlock()
+	// A domain handler may already have edited its candidate in memory. The
+	// local file holds the projection which completed under the write gate.
+	membership, err := loadNodeMembershipState(s.membershipStatePath())
 	if err != nil {
+		return 0, err
+	}
+	if membership.WriterID == "" {
+		return 0, errors.New("promoted membership is unavailable")
+	}
+	revision := expected
+	commit := func(domain, key string, value any) error {
+		return s.withQuorumDatabase(func(t *taskTransaction) error {
+			if err := checkQuorumAuthorityRevision(t.tx, revision); err != nil {
+				return err
+			}
+			if s.quorumNode.CurrentTerm() != s.quorumAuthorityTerm.Load() {
+				return errors.New("quorum leadership changed while materializing authority")
+			}
+			if err := s.stageQuorumAuthorityState(t, domain, key, value); err != nil {
+				return err
+			}
+			revision += uint64(t.quorumAuthorityChanges)
+			return nil
+		})
+	}
+	if err := commit("auth", "bundle", bundle); err != nil {
+		return 0, err
+	}
+	err = commit("membership", "writer", membershipQuorumAuthorityState(membership))
+	return revision, err
+}
+
+func checkQuorumAuthorityRevision(tx *sql.Tx, expected uint64) error {
+	var current uint64
+	if err := tx.QueryRow(`SELECT authority_revision FROM task_quorum_meta WHERE id=1`).Scan(&current); err != nil {
 		return err
 	}
-	s.rebuildMembershipRoutes()
+	if current != expected {
+		return errors.New("quorum authority changed during materialization")
+	}
 	return nil
 }
 
 func (s *Server) readQuorumAuthorityImage() (quorumAuthorityImage, error) {
-	image := quorumAuthorityImage{Values: make(map[string]json.RawMessage, len(quorumRequiredAuthorityRecords))}
+	image := quorumAuthorityImage{Values: make(map[string]json.RawMessage, len(s.requiredQuorumAuthorities()))}
 	var clusterID string
 	var baselineReady, authorityReady int
-	rows := make(map[string]struct {
-		payload  []byte
-		revision uint64
-	}, len(quorumRequiredAuthorityRecords))
-	err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+	rows := make(map[string]quorumAuthorityRow, len(s.requiredQuorumAuthorities()))
+	err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
 		if err := tx.QueryRow(`SELECT cluster_id,applied_index,authority_revision,baseline_ready,authority_ready FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &image.AppliedIndex, &image.AuthorityRevision, &baselineReady, &authorityReady); err != nil {
 			return err
 		}
 		if clusterID != s.quorumClusterID || baselineReady != 1 || authorityReady != 1 {
 			return errors.New("quorum task and authority baseline is not ready")
 		}
-		for domain, key := range quorumRequiredAuthorityRecords {
+		for domain, key := range s.requiredQuorumAuthorities() {
 			name := domain + "/" + key
-			var row struct {
-				payload  []byte
-				revision uint64
-			}
-			if err := tx.QueryRow(`SELECT payload,revision FROM task_quorum_authority WHERE namespace=? AND row_key=?`, "authority/"+domain, key).Scan(&row.payload, &row.revision); err != nil {
+			row, err := readQuorumAuthorityRow(tx, domain, key)
+			if err != nil {
 				return fmt.Errorf("read committed authority %s: %w", name, err)
 			}
 			rows[name] = row
@@ -168,10 +191,8 @@ func (s *Server) readQuorumAuthorityImage() (quorumAuthorityImage, error) {
 	if err != nil {
 		return quorumAuthorityImage{}, err
 	}
-	for domain, key := range quorumRequiredAuthorityRecords {
-		name := domain + "/" + key
-		row := rows[name]
-		opened, err := s.quorumNode.OpenExternalValue("authority/"+domain, key, row.revision, row.payload)
+	for name, row := range rows {
+		opened, err := s.quorumNode.OpenExternalValue(row.namespace, row.key, uint64(row.revision), row.payload)
 		if err != nil {
 			return quorumAuthorityImage{}, fmt.Errorf("authenticate committed authority %s: %w", name, err)
 		}
@@ -187,9 +208,11 @@ func (s *Server) materializeQuorumAuthority(values map[string]json.RawMessage) e
 	return s.materializeAuthorityValues(values, s.promoteQuorumMembership)
 }
 
-// materializeAuthorityValues shares domain validation with the offline role transfer.
-// The caller owns the auth generation gate and provides an explicit membership transition.
-func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, promote func(*nodeMembershipState) error) error {
+func (s *Server) materializeInstructionSets(values map[string]json.RawMessage) error {
+	instructionSetsProcessMu.Lock()
+	defer instructionSetsProcessMu.Unlock()
+	s.instructionWriteMu.Lock()
+	defer s.instructionWriteMu.Unlock()
 	var named instructionSetsState
 	if err := json.Unmarshal(values["instruction_sets_named/current"], &named); err != nil {
 		return fmt.Errorf("decode named instruction state: %w", err)
@@ -238,15 +261,26 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 	s.instructionMu.Lock()
 	s.instructionSet = cloneInstructionSet(defaultSet)
 	s.instructionMu.Unlock()
+	return nil
+}
 
+// materializeAuthorityValues shares domain validation with the offline role transfer.
+// The caller owns the auth generation gate and provides an explicit membership transition.
+func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, promote func(*nodeMembershipState) error) error {
+	if err := s.materializeInstructionSets(values); err != nil {
+		return err
+	}
+	registryKey := "registry/current"
+	if s.quorumControlOnly() {
+		registryKey = "registry/enrollment"
+	}
 	var registry persistentRegistryState
-	if err := json.Unmarshal(values["registry/current"], &registry); err != nil {
+	if err := json.Unmarshal(values[registryKey], &registry); err != nil {
 		return fmt.Errorf("decode committed registry state: %w", err)
 	}
 	if err := s.materializeQuorumRegistry(registry); err != nil {
 		return err
 	}
-
 	var virtual virtualMCPState
 	if err := json.Unmarshal(values["virtual_mcp/current"], &virtual); err != nil {
 		return fmt.Errorf("decode virtual MCP state: %w", err)
@@ -260,33 +294,35 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 		}
 		s.virtualMCP[id] = enabled
 	}
-	if err := s.saveVirtualMCPStateLocked(); err != nil {
+	if err := writeVirtualMCPState(s.virtualMCPStatePath(), virtual); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("materialize virtual MCP state: %w", err)
 	}
 	s.mu.Unlock()
 
-	var routes map[string]WebhookRoute
-	if err := json.Unmarshal(values["webhook_routes/current"], &routes); err != nil {
-		return fmt.Errorf("decode webhook routes: %w", err)
-	}
-	if err := s.materializeQuorumWebhookRoutes(routes); err != nil {
-		return err
-	}
-	var webhookState persistedWebhookState
-	if err := json.Unmarshal(values["webhooks/current"], &webhookState); err != nil {
-		return fmt.Errorf("decode webhook receipts: %w", err)
-	}
-	if err := s.materializeQuorumWebhooks(webhookState); err != nil {
-		return err
-	}
+	if !s.quorumControlOnly() {
+		var routes map[string]WebhookRoute
+		if err := json.Unmarshal(values["webhook_routes/current"], &routes); err != nil {
+			return fmt.Errorf("decode webhook routes: %w", err)
+		}
+		if err := s.materializeQuorumWebhookRoutes(routes); err != nil {
+			return err
+		}
+		var webhookState persistedWebhookState
+		if err := json.Unmarshal(values["webhooks/current"], &webhookState); err != nil {
+			return fmt.Errorf("decode webhook receipts: %w", err)
+		}
+		if err := s.materializeQuorumWebhooks(webhookState); err != nil {
+			return err
+		}
 
+	}
 	var security securitySettings
 	if err := json.Unmarshal(values["security/settings"], &security); err != nil {
 		return fmt.Errorf("decode security state: %w", err)
 	}
 	s.mu.Lock()
-	if err := s.persistSecurity(security); err != nil {
+	if err := saveSecuritySettings(s.securityPath, security, s.securityKey()); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("materialize security state: %w", err)
 	}
@@ -298,24 +334,26 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 		return fmt.Errorf("decode WebAuthn state: %w", err)
 	}
 	s.mu.Lock()
-	if err := s.saveWebAuthnState(webauthn); err != nil {
+	if err := saveWebAuthnState(s.webauthnPath, webauthn); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("materialize WebAuthn state: %w", err)
 	}
 	s.webauthnState = webauthn
 	s.mu.Unlock()
 
-	var secretState quorumSecretIngressState
-	if err := json.Unmarshal(values["secret_ingress/current"], &secretState); err != nil {
-		return fmt.Errorf("decode secret ingress state: %w", err)
-	}
-	if s.secretStore == nil {
-		return errors.New("local secret store is unavailable")
-	}
-	if err := s.secretStore.restoreQuorumAuthorityState(secretState); err != nil {
-		return fmt.Errorf("materialize secret ingress state: %w", err)
-	}
+	if !s.quorumControlOnly() {
+		var secretState quorumSecretIngressState
+		if err := json.Unmarshal(values["secret_ingress/current"], &secretState); err != nil {
+			return fmt.Errorf("decode secret ingress state: %w", err)
+		}
+		if s.secretStore == nil {
+			return errors.New("local secret store is unavailable")
+		}
+		if err := s.secretStore.restoreQuorumAuthorityState(secretState); err != nil {
+			return fmt.Errorf("materialize secret ingress state: %w", err)
+		}
 
+	}
 	var authBundle authSnapshot
 	if err := json.Unmarshal(values["auth/bundle"], &authBundle); err != nil {
 		return fmt.Errorf("decode auth bundle: %w", err)
@@ -335,7 +373,11 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 	}
 	// The caller holds authMu exclusively across reading and applying the image.
 	s.mu.Lock()
-	if err := s.commitAuthSnapshotLocked(authBundle, false); err != nil {
+	if err := s.validateAuthSnapshot(authBundle); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if err := s.writeAuthSnapshotLocked(authBundle, false); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("materialize auth state: %w", err)
 	}
@@ -357,8 +399,19 @@ func (s *Server) materializeQuorumRegistry(state persistentRegistryState) error 
 		return errors.New("registry state path is unavailable")
 	}
 	s.mu.Lock()
+	if s.quorumControlOnly() {
+		local, err := restoreRegistryEnrollments(path, state)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		state = local
+	}
 	localTokens := make(map[string]string, len(s.localExecutorTokens))
 	for id, token := range s.localExecutorTokens {
+		if s.quorumControlOnly() && len(s.localExecutors[id]) == 0 && firstString(state.Agents[id].Meta, shellTokenHashMetaKey) != shellTokenHash(token) {
+			continue
+		}
 		localTokens[id] = token
 	}
 	if state.Agents == nil {
@@ -371,6 +424,9 @@ func (s *Server) materializeQuorumRegistry(state persistentRegistryState) error 
 			continue
 		}
 		if committed, exists := state.Agents[id]; exists {
+			if committed.Status == "disabled" {
+				continue
+			}
 			if approved, recorded := committed.Meta["approved"]; recorded && !truthy(approved) {
 				continue
 			}
@@ -472,8 +528,11 @@ func (s *Server) materializeQuorumWebhooks(state persistedWebhookState) error {
 }
 
 func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {
-	if state == nil || state.Nodes == nil || state.Grants == nil {
+	if state == nil || state.Nodes == nil {
 		return errors.New("committed membership state is incomplete")
+	}
+	if state.Grants == nil { // An empty grant map is omitted from persisted membership.
+		state.Grants = make(map[string]*nodeJoinGrant)
 	}
 	writerID := s.authLocalID
 	if state.Nodes[writerID] == nil {
@@ -514,7 +573,9 @@ func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {
 	if state.Epoch == 0 || state.Revision == 0 {
 		return errors.New("authoritative membership epoch is invalid")
 	}
-	state.WriterURL = publicURL
+	// Existing members persist WriterURL for heartbeats and WebSockets. They
+	// must keep dialing the cluster origin when this physical leader is lost.
+	state.WriterURL = firstNonEmpty(s.cfg.PublicOrigin, publicURL)
 	member.Endpoints = []string{publicURL}
 	member.State = nodeStateReady
 	member.LastSeen = s.now()
@@ -540,8 +601,10 @@ func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {
 			incoming.SnapshotRev = previous.SnapshotRev
 		}
 	}
-	s.membership = state
-	err = s.persistMembershipStateLocked(state)
+	err = s.writeMembershipStateLocked(state)
+	if err == nil {
+		s.membership = state
+	}
 	s.membershipMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("persist promoted membership: %w", err)

@@ -52,7 +52,7 @@ func TestContentSpillReceiptCallsAndACL(t *testing.T) {
 				}
 			}
 			denied, status := codeModeRun(t, s, other, map[string]any{"code": code})
-			if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "content_unavailable" {
+			if status == http.StatusOK || firstString(mapValue(denied["error"]), "code") != "history_unavailable" {
 				t.Errorf("hint crossed principal boundary: %d %#v", status, denied)
 			}
 		})
@@ -87,7 +87,7 @@ func TestContentHintObjectRechecksOriginACL(t *testing.T) {
 		fmt.Sprintf("mcp.content.indexSource({source:%s})", quoted),
 	} {
 		got, status := codeModeRun(t, s, r, map[string]any{"code": "return await " + expression + ";"})
-		if status == http.StatusOK || firstString(mapValue(got["error"]), "code") != "content_unavailable" {
+		if status == http.StatusOK || firstString(mapValue(got["error"]), "code") != "history_unavailable" {
 			t.Errorf("origin ACL bypass for %s: %d %#v", expression, status, got)
 		}
 	}

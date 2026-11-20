@@ -242,7 +242,7 @@ func (s *Server) updateInstructionSets(update func(map[string]InstructionSet) er
 	if err := update(sets); err != nil {
 		return err
 	}
-	if err := s.commitQuorumAuthorityState("instruction_sets", "named", instructionSetsState{Sets: cloneInstructionSets(sets)}); err != nil {
+	if err := s.commitQuorumAuthorityState("instruction_sets_named", "current", instructionSetsState{Sets: cloneInstructionSets(sets)}); err != nil {
 		return fmt.Errorf("commit quorum named instruction sets: %w", err)
 	}
 	if path != "" {

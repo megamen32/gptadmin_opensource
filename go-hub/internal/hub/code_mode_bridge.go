@@ -123,13 +123,13 @@ globalThis.mcp = Object.freeze({
   tasks: Object.freeze({
     start: (target,tool,args={},opts={}) => call(target,tool,args,{...opts,task:true}),
     list: (opts={}) => __tasksMCP("list",opts),
-    get: (taskId) => __tasksMCP("get",{taskId}),
-    result: (taskId) => __tasksMCP("result",{taskId}),
+    get: (taskId,opts={}) => __tasksMCP("get",{...opts,taskId}),
+    result: (taskId,opts={}) => __tasksMCP("result",{...opts,taskId}),
     wait: (taskId,opts={}) => __tasksMCP("wait",{taskId,...opts}),
     cancel: (taskId) => __tasksMCP("cancel",{taskId}),
     update: (taskId,inputResponses) => __tasksMCP("update",{taskId,inputResponses}),
   }),
-  job: (id, owner_target) => __facadeMCP('job', {id, owner_target}),
+  job: (id, owner) => __facadeMCP('job', typeof owner === 'object' ? {...owner,id} : {id,owner_target:owner}),
   expand: (id, path='', offset=0, limit=4096) => __facadeMCP('expand', {id, path, offset, limit}),
   files: Object.freeze({
     ls: (target,path,max_bytes=65536) => __fileMCP('ls',target,path,{max_bytes}),
@@ -606,7 +606,16 @@ func (b *codeModeBridge) facade(this *qjs.This) (*qjs.Value, error) {
 	if err := b.server.authorizePublicFacade(request, name, args); err != nil {
 		return nil, b.fail("forbidden", err.Error(), nil)
 	}
-	result := mapValue(b.server.appsSDKCallForRequest(request, name, args))
+	var result map[string]any
+	if name == "job" {
+		reply := b.server.lookupJob(request, args)
+		if reply.Failure != nil {
+			return nil, b.lookupError(reply.Failure, firstString(args, "id", "job_id"))
+		}
+		result = mapValue(reply.Value)
+	} else {
+		result = mapValue(b.server.appsSDKCallForRequest(request, name, args))
+	}
 	if status := firstString(result, "status"); status == "failed" || status == "approval_required" || status == "running" || status == "queued" {
 		receipt := map[string]any{"status": status}
 		for _, key := range []string{"job_id", "task_id", "operation_id"} {
@@ -1487,7 +1496,7 @@ func codeModeCallPayload(response map[string]any, status int, target, tool strin
 		payload["job_id"] = jobID
 	}
 	// A pending approval is a real outcome the script must stop on, not success.
-	for _, key := range []string{"approval_id", "approval_required", "expires_at", "message", "retryable", "owner_target", "owner_endpoint", "outcome", "retry_policy"} {
+	for _, key := range []string{"approval_id", "approval_required", "expires_at", "message", "executed", "retryable", "owner_target", "owner_endpoint", "outcome", "retry_policy"} {
 		if value, ok := response[key]; ok {
 			payload[key] = value
 		}

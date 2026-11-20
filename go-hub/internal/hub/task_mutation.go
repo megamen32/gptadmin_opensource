@@ -118,9 +118,18 @@ func taskCommitRPCError(err error) map[string]any {
 func taskPersistenceFailure(err error) map[string]any {
 	return map[string]any{"status": "failed", "error": map[string]any{"code": "task_persistence_failed", "message": fmt.Sprintf("task persistence failed: %v", err)}}
 }
+
+// A local enqueue failed before this process exposed the job to a poller.
+// A previously committed request-to-job binding still fences a retry.
+func taskEnqueueFailure(err error) map[string]any {
+	failure := taskPersistenceFailure(err)
+	failure["executed"] = false
+	return failure
+}
 func taskPersistenceRPCError(err error) map[string]any { return taskCommitRPCError(err) }
 func taskResponseStatus(response map[string]any) int {
-	if firstString(mapValue(response["error"]), "code") == "task_persistence_failed" {
+	switch firstString(mapValue(response["error"]), "code") {
+	case "task_persistence_failed", "executor_queue_unavailable":
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusOK
@@ -130,7 +139,9 @@ func (s *Server) relayEnqueueFailure(id string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if job := s.relayJobs[id]; job != nil && firstString(mapValue(job.Error), "code") == "task_persistence_failed" {
-		return relayJobResponse(job)
+		response := relayJobResponse(job)
+		response["executed"] = false
+		return response
 	}
 	return nil
 }

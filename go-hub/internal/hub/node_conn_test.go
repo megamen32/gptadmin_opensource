@@ -2,13 +2,17 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // The node connection tests exercise the real WebSocket surface between an
@@ -26,6 +30,65 @@ func waitForNodeConn(t *testing.T, server *Server, name string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("node connection for %s never registered", name)
+}
+
+func TestNodeConnReadyBeforeDialAndLostReceipt(t *testing.T) {
+	writer := nodeConnWriterNode(t, "writer")
+	const target = "shell:edge"
+	var httpCalls atomic.Int32
+	physical := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		httpCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer physical.Close()
+	key := strings.Repeat("w", 32)
+	member := &nodeMember{NodeID: "edge", Name: target, KeyHash: hashNodeSecret(key), OutboundWS: true,
+		State: nodeStateReady, LeaseExpires: time.Now().Add(time.Minute), Endpoints: []string{physical.URL}}
+	writer.membership.Nodes[member.NodeID] = member
+	writer.rebuildMembershipRoutes()
+	call := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/mcp-relay/call", nil)
+		r.Header.Set("Authorization", "Bearer unit-caller")
+		w := httptest.NewRecorder()
+		writer.forwardNodePeerCall(w, r, target, []byte(`{"target":"shell:edge","tool":"shell_exec"}`))
+		return w
+	}
+	if writer.memberRoutingReady(member, time.Now()) {
+		t.Fatal("lease alone advertised an active WS route")
+	}
+	if w := call(); w.Code != 503 || !strings.Contains(w.Body.String(), `"executed":false`) || httpCalls.Load() != 0 {
+		t.Fatalf("disconnected member caused a dispatch or an ambiguous refusal: HTTP %d", w.Code)
+	}
+
+	web := httptest.NewServer(writer.Handler())
+	defer web.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, nodeConnDialURL(web.URL), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + key}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	waitForNodeConn(t, writer, target)
+	if !writer.memberRoutingReady(member, time.Now()) {
+		t.Fatal("established member WebSocket remained unavailable")
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- call() }()
+	_, data, err := ws.Read(ctx)
+	var frame nodeConnFrame
+	if err != nil || json.Unmarshal(data, &frame) != nil || frame.Op != "call" || frame.ID == "" {
+		t.Fatal("member did not receive the call frame")
+	}
+	ws.CloseNow()
+	select {
+	case w := <-done:
+		if w.Code != 502 || !strings.Contains(w.Body.String(), `"outcome":"unknown"`) || httpCalls.Load() != 0 {
+			t.Fatalf("missing WS receipt did not preserve unknown outcome: HTTP %d, physical HTTP calls %d", w.Code, httpCalls.Load())
+		}
+	case <-ctx.Done():
+		t.Fatal("disconnect left the in-flight call waiting")
+	}
 }
 
 // nodeConnWriterNode mirrors membershipWriterNode but preserves env-seeded

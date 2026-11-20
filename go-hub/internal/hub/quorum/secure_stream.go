@@ -58,6 +58,11 @@ func newSecureStream(c Config) (*secureStream, error) {
 		deadline: c.RPCDeadline, roots: roots, peersByAddr: make(map[raft.ServerAddress]Peer, len(c.Peers)),
 		peersByID: make(map[string]Peer, len(c.Peers)),
 	}
+	// Older binaries ignore unknown handshake fields. Bind the new storage
+	// format to the authenticated cluster identity in both directions.
+	if c.Mode == OwnerLocal {
+		base.clusterID = "owner_local\x00" + c.ClusterID
+	}
 	for _, peer := range c.Peers {
 		base.peersByAddr[raft.ServerAddress(peer.Address)] = peer
 		base.peersByID[peer.ID] = peer

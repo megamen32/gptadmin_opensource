@@ -133,6 +133,9 @@ func TestQuorumPendingInputReplicatesEncryptedAndSurvivesLeaderLoss(t *testing.T
 	}
 	leader.quorumPrivateTLS = &quorumPrivateTLS{peers: map[string]quorum.Peer{"n0": peers[0], "n1": peers[1], "n2": peers[2]}}
 	leader.quorumAuthorityActiveWriter.Store(true)
+	// The writer serves bearer admission only while it holds the authority
+	// term of its current Raft term.
+	leader.quorumAuthorityTerm.Store(leader.quorumNode.CurrentTerm())
 	leader.membership = &nodeMembershipState{Nodes: map[string]*nodeMember{"n1": {NodeID: "n1", Name: "shell:haos", State: nodeStateReady, Capabilities: []string{"executor"}}}}
 	leader.nodePeers = map[string]nodePeerRoute{"shell:haos": {URL: "http://127.0.0.1:1"}}
 	leader.agents["shell:haos"] = &Agent{AgentID: "shell:haos", Status: "online", Meta: map[string]any{"approved": true}}
@@ -188,6 +191,17 @@ func TestQuorumPendingInputReplicatesEncryptedAndSurvivesLeaderLoss(t *testing.T
 		t.Fatal("draining executor accepted new work")
 	}
 	leader.membership.Nodes["n1"].State = nodeStateReady
+	leader.membership.Nodes["mac"] = &nodeMember{NodeID: "mac", Name: "shell:mac", State: nodeStateReady, Capabilities: []string{"executor"}, LocalID: "mac-id", LocalFingerprint: "mac-fingerprint"}
+	if use, err := leader.quorumExecutorUsesLeaderQueue(context.Background(), "shell:mac"); use || err == nil {
+		t.Fatal("old member without a quorum poller admitted new work")
+	}
+	leader.membership.Nodes["mac"].QuorumQueue = true
+	if use, err := leader.quorumExecutorUsesLeaderQueue(context.Background(), "shell:mac"); err != nil || !use {
+		t.Fatalf("enrolled nonvoter would keep the only task history on the Mac: queue=%v err=%v", use, err)
+	}
+	t.Run("nonvoter executes from the replicated queue", func(t *testing.T) {
+		testNonvoterExecutorQueue(t, leader, servers[1])
+	})
 	childID := "mcp:shell:haos:grep"
 	leader.agents[childID] = &Agent{AgentID: childID, Kind: "child_mcp", Meta: map[string]any{"approved": true, "parent_server_id": "shell:haos", "child_ref": "grep", "enabled": true}}
 	childReq := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", nil)

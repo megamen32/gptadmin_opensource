@@ -17,6 +17,8 @@ import (
 const quorumExecutorHeader = "X-GPTAdmin-Quorum-Executor"
 const quorumHeartbeatMaxBytes = 64 << 10
 
+type attestedVoterKey struct{}
+
 func quorumExecutorTarget(r *http.Request) (string, error) {
 	var name string
 	switch {
@@ -87,15 +89,10 @@ func (s *Server) authenticatedQuorumExecutor(r *http.Request) bool {
 	if err != nil || target == "" || r.Header.Get(quorumExecutorHeader) != target {
 		return false
 	}
-	peerID := ""
-	for id, peer := range s.quorumPrivateTLS.peers {
-		if r.TLS.PeerCertificates[0].VerifyHostname(peer.ServerName) == nil {
-			if peerID != "" {
-				return false
-			}
-			peerID = id
-		}
-	}
+	return s.voterOwnsRemoteExecutor(s.receiptPeerID(r), target)
+}
+
+func (s *Server) voterOwnsRemoteExecutor(peerID, target string) bool {
 	if peerID == "" {
 		return false
 	}

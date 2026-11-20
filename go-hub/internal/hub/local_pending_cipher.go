@@ -13,10 +13,7 @@ import (
 // Local queues reuse the installed secret store's AES-GCM key. Domain and
 // immutable task ID are authenticated; ciphertext cannot move between tasks.
 func (s *Server) sealPendingValue(namespace, id string, plain []byte) (json.RawMessage, error) {
-	if s.quorumNode != nil {
-		if s.quorumNode == nil {
-			return nil, errors.New("pending quorum cipher unavailable")
-		}
+	if s.quorumNode != nil && !s.quorumControlOnly() {
 		return s.quorumNode.SealExternalValue(namespace, id, 1, plain)
 	}
 	if s.secretStore == nil || s.secretStoreErr != nil {
@@ -34,6 +31,10 @@ func (s *Server) sealPendingValue(namespace, id string, plain []byte) (json.RawM
 	}{1, nonce, a.Seal(nil, nonce, plain, []byte("gptadmin/local-pending/v1/"+namespace+"/"+id))})
 }
 func (s *Server) openPendingValue(namespace, id string, sealed json.RawMessage) ([]byte, error) {
+	if s.quorumControlOnly() {
+		// The ordinary owner keeps its existing pending input and local key.
+		return s.openLocalPendingValue(namespace, id, sealed)
+	}
 	if s.quorumNode != nil {
 		return s.quorumNode.OpenExternalValue(namespace, id, 1, sealed)
 	}
@@ -63,6 +64,10 @@ func (s *Server) openPendingValue(namespace, id string, sealed json.RawMessage) 
 			}
 		}
 	}
+	return s.openLocalPendingValue(namespace, id, sealed)
+}
+
+func (s *Server) openLocalPendingValue(namespace, id string, sealed json.RawMessage) ([]byte, error) {
 	if s.secretStore == nil || s.secretStoreErr != nil {
 		return nil, errors.New("pending local cipher unavailable")
 	}

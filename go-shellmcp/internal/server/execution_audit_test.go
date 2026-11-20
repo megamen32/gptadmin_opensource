@@ -30,7 +30,7 @@ func TestExecutionAuditQueueAndMCPIgnoreSpoofedOrigin(t *testing.T) {
 	}
 	req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 	s.applyDefaults(&req)
-	if !s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin) {
+	if duplicate, err := s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin); err != nil || duplicate {
 		t.Fatal("queue rejected")
 	}
 	s.callbackWG.Wait()

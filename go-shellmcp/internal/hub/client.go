@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,9 +14,12 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
 )
@@ -25,6 +29,10 @@ type Client struct {
 	HTTP     *http.Client
 	Identity *security.Identity
 	Token    string
+	routes   hubroute.Origins
+	unpinned *http.Client
+	routeMu  sync.Mutex
+	cache    string
 }
 
 // Queue arguments may use the Hub's existing 64 MiB request envelope.
@@ -32,17 +40,54 @@ type Client struct {
 const queueResponseMaxBytes = 64 << 20
 
 func New(base string, id *security.Identity, token, dnsServer, resolveTo string) *Client {
-	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: newHTTPClient(dnsServer, resolveTo)}
+	return &Client{BaseURL: strings.TrimRight(base, "/"), Identity: id, Token: token, HTTP: newHTTPClient(dnsServer, resolveTo), unpinned: newHTTPClient(dnsServer, "")}
+}
+
+// Cache only HTTPS origins learned on an authenticated queue connection. A
+// different configured seed starts a new trust relationship. The embedded
+// executor always polls loopback and gets its route from its own Node.
+func (c *Client) RestoreQuorumRoutes(dir string) {
+	if dir == "" || len(hubroute.Parse(c.BaseURL)) != 1 {
+		return
+	}
+	c.cache = filepath.Join(dir, "shellmcp-quorum-hubs.json")
+	data, err := os.ReadFile(c.cache)
+	var cached struct{ Seed, Hubs string }
+	if err == nil && json.Unmarshal(data, &cached) == nil && cached.Seed == c.BaseURL {
+		c.routes.Set(hubroute.Parse(c.BaseURL + "," + cached.Hubs))
+	}
+}
+
+func (c *Client) learnQuorumRoutes(raw string) {
+	if raw == "" || len(hubroute.Parse(c.BaseURL)) != 1 {
+		return
+	}
+	c.routeMu.Lock()
+	defer c.routeMu.Unlock()
+	if !c.routes.Set(hubroute.Parse(c.BaseURL+","+raw)) || c.cache == "" {
+		return
+	}
+	data, _ := json.Marshal(struct{ Seed, Hubs string }{c.BaseURL, raw})
+	f, err := os.CreateTemp(filepath.Dir(c.cache), ".quorum-hubs-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil && closeErr == nil {
+		_ = os.Rename(f.Name(), c.cache)
+	}
 }
 
 func newHTTPClient(dnsServer, resolveTo string) *http.Client {
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := &http.Client{Timeout: 90 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	dnsServer = strings.TrimSpace(dnsServer)
 	resolveTo = strings.TrimSpace(resolveTo)
 	if resolveTo != "" && net.ParseIP(resolveTo) == nil {
 		resolveTo = ""
 	}
-	if dnsServer == "" && resolveTo == "" {
+	roots := configuredRootCAs()
+	if dnsServer == "" && resolveTo == "" && roots == nil {
 		return client
 	}
 
@@ -66,8 +111,12 @@ func newHTTPClient(dnsServer, resolveTo string) *http.Client {
 
 	dialer := &net.Dialer{}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if roots := configuredRootCAs(); roots != nil {
+	if roots != nil {
 		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
+	if dnsServer == "" && resolveTo == "" {
+		client.Transport = transport
+		return client
 	}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
@@ -310,6 +359,9 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return QueueJob{}, false, fmt.Errorf("queue poll HTTP %d: %s", resp.StatusCode, string(body))
 	}
+	if resp.TLS != nil && len(resp.TLS.VerifiedChains) > 0 {
+		c.learnQuorumRoutes(resp.Header.Get(hubroute.Header))
+	}
 	if len(bytes.TrimSpace(body)) == 0 || string(bytes.TrimSpace(body)) == "{}" {
 		return QueueJob{}, false, nil
 	}
@@ -347,14 +399,43 @@ type HTTPError struct {
 func (e *HTTPError) Error() string { return fmt.Sprintf("result HTTP %d: %s", e.StatusCode, e.Body) }
 
 func (c *Client) PostResult(ctx context.Context, name string, res TaskResult) error {
+	body, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	return c.PostResultJSON(ctx, name, res.ID, body)
+}
+
+// PostResultJSON preserves exact JSON numbers and opaque result bytes from a
+// previous process. The full job ID lets ingress select the owner before reading
+// the body; the owner independently checks the body against that route.
+func (c *Client) PostResultJSON(ctx context.Context, name, id string, body []byte) error {
 	p := "/queue/" + url.PathEscape(name) + "/result"
-	resp, body, err := c.doJSON(ctx, http.MethodPost, p, res)
+	scoped := strings.HasPrefix(id, "ot1.")
+	if scoped {
+		p += "?job_id=" + url.QueryEscape(id)
+	}
+	resp, ackBody, err := c.do(ctx, http.MethodPost, p, body)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
+		return &HTTPError{StatusCode: resp.StatusCode, Body: string(ackBody)}
+	}
+	var ack struct {
+		OK      bool   `json:"ok"`
+		ID      string `json:"id"`
+		OwnerID string `json:"owner_id"`
+	}
+	if json.Unmarshal(ackBody, &ack) != nil || !ack.OK {
+		return fmt.Errorf("Hub did not acknowledge result %s", id)
+	}
+	if scoped {
+		owner, _, _ := strings.Cut(strings.TrimPrefix(id, "ot1."), ".")
+		if ack.ID != id || ack.OwnerID == "" || base64.RawURLEncoding.EncodeToString([]byte(ack.OwnerID)) != owner {
+			return fmt.Errorf("owner did not acknowledge result %s", id)
+		}
 	}
 	return nil
 }
@@ -386,7 +467,14 @@ func (c *Client) do(ctx context.Context, method, p string, body []byte) (*http.R
 }
 
 func (c *Client) doWithResponseLimit(ctx context.Context, method, p string, body []byte, maxBytes int64) (*http.Response, []byte, error) {
-	u, err := url.Parse(c.BaseURL)
+	origin := c.routes.Current()
+	client := c.HTTP
+	if origin == "" {
+		origin = c.BaseURL
+	} else if origin != c.BaseURL {
+		client = c.unpinned
+	}
+	u, err := url.Parse(origin)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -411,13 +499,21 @@ func (c *Client) doWithResponseLimit(ctx context.Context, method, p string, body
 			req.Header.Set(k, v)
 		}
 	}
-	resp, err := c.HTTP.Do(req)
+	req.GetBody = nil
+	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() == nil {
+			c.routes.Failed(origin)
+		}
 		return nil, nil, err
+	}
+	if resp.StatusCode >= 500 || resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		c.routes.Failed(origin)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
+		c.routes.Failed(origin)
 		return nil, nil, fmt.Errorf("Hub response read failed: %w", err)
 	}
 	if int64(len(b)) > maxBytes {

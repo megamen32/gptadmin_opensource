@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,25 +24,21 @@ func (s *Server) openQuorum() error {
 	if s.cfg.QuorumConfigFile == "" {
 		return nil
 	}
+	if err := s.configureQuorum(); err != nil {
+		return err
+	}
+	go s.quorumBootstrapLoop()
+	go s.quorumVoterPromotionLoop()
+	return nil
+}
+
+func (s *Server) configureQuorum() error {
 	if !s.authContinuityEnabled() {
 		return errors.New("quorum Hub requires auth continuity in writer or reader mode")
 	}
-	info, err := os.Lstat(s.cfg.QuorumConfigFile)
+	config, err := readHubQuorumConfig(s.cfg.QuorumConfigFile)
 	if err != nil {
-		return fmt.Errorf("quorum config unavailable: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("quorum config must be a regular file readable only by its owner")
-	}
-	data, err := os.ReadFile(s.cfg.QuorumConfigFile)
-	if err != nil {
-		return fmt.Errorf("read quorum config: %w", err)
-	}
-	var config quorum.Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return fmt.Errorf("decode quorum config: %w", err)
+		return err
 	}
 	if config.DataDir == "" {
 		config.DataDir = filepath.Join(s.cfg.ConfigDir, "quorum")
@@ -69,23 +63,54 @@ func (s *Server) openQuorum() error {
 	if !localPeerFound {
 		return errors.New("local node is missing from the quorum public hub URL configuration")
 	}
+	mode, reopen, err := s.resolveQuorumMode(config)
+	if err != nil {
+		return err
+	}
+	if mode == quorum.OwnerLocal && (config.ExternalSnapshotMaxBytes == 0 || config.ExternalSnapshotMaxBytes > quorum.ControlSnapshotLimit) {
+		config.ExternalSnapshotMaxBytes = quorum.ControlSnapshotLimit
+	}
+	if mode == quorum.OwnerLocal && config.ExternalSnapshotFreeReserveBytes == 0 {
+		config.ExternalSnapshotFreeReserveBytes = 16 << 20
+	}
+	config.Mode = mode
+	if err = config.Validate(); err != nil {
+		return err
+	}
+	privateTLS, err := prepareQuorumPrivateTLS(config)
+	if err != nil {
+		return fmt.Errorf("configure private quorum HTTPS: %w", err)
+	}
+	if mode == quorum.OwnerLocal {
+		if err = checkControlDatabaseFile(filepath.Join(config.DataDir, "hub-control.sqlite")); err != nil {
+			return err
+		}
+	}
+	if !reopen {
+		if err = pinQuorumMode(config.DataDir, quorumStorageIdentity{config.ClusterID, mode}); err != nil {
+			return err
+		}
+	}
+	s.quorumMode, s.quorumLegacyReopen = mode, reopen
 	s.quorumClusterID = config.ClusterID
 	s.quorumBootstrapperID = config.BootstrapperID
 	s.quorumPeers = append([]quorum.Peer(nil), config.Peers...)
 	s.quorumSnapshotMaxBytes = config.ExternalSnapshotMaxBytes
 	s.quorumSnapshotFreeReserve = config.ExternalSnapshotFreeReserveBytes
 	s.quorumSnapshotDataDir = config.DataDir
-	if err := s.withTaskDatabase(func(*taskTransaction) error { return nil }); err != nil {
+	if err := s.withQuorumDatabase(func(*taskTransaction) error { return nil }); err != nil {
 		s.quorumClusterID = ""
 		s.quorumBootstrapperID = ""
 		s.quorumSnapshotMaxBytes = 0
 		s.quorumSnapshotFreeReserve = 0
 		s.quorumSnapshotDataDir = ""
-		return fmt.Errorf("initialize task quorum store: %w", err)
+		return fmt.Errorf("initialize quorum store: %w", err)
 	}
-	privateTLS, err := prepareQuorumPrivateTLS(config)
-	if err != nil {
-		return fmt.Errorf("configure private quorum HTTPS: %w", err)
+	// Replicated clusters retain their pre-Raft local recovery ordering.
+	if !s.quorumControlOnly() {
+		if err := s.loadTaskState(); err != nil {
+			return err
+		}
 	}
 	node, err := quorum.OpenWithExternalState(config, s.applyTaskQuorumMutations, quorum.ExternalSnapshotCallbacks{
 		Snapshot: s.snapshotTaskQuorumState,
@@ -101,8 +126,6 @@ func (s *Server) openQuorum() error {
 	}
 	s.quorumNode = node
 	s.quorumPrivateTLS = privateTLS
-	go s.quorumBootstrapLoop()
-	go s.quorumVoterPromotionLoop()
 	return nil
 }
 
@@ -118,7 +141,7 @@ func (s *Server) taskQuorumReady() error {
 		return err
 	}
 	var authorityRevision uint64
-	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+	if err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
 		return tx.QueryRow(`SELECT authority_revision FROM task_quorum_meta WHERE id=1`).Scan(&authorityRevision)
 	}); err != nil {
 		return err
@@ -137,13 +160,16 @@ func (s *Server) taskQuorumReplicaReady() error {
 	if node == nil {
 		return nil
 	}
+	if s.quorumLegacyReopen && !s.legacyMarkerCommitted() {
+		return errors.New("waiting for the committed legacy baseline")
+	}
 	if _, err := node.ExternalApplyError(); err != nil {
 		return fmt.Errorf("quorum replica has an unapplied durable-state batch: %w", err)
 	}
 	var clusterID string
 	var applied, authorityRevision uint64
 	var baselineReady, authorityReady int
-	err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+	err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
 		return tx.QueryRow(`SELECT cluster_id,applied_index,authority_revision,baseline_ready,authority_ready FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &applied, &authorityRevision, &baselineReady, &authorityReady)
 	})
 	if err != nil {
@@ -166,9 +192,12 @@ func (s *Server) taskQuorumBaselineReady() bool {
 	if s.quorumNode == nil {
 		return false
 	}
+	if s.quorumLegacyReopen && !s.legacyMarkerCommitted() {
+		return false
+	}
 	var clusterID string
 	var baselineReady, authorityReady int
-	err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+	err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
 		return tx.QueryRow(`SELECT cluster_id,baseline_ready,authority_ready FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &baselineReady, &authorityReady)
 	})
 	return err == nil && clusterID == s.quorumClusterID && baselineReady == 1 && authorityReady == 1
@@ -298,10 +327,28 @@ func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
 func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.quorumNode == nil {
+			if origin := s.memberQuorumHubs.Current(); origin != "" && memberQuorumClientPath(r.URL.Path) && r.Header.Get(nodePeerHopHeader) == "" {
+				if r.Header.Get(memberIngressHeader) != "" {
+					s.memberQuorumHubs.Failed(origin)
+					writeJSON(w, http.StatusLoopDetected, map[string]any{"detail": "quorum ingress resolved to an ordinary member", "executed": false})
+					return
+				}
+				s.proxyMemberRequest(w, r, origin, false)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
 		switch r.URL.Path {
+		case ownerReadPath:
+			// This exact read authenticates against the applied voter policy.
+			// Ordinary reader slots may still name a former writer.
+			if !s.readFromQuorumLeader(r) {
+				writeJSON(w, http.StatusServiceUnavailable, readOffline)
+				return
+			}
+			s.ownerReadHTTP(w, r)
+			return
 		case "/healthz", "/version", "/metrics":
 			next.ServeHTTP(w, r)
 			return
@@ -345,6 +392,9 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				proxy.Director = func(outbound *http.Request) {
 					director(outbound)
 					outbound.Host = target.Host
+					outbound.GetBody = nil
+					outbound.Header.Del("Idempotency-Key")
+					outbound.Header.Del("X-Idempotency-Key")
 					outbound.Header.Del(quorumExecutorHeader)
 					if forwardedExecutor != "" {
 						outbound.Header.Set(quorumExecutorHeader, forwardedExecutor)
@@ -352,7 +402,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 					outbound.Header.Set("X-GPTAdmin-Quorum-Forwarded", leaderID)
 				}
 				proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "current quorum leader is unreachable"})
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "current quorum leader delivery was not confirmed", "outcome": "unknown"})
 				}
 				proxy.ServeHTTP(w, r)
 				return
@@ -381,6 +431,9 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		if err := s.taskQuorumReady(); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum Hub state is not ready"})
 			return
+		}
+		if s.quorumControlOnly() {
+			r = r.WithContext(context.WithValue(r.Context(), ownerAdmissionTermKey{}, s.quorumAuthorityTerm.Load()))
 		}
 		next.ServeHTTP(w, r)
 	})

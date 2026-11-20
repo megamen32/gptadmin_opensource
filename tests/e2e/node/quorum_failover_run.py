@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Isolated real-process quorum probe; this is not production acceptance.
 
-Usage: quorum_failover_run.py NODE_BINARY PRIVATE_TMP [--immediate-auth]
-The optional scenario confirms client registrations, profiles, refresh rotation
-and revocation survive a leader stopping immediately after acknowledgment.
+The default CI entry runs the owner-local voter matrix in its isolated container.
+The pre-existing replicated-quorum probes are available with --legacy-shared-probe
+or --immediate-auth.
 """
+import argparse
+import asyncio
 import base64
+from contextlib import ExitStack
 import datetime as dt
 import hashlib
 import http.client
@@ -13,6 +16,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import pwd
 import secrets
 import socket
 import sqlite3
@@ -22,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,16 +36,24 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-BINARY = Path(sys.argv[1]).resolve()
-BASE = Path(sys.argv[2]).resolve()
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("node_binary", type=Path)
+parser.add_argument("private_tmp", type=Path)
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument("--immediate-auth", action="store_true")
+mode.add_argument("--legacy-shared-probe", action="store_true")
+mode.add_argument("--case", choices=("outages", "fencing", "storage"), help="run one part of the default voter matrix")
+parser.add_argument("--shell-binary", type=Path, help="standalone ShellMCP for the voter matrix")
+options = parser.parse_args()
+member_matrix = not (options.legacy_shared_probe or options.immediate_auth)
+BINARY = options.node_binary.resolve(strict=True)
+BASE = options.private_tmp.resolve()
 BASE.mkdir(parents=True, exist_ok=True)
 ROOT = Path(tempfile.mkdtemp(prefix="real-quorum-", dir=BASE))
 os.chmod(ROOT, 0o700)
 NOW = dt.datetime.now(dt.timezone.utc)
 password = secrets.token_urlsafe(32)
 signer = secrets.token_urlsafe(32)
-issuer = "https://quorum-test.invalid"
-resource = issuer + "/mcp"
 nodes = []
 proxies = []
 used_ports = set()
@@ -76,8 +89,9 @@ def cert(name, ca_key, ca):
     return crt, pem
 
 
-def request(index, path, body=None, token=None, form=None, basic=None):
+def request(index, path, body=None, token=None, form=None, basic=None, *, method=None, extra_headers=None):
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    headers.update(extra_headers or {})
     data = None if body is None else json.dumps(body).encode()
     if form is not None:
         data = urllib.parse.urlencode(form).encode()
@@ -87,7 +101,7 @@ def request(index, path, body=None, token=None, form=None, basic=None):
     if basic:
         headers["Authorization"] = "Basic " + base64.b64encode((':'.join(basic)).encode()).decode()
     connection = http.client.HTTPConnection("127.0.0.1", nodes[index]["http"], timeout=45)
-    connection.request("POST" if data is not None else "GET", path, body=data, headers=headers)
+    connection.request(method or ("POST" if data is not None else "GET"), path, body=data, headers=headers)
     response = connection.getresponse()
     raw = response.read()
     headers = dict(response.getheaders())
@@ -102,14 +116,18 @@ def request(index, path, body=None, token=None, form=None, basic=None):
 def start(i):
     node = nodes[i]
     node["log"] = (node["dir"] / "runtime.log").open("ab")
-    node["proc"] = subprocess.Popen([str(BINARY)], cwd=node["dir"], env=node["env"], stdout=node["log"], stderr=node["log"])
+    node["proc"] = subprocess.Popen([str(BINARY)], cwd=node["dir"], env=node["env"], stdout=node["log"],
+                                    stderr=node["log"], group=node.get("group"))
 
 
-def stop(i):
+def stop(i, *, crash=False):
     node = nodes[i]
     process = node.get("proc")
     if process and process.poll() is None:
-        process.terminate()
+        if crash:
+            process.kill()
+        else:
+            process.terminate()
         try:
             process.wait(timeout=12)
         except subprocess.TimeoutExpired:
@@ -185,7 +203,37 @@ def start_tls_ingress(i):
     proxies.append(server)
 
 
-def main():
+def oauth_client(callback, resource, name, *, bind_profile=False):
+    status, registration, _ = request(0, "/register", {"redirect_uris": [callback], "client_name": name})
+    assert status == 201, f"register HTTP {status}"
+    basic = (registration["client_id"], registration["client_secret"])
+    if bind_profile:
+        profile = {"id": "other-client", "access_mode": "full", "approval_mode": "unrestricted",
+                   "allowed_targets": ["*"], "allowed_tools": ["*"]}
+        status, _, _ = request(0, "/admin/api/access-profiles/other-client", profile, nodes[0]["env"]["CTL_TOKEN"],
+                               method="PUT", extra_headers={"If-Match": "*"})
+        assert status == 200, f"create ACL profile HTTP {status}"
+        status, _, _ = request(0, "/admin/api/client-bindings/" + basic[0], {"profile_id": profile["id"]},
+                               nodes[0]["env"]["CTL_TOKEN"], method="PUT")
+        assert status == 200, f"bind second OAuth client HTTP {status}"
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    status, _, headers = request(0, "/oauth/authorize", form={"client_id": basic[0], "redirect_uri": callback,
+        "resource": resource, "scope": "gptadmin.read gptadmin.exec offline_access", "password": password,
+        "code_challenge": challenge, "code_challenge_method": "S256"})
+    assert status == 302, f"authorize HTTP {status}"
+    code = urllib.parse.parse_qs(urllib.parse.urlparse(headers["Location"]).query)["code"][0]
+    status, oauth, _ = request(0, "/oauth/token", form={"grant_type": "authorization_code", "code": code,
+        "redirect_uri": callback, "resource": resource, "code_verifier": verifier}, basic=basic)
+    assert status == 200 and oauth.get("refresh_token"), f"OAuth exchange HTTP {status}"
+    return basic, oauth
+
+
+def main(services):
+    edge_port = port()
+    issuer = f"https://localhost:{edge_port}" if member_matrix else "https://quorum-test.invalid"
+    resource = issuer + "/mcp"
+    shell_token = secrets.token_urlsafe(32)
     ca_key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "GPTAdmin isolated quorum CA")])
     ca = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(ca_key.public_key())
@@ -201,37 +249,42 @@ def main():
         directory = ROOT / f"node{i}"
         directory.mkdir(mode=0o700)
         crt, key = cert(f"node{i}.test", ca_key, ca)
-        env = {k: v for k, v in os.environ.items() if not (k.startswith("GPTADMIN_") or k.startswith("SHELL") or k in {"CTL_TOKEN", "OAUTH_CLIENT_SECRET", "ADMIN_PASSWORD", "PUBLIC_ORIGIN", "MCP_RESOURCE", "MCP_RELAY_AGENT_TOKEN"})}
+        env = dict(PATH=os.environ["PATH"], HOME=str(directory), GPTADMIN_HOME=str(directory))
         env.update(GPTADMIN_CONFIG_DIR=str(directory), GPTADMIN_ROOT=str(directory), GPTADMIN_ENV_FILE=str(directory / "missing.env"),
             GPTADMIN_HUB_HOST="127.0.0.1", GPTADMIN_HUB_PORT=str(port()), CTL_TOKEN=secrets.token_urlsafe(32),
-            SHELL_TOKEN=secrets.token_urlsafe(32), OAUTH_CLIENT_SECRET=signer, ADMIN_PASSWORD=password,
+            SHELL_TOKEN=shell_token, OAUTH_CLIENT_SECRET=signer, ADMIN_PASSWORD=password,
             MCP_RELAY_AGENT_TOKEN=secrets.token_urlsafe(32), PUBLIC_ORIGIN=issuer, MCP_RESOURCE=resource,
             GPTADMIN_OAUTH_ALLOWED_REDIRECTS=json.dumps(["https://legacy.example/oauth/callback"]),
             GPTADMIN_AUTH_MODE="writer" if i == 0 else "reader", SHELL_NAME=f"node{i}",
             SHELL_IDENTITY_DIR=str(directory), SHELL_SPOOL_DIR=str(directory / "spool"),
             SHELL_OUTBOX_DIR=str(directory / "spool/outbox"), SHELL_DEFAULT_CWD=str(directory),
+            SHELL_DEFAULT_USER=pwd.getpwuid(os.getuid()).pw_name,
             SHELL_DEFAULT_HOME=str(directory), SHELLMCP_MCP_CONFIG=str(directory / "no-child.json"),
             HUB_URL="http://127.0.0.1:1", SHELLMCP_SELF_REPAIR_DISABLE="1", NO_PROXY="*", SSL_CERT_FILE=str(ca_path))
         nodes.append({"dir": directory, "http": int(env["GPTADMIN_HUB_PORT"]), "raft": port(), "private": port(), "public": port(),
             "key": secrets.token_hex(32), "cert": crt, "cert_key": key, "env": env})
+        physical_host = f"node{i}.test" if member_matrix else "localhost"
+        env["GPTADMIN_NODE_PUBLIC_URL"] = f"https://{physical_host}:{nodes[i]['public']}"
+        if member_matrix:
+            nodes[i]["group"] = 31000 + i  # identifies this voter's sockets in the isolated netns
+            env["QUEUE_LONG_POLL_TIMEOUT_S"] = "3"
+            env["MCP_RELAY_POLL_MAX_TIMEOUT"] = "3"
+            (directory / "executor-name").write_text(f"node{i}")
+    if member_matrix:
+        import quorum_matrix as matrix
+        services.enter_context(matrix.member_tls(ROOT, nodes))
+    else:
+        for i in range(3):
+            start_tls_ingress(i)
     start(0)
     wait_for("ordinary writer", lambda: health(0))
     writer_id = json.loads((nodes[0]["dir"] / "shellmcp_identity.json").read_text())["server_id"]
     nodes[0]["id"] = writer_id
     callback = "http://127.0.0.1:49173/callback/quorum"
-    status, registration, _ = request(0, "/register", {"redirect_uris": [callback], "client_name": "quorum-probe"})
-    assert status == 201, f"register HTTP {status}"
-    basic = (registration["client_id"], registration["client_secret"])
-    verifier = secrets.token_urlsafe(48)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    status, _, headers = request(0, "/oauth/authorize", form={"client_id": basic[0], "redirect_uri": callback,
-        "resource": resource, "scope": "gptadmin.read gptadmin.exec offline_access", "password": password,
-        "code_challenge": challenge, "code_challenge_method": "S256"})
-    assert status == 302, f"authorize HTTP {status}"
-    code = urllib.parse.parse_qs(urllib.parse.urlparse(headers["Location"]).query)["code"][0]
-    status, oauth, _ = request(0, "/oauth/token", form={"grant_type": "authorization_code", "code": code,
-        "redirect_uri": callback, "resource": resource, "code_verifier": verifier}, basic=basic)
-    assert status == 200 and oauth.get("refresh_token"), f"OAuth exchange HTTP {status}"
+    basic, oauth = oauth_client(callback, resource, "quorum-probe")
+    if member_matrix:
+        _, outsider = oauth_client(callback, resource, "quorum-other-caller", bind_profile=True)
+        history = asyncio.run(matrix.seed_history(nodes[0], oauth["access_token"]))
     for i in (1, 2):
         node = nodes[i]
         node["id"] = secrets.token_hex(16)
@@ -239,7 +292,7 @@ def main():
         status, grant, _ = request(0, "/admin/api/nodes/grant", {"name": name, "ttl_minutes": 30}, nodes[0]["env"]["CTL_TOKEN"])
         assert status == 200, f"grant HTTP {status}"
         status, join, _ = request(0, "/admin/api/nodes/join", {"node_id": node["id"], "node_key": node["key"],
-            "name": name, "endpoints": [f"http://127.0.0.1:{node['http']}"], "capabilities": ["ingress", "executor", "replica"]}, grant["grant"])
+            "name": name, "endpoints": [node["env"]["GPTADMIN_NODE_PUBLIC_URL"]], "capabilities": ["ingress", "executor", "replica"]}, grant["grant"])
         assert status == 200, f"join HTTP {status}"
         identity = {"schema": "gptadmin.node-identity/v1", "node_id": node["id"], "node_key": node["key"],
             "created": NOW.isoformat(), "writer_url": join["writer_url"], "writer_id": writer_id}
@@ -253,9 +306,9 @@ def main():
     wait_for("readers enrolled and synced", members_ready, 90)
     for i in range(3):
         stop(i)
-        start_tls_ingress(i)
     peers = [{"id": n["id"], "address": f"127.0.0.1:{n['raft']}", "server_name": f"node{i}.test",
-        "hub_url": f"https://localhost:{n['public']}", "internal_hub_url": f"https://127.0.0.1:{n['private']}",
+        "hub_url": n["env"]["GPTADMIN_NODE_PUBLIC_URL"],
+        "internal_hub_url": f"https://127.0.0.1:{n['private']}",
         "node_key_sha256": hashlib.sha256(n["key"].encode()).hexdigest(), "failure_domain": f"host{i}"} for i, n in enumerate(nodes)]
     for i, n in enumerate(nodes):
         config = {"cluster_id": "isolated-probe", "node_id": n["id"], "bootstrapper_id": writer_id,
@@ -263,6 +316,8 @@ def main():
             "data_dir": str(n["dir"] / "raft"), "tls_cert_file": str(n["cert"]), "tls_key_file": str(n["cert_key"]),
             "tls_ca_file": str(ca_path), "state_key_file": str(state_key), "external_snapshot_max_bytes": 67108864,
             "external_snapshot_free_reserve_bytes": 1048576, "peers": peers, "bootstrap": i == 0}
+        if not member_matrix:
+            config["mode"] = "replicated"
         config_path = n["dir"] / "quorum.json"
         private(config_path, json.dumps(config).encode())
         n["env"]["GPTADMIN_QUORUM_CONFIG_FILE"] = str(config_path)
@@ -293,7 +348,13 @@ def main():
         if status == 428 and response and response.get("executed") is False and response.get("context"):
             approval["context"] = response["context"]
             status, response, _ = request(0, "/mcp-relay/call", approval, nodes[0]["env"]["CTL_TOKEN"])
-        assert status == 200 and response and not response.get("error"), f"approval failed for {target}: HTTP {status}, error {response.get('error') if response else None}"
+        assert status == 200 and response and not response.get("error"), f"approval failed for {target}: HTTP {status}"
+    if member_matrix:
+        shell = (options.shell_binary or BINARY.with_name("gptadmin-shellmcp")).resolve(strict=True)
+        edge_cert, edge_key = cert("localhost", ca_key, ca)
+        asyncio.run(matrix.run(ROOT, nodes, start, stop, request, issuer, ca_path, edge_cert, edge_key,
+                               oauth["access_token"], outsider["access_token"], shell, history, options.case))
+        return
     init = {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "quorum-probe", "version": "1"}}
     status, response, _ = rpc(0, oauth["access_token"], "initialize", init)
     assert status == 200 and response and "result" in response, f"initial OAuth initialize HTTP {status}"
@@ -332,7 +393,7 @@ def main():
     assert before_row and (nodes[0]["dir"] / "once.txt").read_text().splitlines() == ["once"], "initial command receipt or side effect missing"
     stop(0)
     leader = wait_for("surviving leader ready", lambda: next((i for i in (1, 2) if health(i)), None), 90)
-    if "--immediate-auth" in sys.argv[3:]:
+    if options.immediate_auth:
         start(0)
         def old_follower_ready():
             status, data, _ = request(0, "/healthz")
@@ -461,9 +522,27 @@ def main():
 
 
 try:
-    main()
+    with ExitStack() as services:
+        main(services)
 except Exception as exc:
-    print("probe failed:", type(exc).__name__, str(exc), "evidence:", ROOT, file=sys.stderr, flush=True)
+    def report(error):
+        frames = [frame for frame in traceback.extract_tb(error.__traceback__)
+                  if Path(frame.filename).parent == Path(__file__).parent]
+        if frames:
+            print(" > ".join(f"{Path(frame.filename).name}:{frame.lineno} {frame.name}" for frame in frames),
+                  file=sys.stderr)
+        children = getattr(error, "exceptions", ())
+        if children:
+            for child in children:
+                report(child)
+        elif isinstance(error, (RuntimeError, AssertionError, KeyError, FileNotFoundError, subprocess.CalledProcessError)):
+            print("probe failed:", type(error).__name__, str(error), file=sys.stderr, flush=True)
+        else:
+            # SDK transport exceptions can contain request/response bodies.
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            print("probe failed:", type(error).__name__, "HTTP", status, file=sys.stderr, flush=True)
+    report(exc)
+    print("private test state:", ROOT, file=sys.stderr, flush=True)
     sys.exit(1)
 finally:
     for index in range(len(nodes)):

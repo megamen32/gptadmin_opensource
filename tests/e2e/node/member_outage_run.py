@@ -37,9 +37,9 @@ def loopback_ports(count):
 
 
 @contextmanager
-def running(command, cwd, env=None):
+def running(command, cwd, env=None, *, group=None):
     with (cwd / "process.log").open("ab") as log:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=log)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=log, group=group)
         try:
             yield process
         finally:
@@ -176,12 +176,15 @@ def check_reader_route(origin, cert, reader_env, expected, phase):
 
 
 @asynccontextmanager
-async def mcp_client(origin, tls, token, target):
+async def mcp_client(origin, tls, token, target, *, request_id=None):
     # Each connection starts with its own HTTP pool, SDK transport and initialize/search.
-    async with httpx.AsyncClient(verify=tls, trust_env=False, headers={
-            "Authorization": "Bearer " + token}) as client:
+    headers = {"Authorization": "Bearer " + token}
+    if request_id:
+        headers["X-Request-ID"] = request_id
+    async with httpx.AsyncClient(verify=tls, trust_env=False, headers=headers,
+                                 timeout=httpx.Timeout(60, connect=5)) as client:
         async with streamable_http_client(origin + "/mcp", http_client=client) as (read, write, _):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=30)) as session:
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=60)) as session:
                 await session.initialize()
                 found = await session.call_tool("search", {"target": target, "query": "shell_exec"})
                 if found.isError or not found.structuredContent:
@@ -229,11 +232,31 @@ async def execute(session, context, phase, node):
     print(f"{phase}: {node.target} stdout={receipt['stdout']!r} returncode=0 marker_count=1", flush=True)
 
 
-async def task_call(session, context, code):
-    reply = await session.call_tool("exec", {"code": code, "context": context, "timeout_ms": 12000})
+async def task_reply(session, context, code, *, target=None):
+    arguments = {"code": code, "context": context, "timeout_ms": 12000}
+    reply = await session.call_tool("exec", arguments)
+    detail = reply.structuredContent or {}
+    refusal = (detail.get("error") or {}).get("receipt", {})
+    if (target and refusal.get("http_status") == 428 and refusal.get("executed") is False
+            and refusal.get("owner_target") == target and refusal.get("instructions") and refusal.get("context")):
+        arguments["context"] = refusal["context"]
+        reply = await session.call_tool("exec", arguments)
+    return reply
+
+
+class TaskCallError(RuntimeError):
+    def __init__(self, detail):
+        error = detail.get("error") or {}
+        self.code = error.get("code")
+        status = (error.get("receipt") or {}).get("http_status")
+        super().__init__(f"MCP task call {detail.get('status')} ({self.code}, HTTP {status})")
+
+
+async def task_call(session, context, code, *, target=None):
+    reply = await task_reply(session, context, code, target=target)
     detail = reply.structuredContent or {}
     if reply.isError or detail.get("status") != "completed":
-        raise RuntimeError(f"writer task call failed ({(detail.get('error') or {}).get('code')})")
+        raise TaskCallError(detail)
     return detail["result"]
 
 

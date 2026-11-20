@@ -22,6 +22,10 @@ func (s *Server) LocalIdentity() (string, map[string]string, error) {
 func (s *Server) beginCallback(id string, acceptedPoll bool) (context.Context, func(), bool) {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
+	return s.beginCallbackLocked(id, acceptedPoll)
+}
+
+func (s *Server) beginCallbackLocked(id string, acceptedPoll bool) (context.Context, func(), bool) {
 	if s.callbackClosed || (s.queueDraining && !acceptedPoll) {
 		return nil, nil, false
 	}

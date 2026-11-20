@@ -30,6 +30,9 @@ func (f *taskQuorumSnapshotFile) Close() error {
 }
 
 func (s *Server) snapshotTaskQuorumState(sequence uint64) (io.ReadCloser, int64, error) {
+	if s.quorumControlOnly() {
+		return s.snapshotControlState(sequence)
+	}
 	path := s.taskDatabasePath()
 	if path == "" || sequence == 0 || s.quorumSnapshotMaxBytes <= 0 {
 		return nil, 0, errors.New("task quorum snapshot is not configured")
@@ -159,6 +162,9 @@ func withTaskSnapshotRead(path string, fn func(*sql.Tx) error) error {
 }
 
 func (s *Server) restoreTaskQuorumState(sequence uint64, source io.Reader, size int64) error {
+	if s.quorumControlOnly() {
+		return s.restoreControlState(sequence, source, size)
+	}
 	path := s.taskDatabasePath()
 	if path == "" || sequence == 0 || size <= 0 || size > s.quorumSnapshotMaxBytes {
 		return errors.New("task quorum snapshot restore is not configured or exceeds its byte limit")

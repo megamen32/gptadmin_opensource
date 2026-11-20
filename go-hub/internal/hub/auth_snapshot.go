@@ -463,6 +463,11 @@ func (s *Server) commitAuthSnapshotLocked(bundle authSnapshot, reader bool) erro
 	if err := s.commitQuorumAuthorityState("auth", "bundle", bundle); err != nil {
 		return fmt.Errorf("commit quorum auth state: %w", err)
 	}
+	return s.writeAuthSnapshotLocked(bundle, reader)
+}
+
+// writeAuthSnapshotLocked installs a validated snapshot in the local auth slots.
+func (s *Server) writeAuthSnapshotLocked(bundle authSnapshot, reader bool) error {
 	if err := regularAuthPath(s.authStatePath(), true); err != nil {
 		return err
 	}

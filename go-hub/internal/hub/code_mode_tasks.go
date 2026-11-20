@@ -15,11 +15,22 @@ func (b *codeModeBridge) createdTask(r *http.Request, response map[string]any, t
 		return nil, false, nil
 	}
 	// A durable handle must resolve under this caller before it is returned.
-	receipt, rpcErr := b.server.mcpTaskGetForRequest(r, id, "")
-	if rpcErr != nil {
-		return nil, true, b.fail("task_receipt_unavailable", "submitted task could not be read; do not submit it again", map[string]any{"taskId": id, "target": target, "tool": tool})
+	hint := lookupHint(response)
+	reply := b.server.lookupOwner(r, ownerRead{Action: "task", ID: id, Hint: hint})
+	if reply.Failure != nil {
+		return nil, true, b.fail(reply.Failure.Code, reply.Failure.Message, map[string]any{
+			"taskId": id, "owner_id": hint.OwnerID, "owner_target": hint.OwnerTarget, "owner_endpoint": hint.OwnerEndpoint,
+			"retryable": reply.Failure.Retryable, "target": target, "tool": tool,
+		})
 	}
-	task := cloneMap(mapValue(receipt))
+	task := cloneMap(mapValue(reply.Value))
+	if reply.OwnerID != "" {
+		task["owner_id"] = reply.OwnerID
+	}
+	if hint.OwnerTarget != "" {
+		task["owner_target"] = hint.OwnerTarget
+		task["owner_endpoint"] = hint.OwnerEndpoint
+	}
 	task["resultType"] = "task"
 	b.recordOrigin(target, tool)
 	b.recordToolCall(target, tool, firstString(task, "status"))
@@ -69,11 +80,21 @@ func (b *codeModeBridge) task(this *qjs.This) (*qjs.Value, error) {
 	}
 	request := b.request.WithContext(b.ctx)
 	read := func() (map[string]any, error) {
-		value, rpcErr := b.server.mcpTaskGetForRequest(request, id, "")
-		if rpcErr != nil {
-			return nil, b.fail("task_unavailable", "task is absent or inaccessible to this caller", map[string]any{"taskId": id})
+		// Controls keep their original local authorization and mutation path.
+		var task map[string]any
+		if action == "cancel" || action == "update" {
+			value, rpcErr := b.server.mcpTaskGetForRequest(request, id, "")
+			if rpcErr != nil {
+				return nil, b.fail("task_unavailable", "task is absent or inaccessible to this caller", map[string]any{"taskId": id})
+			}
+			task = mapValue(value)
+		} else {
+			reply := b.server.lookupOwner(request, ownerRead{Action: "task", ID: id, Hint: lookupHint(args)})
+			if reply.Failure != nil {
+				return nil, b.lookupError(reply.Failure, id)
+			}
+			task = mapValue(reply.Value)
 		}
-		task := mapValue(value)
 		progress := mapValue(mapValue(task["_meta"])["io.gptadmin/taskProgress"])
 		b.recordOrigin(firstString(progress, "target"), firstString(progress, "tool", "method"))
 		return task, nil

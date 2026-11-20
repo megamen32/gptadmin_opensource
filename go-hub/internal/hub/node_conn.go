@@ -96,13 +96,12 @@ func (c *nodeConn) resolve(id string, result nodeConnResult) {
 	}
 }
 
-func (c *nodeConn) failAllPending(detail string) {
+func (c *nodeConn) failAllPending() {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 	for id, ch := range c.pending {
 		delete(c.pending, id)
-		ch <- nodeConnResult{status: http.StatusBadGateway,
-			body: json.RawMessage(`{"detail":"node connection closed before a receipt arrived; execution outcome may be unknown"}`)}
+		ch <- nodeConnResult{} // distinct from an owner's actual HTTP receipt
 	}
 }
 
@@ -213,7 +212,7 @@ func (s *Server) nodeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 // connection and fails every pending caller when the connection dies.
 func (s *Server) nodeConnReadLoop(conn *nodeConn, name string) {
 	defer s.nodeConns.remove(conn)
-	defer conn.failAllPending("node connection closed before a receipt arrived; execution outcome may be unknown")
+	defer conn.failAllPending()
 	conn.lastActive.Store(time.Now().Unix())
 	stopKeepalive := make(chan struct{})
 	defer close(stopKeepalive)
@@ -227,6 +226,10 @@ func (s *Server) nodeConnReadLoop(conn *nodeConn, name string) {
 			case <-conn.done:
 				return
 			case <-ticker.C:
+				if s.quorumNode != nil && !s.quorumNode.Status().Leader {
+					conn.close()
+					return
+				}
 				if time.Since(time.Unix(conn.lastActive.Load(), 0)) > nodeConnIdleTimeout {
 					log.Printf("node connection idle timeout name=%s", name)
 					conn.close()
@@ -315,6 +318,11 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 	timeout += 10 * time.Second
 	select {
 	case result := <-wait:
+		if result.status < 200 || result.status > 599 || result.status >= 300 && result.status < 400 {
+			s.writeNodePeerFailure(w, target, origin, endpoint, body, http.StatusBadGateway,
+				"node connection closed or returned no valid receipt", !readingJob)
+			return true
+		}
 		for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version"} {
 			if value := result.headers.Get(name); value != "" {
 				w.Header().Set(name, value)
@@ -345,13 +353,19 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 	return true
 }
 
-// writeNodePeerFailure mirrors the inline fail closure of
-// forwardNodePeerRequest for the live-connection path.
 func (s *Server) writeNodePeerFailure(w http.ResponseWriter, target, origin, endpoint string, body []byte, status int, detail string, unknown bool) {
 	payload := map[string]any{"detail": detail, "owner_target": target, "owner_endpoint": origin}
+	if endpoint == "/mcp" && !unknown && status >= 500 {
+		var envelope map[string]any
+		if json.Unmarshal(body, &envelope) == nil && nodePeerJobTool(firstString(mapValue(envelope["params"]), "name")) {
+			payload["code"], payload["retryable"] = readOffline.Code, true
+		}
+	}
 	if unknown {
 		payload["outcome"] = "unknown"
 		payload["retry_policy"] = "inspect owner or retry the same idempotency_key at owner; never replay elsewhere"
+	} else if status == http.StatusServiceUnavailable {
+		payload["executed"], payload["retryable"] = false, true
 	}
 	if endpoint == "/mcp" {
 		var envelope map[string]json.RawMessage
@@ -366,7 +380,7 @@ func (s *Server) writeNodePeerFailure(w http.ResponseWriter, target, origin, end
 // startNodeConnLoop launches the member's outbound dial loop. Writers and
 // standalone nodes have nothing to dial.
 func (s *Server) startNodeConnLoop() {
-	if s.nodeIdentity == nil || s.membership != nil {
+	if s.nodeIdentity == nil || (s.quorumNode == nil && s.membership != nil) {
 		return
 	}
 	s.membershipDone.Add(1)
@@ -378,13 +392,15 @@ func (s *Server) startNodeConnLoop() {
 
 func (s *Server) nodeConnDialLoop() {
 	backoff := nodeConnDialBackoffMin
+	ordinary := newNodeConnDialClient(s.cfg.NodeWriterConnectTo)
+	defer ordinary.CloseIdleConnections()
 	for {
 		select {
 		case <-s.membershipStop:
 			return
 		case <-time.After(backoff):
 		}
-		writer := strings.TrimSuffix(s.memberWriterURL(), "/")
+		writer, client := s.memberWriterRoute(ordinary)
 		key := s.memberNodeKey()
 		if writer == "" || key == "" {
 			backoff = nodeConnDialBackoffMin
@@ -408,10 +424,14 @@ func (s *Server) nodeConnDialLoop() {
 		// the same override or it would loop back to this node's own proxy.
 		ws, _, err := websocket.Dial(ctx, dialURL, &websocket.DialOptions{
 			HTTPHeader: http.Header{"Authorization": {"Bearer " + key}, managedNodeProtocolHeader: {managedNodeProtocol}},
-			HTTPClient: newNodeConnDialClient(s.cfg.NodeWriterConnectTo),
+			HTTPClient: client,
 		})
 		if err != nil {
 			cancel()
+			if s.quorumPrivateTLS != nil {
+				client.CloseIdleConnections()
+			}
+			s.memberQuorumHubs.Failed(writer)
 			log.Printf("node connection dial failed writer=%s err=%v", writer, err)
 			backoff *= 2
 			if backoff > nodeConnDialBackoffMax {
@@ -424,6 +444,10 @@ func (s *Server) nodeConnDialLoop() {
 		log.Printf("node connection established writer=%s", writer)
 		s.nodeConnServeLoop(ctx, ws)
 		cancel()
+		ws.CloseNow()
+		if s.quorumPrivateTLS != nil {
+			client.CloseIdleConnections()
+		}
 		log.Printf("node connection closed writer=%s", writer)
 	}
 }
@@ -545,6 +569,7 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 		request.Header.Set(instructionContextHeader, token)
 	}
 	if frame.Endpoint == "/mcp" {
+		request.Header.Set(nodePeerHopHeader, "1")
 		// Match the HTTP peer route. Never propagate a browser cookie, client
 		// session ID or arbitrary frame header into another node's session.
 		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", instructionContextHeader} {
@@ -563,20 +588,17 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 				request.Header.Set(name, value)
 			}
 		}
-		request.GetBody = nil
 	}
+	request.GetBody = nil
 	timeout := s.cfg.DefaultTimeout
 	if timeout < 20*time.Second {
 		timeout = 20 * time.Second
 	}
 	timeout += 10 * time.Second
-	client := &http.Client{Timeout: timeout}
-	if managed {
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	}
+	client := &http.Client{Timeout: timeout, CheckRedirect: refuseNodeRedirect}
 	response, err := client.Do(request)
 	if err != nil {
-		return http.StatusBadGateway, nil, []byte(`{"detail":"node loopback delivery failed; execution outcome may be unknown"}`)
+		return http.StatusBadGateway, nil, []byte(`{"detail":"node loopback delivery failed","outcome":"unknown"}`)
 	}
 	defer response.Body.Close()
 	headers := http.Header{}
@@ -587,7 +609,7 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, nodeConnBodyLimit+1))
 	if err != nil || len(data) > nodeConnBodyLimit {
-		return http.StatusBadGateway, headers, []byte(`{"detail":"node loopback receipt could not be read; execution outcome may be unknown"}`)
+		return http.StatusBadGateway, headers, []byte(`{"detail":"node loopback receipt could not be read","outcome":"unknown"}`)
 	}
 	return response.StatusCode, headers, data
 }

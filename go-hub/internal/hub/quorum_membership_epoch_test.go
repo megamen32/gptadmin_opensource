@@ -111,3 +111,24 @@ func TestQuorumMaterializationRejectsStaleLeaseIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestQuorumMembersReconnectThroughSharedOrigin(t *testing.T) {
+	s := membershipWriterNode(t, "successor")
+	s.cfg.NodePublicURL = "https://surviving-node.example"
+	s.cfg.PublicOrigin = "https://mcp.example"
+	id := s.authLocalID
+	state := &nodeMembershipState{
+		Schema: nodeMembershipSchema, Revision: 7, Epoch: 2, WriterID: "previous",
+		Grants: map[string]*nodeJoinGrant{},
+		Nodes:  map[string]*nodeMember{id: {NodeID: id, Name: "shell:successor"}},
+	}
+	if err := s.promoteQuorumMembership(state); err != nil {
+		t.Fatal(err)
+	}
+	if state.WriterURL != s.cfg.PublicOrigin {
+		t.Fatalf("members would reconnect through %q after the next leader loss", state.WriterURL)
+	}
+	if endpoints := state.Nodes[id].Endpoints; len(endpoints) != 1 || endpoints[0] != s.cfg.NodePublicURL {
+		t.Fatalf("incorrect physical executor endpoints: %v", endpoints)
+	}
+}

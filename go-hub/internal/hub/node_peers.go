@@ -16,12 +16,14 @@ import (
 const nodePeerHopHeader = "X-Gptadmin-Node-Hop"
 
 type nodePeerRoute struct {
+	NodeID    string `json:"node_id,omitempty"`
 	URL       string `json:"url"`
 	ConnectTo string `json:"connect_to,omitempty"`
 	// LocalID pins the route to a previously approved shell identity.
 	LocalID          string `json:"-"`
 	LocalFingerprint string `json:"-"`
 	CatalogFresh     bool   `json:"-"`
+	OutboundWS       bool   `json:"-"`
 }
 
 // One pool per logical origin and physical IP. The standard TLS transport
@@ -106,6 +108,9 @@ func nodePeerJobTool(name string) bool {
 // A receipt hint selects an enrolled executor, never an arbitrary URL. No job
 // index is replicated and no peer is searched when the owner is unknown.
 func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args map[string]any, body []byte) bool {
+	if !legacyJobTarget(args) && (r.Header.Get(nodePeerHopHeader) == "" || lookupHint(args) != (ownerHint{})) {
+		return false
+	}
 	rawTarget, hinted := args["owner_target"]
 	if !hinted && r.Header.Get(nodePeerHopHeader) == "" {
 		return false // Existing local job reads retain their contract.
@@ -113,8 +118,14 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 	fail := func(status int, detail string) bool {
 		var envelope map[string]json.RawMessage
 		_ = json.Unmarshal(body, &envelope)
-		writeJSON(w, status, map[string]any{"jsonrpc": "2.0", "id": envelope["id"],
-			"error": map[string]any{"code": -32000, "message": detail}})
+		rpc := map[string]any{"code": -32000, "message": detail}
+		switch status {
+		case http.StatusNotFound:
+			rpc = readMissing.rpc()
+		case http.StatusServiceUnavailable:
+			rpc = readOffline.rpc()
+		}
+		writeJSON(w, status, map[string]any{"jsonrpc": "2.0", "id": envelope["id"], "error": rpc})
 		return true
 	}
 	target, ok := rawTarget.(string)
@@ -205,7 +216,7 @@ func (s *Server) routeNodePeerJob(w http.ResponseWriter, r *http.Request, args m
 	if s.forwardNodePeerRequest(w, r, target, body, "/mcp") {
 		return true
 	}
-	return fail(http.StatusNotFound, "receipt owner is not a configured peer")
+	return fail(http.StatusServiceUnavailable, "receipt owner has no active route")
 }
 
 // finalizeNodePeerReceipt applies the owner metadata contract shared by the
@@ -279,21 +290,9 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	if endpoint == "/mcp" {
 		_ = json.Unmarshal(body, &requestEnvelope)
 	}
-	readingJob := endpoint == "/mcp" && firstString(requestEnvelope, "method") == "tools/call" && nodePeerJobTool(firstString(mapValue(requestEnvelope["params"]), "name"))
+	readingJob := endpoint == ownerReadPath || endpoint == "/mcp" && firstString(requestEnvelope, "method") == "tools/call" && nodePeerJobTool(firstString(mapValue(requestEnvelope["params"]), "name"))
 	fail := func(status int, detail string, unknown bool) {
-		payload := map[string]any{"detail": detail, "owner_target": target, "owner_endpoint": origin}
-		if unknown {
-			payload["outcome"] = "unknown"
-			payload["retry_policy"] = "inspect owner or retry the same idempotency_key at owner; never replay elsewhere"
-		}
-		if endpoint == "/mcp" {
-			var envelope map[string]json.RawMessage
-			_ = json.Unmarshal(body, &envelope)
-			writeJSON(w, status, map[string]any{"jsonrpc": "2.0", "id": envelope["id"],
-				"error": map[string]any{"code": -32000, "message": detail, "data": payload}})
-		} else {
-			writeJSON(w, status, payload)
-		}
+		s.writeNodePeerFailure(w, target, origin, endpoint, body, status, detail, unknown)
 	}
 	if s.nodePeersErr != nil {
 		fail(http.StatusServiceUnavailable, "invalid node peer configuration", false)
@@ -325,7 +324,7 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	if !readingJob && (endpoint == "/mcp-relay/call" || endpoint == "/mcp") {
 		useQueue, err := s.quorumExecutorUsesLeaderQueue(r.Context(), queueTarget)
 		if err != nil {
-			fail(http.StatusServiceUnavailable, "quorum executor queue is not ready", false)
+			fail(http.StatusServiceUnavailable, err.Error(), false)
 			return true
 		}
 		if useQueue {
@@ -359,6 +358,10 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	// that was actually written is never retried over HTTP — the call may
 	// already have executed at the owner.
 	if s.forwardOverNodeConn(w, r, target, origin, body, endpoint, readingJob) {
+		return true
+	}
+	if route.OutboundWS && !readingJob && endpoint != "/mcp-relay/tools" {
+		fail(http.StatusServiceUnavailable, "executor WebSocket is reconnecting", false)
 		return true
 	}
 	if !routed {

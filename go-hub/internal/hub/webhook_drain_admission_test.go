@@ -102,6 +102,7 @@ func TestWebhookAdmittedShellSurvivesDrain(t *testing.T) {
 		}
 		return id != ""
 	})
+	dispatchLocalJob(t, s, id)
 	r := httptest.NewRequest(http.MethodPost, "/queue/local/result", strings.NewReader(`{"id":"`+id+`","result":{"returncode":0,"stdout":"done"}}`))
 	r.Header.Set("Authorization", "Bearer "+strings.Repeat("l", 32))
 	w := httptest.NewRecorder()

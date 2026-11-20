@@ -17,9 +17,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
 )
 
 // Node mesh membership. One writer owns the authoritative membership state;
@@ -54,12 +57,13 @@ var nodeCapabilities = []string{"ingress", "executor", "replica"}
 // nodeIdentity is created once by the lifecycle manager and never regenerated.
 // node_key authenticates this node against the writer's membership endpoints.
 type nodeIdentity struct {
-	Schema    string    `json:"schema"`
-	NodeID    string    `json:"node_id"`
-	NodeKey   string    `json:"node_key"`
-	Created   time.Time `json:"created"`
-	WriterURL string    `json:"writer_url,omitempty"`
-	WriterID  string    `json:"writer_id,omitempty"`
+	Schema     string    `json:"schema"`
+	NodeID     string    `json:"node_id"`
+	NodeKey    string    `json:"node_key"`
+	Created    time.Time `json:"created"`
+	WriterURL  string    `json:"writer_url,omitempty"`
+	WriterID   string    `json:"writer_id,omitempty"`
+	QuorumHubs []string  `json:"quorum_hubs,omitempty"`
 }
 
 const (
@@ -95,6 +99,8 @@ type nodeMember struct {
 	ExecutorCatalog    []nodeExecutorDescriptor `json:"executor_catalog,omitempty"`
 	ExecutorCatalogSet bool                     `json:"executor_catalog_set,omitempty"`
 	CatalogFresh       bool                     `json:"-"`
+	OutboundWS         bool                     `json:"outbound_ws,omitempty"`
+	QuorumQueue        bool                     `json:"quorum_queue,omitempty"`
 }
 
 type nodeMembershipState struct {
@@ -250,10 +256,14 @@ func loadNodeMembershipView(path string) *nodeMembershipView {
 }
 
 func (s *Server) persistMembershipStateLocked(state *nodeMembershipState) error {
-	state.UpdatedAt = s.now()
 	if err := s.commitQuorumAuthorityState("membership", "writer", membershipQuorumAuthorityState(state)); err != nil {
 		return fmt.Errorf("commit quorum membership state: %w", err)
 	}
+	return s.writeMembershipStateLocked(state)
+}
+
+func (s *Server) writeMembershipStateLocked(state *nodeMembershipState) error {
+	state.UpdatedAt = s.now()
 	if err := os.MkdirAll(s.membershipDir(), 0o750); err != nil {
 		return err
 	}
@@ -320,6 +330,9 @@ func membershipSnapshotJSON(state *nodeMembershipState) ([]byte, string) {
 
 func (s *Server) initNodeMembership() {
 	s.nodeIdentity = loadNodeIdentityFile(s.nodeIdentityPath())
+	if s.nodeIdentity != nil && s.cfg.AuthMode == "reader" && s.cfg.QuorumConfigFile == "" {
+		s.memberQuorumHubs.Set(hubroute.Parse(strings.Join(s.nodeIdentity.QuorumHubs, ",")))
+	}
 	if s.cfg.AuthMode == "writer" {
 		state, err := loadNodeMembershipState(s.membershipStatePath())
 		if err != nil {
@@ -398,9 +411,13 @@ func (s *Server) rebuildMembershipRoutes() {
 	now := s.now()
 	var nodes []*nodeMember
 	s.membershipMu.Lock()
-	if s.membership != nil {
+	writer := s.membership != nil
+	if writer {
 		for _, member := range s.membership.Nodes {
-			nodes = append(nodes, member)
+			if member != nil {
+				copy := *member
+				nodes = append(nodes, &copy)
+			}
 		}
 	} else if s.membershipView != nil {
 		nodes = s.membershipView.Nodes
@@ -428,7 +445,7 @@ func (s *Server) rebuildMembershipRoutes() {
 		if len(member.Endpoints) > 0 {
 			endpoint = member.Endpoints[0]
 		}
-		routes[member.Name] = nodePeerRoute{URL: endpoint, ConnectTo: member.ConnectTo,
+		routes[member.Name] = nodePeerRoute{NodeID: member.NodeID, URL: endpoint, ConnectTo: member.ConnectTo, OutboundWS: writer && member.OutboundWS,
 			LocalID: member.LocalID, LocalFingerprint: member.LocalFingerprint, CatalogFresh: member.CatalogFresh}
 		if len(member.ExecutorMeta) > 0 || member.ExecutorCatalogSet {
 			meta := cloneMap(member.ExecutorMeta)
@@ -511,14 +528,17 @@ func normalizeNodeCapabilities(raw []string) []string {
 // accepts owner credentials: member endpoints are a separate authority class.
 func (s *Server) nodeMemberAuth(r *http.Request) *nodeMember {
 	bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if bearer == "" || len(s.membership.Nodes) == 0 {
+	if bearer == "" {
 		return nil
 	}
 	digest := hashNodeSecret(bearer)
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
+	if s.membership == nil {
+		return nil
+	}
 	for _, member := range s.membership.Nodes {
-		if member.KeyHash != "" && member.KeyHash == digest {
+		if member != nil && member.KeyHash != "" && member.KeyHash == digest {
 			clone := *member
 			return &clone
 		}
@@ -557,7 +577,7 @@ func (s *Server) meshSummaryLocked() map[string]any {
 			clone := *member
 			clone.KeyHash = ""
 			nodes = append(nodes, &nodeMemberListEntry{nodeMember: clone,
-				RoutingReady: member.State == nodeStateReady && member.LeaseExpires.After(now) && len(member.Endpoints) > 0})
+				RoutingReady: s.memberRoutingReady(member, now)})
 		}
 	} else if s.membershipView != nil {
 		revision, writerID = s.membershipView.Revision, s.membershipView.WriterID
@@ -565,7 +585,7 @@ func (s *Server) meshSummaryLocked() map[string]any {
 			clone := *member
 			clone.KeyHash = ""
 			nodes = append(nodes, &nodeMemberListEntry{nodeMember: clone,
-				RoutingReady: member.State == nodeStateReady && member.LeaseExpires.After(now) && len(member.Endpoints) > 0})
+				RoutingReady: s.memberRoutingReady(member, now)})
 		}
 	}
 	s.membershipMu.Unlock()
@@ -624,6 +644,18 @@ type nodeMemberListEntry struct {
 	RoutingReady bool `json:"routing_ready"`
 }
 
+// The writer can distinguish an enrolled WS member's lease from an active
+// transport. In quorum its executor polls the leader independently of WS.
+func (s *Server) memberRoutingReady(member *nodeMember, now time.Time) bool {
+	if member.State != nodeStateReady || !member.LeaseExpires.After(now) {
+		return false
+	}
+	if s.membership != nil && s.quorumNode == nil && member.OutboundWS && member.NodeID != s.membership.WriterID {
+		return s.nodeConns.get(member.Name) != nil
+	}
+	return len(member.Endpoints) > 0
+}
+
 func (s *Server) nodeMembershipList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "GET required"})
@@ -640,7 +672,7 @@ func (s *Server) nodeMembershipList(w http.ResponseWriter, r *http.Request) {
 			clone := *member
 			clone.KeyHash = ""
 			entries = append(entries, &nodeMemberListEntry{nodeMember: clone,
-				RoutingReady: member.State == nodeStateReady && member.LeaseExpires.After(now) && len(member.Endpoints) > 0})
+				RoutingReady: s.memberRoutingReady(member, now)})
 		}
 	} else if s.membershipView != nil {
 		revision, writerID = s.membershipView.Revision, s.membershipView.WriterID
@@ -648,7 +680,7 @@ func (s *Server) nodeMembershipList(w http.ResponseWriter, r *http.Request) {
 			clone := *member
 			clone.KeyHash = ""
 			entries = append(entries, &nodeMemberListEntry{nodeMember: clone,
-				RoutingReady: member.State == nodeStateReady && member.LeaseExpires.After(now) && len(member.Endpoints) > 0})
+				RoutingReady: s.memberRoutingReady(member, now)})
 		}
 	}
 	s.membershipMu.Unlock()
@@ -884,7 +916,7 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 	s.rebuildMembershipRoutes()
 	writeJSON(w, http.StatusOK, map[string]any{"node_id": member.NodeID, "name": member.Name,
 		"state": member.State, "generation": member.Generation, "membership_revision": revision,
-		"writer_id": writerID, "writer_url": writerURL,
+		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL,
 		"auth_generation": s.writerAuthGeneration()})
 }
 
@@ -927,6 +959,8 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		SnapshotRev           uint64          `json:"snapshot_revision"`
 		ExecutorCatalog       json.RawMessage `json:"executor_catalog"`
 		ExecutorCatalogStatus string          `json:"executor_catalog_status"`
+		OutboundWS            bool            `json:"outbound_ws"`
+		QuorumQueue           bool            `json:"quorum_queue"`
 		Endpoint              string          `json:"endpoint,omitempty"`
 		LocalID               string          `json:"local_id,omitempty"`
 		LocalName             string          `json:"local_name,omitempty"`
@@ -1026,6 +1060,14 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		next = nodeStateReady
 	}
 	changed := false
+	if current.QuorumQueue != request.QuorumQueue {
+		current.QuorumQueue = request.QuorumQueue
+		changed = true
+	}
+	if current.OutboundWS != request.OutboundWS {
+		current.OutboundWS = request.OutboundWS
+		changed = true
+	}
 	if request.LocalID != "" && current.LocalID == "" && legacyIdentityApproved {
 		// New members without a legacy shell remain enrolled, but their
 		// unverified local identity must not refresh an old shell registration.
@@ -1133,7 +1175,24 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 		s.refreshSearchCatalogHeartbeat(member.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "changed": revision != request.Revision,
-		"writer_id": writerID, "writer_url": writerURL, "auth_generation": s.writerAuthGeneration(), "executor_catalog_status": request.ExecutorCatalogStatus})
+		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL, "auth_generation": s.writerAuthGeneration(), "executor_catalog_status": request.ExecutorCatalogStatus,
+		"quorum_hubs": s.quorumExecutorOrigins()})
+}
+
+// Members pin the writer_id from enrollment in their reader auth store.
+// Keep that logical source stable across elections. Membership views and
+// Raft keep reporting the physical leader independently.
+func (s *Server) memberControlSourceID(writerID string) string {
+	if s.quorumNode != nil {
+		record, ok := s.quorumNode.LocalRecord("cluster_meta", "task_baseline")
+		var baseline struct {
+			Source string `json:"control_source_id"`
+		}
+		if ok && !record.Deleted && json.Unmarshal(record.Value, &baseline) == nil && baseline.Source != "" {
+			return baseline.Source
+		}
+	}
+	return writerID
 }
 
 func (s *Server) nodeMembershipGet(w http.ResponseWriter, r *http.Request) {
@@ -1177,6 +1236,7 @@ func (s *Server) nodeMembershipControlSnapshot(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "auth store unavailable"})
 		return
 	}
+	bundle.WriterID = s.memberControlSourceID(bundle.WriterID)
 	snapshot := controlSnapshot{Revision: bundle.Generation, Generation: bundle.Generation, Bundle: bundle}
 	s.instructionSetsMu.RLock()
 	if len(s.instructionSets) > 0 {
@@ -1330,11 +1390,12 @@ func (s *Server) membershipWriterTick() {
 }
 
 type nodeHeartbeatResponse struct {
-	Revision       uint64 `json:"revision"`
-	Changed        bool   `json:"changed"`
-	WriterID       string `json:"writer_id"`
-	WriterURL      string `json:"writer_url"`
-	AuthGeneration uint64 `json:"auth_generation"`
+	QuorumHubs     []string `json:"quorum_hubs"`
+	Revision       uint64   `json:"revision"`
+	Changed        bool     `json:"changed"`
+	WriterID       string   `json:"writer_id"`
+	WriterURL      string   `json:"writer_url"`
+	AuthGeneration uint64   `json:"auth_generation"`
 }
 
 func (s *Server) memberWriterURL() string {
@@ -1528,30 +1589,12 @@ func (s *Server) memberLocalExecutorIdentity() (string, string, string) {
 }
 
 func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
-	writer := strings.TrimSuffix(s.memberWriterURL(), "/")
-	if s.quorumNode != nil {
-		if s.quorumNode.Status().Leader {
-			return
-		}
-		var leaderID string
-		writer, leaderID = s.quorumNode.LeaderForwardURL()
-		if writer == "" || leaderID == "" {
-			return
-		}
-		if s.quorumPrivateTLS != nil {
-			transport, err := s.quorumPrivateTLS.transport(leaderID)
-			if err != nil {
-				return
-			}
-			defer transport.CloseIdleConnections()
-			client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
-		} else {
-			// A previous writer's IP pin must not redirect a newly elected leader.
-			client = newNodeMembershipClient("")
-		}
-	}
+	writer, client := s.memberWriterRoute(client)
 	if writer == "" {
 		return
+	}
+	if s.quorumPrivateTLS != nil {
+		defer client.CloseIdleConnections()
 	}
 	s.membershipMu.Lock()
 	viewRevision := uint64(0)
@@ -1565,9 +1608,21 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	}
 	localName, localID, localFingerprint := s.memberLocalExecutorIdentity()
 	executorMeta := s.memberLocalExecutorMeta()
+	generation := s.writerAuthGeneration()
+	if s.quorumNode != nil {
+		// A voter receives the authoritative policy in its Raft FSM. Its
+		// reader-side files can still belong to an earlier leadership term.
+		var applied struct {
+			Generation uint64 `json:"generation"`
+		}
+		if s.taskQuorumReplicaReady() != nil || s.readQuorumAuthorityState("auth", "bundle", &applied) != nil {
+			return
+		}
+		generation = applied.Generation
+	}
 	payload := map[string]any{
 		"revision": viewRevision, "state": s.membershipReportedState(), "build": GitCommit,
-		"storage_ok": true, "snapshot_revision": s.writerAuthGeneration(),
+		"outbound_ws": true, "quorum_queue": true, "storage_ok": true, "snapshot_revision": generation,
 		"endpoint": s.cfg.NodePublicURL, "local_name": localName, "local_id": localID, "local_fingerprint": localFingerprint,
 	}
 	if executorMeta != nil {
@@ -1584,6 +1639,9 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 		"Bearer "+s.memberNodeKey(), body, nodeMembershipStateLimit)
 	if err != nil {
 		var remote *nodeHTTPError
+		if !errors.As(err, &remote) || remote.status >= 500 {
+			s.memberQuorumHubs.Failed(writer)
+		}
 		if errors.As(err, &remote) && remote.status == http.StatusConflict {
 			var detail struct {
 				Detail string `json:"detail"`
@@ -1592,7 +1650,9 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 				// The writer requires a newer snapshot before accepting this
 				// heartbeat. Fetch it over the authenticated member channel;
 				// the next heartbeat can then complete the transition.
-				s.membershipApplyControlSnapshot(client, writer)
+				if s.quorumNode == nil {
+					s.membershipApplyControlSnapshot(client, writer)
+				}
 			}
 		}
 		log.Printf("membership heartbeat failed writer=%s err=%v", writer, err)
@@ -1606,6 +1666,17 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	if heartbeatResponse.WriterURL != "" {
 		s.mu.Lock()
 		changed := heartbeatResponse.WriterURL != s.nodeIdentity.WriterURL || heartbeatResponse.WriterID != s.nodeIdentity.WriterID
+		if s.quorumNode == nil {
+			urls := hubroute.Parse(strings.Join(heartbeatResponse.QuorumHubs, ","))
+			if len(urls) > 0 && len(hubroute.Parse(heartbeatResponse.WriterURL)) == 1 {
+				urls = hubroute.Parse(heartbeatResponse.WriterURL + "," + strings.Join(urls, ","))
+			}
+			if len(urls) > 0 && !slices.Equal(s.nodeIdentity.QuorumHubs, urls) {
+				s.nodeIdentity.QuorumHubs = urls
+				s.memberQuorumHubs.Set(urls)
+				changed = true
+			}
+		}
 		if changed {
 			s.nodeIdentity.WriterURL = heartbeatResponse.WriterURL
 			s.nodeIdentity.WriterID = heartbeatResponse.WriterID
@@ -1623,7 +1694,7 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 	}
 	// Named instructions may change independently of the auth generation.
 	// Reconcile the authenticated control snapshot even when the generation is equal.
-	if heartbeatResponse.AuthGeneration > 0 {
+	if heartbeatResponse.AuthGeneration > 0 && s.quorumNode == nil {
 		s.membershipApplyControlSnapshot(client, writer)
 	}
 }

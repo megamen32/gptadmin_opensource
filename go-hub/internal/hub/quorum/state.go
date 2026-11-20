@@ -17,6 +17,7 @@ import (
 
 const maxSnapshotBytes = 64 << 20
 const snapshotMagic = "GPTQSN1\n"
+const controlSnapshotMagic = "GPTQCO1\n"
 
 type Record struct {
 	Revision uint64          `json:"revision"`
@@ -32,14 +33,21 @@ type Mutation struct {
 }
 
 type command struct {
-	ClusterID        string     `json:"cluster_id"`
-	ExternalSequence uint64     `json:"external_sequence,omitempty"`
-	Mutations        []Mutation `json:"mutations"`
+	Operation        *operationCommand `json:"operation,omitempty"`
+	ClusterID        string            `json:"cluster_id"`
+	ExternalSequence uint64            `json:"external_sequence,omitempty"`
+	Mutations        []Mutation        `json:"mutations"`
 }
 
-type applyResult struct{ err error }
+type applyResult struct {
+	err       error
+	operation OperationDecision
+}
 
 type stateMachine struct {
+	controlOnly      bool
+	controlOwners    map[string]bool
+	operations       map[string]Operation
 	clusterID        string
 	onApply          func(index, externalSequence uint64, mutations []Mutation) error
 	externalSnapshot ExternalSnapshotCallbacks
@@ -52,6 +60,7 @@ type stateMachine struct {
 }
 
 type stateImage struct {
+	Operations              map[string]Operation         `json:"operations,omitempty"`
 	ClusterID               string                       `json:"cluster_id"`
 	Values                  map[string]map[string]Record `json:"values"`
 	ExternalSequence        uint64                       `json:"external_sequence,omitempty"`
@@ -73,11 +82,20 @@ func (s *stateMachine) Apply(entry *raft.Log) interface{} {
 	if entry == nil || len(entry.Data) == 0 {
 		return applyResult{}
 	}
+	if s.controlOnly && len(entry.Data) > maxRecordBytes {
+		return applyResult{err: errors.New("quorum: oversized control log entry")}
+	}
 	var cmd command
 	if err := json.Unmarshal(entry.Data, &cmd); err != nil {
 		return applyResult{err: err}
 	}
-	if cmd.ClusterID != s.clusterID || len(cmd.Mutations) == 0 {
+	if cmd.Operation != nil && cmd.ClusterID == s.clusterID && len(cmd.Mutations) == 0 && cmd.ExternalSequence == 0 {
+		if s.controlOnly && !s.controlOwners[cmd.Operation.Owner] {
+			return applyResult{err: ErrOperationOwner}
+		}
+		return s.applyOperation(*cmd.Operation)
+	}
+	if (s.controlOnly && len(cmd.Mutations) != 1) || cmd.Operation != nil || cmd.ClusterID != s.clusterID || len(cmd.Mutations) == 0 {
 		return applyResult{err: errors.New("quorum: invalid committed record")}
 	}
 	s.mu.Lock()
@@ -90,6 +108,11 @@ func (s *stateMachine) Apply(entry *raft.Log) interface{} {
 			(!mutation.Record.Deleted && (len(mutation.Record.Value) == 0 || !json.Valid(mutation.Record.Value))) ||
 			(mutation.External && s.onApply == nil) {
 			return applyResult{err: errors.New("quorum: invalid committed mutation")}
+		}
+		if s.controlOnly && !mutation.External {
+			if err := ValidateControlMutation(mutation, s.clusterID); err != nil {
+				return applyResult{err: err}
+			}
 		}
 		identity := mutation.Namespace + "\x00" + mutation.Key
 		if seen[identity] {
@@ -192,11 +215,14 @@ func (s *stateMachine) Snapshot() (raft.FSMSnapshot, error) {
 		}
 		copyValues[namespace] = copyBucket
 	}
+	operations := make(map[string]Operation, len(s.operations))
+	for key, entry := range s.operations {
+		operations[key] = entry
+	}
+	image := stateImage{ClusterID: s.clusterID, Values: copyValues, Operations: operations,
+		ExternalSequence: s.externalSequence, ExternalApplyErrorIndex: s.applyErrIndex}
 	s.mu.RUnlock()
-	return &stateSnapshot{image: stateImage{
-		ClusterID: s.clusterID, Values: copyValues,
-		ExternalSequence: s.externalSequence, ExternalApplyErrorIndex: s.applyErrIndex,
-	}, externalSnapshot: s.externalSnapshot, maxExternalBytes: s.maxExternalBytes}, nil
+	return &stateSnapshot{controlOnly: s.controlOnly, image: image, externalSnapshot: s.externalSnapshot, maxExternalBytes: s.maxExternalBytes}, nil
 }
 
 func (s *stateMachine) Restore(reader io.ReadCloser) error {
@@ -206,7 +232,11 @@ func (s *stateMachine) Restore(reader io.ReadCloser) error {
 	if _, err := io.ReadFull(br, magic[:]); err != nil {
 		return fmt.Errorf("quorum: read snapshot header: %w", err)
 	}
-	if string(magic[:]) != snapshotMagic {
+	expectedMagic := snapshotMagic
+	if s.controlOnly {
+		expectedMagic = controlSnapshotMagic
+	}
+	if string(magic[:]) != expectedMagic {
 		return errors.New("quorum: unsupported snapshot format")
 	}
 	var headerLength [8]byte
@@ -214,7 +244,7 @@ func (s *stateMachine) Restore(reader io.ReadCloser) error {
 		return fmt.Errorf("quorum: read snapshot length: %w", err)
 	}
 	headerSize := binary.BigEndian.Uint64(headerLength[:])
-	if headerSize == 0 || headerSize > maxSnapshotBytes {
+	if headerSize == 0 || headerSize > maxSnapshotBytes || (s.controlOnly && headerSize > uint64(controlMetadataLimit+len(s.controlOwners)*OperationLimitPerOwner*1280)) {
 		return errors.New("quorum: snapshot metadata exceeds its byte limit")
 	}
 	data := make([]byte, int(headerSize))
@@ -231,6 +261,32 @@ func (s *stateMachine) Restore(reader io.ReadCloser) error {
 	image := envelope.Image
 	if image.ClusterID != s.clusterID {
 		return errors.New("quorum: snapshot cluster identity mismatch")
+	}
+	if s.controlOnly {
+		if len(image.Values) > 1 || envelope.ExternalSize > ControlSnapshotLimit {
+			return errors.New("quorum: invalid control snapshot size or namespaces")
+		}
+		for ns, bucket := range image.Values {
+			if ns != "cluster_meta" || len(bucket) != 1 {
+				return errors.New("quorum: invalid control snapshot namespace")
+			}
+			r, ok := bucket["task_baseline"]
+			if !ok || ValidateControlMutation(Mutation{Namespace: ns, Key: "task_baseline", Record: r}, s.clusterID) != nil {
+				return errors.New("quorum: invalid control snapshot baseline")
+			}
+		}
+		counts := map[string]int{}
+		for key, op := range image.Operations {
+			expires := op.Expires
+			op.Expires = 0
+			if expires < 0 || !s.controlOwners[op.Owner] || !(operationCommand{Action: "claim", Key: key, Now: 1, Operation: op}).valid() {
+				return errors.New("quorum: invalid control snapshot operation")
+			}
+			counts[op.Owner]++
+			if counts[op.Owner] > OperationLimitPerOwner {
+				return ErrOperationCapacity
+			}
+		}
 	}
 	if image.Values == nil {
 		image.Values = make(map[string]map[string]Record)
@@ -272,6 +328,7 @@ func (s *stateMachine) Restore(reader io.ReadCloser) error {
 	}
 	s.mu.Lock()
 	s.values = image.Values
+	s.operations = image.Operations
 	s.externalSequence = image.ExternalSequence
 	s.applyErrIndex = image.ExternalApplyErrorIndex
 	if image.ExternalApplyErrorIndex != 0 {
@@ -293,6 +350,7 @@ func (s *stateMachine) get(namespace, key string) (Record, bool) {
 }
 
 type stateSnapshot struct {
+	controlOnly      bool
 	image            stateImage
 	externalSnapshot ExternalSnapshotCallbacks
 	maxExternalBytes int64
@@ -357,7 +415,11 @@ func (s *stateSnapshot) Persist(sink raft.SnapshotSink) error {
 		_ = sink.Cancel()
 		return errors.New("quorum: snapshot exceeds its byte limit")
 	}
-	if _, err := io.WriteString(sink, snapshotMagic); err != nil {
+	magic := snapshotMagic
+	if s.controlOnly {
+		magic = controlSnapshotMagic
+	}
+	if _, err := io.WriteString(sink, magic); err != nil {
 		_ = sink.Cancel()
 		return err
 	}

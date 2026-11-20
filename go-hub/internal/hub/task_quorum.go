@@ -37,7 +37,7 @@ func quorumBatchDigest(mutations []quorum.Mutation) ([32]byte, error) {
 // obtain a quorum therefore leaves the transaction uncommitted and invisible
 // to the executor queue.
 func (s *Server) commitTaskQuorumChanges(t *taskTransaction) error {
-	if s.taskQuorumApplying.Load() || s.quorumNode == nil || len(t.quorumChanges) == 0 {
+	if t.applyingQuorum || s.quorumNode == nil || len(t.quorumChanges) == 0 {
 		return nil
 	}
 	if s.taskQuorumBaselineSeeding.Load() && t.quorumAuthorityChanges == 0 {
@@ -98,73 +98,118 @@ func (s *Server) commitTaskQuorumChanges(t *taskTransaction) error {
 // majority-committed external sequence as durable tasks. The local file is
 // still written by its existing owner after this returns successfully.
 func (s *Server) commitQuorumAuthorityState(domain, key string, value any) error {
-	if s.taskQuorumApplying.Load() || s.quorumNode == nil || s.cfg.QuorumConfigFile == "" {
+	if s.quorumNode == nil || s.cfg.QuorumConfigFile == "" || (s.quorumControlOnly() && quorum.ControlAuthorityKey(domain) != key) {
 		return nil
 	}
+	// Callers can hold a domain lock needed by promotion. Fail promptly and
+	// let the owner retry with the newly materialized state.
+	if !s.quorumAuthorityWrites.TryRLock() {
+		return errors.New("quorum authority is being materialized")
+	}
+	defer s.quorumAuthorityWrites.RUnlock()
+	// Once projection starts, a partial image or a later election needs a
+	// fresh materialization before a domain owner may publish from it.
+	if term := s.quorumAuthorityTerm.Load(); term != 0 && (!s.quorumAuthorityActiveWriter.Load() || term != s.quorumNode.CurrentTerm()) {
+		return errors.New("quorum authority needs materialization by the current leader")
+	}
+	return s.withQuorumDatabase(func(t *taskTransaction) error {
+		if err := s.stageQuorumAuthorityState(t, domain, key, value); err != nil {
+			return err
+		}
+		if t.quorumAuthorityChanges == 0 {
+			// Even an identical local image can be stale on a former leader.
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return s.quorumNode.VerifyLeader(ctx)
+		}
+		return nil
+	})
+}
+
+func (s *Server) stageQuorumAuthorityState(t *taskTransaction, domain, key string, value any) error {
 	if domain == "" || key == "" {
 		return errors.New("task quorum authority identity is empty")
 	}
-	return s.withTaskDatabase(func(t *taskTransaction) error {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		namespace := "authority/" + domain
-		var revision int64
-		err = t.tx.QueryRow(`SELECT revision FROM task_quorum_revisions WHERE namespace=? AND row_key=?`, namespace, key).Scan(&revision)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if revision < 0 || revision == int64(^uint64(0)>>1) {
-			return errors.New("task quorum authority revision is out of range")
-		}
-		var previous []byte
-		var storedRevision int64
-		readErr := t.tx.QueryRow(`SELECT payload,revision FROM task_quorum_authority WHERE namespace=? AND row_key=?`, namespace, key).Scan(&previous, &storedRevision)
-		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-			return readErr
-		}
-		if readErr == nil && storedRevision != revision || errors.Is(readErr, sql.ErrNoRows) && revision != 0 {
-			return errors.New("task quorum authority row and revision ledger disagree")
-		}
-		if readErr == nil && storedRevision == revision {
-			plaintext, err := s.quorumNode.OpenExternalValue(namespace, key, uint64(revision), previous)
-			if err != nil {
-				return err
-			}
-			if bytes.Equal(plaintext, encoded) {
-				return nil
-			}
-		}
-		nextRevision := uint64(revision + 1)
-		sealed, err := s.quorumNode.SealExternalValue(namespace, key, nextRevision, encoded)
-		if err != nil {
-			return err
-		}
-		if err := t.captureQuorumRow(namespace, key, json.RawMessage(sealed), false); err != nil {
-			return err
-		}
-		_, err = t.tx.Exec(`INSERT INTO task_quorum_authority(namespace,row_key,payload,revision) VALUES(?,?,?,?) ON CONFLICT(namespace,row_key) DO UPDATE SET payload=excluded.payload,revision=excluded.revision`, namespace, key, sealed, nextRevision)
-		if err == nil {
-			t.quorumAuthorityChanges++
-		}
+	encoded, err := json.Marshal(value)
+	if err != nil {
 		return err
-	})
+	}
+	row, readErr := readQuorumAuthorityRow(t.tx, domain, key)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	var revision int64
+	err = t.tx.QueryRow(`SELECT revision FROM task_quorum_revisions WHERE namespace=? AND row_key=?`, row.namespace, row.key).Scan(&revision)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if revision < 0 || uint64(revision) == maxSQLiteQuorumRevision {
+		return errors.New("task quorum authority revision is out of range")
+	}
+	if row.revision != revision {
+		return errors.New("task quorum authority row and revision ledger disagree")
+	}
+	if readErr == nil {
+		plaintext, err := s.quorumNode.OpenExternalValue(row.namespace, row.key, uint64(revision), row.payload)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(plaintext, encoded) {
+			return nil
+		}
+	}
+	next := uint64(revision + 1)
+	sealed, err := s.quorumNode.SealExternalValue(row.namespace, row.key, next, encoded)
+	if err != nil {
+		return err
+	}
+	if err := t.captureQuorumRow(row.namespace, row.key, json.RawMessage(sealed), false); err != nil {
+		return err
+	}
+	_, err = t.tx.Exec(`INSERT INTO task_quorum_authority(namespace,row_key,payload,revision) VALUES(?,?,?,?) ON CONFLICT(namespace,row_key) DO UPDATE SET payload=excluded.payload,revision=excluded.revision`, row.namespace, row.key, sealed, next)
+	if err == nil {
+		t.quorumAuthorityChanges++
+	}
+	return err
+}
+
+type quorumAuthorityRow struct {
+	namespace, key string
+	payload        []byte
+	revision       int64
+}
+
+func readQuorumAuthorityRow(tx *sql.Tx, domain, key string) (quorumAuthorityRow, error) {
+	var row quorumAuthorityRow
+	read := func(domain, key string) error {
+		row.namespace, row.key = "authority/"+domain, key
+		return tx.QueryRow(`SELECT payload,revision FROM task_quorum_authority WHERE namespace=? AND row_key=?`, row.namespace, row.key).Scan(&row.payload, &row.revision)
+	}
+	// Earlier writers put post-baseline instruction edits in a different
+	// row. If present it is the live history for this set. Use its actual
+	// identity for both reads and writes, including AEAD associated data.
+	if key == "current" && (domain == "instruction_sets_default" || domain == "instruction_sets_named") {
+		if err := read("instruction_sets", strings.TrimPrefix(domain, "instruction_sets_")); !errors.Is(err, sql.ErrNoRows) {
+			return row, err
+		}
+	}
+	err := read(domain, key)
+	return row, err
 }
 
 func (s *Server) readQuorumAuthorityState(domain, key string, destination any) error {
 	if s.quorumNode == nil || domain == "" || key == "" || destination == nil {
 		return errors.New("task quorum authority state is unavailable")
 	}
-	namespace := "authority/" + domain
-	var payload []byte
-	var revision uint64
-	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
-		return tx.QueryRow(`SELECT payload,revision FROM task_quorum_authority WHERE namespace=? AND row_key=?`, namespace, key).Scan(&payload, &revision)
+	var row quorumAuthorityRow
+	if err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
+		var err error
+		row, err = readQuorumAuthorityRow(tx, domain, key)
+		return err
 	}); err != nil {
 		return err
 	}
-	plaintext, err := s.quorumNode.OpenExternalValue(namespace, key, revision, payload)
+	plaintext, err := s.quorumNode.OpenExternalValue(row.namespace, row.key, uint64(row.revision), row.payload)
 	if err != nil {
 		return err
 	}
@@ -178,6 +223,13 @@ func (s *Server) readQuorumAuthorityState(domain, key string, destination any) e
 // whole batch in one SQLite transaction; the leader recognizes its own pending
 // batch and leaves the already-open originating transaction to commit it.
 func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mutations []quorum.Mutation) error {
+	for _, m := range mutations {
+		if s.quorumControlOnly() {
+			if err := quorum.ValidateControlMutation(m, s.quorumClusterID); err != nil {
+				return err
+			}
+		}
+	}
 	digest, err := quorumBatchDigest(mutations)
 	if err != nil {
 		return err
@@ -211,7 +263,7 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			if baseline.ClusterID == "" || baseline.ClusterID != s.quorumClusterID {
 				return errors.New("task quorum baseline cluster identity mismatch")
 			}
-			if len(baseline.AuthorityDomains) != len(quorumRequiredAuthorityRecords) {
+			if len(baseline.AuthorityDomains) != len(s.requiredQuorumAuthorities()) {
 				return errors.New("task quorum baseline is missing an authoritative state domain")
 			}
 			if baseline.ChainSequence == 0 || len(baseline.ChainDigest) != sha256.Size*2 {
@@ -219,7 +271,7 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 			}
 			seenDomains := make(map[string]bool, len(baseline.AuthorityDomains))
 			for _, domain := range baseline.AuthorityDomains {
-				if _, required := quorumRequiredAuthorityRecords[domain]; !required || seenDomains[domain] {
+				if _, required := s.requiredQuorumAuthorities()[domain]; !required || seenDomains[domain] {
 					return errors.New("task quorum baseline has an invalid authoritative state domain")
 				}
 				seenDomains[domain] = true
@@ -238,10 +290,9 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 	if err != nil {
 		return err
 	}
-	s.taskQuorumApplying.Store(true)
-	defer s.taskQuorumApplying.Store(false)
 	applyDatabase := func() error {
-		return s.withTaskDatabase(func(t *taskTransaction) error {
+		return s.withQuorumDatabase(func(t *taskTransaction) error {
+			t.applyingQuorum = true
 			if len(external) > 0 {
 				var clusterID string
 				var previousSequence uint64
@@ -318,15 +369,19 @@ func (s *Server) applyTaskQuorumMutations(logIndex, externalSequence uint64, mut
 					return errors.New("task quorum baseline chain checkpoint is invalid")
 				}
 				var currentChain uint64
-				if err := t.tx.QueryRow(`SELECT sequence FROM task_quorum_chain WHERE id=1`).Scan(&currentChain); err != nil && !errors.Is(err, sql.ErrNoRows) {
-					return err
+				var currentDigest []byte
+				if err := t.tx.QueryRow(`SELECT sequence,digest FROM task_quorum_chain WHERE id=1`).Scan(&currentChain, &currentDigest); err != nil {
+					return fmt.Errorf("read task quorum baseline checkpoint: %w", err)
 				}
 				if currentChain < checkpoint.ChainSequence {
-					if _, err := t.tx.Exec(`UPDATE task_quorum_chain SET sequence=?,digest=? WHERE id=1`, checkpoint.ChainSequence, chainDigest); err != nil {
-						return err
-					}
+					return fmt.Errorf("task quorum baseline checkpoint has not been applied: local=%d required=%d", currentChain, checkpoint.ChainSequence)
 				}
-				for domain, key := range quorumRequiredAuthorityRecords {
+				if currentChain == checkpoint.ChainSequence && !bytes.Equal(currentDigest, chainDigest) {
+					return errors.New("task quorum baseline checkpoint digest does not match SQLite")
+				}
+				// Older markers anchor the task prefix before the authority rows.
+				// Historical replay verifies the cumulative digest at the head.
+				for domain, key := range s.requiredQuorumAuthorities() {
 					var count int
 					if err := t.tx.QueryRow(`SELECT count(*) FROM task_quorum_authority WHERE namespace=? AND row_key=?`, "authority/"+domain, key).Scan(&count); err != nil {
 						return err

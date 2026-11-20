@@ -287,6 +287,7 @@ type Server struct {
 	queuePollLatencyMS    atomic.Int64
 	outboxRetryFailures   atomic.Int64
 	outboxDelivered       atomic.Int64
+	outboxSending         sync.Map // job IDs with a receipt POST in progress
 	selfRepairBusy        atomic.Bool
 	selfRepairPolicySeen  atomic.Bool
 	selfRepairDesired     atomic.Int64
@@ -295,6 +296,9 @@ type Server struct {
 }
 
 func New(cfg Config) *Server {
+	if cfg.OutboxDir == "" && cfg.SpillDir != "" {
+		cfg.OutboxDir = filepath.Join(cfg.SpillDir, "outbox")
+	}
 	if cfg.AuditLog == "" && cfg.IdentityDir != "" {
 		cfg.AuditLog = filepath.Join(cfg.IdentityDir, "execution-audit.jsonl")
 	}
@@ -330,6 +334,7 @@ func New(cfg Config) *Server {
 	var hc *hub.Client
 	if cfg.HubURL != "" {
 		hc = hub.New(cfg.HubURL, ident, cfg.Token, cfg.HubDNSServer, cfg.HubResolveTo)
+		hc.RestoreQuorumRoutes(cfg.IdentityDir)
 	}
 
 	var auditLog *audit.Logger
@@ -527,6 +532,11 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	if s.cfg.HeartbeatEnabled {
 		go s.heartbeatLoop(ctx)
 	}
+	// Direct callback receivers also need to resume receipts after a restart.
+	outboxCtx, cancelOutbox := context.WithCancel(ctx)
+	outboxDone := make(chan struct{})
+	go func() { defer close(outboxDone); s.outboxLoop(outboxCtx) }()
+	defer func() { cancelOutbox(); <-outboxDone }()
 	if !s.needsLocalListener() {
 		go s.queueLoop(ctx)
 	}
@@ -658,15 +668,8 @@ func (s *Server) storageStats() shellStorageStats {
 			}
 			if outboxAbs != "" && strings.HasPrefix(abs, outboxAbs+string(os.PathSeparator)) && strings.HasSuffix(abs, ".json") {
 				stats.OutboxDepth++
-				b, e := os.ReadFile(abs)
-				if e == nil {
-					var v struct {
-						Attempts int `json:"attempts"`
-					}
-					if json.Unmarshal(b, &v) == nil {
-						stats.OutboxRetryAttempts += v.Attempts
-					}
-				}
+				attempts, _, _ := outboxSchedule(abs)
+				stats.OutboxRetryAttempts += attempts
 			}
 			return nil
 		})
@@ -940,11 +943,20 @@ func (s *Server) execCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": j.ID, "delivery": "local_job"})
 		return
 	}
-	if !s.startCallbackJob(jobID, req, false) {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "executor is stopping"})
+	duplicate, err := s.startCallbackJob(jobID, req, false)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errStaleDispatch) || errors.Is(err, errInvalidDispatch) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]any{"error": "executor dispatch refused"})
 		return
 	}
-	writeJSON(w, 202, map[string]any{"ok": true, "status": "running", "job_id": jobID, "delivery": "hub_queue_result"})
+	status := "running"
+	if duplicate {
+		status = "already_accepted"
+	}
+	writeJSON(w, 202, map[string]any{"ok": true, "status": status, "job_id": jobID, "delivery": "hub_queue_result"})
 }
 func (s *Server) execLive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1296,7 +1308,6 @@ func (s *Server) queueLoop(ctx context.Context) {
 		return
 	}
 	for {
-		s.flushOutbox(ctx)
 		if !s.beginQueuePoll() {
 			select {
 			case <-ctx.Done():
@@ -1339,11 +1350,14 @@ func (s *Server) queueLoop(ctx context.Context) {
 				continue
 			}
 			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				s.startCallbackTool(q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL, q.ExecutionOrigin)
+				_, err = s.startCallbackTool(q)
 			} else {
 				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
 				s.applyDefaults(&req)
-				s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin)
+				_, err = s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin)
+			}
+			if err != nil {
+				log.Printf("executor dispatch admission failed: %v", err)
 			}
 		}
 		s.endQueuePoll()
@@ -1380,14 +1394,11 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	return req
 }
 
-func (s *Server) startCallbackTool(jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL, origin ...map[string]any) bool {
-	runCtx, finish, ok := s.beginCallback(jobID, true)
-	if !ok {
-		return false
-	}
-	runCtx = withExecutionTask(runCtx, jobID, traceID, origin...)
-	go func() { defer finish(); s.runCallbackTool(runCtx, jobID, traceID, traceParent, name, args, queueACL) }()
-	return true
+func (s *Server) startCallbackTool(q hub.QueueJob) (bool, error) {
+	return s.startBoundCallback(q.ID, true, func(ctx context.Context) {
+		ctx = withExecutionTask(ctx, q.ID, q.TraceID, q.ExecutionOrigin)
+		s.runCallbackTool(ctx, q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
+	})
 }
 
 func (s *Server) runCallbackTool(runCtx context.Context, jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
@@ -1433,15 +1444,7 @@ func (s *Server) runCallbackTool(runCtx context.Context, jobID, traceID, tracePa
 		status = "failed"
 	}
 	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "tool": name, "trace_id": traceID, "traceparent": traceParent, "status": status})
-	if s.hub == nil {
-		return
-	}
-	resultCtx, cancelResult := s.callbackResultContext()
-	defer cancelResult()
-	if postErr := s.hub.PostResult(resultCtx, s.cfg.Name, payload); postErr != nil {
-		log.Printf("callback tool result failed job=%s tool=%s err=%v", jobID, name, postErr)
-		s.spoolOutbox(jobID, payload, postErr)
-	}
+	s.deliverCallbackResult(payload)
 }
 
 func (s *Server) cancelCallbackJob(jobID string) {
@@ -1461,14 +1464,10 @@ func (s *Server) cancelCallbackJob(jobID string) {
 	s.auditLog.Event(audit.PollJob, map[string]any{"job_id": jobID, "status": "cancel_requested"})
 }
 
-func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool, origin ...map[string]any) bool {
-	runCtx, finish, ok := s.beginCallback(jobID, acceptedPoll)
-	if !ok {
-		return false
-	}
-	runCtx = withExecutionTask(runCtx, jobID, req.TraceID, origin...)
-	go func() { defer finish(); s.runCallbackJob(runCtx, jobID, req) }()
-	return true
+func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool, origin ...map[string]any) (bool, error) {
+	return s.startBoundCallback(jobID, acceptedPoll, func(ctx context.Context) {
+		s.runCallbackJob(withExecutionTask(ctx, jobID, req.TraceID, origin...), jobID, req)
+	})
 }
 
 func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.Request) {
@@ -1477,16 +1476,7 @@ func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.
 	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
 	res := s.runShell(runCtx, req)
 	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})
-	if s.hub == nil {
-		return
-	}
-	payload := hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res}
-	resultCtx, cancelResult := s.callbackResultContext()
-	defer cancelResult()
-	if err := s.hub.PostResult(resultCtx, s.cfg.Name, payload); err != nil {
-		log.Printf("callback result failed job=%s err=%v", jobID, err)
-		s.spoolOutbox(jobID, payload, err)
-	}
+	s.deliverCallbackResult(hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res})
 }
 
 // Outbox retry tuning. Mirrors the Python shellmcp exponential-backoff
@@ -1575,28 +1565,6 @@ func (s *Server) cleanupSpoolByAge() {
 	_ = s.enforceStorage(nil)
 }
 
-func (s *Server) spoolOutbox(jobID string, payload hub.TaskResult, cause error) {
-	if s.cfg.OutboxDir == "" {
-		return
-	}
-	_ = os.MkdirAll(s.cfg.OutboxDir, 0o700)
-	path := filepath.Join(s.cfg.OutboxDir, jobID+".json")
-	now := time.Now()
-	entry := map[string]any{
-		"job_id":          jobID,
-		"payload":         payload,
-		"created_at":      now.Unix(),
-		"last_error":      cause.Error(),
-		"attempts":        0,
-		"next_attempt_at": 0,
-	}
-	b, _ := json.Marshal(entry)
-	if err := writeOutboxFile(path, b); err != nil {
-		log.Printf("outbox persist failed job=%s err=%v", jobID, err)
-	}
-	_ = s.enforceStorage(nil)
-}
-
 // Atomic replacement keeps the previous pending payload intact if retry metadata
 // cannot be written (e.g. disk full). Only a successful acknowledgement removes it.
 func writeOutboxFile(path string, data []byte) error {
@@ -1620,7 +1588,7 @@ func writeOutboxFile(path string, data []byte) error {
 	if err = os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return nil
+	return syncReceiptDirectory(filepath.Dir(path))
 }
 
 // computeOutboxBackoff returns the wait time for the given attempt number
@@ -1649,72 +1617,6 @@ func computeOutboxBackoffWith(base, cap time.Duration, attempts int) time.Durati
 		wait = cap
 	}
 	return wait
-}
-
-func (s *Server) flushOutbox(ctx context.Context) {
-	if s.hub == nil || s.cfg.OutboxDir == "" {
-		return
-	}
-	entries, err := os.ReadDir(s.cfg.OutboxDir)
-	if err != nil {
-		return
-	}
-	now := time.Now()
-	for _, ent := range entries {
-		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(s.cfg.OutboxDir, ent.Name())
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var entry struct {
-			JobID         string         `json:"job_id"`
-			Payload       hub.TaskResult `json:"payload"`
-			Attempts      int            `json:"attempts"`
-			NextAttemptAt int64          `json:"next_attempt_at"`
-		}
-		if json.Unmarshal(b, &entry) != nil || entry.Payload.ID == "" {
-			continue
-		}
-		// Skip entries whose next_attempt_at is in the future.
-		if entry.NextAttemptAt > 0 && now.Unix() < entry.NextAttemptAt {
-			continue
-		}
-		if s.hub == nil {
-			continue
-		}
-		postErr := s.hub.PostResult(ctx, s.cfg.Name, entry.Payload)
-		if postErr == nil {
-			s.outboxDelivered.Add(1)
-			_ = os.Remove(path)
-			continue
-		}
-		// Even 404 is not delivery acknowledgement (e.g. temporarily restored Hub).
-		// Bump attempt counter and set next_attempt_at to the backoff window.
-		s.outboxRetryFailures.Add(1)
-		newAttempts := entry.Attempts + 1
-		nextAt := now.Add(s.computeOutboxBackoff(newAttempts)).Unix()
-		updated := map[string]any{
-			"job_id":          entry.JobID,
-			"payload":         entry.Payload,
-			"created_at":      now.Unix(),
-			"last_error":      postErr.Error(),
-			"attempts":        newAttempts,
-			"next_attempt_at": nextAt,
-		}
-		raw, mErr := json.Marshal(updated)
-		if mErr != nil {
-			log.Printf("outbox retry marshal failed file=%s err=%v", path, mErr)
-			continue
-		}
-		if wErr := writeOutboxFile(path, raw); wErr != nil {
-			log.Printf("outbox retry persist failed file=%s err=%v", path, wErr)
-			continue
-		}
-		log.Printf("outbox retry failed file=%s err=%v attempts=%d next_attempt_in=%s", path, postErr, newAttempts, s.computeOutboxBackoff(newAttempts))
-	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -178,6 +178,9 @@ func codeModeFailedWith(code, message string, calls int, receipt map[string]any)
 	}
 	if receipt != nil {
 		failure["receipt"] = receipt
+		if retryable, ok := receipt["retryable"].(bool); ok {
+			failure["retryable"] = retryable
+		}
 	}
 	return map[string]any{
 		"status": "failed",
@@ -191,6 +194,12 @@ func codeModeFailedWith(code, message string, calls int, receipt map[string]any)
 // condition (429), a bad request is 400, and a runtime fault is 500.
 func codeModeStatusFor(code string) int {
 	switch code {
+	case "owner_unavailable":
+		return http.StatusServiceUnavailable
+	case "not_found":
+		return http.StatusNotFound
+	case "history_unavailable":
+		return http.StatusConflict
 	case "invalid_arguments", "invalid_return", "unknown_tool":
 		return http.StatusBadRequest
 	case "recursive_call_denied", "capability_denied", "forbidden":

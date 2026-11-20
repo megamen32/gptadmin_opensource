@@ -182,9 +182,10 @@ func (s *Server) legacyChildSchemaForRequest(r *http.Request, child Agent) (map[
 		}
 	}
 	if id == "" {
-		id = newID()
+		var createdAt float64
+		id, createdAt = s.newOwnerTaskID(s.localReadbackOwnerIDLocked())
 		receipt := &relayJob{ID: id, AgentID: current.AgentID, Caller: caller,
-			CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
+			CreatedAt: createdAt, TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
 		if err := s.dispatchChildSchemaLocked(r, current, receipt); err != nil {
 			s.mu.Unlock()
 			return taskPersistenceFailure(err), true

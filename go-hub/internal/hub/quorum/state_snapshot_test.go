@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/raft"
@@ -94,5 +97,48 @@ func TestSnapshotRefusesToCompactAnUnreconciledExternalApply(t *testing.T) {
 	}
 	if _, err := state.Snapshot(); err == nil {
 		t.Fatal("snapshot must not compact an unreconciled external apply")
+	}
+}
+
+func TestOwnerLocalSnapshotCarriesBoundedOperationsAndRejectsLegacy(t *testing.T) {
+	s := newStateMachine("c", nil, ExternalSnapshotCallbacks{}, ControlSnapshotLimit)
+	s.controlOnly = true
+	s.controlOwners = map[string]bool{"writer": true}
+	// Materialize more than 16KiB of real operation metadata in the FSM.
+	for i := 0; i < 128; i++ {
+		key := fmt.Sprintf("%064x", i)
+		op := Operation{Owner: "writer", Fingerprint: key, Witness: key}
+		if err := s.applyOperation(operationCommand{Key: key, Action: "claim", Now: 1, Operation: op}).err; err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Release()
+	sink := &memorySnapshotSink{}
+	if err = snapshot.Persist(sink); err != nil {
+		t.Fatal(err)
+	}
+	target := newStateMachine("c", nil, ExternalSnapshotCallbacks{}, ControlSnapshotLimit)
+	target.controlOnly = true
+	target.controlOwners = s.controlOwners
+	if err = target.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.operations, target.operations) {
+		t.Fatal("operation state changed on restore")
+	}
+	target.controlOnly = false
+	if err = target.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err == nil {
+		t.Fatal("legacy FSM accepted control snapshot")
+	}
+	target.controlOnly = true
+	if err = target.Restore(io.NopCloser(strings.NewReader(snapshotMagic))); err == nil {
+		t.Fatal("control FSM accepted legacy snapshot")
+	}
+	if err = target.Restore(io.NopCloser(io.MultiReader(strings.NewReader(controlSnapshotMagic), bytes.NewReader(bytes.Repeat([]byte{255}, 8))))); err == nil {
+		t.Fatal("unbounded header accepted")
 	}
 }

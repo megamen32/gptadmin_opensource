@@ -193,6 +193,11 @@ func TestQuorumPendingInputEncryptedAndQuarantinedAfterRestart(t *testing.T) {
 	}
 	restarted := New(Config{ConfigDir: configDir, QuorumConfigFile: "fixture"})
 	defer restarted.Close()
+	// A Hub that carries a quorum configuration restores its local task store
+	// through the quorum startup, not in the constructor.
+	if err := restarted.loadTaskState(); err != nil {
+		t.Fatal(err)
+	}
 	got := restarted.shellJobs[pending.ID]
 	if got == nil || got.Status != "queued" || !got.quorumPendingUnmaterialized || !bytes.Equal(got.quorumPendingSealed, firstCipher) {
 		t.Fatal("never-dispatched input was not safely quarantined")

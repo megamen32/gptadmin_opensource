@@ -35,6 +35,7 @@ import (
 	"github.com/megamen32/gptadmin/go-hub/internal/cloudos"
 	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 	"github.com/megamen32/gptadmin/go-hub/internal/meshroute"
+	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
 )
 
 var BuildVersion = "go-dev"
@@ -628,21 +629,26 @@ type Server struct {
 	quorumNode                    *quorum.Node
 	quorumPrivateTLS              *quorumPrivateTLS
 	quorumPeers                   []quorum.Peer
+	memberQuorumHubs              hubroute.Origins
 	quorumClusterID               string
 	quorumBootstrapperID          string
 	quorumSnapshotMaxBytes        int64
 	quorumSnapshotFreeReserve     int64
 	quorumSnapshotDataDir         string
+	quorumMode                    string
+	quorumLegacyReopen            bool
 	taskQuorumMu                  sync.Mutex
 	taskQuorumReplayMu            sync.Mutex
 	taskQuorumReplay              taskQuorumReplay
 	taskQuorumDBMu                sync.RWMutex
+	quorumControlDBMu             sync.RWMutex
 	quorumAuthorityLoadMu         sync.Mutex
+	quorumAuthorityTerm           atomic.Uint64
 	quorumAuthorityLoadedRevision uint64
 	quorumAuthorityLoadedLeader   string
 	quorumAuthorityActiveWriter   atomic.Bool
 	taskQuorumPending             map[[32]byte]uint64
-	taskQuorumApplying            atomic.Bool
+	quorumAuthorityWrites         sync.RWMutex
 	taskQuorumBaselineSeeding     atomic.Bool
 	taskQuorumInitialTaskReplay   atomic.Bool
 	nodePeerClient                *http.Client
@@ -925,8 +931,12 @@ func New(cfg Config) *Server {
 			log.Printf("registry baseline revision save failed: %v", err)
 		}
 	}
-	if err := s.loadTaskState(); err != nil {
-		log.Printf("task state load failed path=%s err=%v", s.taskStatePath(), err)
+	// The quorum startup path selects the durable format before opening a
+	// local task store. A control bootstrap never invokes task restoration.
+	if cfg.QuorumConfigFile == "" {
+		if err := s.loadTaskState(); err != nil {
+			log.Printf("task state load failed path=%s err=%v", s.taskStatePath(), err)
+		}
 	}
 	if err := s.loadManagedMCPState(); err != nil {
 		log.Printf("MCP token state load failed path=%s err=%v", s.managedMCPStatePath(), err)
@@ -1260,7 +1270,12 @@ func (s *Server) saveRegistryStateLocked() error {
 		}
 		quorumState := state
 		quorumState.LocalExecutorTokens = nil
-		if err := s.commitQuorumAuthorityState("registry", "current", quorumState); err != nil {
+		key := "current"
+		if s.quorumControlOnly() {
+			key = "enrollment"
+			quorumState = registryEnrollments(state)
+		}
+		if err := s.commitQuorumAuthorityState("registry", key, quorumState); err != nil {
 			return fmt.Errorf("commit quorum registry state: %w", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -1690,6 +1705,16 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 	if err := s.openQuorum(); err != nil {
 		return err
 	}
+	// Local worker state belongs to this node. Opening, seeding and restoring
+	// the control quorum never invoke this local task runtime operation.
+	if s.quorumControlOnly() {
+		s.mu.Lock()
+		err := s.loadTaskState()
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	if s.nodePeersErr != nil {
 		return s.nodePeersErr
 	}
@@ -1750,6 +1775,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/auth-snapshot/", s.authSnapshotHTTP)
 	mux.HandleFunc("/admin/api/nodes", s.nodeMembershipHTTP)
 	mux.HandleFunc("/admin/api/nodes/", s.nodeMembershipHTTP)
+	mux.HandleFunc(memberQueuePrefix, s.memberExecutorQueue)
 	mux.HandleFunc("/admin/api/node/drain", s.requireCtl(s.nodeDrainHTTP))
 	mux.HandleFunc("/admin/api/node/handoff", s.requireCtl(s.nodeHandoffHTTP))
 	mux.HandleFunc("/admin/api/agents/connect-info", s.requireCtl(s.trackAccessOperation(s.adminAgentConnectInfo)))
@@ -1816,6 +1842,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/authorize", s.oauthAuthorize)
 	mux.HandleFunc("/oauth/token", s.oauthToken)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
+	mux.HandleFunc(ownerReadPath, s.ownerReadHTTP)
 	mux.HandleFunc("/connect", s.connectionPage)
 	mux.HandleFunc("/connect.json", s.connectionPage)
 	mux.HandleFunc("/connect/callback", s.browserOAuthCallback)
@@ -1911,7 +1938,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/legacy/", s.adminLegacyStatic)
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
-	return withRequestTrace(withIngressAudit(withCORS(s.withCloudOSAuth(s.withQuorumAdmission(s.authSnapshotGate(mux))))))
+	return withRequestTrace(withIngressAudit(withCORS(s.withCloudOSAuth(s.withOwnerReceiptRouting(s.withQuorumAdmission(s.authSnapshotGate(mux)))))))
 }
 
 // cloudOSUI serves the locally installed CloudOS UI (cloudos-ui build output
@@ -2102,7 +2129,11 @@ func withCORS(next http.Handler) http.HandlerFunc {
 }
 
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit})
+	info := map[string]any{"ok": true, "name": "gptadmin-go-hub", "build_version": BuildVersion, "git_commit": GitCommit, "capabilities": []string{quorumControlCapability}}
+	if s.quorumNode != nil {
+		info["quorum_mode"] = s.quorumMode
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
@@ -2113,35 +2144,35 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 			baselineReady := s.taskQuorumBaselineReady()
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "follower", "leader_id": status.LeaderID,
-				"node_id": status.NodeID, "cluster_id": status.ClusterID,
+				"node_id": status.NodeID, "cluster_id": status.ClusterID, "quorum_mode": s.quorumMode,
 				"voter_count": status.VoterCount, "replica_ready": replicaReady, "baseline_ready": baselineReady,
-				"applied_index": s.quorumNode.ExternalAppliedIndex(),
+				"applied_index": s.quorumNode.ExternalAppliedIndex(), "raft_applied_index": status.AppliedIndex,
 			})
 			return
 		}
 		if err := s.ensureQuorumAuthorityMaterialized(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "leader", "detail": "quorum authority state is not ready",
-				"node_id": status.NodeID, "cluster_id": status.ClusterID,
+				"node_id": status.NodeID, "cluster_id": status.ClusterID, "quorum_mode": s.quorumMode,
 				"voter_count": status.VoterCount, "replica_ready": false, "baseline_ready": s.taskQuorumBaselineReady(),
-				"applied_index": s.quorumNode.ExternalAppliedIndex(),
+				"applied_index": s.quorumNode.ExternalAppliedIndex(), "raft_applied_index": status.AppliedIndex,
 			})
 			return
 		}
 		if err := s.taskQuorumReady(); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok": false, "hub_ready": false, "role": "leader", "detail": "quorum Hub state is not ready",
-				"node_id": status.NodeID, "cluster_id": status.ClusterID,
+				"node_id": status.NodeID, "cluster_id": status.ClusterID, "quorum_mode": s.quorumMode,
 				"voter_count": status.VoterCount, "replica_ready": s.taskQuorumReplicaReady() == nil, "baseline_ready": s.taskQuorumBaselineReady(),
-				"applied_index": s.quorumNode.ExternalAppliedIndex(),
+				"applied_index": s.quorumNode.ExternalAppliedIndex(), "raft_applied_index": status.AppliedIndex,
 			})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "hub_ready": true, "role": "leader", "leader_id": status.NodeID,
-			"node_id": status.NodeID, "cluster_id": status.ClusterID,
+			"node_id": status.NodeID, "cluster_id": status.ClusterID, "quorum_mode": s.quorumMode,
 			"voter_count": status.VoterCount, "replica_ready": true,
-			"applied_index": s.quorumNode.ExternalAppliedIndex(),
+			"applied_index": s.quorumNode.ExternalAppliedIndex(), "raft_applied_index": status.AppliedIndex,
 		})
 		return
 	}
@@ -2334,6 +2365,9 @@ func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expected := s.cfg.ShellToken
 		quorumExecutor := s.authenticatedQuorumExecutor(r)
+		if quorumExecutor {
+			r = r.WithContext(context.WithValue(r.Context(), attestedVoterKey{}, r.Header.Get(quorumExecutorHeader)))
+		}
 		r.Header.Del(selfEnrollTokenHeader)
 		r.Header.Del(globalShellAuthHeader)
 		s.mu.Lock()
@@ -2342,8 +2376,18 @@ func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 			parts := strings.Split(rest, "/")
 			name, _ := url.PathUnescape(parts[0])
 			name = canonicalShellQueueName(name)
-			if local := s.localExecutorTokens["shell:"+name]; local != "" {
+			target := "shell:" + name
+			if s.remoteMemberExecutorLocked(target) {
+				// A member poll comes through its enrolled queue or an attested voter.
+				expected = ""
+			} else if local := s.localExecutorTokens[target]; local != "" {
 				expected = local
+			} else if a := s.agents["shell:"+name]; a != nil && firstString(a.Meta, shellTokenHashMetaKey) != "" {
+				// Raft replicates the credential hash, never the raw local binding.
+				expected = ""
+				if s.pendingShellEnrollmentAllowedLocked(name, r) {
+					expected = bearerToken(r)
+				}
 			} else if expected == "" || !tokenMatches(r, expected) {
 				// Self-enrollment: a bare queue poll for an agent the Hub has
 				// never seen may register its own fresh credential. The agent
@@ -2352,12 +2396,6 @@ func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 				if enroll := s.queueSelfEnrollToken(r, "shell:"+name, len(parts) == 1); enroll != "" {
 					expected = enroll
 					r.Header.Set(selfEnrollTokenHeader, enroll)
-				} else if s.pendingShellEnrollmentAllowedLocked(name, r) {
-					// Existing agent whose raw-credential binding is absent
-					// (e.g. enrolled under an older build that pinned only a
-					// credential hash): the poll still authenticates against
-					// the pinned hash.
-					expected = bearerToken(r)
 				}
 			} else if expected != "" && expected == s.cfg.ShellToken {
 				// Authenticated with the Hub's own shell credential. On a
@@ -2373,6 +2411,13 @@ func (s *Server) requireShell(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		s.mu.Unlock()
+		if !allowed && r.URL.Path == "/heartbeat" {
+			if target, err := quorumExecutorTarget(r); err == nil && target != "" {
+				s.mu.Lock()
+				allowed = s.pendingShellEnrollmentAllowedLocked(strings.TrimPrefix(target, "shell:"), r)
+				s.mu.Unlock()
+			}
+		}
 		if !allowed {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "unauthorized"})
 			return
@@ -2420,7 +2465,7 @@ func shellEnrollmentToken(r *http.Request) string {
 		return ""
 	}
 	credential := strings.TrimSpace(authorization[len("Bearer "):])
-	if len(credential) < 32 || len(credential) > 4096 || strings.ContainsAny(credential, " \t\r\n<>") {
+	if len(credential) < 16 || len(credential) > 4096 || strings.ContainsAny(credential, " \t\r\n<>") {
 		return ""
 	}
 	return credential
@@ -3585,7 +3630,7 @@ func (s *Server) fleetExecForRequest(r *http.Request, req map[string]any, taskMo
 	responseStatus := http.StatusOK
 	approvalID := firstString(req, "approval_id")
 	approvalIDs := mapValue(req["approval_ids"])
-	parentID := newID()
+	parentID, parentCreated := s.newOwnerTaskID(s.localReadbackOwnerID())
 	children := []any{}
 	for _, srv := range targets {
 		target := "shell:" + strings.TrimPrefix(srv, "shell:")
@@ -3622,7 +3667,7 @@ func (s *Server) fleetExecForRequest(r *http.Request, req map[string]any, taskMo
 	response := map[string]any{"ok": responseStatus < http.StatusBadRequest, "results": results}
 	if len(children) > 0 {
 		parent := &relayJob{
-			ID: parentID, AgentID: "hub", Method: "task/group", CreatedAt: nowFloat(), Status: "running",
+			ID: parentID, AgentID: "hub", Method: "task/group", CreatedAt: parentCreated, Status: "running",
 			TraceID: requestTraceID(r), TraceParent: requestTraceParent(r),
 			Params: map[string]any{"label": "fleetExec", "children": children},
 		}
@@ -3710,6 +3755,8 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	meta := cloneMap(beat)
 	delete(meta, "name")
 	delete(meta, "server_name")
+	delete(meta, shellTokenHashMetaKey)
+	delete(meta, "self_enrolled")
 	mode := firstString(beat, "mode")
 	transport := mode
 	if transport == "" {
@@ -3718,12 +3765,27 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	identity := shellIdentityFromMap(meta)
 	s.mu.Lock()
 	localToken := s.localExecutorTokens[agentID]
+	if s.remoteMemberExecutorLocked(agentID) && r.Context().Value(attestedVoterKey{}) != agentID {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "member heartbeat requires enrolled executor"})
+		return
+	}
 	if !s.localExecutorMatchesLocked(agentID, identity) || (localToken != "" && !tokenMatches(r, localToken)) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "local executor identity mismatch"})
 		return
 	}
 	approved := s.shellIdentityApprovedLocked(agentID, identity)
+	if known := s.agents[agentID]; known != nil && firstString(known.Meta, shellTokenHashMetaKey) != "" {
+		if !s.pendingShellEnrollmentAllowedLocked(name, r) {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "heartbeat credential does not own executor"})
+			return
+		}
+		meta[shellTokenHashMetaKey] = known.Meta[shellTokenHashMetaKey]
+		meta["self_enrolled"] = known.Meta["self_enrolled"]
+		approved = approved && truthyAny(known.Meta["approved"])
+	}
 	meta["approved"] = approved
 	status := "online"
 	if !approved {
@@ -3761,6 +3823,10 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, _ := url.PathUnescape(parts[0])
+	if origin := s.memberQuorumHubs.Current(); origin != "" && len(parts) == 2 && r.Method == http.MethodPost &&
+		(parts[1] == "result" || parts[1] == "acl-check") && s.proxyMemberResult(w, r, name, origin) {
+		return
+	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		s.pollShellQueue(w, r, name)
 		return
@@ -3802,8 +3868,7 @@ func (s *Server) shellQueueFilesystemACLCheck(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "filesystem ACL job belongs to another executor"})
 		return
 	}
-	localToken := s.localExecutorTokens["shell:"+job.Server]
-	if (localToken != "" && !tokenMatches(r, localToken)) || (localToken == "" && !s.touchShellPollLocked(name, r)) {
+	if !s.executorOwnsReceiptLocked(r, job.Server) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "executor credential does not own filesystem ACL job"})
 		return
@@ -3874,6 +3939,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 		writeJSON(w, http.StatusOK, map[string]any{"server_id": "shell:" + name, "status": "awaiting_approval"})
 		return
 	}
+	if origins := s.quorumExecutorOrigins(); len(origins) > 0 {
+		w.Header().Set(hubroute.Header, strings.Join(origins, ","))
+	}
 	if err := s.recoverQuorumPendingShellLocked(r.Context(), name); err != nil {
 		log.Printf("queued shell recovery failed server=%s: %v", name, err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "queued quorum task recovery unavailable; retry"})
@@ -3893,10 +3961,18 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			return
 		}
 		if controlID != "" {
+			if err := s.verifyOwnerDispatch(r.Context()); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"id": "control_" + controlID, "server": name, "tool_name": "__gptadmin_cancel_task", "arguments": map[string]any{"task_id": controlID}})
 			return
 		}
 		if controls := s.shellControls[name]; len(controls) > 0 {
+			if err := s.verifyOwnerDispatch(r.Context()); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
+				return
+			}
 			control := controls[0]
 			s.shellControls[name] = controls[1:]
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -3957,6 +4033,10 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			}
 			// The first compatible job gets one durable lease. Oversized jobs
 			// retain their IDs, arguments and ordering for a later reader update.
+			if err := s.verifyOwnerDispatch(r.Context()); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
+				return
+			}
 			job := s.shellJobs[choice.ID]
 			encoded := choice.Payload
 			previousStatus, previousStarted := job.Status, job.StartedAt
@@ -3977,6 +4057,12 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			_, _ = w.Write(encoded)
 			return
 		}
+		if origin := s.memberQuorumHubs.Current(); origin != "" && s.localExecutors["shell:"+name] != nil && tokenMatches(r, s.localExecutorTokens["shell:"+name]) {
+			s.mu.Unlock()
+			s.proxyMemberRequest(w, r, origin, true)
+			s.mu.Lock()
+			return
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked()})
@@ -3992,6 +4078,9 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 	}
 	now := nowFloat()
 	agentID := "shell:" + name
+	if agent := s.agents[agentID]; agent != nil && agent.Status == "disabled" {
+		return false
+	}
 	mode := strings.TrimSpace(r.URL.Query().Get("mode"))
 	if mode == "" {
 		mode = "long_poll"
@@ -4021,6 +4110,9 @@ func (s *Server) touchShellPollLocked(name string, r *http.Request) bool {
 		return false
 	}
 	approved := s.shellIdentityApprovedLocked(agentID, identity)
+	if s.agents[agentID] == nil && r.Context().Value(memberExecutorKey{}) == agentID {
+		approved = true // the member queue verified the owner-enrolled ID, key and fingerprint
+	}
 	// An empty identity beat reads as pre-approved for legacy agents. A
 	// self-enrolled agent must stay unapproved until an admin explicitly
 	// approves it, regardless of what the poll discloses about itself.
@@ -4145,6 +4237,19 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	owner, scoped, handleErr := decodeOwnerHandle(res.ID)
+	if handleErr != nil || scoped && owner.Kind != "task" || r.URL.Query().Has("job_id") && r.URL.Query().Get("job_id") != res.ID {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "receipt does not match routed task"})
+		return
+	}
+	if scoped && owner.OwnerID != s.localReadbackOwnerID() {
+		receiptUnavailable(w)
+		return
+	}
+	ack := map[string]any{"ok": true}
+	if scoped {
+		ack["id"], ack["owner_id"] = res.ID, owner.OwnerID
+	}
 	s.mu.Lock()
 	if err := s.refreshTaskRecordsLocked(res.ID); err != nil {
 		s.mu.Unlock()
@@ -4162,10 +4267,14 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "job belongs to another executor"})
 		return
 	}
-	localToken := s.localExecutorTokens["shell:"+job.Server]
-	if (localToken != "" && !tokenMatches(r, localToken)) || (localToken == "" && !s.touchShellPollLocked(name, r)) {
+	if !s.executorOwnsReceiptLocked(r, job.Server) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "executor credential does not own job"})
+		return
+	}
+	if scoped && job.StartedAt == 0 && job.Status == "queued" {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"detail": "receipt for a task that has not been dispatched"})
 		return
 	}
 	if job.Status == "cancelled" {
@@ -4175,16 +4284,26 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 			return
 		}
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
+		ack["cancelled"] = true
+		writeJSON(w, http.StatusOK, ack)
+		return
+	}
+	// A lost HTTP acknowledgment can make the outbox send the same result
+	// to a successor. Preserve the first committed executor receipt. A late
+	// real result may still resolve the Hub's synthetic orphan timeout.
+	if job.Status == "completed" || (job.Status == "failed" && firstString(mapValue(job.Error), "code") != "orphaned_running_task") {
+		s.mu.Unlock()
+		ack["already_recorded"] = true
+		writeJSON(w, http.StatusOK, ack)
 		return
 	}
 	change := s.beginTaskMutationLocked(job.ID)
 	job.DoneAt = nowFloat()
 	job.Status = "completed"
 	job.Result = res.Result
+	job.Error = res.Error
 	if res.Error != nil {
 		job.Status = "failed"
-		job.Error = res.Error
 	}
 	// A receipt that shares the task id follows the dispatch job into its
 	// terminal state, so no record of this task stays unfinished.
@@ -4205,7 +4324,7 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 	}
 	s.cond.Broadcast()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, ack)
 }
 
 func (s *Server) mcpRelayRegister(w http.ResponseWriter, r *http.Request) {
@@ -4382,6 +4501,10 @@ func (s *Server) mcpRelayPoll(w http.ResponseWriter, r *http.Request) {
 			s.markAgentOnlineLocked(a, nowFloat())
 		}
 		if q := s.relayQueues[agentID]; len(q) > 0 {
+			if err := s.verifyOwnerDispatch(r.Context()); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
+				return
+			}
 			id := q[0]
 			if err := s.refreshTaskRecordsLocked(id); err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
@@ -4906,7 +5029,14 @@ func (s *Server) withExposeMetaLocked(a Agent, r *http.Request) Agent {
 }
 
 func (s *Server) hubAgentLocked() Agent {
-	return Agent{AgentID: "hub", Name: "GPTAdmin Hub", Kind: "hub", Transport: "internal", Status: "online", LastSeen: nowFloat(), Capabilities: []string{"registry", "pending_servers", "mcp_relay"}, Meta: map[string]any{"server_count": len(s.agents)}}
+	agent := Agent{AgentID: "hub", Name: "GPTAdmin Hub", Kind: "hub", Transport: "internal", Status: "online", LastSeen: nowFloat(), Capabilities: []string{"registry", "pending_servers", "mcp_relay"}, Meta: map[string]any{"server_count": len(s.agents)}}
+	if s.quorumNode != nil {
+		agent.Meta["quorum_mode"] = s.quorumMode
+		if s.quorumControlOnly() {
+			agent.Capabilities = append(agent.Capabilities, quorumControlCapability)
+		}
+	}
+	return agent
 }
 
 // selectMCPRelayTarget validates a target before it can create a relay job.
@@ -5264,6 +5394,15 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	durableRequestKey := ""
 	operation := func() (map[string]any, int) {
+		if s.quorumControlOnly() {
+			ctx := context.Background()
+			if r != nil {
+				ctx = r.Context()
+			}
+			if err := s.verifyOwnerDispatch(ctx); err != nil {
+				return unavailableExecutorQueue(err.Error()), http.StatusServiceUnavailable
+			}
+		}
 		if target == "control:hub" {
 			if toolName == "control_catalog" {
 				return map[string]any{"server_id": target, "status": "completed", "response": s.controlCatalog(r, target, firstString(args, "section"))}, http.StatusOK
@@ -5798,7 +5937,7 @@ func (s *Server) mcpRelayShellExec(w http.ResponseWriter, r *http.Request) {
 		args["secret_env"] = raw
 	}
 	r = requestWithInstructionContext(r, req)
-	resp, responseStatus := s.executeMCPTool(r, target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), "")
+	resp, responseStatus := s.executeMCPTool(r, target, "shell_exec", args, truthy(req["background"]), timeoutFromReq(req, s.cfg.DefaultTimeout), firstString(req, "idempotency_key"))
 	writeJSON(w, responseStatus, resp)
 }
 
@@ -5908,9 +6047,9 @@ func (s *Server) enqueueRelayWithTraceParent(agentID, method string, params map[
 }
 
 func (s *Server) enqueueRelayWithTraceParentForRequest(r *http.Request, agentID, method string, params map[string]any, traceID, traceParent string, requestKeys ...string) string {
-	id := newID()
+	id, createdAt := s.newOwnerTaskID(s.localReadbackOwnerID())
 	s.mu.Lock()
-	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: nowFloat(), Status: "queued"}
+	s.relayJobs[id] = &relayJob{ID: id, AgentID: agentID, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, Method: method, Params: params, CreatedAt: createdAt, Status: "queued"}
 	if len(requestKeys) > 0 {
 		s.relayJobs[id].RequestKey = requestKeys[0]
 	}
@@ -6093,20 +6232,23 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 		if agent == nil || agent.Status != "awaiting_approval" {
 			return map[string]any{"error": "pending server not found", "server_id": target}, http.StatusNotFound
 		}
+		previous := *agent
+		agent.Meta = cloneMap(agent.Meta)
 		// Relay agents stay pending until their signed enrollment proof collects
 		// the agent-bound credential. Shell agents become online immediately.
 		if _, relay := s.relayEnrollments[target]; !relay {
 			agent.Status = "online"
 		}
 		agent.LastSeen = nowFloat()
-		if agent.Meta == nil {
-			agent.Meta = map[string]any{}
-		}
 		agent.Meta["approved"] = true
-		s.addAuditLocked("approve_pending_server", map[string]any{"agent_id": target})
 		if err := s.saveRegistryStateLocked(); err != nil {
-			log.Printf("registry state save failed: %v", err)
+			*agent = previous
+			if s.quorumControlOnly() {
+				s.quorumAuthorityActiveWriter.Store(false)
+			}
+			return map[string]any{"error": "executor approval could not be confirmed"}, http.StatusServiceUnavailable
 		}
+		s.addAuditLocked("approve_pending_server", map[string]any{"agent_id": target})
 		return map[string]any{"ok": true, "status": "approved", "server_id": target}, http.StatusOK
 	case "settings_schema":
 		return map[string]any{"schema": hubSettingsSchema()}, http.StatusOK
@@ -6287,6 +6429,18 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 	if strings.HasPrefix(target, "control:") {
 		server = canonicalShellQueueName(strings.TrimPrefix(target, "control:"))
 	}
+	if s.memberQuorumHubs.Current() != "" {
+		return unavailableExecutorQueue("submit new work to the quorum Hub")
+	}
+	if s.quorumNode != nil {
+		ctx := context.Background()
+		if r != nil {
+			ctx = r.Context()
+		}
+		if _, err := s.quorumExecutorUsesLeaderQueue(ctx, "shell:"+server); err != nil {
+			return unavailableExecutorQueue(err.Error())
+		}
+	}
 	if toolName == "" {
 		return map[string]any{"server_id": target, "status": "failed", "error": "missing tool name"}
 	}
@@ -6319,7 +6473,8 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 			}
 		}
 	}
-	job := &shellJob{ID: newID(), Server: server, ReceiptTarget: receiptTarget, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: nowFloat(), Status: "queued"}
+	id, createdAt := s.newOwnerTaskID(s.localReadbackOwnerID())
+	job := &shellJob{ID: id, Server: server, ReceiptTarget: receiptTarget, Caller: taskCallerFromRequest(r), TraceID: traceID, TraceParent: traceParent, ToolName: toolName, Arguments: cloneMap(args), SecretValues: append([]string(nil), secretValues...), FilesystemACL: filesystemACL, CreatedAt: createdAt, Status: "queued"}
 	if job.FilesystemACL != nil {
 		job.FilesystemACL = cloneFilesystemACLPolicy(job.FilesystemACL)
 		job.FilesystemACL.JobID = job.ID
@@ -6341,7 +6496,7 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 	owner, err := s.ensureTaskOwnerLocked()
 	if err != nil {
 		s.mu.Unlock()
-		return taskPersistenceFailure(err)
+		return taskEnqueueFailure(err)
 	}
 	job.OwnerID = owner
 	change := s.beginTaskMutationLocked(job.ID)
@@ -6356,7 +6511,7 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 	s.addAuditLocked("shell_enqueue", fields)
 	if err := change.commit(); err != nil {
 		s.mu.Unlock()
-		return taskPersistenceFailure(err)
+		return taskEnqueueFailure(err)
 	}
 	s.shellQueues[server] = append(s.shellQueues[server], job.ID)
 	s.cond.Broadcast()
@@ -9250,36 +9405,36 @@ func (s *Server) agentMCPJSONRPC(r *http.Request, agent Agent, body map[string]a
 			return nil, map[string]any{"code": -32000, "message": nodeDrainRetryDetail, "data": map[string]any{"retryable": true, "owner_target": agent.AgentID}}, false
 		}
 		defer permit.close()
+		asTask := mcpTasksOptedIn(params)
+		shellExec := strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec"
+		if shellExec || asTask && isChildMCPAgent(agent) {
+			key := firstString(mapValue(params["_meta"]), "com.gptadmin/idempotencyKey")
+			raw, status := s.executeMCPTool(r, agent.AgentID, name, args, asTask, s.cfg.DefaultTimeout, key, permit)
+			if status == http.StatusPreconditionRequired && firstString(raw, "status") == "approval_required" {
+				if asTask && shellExec {
+					callArgs, _ := approvalArguments(args)
+					return s.createApprovalShellTask(r, agent.AgentID, name, callArgs, raw), nil, false
+				}
+				return nil, map[string]any{"code": -32004, "message": "approval required", "data": raw}, false
+			}
+			if status >= 400 {
+				return mcpToolResult(raw), nil, false
+			}
+			if asTask {
+				if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
+					return taskResult, nil, false
+				}
+				return mcpToolResult(raw), nil, false
+			}
+			result, err := unwrapMCPUpstream(raw)
+			return result, err, false
+		}
 		callArgs, approvalID := approvalArguments(args)
 		if approvalResponse, blocked := s.approvalGate(r, agent.AgentID, name, callArgs, approvalID); blocked {
-			if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" && firstString(approvalResponse, "status") == "approval_required" {
-				return s.createApprovalShellTask(r, agent.AgentID, name, callArgs, approvalResponse), nil, false
-			}
 			return nil, map[string]any{"code": -32004, "message": "approval required", "data": approvalResponse}, false
 		}
 		if budgetResponse, blocked := s.boundedAutonomousGate(r, agent.AgentID, name, args); blocked {
 			return nil, map[string]any{"code": -32005, "message": "bounded autonomous budget exhausted", "data": budgetResponse}, false
-		}
-		if mcpTasksOptedIn(params) && isChildMCPAgent(agent) {
-			// Reuse the authorized child dispatch and its durable receipt. Do
-			// not synthesize a second task or bypass filesystem policy.
-			meta := mapValue(params["_meta"])
-			key := firstString(meta, "com.gptadmin/idempotencyKey")
-			raw, status := s.executeMCPTool(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, key, permit)
-			if status >= 400 {
-				return mcpToolResult(raw), nil, false
-			}
-			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
-				return taskResult, nil, false
-			}
-			return mcpToolResult(raw), nil, false
-		}
-		if mcpTasksOptedIn(params) && strings.HasPrefix(agent.AgentID, "shell:") && name == "shell_exec" {
-			// Bind the durable receipt to the authenticated submitting client.
-			raw := s.callShellToolWithFilesystemACLForRequest(r, agent.AgentID, name, callArgs, true, s.cfg.DefaultTimeout, requestTraceID(r), requestTraceParent(r), nil, nil)
-			if taskResult := s.mcpTaskResultFromPayload(raw, params); taskResult != nil {
-				return taskResult, nil, false
-			}
 		}
 		result, err := s.agentToolCall(r, agent, name, callArgs, permit)
 		if err == nil {
@@ -10048,7 +10203,13 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		if !mcpTasksOptedIn(params) {
 			rpcErr = map[string]any{"code": -32003, "message": "client did not advertise io.modelcontextprotocol/tasks"}
 		} else {
-			result, rpcErr = s.mcpTaskGetForRequest(r, firstString(params, "taskId"), "")
+			hint := lookupHint(mapValue(mapValue(params["_meta"])["io.gptadmin/owner"]))
+			reply := s.lookupOwner(r, ownerRead{Action: "task", ID: firstString(params, "taskId"), Hint: hint})
+			if reply.Failure != nil {
+				rpcErr = reply.Failure.rpc()
+			} else {
+				result = reply.Value
+			}
 		}
 	case "tasks/cancel":
 		if !mcpTasksOptedIn(params) {
@@ -10257,15 +10418,16 @@ func approvalTaskInputRequests(approvalID string) map[string]any {
 
 func (s *Server) createApprovalShellTask(r *http.Request, target, toolName string, args map[string]any, approvalResponse map[string]any) map[string]any {
 	server := canonicalShellQueueName(strings.TrimPrefix(target, "shell:"))
+	id, createdAt := s.newOwnerTaskID(s.localReadbackOwnerID())
 	job := &shellJob{
-		ID:            newID(),
+		ID:            id,
 		Server:        server,
 		Caller:        taskCallerFromRequest(r),
 		TraceID:       requestTraceID(r),
 		TraceParent:   requestTraceParent(r),
 		ToolName:      toolName,
 		Arguments:     cloneMap(args),
-		CreatedAt:     nowFloat(),
+		CreatedAt:     createdAt,
 		Status:        "input_required",
 		ApprovalID:    firstString(approvalResponse, "approval_id"),
 		ApprovalActor: s.actorForRequest(r),
@@ -10308,7 +10470,7 @@ func (s *Server) mcpTaskResultFromPayload(payload any, params map[string]any) ma
 		return nil
 	}
 	jobID := firstString(m, "task_id", "job_id")
-	if jobID == "" || (!truthy(m["background"]) && firstString(m, "status") != "running" && firstString(m, "status") != "queued") {
+	if jobID == "" {
 		return nil
 	}
 	s.mu.Lock()
@@ -10486,6 +10648,10 @@ func (s *Server) mcpTaskGetForRequest(r *http.Request, taskID, owner string) (an
 		return nil, taskPersistenceRPCError(err)
 	}
 	if j := s.shellJobs[taskID]; j != nil {
+		if j.ReceiptTarget != "" && !profileAllowsTarget(r, j.ReceiptTarget) {
+			s.mu.Unlock()
+			return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+		}
 		if !shellTaskOwnedBy(j, owner) {
 			s.mu.Unlock()
 			return nil, map[string]any{"code": -32602, "message": "invalid taskId for this MCP server"}
@@ -10805,6 +10971,13 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 	}
 	if name == "resource_receipt" {
 		return s.appsSDKResourceReceipt(r, firstString(args, "uri"))
+	}
+	if nodePeerJobTool(name) && !legacyJobTarget(args) {
+		reply := s.lookupJob(r, args)
+		if reply.Failure != nil {
+			return map[string]any{"status": "failed", "error": reply.Failure, "retryable": reply.Failure.Retryable}
+		}
+		return reply.Value
 	}
 	if nodePeerJobTool(name) {
 		if response, found := s.childSchemaJobForRequest(r, firstString(args, "id", "job_id")); found {
@@ -11144,7 +11317,7 @@ func appsSDKTools() []map[string]any {
 			"name":            "job",
 			"title":           "Job",
 			"description":     "Read the state/result of a long call that returned a job_id (owner_target = its target). Use it instead of repeating a call that may still be running.",
-			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "owner_target": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
+			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "owner_target": map[string]any{"type": "string"}, "owner_endpoint": map[string]any{"type": "string"}, "owner_id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 			"securitySchemes": readSecurity,

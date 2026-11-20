@@ -38,7 +38,7 @@ func (s *Server) quorumBootstrapLoop() {
 			if err == nil && found && !record.Deleted {
 				return
 			}
-			if err == nil && !found {
+			if err == nil && !found && !s.quorumLegacyReopen {
 				if status.NodeID != s.quorumBootstrapperID {
 					if err := node.TransferLeadershipTo(s.quorumBootstrapperID); err != nil {
 						log.Printf("quorum initial baseline waits for bootstrapper leadership: %v", err)
@@ -70,6 +70,12 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 	if err := s.quorumNode.VerifyLeader(ctx); err != nil {
 		return err
 	}
+	if s.quorumControlOnly() {
+		return s.seedControlBaseline(ctx)
+	}
+	if s.quorumLegacyReopen {
+		return errors.New("cannot reseed unmarked legacy Raft state")
+	}
 	if err := s.withTaskDatabase(func(*taskTransaction) error { return nil }); err != nil {
 		return err
 	}
@@ -83,12 +89,11 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if taskChainSequence == 0 {
-		taskChainSequence = 1
-	}
-	if taskRowCount == 0 {
-		taskRowCount = 1
-	}
+	// A retained SQLite checkpoint can predate a fresh Raft log. Only that
+	// legacy import reconstructs the checkpoint after streaming the rows.
+	// An ordinary database must apply each batch through the same FSM as
+	// its followers so both the digest and the per-row revisions are installed.
+	rebuildRetainedChain := taskChainSequence > s.quorumNode.ExternalAppliedIndex()
 	digest := sha256.New()
 	var baselineChainDigest [32]byte
 	counts := map[string]int64{"task_records": 0, "task_controls": 0, "task_requests": 0}
@@ -98,7 +103,7 @@ func (s *Server) seedTaskQuorumBaseline(ctx context.Context) error {
 	baselineBatchCount := uint64(0)
 	seenRows := int64(0)
 	s.taskQuorumBaselineSeeding.Store(true)
-	s.taskQuorumInitialTaskReplay.Store(true)
+	s.taskQuorumInitialTaskReplay.Store(rebuildRetainedChain)
 	defer s.taskQuorumBaselineSeeding.Store(false)
 	defer s.taskQuorumInitialTaskReplay.Store(false)
 	flush := func() error {
@@ -279,24 +284,15 @@ WHERE r.key>? ORDER BY r.key LIMIT 32`, lastKeyCursor)
 		return err
 	}
 	taskChainSequence = batchNumber
-	if err := s.withTaskDatabase(func(t *taskTransaction) error {
-		_, err := t.tx.Exec(`UPDATE task_quorum_chain SET sequence=?,digest=? WHERE id=1`, taskChainSequence, baselineChainDigest[:])
-		return err
-	}); err != nil {
-		return err
+	if rebuildRetainedChain {
+		if err := s.withTaskDatabase(func(t *taskTransaction) error {
+			_, err := t.tx.Exec(`UPDATE task_quorum_chain SET sequence=?,digest=? WHERE id=1`, taskChainSequence, baselineChainDigest[:])
+			return err
+		}); err != nil {
+			return err
+		}
 	}
 	s.taskQuorumInitialTaskReplay.Store(false)
-	// Historical task rows are replayed through the external FSM before the
-	// authority baseline may append the next external sequence. ApplyBatch
-	// waits for Raft commit, but a replay callback can legitimately return
-	// before the FSM has caught up to the SQLite chain head. Starting authority
-	// writes in that window would advance SQLite at (for example) sequence 22
-	// while Raft still proposes sequence 8, permanently fencing readiness.
-	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
-		return tx.QueryRow(`SELECT sequence FROM task_quorum_chain WHERE id=1`).Scan(&taskChainSequence)
-	}); err != nil {
-		return err
-	}
 	for s.quorumNode.ExternalAppliedIndex() < taskChainSequence {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -310,15 +306,27 @@ WHERE r.key>? ORDER BY r.key LIMIT 32`, lastKeyCursor)
 	if err := s.seedQuorumAuthorityBaseline(ctx); err != nil {
 		return fmt.Errorf("seed quorum authority state: %w", err)
 	}
+	// The marker covers the complete baseline including authority. Even an
+	// ordinary installation with no tasks now has a real committed chain.
+	var committedDigest []byte
+	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT sequence,digest FROM task_quorum_chain WHERE id=1`).Scan(&taskChainSequence, &committedDigest)
+	}); err != nil {
+		return err
+	}
+	if taskChainSequence != s.quorumNode.ExternalAppliedIndex() || len(committedDigest) != sha256.Size {
+		return errors.New("initial quorum checkpoint is not at the committed sequence")
+	}
 	manifest, err := json.Marshal(map[string]any{
 		"cluster_id":        s.quorumClusterID,
+		"control_source_id": s.authLocalID,
 		"records":           counts["task_records"],
 		"controls":          counts["task_controls"],
 		"requests":          counts["task_requests"],
 		"sha256":            hex.EncodeToString(digest.Sum(nil)),
 		"authority_domains": quorumRequiredAuthorityDomains,
 		"chain_sequence":    taskChainSequence,
-		"chain_digest":      hex.EncodeToString(baselineChainDigest[:]),
+		"chain_digest":      hex.EncodeToString(committedDigest),
 	})
 	if err != nil {
 		return err
@@ -393,13 +401,16 @@ func (s *Server) seedQuorumAuthorityBaseline(ctx context.Context) error {
 		s.mu.Unlock()
 		return err
 	}
-	if err := s.saveWebhookStateLocked(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	webhookRoutes := make(map[string]WebhookRoute, len(s.webhookRoutes))
-	for id, route := range s.webhookRoutes {
-		webhookRoutes[id] = route
+	var webhookRoutes map[string]WebhookRoute
+	if !s.quorumControlOnly() {
+		if err := s.saveWebhookStateLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		webhookRoutes = make(map[string]WebhookRoute, len(s.webhookRoutes))
+		for id, route := range s.webhookRoutes {
+			webhookRoutes[id] = route
+		}
 	}
 	security := s.security
 	webauthn := s.webauthnState
@@ -422,6 +433,9 @@ func (s *Server) seedQuorumAuthorityBaseline(ctx context.Context) error {
 	}
 	if err := s.commitQuorumAuthorityState("instruction_sets_default", "current", s.instructionSetSnapshot()); err != nil {
 		return err
+	}
+	if s.quorumControlOnly() {
+		return nil
 	}
 	if s.secretStore == nil || s.secretStoreErr != nil {
 		return errors.New("secret ingress authority is unavailable")

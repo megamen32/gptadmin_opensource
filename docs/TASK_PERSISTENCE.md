@@ -34,10 +34,18 @@ Already-running tasks can still report results through another Hub. Group
 status is derived from its children rather than from the survival of the group
 creator alone.
 
-## Quorum mode: undispatched shell input
+## Task storage on a cluster
 
-The shared-host behavior above describes non-quorum mode. In configured quorum
-mode, a newly accepted, never-dispatched shell task stores its executable input
+A new quorum cluster uses `owner_local`. Each admitting Hub stores its task
+input, output and content indexes on its own disk. Voters coordinate leadership,
+access, routing and reservations for explicitly keyed retries. When a result's
+owner is offline, the client can keep its handle and submit fresh work on a
+reachable executor. The executor retains its own undelivered receipts.
+See [quorum failover](QUORUM_FAILOVER.md).
+
+### Existing clusters using replicated storage
+
+In `replicated` mode, a newly accepted, never-dispatched shell task stores its executable input
 as an authenticated encrypted payload under the quorum state key. A promoted
 leader may claim it only after quorum and replica-readiness checks; dispatch is
 committed as running before delivery, and its sealed input is then removed.

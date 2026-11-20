@@ -242,7 +242,7 @@ func TestCodeModeTaskResultRequiresCompletedOwnedTask(t *testing.T) {
 	}
 	foreign := requestWithAuthClaims(r, map[string]any{"sub": "foreign", "client_id": "foreign", "scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull})
 	out, status = codeModeRun(t, s, foreign, map[string]any{"code": code})
-	if status == http.StatusOK || firstString(mapValue(out["error"]), "code") != "task_unavailable" {
+	if status == http.StatusOK || firstString(mapValue(out["error"]), "code") != "history_unavailable" {
 		t.Fatalf("foreign result: %d %v", status, out)
 	}
 }

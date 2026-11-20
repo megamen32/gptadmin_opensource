@@ -9,9 +9,10 @@ import (
 )
 
 type durableRequestDecision struct {
-	response map[string]any
-	status   int
-	replay   bool
+	response      map[string]any
+	status        int
+	replay        bool
+	referenceOnly bool
 }
 
 // Reserve before executing. The reservation and task association survive
@@ -47,6 +48,15 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 			return err
 		}
 		for _, expiredKey := range expired {
+			if t.ownerControl != nil {
+				ok, err := t.ownerRequestCanExpire(expiredKey)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					continue
+				}
+			}
 			result, err := t.tx.Exec(`DELETE FROM task_requests WHERE key=?`, expiredKey)
 			if err != nil {
 				return err
@@ -60,9 +70,10 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 			}
 		}
 		var storedFingerprint, storedOwner, jobID string
+		var storedCreated float64
 		var payload []byte
 		var status int
-		err = t.tx.QueryRow(`SELECT fingerprint,owner,job_id,response,status FROM task_requests WHERE key=?`, key).Scan(&storedFingerprint, &storedOwner, &jobID, &payload, &status)
+		err = t.tx.QueryRow(`SELECT fingerprint,owner,created,job_id,response,status FROM task_requests WHERE key=?`, key).Scan(&storedFingerprint, &storedOwner, &storedCreated, &jobID, &payload, &status)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Read pre-reservation-format idempotency records during migration.
 			var legacyBytes []byte
@@ -80,7 +91,7 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 						decision = durableRequestConflict()
 						return nil
 					}
-					decision = durableRequestDecision{p.Response, p.Status, true}
+					decision = durableRequestDecision{response: p.Response, status: p.Status, replay: true}
 					return nil
 				}
 			}
@@ -89,10 +100,17 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 				return err
 			}
 			if count >= idempotencyMaxSize {
-				decision = durableRequestDecision{map[string]any{"status": "failed", "error": "idempotency store full; unresolved requests require inspection"}, http.StatusTooManyRequests, true}
+				decision = durableRequestDecision{response: map[string]any{"status": "failed", "error": "idempotency store full; unresolved requests require inspection"}, status: http.StatusTooManyRequests, replay: true}
 				return nil
 			}
-			_, err = t.tx.Exec(`INSERT INTO task_requests(key,fingerprint,owner,created,job_id,status) VALUES(?,?,?,?,?,0)`, key, fingerprint, owner, nowFloat(), "")
+			created := nowFloat()
+			if t.ownerControl != nil {
+				decision, err = s.claimOwnerRequest(key, fingerprint, owner, created, false)
+				if err != nil || decision.replay {
+					return err
+				}
+			}
+			_, err = t.tx.Exec(`INSERT INTO task_requests(key,fingerprint,owner,created,job_id,status) VALUES(?,?,?,?,?,0)`, key, fingerprint, owner, created, "")
 			if err != nil {
 				return err
 			}
@@ -104,6 +122,12 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 		if storedFingerprint != fingerprint {
 			decision = durableRequestConflict()
 			return nil
+		}
+		if t.ownerControl != nil {
+			decision, err = s.claimOwnerRequest(key, fingerprint, storedOwner, storedCreated, true)
+			if err != nil || decision.replay {
+				return err
+			}
 		}
 		decision.replay = true
 		if payload != nil {
@@ -135,7 +159,7 @@ func (s *Server) reserveDurableTaskRequest(key, fingerprint string) (durableRequ
 }
 
 func durableRequestConflict() durableRequestDecision {
-	return durableRequestDecision{map[string]any{"detail": "idempotency_key was already used for different arguments"}, http.StatusConflict, true}
+	return durableRequestDecision{response: map[string]any{"detail": "idempotency_key was already used for different arguments"}, status: http.StatusConflict, replay: true}
 }
 
 func (t *taskTransaction) finishRequest(key string, response map[string]any, status int) error {
@@ -153,6 +177,15 @@ func (t *taskTransaction) finishRequest(key string, response map[string]any, sta
 	if affected, err := result.RowsAffected(); err != nil {
 		return err
 	} else if affected == 1 {
+		if t.ownerControl != nil {
+			var jobID string
+			if err := t.tx.QueryRow("SELECT job_id FROM task_requests WHERE key=?", key).Scan(&jobID); err != nil {
+				return err
+			}
+			if err := t.reconcileOwnerResponse(key, jobID); err != nil {
+				return err
+			}
+		}
 		return t.captureTaskRequest(key)
 	}
 	return errors.New("request reservation is missing while finalizing")
@@ -172,6 +205,9 @@ func (t *taskTransaction) linkRequestTask(key, id string) error {
 	if rows != 1 {
 		return errors.New("request reservation is missing or already belongs to another task")
 	}
+	if err := t.bindOwnerRequest(key, id); err != nil {
+		return err
+	}
 	return t.captureTaskRequest(key)
 }
 
@@ -181,6 +217,9 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 		return taskPersistenceFailure(err), http.StatusServiceUnavailable
 	}
 	if decision.replay {
+		if decision.referenceOnly {
+			return decision.response, decision.status
+		}
 		if id := firstString(decision.response, "task_id", "job_id"); id != "" && decision.status == http.StatusOK {
 			var caller *taskCaller
 			var filesystemACL *filesystemACLPolicy
@@ -221,7 +260,12 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 		return decision.response, decision.status
 	}
 	response, status := operation()
-	if taskResponseStatus(response) == http.StatusServiceUnavailable {
+	if taskResponseStatus(response) == http.StatusServiceUnavailable || s.quorumControlOnly() && status == http.StatusServiceUnavailable {
+		// A transport error can occur after the owner accepted the command.
+		// Only an explicit pre-dispatch refusal permits releasing its claim.
+		if s.quorumControlOnly() && response["executed"] != false {
+			return response, http.StatusServiceUnavailable
+		}
 		// A known pre-commit failure is retryable with the SAME key. Release
 		// only a reservation with no committed task association. If a task
 		// exists, preserve its pending association rather than cache a transient
@@ -229,6 +273,20 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 		var released bool
 		s.mu.Lock()
 		err = s.withTaskDatabase(func(t *taskTransaction) error {
+			var u *ownerRequestUpdate
+			if t.ownerControl != nil {
+				var existingID string
+				if e := t.tx.QueryRow("SELECT job_id FROM task_requests WHERE key=?", key).Scan(&existingID); e != nil {
+					return e
+				}
+				if existingID == "" {
+					var e error
+					u, e = t.ownerRequest(key, "")
+					if e != nil {
+						return e
+					}
+				}
+			}
 			result, err := t.tx.Exec(`DELETE FROM task_requests WHERE key=? AND job_id='' AND response IS NULL`, key)
 			if err != nil {
 				return err
@@ -236,6 +294,10 @@ func (s *Server) executeDurableTaskRequest(key, fingerprint string, operation fu
 			rows, err := result.RowsAffected()
 			released = rows == 1
 			if released {
+				if u != nil {
+					u.action = "release"
+					t.afterOwnerCommit = append(t.afterOwnerCommit, *u)
+				}
 				if err := t.captureQuorumRow("task_requests", key, nil, true); err != nil {
 					return err
 				}

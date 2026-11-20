@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 	"os"
@@ -86,7 +85,9 @@ func TestPendingReceiptAndSpillSurviveAllStorageCleanup(t *testing.T) {
 			}
 			past := time.Now().Add(-48 * time.Hour)
 			os.Chtimes(output, past, past)
-			s.spoolOutbox("pending", hub.TaskResult{ID: "pending", Result: map[string]any{"stdout_path": output}}, errors.New("connection refused"))
+			if err := s.storeOutbox(hub.TaskResult{ID: "pending", Result: map[string]any{"stdout_path": output}}); err != nil {
+				t.Fatal(err)
+			}
 			s.cleanupSpoolByAge()
 			if err := s.enforceStorage(nil); err != nil {
 				t.Fatal(err)

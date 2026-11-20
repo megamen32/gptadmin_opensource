@@ -154,7 +154,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if err != nil {
 			return fmt.Errorf("seal queued quorum task input: %w", err)
 		}
-		shellResult, err := boundPersistedResult(compactPersistedOutput(redactSecretValues(j.Result, j.SecretValues)))
+		shellResult, err := s.persistedExecutorReceiptLocked(j)
 		if err != nil {
 			return fmt.Errorf("bound shell result: %w", err)
 		}

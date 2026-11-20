@@ -32,6 +32,7 @@ type Peer struct {
 // Config is deliberately explicit. A public URL makes a machine reachable;
 // only a voter in this authenticated configuration can elect or lead the Hub.
 type Config struct {
+	Mode                             string        `json:"mode,omitempty"`
 	ClusterID                        string        `json:"cluster_id"`
 	NodeID                           string        `json:"node_id"`
 	BootstrapperID                   string        `json:"bootstrapper_id"`
@@ -63,7 +64,13 @@ func nodeKeyHash(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Validate checks enrollment and addresses before a Hub binds a storage directory.
+func (c Config) Validate() error { _, err := c.normalized(); return err }
+
 func (c Config) normalized() (Config, error) {
+	if c.Mode != "" && c.Mode != OwnerLocal && c.Mode != Replicated {
+		return Config{}, errors.New("quorum: unknown storage mode")
+	}
 	c.ClusterID = strings.TrimSpace(c.ClusterID)
 	c.NodeID = strings.TrimSpace(c.NodeID)
 	c.BootstrapperID = strings.TrimSpace(c.BootstrapperID)
@@ -76,6 +83,11 @@ func (c Config) normalized() (Config, error) {
 	c.StateKeyFile = strings.TrimSpace(c.StateKeyFile)
 	if c.ClusterID == "" || c.NodeID == "" || c.BootstrapperID == "" || c.DataDir == "" {
 		return Config{}, errors.New("quorum: cluster_id, node_id, bootstrapper_id and data_dir are required")
+	}
+	// Every admitted operation must still fit the bounded Raft snapshot
+	// metadata, even at the maximum supported owner/key/job lengths.
+	if c.Mode == OwnerLocal && len(c.Peers) > (maxSnapshotBytes-controlMetadataLimit)/(OperationLimitPerOwner*1280) {
+		return Config{}, errors.New("quorum: enrolled voter count exceeds control snapshot budget")
 	}
 	if c.ExternalSnapshotMaxBytes < 0 || c.ExternalSnapshotFreeReserveBytes < 0 {
 		return Config{}, errors.New("quorum: external snapshot byte limits cannot be negative")

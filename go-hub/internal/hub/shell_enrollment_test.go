@@ -46,3 +46,32 @@ func TestQueueSelfEnrollmentPinsLocallyGeneratedAgentCredential(t *testing.T) {
 		t.Fatalf("same credential status=%d body=%s", sameW.Code, sameW.Body.String())
 	}
 }
+
+func TestShellCredentialHashSurvivesPromotionAndHeartbeat(t *testing.T) {
+	s := New(Config{ConfigDir: t.TempDir(), ShellToken: strings.Repeat("g", 32)})
+	defer s.Close()
+	const name = "android"
+	token := strings.Repeat("a", 24) // older enrollment accepted 16+ bytes
+	agent := &Agent{AgentID: "shell:" + name, Kind: "virtual_shell", Status: "awaiting_approval",
+		Meta: map[string]any{"self_enrolled": true, "approved": false, shellTokenHashMetaKey: shellTokenHash(token)}}
+	s.agents[agent.AgentID] = agent // replicated registry has no raw credential
+	request := func(method, path, body, credential string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+credential)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	if w := request("GET", "/queue/android?timeout=1", "", s.cfg.ShellToken); w.Code != 401 {
+		t.Fatalf("fleet credential took over hash-bound queue: HTTP %d", w.Code)
+	}
+	if w := request("POST", "/heartbeat", `{"name":"android"}`, token); w.Code != 200 || !strings.Contains(w.Body.String(), "awaiting_approval") {
+		t.Fatalf("hash-bound pending heartbeat lost its enrollment: HTTP %d", w.Code)
+	}
+	if w := request("GET", "/queue/android?timeout=1", "", token); w.Code != 200 || !strings.Contains(w.Body.String(), "awaiting_approval") {
+		t.Fatalf("hash-bound poll did not preserve pending state: HTTP %d", w.Code)
+	}
+	if a := s.agents[agent.AgentID]; firstString(a.Meta, shellTokenHashMetaKey) != shellTokenHash(token) || truthy(a.Meta["approved"]) {
+		t.Fatal("heartbeat replaced the credential or approved itself")
+	}
+}

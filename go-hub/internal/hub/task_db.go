@@ -29,9 +29,12 @@ var errTaskConflict = errors.New("task changed in another Hub; reload and retry"
 var errTaskSchemaNeedsInit = errors.New("task database needs initialization")
 
 type taskTransaction struct {
+	ownerControl           *Server
+	afterOwnerCommit       []ownerRequestUpdate
 	tx                     *sql.Tx
 	revisions              map[string]int64
 	quorumChanges          map[string]quorum.Mutation
+	applyingQuorum         bool // this transaction projects an already committed Raft batch
 	quorumEnabled          bool
 	quorumIndex            uint64
 	quorumBatch            []quorum.Mutation
@@ -95,6 +98,9 @@ func (t *taskTransaction) captureQuorumRow(namespace, key string, value any, del
 }
 
 func (t *taskTransaction) captureTaskRequest(key string) error {
+	if !t.quorumEnabled {
+		return nil
+	}
 	var row quorumTaskRequestRow
 	err := t.tx.QueryRow(`SELECT key,fingerprint,owner,created,job_id,response,status FROM task_requests WHERE key=?`, key).Scan(
 		&row.Key, &row.Fingerprint, &row.Owner, &row.Created, &row.JobID, &row.Response, &row.Status,
@@ -257,15 +263,21 @@ func (s *Server) withTaskReadDatabase(fn func(*sql.Tx) error) error {
 }
 
 func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
-	path := s.taskDatabasePath()
+	return s.withStoreTransaction(s.taskDatabasePath(), false, fn)
+}
+func (s *Server) withStoreTransaction(path string, control bool, fn func(*taskTransaction) error) error {
 	if path == "" {
 		return nil
 	}
-	s.taskQuorumDBMu.RLock()
+	gate := &s.taskQuorumDBMu
+	if control {
+		gate = &s.quorumControlDBMu
+	}
+	gate.RLock()
 	locked := true
 	defer func() {
 		if locked {
-			s.taskQuorumDBMu.RUnlock()
+			gate.RUnlock()
 		}
 	}()
 	db, err := openTaskDatabase(path)
@@ -278,86 +290,17 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, ddl := range []string{
-		`CREATE TABLE IF NOT EXISTS task_records (
-    kind TEXT NOT NULL, key TEXT NOT NULL, updated REAL NOT NULL,
-    done REAL NOT NULL DEFAULT 0, payload BLOB NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(kind,key)) WITHOUT ROWID`,
-		`CREATE INDEX IF NOT EXISTS task_records_done ON task_records(done) WHERE done > 0`,
-		`CREATE INDEX IF NOT EXISTS task_records_updated ON task_records(kind,updated)`,
-		`CREATE INDEX IF NOT EXISTS task_records_inventory ON task_records(json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind IN ('shell','relay')`,
-		`CREATE INDEX IF NOT EXISTS task_records_status ON task_records(kind,json_extract(payload,'$.status')) WHERE kind IN ('shell','relay')`,
-		`CREATE INDEX IF NOT EXISTS task_records_server_page ON task_records(json_extract(payload,'$.server'),json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind='shell'`,
-		`CREATE TABLE IF NOT EXISTS task_controls (task_id TEXT PRIMARY KEY, server TEXT NOT NULL, next_attempt REAL NOT NULL DEFAULT 0)`,
-		`CREATE INDEX IF NOT EXISTS task_controls_server ON task_controls(server,next_attempt)`,
-		`CREATE TABLE IF NOT EXISTS task_requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, owner TEXT NOT NULL, created REAL NOT NULL, job_id TEXT NOT NULL DEFAULT '', response BLOB, status INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS task_store_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)`,
-	} {
-		if _, err = tx.Exec(ddl); err != nil {
-			return err
-		}
+	store := &taskTransaction{tx: tx, quorumEnabled: control || (s.cfg.QuorumConfigFile != "" && !s.quorumControlOnly())}
+	if !control && s.quorumControlOnly() && s.quorumNode != nil {
+		store.ownerControl = s
 	}
-	if s.cfg.QuorumConfigFile != "" {
-		for _, ddl := range []string{
-			`CREATE TABLE IF NOT EXISTS task_quorum_revisions (namespace TEXT NOT NULL, row_key TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
-			`CREATE TABLE IF NOT EXISTS task_quorum_chain (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL, digest BLOB NOT NULL)`,
-			`CREATE TABLE IF NOT EXISTS task_quorum_meta (id INTEGER PRIMARY KEY CHECK(id=1), cluster_id TEXT NOT NULL DEFAULT '', applied_index INTEGER NOT NULL DEFAULT 0, baseline_ready INTEGER NOT NULL DEFAULT 0, authority_ready INTEGER NOT NULL DEFAULT 0)`,
-			`CREATE TABLE IF NOT EXISTS task_quorum_authority (namespace TEXT NOT NULL, row_key TEXT NOT NULL, payload BLOB NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
-		} {
-			if _, err = tx.Exec(ddl); err != nil {
-				return err
-			}
-		}
-		var authorityRevisionColumn int
-		if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('task_quorum_meta') WHERE name='authority_revision'`).Scan(&authorityRevisionColumn); err != nil {
-			return err
-		}
-		if authorityRevisionColumn == 0 {
-			if _, err := tx.Exec(`ALTER TABLE task_quorum_meta ADD COLUMN authority_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return err
-			}
-		}
+	if control {
+		err = initializeControlSchema(tx)
+	} else {
+		err = s.initializeLocalTaskSchema(store)
 	}
-	if err = ensureTaskCountSchema(tx); err != nil {
+	if err != nil {
 		return err
-	}
-	var version int
-	err = tx.QueryRow(`SELECT version FROM task_store_meta WHERE id=1`).Scan(&version)
-	store := &taskTransaction{tx: tx, quorumChanges: map[string]quorum.Mutation{}, quorumEnabled: s.cfg.QuorumConfigFile != ""}
-	if errors.Is(err, sql.ErrNoRows) {
-		// The legacy snapshot is a read-only migration source/rollback backup. Import
-		// and the migration marker share one transaction, including after a crash.
-		err = withStateFileLock(s.taskStatePath(), func() error {
-			data, readErr := os.ReadFile(s.taskStatePath())
-			if errors.Is(readErr, os.ErrNotExist) {
-				return nil
-			}
-			if readErr != nil {
-				return readErr
-			}
-			var legacy persistedTaskState
-			if err := json.Unmarshal(data, &legacy); err != nil {
-				return fmt.Errorf("task snapshot migration: %w", err)
-			}
-			return store.save(legacy)
-		})
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(`INSERT INTO task_store_meta(id,version) VALUES(1,2)`); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	} else if version == 1 {
-		if _, err = tx.Exec(`ALTER TABLE task_records ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(`UPDATE task_store_meta SET version=2 WHERE id=1`); err != nil {
-			return err
-		}
-	} else if version != 2 {
-		return fmt.Errorf("unsupported task database version %d", version)
 	}
 	if err = fn(store); err != nil {
 		return err
@@ -368,7 +311,7 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 			// transaction before replaying it; never acknowledge the caller
 			// when the original local commit did not complete.
 			_ = tx.Rollback()
-			s.taskQuorumDBMu.RUnlock()
+			gate.RUnlock()
 			locked = false
 			if reconcileErr := s.applyTaskQuorumMutations(0, store.quorumIndex, store.quorumBatch); reconcileErr != nil {
 				return fmt.Errorf("task local preparation failed after quorum commit (%v); local quorum reconciliation failed: %w", err, reconcileErr)
@@ -378,7 +321,7 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 	}
 	if err := tx.Commit(); err != nil {
 		if store.quorumIndex != 0 {
-			s.taskQuorumDBMu.RUnlock()
+			gate.RUnlock()
 			locked = false
 			if reconcileErr := s.applyTaskQuorumMutations(0, store.quorumIndex, store.quorumBatch); reconcileErr != nil {
 				return fmt.Errorf("task SQLite commit failed after quorum commit (%v); local quorum reconciliation failed: %w", err, reconcileErr)
@@ -386,6 +329,7 @@ func (s *Server) withTaskDatabase(fn func(*taskTransaction) error) error {
 		}
 		return err
 	}
+	store.publishOwnerCompletions()
 	return nil
 }
 
@@ -429,23 +373,33 @@ func (t *taskTransaction) save(state persistedTaskState) error {
 		return nil
 	}
 	for key, p := range state.Relay {
-		if p.Revision == 0 {
-			if err := t.linkRequestTask(p.RequestKey, p.ID); err != nil {
-				return err
-			}
-		}
 		if err := put("relay", key, persistedTaskUpdated(p.CreatedAt, p.StartedAt, p.DoneAt), p.DoneAt, p.Revision, p); err != nil {
 			return err
 		}
-	}
-	for key, p := range state.Shell {
 		if p.Revision == 0 {
 			if err := t.linkRequestTask(p.RequestKey, p.ID); err != nil {
 				return err
 			}
 		}
+		if changed["relay:"+key] && p.DoneAt > 0 && p.RequestKey != "" {
+			if err := t.completeOwnerRequest(p.RequestKey, p.ID); err != nil {
+				return err
+			}
+		}
+	}
+	for key, p := range state.Shell {
 		if err := put("shell", key, persistedTaskUpdated(p.CreatedAt, p.StartedAt, p.DoneAt), p.DoneAt, p.Revision, p); err != nil {
 			return err
+		}
+		if p.Revision == 0 {
+			if err := t.linkRequestTask(p.RequestKey, p.ID); err != nil {
+				return err
+			}
+		}
+		if changed["shell:"+key] && p.DoneAt > 0 && p.RequestKey != "" {
+			if err := t.completeOwnerRequest(p.RequestKey, p.ID); err != nil {
+				return err
+			}
 		}
 		if changed["shell:"+key] && p.Status == "cancelled" && p.StartedAt > 0 && p.Server != "" {
 			result, err := t.tx.Exec(`INSERT OR IGNORE INTO task_controls(task_id,server) VALUES(?,?)`, p.ID, p.Server)
@@ -644,4 +598,107 @@ func (s *Server) readTaskRecordsSQLIndexed(where string, metadata bool, indexCla
 		}
 	}
 	return state, err
+}
+
+func ensureTaskQuorumSchema(tx *sql.Tx) error {
+	var err error
+	for _, ddl := range []string{
+		`CREATE TABLE IF NOT EXISTS task_quorum_revisions (namespace TEXT NOT NULL, row_key TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
+		`CREATE TABLE IF NOT EXISTS task_quorum_chain (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL, digest BLOB NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS task_quorum_meta (id INTEGER PRIMARY KEY CHECK(id=1), cluster_id TEXT NOT NULL DEFAULT '', applied_index INTEGER NOT NULL DEFAULT 0, baseline_ready INTEGER NOT NULL DEFAULT 0, authority_ready INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS task_quorum_authority (namespace TEXT NOT NULL, row_key TEXT NOT NULL, payload BLOB NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(namespace,row_key)) WITHOUT ROWID`,
+	} {
+		if _, err = tx.Exec(ddl); err != nil {
+			return err
+		}
+	}
+	var authorityRevisionColumn int
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('task_quorum_meta') WHERE name='authority_revision'`).Scan(&authorityRevisionColumn); err != nil {
+		return err
+	}
+	if authorityRevisionColumn == 0 {
+		if _, err := tx.Exec(`ALTER TABLE task_quorum_meta ADD COLUMN authority_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) initializeLocalTaskSchema(store *taskTransaction) error {
+	tx := store.tx
+	var err error
+	for _, ddl := range []string{
+		`CREATE TABLE IF NOT EXISTS task_records (
+    kind TEXT NOT NULL, key TEXT NOT NULL, updated REAL NOT NULL,
+    done REAL NOT NULL DEFAULT 0, payload BLOB NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(kind,key)) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS task_records_done ON task_records(done) WHERE done > 0`,
+		`CREATE INDEX IF NOT EXISTS task_records_updated ON task_records(kind,updated)`,
+		`CREATE INDEX IF NOT EXISTS task_records_inventory ON task_records(json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind IN ('shell','relay')`,
+		`CREATE INDEX IF NOT EXISTS task_records_status ON task_records(kind,json_extract(payload,'$.status')) WHERE kind IN ('shell','relay')`,
+		`CREATE INDEX IF NOT EXISTS task_records_server_page ON task_records(json_extract(payload,'$.server'),json_extract(payload,'$.created_at') DESC,key DESC) WHERE kind='shell'`,
+		`CREATE TABLE IF NOT EXISTS task_controls (task_id TEXT PRIMARY KEY, server TEXT NOT NULL, next_attempt REAL NOT NULL DEFAULT 0)`,
+		`CREATE INDEX IF NOT EXISTS task_controls_server ON task_controls(server,next_attempt)`,
+		`CREATE TABLE IF NOT EXISTS task_requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, owner TEXT NOT NULL, created REAL NOT NULL, job_id TEXT NOT NULL DEFAULT '', response BLOB, status INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS task_store_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)`,
+	} {
+		if _, err = tx.Exec(ddl); err != nil {
+			return err
+		}
+	}
+	if store.quorumEnabled {
+		if err := ensureTaskQuorumSchema(tx); err != nil {
+			return err
+		}
+	}
+	if err = ensureTaskCountSchema(tx); err != nil {
+		return err
+	}
+	var version int
+	err = tx.QueryRow(`SELECT version FROM task_store_meta WHERE id=1`).Scan(&version)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		// The legacy snapshot is a read-only migration source/rollback backup. Import
+		// and the migration marker share one transaction, including after a crash.
+		err = withStateFileLock(s.taskStatePath(), func() error {
+			if s.quorumControlOnly() {
+				if _, e := os.Lstat(s.taskStatePath()); errors.Is(e, os.ErrNotExist) {
+					return nil
+				} else if e != nil {
+					return e
+				}
+				return errors.New("owner_local requires a local SQLite task store; historical JSON import is disabled")
+			}
+			data, readErr := os.ReadFile(s.taskStatePath())
+			if errors.Is(readErr, os.ErrNotExist) {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+			var legacy persistedTaskState
+			if err := json.Unmarshal(data, &legacy); err != nil {
+				return fmt.Errorf("task snapshot migration: %w", err)
+			}
+			return store.save(legacy)
+		})
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO task_store_meta(id,version) VALUES(1,2)`); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if version == 1 {
+		if _, err = tx.Exec(`ALTER TABLE task_records ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE task_store_meta SET version=2 WHERE id=1`); err != nil {
+			return err
+		}
+	} else if version != 2 {
+		return fmt.Errorf("unsupported task database version %d", version)
+	}
+	return nil
 }

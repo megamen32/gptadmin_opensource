@@ -32,7 +32,7 @@ func TestContentReadAllRequiresOriginAuthorizationAndExplicitSize(t *testing.T) 
 	source := firstString(mapValue(indexed["result"]), "source")
 	denied := requestWithAuthClaims(r, map[string]any{"sub": "other", "client_id": "other", "scope": "gptadmin.read gptadmin.exec", "access_mode": accessModeFull})
 	out, status := codeModeRun(t, s, denied, map[string]any{"code": fmt.Sprintf("return await mcp.content.readAll(%q);", source)})
-	if status == http.StatusOK || firstString(mapValue(out["error"]), "code") != "content_unavailable" {
+	if status == http.StatusOK || firstString(mapValue(out["error"]), "code") != "history_unavailable" {
 		t.Fatalf("source was readable by another principal: %d %#v", status, out)
 	}
 	out, status = codeModeRun(t, s, r, map[string]any{"code": fmt.Sprintf("return await mcp.content.readAll(%q,{max_bytes:5});", source)})

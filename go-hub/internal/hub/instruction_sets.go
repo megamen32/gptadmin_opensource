@@ -193,7 +193,7 @@ func (s *Server) adminDefaultInstructionSet(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusPreconditionFailed, map[string]any{"detail": "instruction set version does not match"})
 			return
 		}
-		if err := s.commitQuorumAuthorityState("instruction_sets", "default", InstructionSet{ID: defaultInstructionSetID, Content: content, Version: instructionSetVersion(content)}); err != nil {
+		if err := s.commitQuorumAuthorityState("instruction_sets_default", "current", InstructionSet{ID: defaultInstructionSetID, Content: content, Version: instructionSetVersion(content)}); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum could not commit the new startup instructions"})
 			return
 		}

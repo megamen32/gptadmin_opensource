@@ -13,9 +13,6 @@ func (s *Server) quorumPrepareAuthMutationLocked(tokens *managedMCPTokenState, c
 	if s.quorumNode == nil || s.cfg.QuorumConfigFile == "" {
 		return nil, nil
 	}
-	if s.taskQuorumApplying.Load() {
-		return nil, errors.New("quorum authority is being materialized")
-	}
 	if err := s.authWriteErrorLocked(); err != nil {
 		return nil, err
 	}

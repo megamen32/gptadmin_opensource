@@ -69,6 +69,10 @@ func undeliveredChildSchema(j *relayJob) bool {
 }
 
 func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[string]any, bool) {
+	return s.inspectChildSchemaLocked(r, id, true)
+}
+
+func (s *Server) inspectChildSchemaLocked(r *http.Request, id string, reconcile bool) (map[string]any, bool) {
 	receipt := s.relayJobs[id]
 	if receipt == nil || (receipt.Method != "tools/list" && receipt.Method != childSchemaMethod) {
 		return nil, false
@@ -98,7 +102,7 @@ func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[strin
 	job := s.shellJobs[id]
 	jobUndelivered := job != nil && job.StartedAt == 0 && job.Status == "failed" &&
 		(firstString(mapValue(job.Error), "code") == "hub_restarted_before_dispatch" || firstString(mapValue(job.Error), "code") == "task_owner_exited_before_dispatch")
-	if undeliveredChildSchema(receipt) && (job == nil || (receipt.Method == childSchemaMethod && jobUndelivered)) {
+	if reconcile && undeliveredChildSchema(receipt) && (job == nil || (receipt.Method == childSchemaMethod && jobUndelivered)) {
 		// Only schema reads can be recovered. Arguments are rebuilt from the
 		// currently authorized descriptor, never from a persisted business call.
 		if err := s.dispatchChildSchemaLocked(r, child, receipt); err != nil {
@@ -113,7 +117,7 @@ func (s *Server) childSchemaReceiptLocked(r *http.Request, id string) (map[strin
 		return failure("child schema owner or descriptor changed")
 	}
 	response["status"] = job.Status
-	if receipt.Status != job.Status || receipt.StartedAt != job.StartedAt || receipt.DoneAt != job.DoneAt {
+	if reconcile && (receipt.Status != job.Status || receipt.StartedAt != job.StartedAt || receipt.DoneAt != job.DoneAt) {
 		change := s.beginTaskMutationLocked(id)
 		receipt.Status, receipt.StartedAt, receipt.DoneAt, receipt.Error = job.Status, job.StartedAt, job.DoneAt, job.Error
 		if err := change.commit(); err != nil {
@@ -151,8 +155,8 @@ func (s *Server) childSchemaForRequest(r *http.Request, child Agent) map[string]
 		return map[string]any{"server_id": child.AgentID, "status": "failed", "error": connectionOwnerRPCError()}
 	}
 	s.mu.Lock()
-	id := newID()
-	receipt := &relayJob{ID: id, AgentID: child.AgentID, Caller: taskCallerFromRequest(r), CreatedAt: nowFloat(), TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
+	id, createdAt := s.newOwnerTaskID(s.localReadbackOwnerIDLocked())
+	receipt := &relayJob{ID: id, AgentID: child.AgentID, Caller: taskCallerFromRequest(r), CreatedAt: createdAt, TraceID: requestTraceID(r), TraceParent: requestTraceParent(r)}
 	if err := s.dispatchChildSchemaLocked(r, child, receipt); err != nil {
 		s.mu.Unlock()
 		return taskPersistenceFailure(err)

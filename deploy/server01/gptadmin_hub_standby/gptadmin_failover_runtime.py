@@ -140,10 +140,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     proxy = start_proxy(options)
+    checks = None
     try:
         while not stop:
             if proxy.poll() is not None:
                 proxy = start_proxy(options)
+            if options.get("quorum_ingress_checks") is True and (checks is None or checks.poll() is not None):
+                checks = subprocess.Popen([sys.executable, "/usr/local/bin/gptadmin_failover_proxy.py",
+                                           "--quorum-checks", "/data/config/ingress-quorum.json"])
             if options.get("node_mode") != "writer":
                 reset_dead_frpc_cooldown()
                 result = subprocess.run(command(options), check=False)
@@ -153,6 +157,9 @@ def main() -> int:
             while not stop and time.monotonic() < deadline:
                 time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     finally:
+        if checks is not None:
+            checks.terminate()
+            checks.wait()
         try:
             stop_frpc()
         finally:
