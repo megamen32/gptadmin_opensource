@@ -1,5 +1,6 @@
 """Public-client acceptance against three real Raft voters in an isolated Linux netns."""
 import asyncio
+import csv
 from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass, field
 import base64
@@ -8,6 +9,7 @@ import http.client
 import json
 import os
 import secrets
+import socket
 import sqlite3
 import ssl
 import subprocess
@@ -516,6 +518,33 @@ def member_tls(root, nodes):
     return running(["/usr/sbin/haproxy", "-db", "-f", path], directory)
 
 
+async def missed_ingress_check(check_port, stats_port, origin, tls, token, polling):
+    def server_stats():
+        with socket.create_connection(("127.0.0.1", stats_port), timeout=2) as sock:
+            sock.sendall(b"show stat\n")
+            with sock.makefile("r") as reply:
+                return {row["# pxname"]: row for row in csv.DictReader(reply)
+                        if row["# pxname"].startswith("gptadmin_quorum_voter") and row["svname"] == "physical"}
+
+    def active():
+        ready = [row for row in server_stats().values() if row["status"] == "UP"]
+        return ready[0] if len(ready) == 1 else None
+
+    before = await eventually("one verified public leader backend", active)
+
+    def missed():
+        sample = server_stats()[before["# pxname"]]
+        return sample if int(sample["chkfail"]) > int(before["chkfail"]) else None
+
+    # Drop only probes. The real leader and its data socket continue serving.
+    with isolate_sockets([f"tcp dport {check_port}"]):
+        sample = await eventually("one failed HAProxy probe of the live leader", missed, timeout=10)
+    if not sample["status"].startswith("UP") or sample["chkdown"] != before["chkdown"]:
+        raise RuntimeError("one missed health check removed the live leader from public ingress")
+    await Command(polling).submit(origin, tls, token)
+    print("a missed leader health check preserved the public command path", flush=True)
+
+
 @contextmanager
 def public_ingress(root, nodes, origin, ca_path, cert, key):
     directory = root / "public-ingress"
@@ -524,12 +553,13 @@ def public_ingress(root, nodes, origin, ca_path, cert, key):
     pem.write_bytes(cert.read_bytes() + key.read_bytes())
     pem.chmod(0o600)
     port = urlsplit(origin).port
-    check, tunnel, reclaim = [p for p in loopback_ports(4) if p != port][:3]
+    check, tunnel, reclaim, stats = [p for p in loopback_ports(5) if p != port][:4]
     # Model the two pre-existing physical routes required by the deployed renderer.
     # The active frontend, health policy, selected backend and retry policy come from that renderer.
     base = directory / "original.cfg"
     base.write_text(f"""global
     nbthread 1
+    stats socket ipv4@127.0.0.1:{stats} level user
 defaults
     mode http
     timeout connect 3s
@@ -562,12 +592,12 @@ backend be_gptadmin_hub
         stack.enter_context(running([sys.executable, SCRIPTS / "gptadmin_failover_proxy.py", "--quorum-checks", pool,
                                      "--check-port", str(check)], directory))
         stack.enter_context(running(["/usr/sbin/haproxy", "-db", "-f", config], directory))
-        yield
+        yield check, stats
 
 
 async def run(root, nodes, start, stop, request, origin, ca_path, cert, key, token, outsider, shell, history, case):
     tls = ssl.create_default_context(cafile=str(ca_path))
-    with public_ingress(root, nodes, origin, ca_path, cert, key):
+    with public_ingress(root, nodes, origin, ca_path, cert, key) as (check, stats):
         leader = await eventually("elected writer", lambda: leader_of(nodes, request, range(3)))
         await edge_ready(origin, tls, nodes[leader]["id"])
         def admin(path, body=None):
@@ -588,6 +618,7 @@ async def run(root, nodes, start, stop, request, origin, ca_path, cert, key, tok
                 running([shell], polling.directory, polling.env, group=POLLING_GID) as process:
             await approve_polling_executor(SimpleNamespace(admin=admin), polling, process)
             if case in (None, "outages"):
+                await missed_ingress_check(check, stats, origin, tls, token, polling)
                 await outages(nodes, start, stop, request, origin, tls, token, outsider, polling)
             pending = None
             if case in (None, "fencing"):

@@ -29,6 +29,11 @@ without storing any other machine's history. Each ingress needs a direct route
 to the remaining majority. The public name also needs a working route when a
 machine hosting an ingress is the one that failed.
 
+The recovery HAProxy checks a healthy voter every two seconds. After one
+missed check it keeps the route and probes again after one second. A second
+failure withdraws the route. The Hub still verifies majority authority when
+admitting each request. The proxy never resends an ambiguous command.
+
 For planned maintenance, a service manager can drain its own voter through its
 loopback listener using that node's control credential. Draining a follower
 this way keeps the leader available for new commands on the other executors.

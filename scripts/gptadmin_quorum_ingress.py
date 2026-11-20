@@ -203,7 +203,7 @@ backend {backend_name(index)}
     http-check connect addr 127.0.0.1 port {check_port}
     http-check send meth GET uri {pool.check_path(member)} ver HTTP/1.1 hdr Host localhost
     http-check expect status 200
-    server physical {member.destination} ssl sni str({member.host}) verify required verifyhost {member.host} ca-file {pool.ca_file} alpn http/1.1 check inter 2s fall 1 rise 1 init-state fully-down
+    server physical {member.destination} ssl sni str({member.host}) verify required verifyhost {member.host} ca-file {pool.ca_file} alpn http/1.1 check inter 2s fastinter 1s fall 2 rise 1 init-state fully-down
 """
     return result
 
