@@ -66,10 +66,13 @@ def _node_release_packages(root: Path, source: str = SOURCE,
                                                 + css.rsplit('/', 1)[-1]).encode()
                 files[js] = b'js-fixture'
                 files[css] = b'css-fixture'
-                files['bin/gptadmin-node'] = b'\x7fELF-node-fixture'
+                header = b'\x7fELF'
             else:
                 cpu = 0x0100000C if arch == 'arm64' else 0x01000007
-                files['bin/gptadmin-node'] = b'\xcf\xfa\xed\xfe' + struct.pack('<I', cpu)
+                header = b'\xcf\xfa\xed\xfe' + struct.pack('<I', cpu)
+            for member in required:
+                if member.startswith('bin/'):
+                    files[member] = header + member.encode()
             manifest = {
                 'schema': 'gptadmin.node-package/v1', 'platform': platform,
                 'arch': manifest_arch_override.get((platform, arch), arch),
@@ -79,7 +82,9 @@ def _node_release_packages(root: Path, source: str = SOURCE,
             }
             with tarfile.open(path, 'w:gz') as archive:
                 for member, raw in [*files.items(), ('manifest.json', json.dumps(manifest).encode())]:
-                    info = tarfile.TarInfo(member); info.size = len(raw)
+                    info = tarfile.TarInfo(member)
+                    info.size = len(raw)
+                    info.mode = 0o755 if member.startswith('bin/') else 0o644
                     archive.addfile(info, io.BytesIO(raw))
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             path.with_name(path.name + '.sha256').write_text(digest + '  ' + path.name + '\n')
