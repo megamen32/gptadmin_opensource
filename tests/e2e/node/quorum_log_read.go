@@ -1,4 +1,5 @@
 // Read an inactive CI voter's Raft commands using the same Bolt and Raft codecs as Node.
+// The first two uint64s are the retained Bolt bounds, including non-command entries.
 // Stdout is a private pipe to quorum_storage.py. Never send its contents to a CI log.
 package main
 
@@ -33,6 +34,9 @@ func readCommands(path string, out io.Writer) error {
 		return errors.New("missing log range")
 	}
 	w := bufio.NewWriter(out)
+	if err := binary.Write(w, binary.BigEndian, [2]uint64{first, last}); err != nil {
+		return err
+	}
 	for i := first; i <= last; i++ {
 		var entry raft.Log
 		if err := store.GetLog(i, &entry); err != nil {

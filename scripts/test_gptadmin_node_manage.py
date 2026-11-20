@@ -763,5 +763,52 @@ def argparse_namespace(**kwargs):
     return argparse.Namespace(**kwargs)
 
 
+
+class RefreshInstalledHelpersTest(unittest.TestCase):
+    """The host helpers must follow the verified package, not an older copy."""
+
+    def _verified_root(self, root: Path) -> Path:
+        scripts = root / 'scripts'
+        scripts.mkdir(parents=True)
+        for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+            (scripts / name).write_text('# %s\n' % name, encoding='utf-8')
+        return root
+
+    def test_helpers_are_copied_from_the_verified_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = self._verified_root(root / 'verified')
+            destination = root / 'helpers'
+            destination.mkdir()
+            mgr.refresh_installed_helpers(verified, destination=destination)
+            for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+                self.assertEqual((destination / name).read_text(encoding='utf-8'), '# %s\n' % name)
+
+    def test_missing_helper_in_package_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = root / 'verified'
+            (verified / 'scripts').mkdir(parents=True)
+            (verified / 'scripts' / 'gptadmin_node_manage.py').write_text('# x\n', encoding='utf-8')
+            destination = root / 'helpers'
+            destination.mkdir()
+            with self.assertRaises(mgr.PreflightError):
+                mgr.refresh_installed_helpers(verified, destination=destination)
+
+    def test_symlinked_helper_source_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = self._verified_root(root / 'verified')
+            target = verified / 'scripts' / 'gptadmin_node_manage.py'
+            real = root / 'elsewhere.py'
+            real.write_text('# elsewhere\n', encoding='utf-8')
+            target.unlink()
+            target.symlink_to(real)
+            destination = root / 'helpers'
+            destination.mkdir()
+            with self.assertRaises(mgr.PreflightError):
+                mgr.refresh_installed_helpers(verified, destination=destination)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -49,6 +49,7 @@ FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
     'scripts/gptadmin_node_autoupdate.py', 'public/secret-input/index.html'))
 ADMIN_UI_INDEX = 'public/admin/index.html'
 ADMIN_UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
+HELPER_INSTALL_DIR = Path('/usr/local/lib/gptadmin')
 SHELLMCP_SERVICE = 'gptadmin-shellmcp-go.service'
 SHELLMCP_LEGACY_BINARY = Path('/opt/gptadmin/bin/shellmcp')
 SHELLMCP_ENV_FILE = Path('/etc/gptadmin/go-shellmcp.env')
@@ -753,6 +754,44 @@ def require_current_revision(layout: Layout, expected_revision: str | None) -> N
     actual = (manifest_summary(current) or {}).get('git_commit') if current else None
     if actual != expected_revision:
         raise PreflightError(f'current revision changed: expected {expected_revision}, actual {actual!r}')
+
+
+def refresh_installed_helpers(verified_root, destination=None):
+    """Keep the host's updater/control scripts on the same verified package.
+
+    The host runs its autoupdate and its documented maintenance entry point
+    from HELPER_INSTALL_DIR. A package that ships a new bridge component must
+    not leave an older helper behind: the stale helper rejects the next
+    package at preflight because it does not know the bridge file, and the
+    automatic update then fails for the whole node.
+
+    The verified package is the only accepted source, and the installed
+    helpers stay root owned and not group/other writable.
+    """
+    destination = Path(destination) if destination is not None else HELPER_INSTALL_DIR
+    for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+        source = Path(verified_root) / 'scripts' / name
+        if source.is_symlink() or not source.is_file() or source.stat().st_size > 2 * 1024**2:
+            raise PreflightError('verified Node package lacks a bounded updater helper')
+        target = destination / name
+        if target.is_symlink() or (target.exists() and (target.stat().st_uid != 0 or target.stat().st_mode & 0o022)):
+            raise PreflightError('installed Node updater helper is not protected')
+        data = source.read_text(encoding='utf-8')
+        temp = target.with_name(target.name + '.new-' + str(os.getpid()))
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, target)
+            directory = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def switch_current(layout: Layout, target: Path, *, expected_revision: str | None = None) -> None:
@@ -1772,6 +1811,7 @@ def cmd_install(args, layout: Layout, runner: Runner) -> None:
     manifest = verify_and_extract(Path(args.package), arch, staging)
     verify_elf_binary(staging / 'bin' / 'gptadmin-node')
 
+    refresh_installed_helpers(staging)
     if not confirm(args.yes, f'Install GPTAdmin node {args.name!r} (commit {manifest.get("git_commit")})? [y/N] '):
         shutil.rmtree(staging, ignore_errors=True)
         raise UsageError('install aborted; pass --yes for non-interactive installs')
@@ -2689,6 +2729,11 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     has_admin_ui = any(name.startswith('public/admin/') for name in manifest.get('files', {}))
     if has_admin_ui:
         verify_ui_payload(staging)
+
+    # The host's helpers must match the package that is about to become
+    # current. Refresh them from the verified staging before any live
+    # mutation, so a helper that cannot be written fails the update closed.
+    refresh_installed_helpers(staging)
 
     # Canonical socket-primary releases never enter the ordinary drain path.
     if name == 'primary' and SOCKET_UNIT_PATH.is_file() and socket_activation_enabled(runner, origin, token):

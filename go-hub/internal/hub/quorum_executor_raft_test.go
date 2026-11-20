@@ -3,11 +3,13 @@ package hub
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -49,8 +51,24 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	localToken := strings.Repeat("l", 32)
 	leaderHub := New(Config{ShellToken: strings.Repeat("g", 32)})
 	defer leaderHub.Close()
-	identity := map[string]string{"server_id": "haos-id", "public_key": "haos-key", "fingerprint": "haos-fp"}
-	leaderHub.agents["shell:haos"] = &Agent{AgentID: "shell:haos", Meta: map[string]any{"approved": true, "server_id": "haos-id", "public_key": "haos-key", "fingerprint": "haos-fp"}}
+	testIdentity := func(id string) map[string]string {
+		t.Helper()
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp := sha256.Sum256(pub)
+		return map[string]string{"server_id": id, "public_key": base64.RawURLEncoding.EncodeToString(pub), "fingerprint": "SHA256:" + base64.RawURLEncoding.EncodeToString(fp[:])}
+	}
+	identity, otherIdentity := testIdentity("haos-id"), testIdentity("other-id")
+	setPollIdentity := func(r *http.Request, pin map[string]string) {
+		q := r.URL.Query()
+		for k, v := range pin {
+			q.Set(k, v)
+		}
+		r.URL.RawQuery = q.Encode()
+	}
+	leaderHub.agents["shell:haos"] = &Agent{AgentID: "shell:haos", Meta: map[string]any{"approved": true, "server_id": identity["server_id"], "public_key": identity["public_key"], "fingerprint": identity["fingerprint"]}}
 	queueHandler := leaderHub.requireShell(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	var blockPoll atomic.Bool
 	pollEntered, pollRelease := make(chan struct{}), make(chan struct{})
@@ -142,8 +160,11 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	leaderHub.quorumNode = nodes[0]
 	leaderHub.quorumPrivateTLS = tlsPeers[0]
 	leaderHub.membership = &nodeMembershipState{Nodes: map[string]*nodeMember{
-		"n1": {NodeID: "n1", Name: "shell:haos", State: nodeStateReady, Capabilities: []string{"executor"}},
-		"n2": {NodeID: "n2", Name: "shell:other", State: nodeStateReady, Capabilities: []string{"executor"}},
+		"n1": {NodeID: "n1", Name: "shell:haos", State: nodeStateReady, Capabilities: []string{"executor"},
+			KeyHash: peers[1].NodeKeyHash, LocalID: identity["server_id"], LocalFingerprint: identity["fingerprint"]},
+		"archive": {NodeID: "archive", Name: "shell:haos", State: nodeStateDisabled, Capabilities: []string{"executor"}},
+		"n2": {NodeID: "n2", Name: "shell:other", State: nodeStateReady, Capabilities: []string{"executor"},
+			KeyHash: peers[2].NodeKeyHash, LocalID: otherIdentity["server_id"], LocalFingerprint: otherIdentity["fingerprint"]},
 	}}
 	deadline := time.Now().Add(15 * time.Second)
 	for !nodes[0].Status().Leader && time.Now().Before(deadline) {
@@ -172,6 +193,9 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	follower.quorumPrivateTLS = tlsPeers[1]
 	check := func(method, path, body, token, forged string) int {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if method == http.MethodGet {
+			setPollIdentity(req, identity)
+		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		if forged != "" {
 			req.Header.Set(quorumExecutorHeader, forged)
@@ -249,6 +273,7 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	setPollIdentity(req, identity)
 	req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
 	req.Header.Set(quorumExecutorHeader, "shell:haos")
 	req.Header.Set("X-GPTAdmin-Quorum-Forwarded", "n0")
@@ -309,7 +334,7 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	if other == 2 {
 		resumedName = "other"
 		resumedToken = strings.Repeat("z", 32)
-		resumedIdentity = map[string]string{"server_id": "other-id", "public_key": "other-key", "fingerprint": "other-fp"}
+		resumedIdentity = otherIdentity
 	}
 	if err := resumed.RegisterLocalExecutor(resumedName, resumedIdentity, resumedToken); err != nil {
 		t.Fatal(err)
@@ -317,6 +342,7 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 	resumed.quorumNode = nodes[other]
 	resumed.quorumPrivateTLS = tlsPeers[other]
 	after := httptest.NewRequest(http.MethodGet, "/queue/"+resumedName+"?timeout=0", nil)
+	setPollIdentity(after, resumedIdentity)
 	after.Header.Set("Authorization", "Bearer "+resumedToken)
 	afterRec := httptest.NewRecorder()
 	resumed.withQuorumAdmission(http.HandlerFunc(resumed.requireShell(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))).ServeHTTP(afterRec, after)

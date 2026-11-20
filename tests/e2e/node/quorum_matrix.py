@@ -123,7 +123,7 @@ def read_unavailable(error, *, admission_only=False):
     if children:
         return all(read_unavailable(child, admission_only=admission_only) for child in children)
     if isinstance(error, TaskCallError):
-        return not admission_only and error.code == "owner_unavailable"
+        return error.awaiting_executor if admission_only else error.code == "owner_unavailable"
     if isinstance(error, httpx.TimeoutException):
         return not admission_only
     if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 503:
@@ -423,6 +423,8 @@ async def outages(nodes, start, stop, request, origin, tls, token, outsider, pol
 async def storage_cases(nodes, start, stop, request, origin, tls, token):
     voters = [executor(n) for n in nodes]
     restored = await eventually("leader before storage probes", lambda: leader_of(nodes, request, range(3)))
+    # Establish the previous snapshot generation before recording the workload's log intervals.
+    await storage.snapshot_all(nodes, request, restored)
     content = "current" + secrets.token_hex(24)
     source = await index_content(origin, tls, token, voters[restored].target, content)
 

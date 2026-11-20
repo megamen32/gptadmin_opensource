@@ -62,24 +62,26 @@ func (s *Server) memberWriterRoute(ordinary *http.Client) (string, *http.Client)
 
 func refuseNodeRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
+func executorPollIdentity(r *http.Request) (string, string) {
+	q := r.URL.Query()
+	pub, err := base64.RawURLEncoding.DecodeString(q.Get("public_key"))
+	fp := sha256.Sum256(pub)
+	if err != nil || len(pub) != ed25519.PublicKeySize || "SHA256:"+base64.RawURLEncoding.EncodeToString(fp[:]) != q.Get("fingerprint") {
+		return "", ""
+	}
+	return q.Get("server_id"), q.Get("fingerprint")
+}
+
 type memberExecutorKey struct{}
 
 // The caller holds s.mu. A public fleet credential cannot take the place
 // of an enrolled Node's credential, even before its first authenticated poll.
 func (s *Server) remoteMemberExecutorLocked(target string) bool {
-	if s.quorumNode == nil || s.localExecutors[target] != nil {
+	if s.quorumNode == nil {
 		return false
 	}
-	s.membershipMu.Lock()
-	defer s.membershipMu.Unlock()
-	if s.membership != nil {
-		for _, member := range s.membership.Nodes {
-			if member != nil && member.Name == target && containsString(member.Capabilities, "executor") {
-				return true
-			}
-		}
-	}
-	return false
+	owner, err := s.executorEnrollmentLocked(target)
+	return err != nil || owner != nil && (s.localExecutors[target] == nil || s.localExecutorTokens[target] == "")
 }
 
 // Queue authentication runs before result/ACL handling. These POSTs have
@@ -121,6 +123,13 @@ func (s *Server) memberExecutorQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	owner, ownerErr := s.executorEnrollmentLocked(target)
+	if ownerErr != nil || owner == nil || owner.voter || owner.NodeID != member.NodeID || owner.KeyHash != member.KeyHash {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "member does not own this executor queue"})
+		return
+	}
+	member = &owner.nodeMember
 	local := s.localExecutors[target] != nil
 	agent := s.agents[target]
 	bound := member.LocalID != "" && member.LocalFingerprint != ""
@@ -135,12 +144,8 @@ func (s *Server) memberExecutorQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Method == http.MethodGet {
-		q := req.URL.Query()
-		pub, err := base64.RawURLEncoding.DecodeString(q.Get("public_key"))
-		fp := sha256.Sum256(pub)
-		if member.State == nodeStateDraining || q.Get("server_id") == "" || err != nil || len(pub) != ed25519.PublicKeySize ||
-			"SHA256:"+base64.RawURLEncoding.EncodeToString(fp[:]) != q.Get("fingerprint") ||
-			(member.LocalID != "" && q.Get("server_id") != member.LocalID) || (member.LocalFingerprint != "" && q.Get("fingerprint") != member.LocalFingerprint) {
+		id, fp := executorPollIdentity(req)
+		if member.State == nodeStateDraining || !owner.matches(id, fp) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"detail": "member poll does not match enrolled identity"})
 			return
 		}

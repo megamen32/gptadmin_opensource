@@ -248,8 +248,14 @@ class TaskCallError(RuntimeError):
     def __init__(self, detail):
         error = detail.get("error") or {}
         self.code = error.get("code")
-        status = (error.get("receipt") or {}).get("http_status")
-        super().__init__(f"MCP task call {detail.get('status')} ({self.code}, HTTP {status})")
+        receipt = error.get("receipt") or {}
+        status = receipt.get("http_status")
+        self.awaiting_executor = (
+            status == 503 and receipt.get("executed") is False and receipt.get("retryable") is True
+            and receipt.get("detail") == "enrolled executor has not advertised a bound quorum queue"
+        )
+        reason = ", awaiting executor enrollment" if self.awaiting_executor else ""
+        super().__init__(f"MCP task call {detail.get('status')} ({self.code}, HTTP {status}{reason})")
 
 
 async def task_call(session, context, code, *, target=None):

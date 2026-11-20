@@ -9,6 +9,10 @@ Each task has a storage owner. When that owner is offline, reading its output
 reports that the result is unavailable. The client can run an unrelated
 command immediately. If the owner returns with its data, the same handle can
 read the result again, subject to the original access policy and retention.
+For a known offline owner the API returns `owner_unavailable`. A legacy ID
+without a known owner returns `history_unavailable` and accepts the owner
+hint from the original receipt. Both responses tell the caller it can send a
+new command to an available executor.
 
 ## What belongs on each machine
 
@@ -24,6 +28,10 @@ same voting rights. Android, Macs and other executors can use the service
 without storing any other machine's history. Each ingress needs a direct route
 to the remaining majority. The public name also needs a working route when a
 machine hosting an ingress is the one that failed.
+
+For planned maintenance, a service manager can drain its own voter through its
+loopback listener using that node's control credential. Draining a follower
+this way keeps the leader available for new commands on the other executors.
 
 An unkeyed submission creates no cluster deduplication entry. On a connection
 loss after submission, use the original task handle to check the outcome. A
@@ -57,7 +65,8 @@ authorization and membership state. Fence pending dispatches at the previous
 writer and retain deduplication evidence for unresolved requests. An opaque
 legacy operation can remain unavailable while its owner is down.
 
-A new voter catches up from control records and a bounded control snapshot.
+A fresh cluster defaults to `owner_local`. A new voter catches up from
+control records and a bounded control snapshot.
 Adding a voter, rejoining, promoting a leader or enabling failover must work
 with an existing large local history, an empty local history or a temporarily
 offline former owner. An existing cluster that already uses replicated task

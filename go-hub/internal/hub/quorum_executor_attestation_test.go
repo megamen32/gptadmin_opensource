@@ -18,7 +18,8 @@ func TestLocalQuorumExecutorForwardRequiresItsOwnCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ path, method, body, auth, want string }{
-		{"/queue/haos?timeout=0", http.MethodGet, "", token, "shell:haos"},
+		{"/queue/haos?timeout=0&server_id=id&public_key=key&fingerprint=fp", http.MethodGet, "", token, "shell:haos"},
+		{"/queue/haos?server_id=id&public_key=key&fingerprint=other", http.MethodGet, "", token, ""},
 		{"/queue/haos/result", http.MethodPost, "{}", token, "shell:haos"},
 		{"/queue/haos/acl-check", http.MethodPost, "{}", token, "shell:haos"},
 		{"/heartbeat", http.MethodPost, `{"name":"haos"}`, token, "shell:haos"},
@@ -43,5 +44,11 @@ func TestLocalQuorumExecutorForwardRequiresItsOwnCredential(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/heartbeat", strings.NewReader(strings.Repeat("x", quorumHeartbeatMaxBytes+1)))
 	if _, err := s.localQuorumExecutorForForward(r); err == nil {
 		t.Fatal("oversized heartbeat accepted")
+	}
+	s.localExecutorTokens["shell:other"] = token
+	r = httptest.NewRequest(http.MethodPost, "/queue/other/result", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	if target, err := s.localQuorumExecutorForForward(r); err != nil || target != "" {
+		t.Fatal("standalone executor credential was attested as a voter")
 	}
 }

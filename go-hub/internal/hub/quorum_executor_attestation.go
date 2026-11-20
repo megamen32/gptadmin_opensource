@@ -70,7 +70,12 @@ func (s *Server) localQuorumExecutorForForward(r *http.Request) (string, error) 
 	}
 	s.mu.Lock()
 	token := s.localExecutorTokens[target]
-	valid := token != "" && tokenMatches(r, token)
+	pin := s.localExecutors[target]
+	valid := pin["server_id"] != "" && pin["public_key"] != "" && pin["fingerprint"] != "" && token != "" && tokenMatches(r, token)
+	if valid && r.Method == http.MethodGet {
+		q := r.URL.Query()
+		valid = q.Get("server_id") == pin["server_id"] && q.Get("fingerprint") == pin["fingerprint"] && q.Get("public_key") == pin["public_key"]
+	}
 	s.mu.Unlock()
 	if !valid {
 		return "", nil
@@ -89,27 +94,34 @@ func (s *Server) authenticatedQuorumExecutor(r *http.Request) bool {
 	if err != nil || target == "" || r.Header.Get(quorumExecutorHeader) != target {
 		return false
 	}
-	return s.voterOwnsRemoteExecutor(s.receiptPeerID(r), target)
+	return s.voterOwnsRemoteExecutor(s.receiptPeerID(r), target, r)
 }
 
-func (s *Server) voterOwnsRemoteExecutor(peerID, target string) bool {
+func (s *Server) voterOwnsRemoteExecutor(peerID, target string, r *http.Request) bool {
 	if peerID == "" {
 		return false
 	}
 	s.mu.Lock()
-	local := s.localExecutors[target] != nil
-	s.mu.Unlock()
-	if local {
+	defer s.mu.Unlock()
+	if s.localExecutors[target] != nil {
 		return false
 	}
-	s.membershipMu.Lock()
-	defer s.membershipMu.Unlock()
-	if s.membership == nil {
+	owner, err := s.executorEnrollmentLocked(target)
+	if err != nil || owner == nil || !owner.voter || owner.NodeID != peerID {
 		return false
 	}
-	member := s.membership.Nodes[peerID]
-	if member == nil || member.NodeID != peerID || member.Name != target || !containsString(member.Capabilities, "executor") {
-		return false
+	if r.Method == http.MethodGet {
+		id, fp := executorPollIdentity(r)
+		if !owner.matches(id, fp) {
+			return false
+		}
+		// A freshly enrolled voter can introduce its executor through the
+		// ordinary pending poll. Dispatch and receipts still need the pin.
+		if !owner.bound() {
+			agent := s.agents[target]
+			return agent == nil || (agent.Status == "awaiting_approval" && !truthyAny(agent.Meta["approved"]) &&
+				!conflictingExecutorPin(agent.Meta["server_id"], id) && !conflictingExecutorPin(agent.Meta["fingerprint"], fp))
+		}
 	}
-	return member.State == nodeStateReady || member.State == nodeStateDraining || member.State == nodeStateOffline
+	return owner.bound()
 }

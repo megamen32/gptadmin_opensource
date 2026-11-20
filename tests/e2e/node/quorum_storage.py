@@ -49,17 +49,23 @@ def put_instruction(request, leader, token, headers, content):
 
 async def snapshot_all(nodes, request, leader):
     checkpoint = request(leader, "/healthz")[1]["raft_applied_index"]
-    # Production Raft compacts at 1024 entries. Update a constant-size, authentic control value
-    # so every voter takes a snapshot newer than the marked results without changing Raft settings.
+    # A control PUT can append both a command and a barrier. Advance one production
+    # snapshot threshold in Raft indices so the workload fits in the 2048 trailing entries.
+    threshold = 1024
     token = nodes[leader]["env"]["CTL_TOKEN"]
     headers = instruction_headers(request, leader, token)
-    for version in range(1050):
-        headers = put_instruction(request, leader, token, headers, f"CI control checkpoint {version:04d}")
+    for version in range(threshold):
+        headers = put_instruction(request, leader, token, headers, f"CI control checkpoint {checkpoint}/{version:04d}")
+        if (version + 1) % 16 == 0 and request(leader, "/healthz")[1]["raft_applied_index"] >= checkpoint + threshold:
+            break
     deadline = time.monotonic() + 125
     while time.monotonic() < deadline:
         try:
-            if all(any(json.loads((p.parent / "meta.json").read_text())["Index"] >= checkpoint
-                       for p in snapshots(n)) for n in nodes):
+            # Raft writes meta.json before state.bin and renames the directory on completion.
+            indices = [max((json.loads((p.parent / "meta.json").read_text())["Index"]
+                            for p in snapshots(n) if not p.parent.name.endswith(".tmp")), default=0) for n in nodes]
+            if min(indices) >= checkpoint:
+                print(f"Raft snapshot indices {indices} for checkpoint {checkpoint}", flush=True)
                 return
         except FileNotFoundError:
             pass
@@ -188,6 +194,14 @@ def inspect_log(node, cipher, cluster, patterns, samples, journal):
     journal_entries = 0
     with subprocess.Popen(["/usr/local/bin/quorum-log-read", node["dir"] / "raft" / "raft.db"],
                           stdout=subprocess.PIPE) as process:
+        bounds = process.stdout.read(16)
+        if len(bounds) != 16:
+            raise RuntimeError(f"{location}: missing Bolt log bounds")
+        first, last = struct.unpack(">QQ", bounds)
+        windows = [(begin, end) for begin, end, _ in samples] + [(journal.begin, journal.end)]
+        for begin, end in windows:
+            if not first <= begin + 1 <= end <= last:
+                raise RuntimeError(f"{location}: retained Raft indices {first}..{last} do not cover ({begin}, {end}]")
         while header := process.stdout.read(16):
             index, length = struct.unpack(">QQ", header)
             if length > 16 << 20:
@@ -210,13 +224,18 @@ def inspect_log(node, cipher, cluster, patterns, samples, journal):
                 if begin < index <= end:
                     sizes[i] += length
                     counts[i] += 1
-        if process.wait() or not encrypted or not all(counts) or not journal_entries:
-            raise RuntimeError("missing authenticated Raft commands or sample intervals")
+        if process.wait():
+            raise RuntimeError(f"{location}: could not read the complete Raft log")
+    evidence = (f"{location}: retained {first}..{last}, authenticated mutations {encrypted}, "
+                f"command counts {[*counts, journal_entries]} for windows {windows}")
+    if not encrypted or not all(counts) or not journal_entries:
+        raise RuntimeError(evidence)
     growth = sum(len(c.output) for c in samples[1][2]) - sum(len(c.output) for c in samples[0][2])
     # With three 48 KiB results a single extra copy already exceeds this allowance.
     # This measures real serialized command bytes, independent of TLS/heartbeat timing and Bolt page slack.
     if sizes[1] - sizes[0] > growth // 4:
         raise RuntimeError(f"{location}: Raft grew by {sizes[1] - sizes[0]} bytes for {growth} added stdout bytes")
+    print(evidence, flush=True)
     return sizes
 
 

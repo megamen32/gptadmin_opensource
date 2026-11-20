@@ -352,6 +352,17 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		case "/healthz", "/version", "/metrics":
 			next.ServeHTTP(w, r)
 			return
+		case "/admin/api/node/drain":
+			// A native service manager drains the process behind its loopback
+			// listener. Public endpoints continue to follow the elected leader.
+			if isLoopbackServiceHost(stripPort(r.Host)) && isLoopbackServiceHost(stripPort(r.RemoteAddr)) &&
+				r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("X-GPTAdmin-Quorum-Forwarded") == "" &&
+				s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+				// This credential is configured on the process. Keep its deadline
+				// and audit checks independent of the reader's cached policy slot.
+				s.requireCtl(s.nodeDrainHTTP)(w, r)
+				return
+			}
 		}
 		if err := s.quorumNode.VerifyLeader(r.Context()); err != nil {
 			s.quorumAuthorityActiveWriter.Store(false)

@@ -136,7 +136,9 @@ func TestQuorumPendingInputReplicatesEncryptedAndSurvivesLeaderLoss(t *testing.T
 	// The writer serves bearer admission only while it holds the authority
 	// term of its current Raft term.
 	leader.quorumAuthorityTerm.Store(leader.quorumNode.CurrentTerm())
-	leader.membership = &nodeMembershipState{Nodes: map[string]*nodeMember{"n1": {NodeID: "n1", Name: "shell:haos", State: nodeStateReady, Capabilities: []string{"executor"}}}}
+	t.Run("executor enrollment aliases", func(t *testing.T) { testQuorumExecutorEnrollment(t, leader) })
+	leader.membership = &nodeMembershipState{Nodes: map[string]*nodeMember{"n1": {NodeID: "n1", Name: "shell:haos", State: nodeStateReady,
+		KeyHash: peers[1].NodeKeyHash, LocalID: "haos-id", LocalFingerprint: "haos-fp", Capabilities: []string{"executor"}}}}
 	leader.nodePeers = map[string]nodePeerRoute{"shell:haos": {URL: "http://127.0.0.1:1"}}
 	leader.agents["shell:haos"] = &Agent{AgentID: "shell:haos", Status: "online", Meta: map[string]any{"approved": true}}
 	peerReq := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", nil)
@@ -177,7 +179,8 @@ func TestQuorumPendingInputReplicatesEncryptedAndSurvivesLeaderLoss(t *testing.T
 	if !leader.forwardNodePeerCall(loopRec, loopReq, "shell:haos", nil) || loopRec.Code != http.StatusLoopDetected {
 		t.Fatal("forwarded request bypassed owner hop guard")
 	}
-	leader.membership.Nodes["n2"] = &nodeMember{NodeID: "n2", Name: "shell:haos", State: nodeStateReady, Capabilities: []string{"executor"}}
+	leader.membership.Nodes["n2"] = &nodeMember{NodeID: "n2", Name: "shell:haos", State: nodeStateReady,
+		KeyHash: peers[2].NodeKeyHash, LocalID: "other-id", LocalFingerprint: "other-fp", Capabilities: []string{"executor"}}
 	if _, duplicateErr := leader.quorumExecutorUsesLeaderQueue(context.Background(), "shell:haos"); duplicateErr == nil {
 		t.Fatal("duplicate executor ownership accepted")
 	}
