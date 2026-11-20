@@ -591,7 +591,7 @@ func TestOfflineAuthorityExportDoesNotClearPending(t *testing.T) {
 func offlineHandoffReader(t *testing.T, name, localID, nodeID, key string) *Server {
 	t.Helper()
 	cfg := FromEnv()
-	cfg.ConfigDir = t.TempDir()
+	cfg.ConfigDir = physicalTempDir(t)
 	cfg.RegistryStateFile = ""
 	cfg.StartupInstructionsFile = ""
 	cfg.InstructionSetsStateFile = ""
@@ -691,7 +691,7 @@ func TestOfflineAuthorityApplyAndRetainedReaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	envFile := filepath.Join(t.TempDir(), "node.env")
+	envFile := filepath.Join(physicalTempDir(t), "node.env")
 	if err := os.WriteFile(envFile, []byte("# preserve unrelated values\nUNRELATED=keep\nGPTADMIN_AUTH_MODE=reader\nGPTADMIN_NODE_WRITER_CONNECT_TO=192.0.2.100\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +844,7 @@ func TestOfflineAuthorityApplyAndRetainedReaders(t *testing.T) {
 			localName, localID = "server88", "server88-identity"
 		}
 		priorIdentity, _ := handoffLoadNodeIdentity(cfg, true)
-		readerEnv := filepath.Join(t.TempDir(), "node.env.json")
+		readerEnv := filepath.Join(physicalTempDir(t), "node.env.json")
 		if err := os.WriteFile(readerEnv, []byte(`{"GPTADMIN_AUTH_MODE":"reader","GPTADMIN_AUTH_SOURCE_ID":"writer-identity","UNRELATED":"retained-json"}`), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -947,7 +947,7 @@ func TestOfflineAuthorityApplyAndRetainedReaders(t *testing.T) {
 		{"shell:reader", "reader-identity", writerCfg},
 		{"shell:server88", "server88-identity", retainedReaderConfigs["shell:server88"]},
 	} {
-		reverseEnv := filepath.Join(t.TempDir(), "reverse-reader.env.json")
+		reverseEnv := filepath.Join(physicalTempDir(t), "reverse-reader.env.json")
 		if err := handoffWritePrivate(reverseEnv, map[string]string{"GPTADMIN_AUTH_MODE": reader.cfg.AuthMode, "GPTADMIN_AUTH_SOURCE_ID": reader.cfg.AuthSourceID}); err != nil {
 			t.Fatal(err)
 		}

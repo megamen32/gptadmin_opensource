@@ -34,6 +34,12 @@ python3 tools/publish_public_source.py prepare --receipt /home/admin/gptadmin/.t
 python3 tools/publish_public_source.py push --receipt /home/admin/gptadmin/.tmp/PUBLICATION/receipt.json --receipt-sha256 REVIEWED_PREPARE_DIGEST
 ```
 
+A pull request merged on GitHub skips the local pre-push hook. Fast-forward the
+canonical checkout to the merged `origin/main` and use the same prepare and push
+commands. Verify the public commit's `Source-Commit` trailer against the private
+merge. On that public commit, the `failover-e2e` job exercises a fresh MCP client
+after the former writer's membership expires and checks its return to service.
+
 Create the private receipt directory first. The publisher reads committed bytes,
 uses the existing `.gitpublic` exclusions/replacements/scanner and the installed
 authorized Git SSH connection. It appends a normal commit and refuses source or

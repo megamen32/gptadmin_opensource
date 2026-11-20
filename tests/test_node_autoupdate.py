@@ -14,9 +14,48 @@ from unittest.mock import patch
 from scripts import gptadmin_node_autoupdate as update
 from scripts import gptadmin_node_manage as manager
 from tools import build_node as node_builder
-from test_node_release_publisher import package
 
 TAG='node-v123-'+'1'*12
+
+
+def build_fixture_package(root, commit, version):
+    for name in (*node_builder.PAYLOAD, node_builder.PROXY_ROUTE_UNIT_SOURCE, node_builder.SECRET_INPUT_PAGE):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((node_builder.ROOT / name).read_bytes())
+    ui = root / 'public/admin'
+    (ui / 'assets').mkdir(parents=True)
+    (ui / 'index.html').write_text('<script src="/admin/assets/a.js"></script>')
+    (ui / 'assets/a.js').write_text('ui')
+
+    def fake_go_build(argv, **kwargs):
+        if argv[1:3] == ['version', '-m']:
+            commands = {
+                'gptadmin-node': 'go-hub/cmd/gptadmin-node',
+                'shellmcp': 'go-shellmcp/cmd/shellmcp-go',
+                'gptadmin-mcp-bridge': 'go-shellmcp/cmd/gptadmin-mcp-bridge',
+            }
+            command = commands[Path(argv[-1]).name]
+            return SimpleNamespace(returncode=0, stdout=(
+                f'fixture: go1.26\n\tpath\tgithub.com/megamen32/gptadmin/{command}\n'
+                '\tbuild\tGOOS=linux\n\tbuild\tGOARCH=amd64\n'), stderr='')
+        binary = Path(argv[argv.index('-o') + 1])
+        binary.write_bytes(b'\x7fELF' + argv[-1].encode())
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    with patch.object(node_builder, 'ROOT', root), \
+         patch.object(node_builder, 'build_admin_ui', return_value={
+             'public/admin/index.html': ui / 'index.html', 'public/admin/assets/a.js': ui / 'assets/a.js'}), \
+         patch.object(node_builder, 'probe_node_binary', return_value={
+             'git_commit': commit, 'build_version': str(version), 'handoff_capable': True}), \
+         patch.object(node_builder.subprocess, 'run', side_effect=fake_go_build) as go_build:
+        archive = node_builder.build('amd64', root / '.tmp/packages', commit, version, False)
+    return Path(archive['path']), go_build.call_args_list
+
+
+def package(root):
+    archive, _ = build_fixture_package(Path(root), '1' * 40, 123)
+    return archive
 
 
 def index(**changes):
@@ -430,50 +469,16 @@ class NodeAutoupdateTests(unittest.TestCase):
     def test_node_builder_bundles_same_commit_shellmcp_and_fixed_proxy_unit(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
-            for name in node_builder.PAYLOAD:
-                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(name)
-            unit=root/node_builder.PROXY_ROUTE_UNIT_SOURCE
-            unit.parent.mkdir(parents=True,exist_ok=True)
-            unit.write_text('[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n')
-            ui=root/'public/admin';ui.mkdir(parents=True)
-            (ui/'index.html').write_text('<script src="/admin/assets/a.js"></script>')
-            (ui/'assets').mkdir();(ui/'assets/a.js').write_text('ui')
-
-            def fake_go_build(argv, **kwargs):
-                if argv[1:3] == ['version', '-m']:
-                    command = ('github.com/megamen32/gptadmin/go-hub/cmd/gptadmin-node'
-                               if str(argv[-1]).endswith('gptadmin-node')
-                               else ('github.com/megamen32/gptadmin/go-shellmcp/cmd/gptadmin-mcp-bridge'
-                                     if str(argv[-1]).endswith('gptadmin-mcp-bridge')
-                                     else 'github.com/megamen32/gptadmin/go-shellmcp/cmd/shellmcp-go'))
-                    return SimpleNamespace(returncode=0, stdout=(
-                        'fixture: go1.26\n'
-                        f'\tpath\t{command}\n'
-                        '\tbuild\tGOOS=linux\n'
-                        '\tbuild\tGOARCH=amd64\n'), stderr='')
-                binary=Path(argv[argv.index('-o')+1])
-                binary.write_bytes(b'\x7fELF'+argv[-1].encode())
-                return SimpleNamespace(returncode=0,stdout='',stderr='')
-
-            with patch.object(node_builder,'ROOT',root), \
-                 patch.object(node_builder,'build_admin_ui',return_value={
-                     'public/admin/index.html':ui/'index.html',
-                     'public/admin/assets/a.js':ui/'assets/a.js'}), \
-                 patch.object(node_builder,'probe_node_binary',return_value={
-                     'git_commit':'a'*40,'build_version':'1033','handoff_capable':True}), \
-                 patch.object(node_builder.subprocess,'run',side_effect=fake_go_build) as go_build:
-                result=node_builder.build('amd64',root/'.tmp/packages','a'*40,1033,False)
-
-            builds=[c for c in go_build.call_args_list if c.args[0][1]=='build']
+            archive, calls = build_fixture_package(root, 'a'*40, 1033)
+            builds=[c for c in calls if c.args[0][1]=='build']
             self.assertEqual(len(builds),3)
             self.assertEqual([c.kwargs['cwd'] for c in builds],
                              [root/'go-hub',root/'go-shellmcp',root/'go-shellmcp'])
-            self.assertEqual(sum(c.args[0][1:3]==['version','-m'] for c in go_build.call_args_list),3)
-            archive=Path(result['path'])
+            self.assertEqual(sum(c.args[0][1:3]==['version','-m'] for c in calls),3)
             with tarfile.open(archive,'r:gz') as package:
                 manifest=json.load(package.extractfile('manifest.json'))
                 expected={'bin/gptadmin-node','bin/shellmcp',node_builder.BRIDGE_PACKAGE_FILE,
-                          node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH,
+                          node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH,node_builder.SECRET_INPUT_PAGE,
                           'public/admin/index.html','public/admin/assets/a.js',*node_builder.PAYLOAD}
                 self.assertEqual(set(manifest['files']),expected)
                 self.assertEqual(manifest['git_commit'],'a'*40)
@@ -486,6 +491,9 @@ class NodeAutoupdateTests(unittest.TestCase):
                 self.assertEqual(package.getmember('bin/shellmcp').mode,0o755)
                 self.assertEqual(package.getmember(node_builder.BRIDGE_PACKAGE_FILE).mode,0o755)
                 self.assertEqual(package.getmember(node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH).mode,0o644)
+                page = node_builder.SECRET_INPUT_PAGE
+                self.assertEqual(package.extractfile(page).read(), (node_builder.ROOT / page).read_bytes())
+                self.assertEqual(package.getmember(page).mode, 0o644)
 
     def test_node_builder_packages_the_built_admin_ui_under_public_admin(self):
         with tempfile.TemporaryDirectory() as d:

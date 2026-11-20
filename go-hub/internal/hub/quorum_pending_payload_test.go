@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -222,8 +223,21 @@ func TestQuorumPendingInputEncryptedAndQuarantinedAfterRestart(t *testing.T) {
 }
 
 func TestQuorumPendingInputFailsClosedWithoutCipher(t *testing.T) {
-	s := New(Config{ConfigDir: t.TempDir(), QuorumConfigFile: "configured"})
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "empty.key")
+	// With no active quorum, New would generate a usable local key for a missing file.
+	if err := os.WriteFile(keyFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{
+		ConfigDir:          dir,
+		QuorumConfigFile:   filepath.Join(dir, "quorum.json"),
+		SecretStoreKeyFile: keyFile,
+	})
 	defer s.Close()
+	if !errors.Is(s.secretStoreErr, ErrSecretStoreCorrupt) {
+		t.Fatalf("expected an empty local key to be rejected, got %v", s.secretStoreErr)
+	}
 	s.mu.Lock()
 	s.shellJobs["task"] = &shellJob{ID: "task", Server: "haos", Status: "queued", CreatedAt: nowFloat(), Arguments: map[string]any{"cmd": "must-not-write"}}
 	err := s.saveTaskStateLocked("task")

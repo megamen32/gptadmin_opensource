@@ -50,9 +50,19 @@ func TestAuthSnapshotResponseDoesNotHoldLocks(t *testing.T) {
 	s.mu.Unlock()
 }
 
+// Authority handoff checks every destination ancestor, including macOS's /var symlink.
+func physicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func authContinuityNode(t *testing.T, mode, source string) *Server {
 	t.Helper()
-	dir := t.TempDir()
+	dir := physicalTempDir(t)
 	t.Setenv("GPTADMIN_AUTH_MODE", mode)
 	t.Setenv("GPTADMIN_AUTH_SOURCE_ID", source)
 	t.Setenv("GPTADMIN_CONFIG_DIR", dir)
