@@ -34,6 +34,12 @@ missed check it keeps the route and probes again after one second. A second
 failure withdraws the route. The Hub still verifies majority authority when
 admitting each request. The proxy never resends an ambiguous command.
 
+On OpenWrt the public TLS entry point runs as `haproxy-became`. Its supervisor
+waits five seconds after an unexpected exit and keeps retrying for as long
+as the service is enabled. The usual procd retry limit can leave the public
+port closed even while all three voters are healthy. The init script belongs
+at `/etc/init.d/haproxy-became`. [OpenWrt service definition](../deploy/server01/haproxy-became)
+
 For planned maintenance, a service manager can drain its own voter through its
 loopback listener using that node's control credential. Draining a follower
 this way keeps the leader available for new commands on the other executors.
@@ -45,6 +51,9 @@ The existing key budget is 1,024 reservations per owning Hub. Completed
 reservations expire after 15 minutes. An unresolved claim keeps its slot until
 the outcome is known. The separate budgets let a surviving Hub accept new
 commands when another owner's slots are full.
+
+After a completed reservation expires, a fresh submission with the same key
+can execute again. To inspect an older operation, use its original task ID.
 
 ## Submission, execution and readback
 

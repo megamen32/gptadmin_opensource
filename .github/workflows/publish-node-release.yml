@@ -112,6 +112,12 @@ jobs:
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
         run: python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64
 
+      - name: Preflight the Darwin archives with the publisher and macOS installer
+        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 tests/e2e/node/darwin_package.py .tmp/node-packages "$SOURCE_SHA"
+
       - name: Publish immutable Node release for this public source commit
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
         env:

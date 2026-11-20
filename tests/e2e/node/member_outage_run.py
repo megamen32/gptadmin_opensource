@@ -20,8 +20,10 @@ import urllib.error
 import urllib.request
 
 import httpx
-from mcp import ClientSession
+from anyio import ClosedResourceError
+from mcp import ClientSession, McpError
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CONNECTION_CLOSED
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -181,14 +183,31 @@ async def mcp_client(origin, tls, token, target, *, request_id=None):
     headers = {"Authorization": "Bearer " + token}
     if request_id:
         headers["X-Request-ID"] = request_id
+    failed_notification = None
+
+    async def observe_notification(response):
+        nonlocal failed_notification
+        if (response.is_error and response.request.method == "POST"
+                and json.loads(response.request.content).get("method") == "notifications/initialized"):
+            failed_notification = response
+
     async with httpx.AsyncClient(verify=tls, trust_env=False, headers=headers,
                                  timeout=httpx.Timeout(60, connect=5)) as client:
+        client.event_hooks["response"].append(observe_notification)
         async with streamable_http_client(origin + "/mcp", http_client=client) as (read, write, _):
             async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=60)) as session:
-                await session.initialize()
-                found = await session.call_tool("search", {"target": target, "query": "shell_exec"})
+                try:
+                    await session.initialize()
+                    found = await session.call_tool("search", {"target": target, "query": "shell_exec"})
+                except (ClosedResourceError, McpError) as error:
+                    # The SDK logs a rejected initialized notification in its writer, then closes the channel.
+                    if failed_notification is not None and (isinstance(error, ClosedResourceError)
+                                                            or error.error.code == CONNECTION_CLOSED):
+                        failed_notification.raise_for_status()
+                    raise
                 if found.isError or not found.structuredContent:
                     raise RuntimeError("MCP search for shell_exec failed")
+                client.event_hooks["response"].remove(observe_notification)
                 yield session, found.structuredContent.get("context", "")
 
 

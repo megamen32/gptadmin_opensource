@@ -42,6 +42,7 @@ class Command:
     keyed: bool = True
     output: str = field(default="", repr=False)
     payload_tag: str = field(default_factory=lambda: secrets.token_hex(24), repr=False)
+    retry_unavailable: bool = True
 
     @property
     def marker(self):
@@ -66,11 +67,13 @@ class Command:
         deadline = time.monotonic() + 45
         while True:
             try:
-                async with fresh_client(origin, tls, token, self.executor.target, request_id=trace or self.request_id) as (session, context):
+                async with fresh_client(origin, tls, token, self.executor.target, retry=self.retry_unavailable,
+                                        request_id=trace or self.request_id) as (session, context):
                     result = await task_call(session, context, self.start_code(), target=self.executor.target)
                 break
             except Exception as error:
-                if not self.keyed or not read_unavailable(error, admission_only=True) or time.monotonic() >= deadline:
+                if (not self.retry_unavailable or not self.keyed or not read_unavailable(error, admission_only=True)
+                        or time.monotonic() >= deadline):
                     raise
                 await asyncio.sleep(.5)
         handle = result.get("taskId")
@@ -102,10 +105,11 @@ class Command:
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             try:
-                async with fresh_client(origin, tls, token, self.executor.target) as (session, context):
+                async with fresh_client(origin, tls, token, self.executor.target,
+                                        retry=self.retry_unavailable) as (session, context):
                     result = await task_call(session, context, code)
             except Exception as error:
-                if not read_unavailable(error):
+                if not self.retry_unavailable or not read_unavailable(error):
                     raise
             else:
                 if result.get("status") not in ("working", "queued", "running"):
@@ -141,19 +145,32 @@ def read_unavailable(error, *, admission_only=False):
 
 
 @asynccontextmanager
-async def fresh_client(origin, tls, token, target, **kwargs):
-    deadline = time.monotonic() + 45
+async def fresh_client(origin, tls, token, target, *, retry=True, **kwargs):
+    started = time.monotonic()
+    deadline = started + 45
+    failures = 0
     while True:
         stack = AsyncExitStack()
         try:
             client = await stack.enter_async_context(mcp_client(origin, tls, token, target, **kwargs))
         except Exception as error:
             await stack.aclose()
-            if not read_unavailable(error) or time.monotonic() >= deadline:
+            if not retry or not read_unavailable(error):
                 raise
+            failures += 1
+            if failures == 1:
+                print(f"{target}: public MCP session setup unavailable before command dispatch", flush=True)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{target}: public MCP session setup exceeded 45s "
+                                   f"({failures} failed attempts)") from error
             await asyncio.sleep(.5)
             continue
         async with stack:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{target}: public MCP session setup exceeded 45s")
+            if failures:
+                print(f"{target}: public MCP session opened after {failures} failed attempts "
+                      f"in {time.monotonic() - started:.2f}s", flush=True)
             yield client
         return
 
@@ -409,12 +426,29 @@ async def outages(nodes, start, stop, request, origin, tls, token, outsider, pol
             await retained[1].read_at(origin, tls, token)
         retained = leader, mobile
         checkpoint = request(leader, "/healthz")[1]["raft_applied_index"]
+        restarted = time.time()
         start(victim)
         await caught_up(nodes, request, victim, leader, checkpoint)
         await old.read_at(origin, tls, token)
         if victim == initial:
             await lookup_denied(origin, tls, outsider, old, "not_found")
             await old.submit(origin, tls, token)
+        target = voters[victim].target
+        identity = json.loads((nodes[victim]["dir"] / "shellmcp_identity.json").read_text())
+
+        def executor_online():
+            status, data, _ = request(leader, "/servers", token=nodes[leader]["env"]["CTL_TOKEN"])
+            if status == 503:
+                return False
+            if status != 200:
+                raise RuntimeError(f"executor registry returned HTTP {status}")
+            return any(row["server_id"] == target and row["status"] == "online" and row["last_seen"] >= restarted
+                       and row["meta"].get("approved") is True and row["meta"].get("poll_heartbeat") is True
+                       and row["meta"].get("fingerprint") == identity["fingerprint"] for row in data["servers"])
+
+        await eventually(f"a fresh approved poll for {target} after restart", executor_online, timeout=45)
+        print(f"{target}: leader observed the approved executor online {time.time() - restarted:.2f}s after restart",
+              flush=True)
         await Command(voters[victim]).submit(origin, tls, token)
         print(f"node{victim} ({'leader' if before == victim else 'follower'}) stopped and rejoined; "
               f"successor node{leader}, poller task {mobile.task_id}, original effect count=1", flush=True)
@@ -541,7 +575,7 @@ async def missed_ingress_check(check_port, stats_port, origin, tls, token, polli
         sample = await eventually("one failed HAProxy probe of the live leader", missed, timeout=10)
     if not sample["status"].startswith("UP") or sample["chkdown"] != before["chkdown"]:
         raise RuntimeError("one missed health check removed the live leader from public ingress")
-    await Command(polling).submit(origin, tls, token)
+    await Command(polling, retry_unavailable=False).submit(origin, tls, token)
     print("a missed leader health check preserved the public command path", flush=True)
 
 

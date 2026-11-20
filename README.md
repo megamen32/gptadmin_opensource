@@ -219,13 +219,11 @@ advanced panel, support) will live in a separate repo — the core stays open.
 - 💬 Telegram: [@careviolan](https://t.me/careviolan)
 - 📦 Other projects: https://bezrabotnyi.com
 
-## Failover: alive and degraded
+## Running commands during a node outage
 
-GPTAdmin can keep a fallback control plane available when the primary hub dies. A fallback node watches the public health URL, promotes only after a failure threshold, and keeps enough of the service online to inspect logs, reach surviving servers, and restore the primary.
+In a three-voter installation, any two servers can elect a leader and authorize new commands. Clients reconnect at the same MCP URL and can use reachable executors, including Android. Each task's accepting Hub stores its history and output locally. When that Hub is offline, a read returns `owner_unavailable`. The same task ID works again if its owner returns with the result.
 
-This is graceful degradation, not magic multi-master replication: recent in-memory counters or jobs running exactly on the dead node can be stale. But queues, background job metadata, large stdout/stderr spill files, shellmcp spool files, outbox responses, registry snapshots and failover logs are written to disk, so the recovery trail is not lost forever.
-
-See **[docs/FAILOVER.md](./docs/FAILOVER.md)**.
+The quorum replicates access policy, routes, and short records for keyed retries. Phones and other executors receive only their own work. See the [quorum architecture and acceptance tests](./docs/QUORUM_FAILOVER.md). For installations using a standby Hub, see the [standby recovery guide](./docs/FAILOVER.md).
 
 ## Show current public URLs
 

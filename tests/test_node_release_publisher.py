@@ -28,6 +28,7 @@ def package(root, arch='amd64', platform='linux', **changes):
                                    f'<link href="/admin/assets/{ui_css.rsplit("/", 1)[-1]}" rel="stylesheet">').encode()
     else:
         blobs['bin/gptadmin-node'] = b'\xcf\xfa\xed\xfe\x0c\x00\x00\x01' if arch == 'arm64' else b'\xcf\xfa\xed\xfe\x07\x00\x00\x01'
+    blobs['bin/gptadmin-mcp-bridge'] = blobs['bin/gptadmin-node'] + b'-bridge'
     manifest = {'schema': 'gptadmin.node-package/v1', 'platform': platform, 'arch': arch,
                 'git_commit': SOURCE, 'build_version': 123, 'source_dirty': False,
                 'files': {name: {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
@@ -37,6 +38,7 @@ def package(root, arch='amd64', platform='linux', **changes):
     with tarfile.open(path, 'w:gz') as archive:
         for name, raw in blobs.items():
             info = tarfile.TarInfo(name); info.size = len(raw)
+            info.mode = 0o755 if name.startswith('bin/') else 0o644
             archive.addfile(info, io.BytesIO(raw))
     checksum(path)
     return path
@@ -73,6 +75,8 @@ class NodeReleaseTests(unittest.TestCase):
                          '--source "$SOURCE_SHA"', 'contents: write', 'cancel-in-progress: false'):
             with self.subTest(contract=contract):self.assertIn(contract,text)
         self.assertIn('python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64',text)
+        self.assertLess(text.index('python3 tests/e2e/node/darwin_package.py'),
+                        text.index('python3 tools/publish_node_release.py'))
 
     def test_both_clean_archives_bind_same_exact_source(self):
         with tempfile.TemporaryDirectory() as d:
@@ -84,10 +88,13 @@ class NodeReleaseTests(unittest.TestCase):
             for arch in ('amd64','arm64'):
                 self.assertEqual(release.verify_package(package(d,arch,platform='darwin'),arch,SOURCE,'darwin')['platform'],'darwin')
 
-    def test_release_requires_both_new_fixed_components_in_archive_and_manifest(self):
-        for missing in ('bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service'):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as d:
-                path=package(d)
+    def test_release_requires_fixed_components_in_archive_and_manifest(self):
+        cases = [('linux', 'bin/shellmcp'), ('linux', 'systemd/gptadmin-proxy-route-relay02.service')]
+        cases += [(platform, name) for platform in ('linux', 'darwin')
+                  for name in ('bin/gptadmin-mcp-bridge', 'public/secret-input/index.html')]
+        for platform, missing in cases:
+            with self.subTest(platform=platform, missing=missing), tempfile.TemporaryDirectory() as d:
+                path=package(d, platform=platform)
                 with tarfile.open(path,'r:gz') as archive:
                     rows=[(member,archive.extractfile(member).read()) for member in archive
                           if member.name != missing]
@@ -100,7 +107,7 @@ class NodeReleaseTests(unittest.TestCase):
                 with tarfile.open(path,'w:gz') as archive:
                     for info,raw in rows:archive.addfile(info,io.BytesIO(raw))
                 checksum(path)
-                with self.assertRaises(ValueError):release.verify_package(path,'amd64',SOURCE)
+                with self.assertRaises(ValueError):release.verify_package(path,'amd64',SOURCE,platform)
 
     def test_dirty_foreign_source_wrong_arch_and_bad_version_are_rejected(self):
         cases=[{'source_dirty':True},{'source_dirty':None},{'git_commit':'2'*40},

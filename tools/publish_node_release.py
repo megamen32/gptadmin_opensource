@@ -11,13 +11,13 @@ import tarfile
 import time
 
 REPOSITORY = 'megamen32/gptadmin_opensource'
-LINUX_FILES = {'bin/gptadmin-node', 'bin/shellmcp',
-         'systemd/gptadmin-proxy-route-relay02.service', 'cli.py',
-         'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
-         'scripts/gptadmin_node_autoupdate.py'}
-DARWIN_FILES = {'bin/gptadmin-node', 'cli.py', 'scripts/gptadmin_node_manage.py',
-                'scripts/gptadmin_node_macos_manage.py', 'scripts/gptadmin_node_macos_autoupdate.py',
-                'scripts/gptadmin_node_probe.py', 'scripts/gptadmin_node_autoupdate.py'}
+EXECUTABLES = ('bin/gptadmin-node', 'bin/gptadmin-mcp-bridge')
+COMMON_FILES = {*EXECUTABLES, 'cli.py', 'public/secret-input/index.html',
+                'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
+                'scripts/gptadmin_node_autoupdate.py'}
+LINUX_FILES = COMMON_FILES | {'bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service'}
+DARWIN_FILES = COMMON_FILES | {'scripts/gptadmin_node_macos_manage.py',
+                              'scripts/gptadmin_node_macos_autoupdate.py'}
 FILES = LINUX_FILES
 UI_INDEX = 'public/admin/index.html'
 UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
@@ -82,16 +82,22 @@ def verify_package(path, arch, source, platform='linux'):
                     h.update(block)
             if manifest['files'][name] != {'sha256': h.hexdigest(), 'size': members[name].size}:
                 raise ValueError('Node payload differs from manifest')
-        binary = archive.extractfile(members['bin/gptadmin-node']).read(8)
-        if platform == 'linux':
-            if not binary.startswith(b'\x7fELF'):
-                raise ValueError('Linux Node package does not contain ELF')
-        else:
-            if binary[:4] == b'\xcf\xfa\xed\xfe': cpu = struct.unpack('<I', binary[4:8])[0]
-            elif binary[:4] == b'\xfe\xed\xfa\xcf': cpu = struct.unpack('>I', binary[4:8])[0]
-            else: raise ValueError('Darwin Node package does not contain Mach-O')
-            expected_cpu = {'arm64': 0x0100000C, 'amd64': 0x01000007}[arch]
-            if cpu != expected_cpu: raise ValueError('Darwin Node Mach-O architecture mismatch')
+        for name in EXECUTABLES:
+            member = members[name]
+            if not member.mode & 0o111:
+                raise ValueError(f'Node package file is not executable: {name}')
+            with archive.extractfile(member) as executable:
+                header = executable.read(8)
+            if platform == 'linux':
+                if not header.startswith(b'\x7fELF'):
+                    raise ValueError(f'{name} is not an ELF executable')
+            else:
+                endian = {b'\xcf\xfa\xed\xfe': '<I', b'\xfe\xed\xfa\xcf': '>I'}.get(header[:4])
+                if len(header) != 8 or endian is None:
+                    raise ValueError(f'{name} is not a Mach-O executable')
+                expected_cpu = {'arm64': 0x0100000C, 'amd64': 0x01000007}[arch]
+                if struct.unpack(endian, header[4:])[0] != expected_cpu:
+                    raise ValueError(f'{name} Mach-O architecture mismatch')
     checksum = path.with_name(path.name + '.sha256')
     if checksum.is_symlink() or checksum.stat().st_size > 256:
         raise ValueError('invalid Node checksum file')

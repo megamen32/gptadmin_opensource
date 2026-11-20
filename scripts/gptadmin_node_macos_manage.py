@@ -25,7 +25,8 @@ import urllib.error
 
 SCHEMA = 'gptadmin.node-package/v1'
 DEFAULT_LABEL = 'com.gptadmin.node'
-REQUIRED = ('bin/gptadmin-node', 'cli.py', 'scripts/gptadmin_node_manage.py',
+EXECUTABLES = ('bin/gptadmin-node', 'bin/gptadmin-mcp-bridge')
+REQUIRED = (*EXECUTABLES, 'cli.py', 'scripts/gptadmin_node_manage.py',
             'scripts/gptadmin_node_macos_manage.py', 'scripts/gptadmin_node_probe.py',
             'scripts/gptadmin_node_autoupdate.py', 'scripts/gptadmin_node_macos_autoupdate.py',
             'public/secret-input/index.html')
@@ -90,24 +91,24 @@ def validate_package(path, stage, allow_dirty=False):
         if not isinstance(files, dict) or set(files) != set(REQUIRED) or set(by_name) != set(files) | {'manifest.json'}:
             raise NodeError('package manifest file closure is invalid')
         for name, expected in files.items():
+            if name in EXECUTABLES and not by_name[name].mode & 0o111:
+                raise NodeError(f'package file is not executable: {name}')
             raw = archive.extractfile(by_name[name]).read()
             if len(raw) != expected.get('size') or hashlib.sha256(raw).hexdigest() != expected.get('sha256'):
                 raise NodeError(f'package digest mismatch: {name}')
             target = stage / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(raw)
-            target.chmod(0o755 if name == 'bin/gptadmin-node' else 0o644)
-    binary = stage / 'bin/gptadmin-node'
-    header = binary.read_bytes()[:8]
-    if header[:4] == b'\xcf\xfa\xed\xfe':
-        cpu = struct.unpack('<I', header[4:8])[0]
-    elif header[:4] == b'\xfe\xed\xfa\xcf':
-        cpu = struct.unpack('>I', header[4:8])[0]
-    else:
-        raise NodeError('Node binary is not a Mach-O executable')
+            target.chmod(0o755 if name in EXECUTABLES else 0o644)
     expected_cpu = {'arm64': 0x0100000C, 'amd64': 0x01000007}[arch_name()]
-    if cpu != expected_cpu:
-        raise NodeError('Node Mach-O CPU type does not match this Mac')
+    for name in EXECUTABLES:
+        with (stage / name).open('rb') as binary:
+            header = binary.read(8)
+        endian = {b'\xcf\xfa\xed\xfe': '<I', b'\xfe\xed\xfa\xcf': '>I'}.get(header[:4])
+        if len(header) != 8 or endian is None:
+            raise NodeError(f'{name} is not a Mach-O executable')
+        if struct.unpack(endian, header[4:])[0] != expected_cpu:
+            raise NodeError(f'{name} Mach-O CPU type does not match this Mac')
     return manifest
 
 
