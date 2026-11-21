@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,12 +14,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/shell"
 )
 
 // Deliberately fill a single shard to exercise its hard disk bound independently
@@ -32,6 +35,68 @@ func timedTestIDs(shard byte, issued time.Time, n int) []string {
 		}
 	}
 	return ids
+}
+
+func TestCallbackOnFullAcknowledgedV2Shard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses sh")
+	}
+	dir := t.TempDir()
+	cfg := Config{IdentityDir: dir, OutboxDir: filepath.Join(dir, "outbox"), SpillDir: filepath.Join(dir, "spool")}
+	now := time.Now().Truncate(time.Second)
+	const shard = 17
+	ids := timedTestIDs(shard, now, dispatchBucketSlots+2)
+	claims := make(map[string]int64)
+	for _, id := range ids[:dispatchBucketSlots] {
+		claims[fmt.Sprintf("%x", sha256.Sum256([]byte(id)))] = now.Add(dispatchWindow).Unix()
+	}
+	// Write the installed v2 layout directly, including 128 unexpired ACKs.
+	raw, err := json.Marshal(map[string]any{"clock": now.Unix(), "claims": claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(dir, "shellmcp-dispatch")
+	if err := os.Mkdir(journal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journal, fmt.Sprintf("%02x.v2", shard)), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg)
+	defer s.Close()
+	pending, fresh := ids[dispatchBucketSlots], ids[dispatchBucketSlots+1]
+	if err := s.storeOutbox(hub.TaskResult{ID: pending, Result: "awaiting owner ACK"}); err != nil {
+		t.Fatal(err)
+	}
+	outbox := filepath.Join(cfg.OutboxDir, pending+".json")
+	before, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := shell.Request{Cmd: "printf x >> counter", Cwd: dir, RunAsUser: currentTestUser()}
+	if seen, err := s.startCallbackJob(fresh, cmd, true); seen || err != nil {
+		t.Fatalf("fresh callback on an ACK-only v2 shard: duplicate=%v err=%v", seen, err)
+	}
+	s.callbackWG.Wait()
+	restarted := New(cfg)
+	defer restarted.Close()
+	for _, id := range ids[:dispatchBucketSlots] {
+		if _, err := restarted.startCallbackJob(id, cmd, false); !errors.Is(err, errStaleDispatch) {
+			t.Fatalf("compacted ACK %s: %v", id, err)
+		}
+	}
+	for _, id := range []string{pending, fresh} {
+		if seen, err := restarted.startCallbackJob(id, cmd, false); err != nil || !seen {
+			t.Fatalf("pending callback %s: duplicate=%v err=%v", id, seen, err)
+		}
+	}
+	restarted.callbackWG.Wait()
+	if b, err := os.ReadFile(filepath.Join(dir, "counter")); err != nil || string(b) != "x" {
+		t.Fatalf("physical executions: %q, %v", b, err)
+	}
+	if after, err := os.ReadFile(outbox); err != nil || !bytes.Equal(after, before) {
+		t.Fatal("pending outbox changed during admission or restart")
+	}
 }
 
 func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
@@ -51,13 +116,13 @@ func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
 			}
 		}
 	}
-	if _, err := s.updateDispatch(ids[dispatchBucketSlots], now, false); !errors.Is(err, errDispatchCapacity) {
-		t.Fatalf("full shard: %v", err)
+	if seen, err := s.updateDispatch(ids[dispatchBucketSlots], now, false); err != nil || seen {
+		t.Fatalf("ACKs blocked a new claim: duplicate=%v err=%v", seen, err)
 	}
 	if seen, err := s.updateDispatch(ids[0], now, false); err != nil || !seen {
 		t.Fatal("capacity displaced an unresolved execution")
 	}
-	if seen, err := s.updateDispatch(ids[1], now.Add(dispatchWindow-time.Second), false); err != nil || !seen {
+	if _, err := s.updateDispatch(ids[1], now.Add(dispatchWindow-time.Second), false); !errors.Is(err, errStaleDispatch) {
 		t.Fatal("premature expiry of ACK")
 	}
 	path := filepath.Join(cfg.IdentityDir, "shellmcp-dispatch", fmt.Sprintf("%02x.v2", shard))
@@ -65,7 +130,6 @@ func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
 	if err != nil || info.Size() > dispatchBucketMaxBytes {
 		t.Fatal("shard exceeded its byte budget")
 	}
-	t.Logf("%d exact entries in one shard, %d bytes", dispatchBucketSlots, info.Size())
 	if _, err := s.updateDispatch(ids[1], now.Add(dispatchWindow), false); !errors.Is(err, errStaleDispatch) {
 		t.Fatalf("expiry boundary: %v", err)
 	}
@@ -77,7 +141,7 @@ func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	pruned, err := loadDispatchBucket(path)
-	if err != nil || len(pruned.Claims) != 1 {
+	if err != nil || len(pruned.Claims) != 2 {
 		t.Fatal("idle maintenance did not reclaim confirmed IDs at expiry")
 	}
 	if seen, err := s.updateDispatch(future, now.Add(dispatchWindow), false); err != nil || seen {
@@ -89,7 +153,7 @@ func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
 	}
 	key := sha256.Sum256([]byte(ids[0]))
 	deadline, kept := b.Claims[hex.EncodeToString(key[:])]
-	if len(b.Claims) != 2 || !kept || deadline != 0 {
+	if len(b.Claims) != 3 || !kept || deadline != 0 {
 		t.Fatal("expiry deleted unknown evidence or kept terminal IDs")
 	}
 	s.Close()
@@ -102,13 +166,118 @@ func TestDispatchBudgetExpiryAndClockRollback(t *testing.T) {
 		t.Fatal("late owner ACK:", err)
 	}
 	b, err = loadDispatchBucket(path)
-	if err != nil || len(b.Claims) != 1 {
+	if err != nil || len(b.Claims) != 2 {
 		t.Fatal("late ACK did not release the unresolved slot")
 	}
 	for _, id := range []string{"ot1.YQ.t1_bad_random", "t1_0001_00000000000000000000000000000000"} {
 		if _, err := restarted.updateDispatch(id, now, false); !errors.Is(err, errInvalidDispatch) {
 			t.Fatal("malformed issuance accepted as legacy")
 		}
+	}
+}
+
+func TestFullUnresolvedShardCanCommitOutboxACK(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	const shard = 19
+	ids := timedTestIDs(shard, now, dispatchBucketSlots+2)
+	outboxID, fresh := ids[dispatchBucketSlots], ids[dispatchBucketSlots+1]
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": outboxID, "owner_id": "a"})
+	}))
+	defer owner.Close()
+	s := New(Config{Name: "test", IdentityDir: t.TempDir(), OutboxDir: t.TempDir(), HubURL: owner.URL})
+	defer s.Close()
+	if err := s.withDispatchBucket(shard, true, func(b *dispatchBucket) (bool, error) {
+		for _, id := range ids[:dispatchBucketSlots] {
+			b.Claims[fmt.Sprintf("%x", sha256.Sum256([]byte(id)))] = 0
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updateDispatch(fresh, now, false); !errors.Is(err, errDispatchCapacity) {
+		t.Fatalf("new claim displaced unresolved work: %v", err)
+	}
+	if err := s.storeOutbox(hub.TaskResult{ID: outboxID, Result: "completed before journal upgrade"}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.sendOutbox(context.Background(), outboxID) {
+		t.Fatal("owner ACK needed an exact slot")
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.OutboxDir, outboxID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged outbox retained: %v", err)
+	}
+	if _, err := s.updateDispatch(outboxID, now, false); !errors.Is(err, errStaleDispatch) {
+		t.Fatalf("outbox ACK replay: %v", err)
+	}
+	for _, id := range ids[:dispatchBucketSlots] {
+		if seen, err := s.updateDispatch(id, now, false); err != nil || !seen {
+			t.Fatalf("lost unresolved claim %s: %v", id, err)
+		}
+	}
+	if err := s.ackDispatch(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if seen, err := s.updateDispatch(fresh, now, false); err != nil || seen {
+		t.Fatalf("owner ACK failed to release capacity: duplicate=%v err=%v", seen, err)
+	}
+}
+
+func TestTimedACKWindowsDiskBoundsAndRollback(t *testing.T) {
+	// Two adjacent expiries cross an epoch using full-width timestamp fields.
+	const boundary = 2900000 * int64((dispatchWindow+dispatchClockSkew)/time.Second)
+	now := time.Unix(boundary, 0).Add(-dispatchWindow)
+	shard := byte((boundary - 1) / 15 % 256)
+	s := New(Config{IdentityDir: t.TempDir()})
+	defer s.Close()
+	if err := s.withDispatchBucket(shard, true, func(b *dispatchBucket) (bool, error) {
+		b.Clock = now.Unix()
+		b.Legacy = make(dispatchFilter, legacyFilterBytes)
+		b.V1 = make(dispatchFilter, legacyFilterBytes)
+		for _, id := range timedTestIDs(shard, now, dispatchBucketSlots) {
+			b.Claims[fmt.Sprintf("%x", sha256.Sum256([]byte(id)))] = boundary
+		}
+		// Saturate both windows to exercise collisions and maximum file size.
+		for _, expiry := range []int64{boundary - 1, boundary} {
+			b.rememberTimedACK([sha256.Size]byte{}, expiry)
+			b.ACKs[ackWindowIndex(expiry)].Bits = bytes.Repeat([]byte{0xff}, timedFilterBytes)
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.cfg.IdentityDir, "shellmcp-dispatch", fmt.Sprintf("%02x.v2", shard))
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) > dispatchBucketMaxBytes {
+		t.Fatalf("maximum shard: %d bytes, %v", len(raw), err)
+	}
+	t.Logf("128 exact ACKs, two timed windows and both legacy filters: %d bytes", len(raw))
+	var v2 struct {
+		Clock int64
+	}
+	if err := json.Unmarshal(raw, &v2); err != nil || v2.Clock != boundary {
+		t.Fatalf("rollback reader clock: %d, %v", v2.Clock, err)
+	}
+	if err := s.pruneDispatchShard(time.Unix(boundary-1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := loadDispatchBucket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Clock != boundary-1 || b.ACKs[ackWindowIndex(boundary-1)].Until != 0 || b.ACKs[ackWindowIndex(boundary)].Until != boundary {
+		t.Fatal("partial rotation lost the admission clock or a live window")
+	}
+	for _, issued := range []time.Time{now.Add(-time.Second), now} {
+		// Avoid the fixture's exact IDs. Roll the wall clock back after pruning.
+		ids := timedTestIDs(shard, issued, dispatchBucketSlots+1)
+		if _, err := s.updateDispatch(ids[dispatchBucketSlots], now, false); !errors.Is(err, errStaleDispatch) {
+			t.Fatalf("expired ID or possible filter match admitted: %v", err)
+		}
+	}
+	fresh := timedTestIDs(shard, now.Add(time.Second), 1)[0]
+	if seen, err := s.updateDispatch(fresh, now.Add(time.Second), false); err != nil || seen {
+		t.Fatalf("full filter blocked later issuance: duplicate=%v err=%v", seen, err)
 	}
 }
 
@@ -163,6 +332,91 @@ func TestLegacyDispatchJournalMigration(t *testing.T) {
 	dated := timedTestIDs(key[0], time.Now(), 1)[0]
 	if seen, err := s.updateDispatch(dated, time.Now(), false); err != nil || seen {
 		t.Fatal("full legacy filter blocked a fresh dated ID")
+	}
+}
+
+type importedV2Shard struct {
+	digests []byte
+	bits    [4096]byte
+	example string
+}
+
+// The v2 maintenance writer moved ACK digests into .ids and published their
+// already-imported offset and v1 bitmap. Build that wire format independently.
+func writeImportedV2Journal(t *testing.T, dir string, issued time.Time) []importedV2Shard {
+	t.Helper()
+	const total = 32723
+	shards := make([]importedV2Shard, 256)
+	for seq, stored := 0, 0; stored < total; seq++ {
+		id := fmt.Sprintf("ot1.YQ.t1_%d_%032x", issued.Unix(), seq)
+		key := sha256.Sum256([]byte(id))
+		shard := &shards[key[0]]
+		limit := total / len(shards)
+		if int(key[0]) < total%len(shards) {
+			limit++
+		}
+		if len(shard.digests) == limit*sha256.Size {
+			continue
+		}
+		shard.digests = append(shard.digests, key[:]...)
+		for i := 1; i < 12; i += 2 {
+			bit := binary.BigEndian.Uint16(key[i:i+2]) & 0x7fff
+			shard.bits[bit/8] |= 1 << (bit % 8)
+		}
+		shard.example = id
+		stored++
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for n, shard := range shards {
+		base := filepath.Join(dir, fmt.Sprintf("%02x", n))
+		if err := os.WriteFile(base+".ids", shard.digests, 0600); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(map[string]any{
+			"clock": issued.Unix(), "imported": len(shard.digests), "v1": shard.bits[:], "claims": map[string]int64{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(base+".v2", raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return shards
+}
+
+func TestDispatchOnPreviouslyImportedV2Journal(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	cfg := Config{IdentityDir: t.TempDir()}
+	dir := filepath.Join(cfg.IdentityDir, "shellmcp-dispatch")
+	shards := writeImportedV2Journal(t, dir, now.Add(-time.Minute))
+	s := New(cfg)
+	defer s.Close()
+	// Run a second wave through the maintenance result until one shard must compact.
+	for i, id := range timedTestIDs(17, now, dispatchBucketSlots+1) {
+		if seen, err := s.updateDispatch(id, now, false); err != nil || seen {
+			t.Fatalf("new dispatch %d after v1 import: duplicate=%v err=%v", i+1, seen, err)
+		}
+		if _, err := s.updateDispatch(id, now, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restarted := New(cfg)
+	defer restarted.Close()
+	for n, shard := range shards {
+		if _, err := restarted.updateDispatch(shard.example, now, false); !errors.Is(err, errStaleDispatch) {
+			t.Fatalf("dated ID from an already-imported .ids replayed on shard %02x: %v", n, err)
+		}
+		base := filepath.Join(dir, fmt.Sprintf("%02x", n))
+		b, err := loadDispatchBucket(base + ".v2")
+		if err != nil || b.Imported != int64(len(shard.digests)) || !bytes.Equal(b.V1, shard.bits[:]) {
+			t.Fatalf("imported offset or v1 bitmap changed on shard %02x: %v", n, err)
+		}
+		if raw, err := os.ReadFile(base + ".ids"); err != nil || !bytes.Equal(raw, shard.digests) {
+			t.Fatalf("exact .ids changed on shard %02x: %v", n, err)
+		}
 	}
 }
 

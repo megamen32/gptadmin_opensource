@@ -28,6 +28,7 @@ const (
 	dispatchClockSkew      = 5 * time.Minute
 	dispatchBucketSlots    = 128
 	legacyFilterBytes      = 4096
+	timedFilterBytes       = 1024 // two encoded windows fit alongside both legacy filters and 128 exact claims
 	dispatchBucketMaxBytes = 24 << 10
 )
 
@@ -57,16 +58,66 @@ func dispatchExpiry(id string) (int64, error) {
 	return issued + int64(dispatchWindow/time.Second), nil
 }
 
-// One shard holds at most 128 exact pending/unexpired claims. A zero deadline
-// means unresolved and cannot be evicted. Opaque legacy IDs cannot prove age:
-// preserve their acknowledged membership in a fixed, non-rotating Bloom filter.
-// A possible collision gives an explicit refusal, never a successful dispatch.
+// Zero deadlines stay exact until the owner ACKs. Under pressure, only positive
+// deadlines move into bounded Bloom filters. A possible match refuses execution.
+// Opaque legacy ACKs cannot prove age and keep their non-rotating filter.
 type dispatchBucket struct {
-	Clock    int64            `json:"clock"`
-	Imported int64            `json:"imported,omitempty"`
-	Legacy   dispatchFilter   `json:"legacy,omitempty"`
-	V1       dispatchFilter   `json:"v1,omitempty"`
-	Claims   map[string]int64 `json:"claims"`
+	Clock    int64               `json:"clock"`
+	Imported int64               `json:"imported,omitempty"`
+	Legacy   dispatchFilter      `json:"legacy,omitempty"`
+	V1       dispatchFilter      `json:"v1,omitempty"`
+	Claims   map[string]int64    `json:"claims"`
+	ACKs     []dispatchACKWindow `json:"ack_windows,omitempty"`
+}
+
+type dispatchACKWindow struct {
+	Until int64          `json:"until"` // largest immutable expiry inserted
+	Bits  dispatchFilter `json:"bits,omitempty"`
+}
+
+// An old v2 writer drops unknown fields. Its clock must fence every compacted
+// ACK even after that rewrite. Current readers can use the actual admission
+// clock while the windows are present. Both clocks and all claims commit together.
+type dispatchBucketFile struct {
+	dispatchBucket
+	AdmissionClock *int64 `json:"admission_clock,omitempty"`
+}
+
+// At most two adjacent epochs can contain normally issued, live IDs. Even an
+// outlying future ACK cannot displace live bits: only expire clears a window.
+func ackWindowIndex(expiry int64) int {
+	const epoch = int64((dispatchWindow + dispatchClockSkew) / time.Second)
+	return int((expiry / epoch) % 2)
+}
+
+func (b *dispatchBucket) rememberTimedACK(key [sha256.Size]byte, expiry int64) {
+	if len(b.ACKs) == 0 {
+		b.ACKs = make([]dispatchACKWindow, 2)
+	}
+	w := &b.ACKs[ackWindowIndex(expiry)]
+	if len(w.Bits) == 0 {
+		w.Bits = make(dispatchFilter, timedFilterBytes)
+	}
+	w.Bits.match(key, true)
+	w.Until = max(w.Until, expiry)
+}
+
+func (b *dispatchBucket) compactACKs() error {
+	for fingerprint, expiry := range b.Claims {
+		if expiry == 0 {
+			continue
+		}
+		var key [sha256.Size]byte
+		if expiry < 0 || len(fingerprint) != hex.EncodedLen(len(key)) {
+			return errors.New("invalid acknowledged dispatch claim")
+		}
+		if _, err := hex.Decode(key[:], []byte(fingerprint)); err != nil {
+			return err
+		}
+		b.rememberTimedACK(key, expiry)
+		delete(b.Claims, fingerprint)
+	}
+	return nil
 }
 
 type dispatchFilter []byte
@@ -79,8 +130,8 @@ func (filter *dispatchFilter) match(key [32]byte, add bool) bool {
 		*filter = make([]byte, legacyFilterBytes)
 	}
 	match := true
-	for i := 1; i <= 11; i += 2 { // independent 15-bit locations in this shard
-		bit := int(binary.BigEndian.Uint16(key[i:i+2])) % (legacyFilterBytes * 8)
+	for i := 1; i <= 11; i += 2 { // six locations independent of the shard byte
+		bit := int(binary.BigEndian.Uint16(key[i:i+2])) % (len(*filter) * 8)
 		mask := byte(1 << (bit % 8))
 		if (*filter)[bit/8]&mask == 0 {
 			match = false
@@ -93,7 +144,12 @@ func (filter *dispatchFilter) match(key [32]byte, add bool) bool {
 }
 
 func (b *dispatchBucket) save(path string) error {
-	raw, err := json.Marshal(b)
+	disk := dispatchBucketFile{dispatchBucket: *b}
+	if len(b.ACKs) != 0 {
+		disk.AdmissionClock = &b.Clock
+		disk.Clock = max(b.Clock, b.ACKs[0].Until, b.ACKs[1].Until)
+	}
+	raw, err := json.Marshal(&disk)
 	if err != nil {
 		return err
 	}
@@ -103,8 +159,31 @@ func (b *dispatchBucket) save(path string) error {
 	return writeOutboxFile(path, raw)
 }
 
+func (d *dispatchBucketFile) restoreAdmissionClock() bool {
+	if len(d.ACKs) == 0 {
+		return d.AdmissionClock == nil
+	}
+	if len(d.ACKs) != 2 || d.AdmissionClock == nil || *d.AdmissionClock < 0 {
+		return false
+	}
+	for i, w := range d.ACKs {
+		if w.Until == 0 && len(w.Bits) == 0 {
+			continue
+		}
+		if w.Until <= *d.AdmissionClock || ackWindowIndex(w.Until) != i || len(w.Bits) != timedFilterBytes {
+			return false
+		}
+	}
+	if d.Clock != max(*d.AdmissionClock, d.ACKs[0].Until, d.ACKs[1].Until) {
+		return false
+	}
+	d.Clock = *d.AdmissionClock
+	return true
+}
+
 func loadDispatchBucket(path string) (*dispatchBucket, error) {
-	b := new(dispatchBucket)
+	var disk dispatchBucketFile
+	b := &disk.dispatchBucket
 	f, err := os.Open(path)
 	if err == nil {
 		defer f.Close()
@@ -112,7 +191,7 @@ func loadDispatchBucket(path string) (*dispatchBucket, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(raw) > dispatchBucketMaxBytes || json.Unmarshal(raw, b) != nil || b.Claims == nil || b.Clock < 0 ||
+		if len(raw) > dispatchBucketMaxBytes || json.Unmarshal(raw, &disk) != nil || b.Claims == nil || b.Clock < 0 || !disk.restoreAdmissionClock() ||
 			len(b.Claims) > dispatchBucketSlots || b.Imported < 0 || b.Imported%sha256.Size != 0 ||
 			(len(b.Legacy) != 0 && len(b.Legacy) != legacyFilterBytes) || (len(b.V1) != 0 && len(b.V1) != legacyFilterBytes) || (b.Imported > 0 && len(b.V1) == 0) {
 			return nil, errors.New("invalid executor receipt bucket")
@@ -212,15 +291,24 @@ func (s *Server) withDispatchBucket(shard byte, create bool, change func(*dispat
 func (b *dispatchBucket) expire(clock int64) bool {
 	before := len(b.Claims)
 	for key, deadline := range b.Claims {
-		if deadline != 0 && deadline <= clock {
+		if deadline > 0 && deadline <= clock {
 			delete(b.Claims, key)
 		}
 	}
-	if before == len(b.Claims) {
-		return false
+	dirty := before != len(b.Claims)
+	for i, w := range b.ACKs {
+		if w.Until != 0 && w.Until <= clock {
+			b.ACKs[i] = dispatchACKWindow{}
+			dirty = true
+		}
 	}
-	b.Clock = max(clock, b.Clock)
-	return true
+	if len(b.ACKs) != 0 && b.ACKs[0].Until == 0 && b.ACKs[1].Until == 0 {
+		b.ACKs = nil
+	}
+	if dirty {
+		b.Clock = max(clock, b.Clock)
+	}
+	return dirty
 }
 
 // One existing shard each 15 seconds bounds idle maintenance to one small read
@@ -268,6 +356,13 @@ func (s *Server) updateDispatch(id string, now time.Time, ack bool) (bool, error
 					return false, err
 				}
 			}
+			if expiry != 0 && len(b.ACKs) != 0 {
+				w := &b.ACKs[ackWindowIndex(expiry)]
+				// Even a saturated filter cannot refuse an issuance later than its newest ACK.
+				if expiry <= w.Until && w.Bits.match(key, false) {
+					return false, errStaleDispatch
+				}
+			}
 		}
 		b.expire(clock)
 		// Persist the high-water clock in the same atomic replacement as any
@@ -279,14 +374,23 @@ func (s *Server) updateDispatch(id string, now time.Time, ack bool) (bool, error
 			delete(b.Claims, fingerprint)
 		case ack && expiry <= clock:
 			delete(b.Claims, fingerprint)
+		case ack:
+			if _, exists := b.Claims[fingerprint]; exists || len(b.Claims) < dispatchBucketSlots {
+				b.Claims[fingerprint] = expiry
+			} else {
+				// An outbox predating the journal can ACK without an exact slot.
+				b.rememberTimedACK(key, expiry)
+			}
 		default:
-			if _, exists := b.Claims[fingerprint]; !exists && len(b.Claims) >= dispatchBucketSlots {
-				return false, errDispatchCapacity
+			if len(b.Claims) >= dispatchBucketSlots {
+				if err := b.compactACKs(); err != nil {
+					return false, err
+				}
+				if len(b.Claims) >= dispatchBucketSlots {
+					return false, errDispatchCapacity
+				}
 			}
 			b.Claims[fingerprint] = 0
-			if ack {
-				b.Claims[fingerprint] = expiry
-			}
 		}
 		return true, nil
 	})
