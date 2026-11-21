@@ -223,6 +223,71 @@ func TestFullUnresolvedShardCanCommitOutboxACK(t *testing.T) {
 	}
 }
 
+func TestPolledDispatchCapacityReportsDurableRefusal(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	const shard = 23
+	ids := timedTestIDs(shard, now, dispatchBucketSlots+1)
+	refused := ids[dispatchBucketSlots]
+	delivered := make(chan map[string]any, 1)
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			ID    string         `json:"id"`
+			Error map[string]any `json:"error"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.ID != refused {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		delivered <- payload.Error
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": refused, "owner_id": "a"})
+	}))
+	defer owner.Close()
+	cfg := Config{Name: "test", IdentityDir: t.TempDir(), OutboxDir: t.TempDir(), HubURL: owner.URL}
+	s := New(cfg)
+	if err := s.withDispatchBucket(shard, true, func(b *dispatchBucket) (bool, error) {
+		for _, id := range ids[:dispatchBucketSlots] {
+			b.Claims[fmt.Sprintf("%x", sha256.Sum256([]byte(id)))] = 0
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var starts atomic.Int32
+	run := func(context.Context) { starts.Add(1) }
+	if _, err := s.startBoundCallback(refused, true, run); !errors.Is(err, errDispatchCapacity) {
+		t.Fatalf("unresolved dispatch did not refuse capacity: %v", err)
+	}
+	s.Close()
+
+	restarted := New(cfg)
+	defer restarted.Close()
+	if seen, err := restarted.startBoundCallback(refused, true, run); err != nil || !seen {
+		t.Fatalf("pending refusal did not fence replay after restart: seen=%v err=%v", seen, err)
+	}
+	if !restarted.sendOutbox(context.Background(), refused) {
+		t.Fatal("owner acknowledgement of refusal failed")
+	}
+	select {
+	case failure := <-delivered:
+		if failure["code"] != "executor_dispatch_capacity" || failure["executed"] != false {
+			t.Fatalf("unexpected refusal: %v", failure)
+		}
+	default:
+		t.Fatal("owner did not receive refusal")
+	}
+	// Later capacity must not make the original request executable.
+	if err := restarted.ackDispatch(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.startBoundCallback(refused, true, run); !errors.Is(err, errStaleDispatch) {
+		t.Fatalf("acknowledged refusal did not fence replay: %v", err)
+	}
+	restarted.callbackWG.Wait()
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("refused task started %d times", got)
+	}
+}
+
 func TestTimedACKWindowsDiskBoundsAndRollback(t *testing.T) {
 	// Two adjacent expiries cross an epoch using full-width timestamp fields.
 	const boundary = 2900000 * int64((dispatchWindow+dispatchClockSkew)/time.Second)

@@ -109,3 +109,7 @@ an opt-in replica with an explicit destination, quota and retention policy.
   bytes sent and stored when a voter joins and rejoins, then repeat after adding
   a large result. Control traffic and snapshots should scale with bounded
   metadata. Inspect peer state and the mobile executor for leaked payloads.
+- Fill a polling executor's dispatch journal with unresolved claims. Submit
+  through public MCP and read the same job ID. Expect a terminal
+  `executor_dispatch_capacity` response with `executed: false`. Retry with the
+  same idempotency key and verify the original handle and absence of side effects.

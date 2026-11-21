@@ -250,6 +250,7 @@ type TaskResult struct {
 	TraceID     string `json:"trace_id,omitempty"`
 	TraceParent string `json:"traceparent,omitempty"`
 	Result      any    `json:"result"`
+	Error       any    `json:"error,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, beat Beat) (*http.Response, []byte, error) {

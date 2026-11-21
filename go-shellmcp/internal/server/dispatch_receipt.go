@@ -320,6 +320,10 @@ func (s *Server) pruneDispatchShard(now time.Time) error {
 }
 
 func (s *Server) updateDispatch(id string, now time.Time, ack bool) (bool, error) {
+	return s.updateDispatchWithRefusal(id, now, ack, nil)
+}
+
+func (s *Server) updateDispatchWithRefusal(id string, now time.Time, ack bool, recordRefusal func() error) (bool, error) {
 	if !safeReceiptID(id) {
 		return false, errors.New("invalid executor job ID")
 	}
@@ -387,6 +391,14 @@ func (s *Server) updateDispatch(id string, now time.Time, ack bool) (bool, error
 					return false, err
 				}
 				if len(b.Claims) >= dispatchBucketSlots {
+					// Polling already gave the task a running state at its owner.
+					// Publish evidence of refusal under the claims lock, so a
+					// concurrent retry cannot start work before the receipt exists.
+					if recordRefusal != nil {
+						if err := recordRefusal(); err != nil {
+							return false, err
+						}
+					}
 					return false, errDispatchCapacity
 				}
 			}
@@ -422,7 +434,13 @@ func (s *Server) startBoundCallback(id string, acceptedPoll bool, run func(conte
 	if s.callbackClosed || (s.queueDraining && !acceptedPoll) {
 		return false, errors.New("executor is stopping")
 	}
-	seen, err := s.updateDispatch(id, time.Now(), false)
+	var recordRefusal func() error
+	if acceptedPoll && s.hub != nil {
+		recordRefusal = func() error {
+			return s.persistDispatchRefusal(id)
+		}
+	}
+	seen, err := s.updateDispatchWithRefusal(id, time.Now(), false, recordRefusal)
 	if err != nil || seen {
 		return seen, err
 	}

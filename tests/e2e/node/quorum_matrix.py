@@ -629,13 +629,54 @@ backend be_gptadmin_hub
         yield check, stats
 
 
+async def verify_dispatch_capacity(root, shell, origin, tls, token, polling_env, admin):
+    executor = Executor(root, "full-executor")
+    executor.env.update({key: polling_env[key] for key in (
+        "SSL_CERT_FILE", "HUB_URL", "SHELLMCP_TOKEN", "SHELLMCP_MODE", "SHELLMCP_QUEUE",
+        "SHELLMCP_HEARTBEAT", "SHELLMCP_SELF_REPAIR_DISABLE", "QUEUE_LONG_POLL_TIMEOUT_S")})
+    journal = executor.directory / "shellmcp-dispatch"
+    journal.mkdir(mode=0o700)
+    # The Hub assigns the task ID. Fill every shard with unresolved claims so
+    # the real executor encounters the capacity limit regardless of that ID.
+    for shard in range(256):
+        claims = {f"{shard:02x}{slot:062x}": 0 for slot in range(128)}
+        (journal / f"{shard:02x}.v2").write_text(json.dumps({"clock": int(time.time()), "claims": claims}))
+    with running([shell], executor.directory, executor.env, group=POLLING_GID) as process:
+        await approve_polling_executor(SimpleNamespace(admin=admin), executor, process)
+        command = Command(executor)
+        await command.admit(origin, tls, token)
+        async with fresh_client(origin, tls, token, executor.target) as (session, context):
+            deadline = time.monotonic() + 12
+            while True:
+                reply = await session.call_tool("job", {
+                    "context": context, "id": command.task_id})
+                result = reply.structuredContent or {}
+                if result.get("status") == "failed":
+                    failure = result.get("error") or {}
+                    if failure.get("code") != "executor_dispatch_capacity" or failure.get("executed") is not False:
+                        raise RuntimeError(f"owner returned a different terminal failure: {failure!r}")
+                    break
+                if result.get("status") not in ("queued", "running") or time.monotonic() >= deadline:
+                    raise RuntimeError("owner never recorded a terminal dispatch capacity refusal")
+                await asyncio.sleep(.25)
+        await command.admit(origin, tls, token)
+        if command.marker.exists():
+            raise RuntimeError("dispatch capacity refusal permitted a command side effect")
+    print("full dispatch journal: owner recorded a pre-start refusal and the keyed replay had no effect", flush=True)
+
+
 async def run(root, nodes, start, stop, request, origin, ca_path, cert, key, token, outsider, shell, history, case):
     tls = ssl.create_default_context(cafile=str(ca_path))
     with public_ingress(root, nodes, origin, ca_path, cert, key) as (check, stats):
         leader = await eventually("elected writer", lambda: leader_of(nodes, request, range(3)))
         await edge_ready(origin, tls, nodes[leader]["id"])
         def admin(path, body=None):
-            status, value, _ = request(leader, path, body, nodes[leader]["env"]["CTL_TOKEN"])
+            current = leader_of(nodes, request, range(3))
+            if current is None:
+                raise ConnectionError("quorum leadership unavailable for executor approval")
+            status, value, _ = request(current, path, body, nodes[current]["env"]["CTL_TOKEN"])
+            if status == 503 and body is None:
+                raise ConnectionError(f"{path}: waiting for the current Hub to serve admin reads")
             if status != 200:
                 raise RuntimeError(f"{path} HTTP {status}")
             return value
@@ -659,6 +700,9 @@ async def run(root, nodes, start, stop, request, origin, ca_path, cert, key, tok
                 pending = await partitions(nodes, request, origin, tls, token, [executor(n) for n in nodes], polling)
             if case in (None, "storage"):
                 storage_owner, content, samples, journal = await storage_cases(nodes, start, stop, request, origin, tls, token)
+            if case in (None, "dispatch-capacity"):
+                leader = await eventually("leader before dispatch capacity test", lambda: leader_of(nodes, request, range(3)))
+                await verify_dispatch_capacity(root, shell, origin, tls, token, polling.env, admin)
             if process.poll() is not None:
                 raise RuntimeError("standalone polling process exited during failover")
         for i in range(len(nodes)):

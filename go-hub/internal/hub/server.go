@@ -11316,7 +11316,7 @@ func appsSDKTools() []map[string]any {
 		{
 			"name":            "job",
 			"title":           "Job",
-			"description":     "Read the state/result of a long call that returned a job_id (owner_target = its target). Use it instead of repeating a call that may still be running.",
+			"description":     "Read the state or result of a long call without repeating it. A scoped job ID identifies its storage owner. For a legacy job, use the owner hint returned with the receipt.",
 			"inputSchema":     map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}, "owner_target": map[string]any{"type": "string"}, "owner_endpoint": map[string]any{"type": "string"}, "owner_id": map[string]any{"type": "string"}, "ack": map[string]any{"type": "boolean"}, "detail": toolOutputDetailSchema()}, "required": []string{"id"}, "additionalProperties": false},
 			"outputSchema":    map[string]any{"type": "object", "additionalProperties": true},
 			"annotations":     map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},

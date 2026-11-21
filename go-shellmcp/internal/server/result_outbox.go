@@ -40,6 +40,14 @@ func (s *Server) storeOutbox(payload hub.TaskResult) error {
 	return entry.save(filepath.Join(s.cfg.OutboxDir, payload.ID+".json"))
 }
 
+func (s *Server) persistDispatchRefusal(id string) error {
+	return s.storeOutbox(hub.TaskResult{ID: id, Error: map[string]any{
+		"code":     "executor_dispatch_capacity",
+		"message":  "the executor receipt journal has no free slots",
+		"executed": false,
+	}})
+}
+
 func (e *outboxReceipt) save(path string) error {
 	data, err := json.Marshal(e)
 	if err != nil {
