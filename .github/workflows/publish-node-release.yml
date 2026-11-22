@@ -102,7 +102,7 @@ jobs:
         run: |
           (cd go-hub && go test ./...)
           (cd go-shellmcp && go test ./...)
-          PYTHONPATH=tests python3 -m unittest test_node_autoupdate test_node_release_publisher
+          PYTHONPATH=tests python3 -m unittest test_node_autoupdate test_node_macos_autoupdate test_node_release_publisher
 
       - name: Build both verified Linux Node packages
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
@@ -116,7 +116,21 @@ jobs:
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
         env:
           SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: python3 tests/e2e/node/darwin_package.py .tmp/node-packages "$SOURCE_SHA"
+        run: |
+          set -euo pipefail
+          tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq \
+            '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^node-v[1-9][0-9]*-[0-9a-f]{12}$"))')"
+          previous="$(sort -V <<< "$tags" | tail -n 1)"
+          args=()
+          if [[ -n "$previous" ]]; then
+            [[ "$previous" =~ ^node-v[1-9][0-9]*-([0-9a-f]{12})$ ]]
+            commit="$(git rev-parse "refs/tags/$previous^{commit}")"
+            [[ "$commit" == "${BASH_REMATCH[1]}"* ]]
+            prior="$RUNNER_TEMP/gptadmin-previous-macos-installer.py"
+            git show "$commit:scripts/gptadmin_node_macos_manage.py" > "$prior"
+            args+=(--previous-installer "$prior")
+          fi
+          python3 tests/e2e/node/darwin_package.py .tmp/node-packages "$SOURCE_SHA" "${args[@]}"
 
       - name: Publish immutable Node release for this public source commit
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'

@@ -88,6 +88,18 @@ images or retired VPN-only hosts. Public channel publication is not fleet update
 acceptance; record installed source and genuine MCP execution for every active
 Node host.
 
+## Managed macOS Node updater
+
+The standard macOS install enables automatic updates when the user has no saved
+preference. An explicit disable remains in effect across installs. The launchd
+job checks GitHub at login and every ten minutes using the updater from the
+active version. Network or package validation errors leave the running Node
+available and are retried at the next scheduled check.
+
+Publication runs the previous released macOS installer against the new Darwin
+package to catch incompatible changes to the archive before users receive it.
+The check uses the actual archive and the previous installer's validation code.
+
 ## Validation
 
 Fast units: archive/auth/URL/tag and lifecycle failure logic; expected3/max25s,

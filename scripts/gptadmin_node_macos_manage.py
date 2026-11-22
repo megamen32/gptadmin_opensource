@@ -339,7 +339,13 @@ def update_lock(root):
 def cmd_install(args):
     root, _ = roots()
     with update_lock(root):
-        _cmd_install_locked(args)
+        result = _cmd_install_locked(args)
+        if service_label() == DEFAULT_LABEL and not (root / 'autoupdate.json').exists():
+            try:
+                enable_autoupdate(root)
+            except (NodeError, OSError, subprocess.SubprocessError) as error:
+                raise NodeError(f'Node installed, but automatic updates could not be enabled: {error}') from None
+        print(json.dumps(result))
 
 
 def _cmd_install_locked(args):
@@ -425,8 +431,8 @@ def _cmd_install_locked(args):
     tmp.write_text(json.dumps(state, sort_keys=True, indent=2) + '\n')
     tmp.chmod(0o600)
     os.replace(tmp, state_path)
-    print(json.dumps({'ok': True, 'build_version': state['build_version'], 'git_commit': state['git_commit'],
-                      'identity_preserved': (root / 'config/node-identity.json').exists(), 'service': service_label()}))
+    return {'ok': True, 'build_version': state['build_version'], 'git_commit': state['git_commit'],
+            'identity_preserved': (root / 'config/node-identity.json').exists(), 'service': service_label()}
 
 
 def cmd_status(_args):
@@ -493,6 +499,38 @@ def _cmd_uninstall_locked(args, root, plist):
     print(json.dumps({'ok': True, 'state_preserved': not args.purge}))
 
 
+def enable_autoupdate(root):
+    if not (root / 'state.json').is_file():
+        raise NodeError('install Node before enabling automatic updates')
+    script = root / 'current/scripts/gptadmin_node_macos_autoupdate.py'
+    if not script.is_file():
+        raise NodeError('the installed Node does not contain an automatic updater')
+    config = root / 'autoupdate.json'
+    plist = Path.home() / 'Library/LaunchAgents' / (AUTOUPDATE_LABEL + '.plist')
+    target = f'gui/{os.getuid()}/{AUTOUPDATE_LABEL}'
+    snapshot = capture_autoupdate_state(root)
+    job = {
+        'Label': AUTOUPDATE_LABEL,
+        'ProgramArguments': [sys.executable, str(script)],
+        'StartInterval': 600,
+        'RunAtLoad': True,
+        'StandardOutPath': str(root / 'logs/autoupdate.log'),
+        'StandardErrorPath': str(root / 'logs/autoupdate.log'),
+        'EnvironmentVariables': {'GPTADMIN_NODE_MACOS_ROOT': str(root)},
+    }
+    try:
+        _restore_file(config, {'data': b'{"enabled":true}\n', 'mode': 0o600})
+        if snapshot['loaded']:
+            subprocess.run(['/bin/launchctl', 'bootout', target], check=True, capture_output=True)
+        _restore_file(plist, {'data': plistlib.dumps(job), 'mode': 0o600})
+        subprocess.run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
+        if not launchd_job_loaded(AUTOUPDATE_LABEL):
+            raise NodeError('launchd did not load the automatic updater')
+    except Exception:
+        restore_autoupdate_state(root, snapshot)
+        raise
+
+
 def cmd_autoupdate(args):
     root, _ = roots()
     config = root / 'autoupdate.json'
@@ -503,26 +541,17 @@ def cmd_autoupdate(args):
         data = json.loads(config.read_text()) if config.is_file() else {'enabled':False}
         print(json.dumps({'enabled':data.get('enabled') is True,'launchd_loaded':result.returncode==0})); return
     if args.action == 'disable':
-        if config.exists(): config.write_text('{"enabled":false}\n'); config.chmod(0o600)
+        if root.exists():
+            _restore_file(config, {'data': b'{"enabled":false}\n', 'mode': 0o600})
         subprocess.run(['/bin/launchctl','bootout',f'gui/{os.getuid()}/{label}'],capture_output=True)
         if launchd_job_loaded(label):
             raise NodeError('launchd automatic updater remains loaded after disable')
         plist.unlink(missing_ok=True)
         print(json.dumps({'enabled':False})); return
     if args.action == 'run':
-        subprocess.run([sys.executable,str(Path(__file__).with_name('gptadmin_node_macos_autoupdate.py'))],check=True,timeout=360); return
-    if not (root/'state.json').is_file(): raise NodeError('install Node before enabling automatic updates')
-    config.write_text('{"enabled":true}\n'); config.chmod(0o600)
-    plist.parent.mkdir(parents=True,exist_ok=True)
-    job={'Label':label,'ProgramArguments':[sys.executable,str(Path(__file__).with_name('gptadmin_node_macos_autoupdate.py'))],
-         'StartInterval':600,'RunAtLoad':False,'StandardOutPath':str(root/'logs/autoupdate.log'),
-         'StandardErrorPath':str(root/'logs/autoupdate.log'),
-         'EnvironmentVariables':{'GPTADMIN_NODE_MACOS_ROOT':str(root)}}
-    temp=plist.with_suffix('.plist.new');temp.write_bytes(plistlib.dumps(job));temp.chmod(0o600);os.replace(temp,plist)
-    subprocess.run(['/bin/launchctl','bootout',f'gui/{os.getuid()}/{label}'],capture_output=True)
-    subprocess.run(['/bin/launchctl','bootstrap',f'gui/{os.getuid()}',str(plist)],check=True)
-    active=subprocess.run(['/bin/launchctl','print',f'gui/{os.getuid()}/{label}'],capture_output=True)
-    if active.returncode: raise NodeError('launchd did not load the automatic updater')
+        script = root / 'current/scripts/gptadmin_node_macos_autoupdate.py'
+        subprocess.run([sys.executable,str(script)],check=True,timeout=360); return
+    enable_autoupdate(root)
     print(json.dumps({'enabled':True,'interval_seconds':600,'launchd_loaded':True}))
 
 
@@ -540,7 +569,7 @@ def main():
     uninstall = sub.add_parser('uninstall', help='remove service and code; preserve identity by default')
     uninstall.add_argument('--purge', action='store_true')
     uninstall.set_defaults(func=cmd_uninstall)
-    automatic = sub.add_parser('autoupdate', help='manage the opt-in daily verified updater')
+    automatic = sub.add_parser('autoupdate', help='manage verified GitHub release updates')
     automatic.add_argument('action',choices=('status','enable','disable','run'),nargs='?',default='status')
     automatic.set_defaults(func=cmd_autoupdate)
     args = parser.parse_args()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in, per-user updater for the immutable public GPTAdmin Node channel."""
+"""Per-user updater for the immutable public GPTAdmin Node channel."""
 import hashlib
 import http.client
 import json

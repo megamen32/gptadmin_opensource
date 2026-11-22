@@ -3,6 +3,7 @@ import sys
 import unittest
 import fcntl
 import os
+import plistlib
 import subprocess
 from pathlib import Path
 import json
@@ -20,6 +21,38 @@ import gptadmin_node_macos_manage as manager
 
 
 class MacNodeUpdaterTests(unittest.TestCase):
+    def test_managed_install_enables_updates_when_no_preference_exists(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(manager, 'roots', return_value=(root, root / 'node.plist')), \
+                 patch.object(manager, 'service_label', return_value=manager.DEFAULT_LABEL), \
+                 patch.object(manager, '_cmd_install_locked', return_value={'ok': True}), \
+                 patch.object(manager, 'enable_autoupdate') as enable:
+                manager.cmd_install(SimpleNamespace())
+                enable.assert_called_once_with(root)
+                enable.reset_mock()
+                (root / 'autoupdate.json').write_text('{"enabled":false}\n')
+                manager.cmd_install(SimpleNamespace())
+                enable.assert_not_called()
+                self.assertFalse(json.loads((root / 'autoupdate.json').read_text())['enabled'])
+
+    def test_automatic_update_job_uses_current_installed_release_at_login(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'state.json').write_text('{}')
+            script = root / 'current/scripts/gptadmin_node_macos_autoupdate.py'
+            script.parent.mkdir(parents=True)
+            script.touch()
+            with patch.object(manager.Path, 'home', return_value=root), \
+                 patch.object(manager, 'launchd_job_loaded', side_effect=[False, True]), \
+                 patch.object(manager.subprocess, 'run'):
+                manager.enable_autoupdate(root)
+            plist = root / 'Library/LaunchAgents/com.gptadmin.node.autoupdate.plist'
+            job = plistlib.loads(plist.read_bytes())
+            self.assertEqual(job['ProgramArguments'][1], str(script))
+            self.assertTrue(job['RunAtLoad'])
+            self.assertTrue(json.loads((root / 'autoupdate.json').read_text())['enabled'])
+
     def test_incomplete_release_index_is_retried_without_using_partial_data(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
