@@ -356,13 +356,13 @@ def systemctl(runner: Runner, *args: str, check: bool = True, timeout: float = 4
     return result
 
 
-def atomic_write(path: Path, text: str, mode: int) -> None:
+def atomic_write(path: Path, contents: str | bytes, mode: int) -> None:
     """Write file contents atomically with the requested permission bits."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f'{path.name}.new-{os.getpid()}')
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, 'w') as handle:
-        handle.write(text)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(contents.encode('utf-8') if isinstance(contents, str) else contents)
     os.chmod(tmp, mode)
     os.replace(tmp, path)
 

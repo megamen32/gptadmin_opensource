@@ -3,6 +3,7 @@ import json
 import hashlib
 import io
 from pathlib import Path
+import stat
 import tarfile
 import tempfile
 import time
@@ -1206,7 +1207,20 @@ class NodeAutoupdateTests(unittest.TestCase):
             service=root/'systemd'/'service';timer=root/'systemd'/'timer'
             args=manager.build_parser().parse_args(['autoupdate','enable'])
             live={'node-a':{'git_commit':'1'*40,'build_version':124}}
+            installed_manager.parent.mkdir()
+            original_contents = b'# previous manager\r\n# \xff\n'
+            installed_manager.write_bytes(original_contents)
+            installed_manager.chmod(0o640)
+            original_stat = Path.stat
+
+            def simulate_root_ownership(path, *args, **kwargs):
+                info = original_stat(path, *args, **kwargs)
+                if path == installed_manager:
+                    return SimpleNamespace(st_uid=0, st_mode=info.st_mode)
+                return info
+
             with patch.object(manager,'require_root'),patch.object(manager,'prepare_primary_node') as adopt, \
+                 patch.object(Path, 'stat', simulate_root_ownership), \
                  patch.object(manager,'active_node_names',return_value=['node-a']), \
                  patch.object(manager,'active_node_versions',return_value=live), \
                  patch.object(manager,'AUTOUPDATE_CONFIG',config),patch.object(manager,'AUTOUPDATE_SCRIPT',script), \
@@ -1217,7 +1231,9 @@ class NodeAutoupdateTests(unittest.TestCase):
                 with self.assertRaisesRegex(manager.PreflightError,'package verification failed'):
                     manager.cmd_autoupdate(args,manager.Layout(),manager.Runner())
             self.assertEqual(json.loads(config.read_text()),{'enabled':False,'names':['node-a']})
-            self.assertTrue(all(not path.exists() for path in (script,installed_manager,installed_probe,service,timer)))
+            self.assertEqual(installed_manager.read_bytes(), original_contents)
+            self.assertEqual(stat.S_IMODE(installed_manager.stat().st_mode), 0o640)
+            self.assertTrue(all(not path.exists() for path in (script,installed_probe,service,timer)))
             adopt.assert_not_called();systemctl.assert_not_called()
 
     def test_catchable_deadline_restores_previous_code_and_cancels_drain(self):
