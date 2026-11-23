@@ -96,7 +96,8 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$(dirname "$CLI_PATH")"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+_cli_tmp=""
+trap 'rm -rf "$TMP_DIR"; if [ -n "$_cli_tmp" ]; then rm -f "$_cli_tmp"; fi' EXIT
 
 # 1) CLI
 if download_file "$CLI_URL" "$TMP_DIR/gptadmin.py"; then
@@ -108,7 +109,11 @@ else
   [ -f "$TMP_DIR/pkg/cli/gptadmin.py" ] || err "cli/gptadmin.py not found in package"
   cp "$TMP_DIR/pkg/cli/gptadmin.py" "$TMP_DIR/gptadmin.py"
 fi
-install -m 0755 "$TMP_DIR/gptadmin.py" "$CLI_PATH"
+# Rename over an existing symlink, never overwrite its version-slot target.
+_cli_tmp="$(mktemp "${CLI_PATH}.new.XXXXXX")"
+install -m 0755 "$TMP_DIR/gptadmin.py" "$_cli_tmp"
+python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$_cli_tmp" "$CLI_PATH"
+_cli_tmp=""
 export GPTADMIN_HOME="$INSTALL_DIR"
 
 # 2) Existing install -> update by default. Fresh install -> interactive setup.

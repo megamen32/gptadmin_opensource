@@ -71,13 +71,14 @@ const (
 )
 
 type nodeJoinGrant struct {
-	Name       string    `json:"name"`
-	SecretHash string    `json:"secret_hash"`
-	IssuedAt   time.Time `json:"issued_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	Used       bool      `json:"used"`
-	UsedBy     string    `json:"used_by,omitempty"`
-	UsedAt     time.Time `json:"used_at,omitempty"`
+	Name         string    `json:"name"`
+	SecretHash   string    `json:"secret_hash"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Used         bool      `json:"used"`
+	UsedBy       string    `json:"used_by,omitempty"`
+	UsedAt       time.Time `json:"used_at,omitempty"`
+	FRPRelayIPv4 string    `json:"frp_relay_ipv4,omitempty"`
 }
 
 type nodeMember struct {
@@ -101,6 +102,7 @@ type nodeMember struct {
 	CatalogFresh       bool                     `json:"-"`
 	OutboundWS         bool                     `json:"outbound_ws,omitempty"`
 	QuorumQueue        bool                     `json:"quorum_queue,omitempty"`
+	FRPRelayIPv4       string                   `json:"frp_relay_ipv4,omitempty"`
 }
 
 type nodeMembershipState struct {
@@ -707,8 +709,9 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Name       string `json:"name"`
-		TTLMinutes int    `json:"ttl_minutes"`
+		Name         string `json:"name"`
+		TTLMinutes   int    `json:"ttl_minutes"`
+		FRPRelayIPv4 string `json:"frp_relay_ipv4"`
 	}
 	if json.Unmarshal(raw, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "grant request must be JSON"})
@@ -716,6 +719,10 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateNodeMemberName(request.Name); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if request.FRPRelayIPv4 != "" && !validFRPRelayIPv4(request.FRPRelayIPv4) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "frp_relay_ipv4 must be a unicast IPv4 address"})
 		return
 	}
 	ttl := nodeGrantDefaultTTL
@@ -733,7 +740,7 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.now()
 	grant := &nodeJoinGrant{Name: request.Name, SecretHash: hashNodeSecret(hex.EncodeToString(secret)),
-		IssuedAt: now, ExpiresAt: now.Add(ttl)}
+		IssuedAt: now, ExpiresAt: now.Add(ttl), FRPRelayIPv4: request.FRPRelayIPv4}
 	s.membershipMu.Lock()
 	s.membership.Grants[grant.SecretHash] = grant
 	for hash, existing := range s.membership.Grants {
@@ -849,7 +856,7 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.membershipMu.Lock()
 	grant, ok := s.membership.Grants[hashNodeSecret(bearer)]
-	if !ok || grant.Used || !now.Before(grant.ExpiresAt) {
+	if !ok || (grant.Used && (grant.FRPRelayIPv4 == "" || grant.UsedBy != request.NodeID)) || !now.Before(grant.ExpiresAt) {
 		s.membershipMu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "join grant is invalid, expired or already used"})
 		return
@@ -888,9 +895,14 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 		Capabilities: normalizeNodeCapabilities(request.Capabilities), Endpoints: endpoints,
 		ConnectTo: connectTo, State: nodeStateJoining, LastSeen: now, LeaseExpires: now.Add(nodeLeaseTTL),
 		Build: strings.TrimSpace(request.Build.GitCommit), LocalID: strings.TrimSpace(request.LocalID)}
+	if grant.FRPRelayIPv4 != "" {
+		s.finishFRPRelayJoin(w, r, grant, member, previous, now)
+		return
+	}
 	if previous != nil {
 		member.Generation = previous.Generation + 1
 		member.LocalFingerprint = previous.LocalFingerprint
+		member.FRPRelayIPv4 = previous.FRPRelayIPv4
 	} else {
 		member.Generation = 1
 	}
@@ -914,6 +926,10 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.rebuildMembershipRoutes()
+	s.writeNodeJoinResponse(w, member, writerID, writerURL, revision)
+}
+
+func (s *Server) writeNodeJoinResponse(w http.ResponseWriter, member *nodeMember, writerID, writerURL string, revision uint64) {
 	writeJSON(w, http.StatusOK, map[string]any{"node_id": member.NodeID, "name": member.Name,
 		"state": member.State, "generation": member.Generation, "membership_revision": revision,
 		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL,

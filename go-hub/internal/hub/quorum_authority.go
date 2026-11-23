@@ -25,15 +25,25 @@ func (s *Server) ensureQuorumAuthorityMaterialized(ctx context.Context) error {
 	if node == nil {
 		return nil
 	}
+	term := node.CurrentTerm()
 	if err := node.VerifyLeader(ctx); err != nil {
 		s.quorumAuthorityActiveWriter.Store(false)
 		return err
 	}
+	return s.materializeVerifiedQuorumAuthority(ctx, term)
+}
+
+// The caller must have just verified majority contact, starting in this term.
+func (s *Server) materializeVerifiedQuorumAuthority(ctx context.Context, verifiedTerm uint64) error {
+	node := s.quorumNode
 	s.quorumAuthorityLoadMu.Lock()
 	defer s.quorumAuthorityLoadMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status := node.Status()
 	term := node.CurrentTerm()
-	if !status.Leader {
+	if !status.Leader || verifiedTerm == 0 || term != verifiedTerm {
 		s.quorumAuthorityActiveWriter.Store(false)
 		return errors.New("quorum leadership changed before materialization")
 	}
@@ -167,10 +177,14 @@ func checkQuorumAuthorityRevision(tx *sql.Tx, expected uint64) error {
 }
 
 func (s *Server) readQuorumAuthorityImage() (quorumAuthorityImage, error) {
-	image := quorumAuthorityImage{Values: make(map[string]json.RawMessage, len(s.requiredQuorumAuthorities()))}
+	return s.readQuorumAuthorityImageFor(s.requiredQuorumAuthorities())
+}
+
+func (s *Server) readQuorumAuthorityImageFor(domains map[string]string) (quorumAuthorityImage, error) {
+	image := quorumAuthorityImage{Values: make(map[string]json.RawMessage, len(domains))}
 	var clusterID string
 	var baselineReady, authorityReady int
-	rows := make(map[string]quorumAuthorityRow, len(s.requiredQuorumAuthorities()))
+	rows := make(map[string]quorumAuthorityRow, len(domains))
 	err := s.withQuorumReadDatabase(func(tx *sql.Tx) error {
 		if err := tx.QueryRow(`SELECT cluster_id,applied_index,authority_revision,baseline_ready,authority_ready FROM task_quorum_meta WHERE id=1`).Scan(&clusterID, &image.AppliedIndex, &image.AuthorityRevision, &baselineReady, &authorityReady); err != nil {
 			return err
@@ -178,7 +192,7 @@ func (s *Server) readQuorumAuthorityImage() (quorumAuthorityImage, error) {
 		if clusterID != s.quorumClusterID || baselineReady != 1 || authorityReady != 1 {
 			return errors.New("quorum task and authority baseline is not ready")
 		}
-		for domain, key := range s.requiredQuorumAuthorities() {
+		for domain, key := range domains {
 			name := domain + "/" + key
 			row, err := readQuorumAuthorityRow(tx, domain, key)
 			if err != nil {

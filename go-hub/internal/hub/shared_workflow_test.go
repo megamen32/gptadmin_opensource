@@ -126,9 +126,27 @@ func TestSharedWorkflowDeploysBeforePR(t *testing.T) {
 			t.Fatalf("stale early-PR wording: %q", banned)
 		}
 	}
-	for _, need := range []string{"only after that scenario passed", "do not ask again", "refs/lhc/release/<project>", "3 minutes"} {
+	for _, need := range []string{"only after that scenario passed", "do not ask again"} {
 		if !strings.Contains(w, need) {
 			t.Fatalf("missing rule: %q", need)
 		}
+	}
+}
+
+func TestSharedWorkflowScopesReleaseOccupancyToTheEntryPoint(t *testing.T) {
+	s, r, _ := instructionFixture(t)
+	out := instructionDiscovery(t, s, r)
+	content := firstString(out, "instructions")
+	for _, need := range []string{
+		"best-effort coordination", "authorized private replica", "unavailable status is not evidence",
+		"unresolved ownership conflict blocks mutation", "requires a lease", "controller's checks",
+		"revision compare-and-swap (CAS)", "release only your own lease",
+	} {
+		if !strings.Contains(content, need) {
+			t.Fatalf("delivered workflow is missing %q", need)
+		}
+	}
+	if strings.Contains(content, "refs/lhc/release/<project>") {
+		t.Fatal("delivered workflow still advertises an unconditional alternate lease")
 	}
 }

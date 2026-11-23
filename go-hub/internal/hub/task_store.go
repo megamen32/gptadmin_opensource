@@ -49,26 +49,27 @@ type persistedRelayTask struct {
 }
 
 type persistedShellTask struct {
-	ReceiptTarget string          `json:"receipt_target,omitempty"`
-	SealedPending json.RawMessage `json:"sealed_pending,omitempty"`
-	Timeout       int             `json:"timeout,omitempty"`
-	RequestKey    string          `json:"request_key,omitempty"`
-	Revision      int64           `json:"-"`
-	OwnerID       string          `json:"owner_id,omitempty"`
-	Caller        *taskCaller     `json:"caller,omitempty"`
-	ID            string          `json:"id"`
-	Server        string          `json:"server,omitempty"`
-	TraceID       string          `json:"trace_id,omitempty"`
-	TraceParent   string          `json:"traceparent,omitempty"`
-	ToolName      string          `json:"tool_name,omitempty"`
-	CreatedAt     float64         `json:"created_at"`
-	StartedAt     float64         `json:"started_at,omitempty"`
-	DoneAt        float64         `json:"completed_at,omitempty"`
-	Status        string          `json:"status"`
-	Result        any             `json:"result,omitempty"`
-	Error         any             `json:"error,omitempty"`
-	ApprovalID    string          `json:"approval_id,omitempty"`
-	ParentTaskID  string          `json:"parent_task_id,omitempty"`
+	LocalExecutor *localShellExecutorIdentity `json:"local_executor,omitempty"`
+	ReceiptTarget string                      `json:"receipt_target,omitempty"`
+	SealedPending json.RawMessage             `json:"sealed_pending,omitempty"`
+	Timeout       int                         `json:"timeout,omitempty"`
+	RequestKey    string                      `json:"request_key,omitempty"`
+	Revision      int64                       `json:"-"`
+	OwnerID       string                      `json:"owner_id,omitempty"`
+	Caller        *taskCaller                 `json:"caller,omitempty"`
+	ID            string                      `json:"id"`
+	Server        string                      `json:"server,omitempty"`
+	TraceID       string                      `json:"trace_id,omitempty"`
+	TraceParent   string                      `json:"traceparent,omitempty"`
+	ToolName      string                      `json:"tool_name,omitempty"`
+	CreatedAt     float64                     `json:"created_at"`
+	StartedAt     float64                     `json:"started_at,omitempty"`
+	DoneAt        float64                     `json:"completed_at,omitempty"`
+	Status        string                      `json:"status"`
+	Result        any                         `json:"result,omitempty"`
+	Error         any                         `json:"error,omitempty"`
+	ApprovalID    string                      `json:"approval_id,omitempty"`
+	ParentTaskID  string                      `json:"parent_task_id,omitempty"`
 }
 
 func (s *Server) taskStatePath() string {
@@ -158,7 +159,7 @@ func (s *Server) saveTaskStateLocked(taskIDs ...string) error {
 		if err != nil {
 			return fmt.Errorf("bound shell result: %w", err)
 		}
-		state.Shell[id] = persistedShellTask{ReceiptTarget: j.ReceiptTarget, SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: shellResult, Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
+		state.Shell[id] = persistedShellTask{LocalExecutor: j.LocalExecutor, ReceiptTarget: j.ReceiptTarget, SealedPending: sealedPending, Timeout: j.Timeout, ID: j.ID, RequestKey: j.RequestKey, Revision: j.Revision, OwnerID: j.OwnerID, Caller: j.Caller, Server: j.Server, TraceID: j.TraceID, TraceParent: j.TraceParent, ToolName: j.ToolName, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, DoneAt: j.DoneAt, Status: j.Status, Result: shellResult, Error: redactSecretValues(j.Error, j.SecretValues), ApprovalID: j.ApprovalID, ParentTaskID: j.ParentTaskID}
 	}
 	nowTime := time.Now()
 	for key, entry := range s.idempotency {
@@ -389,7 +390,7 @@ func (s *Server) loadTaskState() error {
 			done = now
 			recoveredIDs = append(recoveredIDs, id)
 		}
-		s.shellJobs[id] = &shellJob{ReceiptTarget: p.ReceiptTarget, quorumPendingSealed: append(json.RawMessage(nil), p.SealedPending...), quorumPendingUnmaterialized: quorumPending, Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
+		s.shellJobs[id] = &shellJob{LocalExecutor: p.LocalExecutor, ReceiptTarget: p.ReceiptTarget, quorumPendingSealed: append(json.RawMessage(nil), p.SealedPending...), quorumPendingUnmaterialized: quorumPending, Timeout: p.Timeout, ID: p.ID, RequestKey: p.RequestKey, Revision: p.Revision, OwnerID: p.OwnerID, Caller: p.Caller, Server: p.Server, TraceID: p.TraceID, TraceParent: p.TraceParent, ToolName: p.ToolName, CreatedAt: p.CreatedAt, StartedAt: p.StartedAt, DoneAt: done, Status: status, Result: p.Result, Error: errVal, ApprovalID: p.ApprovalID, ParentTaskID: p.ParentTaskID}
 		if status == "cancelled" && p.StartedAt > 0 && p.Server != "" {
 			s.shellControls[p.Server] = append(s.shellControls[p.Server], shellControl{TaskID: p.ID})
 		}

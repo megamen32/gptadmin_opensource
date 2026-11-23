@@ -1859,6 +1859,12 @@ def write_frpc_conf(env: dict):
     FRPC_CONF.parent.mkdir(parents=True, exist_ok=True)
     local_port = env.get('HUB_PORT', '9001')
     local_ip = env.get('FRP_LOCAL_IP', '127.0.0.1')
+    shared = env.get('FRP_SHARED_SUBDOMAIN', '').strip()
+    group_key = env.get('FRP_SHARED_GROUP_KEY', '')
+    if shared:
+        if (not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', shared)
+                or shared == env['FRP_SUBDOMAIN'] or not group_key):
+            raise ValueError('shared FRP ingress requires a distinct DNS label and FRP_SHARED_GROUP_KEY')
     for spec in frpc_endpoint_specs(env):
         proxy_name = f"gptadmin-web-{env['FRP_SUBDOMAIN']}"
         if not spec['primary']:
@@ -1879,6 +1885,24 @@ type = "http"
 localIP = "{local_ip}"
 localPort = {local_port}
 subdomain = "{env['FRP_SUBDOMAIN']}"
+"""
+        if shared:
+            # Each enrolled origin keeps its own address and joins the same
+            # public HTTP group on every configured relay. FRP checks it locally.
+            content += f"""
+[[proxies]]
+name = {json.dumps(proxy_name + '-shared-' + shared)}
+type = "http"
+localIP = {json.dumps(local_ip)}
+localPort = {int(local_port)}
+subdomain = {json.dumps(shared)}
+loadBalancer.group = {json.dumps(shared)}
+loadBalancer.groupKey = {json.dumps(group_key)}
+healthCheck.type = "http"
+healthCheck.path = "/_gptadmin/ingress-readyz"
+healthCheck.intervalSeconds = 3
+healthCheck.timeoutSeconds = 2
+healthCheck.maxFailed = 1
 """
         path = frpc_conf_path(spec)
         path.write_text(content)
@@ -7749,16 +7773,27 @@ def maybe_update_hint(args):
     )
 
 
+NODE_MANAGED_HELPER = Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py')
+
+
+def _node_manager(cli_entry: Path):
+    root = cli_entry.resolve().parent
+    managed = NODE_MANAGED_HELPER
+    bundled = (root / 'scripts' / 'gptadmin_node_manage.py',
+               root / 'gptadmin_node_manage.py',
+               INSTALL_DIR / 'cli' / 'scripts' / 'gptadmin_node_manage.py')
+    # Compare the entry point, not its resolved target: an installed symlink can
+    # point into a rollback slot whose adjacent manager must not take precedence.
+    installed = os.path.abspath(cli_entry) == os.path.abspath(CLI_PATH)
+    candidates = (managed, *bundled) if installed else (*bundled, managed)
+    return next((p for p in candidates if p.is_file()), None)
+
+
 def main():
     # The portable Node lifecycle owns its instance paths and service transaction.
     # Dispatch before legacy parsing/update hints, including `node --help`.
     if len(sys.argv) > 1 and sys.argv[1] == 'node':
-        root = Path(__file__).resolve().parent
-        manager = next((p for p in (root / 'scripts' / 'gptadmin_node_manage.py',
-                                   root / 'gptadmin_node_manage.py',
-                                   INSTALL_DIR / 'cli' / 'scripts' / 'gptadmin_node_manage.py',
-                                   Path('/usr/local/lib/gptadmin/gptadmin_node_manage.py'))
-                        if p.is_file()), None)
+        manager = _node_manager(Path(sys.argv[0]))
         if manager is None:
             die('Node manager is missing; install the complete Node or CLI package.')
         os.execv(sys.executable, [sys.executable, str(manager), *sys.argv[2:]])

@@ -14,6 +14,13 @@ business acceptance. Shared updates invalidate old receipts without changing
 profile IDs, credentials, ACLs or approval modes. MCP initialize/resource text
 and search/schema use the same composition for pluginless clients.
 
+The shared workflow directs callers to the exact release entry point for the
+target. The instruction receipt attests to delivery. Release admission is
+enforced by the selected controller, for example the separate socket bootstrap
+procedure. Optional Herder occupancy can be unavailable during authorized
+replica work. Shared ownership conflicts still require preserving the target
+until ownership is resolved, and required controller proof still has to pass.
+
 A missing named profile does not fall back to a different profile. Its startup
 text reports unavailability and instruction-context execution remains fail-closed.
 No production config migration is needed: deploy the reviewed binary through the

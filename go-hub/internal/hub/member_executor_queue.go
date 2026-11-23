@@ -7,11 +7,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
 )
@@ -202,12 +206,26 @@ func (s *Server) proxyMemberResult(w http.ResponseWriter, r *http.Request, name,
 }
 
 func (s *Server) proxyMemberRequest(w http.ResponseWriter, r *http.Request, origin string, executor bool) {
+	s.proxyMemberRequestWithFallback(w, r, origin, executor, nil)
+}
+
+// The proxy owns the outbound request. Retain the original body's ownership
+// only when a local destination has been offered and sending can be excluded.
+func (s *Server) proxyMemberRequestWithFallback(w http.ResponseWriter, r *http.Request, origin string, executor bool, fallback http.HandlerFunc) {
 	target, err := url.Parse(origin)
 	if err != nil || target.Scheme != "https" || target.Host == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum address unavailable"})
 		return
 	}
+	var gotConn, readBody atomic.Bool
 	proxy := &httputil.ReverseProxy{Transport: s.nodePeerClient.Transport, Rewrite: func(p *httputil.ProxyRequest) {
+		if fallback != nil {
+			trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) }}
+			p.Out = p.Out.WithContext(httptrace.WithClientTrace(p.Out.Context(), trace))
+			if p.Out.Body != nil {
+				p.Out.Body = io.NopCloser(memberProxyBody{Reader: p.Out.Body, read: &readBody})
+			}
+		}
 		p.SetURL(target)
 		p.Out.Host = target.Host
 		p.Out.GetBody = nil
@@ -230,9 +248,25 @@ func (s *Server) proxyMemberRequest(w http.ResponseWriter, r *http.Request, orig
 		return nil
 	}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 		s.memberQuorumHubs.Failed(origin)
+		var dial *net.OpError
+		if fallback != nil && !gotConn.Load() && !readBody.Load() && r.Context().Err() == nil &&
+			errors.As(err, &dial) && dial.Op == "dial" {
+			fallback(w, r)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "quorum delivery was not confirmed", "outcome": "unknown"})
 	}}
 	proxy.ServeHTTP(w, r)
+}
+
+type memberProxyBody struct {
+	io.Reader
+	read *atomic.Bool
+}
+
+func (b memberProxyBody) Read(p []byte) (int, error) {
+	b.read.Store(true)
+	return b.Reader.Read(p)
 }
 
 func memberQuorumClientPath(path string) bool {

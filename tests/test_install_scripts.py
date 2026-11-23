@@ -5,6 +5,8 @@ the expected download URLs — without actually executing them.
 """
 
 import re
+import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +36,46 @@ def test_install_sh_references_download_url():
     content = (DEPLOY / "install.sh").read_text()
     assert EXPECTED_URL_FRAGMENT in content, \
         f"install.sh should reference {EXPECTED_URL_FRAGMENT}"
+
+
+def test_bootstrap_replaces_file_and_symlink_and_cleans_temp(tmp_path):
+    tools = tmp_path / 'tools'
+    tools.mkdir()
+    curl = tools / 'curl'
+    curl.write_text('#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\nprintf "#!/bin/sh\\nexit 0\\n" > "$2"\n')
+    curl.chmod(0o755)
+    uname = tools / 'uname'
+    uname.write_text('#!/bin/sh\nif [ "$1" = -s ]; then echo "$FAKE_OS"; else echo "$FAKE_ARCH"; fi\n')
+    uname.chmod(0o755)
+    entry = tmp_path / 'bin' / 'gptadmin'
+    entry.parent.mkdir()
+    slot = tmp_path / 'old-cli'
+    slot.write_text('rollback')
+    env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}',
+               GPTADMIN_CLI_PATH=str(entry), GPTADMIN_HOME=str(tmp_path / 'home'),
+               GPTADMIN_CONFIG_DIR=str(tmp_path / 'config'), GPTADMIN_INSTALL_ACTION='update',
+               GPTADMIN_DOWNLOAD_QUIET='1')
+    for name in ('RELEASES_URL', 'CLI_URL', 'PKG_ALL_URL', 'PKG_HUB_URL', 'PKG_SHELLMCP_URL'):
+        env.pop(name, None)
+    for symlink, system, arch, package in ((False, 'Linux', 'x86_64', 'ubuntu-x64'),
+                                           (True, 'Linux', 'aarch64', 'ubuntu-arm64'),
+                                           (False, 'Darwin', 'x86_64', 'macos-x64'),
+                                           (True, 'Darwin', 'arm64', 'macos-arm64')):
+        env.update(FAKE_OS=system, FAKE_ARCH=arch)
+        if entry.exists() or entry.is_symlink():
+            entry.unlink()
+        entry.symlink_to(slot) if symlink else entry.write_text('old executable')
+        result = subprocess.run(['bash', str(DEPLOY / 'install.sh')], env=env, check=True, capture_output=True, text=True)
+        assert 'https://github.com/megamen32/gptadmin_opensource/releases/latest/download/' in result.stdout
+        assert f'gptadmin-{package}-full.tar.gz' in result.stdout
+        assert not entry.is_symlink() and entry.read_text().startswith('#!/bin/sh')
+        assert slot.read_text() == 'rollback'
+        assert not list(entry.parent.glob('gptadmin.new.*'))
+    entry.unlink()
+    entry.mkdir()  # os.replace fails; the temporary file must still be removed.
+    result = subprocess.run(['bash', str(DEPLOY / 'install.sh')], env=env, capture_output=True)
+    assert result.returncode != 0 and entry.is_dir()
+    assert not list(entry.parent.glob('gptadmin.new.*'))
 
 
 def test_android_installer_configures_github_self_repair():
@@ -136,6 +178,29 @@ def test_node_dispatch_runs_without_site_packages_or_optional_python_dependencie
     )
     assert result.returncode == 0, result.stderr
     assert "install" in result.stdout and "status" in result.stdout
+
+
+def test_installed_node_cli_uses_managed_helper_without_touching_rollback(tmp_path):
+    namespace = runpy.run_path(str(ROOT / 'cli.py'), run_name='gptadmin_test')
+    select = namespace['_node_manager']
+    slot = tmp_path / 'versions' / 'old'
+    neighbor = slot / 'scripts' / 'gptadmin_node_manage.py'
+    neighbor.parent.mkdir(parents=True)
+    neighbor.write_text('old slot')
+    (slot / 'cli.py').touch()
+    entry = tmp_path / 'bin' / 'gptadmin'
+    entry.parent.mkdir()
+    entry.symlink_to(slot / 'cli.py')
+    managed = tmp_path / 'lib' / 'gptadmin_node_manage.py'
+    managed.parent.mkdir()
+    managed.write_text('public helper')
+    select.__globals__.update(CLI_PATH=entry, NODE_MANAGED_HELPER=managed,
+                              INSTALL_DIR=tmp_path / 'install')
+    assert select(entry) == managed
+    assert select(slot / 'cli.py') == neighbor  # explicit portable bootstrap
+    managed.unlink()
+    assert select(entry) == neighbor  # clean bootstrap before helper exists
+    assert entry.is_symlink() and neighbor.read_text() == 'old slot'
 
 
 def test_openapi_schema_exists():

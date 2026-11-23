@@ -3,9 +3,11 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,8 +53,13 @@ func TestOwnerLocalAdmissionReservesOnlyClientKeys(t *testing.T) {
 	if status != http.StatusOK || again != first {
 		t.Fatalf("retry: id=%q status=%d want %q", again, status, first)
 	}
-	if stale, status := run(r.WithContext(context.WithValue(r.Context(), ownerAdmissionTermKey{}, term+1)), ""); status != http.StatusServiceUnavailable || stale != "" {
-		t.Fatalf("stale admission: id=%q status=%d", stale, status)
+	stale := r.WithContext(context.WithValue(r.Context(), ownerAdmissionTermKey{}, term+1))
+	for _, target := range []string{"shell:standalone", "shell:server01"} {
+		result, status := s.executeMCPTool(stale, target, "shell_exec",
+			map[string]any{"argv": []any{"echo", "owner-local"}}, true, time.Second, "")
+		if status != http.StatusServiceUnavailable || firstString(result, "job_id") != "" || result["executed"] != false {
+			t.Fatalf("stale admission to %s: HTTP %d %#v", target, status, result)
+		}
 	}
 	if err := s.withTaskReadDatabase(func(tx *sql.Tx) error {
 		var keys, jobs int
@@ -68,4 +75,79 @@ func TestOwnerLocalAdmissionReservesOnlyClientKeys(t *testing.T) {
 	if op, ok := n.LocalOperation(digest); !ok || op.JobID != first {
 		t.Fatalf("cluster reservation does not point to original job")
 	}
+
+	t.Run("delivery after Raft stops", func(t *testing.T) {
+		const target = "shell:review"
+		const token = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		admission := context.WithValue(r.Context(), ownerAdmissionTermKey{}, term)
+		admission = context.WithValue(admission, localShellAuthStateKey{}, s.authState)
+		submit := func(key string) string {
+			t.Helper()
+			result, status := s.executeMCPTool(r.WithContext(admission), target, "shell_exec",
+				map[string]any{"argv": []any{"echo", "same input"}}, true, time.Second, key)
+			if id := firstString(result, "job_id"); status == http.StatusOK && id != "" {
+				return id
+			}
+			t.Fatalf("addressed submission failed: HTTP %d %#v", status, result)
+			return ""
+		}
+		a, b := submit(""), submit("")
+		keyed := submit("local-retry")
+		if a == b || a == keyed || b == keyed || submit("local-retry") != keyed {
+			t.Fatal("independent identical calls or explicit retry lost their identity")
+		}
+		defer func() {
+			// Keep the stopped node for route and owner checks, then avoid
+			// closing it twice in the fixture cleanup.
+			s.mu.Lock()
+			s.quorumNode = nil
+			s.mu.Unlock()
+		}()
+		if err := n.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if n.VerifyLeader(ctx) == nil {
+			t.Fatal("Raft still authorizes dispatch")
+		}
+		poll := func(credential, fingerprint string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/queue/review?timeout=0&server_id=n0&public_key=review-public&fingerprint="+fingerprint, nil)
+			req.Header.Set("Authorization", "Bearer "+credential)
+			reply := httptest.NewRecorder()
+			s.Handler().ServeHTTP(reply, req)
+			return reply
+		}
+		for _, reply := range []*httptest.ResponseRecorder{poll("wrong-token", "review-fingerprint"), poll(token, "wrong-pin")} {
+			if reply.Code != http.StatusServiceUnavailable {
+				t.Fatalf("unbound poll received HTTP %d", reply.Code)
+			}
+		}
+		for _, id := range []string{a, b, keyed} {
+			reply := poll(token, "review-fingerprint")
+			var envelope map[string]any
+			if reply.Code != http.StatusOK || json.Unmarshal(reply.Body.Bytes(), &envelope) != nil || firstString(envelope, "id") != id {
+				t.Fatalf("wrong delivery for %s: HTTP %d %s", id, reply.Code, reply.Body)
+			}
+		}
+		if reply := poll(token, "review-fingerprint"); reply.Code != http.StatusServiceUnavailable {
+			t.Fatalf("poll replayed a dispatched ID: HTTP %d", reply.Code)
+		}
+		post := func(result string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodPost, "/queue/review/result?job_id="+keyed,
+				strings.NewReader(`{"id":"`+keyed+`","result":{"stdout":"`+result+`"}}`))
+			req.Header.Set("Authorization", "Bearer "+token)
+			reply := httptest.NewRecorder()
+			s.Handler().ServeHTTP(reply, req)
+			return reply
+		}
+		for _, result := range []string{"first", "duplicate"} {
+			if reply := post(result); reply.Code != http.StatusOK {
+				t.Fatalf("receipt: HTTP %d %s", reply.Code, reply.Body)
+			}
+		}
+		state, err := s.readTaskRecords(keyed)
+		if err != nil || firstString(mapValue(state.Shell[keyed].Result), "stdout") != "first" {
+			t.Fatalf("original result was replaced or lost: %v", err)
+		}
+	})
+
 }

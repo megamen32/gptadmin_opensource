@@ -86,6 +86,7 @@ type Config struct {
 	AuthMode      string
 	// Shared signer is opt-in because this node can also mint writer tokens.
 	ReaderOfflineSharedSigner bool
+	OfflineDurableBearer      bool
 	AuthSourceID              string
 	AuthSnapshotReserveBytes  int64
 	AuthSnapshotBudget        int
@@ -198,6 +199,7 @@ func FromEnv() Config {
 		NodePublicURL:              normalizePublicURL(env("GPTADMIN_NODE_PUBLIC_URL", "")),
 		AuthMode:                   strings.ToLower(strings.TrimSpace(env("GPTADMIN_AUTH_MODE", "legacy"))),
 		ReaderOfflineSharedSigner:  truthyString(env("GPTADMIN_READER_OFFLINE_SHARED_SIGNER", "0")),
+		OfflineDurableBearer:       truthyString(env("GPTADMIN_OFFLINE_DURABLE_BEARER", "0")),
 		StandaloneAutoTrust:        truthyString(env("GPTADMIN_STANDALONE", "0")),
 		AuthSourceID:               strings.TrimSpace(env("GPTADMIN_AUTH_SOURCE_ID", "")),
 		AuthSnapshotReserveBytes:   authSnapshotReserveFromEnv(),
@@ -472,7 +474,9 @@ type shellControl struct {
 }
 
 type shellJob struct {
-	ReceiptTarget               string `json:"receipt_target,omitempty"`
+	offlineShell                bool
+	LocalExecutor               *localShellExecutorIdentity `json:"-"`
+	ReceiptTarget               string                      `json:"receipt_target,omitempty"`
 	quorumPendingSealed         json.RawMessage
 	quorumPendingDigest         [32]byte
 	quorumPendingUnmaterialized bool
@@ -1938,7 +1942,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/legacy/", s.adminLegacyStatic)
 	mux.HandleFunc("/admin/", s.adminStatic)
 	mux.HandleFunc("/admin", s.adminIndex)
-	return withRequestTrace(withIngressAudit(withCORS(s.withCloudOSAuth(s.withOwnerReceiptRouting(s.withQuorumAdmission(s.authSnapshotGate(mux)))))))
+	handler := withRequestTrace(withIngressAudit(withCORS(s.withCloudOSAuth(s.withOwnerReceiptRouting(s.withQuorumAdmission(s.authSnapshotGate(mux)))))))
+	return s.withLocalIngressReadiness(handler)
 }
 
 // cloudOSUI serves the locally installed CloudOS UI (cloudos-ui build output
@@ -3997,25 +4002,26 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 				if job == nil || job.Status != "queued" {
 					return nil, false, nil
 				}
+				if !s.localShellReceiptMatchesLocked(r, job) {
+					// Keep the job queued for its original physical executor.
+					return nil, false, errExecutorUnavailable
+				}
 				if expired, err := s.expireQueuedRequestLocked(id, job.CreatedAt); err != nil {
 					readError = err
 					return nil, false, err
 				} else if expired {
 					return nil, false, nil
 				}
-				payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
-				payload["execution_origin"] = executionOriginForCaller(job.Caller)
-				if job.FilesystemACL != nil {
-					payload["filesystem_acl"] = job.FilesystemACL
-				}
-				encoded, err := json.Marshal(payload)
+				encoded, err := s.encodeShellQueueJobLocked(job)
 				return encoded, true, err
 			})
 			if r.Context().Err() != nil {
 				return
 			}
 			if err != nil {
-				if readError != nil {
+				if errors.Is(err, errExecutorUnavailable) {
+					writeJSON(w, http.StatusForbidden, map[string]any{"detail": "job belongs to another executor"})
+				} else if readError != nil {
 					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})
 				} else {
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "queue payload cannot be encoded; job remains queued"})
@@ -4033,28 +4039,17 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			}
 			// The first compatible job gets one durable lease. Oversized jobs
 			// retain their IDs, arguments and ordering for a later reader update.
-			if err := s.verifyOwnerDispatch(r.Context()); err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
-				return
-			}
 			job := s.shellJobs[choice.ID]
-			encoded := choice.Payload
-			previousStatus, previousStarted := job.Status, job.StartedAt
-			job.Status = "running"
-			job.StartedAt = nowFloat()
-			if err := s.saveTaskStateLocked(job.ID); err != nil {
-				log.Printf("task dispatch commit failed: %v", err)
-				job.Status, job.StartedAt = previousStatus, previousStarted
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task dispatch persistence failed; retry polling"})
-				return
+			if !s.localShellDeliveryFencedLocked(job) {
+				if err := s.verifyOwnerDispatch(r.Context()); err != nil {
+					writeJSON(w, http.StatusServiceUnavailable, unavailableExecutorQueue(err.Error()))
+					return
+				}
 			}
-			s.shellQueues[name] = choice.Queue
-			// Deliver the exact bytes validated before the durable transition.
-			encoded = append(encoded, '\n')
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(encoded)
+			if s.commitShellQueueDispatchLocked(w, job) {
+				s.shellQueues[name] = choice.Queue
+				writeShellQueueEnvelope(w, choice.Payload)
+			}
 			return
 		}
 		if origin := s.memberQuorumHubs.Current(); origin != "" && s.localExecutors["shell:"+name] != nil && tokenMatches(r, s.localExecutorTokens["shell:"+name]) {
@@ -4267,7 +4262,7 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "job belongs to another executor"})
 		return
 	}
-	if !s.executorOwnsReceiptLocked(r, job.Server) {
+	if !s.executorOwnsReceiptLocked(r, job.Server) || !s.localShellReceiptMatchesLocked(r, job) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "executor credential does not own job"})
 		return
@@ -5321,6 +5316,15 @@ const (
 )
 
 func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args map[string]any, background bool, timeout time.Duration, key string, permits ...*nodeSubmissionPermit) (map[string]any, int) {
+	if r != nil && r.Header.Get("X-GPTAdmin-Offline-Target") != "" && (r.Header.Get("X-GPTAdmin-Offline-Target") != target || toolName != "shell_exec") {
+		return map[string]any{"status": "failed", "error": "peer target mismatch", "executed": false}, http.StatusForbidden
+	}
+	if offlineShellMCP(r) {
+		_, secretEnv := args["secret_env"]
+		if toolName != "shell_exec" || secretEnv || !s.offlineShellTargetAllowed(r, target) {
+			return map[string]any{"status": "failed", "error": "offline execution is limited to the authorized local shell_exec", "executed": false}, http.StatusForbidden
+		}
+	}
 	if err := authorizeToolAction(r, target, toolName, args); err != nil {
 		var banErr *CodexCallerBanError
 		if errors.As(err, &banErr) {
@@ -5393,8 +5397,11 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		releaseAuthAdmission(r)
 	}
 	durableRequestKey := ""
+	shellName, hasShellTarget := strings.CutPrefix(target, "shell:")
+	addressedShell := r != nil && hasShellTarget && shellName != "" && shellName == canonicalShellQueueName(shellName) &&
+		toolName == "shell_exec" && filesystemACL == nil
 	operation := func() (map[string]any, int) {
-		if s.quorumControlOnly() {
+		if s.quorumControlOnly() && !addressedShell {
 			ctx := context.Background()
 			if r != nil {
 				ctx = r.Context()
@@ -5440,6 +5447,11 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 		}
 		if strings.HasPrefix(target, "shell:") {
 			args = s.shellConnectionArguments(r, target, toolName, args)
+			if addressedShell {
+				// Only this fully authorized path can fence a local shell handoff
+				// at acceptance. The marker never comes from a request header.
+				r = r.WithContext(context.WithValue(r.Context(), localShellAdmissionKey{}, target))
+			}
 			return s.callShellToolWithFilesystemACLForRequest(r, target, toolName, args, background, timeout, requestTraceID(r), requestTraceParent(r), secretValues, filesystemACL, durableRequestKey), http.StatusOK
 		}
 		if strings.HasPrefix(target, "file:") {
@@ -5518,6 +5530,9 @@ func (s *Server) executeMCPTool(r *http.Request, target, toolName string, args m
 	}
 	scope := sha256Hex([]byte(authorization))
 	entryKey := scope + ":" + key
+	if offlineShellMCP(r) {
+		return s.replayOfflineSharedShell(r, entryKey, fingerprint, target, background)
+	}
 	if s.cfg.ConfigDir != "" {
 		durableRequestKey = entryKey
 		return s.executeDurableTaskRequest(entryKey, fingerprint, func() (map[string]any, int) {
@@ -6429,7 +6444,7 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 	if strings.HasPrefix(target, "control:") {
 		server = canonicalShellQueueName(strings.TrimPrefix(target, "control:"))
 	}
-	if s.memberQuorumHubs.Current() != "" {
+	if s.memberQuorumHubs.Current() != "" && !offlineShellMCP(r) {
 		return unavailableExecutorQueue("submit new work to the quorum Hub")
 	}
 	if s.quorumNode != nil {
@@ -6499,6 +6514,10 @@ func (s *Server) callShellToolWithReceiptTargetForRequest(r *http.Request, targe
 		return taskEnqueueFailure(err)
 	}
 	job.OwnerID = owner
+	if err := s.fenceLocalShellHandoffLocked(r, target, job); err != nil {
+		s.mu.Unlock()
+		return unavailableExecutorQueue(err.Error())
+	}
 	change := s.beginTaskMutationLocked(job.ID)
 	s.shellJobs[job.ID] = job
 	fields := map[string]any{"server": server, "job_id": job.ID}
@@ -9988,6 +10007,10 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": id, "error": headerErr})
 		return
 	}
+	if offlineShellMCP(r) && !s.offlineShellRPCAllowed(r, body) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "this MCP operation requires quorum", "executed": false})
+		return
+	}
 	if firstString(body, "method") == "subscriptions/listen" && isMCP20260728Request(r, body) {
 		s.serveTaskSubscription(w, r, body, "")
 		return
@@ -10084,7 +10107,7 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			args = withoutInstructionContext(args)
-			if nodePeerJobTool(name) && s.routeNodePeerJob(w, r, args, originalBody.Bytes()) {
+			if !offlineShellMCP(r) && nodePeerJobTool(name) && s.routeNodePeerJob(w, r, args, originalBody.Bytes()) {
 				return
 			}
 			if (name == "execute" || name == "callMcpTool" || name == "call_mcp_tool") && firstString(args, "tool", "tool_name", "name") == "shell_exec" {
@@ -10648,6 +10671,10 @@ func (s *Server) mcpTaskGetForRequest(r *http.Request, taskID, owner string) (an
 		return nil, taskPersistenceRPCError(err)
 	}
 	if j := s.shellJobs[taskID]; j != nil {
+		if offlineShellMCP(r) && !s.offlineShellJobAllowedLocked(r, j) {
+			s.mu.Unlock()
+			return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
+		}
 		if j.ReceiptTarget != "" && !profileAllowsTarget(r, j.ReceiptTarget) {
 			s.mu.Unlock()
 			return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
@@ -10663,7 +10690,7 @@ func (s *Server) mcpTaskGetForRequest(r *http.Request, taskID, owner string) (an
 		}
 		return result, nil
 	}
-	if j := s.relayJobs[taskID]; j != nil {
+	if j := s.relayJobs[taskID]; j != nil && !offlineShellMCP(r) {
 		if j.Method == "task/group" {
 			if owner != "" && owner != "hub" {
 				s.mu.Unlock()
@@ -11500,6 +11527,9 @@ func (s *Server) verifyBearerJWTFromRequest(r *http.Request) (map[string]any, er
 }
 
 func (s *Server) verifyJWTForRequest(r *http.Request, token string) (map[string]any, error) {
+	if offlineShellMCP(r) && !strings.HasPrefix(token, "gptk_") && strings.Count(token, ".") != 2 {
+		return nil, errors.New("offline shell requires a durable bearer or signed OAuth JWT")
+	}
 	claims, managed := s.verifyManagedMCPToken(token)
 	if !managed {
 		// A revoked/unknown managed credential is a local denial, not an
@@ -11773,6 +11803,9 @@ func decodeJWTClaimsUnverified(token string) map[string]any {
 }
 
 func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
+	if offlineShellMCP(r) {
+		return s.authenticateOfflineShellMCP(w, r)
+	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 		tok := strings.TrimSpace(auth[7:])

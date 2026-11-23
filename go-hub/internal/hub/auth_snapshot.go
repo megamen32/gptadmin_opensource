@@ -282,7 +282,7 @@ func (s *Server) authSnapshotGate(next http.Handler) http.Handler {
 			_ = r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(raw))
 		}
-		if strings.HasPrefix(r.URL.Path, "/admin/api/auth-snapshot/") {
+		if (s.quorumNode != nil && offlineShellMCP(r)) || strings.HasPrefix(r.URL.Path, "/admin/api/auth-snapshot/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -307,13 +307,13 @@ func (s *Server) authSnapshotGate(next http.Handler) http.Handler {
 		state := s.authState
 		s.mu.Unlock()
 		var err error
+		var bundle authSnapshot
 		if !initialized || state.Pending || state.Generation == 0 {
 			err = errors.New("auth snapshot is not ready")
 		} else {
 			if s.effectiveAuthMode() == "reader" && state.WriterID != s.cfg.AuthSourceID {
 				err = errors.New("auth source differs from enrolled writer")
 			} else {
-				var bundle authSnapshot
 				bundle, err = s.readAuthSlot(state)
 				if err == nil && s.effectiveAuthMode() == "reader" && authSnapshotDigest(bundle) != state.Digest {
 					err = errors.New("auth generation was modified outside snapshot apply")
@@ -324,6 +324,12 @@ func (s *Server) authSnapshotGate(next http.Handler) http.Handler {
 			release()
 			writeJSON(w, 503, map[string]any{"detail": err.Error()})
 			return
+		}
+		if offlineShellMCP(r) {
+			r = r.WithContext(context.WithValue(r.Context(), memberOfflineSnapshotKey{}, memberOfflineSnapshot{state: state, bundle: bundle}))
+		}
+		if s.quorumControlOnly() {
+			r = r.WithContext(context.WithValue(r.Context(), localShellAuthStateKey{}, state))
 		}
 		next.ServeHTTP(w, r)
 	})

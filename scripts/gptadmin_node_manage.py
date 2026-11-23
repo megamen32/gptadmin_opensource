@@ -67,6 +67,8 @@ HTTP_CALL_TIMEOUT_SECS = 5.0
 # Drain snapshots may wait behind durable task-store commits on a busy Hub.
 DRAIN_HTTP_TIMEOUT_SECS = 20.0
 JOIN_HTTP_TIMEOUT_SECS = 15.0
+# A relay join can await the bounded publish and provider readback.
+JOIN_REGISTRATION_TIMEOUT_SECS = 100.0
 SOCKET_STOP_TIMEOUT_SECS = 120.0
 SOCKET_START_TIMEOUT_SECS = 45.0
 ELF_MAGIC = b'\x7fELF'
@@ -1677,13 +1679,13 @@ def perform_join(origin: str, grant: str, identity_path: Path, name: str, endpoi
     identity = ensure_identity(identity_path)
     body = build_join_body(identity, membership_target(name), endpoints, connect_to, manifest)
     status, payload = http_json('POST', origin + JOIN_ENDPOINT, token=grant, body=body,
-                                timeout=JOIN_HTTP_TIMEOUT_SECS)
+                                timeout=JOIN_REGISTRATION_TIMEOUT_SECS)
     final_origin = origin
     if status == 409 and isinstance(payload, dict) and payload.get('writer_url'):
         writer = validate_origin(str(payload['writer_url']), 'writer_url redirect')
         final_origin = writer
         status, payload = http_json('POST', writer + JOIN_ENDPOINT, token=grant, body=body,
-                                    timeout=JOIN_HTTP_TIMEOUT_SECS)
+                                    timeout=JOIN_REGISTRATION_TIMEOUT_SECS)
     if not 200 <= status < 300:
         raise RuntimeFailure(f'join at {final_origin} failed: HTTP {status} {payload!r}')
     # writer_id pins the member's control-snapshot source; the join response
@@ -2895,6 +2897,8 @@ def cmd_grant_issue(args, layout: Layout, runner: Runner) -> None:
         raise UsageError('--ttl-mins must be between 1 and 1440')
     url = writer + GRANT_ENDPOINT
     body = {'name': membership_target(args.name), 'ttl_minutes': args.ttl_mins}
+    if args.frp_relay_ipv4:
+        body['frp_relay_ipv4'] = args.frp_relay_ipv4
     try:
         status, payload = http_json('POST', url, token=token, body=body, timeout=JOIN_HTTP_TIMEOUT_SECS)
     except (OSError, urllib.error.URLError) as error:
@@ -3300,6 +3304,8 @@ def build_parser() -> argparse.ArgumentParser:
     issue = grant_sub.add_parser('issue', help='issue a single-use join grant for a new node')
     issue.add_argument('--name', required=True, metavar='NEW-NODE-NAME')
     issue.add_argument('--ttl-mins', type=int, default=30, metavar='MINUTES')
+    issue.add_argument('--frp-relay-ipv4', metavar='ADDRESS',
+                       help='approve this new relay IPv4 address for DNS publication at first join')
     issue.add_argument('--writer-url', default=None, metavar='ORIGIN',
                        help='writer origin; default $GPTADMIN_WRITER_URL')
     issue.add_argument('--admin-token-env', default='GPTADMIN_ADMIN_BEARER', metavar='ENV',

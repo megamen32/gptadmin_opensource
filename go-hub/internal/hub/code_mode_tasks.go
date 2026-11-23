@@ -52,6 +52,9 @@ func (b *codeModeBridge) task(this *qjs.This) (*qjs.Value, error) {
 		return nil, err
 	}
 	action := codeModeStringArg(this, 0)
+	if offlineShellMCP(b.request) && action != "get" && action != "result" && action != "wait" {
+		return nil, b.fail("forbidden", "offline task access is read-only", nil)
+	}
 	args := codeModeObjectArg(this, 1)
 	if action == "list" {
 		limit := intFromAny(args["limit"])

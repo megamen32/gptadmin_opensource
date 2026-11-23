@@ -14,6 +14,53 @@ is created and verified before draft assets are uploaded; drafts are inspected b
 release ID, not the published-only tag endpoint. Existing tags/assets are never
 overwritten. A interrupted draft is resumed only with identical verified inputs.
 
+## One-time transition from a pinned private CLI
+
+An old installation may have `/usr/local/bin/gptadmin` pointing into a fixed
+private version slot. Its old manager can reject public packages before an
+automatic update starts. Do not modify its validator or overwrite the slot.
+For the one-time transition, obtain an independently verified public CLI and
+its matching bundled manager, and the public Node archive. Verify the release
+tag, full source revision, archive checksum and manifest closure before use.
+Run that public CLI's `node update --name NAME --package ARCHIVE
+--expected-revision INSTALLED_REVISION --require-drain` with the normal service
+privileges. It retains the previous version for rollback and refreshes the
+installed manager. Review the result before proceeding; do not retry an unknown
+outcome.
+
+Replace a pinned CLI entry atomically with the CLI from a verified public
+release containing the installed-helper selection fix. Create the temporary
+file in the entry's directory and use `os.replace`; never write through the old
+symlink. For example, after verifying `PUBLIC_CLI` against its release:
+
+```sh
+sudo python3 - "$PUBLIC_CLI" /usr/local/bin/gptadmin <<'PY'
+import os, shutil, sys, tempfile
+src, dst = sys.argv[1:]
+fd, tmp = tempfile.mkstemp(prefix='.gptadmin-', dir=os.path.dirname(dst))
+try:
+    with os.fdopen(fd, 'wb') as out, open(src, 'rb') as inp:
+        shutil.copyfileobj(inp, out)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dst)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
+```
+
+The corrected installed CLI selects
+`/usr/local/lib/gptadmin/gptadmin_node_manage.py`, while an explicitly invoked
+portable CLI keeps its bundled manager for bootstrap. The Node timer invokes
+the managed updater, which uses the same installed manager. The public bootstrap
+installer also atomically replaces an existing file or link. The legacy pinned
+CLI itself cannot acquire this fix until its entry is replaced.
+
+The named-instance KVM transition was verified with an independently checked
+public 1145 CLI/manager and public 1147 archive, followed by rollback and another
+update using the refreshed helper. This does not establish socket-primary or a
+network timer migration; verify the relevant installed entry and timer locally.
+
 ## Managed Linux Node updater
 
 The updater and its manager are part of each public Node package. It is an explicit

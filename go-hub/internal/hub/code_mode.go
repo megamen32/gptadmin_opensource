@@ -198,7 +198,7 @@ func codeModeStatusFor(code string) int {
 		return http.StatusServiceUnavailable
 	case "not_found":
 		return http.StatusNotFound
-	case "history_unavailable":
+	case "history_unavailable", "task_outcome_unknown":
 		return http.StatusConflict
 	case "invalid_arguments", "invalid_return", "unknown_tool":
 		return http.StatusBadRequest

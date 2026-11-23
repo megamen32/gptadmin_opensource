@@ -16,6 +16,7 @@ import (
 const nodePeerHopHeader = "X-Gptadmin-Node-Hop"
 
 type nodePeerRoute struct {
+	private   bool
 	NodeID    string `json:"node_id,omitempty"`
 	URL       string `json:"url"`
 	ConnectTo string `json:"connect_to,omitempty"`

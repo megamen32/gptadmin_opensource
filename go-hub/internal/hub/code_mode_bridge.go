@@ -467,18 +467,20 @@ func (b *codeModeBridge) fail(code, message string, receipt map[string]any) *cod
 
 // install binds the bridge functions onto the sandbox global object.
 func (b *codeModeBridge) install(ctx *qjs.Context) error {
-	ctx.SetFunc("__codeModeDiscover", b.discover)
-	ctx.SetFunc("__codeModeSchema", b.schema)
-	ctx.SetFunc("__codeModeInspect", b.inspect)
-	ctx.SetFunc("__codeModePrepareTool", b.prepareTool)
-	ctx.SetFunc("__codeModeSearch", b.search)
+	if !offlineShellMCP(b.request) {
+		ctx.SetFunc("__codeModeDiscover", b.discover)
+		ctx.SetFunc("__codeModeSchema", b.schema)
+		ctx.SetFunc("__codeModeInspect", b.inspect)
+		ctx.SetFunc("__codeModePrepareTool", b.prepareTool)
+		ctx.SetFunc("__codeModeSearch", b.search)
+		ctx.SetFunc("__codeModeFacade", b.facade)
+		ctx.SetFunc("__codeModeFile", b.file)
+		ctx.SetFunc("__codeModeContent", b.content)
+	}
 	ctx.SetFunc("__codeModeStartCall", b.startCall)
 	ctx.SetFunc("__codeModePollCall", b.pollCall)
 	ctx.SetFunc("__codeModeYield", b.yieldCall)
-	ctx.SetFunc("__codeModeFacade", b.facade)
 	ctx.SetFunc("__codeModeTask", b.task)
-	ctx.SetFunc("__codeModeFile", b.file)
-	ctx.SetFunc("__codeModeContent", b.content)
 	ctx.SetFunc("__codeModeLog", b.log)
 	if _, err := ctx.Eval("code_mode_api.js", qjs.Code(codeModeAPISource)); err != nil {
 		return fmt.Errorf("cannot expose the code_mode API: %w", err)
@@ -1107,6 +1109,9 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 	}
 	target := firstString(args, "target", "server_id", "agent_id")
 	tool := firstString(args, "tool", "tool_name", "name")
+	if peerTarget := b.request.Header.Get("X-GPTAdmin-Offline-Target"); peerTarget != "" && (target != peerTarget || tool != "shell_exec" || !asTask || ref != "" || indexResult) {
+		return nil, b.fail("forbidden", "peer operation is restricted to the local task target", nil)
+	}
 
 	// A reference alone is enough: it carries the resolved target and tool.
 	resolvedArgs := map[string]any{}
@@ -1117,6 +1122,9 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 		}
 		target = firstString(resolved, "target")
 		tool = firstString(resolved, "tool")
+	}
+	if offlineShellMCP(b.request) && (ref != "" || indexResult || tool != "shell_exec" || (!b.server.offlineShellTargetAllowed(b.request, target) && !b.server.offlineRemoteAllowed(b.request, target))) {
+		return nil, b.fail("forbidden", "offline execution is limited to the authorized local shell_exec", nil)
 	}
 	if b.readOnly && (truthy(args["__indexResult"]) || truthy(args["index"])) {
 		return nil, b.fail("forbidden", "read-only execution cannot create persistent content sources", nil)
@@ -1187,6 +1195,9 @@ func (b *codeModeBridge) runCallData(args map[string]any, admitted bool) (any, e
 		// A refused call is a policy refusal, not a runtime fault: it is
 		// reported as forbidden so the caller can tell the two apart.
 		code := firstString(payload, "status")
+		if offlineShellMCP(b.request) && firstString(mapValue(response["error"]), "code") == "task_outcome_unknown" {
+			code = "task_outcome_unknown"
+		}
 		if typed := firstString(mapValue(payload["validation"]), "code"); typed == "invalid_arguments" || typed == "invalid_tool_schema" {
 			code = typed
 		}
@@ -1392,6 +1403,12 @@ func (b *codeModeBridge) dispatchMode(callRequest *http.Request, target, tool st
 	}
 	if failure := b.server.requireInstructionContext(callRequest, target, tool); failure != nil {
 		return failure, http.StatusPreconditionRequired
+	}
+	if offlineShellMCP(callRequest) && b.server.offlineRemoteAllowed(callRequest, target) {
+		if len(contract) != 0 {
+			return map[string]any{"status": "failed", "error": "offline remote schema contract is unsupported", "executed": false}, http.StatusPreconditionFailed
+		}
+		return b.server.offlineRemoteDispatch(callRequest, target, tool, callArgs, idempotencyKey, background)
 	}
 	peerArgs := map[string]any{"target": target, "tool": tool, "arguments": callArgs}
 	if background {

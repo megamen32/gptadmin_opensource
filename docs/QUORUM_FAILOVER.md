@@ -113,3 +113,47 @@ an opt-in replica with an explicit destination, quota and retention policy.
   through public MCP and read the same job ID. Expect a terminal
   `executor_dispatch_capacity` response with `executed: false`. Retry with the
   same idempotency key and verify the original handle and absence of side effects.
+
+## A local command after loss of quorum
+
+An enrolled voter or ordinary reader can verify a managed durable bearer
+against the issuer's last applied token record when the operator enables
+`GPTADMIN_OFFLINE_DURABLE_BEARER=1` on that node. The setting defaults to
+off and applies to eligible bound profiles on that node. Verification uses
+the stored credential digest and the existing expiry, revocation, audience,
+profile and tool policy. This credential type does not require the issuer's
+signing key.
+
+With a bound full-access profile whose approval mode is unrestricted, a
+caller can start an addressed shell task through an available ingress.
+A voter finds the executor's owner in its applied membership and registry.
+It sends the task to the configured private HTTPS endpoint with mutual TLS.
+An ordinary reader can use its configured HTTPS peer route and applied
+membership. The receiving node checks the caller's grant and its local
+executor identity before accepting the task. A profile requiring approval
+cannot start a task through this path while its approval authority is
+unavailable.
+
+Use the existing MCP discovery and `mcp.tasks.start` for the target's
+`shell_exec`. The returned task ID names the executor's owner. The same
+caller can read it through the ingress or directly through that owner.
+The remote path supports an unkeyed task start and receipt reads. When a
+write response is lost, the ingress reports an unknown outcome and makes
+no automatic second submission. The executor's existing delivery journal
+handles repeated delivery of an already accepted task.
+
+For an authorization-code OAuth token, an enrolled voter with explicitly
+provisioned offline signature verification can
+accept a new shell command for its own embedded executor through the usual
+`/mcp` endpoint. The caller uses its existing, unexpired OAuth credential
+and a bound profile authorizing the local executor and `shell_exec`. The
+normal code-mode discovery and `mcp.tasks.start` path returns a task ID.
+Read that ID to learn the result after reconnecting. Independent submissions
+with the same arguments represent separate requests.
+
+For older cluster-wide idempotency keys, the original owner can return a
+locally proven prior result. When the outcome cannot be established with
+the available state, the caller receives an unknown-outcome error and can
+look up the same request after quorum returns. Shared changes including
+OAuth registration continue to require an authority. Rights changes made
+elsewhere during disconnection become visible after synchronization.

@@ -105,6 +105,10 @@ func (s *Server) taskReceiptForRequest(r *http.Request, jobID string, detail any
 		return taskPersistenceFailure(err), true
 	}
 	relay, shell := s.relayJobs[jobID], s.shellJobs[jobID]
+	if offlineShellMCP(r) && (shell == nil || relay != nil || !s.offlineShellJobAllowedLocked(r, shell)) {
+		s.mu.Unlock()
+		return nil, false
+	}
 	var caller *taskCaller
 	var filesystemACL *filesystemACLPolicy
 	receiptTarget := ""

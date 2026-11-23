@@ -194,6 +194,12 @@ func (s *Server) lookupOwner(r *http.Request, q ownerRead) ownerReadReply {
 		return ownerReadReply{Failure: failure}
 	}
 	here := s.localLookupPeer()
+	if offlineShellMCP(r) && ((q.Action != "task" && q.Action != "job") || q.Hint.OwnerID == "") {
+		return ownerReadReply{Failure: &readOffline}
+	}
+	if offlineShellMCP(r) && !q.Hint.matches(here) {
+		return s.offlineRemoteRead(r, q)
+	}
 	if q.Hint.matches(here) {
 		reply := s.readAtOwner(r, q, here.id)
 		if q.Hint == (ownerHint{}) && reply.Failure == &readMissing {

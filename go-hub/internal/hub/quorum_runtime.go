@@ -326,14 +326,32 @@ func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
 
 func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(nodePeerHopHeader) != "" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
+			owner, target := r.Header.Get("X-GPTAdmin-Offline-Owner"), r.Header.Get("X-GPTAdmin-Offline-Target")
+			s.mu.Lock()
+			local := s.localReadbackOwnerIDLocked() == owner && s.localExecutors[target] != nil
+			s.mu.Unlock()
+			if r.Header.Get(nodePeerHopHeader) != "1" || !local {
+				writeJSON(w, http.StatusForbidden, map[string]any{"detail": "peer destination does not own target", "executed": false})
+				return
+			}
+		}
 		if s.quorumNode == nil {
+			if r.Header.Get(nodePeerHopHeader) == "1" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
+				if fallback := s.memberOfflineShellFallback(r, next); fallback != nil {
+					fallback(w, r)
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable", "executed": false})
+				return
+			}
 			if origin := s.memberQuorumHubs.Current(); origin != "" && memberQuorumClientPath(r.URL.Path) && r.Header.Get(nodePeerHopHeader) == "" {
 				if r.Header.Get(memberIngressHeader) != "" {
 					s.memberQuorumHubs.Failed(origin)
 					writeJSON(w, http.StatusLoopDetected, map[string]any{"detail": "quorum ingress resolved to an ordinary member", "executed": false})
 					return
 				}
-				s.proxyMemberRequest(w, r, origin, false)
+				s.proxyMemberRequestWithFallback(w, r, origin, false, s.memberOfflineShellFallback(r, next))
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -364,8 +382,12 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				return
 			}
 		}
+		termBeforeVerification := s.quorumNode.CurrentTerm()
 		if err := s.quorumNode.VerifyLeader(r.Context()); err != nil {
 			s.quorumAuthorityActiveWriter.Store(false)
+			if s.pollFencedLocalShell(w, r) {
+				return
+			}
 			if r.Header.Get("X-GPTAdmin-Quorum-Forwarded") != "" {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
 				return
@@ -384,6 +406,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				defer release()
 			}
 			hubURL, leaderID := s.quorumNode.LeaderForwardURL()
+			if leaderID != "" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable while writer is known", "executed": false})
+				return
+			}
 			target, parseErr := url.Parse(hubURL)
 			if parseErr == nil && (target.Scheme == "https" || target.Scheme == "http") && target.Host != "" && leaderID != "" && target.Host != r.Host {
 				proxy := httputil.NewSingleHostReverseProxy(target)
@@ -418,10 +444,18 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				proxy.ServeHTTP(w, r)
 				return
 			}
+			if leaderID == "" && s.offlineShellMCPRoute(r) {
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), offlineShellMCPKey{}, true)))
+				return
+			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "this GPTAdmin node has no quorum-confirmed Hub leadership", "leader_id": leaderID})
 			return
 		}
-		if err := s.ensureQuorumAuthorityMaterialized(r.Context()); err != nil {
+		if r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable while writer is active", "executed": false})
+			return
+		}
+		if err := s.materializeVerifiedQuorumAuthority(r.Context(), termBeforeVerification); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum authority state is not ready on this leader"})
 			return
 		}

@@ -199,3 +199,32 @@ watcher is enabled on VUSA and reports healthy `watching`, failures0, while
 the production A record remains primary95. Its readiness was checked with a
 real managed command at the canonical hostname pinned to VUSA. A fault of that
 production hostname or the entire primary machine was not performed here.
+
+## Enrolling a public FRP relay
+
+An operator can add an IPv4 address to a first-time node grant with
+`gptadmin node grant issue --name NODE --frp-relay-ipv4 ADDRESS`. The new
+node uses its normal join command. The quorum leader commits the enrollment
+and publishes the address supplied by the operator. Ordinary grants and
+heartbeats perform zero DNS writes. Route the grant output directly to the
+joining node under the existing credential-handling procedure.
+
+The publishing backend is configured on each eligible writer.
+
+| Setting | Purpose |
+| --- | --- |
+| `GPTADMIN_FRP_DNS_PROVIDER=spaceweb` | Append the approved IPv4 address to one dedicated A record set |
+| `GPTADMIN_FRP_DNS_ZONE`, `GPTADMIN_FRP_DNS_SPACEWEB_NAME` | Authoritative zone and exact record name |
+| `GPTADMIN_FRP_DNS_SPACEWEB_HELPER` | Absolute path to the trusted executable `scripts/gptadmin_dns_sweb.py` |
+| `GPTADMIN_FRP_DNS_SPACEWEB_CREDENTIALS_FILE`, `GPTADMIN_FRP_DNS_SPACEWEB_TRANSPORT` | Protected provider credential file and absolute path to the single-attempt transport |
+| `GPTADMIN_FRP_DNS_PROVIDER=powerdns` | Publish `frp-members.<zone>` and a health-checked `frp.<zone>` in an authoritative PowerDNS zone with Lua records enabled |
+| `GPTADMIN_FRP_DNS_API_URL`, `GPTADMIN_FRP_DNS_API_KEY`, `GPTADMIN_FRP_DNS_HEALTH_URL` | PowerDNS API base, protected API credential and HTTP(S) URL through the relay returning GPTAdmin's version |
+
+For a static A pool, configure each accepted origin's usual FRP endpoints
+and unique `FRP_SUBDOMAIN`. To serve the same public host on each relay, set
+`FRP_SHARED_SUBDOMAIN` to the shared label and provision the same protected
+`FRP_SHARED_GROUP_KEY` on those origins. The regular CLI writes a second
+HTTP proxy in each frpc configuration and uses FRP's load-balancing group
+and local readiness check. The existing private subdomain still addresses
+its own origin. Each public relay needs a working TLS frontend for the same
+hostname and an active connector to a surviving origin.

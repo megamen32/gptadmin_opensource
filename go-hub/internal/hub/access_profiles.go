@@ -870,9 +870,22 @@ func (s *Server) applyAccessProfileContext(r *http.Request, claims map[string]an
 	if err := s.refreshAccessState(); err != nil {
 		return requestWithAccessProfile(r, AccessProfile{ID: "unavailable", AccessMode: accessModeReadonly, ApprovalMode: approvalModeReadOnly})
 	}
+	profile, profileID, bound := s.accessProfileBinding(claims)
+	if !bound {
+		if profileID != "" {
+			return requestWithAccessProfile(r, AccessProfile{ID: profileID, AccessMode: accessModeReadonly, ApprovalMode: approvalModeReadOnly})
+		}
+		return r
+	}
+	claims["profile_id"] = profileID
+	return requestWithAccessProfile(r, s.resolveAccessProfileTargets(profile))
+}
+
+func (s *Server) accessProfileBinding(claims map[string]any) (AccessProfile, string, bool) {
 	jti := firstString(claims, "jti")
 	clientID := firstString(claims, "client_id")
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, managed := s.managedMCP[jti]
 	profileID := ""
 	if managed {
@@ -886,13 +899,5 @@ func (s *Server) applyAccessProfileContext(r *http.Request, claims map[string]an
 		profileID = firstString(claims, "profile_id")
 	}
 	profile, bound := s.accessProfiles[profileID]
-	s.mu.Unlock()
-	if !bound {
-		if profileID != "" {
-			return requestWithAccessProfile(r, AccessProfile{ID: profileID, AccessMode: accessModeReadonly, ApprovalMode: approvalModeReadOnly})
-		}
-		return r
-	}
-	claims["profile_id"] = profileID
-	return requestWithAccessProfile(r, s.resolveAccessProfileTargets(profile))
+	return profile, profileID, bound
 }
