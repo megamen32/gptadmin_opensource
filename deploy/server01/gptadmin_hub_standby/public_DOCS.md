@@ -66,6 +66,13 @@ handoff. Existing member and legacy modes retain their current behavior.
 
 ## Optional quorum membership
 
+`offline_durable_bearer` is an explicit per-node opt-in and defaults to false,
+including for existing installations that omit it. When enabled, a member can
+verify existing managed durable bearer credentials against its last applied
+authority state while the writer is unavailable. Expiry, revocation, bound
+profile, tool policy and approval requirements still apply. This does not enable
+or require `offline_shared_signer`; it is a separate OAuth setting.
+
 `quorum_enabled` defaults to false. A provisioned voter may enable it only after
 its authenticated cluster and private peer routes are ready. Stage the complete
 node-specific quorum configuration at `/data/config/quorum/quorum.json` as a

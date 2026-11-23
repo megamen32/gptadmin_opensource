@@ -513,6 +513,51 @@ class TestDrainAndHealthHttp(BaseTempCase):
         mgr.drain_wait_ready(origin, 'secret-token', wait_secs=1, poll_interval=0.02)
         self.assertEqual(seen, ['Bearer secret-token'])
 
+    def test_control_origin_uses_bind_precedence_and_preserves_specific_addresses(self):
+        cases = (
+            ({}, 'http://127.0.0.1:9001'),
+            ({'GPTADMIN_HUB_HOST': '0.0.0.0', 'GPTADMIN_HUB_PORT': '9088',
+              'HUB_BIND': '192.0.2.10', 'HUB_PORT': '9002'}, 'http://127.0.0.1:9088'),
+            ({'GPTADMIN_HUB_HOST': '  ', 'HUB_BIND': '192.0.2.10', 'PORT': '9088'},
+             'http://192.0.2.10:9088'),
+            ({'HUB_HOST': 'localhost', 'HUB_BIND': '0.0.0.0', 'HUB_PORT': '9002'},
+             'http://localhost:9002'),
+            ({'HUB_BIND': '[::]'}, 'http://[::1]:9001'),
+            ({'HUB_BIND': '0:0:0:0:0:0:0:0'}, 'http://[::1]:9001'),
+            ({'HUB_BIND': '2001:db8::1'}, 'http://[2001:db8::1]:9001'),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self.assertEqual(mgr.origin_from_env(env), expected)
+
+    def test_managed_follower_requires_local_identity_readiness_and_exact_version(self):
+        origin, commit = 'http://127.0.0.1:9001', 'a' * 40
+        health = dict(role='follower', leader_id='other', node_id='local', cluster_id='cluster',
+                      quorum_mode='owner_local', baseline_ready=True, replica_ready=True)
+        version = dict(git_commit=commit, quorum_mode='owner_local')
+        for changes, version_changes, verified, accepted in (
+            ({}, {}, True, True),
+            ({'replica_ready': False}, {}, True, False),
+            ({'baseline_ready': False}, {}, True, False),
+            ({'role': 'leader'}, {}, True, False),
+            ({'leader_id': ''}, {}, True, False),
+            ({'leader_id': 'local'}, {}, True, False),
+            ({}, {'git_commit': 'b' * 40}, True, False),
+            ({}, {'quorum_mode': None}, True, False),
+            ({}, {}, False, False),
+        ):
+            with self.subTest(changes=changes, version=version_changes, verified=verified):
+                def response(_method, url, **_):
+                    return (503, health | changes) if url.endswith('/healthz') else (200, version | version_changes)
+
+                with patch.object(mgr, 'http_json', side_effect=response):
+                    if accepted:
+                        self.assertEqual(mgr.wait_healthy(origin, commit, timeout=.02,
+                                                          verify_voter=lambda _: verified), version)
+                    else:
+                        with self.assertRaises(mgr.RuntimeFailure):
+                            mgr.wait_healthy(origin, commit, timeout=.02, verify_voter=lambda _: verified)
+
     def test_wait_healthy_requires_commit_match(self):
         commit = 'cafe1234abcd'
 
@@ -676,8 +721,10 @@ class TestJoin(BaseTempCase):
 
         server = self.start(Handler)
         writer = f'http://127.0.0.1:{server.server_address[1]}'
-        args = argparse_namespace(admin_token_env='TEST_ADMIN_BEARER', writer_url=writer,
-                                  ttl_mins=45, name='edge-9')
+        args = mgr.build_parser().parse_args([
+            'grant', 'issue', '--name', 'edge-9', '--writer-url', writer,
+            '--ttl-mins', '45', '--admin-token-env', 'TEST_ADMIN_BEARER',
+        ])
         out = io.StringIO()
         with patch.dict(os.environ, {'TEST_ADMIN_BEARER': 'owner-bearer'}):
             with redirect_stdout(out):
@@ -688,8 +735,10 @@ class TestJoin(BaseTempCase):
         self.assertEqual(captured[0]['body'], {'name': 'shell:edge-9', 'ttl_minutes': 45})
 
     def test_grant_issue_requires_token_and_reachable_writer(self):
-        args = argparse_namespace(admin_token_env='TEST_ADMIN_BEARER', writer_url='http://127.0.0.1:1',
-                                  ttl_mins=30, name='edge-9')
+        args = mgr.build_parser().parse_args([
+            'grant', 'issue', '--name', 'edge-9', '--writer-url', 'http://127.0.0.1:1',
+            '--admin-token-env', 'TEST_ADMIN_BEARER',
+        ])
         with patch.dict(os.environ, {'TEST_ADMIN_BEARER': ''}):
             with self.assertRaises(mgr.UsageError):
                 mgr.cmd_grant_issue(args, self.layout, mgr.Runner())

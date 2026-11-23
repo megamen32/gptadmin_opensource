@@ -244,6 +244,30 @@ def test_haos_quorum_is_opt_in_and_packaged() -> None:
     assert "gptadmin_hub_standby/gptadmin_quorum_config.py" in (source / "public_publish_image_workflow.yml").read_text()
 
 
+def test_haos_durable_bearer_opt_in_reaches_node_environment(tmp_path: Path) -> None:
+    import shutil
+
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the actual HAOS entrypoint")
+    source = ROOT / "deploy" / DEPLOY_TARGET / "gptadmin_hub_standby"
+    for name in ("public_config.yaml", "config.yaml.template"):
+        config = (source / name).read_text()
+        assert "  offline_durable_bearer: false" in config
+        assert "  offline_durable_bearer: bool?" in config
+
+    entrypoint = (source / "run.sh").read_text()
+    line = next(line for line in entrypoint.splitlines() if line.startswith("export GPTADMIN_OFFLINE_DURABLE_BEARER="))
+    assert entrypoint.index(line) < entrypoint.index('"$NODE_BINARY" &')
+    script = 'set -euo pipefail\nOPTS=$1\n' + line + '\nexec env\n'
+    options = tmp_path / "options.json"
+    for payload, expected in (({}, "0"), ({"offline_durable_bearer": False}, "0"),
+                              ({"offline_durable_bearer": True}, "1")):
+        options.write_text(json.dumps(payload))
+        result = subprocess.run(["bash", "-c", script, "entrypoint", str(options)],
+                                capture_output=True, text=True, check=True)
+        assert f"GPTADMIN_OFFLINE_DURABLE_BEARER={expected}" in result.stdout.splitlines()
+
+
 def test_haos_quorum_runtime_opt_in_exports_private_config(tmp_path: Path) -> None:
     import shutil
     if not shutil.which("jq"):

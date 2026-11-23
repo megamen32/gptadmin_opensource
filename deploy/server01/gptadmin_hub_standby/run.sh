@@ -13,6 +13,7 @@ GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES="$(jq -er '
   else . end
 ' "$OPTS")"
 export GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES
+export GPTADMIN_OFFLINE_DURABLE_BEARER="$(jq -r 'if .offline_durable_bearer == true then "1" else "0" end' "$OPTS")"
 
 mkdir -p /data/config /data/outputs /opt/gptadmin/build /opt/gptadmin/public
 INTERNAL_SECRETS=/data/config/internal-secrets.json

@@ -16,6 +16,7 @@ import fcntl
 from contextlib import contextmanager
 import threading
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -1495,8 +1496,19 @@ def write_unit_template(layout: Layout) -> None:
 
 
 def origin_from_env(env: dict) -> str:
-    host = env.get('GPTADMIN_HUB_HOST') or DEFAULT_BIND[0]
-    port = env.get('GPTADMIN_HUB_PORT') or str(DEFAULT_BIND[1])
+    def setting(keys, default):
+        return next((env[key].strip() for key in keys if env.get(key, '').strip()), default)
+
+    # Match Hub.FromEnv precedence, including installations with only HUB_BIND.
+    host = setting(('GPTADMIN_HUB_HOST', 'HUB_HOST', 'HUB_BIND'), DEFAULT_BIND[0])
+    port = setting(('GPTADMIN_HUB_PORT', 'HUB_PORT', 'PORT'), str(DEFAULT_BIND[1]))
+    if host == '0.0.0.0':
+        host = '127.0.0.1'
+    elif ':' in host:
+        if host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
+        address = ipaddress.IPv6Address(host)
+        host = f'[{"::1" if address.is_unspecified else address}]'
     return f'http://{host}:{port}'
 
 
@@ -1512,21 +1524,36 @@ def read_admin_token(layout: Layout, name: str, env: dict) -> str:
     return token
 
 
-def wait_healthy(origin: str, expected_commit: str, timeout: float = HEALTH_TIMEOUT_SECS) -> dict:
-    """Poll /healthz, then require /version git_commit == expected_commit."""
+def wait_healthy(origin: str, expected_commit: str, timeout: float = HEALTH_TIMEOUT_SECS,
+                 *, verify_voter=None) -> dict:
+    """Wait for the expected version and the appropriate local readiness."""
     deadline = time.monotonic() + timeout
     detail = 'no response yet'
     while time.monotonic() < deadline:
         remaining = max(0.5, deadline - time.monotonic())
         try:
-            status, _ = http_json('GET', origin + '/healthz', timeout=min(3.0, remaining))
-            if 200 <= status < 300:
+            status, health = http_json('GET', origin + '/healthz', timeout=min(3.0, remaining))
+            follower_ready = (
+                status == 503 and verify_voter is not None and bool(expected_commit)
+                and isinstance(health, dict) and health.get('role') == 'follower'
+                and health.get('replica_ready') is True and health.get('baseline_ready') is True
+                and isinstance(health.get('leader_id'), str) and bool(health['leader_id'])
+                and health['leader_id'] != health.get('node_id')
+            )
+            if 200 <= status < 300 or follower_ready:
                 vstatus, version = http_json('GET', origin + '/version', timeout=min(3.0, remaining))
                 if 200 <= vstatus < 300 and isinstance(version, dict):
+                    health_mode = health.get('quorum_mode') if isinstance(health, dict) else None
+                    version_mode = version.get('quorum_mode')
                     # An empty expectation accepts any healthy build (unknown old manifest).
-                    if not expected_commit or version.get('git_commit') == expected_commit:
+                    if expected_commit and version.get('git_commit') != expected_commit:
+                        detail = f'/version git_commit={version.get("git_commit")!r}, expected {expected_commit!r}'
+                    elif verify_voter is not None and (follower_ready or health_mode or version_mode) and (
+                        not health_mode or health_mode != version_mode or not verify_voter(health)
+                    ):
+                        detail = 'quorum identity or service executable did not match the local node'
+                    else:
                         return version
-                    detail = f'/version git_commit={version.get("git_commit")!r}, expected {expected_commit!r}'
                 else:
                     detail = f'/version returned HTTP {vstatus}'
             else:
@@ -1535,6 +1562,35 @@ def wait_healthy(origin: str, expected_commit: str, timeout: float = HEALTH_TIME
             detail = type(error).__name__
         time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
     raise RuntimeFailure(f'node at {origin} did not become healthy within {timeout:.0f}s ({detail})')
+
+
+def wait_managed_healthy(origin: str, expected_commit: str, runner, unit: str, slot: Path) -> dict:
+    # A legacy installation listening only on a specific interface retains its
+    # existing health contract. Replica readiness is accepted only on loopback.
+    if urllib.parse.urlsplit(origin).hostname not in ('127.0.0.1', 'localhost', '::1'):
+        return wait_healthy(origin, expected_commit)
+
+    def verify_voter(health):
+        identity = service_identity(runner, unit)
+        if (not identity['active'] or not identity['pid']
+                or identity['executable'] != os.path.realpath(slot / 'bin' / 'gptadmin-node')):
+            return False
+        proc = Path('/proc') / str(identity['pid'])
+        try:
+            env = dict(item.split(b'=', 1) for item in (proc / 'environ').read_bytes().split(b'\0') if b'=' in item)
+            config_path = Path(os.fsdecode(env[b'GPTADMIN_QUORUM_CONFIG_FILE'].strip()))
+            config = json.loads((proc / 'cwd' / config_path).read_text())
+            if not all(config.get(key) and config[key] == health.get(key) for key in ('node_id', 'cluster_id')):
+                return False
+            if health.get('role') == 'follower' and not any(
+                peer.get('id') == health['leader_id'] for peer in config.get('peers', [])
+            ):
+                return False
+            return service_identity(runner, unit) == identity
+        except (OSError, ValueError, KeyError, AttributeError, TypeError):
+            return False
+
+    return wait_healthy(origin, expected_commit, verify_voter=verify_voter)
 
 
 def drain_begin(origin: str, token: str) -> bool:
@@ -1876,7 +1932,7 @@ def cmd_install(args, layout: Layout, runner: Runner) -> None:
                 post_env['GPTADMIN_AUTH_SOURCE_ID'] = writer_id
                 write_env_file(env_path, post_env)
         systemctl(runner, 'start', unit)
-        origin = f'http://{bind_host}:{bind_port}'
+        origin = origin_from_env(values)
         wait_healthy(origin, manifest['git_commit'])
     except (RuntimeFailure, PreflightError, OSError) as error:
         # Keep nothing half-installed, but never touch an existing state directory.
@@ -2774,7 +2830,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
             env_updated = True
         switch_current(layout, final, expected_revision=expected_revision)
         systemctl(runner, 'restart', unit)
-        wait_healthy(origin, new_commit)
+        wait_managed_healthy(origin, new_commit, runner, unit, final)
         if name == 'primary' and has_admin_ui:
             ui_source, ui_manifest = verify_ui_payload(final)
             public_root = Path(env.get('GPTADMIN_PUBLIC_DIR') or (Path(env.get('GPTADMIN_ROOT') or '.') / 'public'))
@@ -2800,7 +2856,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
                 atomic_write(env_path, previous_env_text, 0o600)
             switch_current(layout, current, expected_revision=new_commit)
             systemctl(runner, 'restart', unit)
-            wait_healthy(origin, previous_manifest.get('git_commit') or '')
+            wait_managed_healthy(origin, previous_manifest.get('git_commit') or '', runner, unit, current)
             if not drain_cancel(origin, token):
                 raise RuntimeFailure('rollback drain cancel unverified')
         except (RuntimeFailure, PreflightError, OSError) as rollback_error:
@@ -2836,7 +2892,7 @@ def cmd_rollback(args, layout: Layout, runner: Runner) -> None:
     switch_current(layout, target)
     try:
         systemctl(runner, 'restart', unit)
-        wait_healthy(origin, target_manifest.get('git_commit') or '')
+        wait_managed_healthy(origin, target_manifest.get('git_commit') or '', runner, unit, target)
     except (RuntimeFailure, OSError) as error:
         try:
             switch_current(layout, current)
