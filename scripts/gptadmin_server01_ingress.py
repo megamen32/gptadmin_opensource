@@ -109,7 +109,8 @@ def health_pattern(enrolled: Enrollment, route: str, follower: bool) -> str:
 def checked_backend(label: str, host: str, route: str, follower: bool, enrolled: Enrollment, ca: str) -> str:
     address, port = TLS_TARGETS[route]
     def probe(path):
-        return (f"    http-check connect ssl sni {host} alpn http/1.1\n"
+        # Select the H1 multiplexer explicitly for these TLS health checks.
+        return (f"    http-check connect ssl sni {host} alpn http/1.1 proto h1\n"
                 f"    http-check send meth GET uri {path} ver HTTP/1.1 hdr Host {host}")
 
     # Discovery passes through Node's quorum admission, including the private

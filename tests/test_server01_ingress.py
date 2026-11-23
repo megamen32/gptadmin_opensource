@@ -63,7 +63,9 @@ def test_original_routes_and_tls_policy():
     candidate = gateway.render(base, MEMBERS)
     assert candidate.startswith(base[:cut])
     assert base[cut:] in candidate
+    assert candidate.count("    http-check connect ") == 18
     for name in gateway.HUB_NAMES:
+        assert candidate.count(f"    http-check connect ssl sni {name} alpn http/1.1 proto h1\n") == 6
         assert candidate.count("req.ssl_sni -i " + name + "\n") == 1
         assert candidate.count(f"verify required verifyhost {name} ca-file ") == 3
     assert candidate.count("    retries 0\n") == 9
