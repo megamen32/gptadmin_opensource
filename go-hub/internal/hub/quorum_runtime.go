@@ -389,16 +389,9 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			if s.pollFencedLocalShell(w, r) {
 				return
 			}
-			if s.quorumControlOnly() && s.quorumLocalDispatchRequest(r) {
-				if r.URL.Path != "/mcp" {
-					next.ServeHTTP(w, r)
-					return
-				}
-				// Public MCP needs the writer or a credential enabled against applied authority.
-				if s.offlineShellMCPRoute(r) {
-					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), offlineShellMCPKey{}, true)))
-					return
-				}
+			if r.URL.Path != "/mcp" && s.quorumControlOnly() && s.quorumLocalDispatchRequest(r) {
+				next.ServeHTTP(w, r)
+				return
 			}
 			if r.Header.Get("X-GPTAdmin-Quorum-Forwarded") != "" {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
@@ -426,6 +419,13 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable while writer is known", "executed": false})
 				return
 			}
+			serveOffline := func() bool {
+				if !s.offlineShellMCPRoute(r) {
+					return false
+				}
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), offlineShellMCPKey{}, true)))
+				return true
+			}
 			target, parseErr := url.Parse(hubURL)
 			if parseErr == nil && (target.Scheme == "https" || target.Scheme == "http") && target.Host != "" && leaderID != "" && target.Host != r.Host {
 				proxy := httputil.NewSingleHostReverseProxy(target)
@@ -442,8 +442,13 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				}
 				defer transport.CloseIdleConnections()
 				proxy.Transport = transport
+				watchDelivery := r.Method == http.MethodPost && r.URL.Path == "/mcp"
+				var delivery proxyDelivery
 				proxy.Director = func(outbound *http.Request) {
 					director(outbound)
+					if watchDelivery {
+						delivery.track(outbound)
+					}
 					outbound.Host = target.Host
 					outbound.GetBody = nil
 					outbound.Header.Del("Idempotency-Key")
@@ -455,13 +460,15 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 					outbound.Header.Set("X-GPTAdmin-Quorum-Forwarded", leaderID)
 				}
 				proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+					if watchDelivery && delivery.failedBeforeSend(r.Context(), err) && serveOffline() {
+						return
+					}
 					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "current quorum leader delivery was not confirmed", "outcome": "unknown"})
 				}
 				proxy.ServeHTTP(w, r)
 				return
 			}
-			if leaderID == "" && s.offlineShellMCPRoute(r) {
-				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), offlineShellMCPKey{}, true)))
+			if leaderID == "" && serveOffline() {
 				return
 			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "this GPTAdmin node has no quorum-confirmed Hub leadership", "leader_id": leaderID})

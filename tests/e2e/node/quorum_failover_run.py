@@ -267,6 +267,8 @@ def main(services):
         physical_host = f"node{i}.test" if member_matrix else "localhost"
         env["GPTADMIN_NODE_PUBLIC_URL"] = f"https://{physical_host}:{nodes[i]['public']}"
         if member_matrix:
+            if options.case == "outages" and i == 2:
+                env["GPTADMIN_READER_OFFLINE_SHARED_SIGNER"] = "1"
             nodes[i]["group"] = 31000 + i  # identifies this voter's sockets in the isolated netns
             env["QUEUE_LONG_POLL_TIMEOUT_S"] = "3"
             env["MCP_RELAY_POLL_MAX_TIMEOUT"] = "3"
@@ -388,6 +390,13 @@ def main(services):
             approval["context"] = response["context"]
             status, response, _ = request(0, "/mcp-relay/call", approval, nodes[0]["env"]["CTL_TOKEN"])
         assert status == 200 and response and not response.get("error"), f"approval failed for {target}: HTTP {status}"
+    if member_matrix and options.case == "outages":
+        # Reach the active writer from a follower that also supports offline shell.
+        follower_origin = f"https://localhost:{nodes[2]['public']}"
+        command = matrix.Command(matrix.executor(nodes[0]), retry_unavailable=False)
+        tls = ssl.create_default_context(cafile=str(ca_path))
+        asyncio.run(command.submit(follower_origin, tls, oauth["access_token"]))
+        command.check_owner(nodes[0])
     if member_matrix:
         shell = (options.shell_binary or BINARY.with_name("gptadmin-shellmcp")).resolve(strict=True)
         edge_cert, edge_key = cert("localhost", ca_key, ca)

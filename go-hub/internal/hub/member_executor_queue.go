@@ -217,14 +217,10 @@ func (s *Server) proxyMemberRequestWithFallback(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum address unavailable"})
 		return
 	}
-	var gotConn, readBody atomic.Bool
+	var delivery proxyDelivery
 	proxy := &httputil.ReverseProxy{Transport: s.nodePeerClient.Transport, Rewrite: func(p *httputil.ProxyRequest) {
 		if fallback != nil {
-			trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) }}
-			p.Out = p.Out.WithContext(httptrace.WithClientTrace(p.Out.Context(), trace))
-			if p.Out.Body != nil {
-				p.Out.Body = io.NopCloser(memberProxyBody{Reader: p.Out.Body, read: &readBody})
-			}
+			delivery.track(p.Out)
 		}
 		p.SetURL(target)
 		p.Out.Host = target.Host
@@ -248,9 +244,7 @@ func (s *Server) proxyMemberRequestWithFallback(w http.ResponseWriter, r *http.R
 		return nil
 	}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 		s.memberQuorumHubs.Failed(origin)
-		var dial *net.OpError
-		if fallback != nil && !gotConn.Load() && !readBody.Load() && r.Context().Err() == nil &&
-			errors.As(err, &dial) && dial.Op == "dial" {
+		if fallback != nil && delivery.failedBeforeSend(r.Context(), err) {
 			fallback(w, r)
 			return
 		}
@@ -259,12 +253,31 @@ func (s *Server) proxyMemberRequestWithFallback(w http.ResponseWriter, r *http.R
 	proxy.ServeHTTP(w, r)
 }
 
-type memberProxyBody struct {
+// A failed dial is safe to handle locally only while the original body is untouched.
+type proxyDelivery struct {
+	gotConn  atomic.Bool
+	readBody atomic.Bool
+}
+
+func (d *proxyDelivery) track(out *http.Request) {
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { d.gotConn.Store(true) }}
+	*out = *out.WithContext(httptrace.WithClientTrace(out.Context(), trace))
+	if out.Body != nil {
+		out.Body = io.NopCloser(trackedProxyBody{Reader: out.Body, read: &d.readBody})
+	}
+}
+
+func (d *proxyDelivery) failedBeforeSend(ctx context.Context, err error) bool {
+	var dial *net.OpError
+	return !d.gotConn.Load() && !d.readBody.Load() && ctx.Err() == nil && errors.As(err, &dial) && dial.Op == "dial"
+}
+
+type trackedProxyBody struct {
 	io.Reader
 	read *atomic.Bool
 }
 
-func (b memberProxyBody) Read(p []byte) (int, error) {
+func (b trackedProxyBody) Read(p []byte) (int, error) {
 	b.read.Store(true)
 	return b.Reader.Read(p)
 }
