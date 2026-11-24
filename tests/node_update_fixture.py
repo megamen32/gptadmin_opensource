@@ -13,7 +13,7 @@ from tools import build_node
 def staged_update_package(extract):
     def extract_with_helpers(package, arch, target):
         manifest = extract(package, arch, target)
-        for member in build_node.PAYLOAD:
+        for member in build_node.LINUX_PAYLOAD:
             if member.startswith("scripts/"):
                 path = target / member
                 path.parent.mkdir(parents=True, exist_ok=True)

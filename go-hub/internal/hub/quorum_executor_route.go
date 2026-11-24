@@ -172,7 +172,8 @@ func (s *Server) quorumExecutorUsesLeaderQueue(ctx context.Context, target strin
 	if !owner.bound() || (!owner.voter && !owner.QuorumQueue) {
 		return false, errors.New("enrolled executor has not advertised a bound quorum queue")
 	}
-	addressed := ctx.Value(localShellAdmissionKey{}) == target
+	// Only voters use addressed peer dispatch; nonvoters keep their enrolled queue.
+	addressed := owner.voter && ctx.Value(localShellAdmissionKey{}) == target
 	if addressed && !local && !routed && !connected {
 		return false, errors.New("addressed executor has no authenticated peer route")
 	}

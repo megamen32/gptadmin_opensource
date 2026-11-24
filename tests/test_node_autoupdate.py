@@ -21,7 +21,7 @@ TAG='node-v123-'+'1'*12
 
 
 def build_fixture_package(root, commit, version):
-    for name in (*node_builder.PAYLOAD, node_builder.PROXY_ROUTE_UNIT_SOURCE, node_builder.SECRET_INPUT_PAGE):
+    for name in (*node_builder.LINUX_PAYLOAD, node_builder.PROXY_ROUTE_UNIT_SOURCE, node_builder.SECRET_INPUT_PAGE):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((node_builder.ROOT / name).read_bytes())
@@ -481,7 +481,7 @@ class NodeAutoupdateTests(unittest.TestCase):
                 manifest=json.load(package.extractfile('manifest.json'))
                 expected={'bin/gptadmin-node','bin/shellmcp',node_builder.BRIDGE_PACKAGE_FILE,
                           node_builder.PROXY_ROUTE_UNIT_PACKAGE_PATH,node_builder.SECRET_INPUT_PAGE,
-                          'public/admin/index.html','public/admin/assets/a.js',*node_builder.PAYLOAD}
+                          'public/admin/index.html','public/admin/assets/a.js',*node_builder.LINUX_PAYLOAD}
                 self.assertEqual(set(manifest['files']),expected)
                 self.assertEqual(manifest['git_commit'],'a'*40)
                 self.assertFalse(manifest['source_dirty'])
