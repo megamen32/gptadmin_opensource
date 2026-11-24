@@ -122,6 +122,38 @@ class DNSAppendTests(unittest.TestCase):
                          {'ok': True, 'values': [self.value]})
         self.assertEqual([method for method, _ in self.calls], ['info'])
 
+    def test_concurrent_independent_a_addition_is_accepted(self):
+        other = {'name': 'frp', 'type': 'A', 'value': '8.8.4.4', 'index': 5}
+        calls = []
+
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == 'info':
+                rows = list(self.rows)
+                if len(calls) == 3:
+                    rows.append(dict(other))
+                return {'result': rows}
+            self.rows.append({'name': 'frp', 'type': 'A', 'value': self.value, 'index': 4})
+            return {'ok': True}
+
+        self.assertEqual(self.append(rpc), {'ok': True, 'value': self.value, 'changed': True})
+        self.assertEqual([method for method, _ in calls], ['info', 'editMain', 'info'])
+
+    def test_concurrent_change_to_existing_a_payload_is_unresolved(self):
+        calls = []
+
+        def rpc(method, params):
+            calls.append(method)
+            if method == 'info':
+                rows = [dict(row) for row in self.rows]
+                if len(calls) == 3:
+                    rows[0]['ttl'] = 900
+                return {'result': rows}
+            self.rows.append({'name': 'frp', 'type': 'A', 'value': self.value, 'index': 4})
+            return {'ok': True}
+
+        self.assertEqual(self.append(rpc), {'ok': False, 'error': 'write_unresolved'})
+
     def test_needs_opt_in_and_public_address(self):
         with self.assertRaises(ValueError):
             self.append(enabled=False)

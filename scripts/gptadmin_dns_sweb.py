@@ -65,8 +65,9 @@ def append_a(relative, zone, value, rpc):
         after, after_others = pool_snapshot(relative, zone, rpc)
     except Exception:
         return {'ok': False, 'error': 'write_unresolved'}
-    if (after.keys() != before.keys() | {value} or after_others != other_records
-            or any(after[address] != record for address, record in before.items())):
+    # Other writers can append to this pool between our two reads.
+    if (value not in after or after_others != other_records
+            or any(after.get(address) != record for address, record in before.items())):
         return {'ok': False, 'error': 'write_unresolved'}
     return {'ok': True, 'value': value, 'changed': True}
 
