@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const ownerReceiptTimeout = 15 * time.Second
+
 // The handle names the Hub that authorized and issued the job. Its receipt
 // remains deliverable to that Hub after it loses leadership.
 func receiptUnavailable(w http.ResponseWriter) {
@@ -168,7 +170,7 @@ func (s *Server) receiptPeerRequest(ctx context.Context, peerID, path string, h 
 	}
 	req.Header = h
 	req.GetBody = nil
-	return (&http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: refuseNodeRedirect}).Do(req)
+	return (&http.Client{Transport: transport, Timeout: ownerReceiptTimeout, CheckRedirect: refuseNodeRedirect}).Do(req)
 }
 
 func (s *Server) forwardOwnerReceipt(w http.ResponseWriter, r *http.Request, ownerID, id string) {
@@ -199,10 +201,16 @@ func (s *Server) forwardOwnerReceipt(w http.ResponseWriter, r *http.Request, own
 	if len(payload) > 0 && (err != nil || resp.StatusCode >= 500) {
 		// This only records the already executed outcome. Keep the original
 		// executor outbox until its normal owner has durably acknowledged it.
+		// The ingress has authenticated the executor and fully received this
+		// result. A proxy can close the client while a stalled issuer still
+		// holds its socket. Finish this one authorized durable write within
+		// its own deadline; no command is dispatched or acknowledged here.
+		copyCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), ownerReceiptTimeout)
+		defer cancel()
 		if indirect {
-			s.memberCopyViaLeader(r, id, name, member, payload)
+			s.memberCopyViaLeader(r.WithContext(copyCtx), id, name, member, payload)
 		} else {
-			s.preserveExecutorResult(r.Context(), id, attested, payload)
+			s.preserveExecutorResult(copyCtx, id, attested, payload)
 		}
 	}
 	if err != nil {

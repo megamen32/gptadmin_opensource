@@ -89,6 +89,7 @@ type Config struct {
 	ReaderOfflineSharedSigner bool
 	OfflineDurableBearer      bool
 	AuthSourceID              string
+	LegacyMemberControlSource string
 	AuthSnapshotReserveBytes  int64
 	AuthSnapshotBudget        int
 	DefaultTimeout            time.Duration
@@ -203,6 +204,7 @@ func FromEnv() Config {
 		OfflineDurableBearer:       truthyString(env("GPTADMIN_OFFLINE_DURABLE_BEARER", "0")),
 		StandaloneAutoTrust:        truthyString(env("GPTADMIN_STANDALONE", "0")),
 		AuthSourceID:               strings.TrimSpace(env("GPTADMIN_AUTH_SOURCE_ID", "")),
+		LegacyMemberControlSource:  strings.TrimSpace(env("GPTADMIN_LEGACY_MEMBER_CONTROL_SOURCE_ID", "")),
 		AuthSnapshotReserveBytes:   authSnapshotReserveFromEnv(),
 		AuthSnapshotBudget:         positiveIntEnv("GPTADMIN_AUTH_SNAPSHOT_MAX_BYTES", authSnapshotDefaultBudget),
 		DefaultTimeout:             time.Duration(defTimeout) * time.Second,

@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import pwd
 import secrets
+import signal
 import socket
 import sqlite3
 import ssl
@@ -47,12 +48,13 @@ mode.add_argument("--case", choices=("outages", "fencing", "storage", "dispatch-
                   help="run one part of the default voter matrix")
 parser.add_argument("--shell-binary", type=Path, help="standalone ShellMCP for the voter matrix")
 parser.add_argument("--additional-member-fixture", action="store_true", help="use a fourth enrolled ordinary Node for the owner-local in-flight command")
+parser.add_argument("--freeze-owner", action="store_true", help="keep the failed issuer TCP listener open while its process is stopped")
 parser.add_argument("--secret-receipt-fixture", action="store_true", help="use a synthetic one-time secret input in the running task")
 parser.add_argument("--legacy-executor-binary", type=Path, help="use an unmodified older Node as the fourth executor")
 options = parser.parse_args()
 if options.legacy_executor_binary and not (options.secret_receipt_fixture and options.additional_member_fixture):
     parser.error("legacy executor verification requires both the member and secret receipt fixtures")
-if (options.additional_member_fixture or options.secret_receipt_fixture) and not options.owner_local_receipt_probe:
+if (options.additional_member_fixture or options.secret_receipt_fixture or options.freeze_owner) and not options.owner_local_receipt_probe:
     parser.error("optional receipt fixtures require the owner-local receipt probe")
 member_matrix = not (options.legacy_shared_probe or options.immediate_auth or options.owner_local_receipt_probe)
 BINARY = options.node_binary.resolve(strict=True)
@@ -133,6 +135,8 @@ def stop(i, *, crash=False):
     node = nodes[i]
     process = node.get("proc")
     if process and process.poll() is None:
+        if node.pop("frozen", False):
+            process.send_signal(signal.SIGCONT)
         if crash:
             process.kill()
         else:
@@ -561,7 +565,11 @@ def main(services):
             nodes[running_index]["binary"] = BINARY
             start(running_index)
         wait_for("one real dispatch before issuer outage", lambda: (nodes[running_index]["dir"] / "running-effects").exists())
-    stop(0, crash=options.owner_local_receipt_probe)
+    if options.freeze_owner:
+        nodes[0]["proc"].send_signal(signal.SIGSTOP)
+        nodes[0]["frozen"] = True
+    else:
+        stop(0, crash=options.owner_local_receipt_probe)
     leader = wait_for("surviving leader ready", lambda: next((i for i in (1, 2) if health(i)), None), 90)
     if ongoing:
         if options.additional_member_fixture:
@@ -582,7 +590,8 @@ def main(services):
         wait_for("completed output from still-stopped issuer via native tasks/get", original_result, 90)
         assert (nodes[running_index]["dir"] / "running-effects").read_text().splitlines() == ["once"], "running task replayed"
     if options.owner_local_receipt_probe:
-        owner_content_probe.verify(rpc, leader, oauth["access_token"], outsider["access_token"], content_ids)
+        owner_content_probe.verify(rpc, leader, oauth["access_token"], outsider["access_token"], content_ids,
+                                   response_budget=7 if options.freeze_owner else None)
         opt = {"io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}}
         for method, params in (("tasks/get", {"taskId": before_row[0], "_meta": opt}),
                                ("tools/call", {"name": "job", "arguments": {"id": before_row[0], "owner_target": "shell:node0"}})):
@@ -594,7 +603,10 @@ def main(services):
             _, result, _ = rpc(leader, oauth["access_token"], "tasks/get", {"taskId": task_id, "_meta": opt})
             assert ("previously-retained-fixture" in json.dumps(result)) == expected, ("historical receipt/ACK divergence", expected, result)
         print("historical output survived while the consumed copy stayed inaccessible", flush=True)
-        assert nodes[0]["proc"].poll() is not None
+        if options.freeze_owner:
+            assert nodes[0]["frozen"] and nodes[0]["proc"].poll() is None
+        else:
+            assert nodes[0]["proc"].poll() is not None
         # The executor still owns its durable receipt while its primary Hub is down.
         assert (nodes[running_index]["dir"] / "spool" / "outbox" / (ongoing + ".json")).is_file()
         if secret_value:
@@ -606,7 +618,42 @@ def main(services):
                 assert secret_value.encode() not in data and base64.b64encode(secret_value.encode()) not in data, "unredacted fixture value found"
             assert expected_output.encode() in completed and expected_output.encode() in outbox, "filtered output missing"
             print("secret redacted before outbox and backup while original issuer remained stopped", flush=True)
-        start(0)
+        if options.additional_member_fixture:
+            member = nodes[3]
+            def proofs_match():
+                code, snapshot, _ = request(leader, "/admin/api/nodes/control-snapshot", token=member["key"])
+                if code != 200 or snapshot["bundle"]["writer_id"] != writer_id:
+                    return False
+                code, proof, _ = request(leader, "/admin/api/nodes/bearer-admission",
+                                         {"token": oauth["access_token"]}, member["key"])
+                local = json.loads((member["dir"] / "auth-continuity/state.json").read_text())
+                identity = json.loads((member["dir"] / "node-identity.json").read_text())
+                drain_code, _, _ = request(3, "/admin/api/node/drain", {"action": "status"}, member["env"]["CTL_TOKEN"])
+                return (code == 200 and drain_code == 200 and
+                        proof["writer_id"] == identity["writer_id"] == local["writer_id"] == writer_id and
+                        proof["authority_digest"] == local["digest"] and
+                        proof["generation"] == snapshot["generation"] == local["generation"])
+            wait_for("member drain and delegated bearer match the original logical source after election", proofs_match, 75)
+            if options.secret_receipt_fixture:
+                status, answer, _ = rpc(leader, oauth["access_token"], "tools/call", {"name": "secret_request",
+                    "arguments": {"label": "successor fixture", "env_name": "CHECK_SUCCESSOR"}})
+                info = answer["result"].get("structuredContent") or json.loads(answer["result"]["content"][0]["text"])
+                value = secrets.token_urlsafe(24)
+                assert status == 200 and request(leader, urllib.parse.urlparse(info["input_url"]).path, form={"value": value})[0] == 200
+                args = {"token": oauth["access_token"], "target": "shell:node3", "ref": info["secret_ref"], "args": {"cmd": "true"}}
+                status, result, _ = request(leader, "/admin/api/nodes/secret-resolve", args, member["key"])
+                assert status == 200 and result["value"] == value and result["writer_id"] == writer_id
+                state = json.loads((member["dir"] / "auth-continuity/state.json").read_text())
+                assert result["authority_digest"] == state["digest"] and result["generation"] == state["generation"]
+                args["target"] = "shell:node2"
+                status, denied, _ = request(leader, "/admin/api/nodes/secret-resolve", args, member["key"])
+                assert status == 403 and value not in json.dumps(denied)
+                print("successor secret proof matched the reader; different target was denied", flush=True)
+        if options.freeze_owner:
+            nodes[0]["proc"].send_signal(signal.SIGCONT)
+            nodes[0]["frozen"] = False
+        else:
+            start(0)
         def reconciled():
             with sqlite3.connect((nodes[0]["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
                 row = db.execute("SELECT json_extract(payload,'$.status'),json_extract(payload,'$.result.stdout') FROM task_records WHERE kind='shell' AND key=?", (ongoing,)).fetchone()
@@ -614,7 +661,7 @@ def main(services):
         wait_for("rejoined issuer persisted original outcome before executor released outbox", reconciled, 90)
         assert (nodes[running_index]["dir"] / "running-effects").read_text().splitlines() == ["once"]
         assert (nodes[0]["dir"] / "once.txt").read_text().splitlines() == ["once"]
-        print("owner_local: original tasks/get and job include output with issuer process killed; foreign caller denied; one side effect", flush=True)
+        print("owner_local: original tasks/get and job include output with issuer unavailable; foreign caller denied; one side effect", flush=True)
         return
     if options.immediate_auth:
         start(0)

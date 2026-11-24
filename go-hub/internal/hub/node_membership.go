@@ -112,6 +112,7 @@ type nodeMembershipState struct {
 	Revision        uint64                    `json:"revision"`
 	Epoch           uint64                    `json:"epoch"`
 	WriterID        string                    `json:"writer_id"`
+	ControlSourceID string                    `json:"control_source_id,omitempty"`
 	WriterURL       string                    `json:"writer_url,omitempty"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
 	Grants          map[string]*nodeJoinGrant `json:"grants,omitempty"`
@@ -1230,6 +1231,16 @@ func (s *Server) nodeMembershipHeartbeat(w http.ResponseWriter, r *http.Request)
 // Keep that logical source stable across elections. Membership views and
 // Raft keep reporting the physical leader independently.
 func (s *Server) memberControlSourceID(writerID string) string {
+	if s.quorumControlOnly() && s.quorumNode != nil {
+		s.membershipMu.Lock()
+		defer s.membershipMu.Unlock()
+		if s.membership != nil && s.membership.ControlSourceID != "" {
+			return s.membership.ControlSourceID
+		}
+		// A pre-upgrade owner_local cluster without a migration pin keeps its
+		// previous wire contract during the rolling binary installation.
+		return writerID
+	}
 	if s.quorumNode != nil {
 		record, ok := s.quorumNode.LocalRecord("cluster_meta", "task_baseline")
 		var baseline struct {
@@ -1710,6 +1721,10 @@ func (s *Server) membershipMemberTick(client *http.Client, forceSync bool) {
 		log.Printf("membership heartbeat response malformed writer=%s", writer)
 		return
 	}
+	if s.quorumNode == nil && s.cfg.AuthSourceID != "" && heartbeatResponse.WriterID != s.cfg.AuthSourceID {
+		log.Print("membership heartbeat rejected: control source differs from enrolled writer")
+		return
+	}
 	if heartbeatResponse.WriterURL != "" {
 		s.mu.Lock()
 		changed := heartbeatResponse.WriterURL != s.nodeIdentity.WriterURL || heartbeatResponse.WriterID != s.nodeIdentity.WriterID
@@ -1837,7 +1852,9 @@ func (s *Server) membershipApplyControlSnapshot(client *http.Client, writer stri
 	s.mu.Lock()
 	knownWriter := s.nodeIdentity.WriterID
 	s.mu.Unlock()
-	if knownWriter != "" && snapshot.Bundle.WriterID != "" && snapshot.Bundle.WriterID != knownWriter {
+	if snapshot.Bundle.WriterID == "" ||
+		(knownWriter != "" && snapshot.Bundle.WriterID != knownWriter) ||
+		(s.cfg.AuthSourceID != "" && snapshot.Bundle.WriterID != s.cfg.AuthSourceID) {
 		log.Printf("control snapshot writer mismatch got=%s want=%s", snapshot.Bundle.WriterID, knownWriter)
 		return
 	}

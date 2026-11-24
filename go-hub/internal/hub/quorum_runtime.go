@@ -337,6 +337,17 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// Native drain is a physical, local operation. Keep the configured
+		// credential's ordinary deadline and audit independent of a stale
+		// enrolled reader slot, for voters and ordinary members alike.
+		if r.URL.Path == "/admin/api/node/drain" && (s.quorumNode != nil || s.cfg.AuthMode == "reader") &&
+			isLoopbackServiceHost(stripPort(r.Host)) && isLoopbackServiceHost(stripPort(r.RemoteAddr)) &&
+			r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("X-GPTAdmin-Quorum-Forwarded") == "" &&
+			r.Header.Get(nodePeerHopHeader) == "" && r.Header.Get(memberIngressHeader) == "" &&
+			s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
+			s.requireCtl(s.nodeDrainHTTP)(w, r)
+			return
+		}
 		if s.quorumNode == nil {
 			if r.Header.Get(nodePeerHopHeader) == "1" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
 				if fallback := s.memberOfflineShellFallback(r, next); fallback != nil {
@@ -386,17 +397,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		case "/healthz", "/version", "/metrics":
 			next.ServeHTTP(w, r)
 			return
-		case "/admin/api/node/drain":
-			// A native service manager drains the process behind its loopback
-			// listener. Public endpoints continue to follow the elected leader.
-			if isLoopbackServiceHost(stripPort(r.Host)) && isLoopbackServiceHost(stripPort(r.RemoteAddr)) &&
-				r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("X-GPTAdmin-Quorum-Forwarded") == "" &&
-				s.cfg.CtlToken != "" && tokenMatches(r, s.cfg.CtlToken) {
-				// This credential is configured on the process. Keep its deadline
-				// and audit checks independent of the reader's cached policy slot.
-				s.requireCtl(s.nodeDrainHTTP)(w, r)
-				return
-			}
+
 		}
 		termBeforeVerification := s.quorumNode.CurrentTerm()
 		if err := s.quorumNode.VerifyLeader(r.Context()); err != nil {

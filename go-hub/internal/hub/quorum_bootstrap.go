@@ -388,6 +388,11 @@ func (s *Server) seedQuorumAuthorityBaseline(ctx context.Context) error {
 	if membership == nil {
 		return errors.New("authoritative node membership is not initialized")
 	}
+	if s.quorumControlOnly() {
+		// Preserve the original authority before any promotion changes its
+		// physical writer. The membership image is already sealed and replicated.
+		membership.ControlSourceID = authBundle.WriterID
+	}
 	if err := s.commitQuorumAuthorityState("membership", "writer", membership); err != nil {
 		return err
 	}

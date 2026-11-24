@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 )
 
 // This peer endpoint accepts only exact reads. It never routes another hop.
@@ -226,6 +228,7 @@ func (s *Server) lookupOwner(r *http.Request, q ownerRead) ownerReadReply {
 	if r.Header.Get("Authorization") == "" {
 		return ownerReadReply{Failure: &readMissing}
 	}
+	backup := s.ownerReadStandby(r, q)
 	reply := ownerReadReply{Failure: &readOffline}
 	if ok {
 		if peer.id != "" {
@@ -233,30 +236,55 @@ func (s *Server) lookupOwner(r *http.Request, q ownerRead) ownerReadReply {
 		} else if q.Hint.OwnerTarget == "" {
 			q.Hint.OwnerTarget = peer.target
 		}
-		reply = s.forwardOwnerRead(r, q, peer)
+		reply = s.forwardOwnerRead(r, q, peer, backup != "")
 	}
 	// The issuer is authoritative for deletion and expiry while reachable.
 	// Fall back only on transport/availability failure, never access denial.
-	if reply.Failure != nil && reply.Failure.Code == readOffline.Code && s.receiptCopyGeneration() != "" && !offlineShellMCP(r) && (q.kind() == "task" || q.kind() == "content" && q.Action != "indexSource") {
-		h, scoped, e := decodeOwnerHandle(q.ID)
-		if scoped && e == nil && h.OwnerID == q.Hint.OwnerID {
-			q.Replica = true
-			backup := s.receiptBackup(h.OwnerID)
-			var copy ownerReadReply
-			if backup == here.id {
-				copy = s.readStandby(r, q)
-			} else if backup != "" {
-				copy = s.forwardOwnerRead(r, q, lookupPeer{id: backup, private: true})
-			}
-			if copy.Value != nil && copy.Failure == nil || q.kind() == "content" && copy.Failure != nil && copy.Failure.Code != readMissing.Code && copy.Failure.Code != readOffline.Code {
-				return copy
-			}
+	if reply.Failure != nil && reply.Failure.Code == readOffline.Code && backup != "" {
+		q.Replica = true
+		var copy ownerReadReply
+		if backup == here.id {
+			copy = s.readStandby(r, q)
+		} else {
+			copy = s.forwardOwnerRead(r, q, lookupPeer{id: backup, private: true}, false)
+		}
+		if copy.Value != nil && copy.Failure == nil || q.kind() == "content" && copy.Failure != nil && copy.Failure.Code != readMissing.Code && copy.Failure.Code != readOffline.Code {
+			return copy
 		}
 	}
 	return reply
 }
 
-func (s *Server) forwardOwnerRead(r *http.Request, q ownerRead, peer lookupPeer) ownerReadReply {
+// A short owner preference applies only to exact reads with an independently
+// enrolled standby. Legacy routing and mutations retain their original limits.
+func (s *Server) ownerReadStandby(r *http.Request, q ownerRead) string {
+	if s.receiptCopyGeneration() == "" || offlineShellMCP(r) || q.Action == "indexSource" {
+		return ""
+	}
+	h, scoped, err := decodeOwnerHandle(q.ID)
+	if !scoped || err != nil || h.Kind != q.kind() || h.OwnerID != q.Hint.OwnerID {
+		return ""
+	}
+	return s.receiptBackup(h.OwnerID)
+}
+
+// A stopped process can accept TCP without completing TLS or sending HTTP
+// headers. Keep each handshake stage inside a combined MCP call's budget.
+// Once the owner sends its headers retain the normal deadline for large bodies.
+const ownerReadStageTimeout = 500 * time.Millisecond
+
+func boundOwnerReadTransport(t *http.Transport) {
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		d, cancel := context.WithTimeout(ctx, ownerReadStageTimeout)
+		defer cancel()
+		return dial(d, network, address)
+	}
+	t.TLSHandshakeTimeout = ownerReadStageTimeout
+	t.ResponseHeaderTimeout = ownerReadStageTimeout
+}
+
+func (s *Server) forwardOwnerRead(r *http.Request, q ownerRead, peer lookupPeer, preferOwner bool) ownerReadReply {
 	// Only a caller-provided endpoint is a continuity pin. A route's public
 	// alias can differ from the owner's local listener (e.g. behind NAT).
 	q.RO = readOnlyExecRequest(r)
@@ -280,6 +308,9 @@ func (s *Server) forwardOwnerRead(r *http.Request, q ownerRead, peer lookupPeer)
 			return ownerReadReply{Failure: &readOffline}
 		}
 		defer transport.CloseIdleConnections()
+		if preferOwner {
+			boundOwnerReadTransport(transport)
+		}
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(p.InternalHubURL, "/")+ownerReadPath, bytes.NewReader(body))
 		if err != nil {
 			return ownerReadReply{Failure: &readOffline}
@@ -293,6 +324,9 @@ func (s *Server) forwardOwnerRead(r *http.Request, q ownerRead, peer lookupPeer)
 		}
 		defer res.Body.Close()
 		status = res.StatusCode
+		if status == http.StatusForbidden || status == http.StatusUnauthorized {
+			return ownerReadReply{Failure: &readMissing}
+		}
 		data, err = io.ReadAll(io.LimitReader(res.Body, (64<<20)+1))
 		if err != nil || len(data) > 64<<20 {
 			return ownerReadReply{Failure: &readOffline}

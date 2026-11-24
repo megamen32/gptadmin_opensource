@@ -190,7 +190,7 @@ func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byt
 	}
 	// Match the exact control snapshot sent to readers, which intentionally
 	// excludes legacy/control credentials even when the writer retains them.
-	bundle.WriterID = s.authLocalID
+	bundle.WriterID = s.memberControlSourceID(s.authLocalID)
 	s.excludeSnapshotControlCredentials(&bundle)
 	authorityDigest := authSnapshotDigest(bundle)
 	origin := s.cfg.PublicOrigin
@@ -225,12 +225,12 @@ func (s *Server) nodeBearerAdmissionResult(r *http.Request, token string) ([]byt
 	if currentErr != nil {
 		return nil, http.StatusServiceUnavailable
 	}
-	current.WriterID = s.authLocalID
+	current.WriterID = s.memberControlSourceID(s.authLocalID)
 	s.excludeSnapshotControlCredentials(&current)
 	if authSnapshotDigest(current) != authorityDigest {
 		return nil, http.StatusServiceUnavailable
 	}
-	output := nodeBearerAdmission{WriterID: state.WriterID, Generation: state.Generation,
+	output := nodeBearerAdmission{WriterID: current.WriterID, Generation: state.Generation,
 		AuthorityDigest: authorityDigest, TokenDigest: hashNodeSecret(token), Claims: claims}
 	data, err := json.Marshal(output)
 	if err != nil || len(data) > nodeBearerAdmissionLimit {

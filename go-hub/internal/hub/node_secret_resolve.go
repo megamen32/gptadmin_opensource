@@ -105,9 +105,9 @@ func (s *Server) nodeSecretResolveHTTP(w http.ResponseWriter, r *http.Request) {
 		deny(http.StatusForbidden)
 		return
 	}
-	bundle.WriterID = s.authLocalID
+	bundle.WriterID = s.memberControlSourceID(s.authLocalID)
 	s.excludeSnapshotControlCredentials(&bundle)
-	writeJSON(w, http.StatusOK, map[string]any{"value": value, "writer_id": state.WriterID, "generation": state.Generation, "authority_digest": authSnapshotDigest(bundle), "token_digest": hashNodeSecret(input.Token)})
+	writeJSON(w, http.StatusOK, map[string]any{"value": value, "writer_id": bundle.WriterID, "generation": state.Generation, "authority_digest": authSnapshotDigest(bundle), "token_digest": hashNodeSecret(input.Token)})
 }
 
 func (s *Server) resolveNodeWriterSecret(r *http.Request, target, ref string, args map[string]any) (string, error) {

@@ -91,6 +91,18 @@ func (s *Server) materializeVerifiedQuorumAuthority(ctx context.Context, verifie
 	if err != nil {
 		return err
 	}
+	if s.quorumControlOnly() && s.cfg.LegacyMemberControlSource != "" && s.authLocalID == s.cfg.LegacyMemberControlSource {
+		s.membershipMu.Lock()
+		pendingPin := s.membership == nil || s.membership.ControlSourceID == ""
+		s.membershipMu.Unlock()
+		if pendingPin {
+			// This writer just took over from another physical voter. Its
+			// ordinary promotion has committed both authority projections.
+			// Keep admission closed until the next majority-verified pass reads
+			// those records back and commits the configured historical source.
+			return errors.New("original writer promoted; waiting for committed control source migration")
+		}
+	}
 	if err := node.VerifyLeader(ctx); err != nil {
 		return err
 	}
@@ -372,6 +384,15 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 	if err := json.Unmarshal(values["auth/bundle"], &authBundle); err != nil {
 		return fmt.Errorf("decode auth bundle: %w", err)
 	}
+	var membership *nodeMembershipState
+	if err := json.Unmarshal(values["membership/writer"], &membership); err != nil {
+		return fmt.Errorf("decode membership state: %w", err)
+	}
+	if s.quorumControlOnly() && s.quorumNode != nil {
+		if err := s.pinLegacyMemberControlSource(membership, authBundle.WriterID); err != nil {
+			return err
+		}
+	}
 	if s.authLocalID == "" {
 		return errors.New("local auth identity is unavailable")
 	}
@@ -397,10 +418,6 @@ func (s *Server) materializeAuthorityValues(values map[string]json.RawMessage, p
 	}
 	s.mu.Unlock()
 
-	var membership *nodeMembershipState
-	if err := json.Unmarshal(values["membership/writer"], &membership); err != nil {
-		return fmt.Errorf("decode membership state: %w", err)
-	}
 	if err := promote(membership); err != nil {
 		return err
 	}
@@ -539,6 +556,55 @@ func (s *Server) materializeQuorumWebhooks(state persistedWebhookState) error {
 		return fmt.Errorf("load committed webhook state: %w", err)
 	}
 	return nil
+}
+
+// A legacy control baseline does not identify its original authority. Only an
+// operator-specified historical pin corroborated by the existing committed
+// auth and membership images may initialize it. Requiring that same writer
+// during this one transition also keeps the two-domain promotion retryable.
+func (s *Server) pinLegacyMemberControlSource(state *nodeMembershipState, authWriter string) error {
+	pin := s.cfg.LegacyMemberControlSource
+	if pin == "" {
+		return nil
+	}
+	if state == nil {
+		return errors.New("committed membership is unavailable for control source migration")
+	}
+	if state.ControlSourceID != "" {
+		if state.ControlSourceID != pin {
+			return errors.New("legacy member control source conflicts with the committed source")
+		}
+		return nil
+	}
+	if s.authLocalID != pin {
+		return errors.New("legacy control source migration must run on its historical writer")
+	}
+	localID := s.quorumNode.Status().NodeID
+	member := state.Nodes[localID]
+	if member == nil || member.NodeID != localID || (member.NodeID != pin && member.LocalID != pin) {
+		return errors.New("legacy control source differs from the committed voter enrollment")
+	}
+	for _, peer := range s.quorumPeers {
+		if peer.ID != localID || peer.NodeKeyHash == "" || peer.NodeKeyHash != member.KeyHash {
+			continue
+		}
+		if state.WriterID != localID {
+			previous := state.Nodes[state.WriterID]
+			if previous == nil || previous.NodeID != state.WriterID || authWriter == "" ||
+				(previous.NodeID != authWriter && previous.LocalID != authWriter) {
+				return errors.New("prior committed auth and membership writers disagree")
+			}
+			// Use the regular promotion first. Its committed auth and membership
+			// will be read back before this process opens admission.
+			return nil
+		}
+		if authWriter != pin {
+			return errors.New("committed auth writer does not corroborate the legacy control source")
+		}
+		state.ControlSourceID = pin
+		return nil
+	}
+	return errors.New("legacy control source is not the enrolled local quorum voter")
 }
 
 func (s *Server) promoteQuorumMembership(state *nodeMembershipState) error {

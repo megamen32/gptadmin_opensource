@@ -387,3 +387,32 @@ func TestNodeDrainSynchronizesExecutorPollGate(t *testing.T) {
 		t.Fatal("poll gate did not reopen")
 	}
 }
+
+func TestNativeMemberDrainWithStaleAuth(t *testing.T) {
+	member, _, _ := membershipMemberNode(t, "member", "http://127.0.0.1:1", "original")
+	for _, test := range []struct {
+		host, remote, header, token string
+		allowed                     bool
+	}{
+		{"127.0.0.1:9001", "127.0.0.1:42123", "", "member-owner", true},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "", "wrong", false},
+		{"127.0.0.1:9001", "192.0.2.2:42123", "", "member-owner", false},
+		{"public.test", "127.0.0.1:42123", "", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "X-Forwarded-For", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", "X-GPTAdmin-Quorum-Forwarded", "member-owner", false},
+		{"127.0.0.1:9001", "127.0.0.1:42123", nodePeerHopHeader, "member-owner", false},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "http://"+test.host+"/admin/api/node/drain", strings.NewReader(`{"action":"begin"}`))
+		request.RemoteAddr = test.remote
+		request.Header.Set("Authorization", "Bearer "+test.token)
+		if test.header != "" {
+			request.Header.Set(test.header, "1")
+		}
+		response := httptest.NewRecorder()
+		member.Handler().ServeHTTP(response, request)
+		if got := member.NodeDrainStatus().Draining; got != test.allowed || (response.Code == 200) != test.allowed {
+			t.Fatalf("host=%s remote=%s header=%s: HTTP %d drain=%t", test.host, test.remote, test.header, response.Code, got)
+		}
+		member.CancelNodeDrain()
+	}
+}

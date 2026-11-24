@@ -1,6 +1,7 @@
 """Authenticated MCP content acceptance on the real three-voter failover fixture."""
 import json
 import sqlite3
+import time
 
 
 def execute(rpc, node, token, code):
@@ -42,11 +43,15 @@ def prepare(rpc, nodes, owner, token, wait_for):
     return kept, deleted, ident
 
 
-def verify(rpc, leader, original, outsider, ids):
+def verify(rpc, leader, original, outsider, ids, *, response_budget=None):
     kept, deleted, historical = map(json.dumps, ids)
     for id_ in (kept, historical):
         script = f"""const s={id_};return {{status:(await mcp.content.status(s)).source,one:(await mcp.content.read(s,1)).text,all:(await mcp.content.readAll(s)).text,hits:(await mcp.content.search("preserved",{{source:s}})).count}};"""
+        start = time.monotonic()
         value = execute(rpc, leader, original, script)
+        elapsed = time.monotonic() - start
+        if response_budget is not None:
+            assert elapsed < response_budget, f"frozen-owner composite read took {elapsed:.3f}s"
         result = value.get("result", {})
         assert result.get("one") == result.get("all") == "preserved-oc1-marker", ("content after owner death", value)
         assert result.get("hits") == 1 and result.get("status") == json.loads(id_)

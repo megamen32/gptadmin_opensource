@@ -88,6 +88,37 @@ offline former owner. An existing cluster that already uses replicated task
 storage must retain access to its previously acknowledged data when upgraded.
 Changing that cluster's storage policy is an explicit operator operation.
 
+### Preserving the control source enrolled by ordinary members
+
+New `owner_local` clusters retain their original auth writer ID in the
+existing sealed membership authority. Elections still update the physical
+writer and its reachable address. Join, heartbeat, control snapshots,
+delegated bearer admission and scoped secret resolution use the stored
+logical ID. A reader checks the writer, generation, policy digest and caller
+credential before it accepts a proof.
+
+For a cluster created by an older release, install compatible binaries on
+all voters first. Verify the original source against the previously accepted
+reader auth snapshot and an independent enrollment record, including the
+voter's credential hash. The bootstrapper's Raft ID can differ from this
+source. Set `GPTADMIN_LEGACY_MEMBER_CONTROL_SOURCE_ID` on the historical
+writer alone, using its approved service environment. Use its normal rolling
+restart and transfer leadership to that voter. Keep the existing quorum
+configuration and data directories. During promotion the Hub verifies the
+committed auth writer, membership writer, local identity and enrolled voter
+credential before committing the logical ID. A writer returning from another
+voter's term completes its ordinary promotion and rechecks the committed
+records before opening admission.
+
+Read `control_source_id` in the projected membership on the active writer.
+Re-elect a different voter and verify an enrolled ordinary member's
+heartbeat, accepted snapshot, authenticated bearer proof and native drain
+status. The committed source survives further elections and removal of the
+migration environment setting. A conflicting setting fails closed.
+Downgrading to a binary that predates this field can discard it on a later
+membership write. Retain the original source evidence and repeat the same
+migration before relying on protected member operations after a downgrade.
+
 ### Reading shell receipts when the issuing voter is offline
 
 Install the same compatible release on every voting Hub with the feature

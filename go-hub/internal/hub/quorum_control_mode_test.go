@@ -169,6 +169,39 @@ func TestOwnerLocalControlBootstrap(t *testing.T) {
 	if err := leader.ensureQuorumAuthorityMaterialized(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if got := leader.memberControlSourceID("physical-writer"); got != "n0" {
+		t.Fatalf("fresh owner_local source = %q", got)
+	}
+	// Emulate an already committed 1153 membership with no stable source.
+	legacy := membershipQuorumAuthorityState(leader.membership)
+	legacy.ControlSourceID = ""
+	legacy.Nodes["n0"].KeyHash = cfg.Peers[0].NodeKeyHash
+	if err := leader.commitQuorumAuthorityState("membership", "writer", legacy); err != nil {
+		t.Fatal(err)
+	}
+	leader.cfg.LegacyMemberControlSource = "n0"
+	if err := leader.ensureQuorumAuthorityMaterialized(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var migrated nodeMembershipState
+	if err := leader.readQuorumAuthorityState("membership", "writer", &migrated); err != nil || migrated.ControlSourceID != "n0" {
+		t.Fatalf("legacy pin was not committed: %v", err)
+	}
+	probe := membershipQuorumAuthorityState(legacy)
+	for _, bad := range []string{"", "other-writer"} {
+		if err := leader.pinLegacyMemberControlSource(probe, bad); err == nil || probe.ControlSourceID != "" {
+			t.Fatal("migrated without corroborating committed auth")
+		}
+	}
+	probe.Nodes["n0"].KeyHash = hashNodeSecret("wrong-key")
+	if err := leader.pinLegacyMemberControlSource(probe, "n0"); err == nil || probe.ControlSourceID != "" {
+		t.Fatal("migrated without quorum enrollment proof")
+	}
+	leader.cfg.LegacyMemberControlSource = "n1"
+	if err := leader.pinLegacyMemberControlSource(&migrated, "n1"); err == nil || migrated.ControlSourceID != "n0" {
+		t.Fatal("operator replaced the committed logical source")
+	}
+	leader.cfg.LegacyMemberControlSource = ""
 	for _, ns := range []string{"task_records/shell", "task_controls", "task_requests", "content_sources", "authority/webhooks", "authority/secret_ingress", "other"} {
 		m := quorum.Mutation{Namespace: ns, Key: "current", External: true, Record: quorum.Record{Revision: 1, Value: []byte(`{"stdout":"private-local-only"}`)}}
 		if err := leader.quorumNode.ApplyBatch(ctx, []quorum.Mutation{m}); err == nil {
@@ -182,6 +215,9 @@ func TestOwnerLocalControlBootstrap(t *testing.T) {
 	authorityTestWait(t, "transferred leadership", func() bool { return leader.quorumNode.Status().Leader })
 	if err := leader.ensureQuorumAuthorityMaterialized(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if leader.authLocalID != "n1" || leader.membership.WriterID != "n1" || leader.memberControlSourceID(leader.authLocalID) != "n0" {
+		t.Fatal("physical election replaced the committed member control source")
 	}
 	if err := leader.taskQuorumReady(); err != nil {
 		t.Fatal(err)
@@ -230,6 +266,30 @@ func TestOwnerLocalControlBootstrap(t *testing.T) {
 	if err = checkControlDatabaseFile(dest.taskDatabasePath()); err == nil {
 		t.Fatal("accepted foreign task store as control SQLite")
 	}
+	// Rolling the historical writer can elect a different node before its
+	// new binary returns. The original must be able to migrate on re-election
+	// without requiring an offline edit or opening adoption to other voters.
+	legacy = membershipQuorumAuthorityState(leader.membership)
+	legacy.ControlSourceID = ""
+	if err := leader.commitQuorumAuthorityState("membership", "writer", legacy); err != nil {
+		t.Fatal(err)
+	}
+	servers[0].cfg.LegacyMemberControlSource = "n0"
+	if err := leader.quorumNode.TransferLeadershipTo("n0"); err != nil {
+		t.Fatal(err)
+	}
+	original := servers[0]
+	authorityTestWait(t, "historical writer re-elected", func() bool { return original.quorumNode.Status().Leader })
+	err = original.ensureQuorumAuthorityMaterialized(ctx)
+	if err == nil || original.quorumAuthorityActiveWriter.Load() {
+		t.Fatal("admission opened before the re-elected writer verified its committed source")
+	}
+	if err = original.ensureQuorumAuthorityMaterialized(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = original.readQuorumAuthorityState("membership", "writer", &migrated); err != nil || migrated.ControlSourceID != "n0" {
+		t.Fatalf("re-elected historical source was not committed: %v", err)
+	}
 }
 
 // A live legacy cluster keeps a committed baseline, committed authority rows
@@ -263,7 +323,8 @@ func TestLegacyReplicatedClusterReopensWithDivergentCounters(t *testing.T) {
 	}
 }
 
-func TestOwnerLocalModeRequiresLegacyEvidence(t *testing.T) {	root := t.TempDir()
+func TestOwnerLocalModeRequiresLegacyEvidence(t *testing.T) {
+	root := t.TempDir()
 	t.Setenv("GPTADMIN_HOME", filepath.Join(root, "home"))
 	s := reviewWriter(t, filepath.Join(root, "writer"))
 	defer s.Close()
