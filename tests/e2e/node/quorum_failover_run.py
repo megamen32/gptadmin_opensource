@@ -48,10 +48,14 @@ mode.add_argument("--case", choices=("outages", "fencing", "storage", "dispatch-
                   help="run one part of the default voter matrix")
 parser.add_argument("--shell-binary", type=Path, help="standalone ShellMCP for the voter matrix")
 parser.add_argument("--additional-member-fixture", action="store_true", help="use a fourth enrolled ordinary Node for the owner-local in-flight command")
+parser.add_argument("--hold-executor-claim", action="store_true",
+                    help="hold the enrolled executor's on-disk journal lock across the original dispatch")
 parser.add_argument("--freeze-owner", action="store_true", help="keep the failed issuer TCP listener open while its process is stopped")
 parser.add_argument("--secret-receipt-fixture", action="store_true", help="use a synthetic one-time secret input in the running task")
 parser.add_argument("--legacy-executor-binary", type=Path, help="use an unmodified older Node as the fourth executor")
 options = parser.parse_args()
+if options.hold_executor_claim and (not options.additional_member_fixture or options.legacy_executor_binary):
+    parser.error("claim contention requires the candidate as the fourth enrolled executor")
 if options.legacy_executor_binary and not (options.secret_receipt_fixture and options.additional_member_fixture):
     parser.error("legacy executor verification requires both the member and secret receipt fixtures")
 if (options.additional_member_fixture or options.secret_receipt_fixture or options.freeze_owner) and not options.owner_local_receipt_probe:
@@ -527,6 +531,12 @@ def main(services):
                   + ",{idempotency_key:'long-quorum-fixture'}); return {id:t.taskId};"}
         if search.get("context"):
             params["context"] = search["context"]
+        if options.hold_executor_claim:
+            import fcntl
+            journal = nodes[running_index]["dir"] / "shellmcp-dispatch"
+            journal.mkdir(mode=0o700, exist_ok=True)
+            held_claim = services.enter_context((journal / "claims.lock").open("a+b"))
+            fcntl.flock(held_claim, fcntl.LOCK_EX)
         def submit():
             return rpc(0, oauth["access_token"], "tools/call", {"name": "exec", "arguments": params})
         status, answer, _ = submit()
@@ -537,6 +547,21 @@ def main(services):
             detail = (answer.get("result") or {}).get("structuredContent") or {}
         ongoing = (detail.get("result") or {}).get("id")
         assert status == 200 and isinstance(ongoing, str) and ongoing.startswith("ot1."), "no original running task handle"
+        if options.hold_executor_claim:
+            def leased():
+                with sqlite3.connect((nodes[0]["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                    row = db.execute("SELECT json_extract(payload,'$.started_at') FROM task_records "
+                                     "WHERE kind='shell' AND key=? AND json_extract(payload,'$.status')='running'",
+                                     (ongoing,)).fetchone()
+                return row and row[0]
+            started_at = wait_for("original owner committed the single lease", leased, 60)
+            time.sleep(2.5)
+            assert not (nodes[running_index]["dir"] / "running-effects").exists(), "effect preceded durable claim"
+            digest = hashlib.sha256(ongoing.encode()).hexdigest()
+            bucket = journal / (digest[:2] + ".v2")
+            assert not bucket.exists() or digest not in json.loads(bucket.read_bytes())["claims"], "lock was bypassed"
+            fcntl.flock(held_claim, fcntl.LOCK_UN)
+            print(f"original executor claim released {time.time()-started_at:.3f}s after the authenticated lease", flush=True)
         if options.legacy_executor_binary:
             def old_refused_lease():
                 with sqlite3.connect((nodes[0]["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:

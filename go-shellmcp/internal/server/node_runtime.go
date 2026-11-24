@@ -54,9 +54,7 @@ func (s *Server) StopCallbacks() {
 	s.callbackClosed = true
 	grace := s.cfg.ShutdownGrace
 	if grace <= 0 {
-		for _, cancel := range s.callbackCancels {
-			cancel()
-		}
+		s.stopCallbacksLocked()
 	}
 	s.callbackMu.Unlock()
 	if grace > 0 {
@@ -69,13 +67,20 @@ func (s *Server) StopCallbacks() {
 		case <-finished:
 		case <-time.After(grace):
 			s.callbackMu.Lock()
-			for _, cancel := range s.callbackCancels {
-				cancel()
-			}
+			s.stopCallbacksLocked()
 			s.callbackMu.Unlock()
 		}
 	}
 	s.callbackWG.Wait()
+}
+
+func (s *Server) stopCallbacksLocked() {
+	if pending := s.pendingClaim; pending != nil {
+		pending.stop()
+	}
+	for _, cancel := range s.callbackCancels {
+		cancel()
+	}
 }
 
 func (s *Server) callbackResultContext() (context.Context, context.CancelFunc) {

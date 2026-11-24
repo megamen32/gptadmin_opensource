@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/megamen32/gptadmin/go-shellmcp/internal/hub"
 )
 
 // A dated local ID carries the time of original issuance through every retry,
@@ -33,6 +34,7 @@ const (
 )
 
 var (
+	errDispatchBusy     = errors.New("executor receipt journal busy")
 	errStaleDispatch    = errors.New("executor dispatch expired or already acknowledged")
 	errDispatchCapacity = errors.New("executor receipt bucket is full")
 	errInvalidDispatch  = errors.New("invalid executor dispatch issuance")
@@ -243,6 +245,10 @@ func (s *Server) ackDispatch(id string) error {
 }
 
 func (s *Server) withDispatchBucket(shard byte, create bool, change func(*dispatchBucket) (bool, error)) error {
+	return s.changeDispatchBucket(nil, shard, create, change)
+}
+
+func (s *Server) changeDispatchBucket(wait context.Context, shard byte, create bool, change func(*dispatchBucket) (bool, error)) error {
 	dir := s.cfg.IdentityDir
 	if dir == "" {
 		dir = s.cfg.OutboxDir
@@ -266,13 +272,19 @@ func (s *Server) withDispatchBucket(shard byte, create bool, change func(*dispat
 		return err
 	}
 	lock := flock.New(filepath.Join(journal, "claims.lock"), flock.SetPermissions(0600))
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	if wait == nil {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+	}
 	defer lock.Close()
-	if held, err := lock.TryLockContext(ctx, 10*time.Millisecond); err != nil {
+	if held, err := lock.TryLockContext(wait, 10*time.Millisecond); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.Join(errDispatchBusy, err)
+		}
 		return err
 	} else if !held {
-		return errors.New("executor receipt journal busy")
+		return errDispatchBusy
 	}
 	b, err := loadDispatchBucket(path)
 	if err != nil {
@@ -320,10 +332,10 @@ func (s *Server) pruneDispatchShard(now time.Time) error {
 }
 
 func (s *Server) updateDispatch(id string, now time.Time, ack bool) (bool, error) {
-	return s.updateDispatchWithRefusal(id, now, ack, nil)
+	return s.updateDispatchWithRefusal(nil, id, now, ack, nil)
 }
 
-func (s *Server) updateDispatchWithRefusal(id string, now time.Time, ack bool, recordRefusal func() error) (bool, error) {
+func (s *Server) updateDispatchWithRefusal(wait context.Context, id string, now time.Time, ack bool, recordRefusal func() error) (bool, error) {
 	if !safeReceiptID(id) {
 		return false, errors.New("invalid executor job ID")
 	}
@@ -333,7 +345,10 @@ func (s *Server) updateDispatchWithRefusal(id string, now time.Time, ack bool, r
 	}
 	key := sha256.Sum256([]byte(id))
 	var seen bool
-	err = s.withDispatchBucket(key[0], true, func(b *dispatchBucket) (bool, error) {
+	err = s.changeDispatchBucket(wait, key[0], true, func(b *dispatchBucket) (bool, error) {
+		if now.IsZero() {
+			now = time.Now()
+		}
 		fingerprint := hex.EncodeToString(key[:])
 		clock := max(now.Unix(), b.Clock)
 		if !ack {
@@ -434,17 +449,79 @@ func (s *Server) startBoundCallback(id string, acceptedPoll bool, run func(conte
 	if s.callbackClosed || (s.queueDraining && !acceptedPoll) {
 		return false, errors.New("executor is stopping")
 	}
+	// Only the original polled callback owns an envelope awaiting admission.
+	// A direct request must never acknowledge it before the durable claim.
+	if pending := s.pendingClaim; pending != nil && pending.id == id {
+		if acceptedPoll {
+			return true, nil
+		}
+		return false, errDispatchBusy
+	}
 	var recordRefusal func() error
 	if acceptedPoll && s.hub != nil {
 		recordRefusal = func() error {
 			return s.persistDispatchRefusal(id)
 		}
 	}
-	seen, err := s.updateDispatchWithRefusal(id, time.Now(), false, recordRefusal)
+	seen, err := s.updateDispatchWithRefusal(nil, id, time.Time{}, false, recordRefusal)
 	if err != nil || seen {
 		return seen, err
 	}
 	ctx, finish, _ := s.beginCallbackLocked(id, acceptedPoll)
 	go func() { defer finish(); run(ctx) }()
 	return false, nil
+}
+
+type pendingDispatchClaim struct {
+	id   string
+	stop context.CancelFunc
+}
+
+// finishPolledAdmission retains the one envelope already leased by this queue
+// loop. The next poll cannot lease more work while this claim is pending.
+func (s *Server) finishPolledAdmission(queue context.Context, id string, run func(context.Context)) error {
+	s.callbackMu.Lock()
+	if s.callbackClosed {
+		s.callbackMu.Unlock()
+		return context.Canceled
+	}
+	if s.callbackCancels[id] != nil {
+		s.callbackMu.Unlock()
+		return nil
+	}
+	ctx, finish, _ := s.beginCallbackLocked(id, true)
+	admission, stop := context.WithCancel(queue)
+	s.pendingClaim = &pendingDispatchClaim{id: id, stop: stop}
+	s.callbackMu.Unlock()
+	defer stop()
+
+	// Keep the cancellation of the command separate from stopping the
+	// executor. Only a winning durable claim can certify non-execution.
+	duplicate, err := s.updateDispatchWithRefusal(admission, id, time.Time{}, false, func() error {
+		return s.persistDispatchRefusal(id)
+	})
+	if err != nil || duplicate {
+		// Clear the callback first. A direct delivery cannot register a new
+		// callback for this ID until the transient fence below is gone.
+		finish()
+		s.callbackMu.Lock()
+		s.pendingClaim = nil
+		s.callbackMu.Unlock()
+		return err
+	}
+	s.callbackMu.Lock()
+	s.pendingClaim = nil
+	if admission.Err() != nil {
+		s.callbackCancels[id]()
+	}
+	s.callbackMu.Unlock()
+	go func() {
+		defer finish()
+		if ctx.Err() != nil {
+			s.deliverCallbackResult(hub.TaskResult{ID: id, Error: map[string]any{"code": "cancelled", "executed": false}})
+			return
+		}
+		run(ctx)
+	}()
+	return nil
 }

@@ -282,6 +282,7 @@ type Server struct {
 	queueDrainPending     bool
 	queuePollsInFlight    int
 	callbackCancels       map[string]context.CancelFunc
+	pendingClaim          *pendingDispatchClaim
 	callbackCancelled     map[string]bool
 	queuePollCount        atomic.Int64
 	queuePollErrors       atomic.Int64
@@ -1350,13 +1351,7 @@ func (s *Server) queueLoop(ctx context.Context) {
 				s.endQueuePoll()
 				continue
 			}
-			if q.ToolName != "" && q.ToolName != "shell_exec" {
-				_, err = s.startCallbackTool(q)
-			} else {
-				req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
-				s.applyDefaults(&req)
-				_, err = s.startCallbackJob(q.ID, req, true, q.ExecutionOrigin)
-			}
+			err = s.startPolledJob(ctx, q)
 			if err != nil {
 				log.Printf("executor dispatch admission failed: %v", err)
 			}
@@ -1395,11 +1390,23 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	return req
 }
 
-func (s *Server) startCallbackTool(q hub.QueueJob) (bool, error) {
-	return s.startBoundCallback(q.ID, true, func(ctx context.Context) {
-		ctx = withExecutionTask(ctx, q.ID, q.TraceID, q.ExecutionOrigin)
-		s.runCallbackTool(ctx, q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
-	})
+func (s *Server) startPolledJob(ctx context.Context, q hub.QueueJob) error {
+	var run func(context.Context)
+	if q.ToolName != "" && q.ToolName != "shell_exec" {
+		run = func(ctx context.Context) {
+			ctx = withExecutionTask(ctx, q.ID, q.TraceID, q.ExecutionOrigin)
+			s.runCallbackTool(ctx, q.ID, q.TraceID, q.TraceParent, q.ToolName, q.Arguments, q.FilesystemACL)
+		}
+	} else {
+		req := shellRequestFromQueueJob(q, s.cfg.SpillDir)
+		s.applyDefaults(&req)
+		run = s.shellCallback(q.ID, req, q.ExecutionOrigin)
+	}
+	_, err := s.startBoundCallback(q.ID, true, run)
+	if errors.Is(err, errDispatchBusy) {
+		return s.finishPolledAdmission(ctx, q.ID, run)
+	}
+	return err
 }
 
 func (s *Server) runCallbackTool(runCtx context.Context, jobID, traceID, traceParent, name string, args map[string]any, queueACL *hub.FilesystemACL) {
@@ -1466,9 +1473,13 @@ func (s *Server) cancelCallbackJob(jobID string) {
 }
 
 func (s *Server) startCallbackJob(jobID string, req shell.Request, acceptedPoll bool, origin ...map[string]any) (bool, error) {
-	return s.startBoundCallback(jobID, acceptedPoll, func(ctx context.Context) {
+	return s.startBoundCallback(jobID, acceptedPoll, s.shellCallback(jobID, req, origin...))
+}
+
+func (s *Server) shellCallback(jobID string, req shell.Request, origin ...map[string]any) func(context.Context) {
+	return func(ctx context.Context) {
 		s.runCallbackJob(withExecutionTask(ctx, jobID, req.TraceID, origin...), jobID, req)
-	})
+	}
 }
 
 func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.Request) {
