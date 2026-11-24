@@ -2,11 +2,15 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 type localShellAdmissionKey struct{}
@@ -143,6 +147,7 @@ func (s *Server) pollFencedLocalShell(w http.ResponseWriter, r *http.Request) bo
 	limit := shellQueueResponseLimit(r)
 	oversized := false
 	inspected := 0
+	var blocked []string
 	for _, id := range queue {
 		job := s.shellJobs[id]
 		if job == nil || job.Status != "queued" || !s.localShellDeliveryFencedLocked(job) || *job.LocalExecutor != identity || (!eligible && !job.offlineShell) {
@@ -168,7 +173,11 @@ func (s *Server) pollFencedLocalShell(w http.ResponseWriter, r *http.Request) bo
 		} else if expired {
 			continue
 		}
-		encoded, err := s.encodeShellQueueJobLocked(job)
+		encoded, err := s.encodeShellQueueJobLocked(job, r)
+		if errors.Is(err, errReceiptRedactionCapability) {
+			blocked = append(blocked, id)
+			continue
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "queue payload cannot be encoded; job remains queued"})
 			return true
@@ -183,14 +192,28 @@ func (s *Server) pollFencedLocalShell(w http.ResponseWriter, r *http.Request) bo
 		}
 		return true
 	}
+	if len(blocked) > 0 {
+		// A bounded scan must still allow an ordinary task beyond this window
+		// to run while the executor is waiting for its compatible update.
+		s.shellQueues[name] = append(slices.DeleteFunc(s.shellQueues[name], func(id string) bool { return slices.Contains(blocked, id) }), blocked...)
+		writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked(), "required_receipt_redaction": 1})
+		return true
+	}
 	if oversized {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "queue payload exceeds agent response limit; job remains queued; update agent"})
 	}
 	return oversized
 }
 
-func (s *Server) encodeShellQueueJobLocked(job *shellJob) ([]byte, error) {
+func (s *Server) encodeShellQueueJobLocked(job *shellJob, r *http.Request) ([]byte, error) {
+	policy := s.queueReceiptRedaction(job, r)
+	if len(job.SecretValues) > 0 && s.receiptCopyGeneration() != "" && policy == nil {
+		return nil, errReceiptRedactionCapability
+	}
 	payload := map[string]any{"id": job.ID, "trace_id": job.TraceID, "traceparent": job.TraceParent, "tool_name": job.ToolName, "arguments": job.Arguments, "cmd": job.Cmd, "cwd": job.Cwd, "timeout": job.Timeout, "env": job.Env, "runtime_settings": s.shellRuntimeSettingsLocked()}
+	if policy != nil {
+		payload["receipt_redaction"] = policy
+	}
 	payload["execution_origin"] = executionOriginForCaller(job.Caller)
 	if job.FilesystemACL != nil {
 		payload["filesystem_acl"] = job.FilesystemACL
@@ -217,4 +240,39 @@ func writeShellQueueEnvelope(w http.ResponseWriter, encoded []byte) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(encoded)
+}
+
+// Preserve the order of the established literal redaction rules. The grant
+// carries only a protocol version; variable names are sent only in the primary
+// queue to the executor that already needs the environment to run this job.
+func (s *Server) queueReceiptRedaction(j *shellJob, r *http.Request) *receiptredaction.Policy {
+	if r == nil || s.receiptCopyGeneration() == "" || r.URL.Query().Get("receipt_redaction") != "1" || j.ToolName != "shell_exec" || len(j.SecretValues) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(j.Env))
+	for k := range j.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	names := make([]string, 0, len(j.SecretValues))
+	for _, v := range j.SecretValues {
+		if v == "" {
+			continue
+		}
+		chosen := ""
+		for _, k := range keys {
+			if value, ok := j.Env[k].(string); ok && value == v && validSecretEnvName.MatchString(k) {
+				chosen = k
+				break
+			}
+		}
+		if chosen == "" {
+			return nil
+		}
+		names = append(names, chosen)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return &receiptredaction.Policy{Version: receiptredaction.Version, EnvNames: names}
 }

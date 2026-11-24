@@ -133,7 +133,15 @@ func New(options ...Option) (runtime *Runtime, err error) {
 		cachedRuntimeConfig,
 	)
 
-	if _, err := wsp1.Instantiate(option.Context, runtime.wrt); err != nil {
+	// Export the normal WASI ABI, replacing only the optional blocking syscall.
+	// A per-function listener on every fresh host module makes wazevo retain
+	// native listener trampolines for the lifetime of its compilation cache.
+	wasi := runtime.wrt.NewHostModuleBuilder(wsp1.ModuleName)
+	wsp1.NewFunctionExporter().ExportFunctions(wasi)
+	if option.WASIPollOneoff != nil {
+		wasi.NewFunctionBuilder().WithFunc(option.WASIPollOneoff).Export("poll_oneoff")
+	}
+	if _, err := wasi.Instantiate(option.Context); err != nil {
 		return nil, fmt.Errorf("failed to instantiate WASI: %w", err)
 	}
 

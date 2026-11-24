@@ -359,6 +359,21 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			return
 		}
 		switch r.URL.Path {
+		case memberCopyPath:
+			s.memberCopyHTTP(w, r)
+			return
+		case executorCopyPath:
+			s.executorCopyHTTP(w, r)
+			return
+		case contentDeletePath:
+			s.acceptContentDelete(w, r)
+			return
+		case contentCopyPath:
+			s.receiveContentCopy(w, r)
+			return
+		case receiptCopyPath:
+			s.terminalCopyHTTP(w, r)
+			return
 		case ownerReadPath:
 			// This exact read authenticates against the applied voter policy.
 			// Ordinary reader slots may still name a former writer.
@@ -386,6 +401,14 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		termBeforeVerification := s.quorumNode.CurrentTerm()
 		if err := s.quorumNode.VerifyLeader(r.Context()); err != nil {
 			s.quorumAuthorityActiveWriter.Store(false)
+			// A peer tools/list read belongs to the physical local child, not
+			// to the Raft leader. Keep the original bearer and all normal
+			// requireCtl/profile/owner checks; never admit a remote child or
+			// any mutating request through this read-only exception.
+			if s.quorumControlOnly() && s.quorumLocalChildSchemaRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if s.pollFencedLocalShell(w, r) {
 				return
 			}
@@ -509,6 +532,49 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// quorumLocalChildSchemaRequest recognizes only forwarded tools/list for an
+// approved child of this process's pinned executor. The normal relay handler
+// still authenticates the original bearer and filters the actual child schema.
+// The hop header is routing metadata, never an authentication credential.
+func (s *Server) quorumLocalChildSchemaRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost || r.URL.Path != "/mcp-relay/tools" ||
+		r.Header.Get(nodePeerHopHeader) != "1" || r.Header.Get("Authorization") == "" || r.Body == nil {
+		return false
+	}
+	const maxSchemaBody = 64 << 10
+	original := r.Body
+	raw, err := io.ReadAll(io.LimitReader(original, maxSchemaBody+1))
+	// Preserve the complete request even when it is rejected by this classifier.
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(raw), original), original}
+	if err != nil || len(raw) == 0 || len(raw) > maxSchemaBody {
+		return false
+	}
+	var input map[string]any
+	if json.Unmarshal(raw, &input) != nil {
+		return false
+	}
+	target := firstString(input, "target")
+	if !strings.HasPrefix(target, "mcp:shell:") ||
+		firstString(input, "server_id", "agent_id") != "" || truthy(input["background"]) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	child, exists := s.exposedAgentByIDLocked(target)
+	if !exists || !isChildMCPAgent(child) || isLogicalBrowserAgent(child) {
+		return false
+	}
+	parent := firstString(child.Meta, "parent_server_id")
+	ref := firstString(child.Meta, "child_ref")
+	executor := s.agents[parent]
+	return ref != "" && target == "mcp:"+parent+":"+ref &&
+		executor != nil && truthy(executor.Meta["approved"]) &&
+		s.localExecutors[parent] != nil
 }
 
 // Addressed shell work is admitted by the executor owner. The outer MCP

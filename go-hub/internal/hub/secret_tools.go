@@ -2,13 +2,15 @@ package hub
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 func secretOwnerFingerprint(r *http.Request) string {
@@ -147,51 +149,51 @@ func (s *Server) resolveSecretEnvForRequest(r *http.Request, target string, args
 	return cloned, values, nil
 }
 
-func redactSecretValues(value any, secrets []string) any {
-	switch current := value.(type) {
-	case string:
-		for _, secret := range secrets {
-			if secret != "" {
-				current = strings.ReplaceAll(current, secret, "***")
-			}
-		}
-		return current
-	case []any:
-		out := make([]any, len(current))
-		for i, item := range current {
-			out[i] = redactSecretValues(item, secrets)
-		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(current))
-		for key, item := range current {
-			if key == "stdout_base64" && len(secrets) > 0 {
-				// Binary stdout crosses the same disclosure/persistence boundary
-				// as text. Redact decoded bytes before restoring the encoding.
-				encoded, ok := item.(string)
-				if !ok {
-					continue
-				}
-				raw, err := base64.StdEncoding.DecodeString(encoded)
-				if err != nil {
-					// Omit malformed data whose redaction cannot be verified.
-					continue
-				}
-				redacted := redactSecretValues(string(raw), secrets).(string)
-				encoded = base64.StdEncoding.EncodeToString([]byte(redacted))
-				// The encoding itself must also obey the existing literal-secret rule.
-				if redactSecretValues(encoded, secrets).(string) != encoded {
-					continue
-				}
-				out[key] = encoded
-				continue
-			}
-			out[key] = redactSecretValues(item, secrets)
-		}
-		return out
-	default:
-		return value
+// Persist only the redaction dictionary needed for an outstanding callback.
+// The existing issuer-local secret-store cipher binds it to this task ID.
+// Completed/cancelled records shed the dictionary automatically.
+const receiptSecretNamespace = "original-receipt-redaction"
+
+func (s *Server) sealOriginalReceiptSecrets(j *shellJob) (json.RawMessage, error) {
+	if j.Status != "running" && firstString(mapValue(j.Error), "code") != "orphaned_running_task" {
+		return nil, nil
 	}
+	if len(j.receiptRedactionSealed) > 0 {
+		return j.receiptRedactionSealed, nil
+	}
+	if len(j.SecretValues) == 0 || s.receiptCopyGeneration() == "" {
+		return nil, nil
+	}
+	data, err := json.Marshal(j.SecretValues)
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := s.sealPendingValue(receiptSecretNamespace, j.ID, data)
+	if err == nil {
+		j.receiptRedactionSealed = sealed
+	}
+	return sealed, err
+}
+func (s *Server) originalReceiptSecrets(j *shellJob) ([]string, error) {
+	if len(j.receiptRedactionSealed) == 0 {
+		if len(j.SecretValues) == 0 || s.receiptCopyGeneration() == "" {
+			return nil, nil
+		}
+		return j.SecretValues, nil
+	}
+	plain, err := s.openPendingValue(receiptSecretNamespace, j.ID, j.receiptRedactionSealed)
+	if err != nil {
+		return nil, err
+	}
+	var values []string
+	if json.Unmarshal(plain, &values) != nil || len(values) == 0 {
+		return nil, errors.New("invalid original receipt redaction")
+	}
+	return values, nil
+}
+
+func redactSecretValues(value any, secrets []string) any {
+	return receiptredaction.Values(value, secrets)
 }
 
 func secretHubTools() []map[string]any {

@@ -42,11 +42,19 @@ parser.add_argument("private_tmp", type=Path)
 mode = parser.add_mutually_exclusive_group()
 mode.add_argument("--immediate-auth", action="store_true")
 mode.add_argument("--legacy-shared-probe", action="store_true")
+mode.add_argument("--owner-local-receipt-probe", action="store_true")
 mode.add_argument("--case", choices=("outages", "fencing", "storage", "dispatch-capacity"),
                   help="run one part of the default voter matrix")
 parser.add_argument("--shell-binary", type=Path, help="standalone ShellMCP for the voter matrix")
+parser.add_argument("--additional-member-fixture", action="store_true", help="use a fourth enrolled ordinary Node for the owner-local in-flight command")
+parser.add_argument("--secret-receipt-fixture", action="store_true", help="use a synthetic one-time secret input in the running task")
+parser.add_argument("--legacy-executor-binary", type=Path, help="use an unmodified older Node as the fourth executor")
 options = parser.parse_args()
-member_matrix = not (options.legacy_shared_probe or options.immediate_auth)
+if options.legacy_executor_binary and not (options.secret_receipt_fixture and options.additional_member_fixture):
+    parser.error("legacy executor verification requires both the member and secret receipt fixtures")
+if (options.additional_member_fixture or options.secret_receipt_fixture) and not options.owner_local_receipt_probe:
+    parser.error("optional receipt fixtures require the owner-local receipt probe")
+member_matrix = not (options.legacy_shared_probe or options.immediate_auth or options.owner_local_receipt_probe)
 BINARY = options.node_binary.resolve(strict=True)
 BASE = options.private_tmp.resolve()
 BASE.mkdir(parents=True, exist_ok=True)
@@ -117,7 +125,7 @@ def request(index, path, body=None, token=None, form=None, basic=None, *, method
 def start(i):
     node = nodes[i]
     node["log"] = (node["dir"] / "runtime.log").open("ab")
-    node["proc"] = subprocess.Popen([str(BINARY)], cwd=node["dir"], env=node["env"], stdout=node["log"],
+    node["proc"] = subprocess.Popen([str(node.get("binary", BINARY))], cwd=node["dir"], env=node["env"], stdout=node["log"],
                                     stderr=node["log"], group=node.get("group"))
 
 
@@ -246,7 +254,8 @@ def main(services):
     private(ca_path, ca.public_bytes(serialization.Encoding.PEM))
     state_key = ROOT / "state.key"
     private(state_key, secrets.token_bytes(32))
-    for i in range(3):
+    fixture_count = 4 if options.additional_member_fixture else 3
+    for i in range(fixture_count):
         directory = ROOT / f"node{i}"
         directory.mkdir(mode=0o700)
         crt, key = cert(f"node{i}.test", ca_key, ca)
@@ -264,6 +273,8 @@ def main(services):
             HUB_URL="http://127.0.0.1:1", SHELLMCP_SELF_REPAIR_DISABLE="1", NO_PROXY="*", SSL_CERT_FILE=str(ca_path))
         nodes.append({"dir": directory, "http": int(env["GPTADMIN_HUB_PORT"]), "raft": port(), "private": port(), "public": port(),
             "key": secrets.token_hex(32), "cert": crt, "cert_key": key, "env": env})
+        if i == 3 and options.legacy_executor_binary:
+            nodes[i]["binary"] = options.legacy_executor_binary.resolve(strict=True)
         physical_host = f"node{i}.test" if member_matrix else "localhost"
         env["GPTADMIN_NODE_PUBLIC_URL"] = f"https://{physical_host}:{nodes[i]['public']}"
         if member_matrix:
@@ -277,7 +288,7 @@ def main(services):
         import quorum_matrix as matrix
         services.enter_context(matrix.member_tls(ROOT, nodes))
     else:
-        for i in range(3):
+        for i in range(fixture_count):
             start_tls_ingress(i)
     start(0)
     wait_for("ordinary writer", lambda: health(0))
@@ -285,8 +296,9 @@ def main(services):
     nodes[0]["id"] = writer_id
     callback = "http://127.0.0.1:49173/callback/quorum"
     basic, oauth = oauth_client(callback, resource, "quorum-probe")
-    if member_matrix:
+    if member_matrix or options.owner_local_receipt_probe:
         _, outsider = oauth_client(callback, resource, "quorum-other-caller", bind_profile=True)
+    if member_matrix:
         history = asyncio.run(matrix.seed_history(nodes[0], oauth["access_token"]))
     def enroll(name, identity, key, public_url, local_id=""):
         status, grant, _ = request(0, "/admin/api/nodes/grant", {"name": name, "ttl_minutes": 30}, nodes[0]["env"]["CTL_TOKEN"])
@@ -303,7 +315,7 @@ def main(services):
         enroll("shell:node2", retired_id, retired_key, nodes[2]["env"]["GPTADMIN_NODE_PUBLIC_URL"])
         status, retired, _ = request(0, "/admin/api/nodes/disable", {"node_id": retired_id}, nodes[0]["env"]["CTL_TOKEN"])
         assert status == 200 and retired["state"] == "disabled", f"retire previous node2 enrollment HTTP {status}"
-    for i in (1, 2):
+    for i in range(1, fixture_count):
         node = nodes[i]
         node["id"] = secrets.token_hex(16)
         name = f"shell:node{i}"
@@ -318,21 +330,36 @@ def main(services):
         enroll(name, node["id"], node["key"], node["env"]["GPTADMIN_NODE_PUBLIC_URL"], local["server_id"])
     def members_ready():
         status, data, _ = request(0, "/admin/api/nodes", token=nodes[0]["env"]["CTL_TOKEN"])
-        return status == 200 and all(any(n.get("node_id") == nodes[i]["id"] and n.get("state") == "ready" for n in data.get("nodes", [])) for i in (1, 2))
+        return status == 200 and all(any(n.get("node_id") == nodes[i]["id"] and n.get("state") == "ready" for n in data.get("nodes", [])) for i in range(1, fixture_count))
     wait_for("readers enrolled and synced", members_ready, 90)
-    for i in range(3):
+    for i in range(fixture_count):
         stop(i)
+    if options.owner_local_receipt_probe:
+        # Historical fixtures exist before this opt-in is installed.
+        prefix = "ot1." + base64.urlsafe_b64encode(writer_id.encode()).decode().rstrip("=") + "."
+        historic_id, consumed_id = prefix + "historical", prefix + "acknowledged"
+        with sqlite3.connect(nodes[0]["dir"] / "tasks_state.sqlite") as db:
+            for task_id in (historic_id, consumed_id):
+                done = time.time() - 12
+                body = {"id": task_id, "caller":{"client_id":basic[0],"subject":"admin"}, "tool_name": "shell_exec", "server": "node0", "created_at": done - 2,
+                        "started_at": done - 1, "completed_at": done, "status": "completed",
+                        "result": {"stdout": "previously-retained-fixture", "returncode": 0}}
+                db.execute("INSERT INTO task_records(kind,key,updated,done,payload,revision) VALUES(?,?,?,?,?,?)",
+                           ("shell", task_id, done, done, json.dumps(body).encode(), 1))
     peers = [{"id": n["id"], "address": f"127.0.0.1:{n['raft']}", "server_name": f"node{i}.test",
         "hub_url": n["env"]["GPTADMIN_NODE_PUBLIC_URL"],
         "internal_hub_url": f"https://127.0.0.1:{n['private']}",
-        "node_key_sha256": hashlib.sha256(n["key"].encode()).hexdigest(), "failure_domain": f"host{i}"} for i, n in enumerate(nodes)]
-    for i, n in enumerate(nodes):
+        "node_key_sha256": hashlib.sha256(n["key"].encode()).hexdigest(), "failure_domain": f"host{i}"} for i, n in enumerate(nodes[:3])]
+    for i, n in enumerate(nodes[:3]):
         config = {"cluster_id": "isolated-probe", "node_id": n["id"], "bootstrapper_id": writer_id,
             "node_key": n["key"], "bind_address": peers[i]["address"], "advertise": peers[i]["address"],
             "data_dir": str(n["dir"] / "raft"), "tls_cert_file": str(n["cert"]), "tls_key_file": str(n["cert_key"]),
             "tls_ca_file": str(ca_path), "state_key_file": str(state_key), "external_snapshot_max_bytes": 67108864,
             "external_snapshot_free_reserve_bytes": 1048576, "peers": peers, "bootstrap": i == 0}
-        if not member_matrix:
+        if options.owner_local_receipt_probe:
+            config["mode"] = "owner_local"
+            n["env"]["GPTADMIN_RECEIPT_COPY_GENERATION"] = "isolated-receipt-fixture"
+        elif not member_matrix:
             config["mode"] = "replicated"
         config_path = n["dir"] / "quorum.json"
         private(config_path, json.dumps(config).encode())
@@ -351,6 +378,14 @@ def main(services):
     for i in (1, 2):
         start(i)
     wait_for("three-voter leader ready", lambda: health(0), 90)
+    if options.additional_member_fixture:
+        ordinary = nodes[3]
+        path = ordinary["dir"] / "node-identity.json"
+        identity = json.loads(path.read_text())
+        identity["quorum_hubs"] = [p["hub_url"] for p in peers]
+        private(path, json.dumps(identity).encode())
+        start(3)
+        print("started fourth ordinary Node with its enrolled member credential", flush=True)
     if member_matrix:
         status, _, _ = request(0, "/admin/api/nodes/heartbeat",
                                {"state": "ready", "snapshot_revision": 1}, retired_key)
@@ -371,7 +406,7 @@ def main(services):
         finally:
             status, local, _ = request(1, drain, {"action": "cancel"}, follower_token)
             assert status == 200 and not local["draining"], "follower drain did not clear"
-    for i in (1, 2):
+    for i in range(1, fixture_count):
         target = f"shell:node{i}"
         identity = json.loads((nodes[i]["dir"] / "shellmcp_identity.json").read_text())
         def registration():
@@ -439,8 +474,148 @@ def main(services):
     before_row = database.execute("SELECT key FROM task_records WHERE kind='shell' AND json_extract(payload,'$.tool_name')='shell_exec' ORDER BY json_extract(payload,'$.created_at') DESC LIMIT 1").fetchone()
     database.close()
     assert before_row and (nodes[0]["dir"] / "once.txt").read_text().splitlines() == ["once"], "initial command receipt or side effect missing"
-    stop(0)
+    if options.owner_local_receipt_probe:
+        ids = sorted(n["id"] for n in nodes[:3])
+        backup_id = ids[(ids.index(nodes[0]["id"]) + 1) % len(ids)]
+        backup = next(n for n in nodes if n["id"] == backup_id)
+        def stored(task_id):
+            try:
+                with sqlite3.connect((backup["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                    return db.execute("SELECT body IS NOT NULL FROM task_terminal_copies WHERE generation=? AND id=?",
+                                      ("isolated-receipt-fixture", task_id)).fetchone() == (1,)
+            except sqlite3.OperationalError:
+                return False
+        wait_for("independent voter committed the terminal copy", lambda: stored(before_row[0]), 60)
+        wait_for("backfilled both pre-upgrade receipts", lambda: stored(historic_id) and stored(consumed_id), 90)
+        status, acked, _ = request(0, "/mcp-relay/get_mcp_job/" + consumed_id + "?ack=true",
+                                   token=nodes[0]["env"]["CTL_TOKEN"])
+        assert status == 200 and "previously-retained-fixture" in json.dumps(acked), (status, acked)
+        assert not stored(consumed_id), "destructive ACK left readable copy"
+    if options.owner_local_receipt_probe:
+        import owner_content_probe
+        content_ids = owner_content_probe.prepare(rpc, nodes, 0, oauth["access_token"], wait_for)
+    ongoing = None
+    expected_output = "across-election"
+    secret_value = None
+    if options.owner_local_receipt_probe:
+        backup_index = nodes.index(backup)
+        running_index = backup_index if os.environ.get("GPTADMIN_TEST_EXECUTOR_ON_RECEIPT_COPY") == "1" else 3 - backup_index
+        if options.additional_member_fixture:
+            running_index = 3
+        # Keep the real executor running after we remove its issuing Hub.
+        # Writing the marker precedes the gate so a duplicate is observable.
+        command = {"cmd": "echo once >> running-effects; while [ ! -f release-running ]; do sleep 0.2; done; printf across-election",
+                   "timeout": 120}
+        if options.secret_receipt_fixture:
+            env_name = "COPY_TEST_VALUE"
+            status, requested, _ = rpc(0, oauth["access_token"], "tools/call", {"name": "secret_request", "arguments": {"label": "ephemeral receipt fixture", "env_name": env_name}})
+            info = (requested.get("result") or {}).get("structuredContent") or {}
+            if not info and (requested.get("result") or {}).get("content"):
+                info = json.loads(requested["result"]["content"][0]["text"])
+            assert status == 200 and info.get("secret_ref") and info.get("input_url"), ("could not create fixture secret", list(info))
+            secret_value = secrets.token_urlsafe(30)
+            status, _, _ = request(0, urllib.parse.urlparse(info["input_url"]).path, form={"value": secret_value})
+            assert status == 200, "one-time secret fixture input failed"
+            command["cmd"] += """; printf ' %s' "$COPY_TEST_VALUE" """
+            command["secret_env"] = {env_name: info["secret_ref"]}
+            expected_output += " ***"
+        params = {"code": f"const t=await mcp.tasks.start('shell:node{running_index}','shell_exec'," + json.dumps(command)
+                  + ",{idempotency_key:'long-quorum-fixture'}); return {id:t.taskId};"}
+        if search.get("context"):
+            params["context"] = search["context"]
+        def submit():
+            return rpc(0, oauth["access_token"], "tools/call", {"name": "exec", "arguments": params})
+        status, answer, _ = submit()
+        detail = (answer.get("result") or {}).get("structuredContent") or {}
+        if detail.get("executed") is False and detail.get("context"):
+            params["context"] = detail["context"]
+            status, answer, _ = submit()
+            detail = (answer.get("result") or {}).get("structuredContent") or {}
+        ongoing = (detail.get("result") or {}).get("id")
+        assert status == 200 and isinstance(ongoing, str) and ongoing.startswith("ot1."), "no original running task handle"
+        if options.legacy_executor_binary:
+            def old_refused_lease():
+                with sqlite3.connect((nodes[0]["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                    state = db.execute("SELECT json_extract(payload,'$.status') FROM task_records WHERE kind='shell' AND key=?", (ongoing,)).fetchone()
+                return state == ("queued",) and not (nodes[running_index]["dir"] / "running-effects").exists()
+            assert old_refused_lease()
+            # An ordinary job behind the gated job proves the exact legacy
+            # process completed a real queue poll without starting secret work.
+            ordinary = {"code": "const t=await mcp.tasks.start('shell:node3','shell_exec',{cmd:'printf ready > ordinary-after-secret'}); return {id:t.taskId};"}
+            if search.get("context"):
+                ordinary["context"] = search["context"]
+            for _ in range(2):
+                status, response, _ = rpc(0, oauth["access_token"], "tools/call", {"name": "exec", "arguments": ordinary})
+                details = (response.get("result") or {}).get("structuredContent") or {}
+                if details.get("executed") is False and details.get("context"):
+                    ordinary["context"] = details["context"]
+                    continue
+                break
+            assert status == 200 and (details.get("result") or {}).get("id"), "missing ordinary task handle"
+            wait_for("legacy executor ran following ordinary command", lambda: (nodes[running_index]["dir"] / "ordinary-after-secret").is_file(), 60)
+            assert old_refused_lease()
+            with sqlite3.connect((backup["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                assert db.execute("SELECT count(*) FROM task_terminal_dispatch WHERE id=?", (ongoing,)).fetchone() == (0,)
+            print("unmodified legacy executor ran ordinary work, protected task remained queued with zero grants", flush=True)
+            stop(running_index)
+            nodes[running_index]["binary"] = BINARY
+            start(running_index)
+        wait_for("one real dispatch before issuer outage", lambda: (nodes[running_index]["dir"] / "running-effects").exists())
+    stop(0, crash=options.owner_local_receipt_probe)
     leader = wait_for("surviving leader ready", lambda: next((i for i in (1, 2) if health(i)), None), 90)
+    if ongoing:
+        if options.additional_member_fixture:
+            path = "/admin/api/nodes/executor/queue/node3/result?" + urllib.parse.urlencode({"job_id": ongoing})
+            status, _, _ = request(leader, path, {"id": ongoing, "result": {"stdout": "wrong-executor"}},
+                                   token=nodes[2]["key"])
+            assert status != 200, "a different enrolled member acknowledged the running command"
+            with sqlite3.connect((backup["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                row = db.execute("SELECT result IS NULL FROM task_terminal_dispatch WHERE id=?", (ongoing,)).fetchone()
+            assert row == (1,), "unexpected grant or result after a different member callback"
+            print("different enrolled credential denied before legitimate result", flush=True)
+        (nodes[running_index]["dir"] / "release-running").touch()
+        opted = {"io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}}
+        def original_result():
+            status, reply, _ = rpc(leader, oauth["access_token"], "tasks/get", {"taskId": ongoing, "_meta": opted})
+            body = reply.get("result") or {}
+            return status == 200 and body.get("status") == "completed" and expected_output in json.dumps(body) and (not secret_value or secret_value not in json.dumps(body))
+        wait_for("completed output from still-stopped issuer via native tasks/get", original_result, 90)
+        assert (nodes[running_index]["dir"] / "running-effects").read_text().splitlines() == ["once"], "running task replayed"
+    if options.owner_local_receipt_probe:
+        owner_content_probe.verify(rpc, leader, oauth["access_token"], outsider["access_token"], content_ids)
+        opt = {"io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}}
+        for method, params in (("tasks/get", {"taskId": before_row[0], "_meta": opt}),
+                               ("tools/call", {"name": "job", "arguments": {"id": before_row[0], "owner_target": "shell:node0"}})):
+            status, reply, _ = rpc(leader, oauth["access_token"], method, params)
+            assert status == 200 and "quorum-before" in json.dumps(reply), (method, reply)
+            status, denied, _ = rpc(leader, outsider["access_token"], method, params)
+            assert "quorum-before" not in json.dumps(denied), "foreign client could read an existing copy"
+        for task_id, expected in ((historic_id, True), (consumed_id, False)):
+            _, result, _ = rpc(leader, oauth["access_token"], "tasks/get", {"taskId": task_id, "_meta": opt})
+            assert ("previously-retained-fixture" in json.dumps(result)) == expected, ("historical receipt/ACK divergence", expected, result)
+        print("historical output survived while the consumed copy stayed inaccessible", flush=True)
+        assert nodes[0]["proc"].poll() is not None
+        # The executor still owns its durable receipt while its primary Hub is down.
+        assert (nodes[running_index]["dir"] / "spool" / "outbox" / (ongoing + ".json")).is_file()
+        if secret_value:
+            with sqlite3.connect((backup["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                grant, completed = db.execute("SELECT body,result FROM task_terminal_dispatch WHERE id=?", (ongoing,)).fetchone()
+            outbox = (nodes[running_index]["dir"] / "spool" / "outbox" / (ongoing + ".json")).read_bytes()
+            for payload in (grant, completed, outbox):
+                data = payload if isinstance(payload, bytes) else payload.encode()
+                assert secret_value.encode() not in data and base64.b64encode(secret_value.encode()) not in data, "unredacted fixture value found"
+            assert expected_output.encode() in completed and expected_output.encode() in outbox, "filtered output missing"
+            print("secret redacted before outbox and backup while original issuer remained stopped", flush=True)
+        start(0)
+        def reconciled():
+            with sqlite3.connect((nodes[0]["dir"] / "tasks_state.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+                row = db.execute("SELECT json_extract(payload,'$.status'),json_extract(payload,'$.result.stdout') FROM task_records WHERE kind='shell' AND key=?", (ongoing,)).fetchone()
+            return row == ("completed", expected_output) and not (nodes[running_index]["dir"] / "spool" / "outbox" / (ongoing + ".json")).exists()
+        wait_for("rejoined issuer persisted original outcome before executor released outbox", reconciled, 90)
+        assert (nodes[running_index]["dir"] / "running-effects").read_text().splitlines() == ["once"]
+        assert (nodes[0]["dir"] / "once.txt").read_text().splitlines() == ["once"]
+        print("owner_local: original tasks/get and job include output with issuer process killed; foreign caller denied; one side effect", flush=True)
+        return
     if options.immediate_auth:
         start(0)
         def old_follower_ready():

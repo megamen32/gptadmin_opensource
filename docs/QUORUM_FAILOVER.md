@@ -5,8 +5,9 @@
 The client keeps its public HTTPS MCP URL and credentials. After the loss of one
 server it can open a session and run a new command on a reachable executor,
 including Android. Election and reconnection can briefly delay admission.
-Each task has a storage owner. When that owner is offline, reading its output
-reports that the result is unavailable. The client can run an unrelated
+Each task has an issuing Hub. By default an offline issuer makes its local
+output unavailable. The opt-in voter copy described below can serve protected
+shell receipts while the issuer is offline. The client can run an unrelated
 command immediately. If the owner returns with its data, the same handle can
 read the result again, subject to the original access policy and retention.
 For a known offline owner the API returns `owner_unavailable`. A legacy ID
@@ -87,9 +88,72 @@ offline former owner. An existing cluster that already uses replicated task
 storage must retain access to its previously acknowledged data when upgraded.
 Changing that cluster's storage policy is an explicit operator operation.
 
-The availability requirement does not require a backup of command output. A
-separate request to read selected results during an owner's outage could justify
-an opt-in replica with an explicit destination, quota and retention policy.
+### Reading shell receipts when the issuing voter is offline
+
+Install the same compatible release on every voting Hub with the feature
+disabled. Keep the current local task databases, executor outboxes, quorum
+mode, keys and Raft directories. For activation, set
+`GPTADMIN_RECEIPT_COPY_GENERATION` to the same new value on all voters and
+restart one voter at a time. The value accepts 1 to 64 letters, digits,
+underscores or hyphens. Use one retention policy across these voters. Record
+the generation and voter roster in the deployment record. Ordinary executors
+and clients continue to use their existing configuration.
+
+Each issuer stores a read-only copy on the next physical voter in the sorted
+list of configured voter IDs, wrapping to the first voter at the end. Private
+mutual TLS binds the sender to the issuing voter. The receiving voter stores
+the projection in a separate table of its existing private task database.
+Only an exact read with the original caller, current authorization and valid
+target can disclose the result. Normal reads try the issuer first. A
+destructive acknowledgment revokes the backup before confirming deletion.
+A received backup, including a replayed copy, has no dispatch or enqueue path.
+
+The copy process also reads existing retained shell rows whose `ot1` handles
+identify this physical voter. Backfill runs concurrently with normal service
+and resumes after a restart. Copies expire within the original retention
+window. Each transfer is bounded at 64 MiB. The voter checks available disk
+space for the SQLite write and WAL while preserving its configured free-space
+reserve. An executor retains its original callback when the majority is healthy
+but a second copy cannot be persisted. Isolated local operation remains available.
+
+When a remote, individually enrolled executor is dispatched, the copy voter may also
+receive an exact read authorization bound to that job, physical executor and
+fingerprint. If the issuer subsequently stops, the surviving executor can
+present its completed outcome on the existing authenticated result route.
+The executor keeps its durable outbox for reconciliation with the issuer.
+The copy voter never sends a command. This in-flight path requires successful
+delivery of the dispatch authorization. A newly issued `shell_exec` with
+`secret_env` can use an in-flight copy only when the executor advertises
+receipt redaction version 1 and every required value is bound to its execution
+environment. The worker redacts text and binary stdout before creating its
+durable outbox and transmitting the result. The backup receives no redaction
+secrets. Workers without the negotiated capability receive no secret-bearing
+lease. The protected job stays in its issuing queue until a compatible worker
+polls, subject to normal queue expiry. Ordinary queued jobs continue on the
+same legacy worker. Secret-bearing spilled output supplies only
+its redacted inline preview. Already completed results retain the original
+Hub redaction checks and use the standard terminal copy. The issuer seals only
+the original redaction values under its existing local, task-bound key while
+a protected command is running. It drops them from the row on completion or
+cancellation. This lets a restarted issuer safely receive an older worker's
+retained callback. The copy contains neither the key nor the sealed values.
+Drain secret-bearing commands issued before the upgrade before failing their
+original Hub: old running records may have no recoverable redaction dictionary. For an ordinary Node, the current leader verifies
+its existing per-node credential and physical binding, then confirms the
+job-specific dispatch grant on the copy voter. Only a positive response permits
+output to be sent. Individually approved standalone shell tokens use the same
+checks. A shared fleet credential cannot establish an executor identity. Files referenced by spilled output remain
+on their physical executor.
+
+For rollback, restore the issuers and allow outstanding executor callbacks to
+reconcile. Verify the authoritative local result of each still-pending protected
+operation and the associated executor outbox before disabling the feature on
+all voters. Then restore the previous binary through the deployment's rolling
+rollback. Previously enabled voters read their original local history directly.
+Use a fresh generation for every subsequent activation or change of voter
+roster. This keeps older private copies out of the new generation after
+intervening local acknowledgments. No task database union or Raft migration is
+part of enabling or disabling this feature.
 
 ## Acceptance on installed processes and in CI
 

@@ -240,6 +240,9 @@ func (s *Server) mcpTaskCancel(taskID, owner string) (any, any) {
 	} else {
 		return nil, map[string]any{"code": -32602, "message": "unknown taskId"}
 	}
+	if err := s.fenceCancelCopiesLocked(taskID); err != nil {
+		return nil, taskPersistenceRPCError(err)
+	}
 	change := s.beginTaskMutationLocked(taskID)
 	if j := s.relayJobs[taskID]; j != nil && j.Method == "task/group" {
 		for _, id := range taskGroupChildIDs(j) {
@@ -289,6 +292,15 @@ func (s *Server) mcpTaskUpdate(r *http.Request, taskID string, inputResponses ma
 			return nil, map[string]any{"code": -32602, "message": decisionErr.Error()}
 		}
 		if decision == "decline" {
+			if err := s.fenceCancelCopiesLocked(group.ID); err != nil {
+				s.mu.Unlock()
+				return nil, taskCommitRPCError(err)
+			}
+			group = s.relayJobs[taskID]
+			if group == nil || group.Status != "input_required" {
+				s.mu.Unlock()
+				return nil, taskCommitRPCError(errTaskConflict)
+			}
 			change := s.beginTaskMutationLocked(group.ID)
 			for _, childID := range taskGroupChildIDs(group) {
 				s.cancelTaskLocked(childID)

@@ -36,6 +36,7 @@ import (
 	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 	"github.com/megamen32/gptadmin/go-hub/internal/meshroute"
 	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 var BuildVersion = "go-dev"
@@ -474,6 +475,8 @@ type shellControl struct {
 }
 
 type shellJob struct {
+	receiptRedactionSealed      json.RawMessage
+	CopyRedactionVersion        int `json:"receipt_redaction_version,omitempty"`
 	offlineShell                bool
 	LocalExecutor               *localShellExecutorIdentity `json:"-"`
 	ReceiptTarget               string                      `json:"receipt_target,omitempty"`
@@ -1729,6 +1732,18 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 		log.Printf("output dir unavailable: %v", err)
 	}
 	log.Printf("gptadmin go hub listening addr=%s config_dir=%s public_dir=%s", s.cfg.Addr, s.cfg.ConfigDir, s.cfg.PublicDir)
+	if s.receiptCopyGeneration() != "" {
+		if err := s.initReceiptCopies(); err != nil {
+			return err
+		}
+		copyCtx, cancelCopies := context.WithCancel(ctx)
+		copiesStopped := make(chan struct{})
+		contentStopped := make(chan struct{})
+		go func() { defer close(contentStopped); s.catchUpContentCopies(copyCtx) }()
+		defer func() { cancelCopies(); <-contentStopped }()
+		go func() { defer close(copiesStopped); s.catchUpReceiptCopies(copyCtx) }()
+		defer func() { cancelCopies(); <-copiesStopped }()
+	}
 	go s.registryCleanupLoop()
 	s.startMembershipLoops()
 	defer s.stopMembershipLoops()
@@ -4012,7 +4027,7 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 				} else if expired {
 					return nil, false, nil
 				}
-				encoded, err := s.encodeShellQueueJobLocked(job)
+				encoded, err := s.encodeShellQueueJobLocked(job, r)
 				return encoded, true, err
 			})
 			if r.Context().Err() != nil {
@@ -4030,7 +4045,9 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			}
 			if choice.ID == "" {
 				s.shellQueues[name] = choice.Queue
-				if choice.Oversized {
+				if choice.NeedsReceiptRedaction {
+					writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked(), "required_receipt_redaction": 1})
+				} else if choice.Oversized {
 					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": "queue payload exceeds agent response limit; job remains queued; update agent"})
 				} else {
 					writeJSON(w, http.StatusOK, map[string]any{"runtime_settings": s.shellRuntimeSettingsLocked()})
@@ -4048,6 +4065,7 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			}
 			if s.commitShellQueueDispatchLocked(w, job) {
 				s.shellQueues[name] = choice.Queue
+				s.protectIssuedShellLocked(r, job)
 				writeShellQueueEnvelope(w, choice.Payload)
 			}
 			return
@@ -4287,10 +4305,25 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 	// to a successor. Preserve the first committed executor receipt. A late
 	// real result may still resolve the Hub's synthetic orphan timeout.
 	if job.Status == "completed" || (job.Status == "failed" && firstString(mapValue(job.Error), "code") != "orphaned_running_task") {
+		copy := s.terminalCopyLocked(job)
+		offline := job.offlineShell
 		s.mu.Unlock()
 		ack["already_recorded"] = true
-		writeJSON(w, http.StatusOK, ack)
+		s.finishReceiptCopy(w, r, ack, copy, offline)
 		return
+	}
+	// The previous worker version returns raw output to its original issuer.
+	// Recover the issuer-local dictionary after a restart before accepting a
+	// byte for persistence, readback or a terminal copy.
+	secrets, err := s.originalReceiptSecrets(job)
+	if err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "original redaction key unavailable; retain executor receipt"})
+		return
+	}
+	if len(secrets) > 0 {
+		res.Result = receiptredaction.SanitizedResult(res.Result, secrets)
+		res.Error = redactSecretValues(res.Error, secrets)
 	}
 	change := s.beginTaskMutationLocked(job.ID)
 	job.DoneAt = nowFloat()
@@ -4317,9 +4350,11 @@ func (s *Server) shellQueueResult(w http.ResponseWriter, r *http.Request, name s
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task result persistence failed; retry delivery"})
 		return
 	}
+	copy := s.terminalCopyLocked(job)
+	offline := job.offlineShell
 	s.cond.Broadcast()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, ack)
+	s.finishReceiptCopy(w, r, ack, copy, offline)
 }
 
 func (s *Server) mcpRelayRegister(w http.ResponseWriter, r *http.Request) {
@@ -6034,6 +6069,21 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		resp := shellJobResponse(shell)
 		acknowledge := ack && (shell.Status == "completed" || shell.Status == "failed")
 		if acknowledge {
+			copy := s.terminalCopyLocked(shell)
+			if copy != nil {
+				copy.Job = nil
+				// A delayed upload cannot resurrect an acknowledged receipt even
+				// if retention is increased to its configured maximum later.
+				copy.Expires = shell.DoneAt + 720*3600
+				s.mu.Unlock()
+				err := s.sendTerminalCopy(r.Context(), copy)
+				s.mu.Lock()
+				if err != nil || s.shellJobs[jobID] != shell {
+					s.mu.Unlock()
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "receipt revocation unavailable; retry"})
+					return
+				}
+			}
 			if err := s.deleteTaskRecordLocked("shell", jobID, shell.Revision); err != nil {
 				s.mu.Unlock()
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "task state unavailable; retry"})

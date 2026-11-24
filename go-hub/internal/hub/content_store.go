@@ -1,11 +1,13 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,19 +54,21 @@ func (l ContentLimits) normalized() ContentLimits {
 type ContentStore struct {
 	db      *sql.DB
 	limits  ContentLimits
+	standby *contentCopyHooks
 	ownerID func() string
 }
 
 type ContentSource struct {
-	Indexed   bool      `json:"indexed"`
-	ID        string    `json:"source"`
-	Name      string    `json:"name,omitempty"`
-	Origin    string    `json:"origin,omitempty"`
-	Format    string    `json:"format"`
-	Bytes     int64     `json:"bytes"`
-	Chunks    int       `json:"chunks"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Durability string    `json:"durability,omitempty"`
+	Indexed    bool      `json:"indexed"`
+	ID         string    `json:"source"`
+	Name       string    `json:"name,omitempty"`
+	Origin     string    `json:"origin,omitempty"`
+	Format     string    `json:"format"`
+	Bytes      int64     `json:"bytes"`
+	Chunks     int       `json:"chunks"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
 	// Complete reports whether the stored bytes are the complete result. It is
 	// false only for a source that was stored with the explicit consent of the
 	// caller and that is known to be a part. The marker is permanent: it is
@@ -241,69 +245,37 @@ func (s *ContentStore) storeFormatted(principal, name, origin, format, text stri
 	if len(chunks) == 0 {
 		chunks = append(chunks, chunk{1, 1, 1, ""})
 	}
+	var planned []string
+	automatic := !eager && name == codeModeResultSourceName
+	if automatic {
+		var err error
+		planned, err = s.prepareRetirements(principal, "", int64(len(b)))
+		if err != nil {
+			return out, err
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback()
-	var total int64
-	var count int
-	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources WHERE principal=?`, principal).Scan(&total, &count); err != nil {
+	reclaim, err := s.reclaimCandidates(tx, principal, int64(len(b)), automatic)
+	if err != nil {
 		return out, err
 	}
-	// Bound all principals together as well as each principal separately.
-	var globalBytes int64
-	var globalCount int
-	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources`).Scan(&globalBytes, &globalCount); err != nil {
-		return out, err
-	}
-	needsSpace := func() bool {
-		return total+int64(len(b)) > s.limits.MaxTotalBytes || count >= s.limits.MaxSources ||
-			globalBytes+int64(len(b)) > 128<<20 || globalCount >= 1000
-	}
-	var reclaim []string
-	if !eager && name == codeModeResultSourceName && needsSpace() {
-		// Oversized exec results are an automatic bounded cache. A full cache
-		// must not prevent the next successful tool call from returning its
-		// result. Only reclaim this principal's oldest automatic, unindexed
-		// results. Explicit sources and results retained by indexing survive.
-		rows, queryErr := tx.Query(`SELECT id,bytes FROM content_sources WHERE principal=? AND name=? AND indexed=0 ORDER BY created,rowid`, principal, codeModeResultSourceName)
-		if queryErr != nil {
-			return out, queryErr
+	// Another admission can free space while the peer confirms retirement.
+	// Finish every already-reserved eviction in the same transaction.
+	for _, id := range planned {
+		if !slices.Contains(reclaim, id) {
+			reclaim = append(reclaim, id)
 		}
-		for needsSpace() && rows.Next() {
-			var sourceID string
-			var sourceBytes int64
-			if err = rows.Scan(&sourceID, &sourceBytes); err != nil {
-				rows.Close()
-				return out, err
-			}
-			reclaim = append(reclaim, sourceID)
-			total -= sourceBytes
-			count--
-			globalBytes -= sourceBytes
-			globalCount--
-		}
-		err = rows.Err()
-		if closeErr := rows.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return out, err
-		}
-	}
-	if total+int64(len(b)) > s.limits.MaxTotalBytes {
-		return out, errors.New("principal content byte limit reached")
-	}
-	if count >= s.limits.MaxSources {
-		return out, errors.New("principal content source limit reached")
-	}
-	if globalBytes+int64(len(b)) > 128<<20 || globalCount >= 1000 {
-		return out, errors.New("global content storage limit reached")
 	}
 	// Reclamation and insertion commit together. An admission or write failure
 	// cannot lose a previous result, and no other principal can be reclaimed.
 	for _, sourceID := range reclaim {
+		if err = s.requireRetirement(tx, principal, sourceID); err != nil {
+			return out, err
+		}
 		for _, table := range []string{"content_fts", "content_chunks"} {
 			if _, err = tx.Exec("DELETE FROM "+table+" WHERE source_id=? AND principal=?", sourceID, principal); err != nil {
 				return out, err
@@ -330,7 +302,77 @@ func (s *ContentStore) storeFormatted(principal, name, origin, format, text stri
 	if err = tx.Commit(); err != nil {
 		return out, err
 	}
-	return ContentSource{Indexed: eager, ID: id, Name: name, Origin: origin, Format: format, Bytes: int64(len(b)), Chunks: len(chunks), CreatedAt: now, ExpiresAt: expires, Complete: complete}, nil
+	// The owner has durably committed this result. If its designated standby
+	// is down, return the original handle and mark the outstanding copy.
+	// Backfill retries the stored bytes; callers never repeat the tool.
+	durability := ""
+	if s.standby != nil {
+		durability = "confirmed"
+		if err = s.publishContent(context.Background(), principal, id); err != nil {
+			durability = "owner_only"
+		}
+	}
+	return ContentSource{Durability: durability, Indexed: eager, ID: id, Name: name, Origin: origin, Format: format, Bytes: int64(len(b)), Chunks: len(chunks), CreatedAt: now, ExpiresAt: expires, Complete: complete}, nil
+}
+
+func (s *ContentStore) reclaimCandidates(tx *sql.Tx, principal string, incoming int64, automatic bool) ([]string, error) {
+	var err error
+	var total int64
+	var count int
+	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources WHERE principal=?`, principal).Scan(&total, &count); err != nil {
+		return nil, err
+	}
+	// Bound all principals together as well as each principal separately.
+	var globalBytes int64
+	var globalCount int
+	if err = tx.QueryRow(`SELECT COALESCE(sum(bytes),0),count(*) FROM content_sources`).Scan(&globalBytes, &globalCount); err != nil {
+		return nil, err
+	}
+	needsSpace := func() bool {
+		return total+incoming > s.limits.MaxTotalBytes || count >= s.limits.MaxSources ||
+			globalBytes+incoming > 128<<20 || globalCount >= 1000
+	}
+	var reclaim []string
+	if automatic && needsSpace() {
+		// Oversized exec results are an automatic bounded cache. A full cache
+		// must not prevent the next successful tool call from returning its
+		// result. Only reclaim this principal's oldest automatic, unindexed
+		// results. Explicit sources and results retained by indexing survive.
+		rows, queryErr := tx.Query(`SELECT id,bytes FROM content_sources WHERE principal=? AND name=? AND indexed=0 ORDER BY created,rowid`, principal, codeModeResultSourceName)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		for needsSpace() && rows.Next() {
+			var sourceID string
+			var sourceBytes int64
+			if err = rows.Scan(&sourceID, &sourceBytes); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			reclaim = append(reclaim, sourceID)
+			total -= sourceBytes
+			count--
+			globalBytes -= sourceBytes
+			globalCount--
+		}
+		err = rows.Err()
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if total+incoming > s.limits.MaxTotalBytes {
+		return nil, errors.New("principal content byte limit reached")
+	}
+	if count >= s.limits.MaxSources {
+		return nil, errors.New("principal content source limit reached")
+	}
+	if globalBytes+incoming > 128<<20 || globalCount >= 1000 {
+		return nil, errors.New("global content storage limit reached")
+	}
+	return reclaim, nil
 }
 
 // Search is source-scoped when sourceID is nonempty. Query terms are converted
@@ -512,14 +554,26 @@ func (s *ContentStore) Delete(principal, sourceID string) error {
 	if err := s.expire(time.Now()); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM content_fts WHERE source_id IN (SELECT id FROM content_sources WHERE id=? AND principal=?)`, sourceID, principal); err != nil {
+	if _, e := s.prepareRetirements(principal, sourceID, 0); e != nil {
+		return e
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM content_chunks WHERE source_id IN (SELECT id FROM content_sources WHERE id=? AND principal=?)`, sourceID, principal); err != nil {
+	defer tx.Rollback()
+	if err = s.requireRetirement(tx, principal, sourceID); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`DELETE FROM content_sources WHERE id=? AND principal=?`, sourceID, principal)
-	return err
+	for _, table := range []string{"content_fts", "content_chunks"} {
+		if _, err = tx.Exec("DELETE FROM "+table+" WHERE source_id IN (SELECT id FROM content_sources WHERE id=? AND principal=?)", sourceID, principal); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM content_sources WHERE id=? AND principal=?", sourceID, principal); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *ContentStore) Source(principal, sourceID string) (ContentSource, error) {

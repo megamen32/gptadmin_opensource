@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 const DefaultLimitBytes int64 = 8192
@@ -26,21 +27,22 @@ const DefaultSpillThresholdBytes int64 = 1024 * 1024
 const DefaultTimeout = 300 * time.Second
 
 type Request struct {
-	Cmd         string            `json:"cmd,omitempty"`
-	Argv        []string          `json:"argv,omitempty"`
-	Stdin       string            `json:"stdin,omitempty"`
-	TraceID     string            `json:"trace_id,omitempty"`
-	TraceParent string            `json:"traceparent,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Cwd         string            `json:"cwd,omitempty"`
-	Timeout     int               `json:"timeout,omitempty"`
-	SpillDir    string            `json:"spill_dir,omitempty"`
-	Background  bool              `json:"background,omitempty"`
-	RunAsUser   string            `json:"run_as_user,omitempty"`
-	User        string            `json:"user,omitempty"`
-	DefaultUser string            `json:"-"`
-	DefaultCwd  string            `json:"-"`
-	OnStarted   func(int) error   `json:"-"`
+	ReceiptRedaction *receiptredaction.Policy `json:"-"`
+	Cmd              string                   `json:"cmd,omitempty"`
+	Argv             []string                 `json:"argv,omitempty"`
+	Stdin            string                   `json:"stdin,omitempty"`
+	TraceID          string                   `json:"trace_id,omitempty"`
+	TraceParent      string                   `json:"traceparent,omitempty"`
+	Env              map[string]string        `json:"env,omitempty"`
+	Cwd              string                   `json:"cwd,omitempty"`
+	Timeout          int                      `json:"timeout,omitempty"`
+	SpillDir         string                   `json:"spill_dir,omitempty"`
+	Background       bool                     `json:"background,omitempty"`
+	RunAsUser        string                   `json:"run_as_user,omitempty"`
+	User             string                   `json:"user,omitempty"`
+	DefaultUser      string                   `json:"-"`
+	DefaultCwd       string                   `json:"-"`
+	OnStarted        func(int) error          `json:"-"`
 }
 
 type Result struct {

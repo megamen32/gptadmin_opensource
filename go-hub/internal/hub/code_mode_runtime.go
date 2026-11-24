@@ -28,8 +28,6 @@ import (
 	"time"
 
 	"github.com/fastschema/qjs"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
 )
 
 const (
@@ -411,7 +409,7 @@ func codeModeResultTail(value any) (string, string, bool) {
 // before the context deadline is observed, so a script can never buy itself
 // unbounded host time. Every run is fresh, so nothing is shared between callers.
 func newCodeModeRuntime(ctx context.Context, limits codeModeLimits) (*qjs.Runtime, context.CancelFunc, error) {
-	runtimeCtx, cancel := context.WithCancel(codeModeDenyHostPolling(ctx))
+	runtimeCtx, cancel := context.WithCancel(ctx)
 	rt, err := qjs.New(qjs.Option{
 		// CWD is mounted as WASI "/" by qjs. os.DevNull is a character device,
 		// never a directory, so no real path is reachable from inside the sandbox.
@@ -424,6 +422,7 @@ func newCodeModeRuntime(ctx context.Context, limits codeModeLimits) (*qjs.Runtim
 		// growing the Go stack without bound.
 		MaxStackSize:       1 << 20,
 		CloseOnContextDone: true,
+		WASIPollOneoff:     func(uint32, uint32, uint32, uint32) uint32 { panic(codeModeHostPollingPanic) },
 		Context:            runtimeCtx,
 	})
 	if err != nil {
@@ -431,27 +430,6 @@ func newCodeModeRuntime(ctx context.Context, limits codeModeLimits) (*qjs.Runtim
 		return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
 	}
 	return rt, cancel, nil
-}
-
-// codeModeDenyHostPolling raises inside the WASI poll implementation, before a
-// host sleep starts. The resulting wazero error is recovered and reported as a
-// capability denial rather than an ordinary script failure.
-func codeModeDenyHostPolling(ctx context.Context) context.Context {
-	return experimental.WithFunctionListenerFactory(ctx, experimental.FunctionListenerFactoryFunc(
-		func(def api.FunctionDefinition) experimental.FunctionListener {
-			if def.ModuleName() != "wasi_snapshot_preview1" {
-				return nil
-			}
-			for _, name := range def.ExportNames() {
-				if name == "poll_oneoff" {
-					return experimental.FunctionListenerFunc(
-						func(context.Context, api.Module, api.FunctionDefinition, []uint64, experimental.StackIterator) {
-							panic(codeModeHostPollingPanic)
-						})
-				}
-			}
-			return nil
-		}))
 }
 
 // codeModeHostPollingPanic is the marker recovered from the WASI poll guard.

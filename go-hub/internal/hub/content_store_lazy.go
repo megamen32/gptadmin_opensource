@@ -65,10 +65,23 @@ func (s *ContentStore) ensureContentIndexed(principal string, ids []string) erro
 		if indexed {
 			continue
 		}
+		if s.standby != nil {
+			var state string
+			if err := tx.QueryRow("SELECT standby_generation FROM content_sources WHERE id=? AND principal=?", id, principal).Scan(&state); err != nil {
+				return err
+			}
+			if state == "pending:"+s.standby.generation || state == "retired:"+s.standby.generation {
+				return errors.New("source retirement is in progress")
+			}
+		}
 		if _, err = tx.Exec("INSERT INTO content_fts(source_id,principal,chunk_id,body) SELECT source_id,principal,chunk_id,body FROM content_chunks WHERE source_id=? AND principal=?", id, principal); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("UPDATE content_sources SET indexed=1 WHERE id=? AND principal=?", id, principal); err != nil {
+		update := "UPDATE content_sources SET indexed=1 WHERE id=? AND principal=?"
+		if s.standby != nil {
+			update = "UPDATE content_sources SET indexed=1,standby_generation='' WHERE id=? AND principal=?"
+		}
+		if _, err = tx.Exec(update, id, principal); err != nil {
 			return err
 		}
 	}

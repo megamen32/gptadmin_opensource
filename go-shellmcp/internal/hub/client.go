@@ -22,6 +22,7 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/hubroute"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/security"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 type Client struct {
@@ -210,18 +211,19 @@ type Beat struct {
 }
 
 type QueueJob struct {
-	ExecutionOrigin map[string]any    `json:"execution_origin,omitempty"`
-	ID              string            `json:"id"`
-	TraceID         string            `json:"trace_id,omitempty"`
-	TraceParent     string            `json:"traceparent,omitempty"`
-	ToolName        string            `json:"tool_name,omitempty"`
-	Arguments       map[string]any    `json:"arguments,omitempty"`
-	Cmd             string            `json:"cmd,omitempty"`
-	Cwd             string            `json:"cwd,omitempty"`
-	Timeout         int               `json:"timeout,omitempty"`
-	Env             map[string]string `json:"env,omitempty"`
-	RuntimeSettings map[string]any    `json:"runtime_settings,omitempty"`
-	FilesystemACL   *FilesystemACL    `json:"filesystem_acl,omitempty"`
+	ReceiptRedaction *receiptredaction.Policy `json:"receipt_redaction,omitempty"`
+	ExecutionOrigin  map[string]any           `json:"execution_origin,omitempty"`
+	ID               string                   `json:"id"`
+	TraceID          string                   `json:"trace_id,omitempty"`
+	TraceParent      string                   `json:"traceparent,omitempty"`
+	ToolName         string                   `json:"tool_name,omitempty"`
+	Arguments        map[string]any           `json:"arguments,omitempty"`
+	Cmd              string                   `json:"cmd,omitempty"`
+	Cwd              string                   `json:"cwd,omitempty"`
+	Timeout          int                      `json:"timeout,omitempty"`
+	Env              map[string]string        `json:"env,omitempty"`
+	RuntimeSettings  map[string]any           `json:"runtime_settings,omitempty"`
+	FilesystemACL    *FilesystemACL           `json:"filesystem_acl,omitempty"`
 }
 
 // FilesystemACL is trusted only when received in an authenticated Hub queue
@@ -246,11 +248,12 @@ type FilesystemACLCheck struct {
 }
 
 type TaskResult struct {
-	ID          string `json:"id"`
-	TraceID     string `json:"trace_id,omitempty"`
-	TraceParent string `json:"traceparent,omitempty"`
-	Result      any    `json:"result"`
-	Error       any    `json:"error,omitempty"`
+	RedactionVersion int    `json:"receipt_redaction_version,omitempty"`
+	ID               string `json:"id"`
+	TraceID          string `json:"trace_id,omitempty"`
+	TraceParent      string `json:"traceparent,omitempty"`
+	Result           any    `json:"result"`
+	Error            any    `json:"error,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, beat Beat) (*http.Response, []byte, error) {
@@ -261,6 +264,7 @@ func (c *Client) PollQueue(ctx context.Context, beat Beat, timeout int) (QueueJo
 	p := "/queue/" + url.PathEscape(name)
 	q := url.Values{}
 	q.Set("max_response_bytes", fmt.Sprint(queueResponseMaxBytes))
+	q.Set("receipt_redaction", fmt.Sprint(receiptredaction.Version))
 	if timeout > 0 {
 		q.Set("timeout", fmt.Sprintf("%d", timeout))
 	}
@@ -415,6 +419,9 @@ func (c *Client) PostResultJSON(ctx context.Context, name, id string, body []byt
 	scoped := strings.HasPrefix(id, "ot1.")
 	if scoped {
 		p += "?job_id=" + url.QueryEscape(id)
+		if receiptredaction.PayloadVersion(body) == receiptredaction.Version {
+			p += "&receipt_redaction=1"
+		}
 	}
 	resp, ackBody, err := c.do(ctx, http.MethodPost, p, body)
 	if err != nil {

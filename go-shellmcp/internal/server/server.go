@@ -32,6 +32,7 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/storagebudget"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/supervisor"
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/system"
+	"github.com/megamen32/gptadmin/go-shellmcp/receiptredaction"
 )
 
 var BuildVersion = "3"
@@ -1369,7 +1370,7 @@ func shellRequestFromQueueJob(q hub.QueueJob, spillDir string) shell.Request {
 	if runAsUser == "" {
 		runAsUser, _ = q.Arguments["user"].(string)
 	}
-	req := shell.Request{Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
+	req := shell.Request{ReceiptRedaction: q.ReceiptRedaction, Cmd: q.Cmd, TraceID: normalizeTraceID(q.TraceID), TraceParent: q.TraceParent, Cwd: q.Cwd, Timeout: q.Timeout, Env: q.Env, SpillDir: spillDir, RunAsUser: runAsUser}
 	if source, ok := q.Arguments["stdin"].(string); ok {
 		req.Stdin = source
 	}
@@ -1476,7 +1477,18 @@ func (s *Server) runCallbackJob(runCtx context.Context, jobID string, req shell.
 	s.auditLog.Event(audit.ExecStart, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "background": true})
 	res := s.runShell(runCtx, req)
 	s.auditLog.Event(audit.ExecEnd, map[string]any{"job_id": jobID, "trace_id": req.TraceID, "traceparent": req.TraceParent, "return_code": res.ReturnCode, "elapsed_ms": res.DurationMS})
-	s.deliverCallbackResult(hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res})
+	out := hub.TaskResult{ID: jobID, TraceID: req.TraceID, TraceParent: req.TraceParent, Result: res}
+	if p := req.ReceiptRedaction; p != nil {
+		out.Result = nil
+		filtered, err := p.Result(res, req.Env)
+		if err != nil {
+			out.Error = map[string]any{"code": "receipt_redaction_unavailable", "message": "output withheld"}
+		} else {
+			out.Result = filtered
+		}
+		out.RedactionVersion = receiptredaction.Version
+	}
+	s.deliverCallbackResult(out)
 }
 
 // Outbox retry tuning. Mirrors the Python shellmcp exponential-backoff

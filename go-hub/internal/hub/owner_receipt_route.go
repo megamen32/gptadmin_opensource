@@ -183,7 +183,28 @@ func (s *Server) forwardOwnerReceipt(w http.ResponseWriter, r *http.Request, own
 		h.Set(quorumExecutorHeader, attested)
 		h.Set("X-GPTAdmin-Quorum-Forwarded", ownerID)
 	}
-	resp, err := s.receiptPeerRequest(r.Context(), ownerID, r.URL.EscapedPath()+"?job_id="+url.QueryEscape(id), h, r.Body)
+	var payload []byte
+	var original io.Reader = r.Body
+	name, member := resultQueue(r.URL.Path)
+	indirect := attested == "" && s.receiptCopyGeneration() != "" && name != "" && receiptCredentials(r).Get("Authorization") != "" && s.memberCopyViaLeader(r, id, name, member, nil)
+	if s.receiptCopyGeneration() != "" && (attested != "" || indirect) {
+		payload, err = io.ReadAll(r.Body)
+		if err != nil {
+			writeReceiptDenial(w, http.StatusBadRequest)
+			return
+		}
+		original = bytes.NewReader(payload)
+	}
+	resp, err := s.receiptPeerRequest(r.Context(), ownerID, r.URL.EscapedPath()+"?job_id="+url.QueryEscape(id), h, original)
+	if len(payload) > 0 && (err != nil || resp.StatusCode >= 500) {
+		// This only records the already executed outcome. Keep the original
+		// executor outbox until its normal owner has durably acknowledged it.
+		if indirect {
+			s.memberCopyViaLeader(r, id, name, member, payload)
+		} else {
+			s.preserveExecutorResult(r.Context(), id, attested, payload)
+		}
+	}
 	if err != nil {
 		receiptUnavailable(w)
 		return

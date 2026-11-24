@@ -55,6 +55,13 @@ func (s *Server) contentStoreForExec() (*ContentStore, error) {
 			return nil, err
 		}
 	}
+	if g := s.receiptCopyGeneration(); g != "" {
+		if _, err = store.db.Exec("ALTER TABLE content_sources ADD COLUMN standby_generation TEXT NOT NULL DEFAULT ''"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			store.Close()
+			return nil, err
+		}
+		store.standby = &contentCopyHooks{generation: g, owner: s.quorumNode.Status().NodeID, put: s.sendContentCopy}
+	}
 	store.ownerID = s.localReadbackOwnerID
 	s.contentStore = store
 	return store, nil
@@ -103,7 +110,11 @@ func (b *codeModeBridge) saveContent(text, name, origin, format string, eager, c
 
 func contentSourceMap(x ContentSource) map[string]any {
 	origin := contentOriginDescription(x.Origin)
-	return mapValue(redactPublicMetadata(map[string]any{"source": x.ID, "name": x.Name, "origin": origin, "format": x.Format, "bytes": x.Bytes, "chunks": x.Chunks, "indexed": x.Indexed, "complete": x.Complete, "created_at": x.CreatedAt.UTC().Format(time.RFC3339), "expires_at": x.ExpiresAt.UTC().Format(time.RFC3339)}))
+	meta := mapValue(redactPublicMetadata(map[string]any{"source": x.ID, "name": x.Name, "origin": origin, "format": x.Format, "bytes": x.Bytes, "chunks": x.Chunks, "indexed": x.Indexed, "complete": x.Complete, "created_at": x.CreatedAt.UTC().Format(time.RFC3339), "expires_at": x.ExpiresAt.UTC().Format(time.RFC3339)}))
+	if x.Durability != "" {
+		meta["durability"] = x.Durability
+	}
+	return meta
 }
 
 // contentSourceStatusMap describes one stored source, including whether its
@@ -403,6 +414,12 @@ func (b *codeModeBridge) content(this *qjs.This) (*qjs.Value, error) {
 	case "delete":
 		if b.readOnly {
 			return nil, b.fail("forbidden", "read-only execution cannot delete content sources", nil)
+		}
+		if h, scoped, err := decodeOwnerHandle(arg); err == nil && scoped && store.standby != nil && h.OwnerID != b.server.localReadbackOwnerID() {
+			if err = b.server.deleteAtContentOwner(b.request.WithContext(b.ctx), h.OwnerID, arg); err != nil {
+				return nil, b.lookupError(&readOffline, arg)
+			}
+			return b.jsonValue(this, map[string]any{"deleted": true, "source": arg}), nil
 		}
 		if err := store.Delete(principal, arg); err != nil {
 			return nil, b.fail("content_delete_failed", "content source could not be deleted", nil)

@@ -175,3 +175,24 @@ func (n *Node) LocalOperation(key string) (Operation, bool) {
 	op, ok := n.fsm.operations[key]
 	return op, ok
 }
+
+// LocalOperationOwner is a routing hint for an exact legacy task ID. Multiple
+// matching reservations must agree. The original Hub authorizes the caller.
+func (n *Node) LocalOperationOwner(jobID string, now time.Time) string {
+	if jobID == "" {
+		return ""
+	}
+	n.fsm.mu.RLock()
+	defer n.fsm.mu.RUnlock()
+	owner := ""
+	for _, claim := range n.fsm.operations {
+		if claim.JobID != jobID || (claim.Expires != 0 && claim.Expires <= now.Unix()) {
+			continue
+		}
+		if owner != "" && owner != claim.Owner {
+			return ""
+		}
+		owner = claim.Owner
+	}
+	return owner
+}

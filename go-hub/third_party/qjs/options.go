@@ -45,8 +45,10 @@ type Option struct {
 	GCThreshold        int
 	QuickJSWasmBytes   []byte
 	ProxyFunction      any
-	Stdout             io.Writer
-	Stderr             io.Writer
+	// WASIPollOneoff replaces the potentially blocking WASI syscall when supplied.
+	WASIPollOneoff func(uint32, uint32, uint32, uint32) uint32
+	Stdout         io.Writer
+	Stderr         io.Writer
 }
 
 // EvalOption configures JavaScript evaluation behavior in QuickJS context.

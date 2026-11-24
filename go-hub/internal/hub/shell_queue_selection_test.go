@@ -3,6 +3,7 @@ package hub
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -57,5 +58,41 @@ func TestQueueChoicePrunesOnlyKnownTerminalWithinWindow(t *testing.T) {
 	choice, err := chooseShellQueueEnvelope(q, 8, func(string) ([]byte, bool, error) { return nil, false, nil })
 	if err != nil || choice.ID != "" || !choice.WindowExhausted || !reflect.DeepEqual(choice.Queue, []string{"terminal"}) {
 		t.Fatal("terminal window made no progress or dropped unknown tail")
+	}
+}
+
+func TestOlderWorkerCannotBlockOrdinaryJobBehindSecretWindow(t *testing.T) {
+	var jobs []string
+	for i := 0; i < 32; i++ {
+		jobs = append(jobs, "secret-"+strconv.Itoa(i))
+	}
+	jobs = append(jobs, "ordinary")
+	poll := func(queue []string) shellQueueChoice {
+		t.Helper()
+		c, err := chooseShellQueueEnvelope(queue, 1024, func(id string) ([]byte, bool, error) {
+			if id == "ordinary" {
+				return []byte("{}"), true, nil
+			}
+			return nil, true, errReceiptRedactionCapability
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	q := jobs
+	for i := 0; i < 2; i++ {
+		c := poll(q)
+		if c.ID != "" || !c.NeedsReceiptRedaction || !c.WindowExhausted || len(c.Queue) != len(jobs) {
+			t.Fatal("incompatible jobs were dropped or prematurely dispatched")
+		}
+		q = c.Queue
+	}
+	c := poll(q)
+	if c.ID != "ordinary" || len(c.Queue) != 32 {
+		t.Fatal("older worker did not run eligible job")
+	}
+	if !reflect.DeepEqual(c.Queue, jobs[:32]) {
+		t.Fatal("protected jobs lost or duplicated")
 	}
 }

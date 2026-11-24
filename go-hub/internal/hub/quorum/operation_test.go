@@ -42,6 +42,11 @@ func TestOperationReservationSurvivesSnapshotAndOwnerLoss(t *testing.T) {
 	if err := other.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
 		t.Fatal(err)
 	}
+	node := &Node{fsm: other}
+	if got := node.LocalOperationOwner("original-task", time.Unix(cmd.Now, 0)); got != cmd.Owner ||
+		node.LocalOperationOwner("unrelated", time.Unix(cmd.Now, 0)) != "" {
+		t.Fatal("restored exact task owner was not preserved")
+	}
 	retry := cmd
 	retry.Action, retry.JobID, retry.Owner, retry.Witness = "claim", "", "node-88", operationKey("other row")
 	retry.Now += int64(OperationRetention.Seconds()) + 10
@@ -60,6 +65,9 @@ func TestOperationReservationSurvivesSnapshotAndOwnerLoss(t *testing.T) {
 	cmd.Action = "terminal"
 	if got := other.applyOperation(cmd); got.err != nil {
 		t.Fatal(got)
+	}
+	if node.LocalOperationOwner("original-task", time.Unix(retry.Now, 0)) != "" {
+		t.Fatal("expired legacy reservation identified an owner")
 	}
 	retry.Fingerprint = cmd.Fingerprint
 	if got := other.applyOperation(retry); !got.operation.Created || got.err != nil {

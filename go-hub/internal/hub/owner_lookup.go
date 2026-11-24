@@ -34,6 +34,7 @@ type ownerRead struct {
 	RO     bool           `json:"read_only,omitempty"`
 	// This binds a forwarded read to the same locally authorized profile and
 	// caller. It grants no rights: the recipient authenticates the bearer.
+	Replica        bool   `json:"replica,omitempty"`
 	Principal      string `json:"principal,omitempty"`
 	AuthorityIndex uint64 `json:"authority_index,omitempty"`
 }
@@ -203,22 +204,59 @@ func (s *Server) lookupOwner(r *http.Request, q ownerRead) ownerReadReply {
 	if q.Hint.matches(here) {
 		reply := s.readAtOwner(r, q, here.id)
 		if q.Hint == (ownerHint{}) && reply.Failure == &readMissing {
+			// Some pre-handle jobs have an exact, unexpired reservation in
+			// the control ledger. Consult only its owner. Missing, forbidden
+			// and unreachable lookups must not expose a foreign reservation.
+			if s.receiptCopyGeneration() != "" && q.kind() == "task" && r != nil {
+				if owner := s.quorumNode.LocalOperationOwner(q.ID, s.now()); owner != "" && owner != here.id {
+					q.Hint.OwnerID = owner
+					if recovered := s.lookupOwner(r, q); recovered.Failure == nil {
+						return recovered
+					}
+				}
+			}
 			reply.Failure = &readHistory
 		}
 		return reply
 	}
 	peer, ok := s.lookupPeer(q.Hint)
-	if !ok || r == nil || r.Header.Get(nodePeerHopHeader) != "" {
+	if r == nil || r.Header.Get(nodePeerHopHeader) != "" {
 		return ownerReadReply{Failure: &readOffline}
 	}
 	if r.Header.Get("Authorization") == "" {
 		return ownerReadReply{Failure: &readMissing}
 	}
-	if peer.id != "" {
-		q.Hint.OwnerID = peer.id
-	} else if q.Hint.OwnerTarget == "" {
-		q.Hint.OwnerTarget = peer.target
+	reply := ownerReadReply{Failure: &readOffline}
+	if ok {
+		if peer.id != "" {
+			q.Hint.OwnerID = peer.id
+		} else if q.Hint.OwnerTarget == "" {
+			q.Hint.OwnerTarget = peer.target
+		}
+		reply = s.forwardOwnerRead(r, q, peer)
 	}
+	// The issuer is authoritative for deletion and expiry while reachable.
+	// Fall back only on transport/availability failure, never access denial.
+	if reply.Failure != nil && reply.Failure.Code == readOffline.Code && s.receiptCopyGeneration() != "" && !offlineShellMCP(r) && (q.kind() == "task" || q.kind() == "content" && q.Action != "indexSource") {
+		h, scoped, e := decodeOwnerHandle(q.ID)
+		if scoped && e == nil && h.OwnerID == q.Hint.OwnerID {
+			q.Replica = true
+			backup := s.receiptBackup(h.OwnerID)
+			var copy ownerReadReply
+			if backup == here.id {
+				copy = s.readStandby(r, q)
+			} else if backup != "" {
+				copy = s.forwardOwnerRead(r, q, lookupPeer{id: backup, private: true})
+			}
+			if copy.Value != nil && copy.Failure == nil || q.kind() == "content" && copy.Failure != nil && copy.Failure.Code != readMissing.Code && copy.Failure.Code != readOffline.Code {
+				return copy
+			}
+		}
+	}
+	return reply
+}
+
+func (s *Server) forwardOwnerRead(r *http.Request, q ownerRead, peer lookupPeer) ownerReadReply {
 	// Only a caller-provided endpoint is a continuity pin. A route's public
 	// alias can differ from the owner's local listener (e.g. behind NAT).
 	q.RO = readOnlyExecRequest(r)
@@ -267,8 +305,12 @@ func (s *Server) lookupOwner(r *http.Request, q ownerRead) ownerReadReply {
 		status, data = w.Code, w.Body.Bytes()
 	}
 	var reply ownerReadReply
+	expected := peer.id
+	if q.Replica {
+		expected = q.Hint.OwnerID
+	}
 	if status != http.StatusOK || decodeOwnerReply(data, &reply) != nil || reply.ID != q.ID ||
-		(peer.id != "" && reply.OwnerID != peer.id) || reply.Value == nil && reply.Failure == nil {
+		(expected != "" && reply.OwnerID != expected) || reply.Value == nil && reply.Failure == nil {
 		return ownerReadReply{Failure: &readOffline}
 	}
 	return reply
@@ -343,7 +385,7 @@ func (s *Server) ownerReadHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	here := s.localLookupPeer()
-	if !q.Hint.matches(here) || q.Principal == "" || q.Principal != operationPrincipal(r) {
+	if (!q.Replica && !q.Hint.matches(here) || q.Replica && (s.receiptCopyGeneration() == "" || s.receiptBackup(q.Hint.OwnerID) != here.id)) || q.Principal == "" || q.Principal != operationPrincipal(r) {
 		writeJSON(w, http.StatusServiceUnavailable, readOffline)
 		return
 	}
@@ -359,6 +401,10 @@ func (s *Server) ownerReadHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Action != "task" && s.authorizePublicFacade(r, facade, nil) != nil {
 		writeJSON(w, http.StatusOK, ownerReadReply{OwnerID: here.id, ID: q.ID, Failure: &readMissing})
+		return
+	}
+	if q.Replica {
+		writeJSON(w, http.StatusOK, s.readStandby(r, q))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.readAtOwner(r, q, here.id))
