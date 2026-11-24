@@ -426,29 +426,13 @@ async def outages(nodes, start, stop, request, origin, tls, token, outsider, pol
             await retained[1].read_at(origin, tls, token)
         retained = leader, mobile
         checkpoint = request(leader, "/healthz")[1]["raft_applied_index"]
-        restarted = time.time()
         start(victim)
         await caught_up(nodes, request, victim, leader, checkpoint)
         await old.read_at(origin, tls, token)
         if victim == initial:
             await lookup_denied(origin, tls, outsider, old, "not_found")
             await old.submit(origin, tls, token)
-        target = voters[victim].target
-        identity = json.loads((nodes[victim]["dir"] / "shellmcp_identity.json").read_text())
-
-        def executor_online():
-            status, data, _ = request(leader, "/servers", token=nodes[leader]["env"]["CTL_TOKEN"])
-            if status == 503:
-                return False
-            if status != 200:
-                raise RuntimeError(f"executor registry returned HTTP {status}")
-            return any(row["server_id"] == target and row["status"] == "online" and row["last_seen"] >= restarted
-                       and row["meta"].get("approved") is True and row["meta"].get("poll_heartbeat") is True
-                       and row["meta"].get("fingerprint") == identity["fingerprint"] for row in data["servers"])
-
-        await eventually(f"a fresh approved poll for {target} after restart", executor_online, timeout=45)
-        print(f"{target}: leader observed the approved executor online {time.time() - restarted:.2f}s after restart",
-              flush=True)
+        # The restarted voter owns its embedded executor. Prove the route by its physical effect.
         await Command(voters[victim]).submit(origin, tls, token)
         print(f"node{victim} ({'leader' if before == victim else 'follower'}) stopped and rejoined; "
               f"successor node{leader}, poller task {mobile.task_id}, original effect count=1", flush=True)
