@@ -390,8 +390,15 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				return
 			}
 			if s.quorumControlOnly() && s.quorumLocalDispatchRequest(r) {
-				next.ServeHTTP(w, r)
-				return
+				if r.URL.Path != "/mcp" {
+					next.ServeHTTP(w, r)
+					return
+				}
+				// Public MCP needs the writer or a credential enabled against applied authority.
+				if s.offlineShellMCPRoute(r) {
+					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), offlineShellMCPKey{}, true)))
+					return
+				}
 			}
 			if r.Header.Get("X-GPTAdmin-Quorum-Forwarded") != "" {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
@@ -411,6 +418,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				defer release()
 			}
 			hubURL, leaderID := s.quorumNode.LeaderForwardURL()
+			if leaderID == s.quorumNode.Status().NodeID {
+				// This process just failed leader verification; it cannot forward to itself.
+				hubURL, leaderID = "", ""
+			}
 			if leaderID != "" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable while writer is known", "executed": false})
 				return
