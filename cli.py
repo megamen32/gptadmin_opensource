@@ -1855,17 +1855,46 @@ done
 """.format(frpc_bin=str(frpc_bin), confs=confs)
 
 
+def frpc_public_url(env: dict) -> str:
+    if env.get('FRP_SHARED_GROUP_KEY') and not env.get('FRP_SHARED_SUBDOMAIN', '').strip():
+        origin = urllib.parse.urlsplit(env.get('PUBLIC_ORIGIN', ''))
+        if (origin.scheme != 'https' or not origin.hostname or origin.username is not None
+                or origin.password is not None or origin.path not in ('', '/') or origin.query or origin.fragment):
+            raise ValueError('a shared FRP group requires the configured public HTTPS origin')
+        return origin.geturl().rstrip('/')
+    return f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
+
+
 def write_frpc_conf(env: dict):
     FRPC_CONF.parent.mkdir(parents=True, exist_ok=True)
     local_port = env.get('HUB_PORT', '9001')
     local_ip = env.get('FRP_LOCAL_IP', '127.0.0.1')
-    shared = env.get('FRP_SHARED_SUBDOMAIN', '').strip()
+    shared_label = env.get('FRP_SHARED_SUBDOMAIN', '').strip()
     group_key = env.get('FRP_SHARED_GROUP_KEY', '')
-    if shared:
-        if (not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', shared)
-                or shared == env['FRP_SUBDOMAIN'] or not group_key):
+    shared_domain = ''
+    label_pattern = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+    if shared_label:
+        if not group_key or not re.fullmatch(label_pattern, shared_label) or shared_label == env['FRP_SUBDOMAIN']:
             raise ValueError('shared FRP ingress requires a distinct DNS label and FRP_SHARED_GROUP_KEY')
-    for spec in frpc_endpoint_specs(env):
+        shared_route = 'subdomain = ' + json.dumps(shared_label)
+    elif group_key:
+        shared_domain = urllib.parse.urlsplit(frpc_public_url(env)).hostname.rstrip('.')
+        if (len(shared_domain) > 253 or '.' not in shared_domain
+                or not all(re.fullmatch(label_pattern, label) for label in shared_domain.split('.'))):
+            raise ValueError('the shared FRP origin requires a fully qualified hostname')
+        shared_route = 'customDomains = ' + json.dumps([shared_domain])
+    shared = shared_domain or shared_label
+    token_file = env.get('FRP_TOKEN_FILE', '')
+    if token_file:
+        if not os.path.isabs(token_file):
+            raise ValueError('FRP_TOKEN_FILE requires an absolute service credential path')
+        auth = 'tokenSource.type = "file"\ntokenSource.file.path = ' + json.dumps(token_file)
+    else:
+        auth = 'token = ' + json.dumps(env['FRP_TOKEN'])
+    endpoints = frpc_endpoint_specs(env)
+    if shared_domain and any(shared_domain == env['FRP_SUBDOMAIN'] + '.' + spec['domain'] for spec in endpoints):
+        raise ValueError('the shared FRP hostname must differ from the dedicated origin')
+    for spec in endpoints:
         proxy_name = f"gptadmin-web-{env['FRP_SUBDOMAIN']}"
         if not spec['primary']:
             proxy_name += f"-{spec['slug']}"
@@ -1873,7 +1902,7 @@ def write_frpc_conf(env: dict):
 serverPort = {spec['port']}
 
 [auth]
-token = "{env['FRP_TOKEN']}"
+{auth}
 
 [transport.tls]
 enable = true
@@ -1895,7 +1924,7 @@ name = {json.dumps(proxy_name + '-shared-' + shared)}
 type = "http"
 localIP = {json.dumps(local_ip)}
 localPort = {int(local_port)}
-subdomain = {json.dumps(shared)}
+{shared_route}
 loadBalancer.group = {json.dumps(shared)}
 loadBalancer.groupKey = {json.dumps(group_key)}
 healthCheck.type = "http"
@@ -2516,7 +2545,7 @@ def setup_interactive(args):
             env['FRP_DOMAIN'] = env.get('FRP_DOMAIN') or FRPC_DOMAIN_DEFAULT
             env['FRP_SUBDOMAIN'] = env.get('FRP_SUBDOMAIN') or gen_subdomain()
             env['FRP_TOKEN'] = env.get('FRP_TOKEN') or FRPC_TOKEN_DEFAULT
-            env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
+            env['HUB_PUBLIC_URL'] = frpc_public_url(env)
             # Public FRP is for ChatGPT/external clients. Same-machine ShellMCP
             # still uses the separate durable hub↔shell transport against local hub.
             if install_shellmcp:
@@ -4767,10 +4796,10 @@ def cmd_tunnel_enable(args):
     svc_daemon_reload()
     svc_frpc_enable_start_all(env)
 
-    env['HUB_PUBLIC_URL'] = f"https://{env['FRP_SUBDOMAIN']}.{env['FRP_DOMAIN']}"
+    env['HUB_PUBLIC_URL'] = frpc_public_url(env)
     # FRP publishes the hub for external clients. Do not clobber the local
     # hub→ShellMCP durable transport URL on bundled installs.
-    if env.get('INSTALL_SHELLMCP') == 'true' and env.get('INSTALL_HUB') == 'true':
+    if env.get('FRP_SHARED_GROUP_KEY') or (env.get('INSTALL_SHELLMCP') == 'true' and env.get('INSTALL_HUB') == 'true'):
         env['HUB_URL'] = env.get('HUB_URL') or f"http://127.0.0.1:{env.get('HUB_PORT', '9001')}"
     else:
         env['HUB_URL'] = env['HUB_PUBLIC_URL']

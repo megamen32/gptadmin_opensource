@@ -65,6 +65,7 @@ def make_package(directory: Path, *, arch='amd64', commit='cafe1234abcd' * 3 + '
         'cli.py': b'# cli payload\n',
         'scripts/gptadmin_node_manage.py': b'# manager payload\n',
         'scripts/gptadmin_node_probe.py': b'# probe payload\n',
+        'scripts/gptadmin_dns_sweb.py': b'# dns adapter payload\n',
         'scripts/gptadmin_node_autoupdate.py': b'# autoupdate payload\n',
         'public/admin/index.html': b'<script src=\"assets/app.js\"></script>',
         'public/admin/assets/app.js': b'// asset fixture',
@@ -450,6 +451,97 @@ class TestDrainAndHealthHttp(BaseTempCase):
         self.assertFalse(mgr.drain_begin(origin, 't'))
         self.assertTrue(mgr.drain_cancel(origin, 't'))  # 404 on cancel is tolerated
 
+    def legacy_follower_fixture(self):
+        manifest = {'schema': mgr.PACKAGE_SCHEMA, 'platform': 'linux', 'build_version': 1145,
+                    'git_commit': mgr.LEGACY_FOLLOWER_DRAIN_REVISION}
+        status = {'draining': True, 'ready_to_stop': False, 'since': '2026-11-24T00:00:00Z',
+                  'reason': 'quorum follower in-flight task verification unavailable',
+                  'counters': {'active_submissions': 0, 'active_callbacks': 0,
+                               'unfinished_executions': 1, 'outbox_pending': 0}}
+        return manifest, status
+
+    def test_legacy_follower_normalization_requires_exact_phantom_snapshot(self):
+        manifest, status = self.legacy_follower_fixture()
+        before = json.loads(json.dumps(status))
+        receipt = mgr.normalize_legacy_follower_drain(status, manifest)
+        self.assertTrue(receipt['normalized_ready_to_stop'])
+        self.assertEqual(receipt['raw_status'], before)
+        self.assertIs(receipt['raw_status']['ready_to_stop'], False)
+        self.assertEqual(status, before)
+        for field, value in [('git_commit', 'f' * 40), ('build_version', 1149),
+                             ('build_version', '1145'), ('schema', 'other'), ('platform', 'darwin')]:
+            with self.subTest(manifest_field=field, value=value):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain(status, {**manifest, field: value}))
+        self.assertIsNone(mgr.normalize_legacy_follower_drain(status, None))
+        for field, value in [('reason', 'maintenance'), ('draining', False), ('ready_to_stop', True)]:
+            with self.subTest(status_field=field):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain({**status, field: value}, manifest))
+        for field, value in [('active_submissions', 1), ('active_callbacks', 1),
+                             ('outbox_pending', 1), ('unfinished_executions', 2),
+                             ('unfinished_executions', 0), ('active_callbacks', False)]:
+            with self.subTest(counter=field, value=value):
+                busy = {**status, 'counters': {**status['counters'], field: value}}
+                self.assertIsNone(mgr.normalize_legacy_follower_drain(busy, manifest))
+        for counters in [{}, {**status['counters'], 'unknown_work': 1}]:
+            with self.subTest(counters=counters):
+                self.assertIsNone(mgr.normalize_legacy_follower_drain({**status, 'counters': counters}, manifest))
+
+    def test_legacy_follower_update_drain_keeps_fence_auth_and_raw_receipt(self):
+        manifest, raw_status = self.legacy_follower_fixture()
+        state = {'actions': [], 'draining': False, 'busy': False}
+
+        class Handler(QuietHandler):
+            def do_POST(self):
+                if self.headers.get('Authorization') != 'Bearer legacy-token':
+                    respond_json(self, 401, {'error': 'unauthorized'})
+                    return
+                request = read_body(self)
+                action = request.get('action')
+                state['actions'].append(action)
+                if action == 'begin':
+                    state['begin'] = request
+                    state['draining'] = True
+                elif action == 'cancel':
+                    state['draining'] = False
+                payload = {**raw_status, 'draining': state['draining'],
+                           'counters': {**raw_status['counters'],
+                                        'active_callbacks': int(state['busy'])}}
+                respond_json(self, 200, payload)
+
+        class Budget:
+            cleaned = False
+            def cleanup(self):
+                self.cleaned = True
+
+        server = self.start(Handler)
+        origin = f'http://127.0.0.1:{server.server_address[1]}'
+        receipt = {}
+        output = io.StringIO()
+        budget = Budget()
+        with patch.object(sys, 'stderr', output):
+            self.assertTrue(mgr.prepare_update_drain(
+                origin, 'legacy-token', 1, True, budget,
+                current_manifest=manifest, receipt=receipt))
+        self.assertEqual(state['actions'], ['begin', 'status'])
+        self.assertEqual(state['begin'], {'action': 'begin'})
+        self.assertTrue(state['draining'])
+        self.assertFalse(budget.cleaned)
+        self.assertEqual(receipt['raw_status'], raw_status)
+        emitted = json.loads(output.getvalue())
+        self.assertEqual(emitted['raw_status'], raw_status)
+        self.assertTrue(mgr.drain_cancel(origin, 'legacy-token'))
+
+        # The same binary and follower reason cannot hide a real callback.
+        state['busy'] = True
+        receipt = {}
+        with self.assertRaisesRegex(mgr.RuntimeFailure, 'did not reach ready_to_stop'):
+            mgr.prepare_update_drain(origin, 'legacy-token', 0.1, True, budget,
+                                     current_manifest=manifest, receipt=receipt)
+        self.assertFalse(state['draining'])
+        self.assertTrue(budget.cleaned)
+        self.assertEqual(state['actions'][-1], 'cancel')
+        self.assertEqual(receipt, {})
+
     def test_drain_timeout_raises(self):
         server, state = self.make_drain_server(ready_after=10 ** 9)
         origin = f'http://127.0.0.1:{server.server_address[1]}'
@@ -819,7 +911,7 @@ class RefreshInstalledHelpersTest(unittest.TestCase):
     def _verified_root(self, root: Path) -> Path:
         scripts = root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+        for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py', 'gptadmin_dns_sweb.py'):
             (scripts / name).write_text('# %s\n' % name, encoding='utf-8')
         return root
 
@@ -830,7 +922,7 @@ class RefreshInstalledHelpersTest(unittest.TestCase):
             destination = root / 'helpers'
             destination.mkdir()
             mgr.refresh_installed_helpers(verified, destination=destination)
-            for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+            for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py', 'gptadmin_dns_sweb.py'):
                 self.assertEqual((destination / name).read_text(encoding='utf-8'), '# %s\n' % name)
 
     def test_missing_helper_in_package_fails_closed(self):

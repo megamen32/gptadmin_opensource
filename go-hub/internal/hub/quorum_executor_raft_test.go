@@ -236,6 +236,27 @@ func TestQuorumFollowerExecutorAuthenticatedForwarding(t *testing.T) {
 		t.Fatal("admitted poll did not finish")
 	}
 	blockPoll.Store(false)
+	if drain := follower.NodeDrainStatus(); drain.ReadyToStop || drain.Counters.ActiveSubmissions != 0 || drain.Counters.UnfinishedExecutions != 1 {
+		t.Fatalf("standalone follower lost conservative drain: %+v", drain)
+	}
+	for _, tc := range []struct {
+		name     string
+		counters runtimeCountersStub
+		ready    bool
+	}{
+		{"callback", runtimeCountersStub{callbacks: 1}, false},
+		{"outbox", runtimeCountersStub{outbox: 1}, false},
+		{"idle", runtimeCountersStub{}, true},
+	} {
+		t.Run("unified_drain_"+tc.name, func(t *testing.T) {
+			follower.SetNodeRuntimeCounters(tc.counters)
+			drain := follower.NodeDrainStatus()
+			if drain.ReadyToStop != tc.ready || drain.Counters.UnfinishedExecutions != 0 ||
+				drain.Counters.ActiveCallbacks != tc.counters.callbacks || drain.Counters.OutboxPending != tc.counters.outbox {
+				t.Fatalf("unified follower drain: %+v", drain)
+			}
+		})
+	}
 	if got := check(http.MethodGet, "/queue/haos?timeout=0", "", localToken, ""); got != http.StatusServiceUnavailable {
 		t.Fatalf("draining follower accepted new queue poll: %d", got)
 	}

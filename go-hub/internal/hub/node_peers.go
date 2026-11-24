@@ -382,6 +382,9 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	upstream.Header.Set("Authorization", r.Header.Get("Authorization"))
 	upstream.Header.Set("Content-Type", "application/json")
 	upstream.Header.Set(nodePeerHopHeader, "1")
+	if s.addressedMemberIngress(r, target) {
+		upstream.Header.Set(memberIngressHeader, "1")
+	}
 	if token := instructionToken(r); token != "" {
 		upstream.Header.Set(instructionContextHeader, token)
 	}

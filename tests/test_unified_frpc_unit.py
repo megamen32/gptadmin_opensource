@@ -44,3 +44,28 @@ print(cli.UNIT_PATH_FRPC.read_text())
     else:
         assert 'BindsTo=gptadmin-hub.service' in result.stdout
         assert 'After=network-online.target gptadmin-hub.service' in result.stdout
+
+
+def test_enrolled_frp_group_uses_canonical_origin_and_service_credential(tmp_path, monkeypatch):
+    import cli
+
+    config = tmp_path / 'frpc.toml'
+    monkeypatch.setattr(cli, 'FRPC_CONF', config)
+    token = tmp_path / 'client.token'
+    token.write_text('synthetic-fixture-only')
+    settings = {
+        'PUBLIC_ORIGIN': 'https://mcp.example.org',
+        'FRP_SUBDOMAIN': 'test-mac',
+        'FRP_SERVER_ENDPOINTS': 'edge=127.0.0.1:27001',
+        'FRP_DOMAIN': 'relays.example.org',
+        'FRP_TOKEN_FILE': str(token),
+        'FRP_SHARED_GROUP_KEY': 'fixture-group',
+    }
+    cli.write_frpc_conf(settings)
+    rendered = config.read_text()
+    assert 'customDomains = ["mcp.example.org"]' in rendered
+    assert 'subdomain = "test-mac"' in rendered
+    assert 'healthCheck.path = "/_gptadmin/ingress-readyz"' in rendered
+    assert 'tokenSource.type = "file"' in rendered
+    assert str(token) in rendered
+    assert token.read_text() not in rendered

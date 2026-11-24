@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 'gptadmin.node-package/v1'
 PAYLOAD = ('cli.py', 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
            'scripts/gptadmin_node_autoupdate.py')
+LINUX_PAYLOAD = (*PAYLOAD, 'scripts/gptadmin_dns_sweb.py')
 DARWIN_PAYLOAD = (*PAYLOAD, 'scripts/gptadmin_node_macos_manage.py',
                   'scripts/gptadmin_node_macos_autoupdate.py')
 SHELLMCP_MAIN = './cmd/shellmcp-go'
@@ -227,7 +228,7 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
                 raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
             files.update({'bin/shellmcp': shellmcp_binary,
                           PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit})
-        payload = PAYLOAD if platform == 'linux' else DARWIN_PAYLOAD
+        payload = LINUX_PAYLOAD if platform == 'linux' else DARWIN_PAYLOAD
         files.update({name: ROOT / name for name in payload})
         secret_page = ROOT / SECRET_INPUT_PAGE
         if secret_page.is_symlink() or not secret_page.is_file():

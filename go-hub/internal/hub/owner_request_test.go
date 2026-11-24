@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 )
+
+func TestQuorumLocalDispatchRequestPreservesCodeModeBody(t *testing.T) {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"exec","arguments":{"code":"return 1;"}}}`))
+	if !s.quorumLocalDispatchRequest(r) {
+		t.Fatal("code mode request was not admitted to the inner target gate")
+	}
+	if r.Body == nil {
+		t.Fatal("request body was consumed")
+	}
+	var envelope map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || firstString(envelope, "method") != "tools/call" {
+		t.Fatalf("request body was not restored: %v %#v", err, envelope)
+	}
+}
 
 // Exercise the local SQLite admission path and the actual Raft FSM.
 // The process-level outage matrix separately exercises the transport and executor.
@@ -109,6 +125,13 @@ func TestOwnerLocalAdmissionReservesOnlyClientKeys(t *testing.T) {
 		if n.VerifyLeader(ctx) == nil {
 			t.Fatal("Raft still authorizes dispatch")
 		}
+		localAdmission := context.WithValue(admission, localShellAdmissionKey{}, target)
+		localResult, localStatus := s.executeMCPTool(r.WithContext(localAdmission), target, "shell_exec",
+			map[string]any{"argv": []any{"echo", "after-raft"}}, true, time.Second, "")
+		if localStatus != http.StatusOK || firstString(localResult, "job_id") == "" {
+			t.Fatalf("addressed local submission after Raft loss: HTTP %d %#v", localStatus, localResult)
+		}
+		localJobID := firstString(localResult, "job_id")
 		poll := func(credential, fingerprint string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(http.MethodGet, "/queue/review?timeout=0&server_id=n0&public_key=review-public&fingerprint="+fingerprint, nil)
 			req.Header.Set("Authorization", "Bearer "+credential)
@@ -121,7 +144,7 @@ func TestOwnerLocalAdmissionReservesOnlyClientKeys(t *testing.T) {
 				t.Fatalf("unbound poll received HTTP %d", reply.Code)
 			}
 		}
-		for _, id := range []string{a, b, keyed} {
+		for _, id := range []string{a, b, keyed, localJobID} {
 			reply := poll(token, "review-fingerprint")
 			var envelope map[string]any
 			if reply.Code != http.StatusOK || json.Unmarshal(reply.Body.Bytes(), &envelope) != nil || firstString(envelope, "id") != id {

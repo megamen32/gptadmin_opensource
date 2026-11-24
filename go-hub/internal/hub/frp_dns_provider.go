@@ -12,12 +12,19 @@ type frpDNSPublisher interface {
 	reconcile(context.Context, string) error
 }
 
-func frpDNSPublisherFromEnv() (frpDNSPublisher, error) {
-	switch strings.TrimSpace(os.Getenv("GPTADMIN_FRP_DNS_PROVIDER")) {
+func frpDNSPublisherFromEnv(pool *frpSpaceWebPool) (frpDNSPublisher, error) {
+	provider := strings.TrimSpace(os.Getenv("GPTADMIN_FRP_DNS_PROVIDER"))
+	if pool != nil {
+		if provider != "" && provider != "spaceweb" {
+			return nil, errors.New("local FRP DNS provider conflicts with the approved pool")
+		}
+		return frpSpaceWebFromEnv(pool)
+	}
+	switch provider {
 	case "", "powerdns":
 		return frpPowerDNSFromEnv()
 	case "spaceweb":
-		return frpSpaceWebFromEnv()
+		return frpSpaceWebFromEnv(nil)
 	default:
 		return nil, errors.New("unknown FRP DNS provider")
 	}

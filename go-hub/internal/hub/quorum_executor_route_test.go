@@ -28,9 +28,9 @@ func testQuorumExecutorEnrollment(t *testing.T, s *Server) {
 	voter88 := add("n1", remote, nodeStateReady, "executor-88", "fp88")
 	add("archive", remote, nodeStateDisabled, "", "")
 
-	oldMembership, oldLocal, oldTokens, oldAgents := s.membership, s.localExecutors, s.localExecutorTokens, s.agents
+	oldMembership, oldView, oldLocal, oldTokens, oldAgents := s.membership, s.membershipView, s.localExecutors, s.localExecutorTokens, s.agents
 	t.Cleanup(func() {
-		s.membership, s.localExecutors, s.localExecutorTokens, s.agents = oldMembership, oldLocal, oldTokens, oldAgents
+		s.membership, s.membershipView, s.localExecutors, s.localExecutorTokens, s.agents = oldMembership, oldView, oldLocal, oldTokens, oldAgents
 	})
 	s.membership = &nodeMembershipState{Nodes: nodes}
 	s.localExecutors = map[string]map[string]string{local: {"server_id": "executor-44", "fingerprint": "fp44", "public_key": "public44"}}
@@ -92,6 +92,17 @@ func testQuorumExecutorEnrollment(t *testing.T, s *Server) {
 			}
 			*field = old
 		}
+	})
+	t.Run("ready voter view may omit private key hash", func(t *testing.T) {
+		viewNodes := make([]*nodeMember, 0, len(nodes))
+		for _, member := range nodes {
+			clone := *member
+			clone.KeyHash = ""
+			viewNodes = append(viewNodes, &clone)
+		}
+		s.membership = nil
+		s.membershipView = &nodeMembershipView{Nodes: viewNodes}
+		route(t, remote, true, false)
 	})
 	t.Run("historical member credential", func(t *testing.T) {
 		alias := add("executor-88", remote, nodeStateReady, "executor-88", "fp88")

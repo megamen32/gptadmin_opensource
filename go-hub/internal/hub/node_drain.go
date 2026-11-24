@@ -124,9 +124,10 @@ func (s *Server) NodeDrainStatus() NodeDrainStatus {
 		gate.SetQueueDrainPending(draining && (submissions > 0 || counters.UnfinishedExecutions > 0))
 	}
 	counters.ActiveCallbacks, counters.OutboxPending = s.nodeRuntimeCounterValues()
-	if draining && s.quorumNode != nil && s.quorumPrivateTLS != nil && !s.quorumNode.Status().Leader {
-		// Until a leader-authoritative running-task check is wired, a follower
-		// cannot prove that an already delivered remote lease has finished.
+	if draining && hook == nil && s.quorumNode != nil && s.quorumPrivateTLS != nil && !s.quorumNode.Status().Leader {
+		// A standalone Hub cannot account for work already delivered to an
+		// external executor. A unified node has fenced local polls and tracks
+		// their callbacks and durable result outbox regardless of Raft role.
 		counters.UnfinishedExecutions++
 		if reason == "" {
 			reason = "quorum follower in-flight task verification unavailable"

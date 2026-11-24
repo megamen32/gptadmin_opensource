@@ -209,7 +209,18 @@ and publishes the address supplied by the operator. Ordinary grants and
 heartbeats perform zero DNS writes. Route the grant output directly to the
 joining node under the existing credential-handling procedure.
 
-The publishing backend is configured on each eligible writer.
+For SpaceWeb, the first owner-approved relay grant can set the cluster pool
+with `--frp-spaceweb-pool ZONE FQDN`. The membership log carries that choice
+across elections. Subsequent grants inherit it. Changing the pool through a
+different relay grant returns a conflict. Each eligible writer uses its own
+service credential binding to execute the approved addition.
+
+On Linux the verified Node package installs the SpaceWeb adapter in
+`/usr/local/lib/gptadmin/gptadmin_dns_sweb.py`. A service credential named
+`gptadmin-spaceweb` in the instance credentials directory supplies provider
+access. The connector transport remains the existing protected
+`/usr/local/bin/swebmimic`. Ordinary members receive no provider credential
+through membership.
 
 | Setting | Purpose |
 | --- | --- |
@@ -228,3 +239,16 @@ HTTP proxy in each frpc configuration and uses FRP's load-balancing group
 and local readiness check. The existing private subdomain still addresses
 its own origin. Each public relay needs a working TLS frontend for the same
 hostname and an active connector to a surviving origin.
+
+When the pool serves the configured `PUBLIC_ORIGIN`, a shared group key
+alone selects its HTTPS hostname as an FRP custom domain. `FRP_TOKEN_FILE`
+selects the service-owned FRP credential file. The generated configuration
+references this file directly. The relay must present a valid certificate
+for the same hostname.
+
+Before provisioning DNS-01 for an existing public service, check the exact
+A record at the DNS provider. Adding `_acme-challenge.<name>` when the
+service relies on a wildcard creates an empty nonterminal at `<name>`.
+Until the challenge is removed and the zone converges, authoritative A
+queries for the service can return an empty answer. Preserve the established
+addresses when the leader initializes an explicit pool at first enrollment.

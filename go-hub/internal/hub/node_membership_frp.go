@@ -62,7 +62,7 @@ func (s *Server) enrollFRPRelayLocked(r *http.Request, grant *nodeJoinGrant, mem
 	if !s.frpJoinAdmitted(r) {
 		return nil, nil, http.StatusServiceUnavailable, errFRPJoinLeader
 	}
-	publisher, err := frpDNSPublisherFromEnv()
+	publisher, err := frpDNSPublisherFromEnv(s.membership.FRPSpaceWebPool)
 	if err != nil {
 		return nil, nil, http.StatusServiceUnavailable, err
 	}

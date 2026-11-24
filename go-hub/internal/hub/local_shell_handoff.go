@@ -58,6 +58,29 @@ func (s *Server) fenceLocalShellHandoffLocked(r *http.Request, target string, jo
 		job.offlineShell = true
 		return nil
 	}
+	localAdmission := r.Context().Value(localShellAdmissionKey{}) == target
+	if localAdmission {
+		state, stateOK := r.Context().Value(localShellAuthStateKey{}).(authSnapshotState)
+		pin := s.localShellIdentityLocked(target)
+		if pin != nil {
+			if !stateOK {
+				if _, admitted := r.Context().Value(ownerAdmissionTermKey{}).(uint64); !admitted {
+					return nil
+				}
+				return errExecutorUnavailable
+			}
+			if state.Pending || state.Generation == 0 || state != s.authState {
+				return errExecutorUnavailable
+			}
+			if owner, err := s.executorEnrollmentLocked(target); err != nil {
+				return errExecutorUnavailable
+			} else if owner != nil && (!owner.bound() || owner.NodeID != s.quorumNode.Status().NodeID || owner.State == nodeStateDraining) {
+				return errExecutorUnavailable
+			}
+			job.LocalExecutor = pin
+			return nil
+		}
+	}
 	if err := s.verifyOwnerDispatch(r.Context()); err != nil {
 		return err
 	}

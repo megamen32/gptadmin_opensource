@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -106,24 +107,26 @@ type nodeMember struct {
 }
 
 type nodeMembershipState struct {
-	Schema    uint64                    `json:"schema"`
-	Revision  uint64                    `json:"revision"`
-	Epoch     uint64                    `json:"epoch"`
-	WriterID  string                    `json:"writer_id"`
-	WriterURL string                    `json:"writer_url,omitempty"`
-	UpdatedAt time.Time                 `json:"updated_at"`
-	Grants    map[string]*nodeJoinGrant `json:"grants,omitempty"`
-	Nodes     map[string]*nodeMember    `json:"nodes"`
+	FRPSpaceWebPool *frpSpaceWebPool          `json:"frp_spaceweb_pool,omitempty"`
+	Schema          uint64                    `json:"schema"`
+	Revision        uint64                    `json:"revision"`
+	Epoch           uint64                    `json:"epoch"`
+	WriterID        string                    `json:"writer_id"`
+	WriterURL       string                    `json:"writer_url,omitempty"`
+	UpdatedAt       time.Time                 `json:"updated_at"`
+	Grants          map[string]*nodeJoinGrant `json:"grants,omitempty"`
+	Nodes           map[string]*nodeMember    `json:"nodes"`
 }
 
 // nodeMembershipView is the member-side replica used to build routes.
 type nodeMembershipView struct {
-	Schema    uint64        `json:"schema"`
-	Revision  uint64        `json:"revision"`
-	SHA256    string        `json:"sha256"`
-	FetchedAt time.Time     `json:"fetched_at"`
-	WriterID  string        `json:"writer_id"`
-	Nodes     []*nodeMember `json:"nodes"`
+	Schema          uint64           `json:"schema"`
+	Revision        uint64           `json:"revision"`
+	SHA256          string           `json:"sha256"`
+	FetchedAt       time.Time        `json:"fetched_at"`
+	WriterID        string           `json:"writer_id"`
+	FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool,omitempty"`
+	Nodes           []*nodeMember    `json:"nodes"`
 }
 
 // controlSnapshot is the minimal bootstrap payload for a member: the bounded
@@ -319,12 +322,13 @@ func membershipSnapshotJSON(state *nodeMembershipState) ([]byte, string) {
 		nodes = append(nodes, &clone)
 	}
 	payload := map[string]any{
-		"schema":     state.Schema,
-		"revision":   state.Revision,
-		"epoch":      state.Epoch,
-		"writer_id":  state.WriterID,
-		"writer_url": state.WriterURL,
-		"nodes":      nodes,
+		"schema":            state.Schema,
+		"revision":          state.Revision,
+		"epoch":             state.Epoch,
+		"writer_id":         state.WriterID,
+		"writer_url":        state.WriterURL,
+		"frp_spaceweb_pool": state.FRPSpaceWebPool,
+		"nodes":             nodes,
 	}
 	raw, _ := json.Marshal(payload)
 	return raw, hashNodeSecret(string(raw))
@@ -709,9 +713,10 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Name         string `json:"name"`
-		TTLMinutes   int    `json:"ttl_minutes"`
-		FRPRelayIPv4 string `json:"frp_relay_ipv4"`
+		Name            string           `json:"name"`
+		TTLMinutes      int              `json:"ttl_minutes"`
+		FRPRelayIPv4    string           `json:"frp_relay_ipv4"`
+		FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool"`
 	}
 	if json.Unmarshal(raw, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "grant request must be JSON"})
@@ -723,6 +728,10 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.FRPRelayIPv4 != "" && !validFRPRelayIPv4(request.FRPRelayIPv4) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "frp_relay_ipv4 must be a unicast IPv4 address"})
+		return
+	}
+	if p := request.FRPSpaceWebPool; p != nil && (request.FRPRelayIPv4 == "" || !p.valid()) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "a SpaceWeb pool requires an approved relay and one DNS name inside its zone"})
 		return
 	}
 	ttl := nodeGrantDefaultTTL
@@ -742,17 +751,28 @@ func (s *Server) nodeMembershipGrant(w http.ResponseWriter, r *http.Request) {
 	grant := &nodeJoinGrant{Name: request.Name, SecretHash: hashNodeSecret(hex.EncodeToString(secret)),
 		IssuedAt: now, ExpiresAt: now.Add(ttl), FRPRelayIPv4: request.FRPRelayIPv4}
 	s.membershipMu.Lock()
-	s.membership.Grants[grant.SecretHash] = grant
-	for hash, existing := range s.membership.Grants {
+	next := *s.membership
+	if p := request.FRPSpaceWebPool; p != nil {
+		if next.FRPSpaceWebPool != nil && *next.FRPSpaceWebPool != *p {
+			s.membershipMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]any{"detail": "the cluster already has a different approved FRP DNS pool"})
+			return
+		}
+		next.FRPSpaceWebPool = p
+	}
+	next.Grants = maps.Clone(s.membership.Grants)
+	next.Grants[grant.SecretHash] = grant
+	for hash, existing := range next.Grants {
 		if existing.ExpiresAt.Add(nodeGrantRetention).Before(now) {
-			delete(s.membership.Grants, hash)
+			delete(next.Grants, hash)
 		}
 	}
-	if err := s.persistMembershipStateLocked(s.membership); err != nil {
+	if err := s.persistMembershipStateLocked(&next); err != nil {
 		s.membershipMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "grant persistence failed"})
 		return
 	}
+	s.membership = &next
 	s.membershipMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"grant": hex.EncodeToString(secret), "name": grant.Name,
 		"expires_at": grant.ExpiresAt.UTC().Format(time.RFC3339)})
@@ -930,10 +950,21 @@ func (s *Server) nodeMembershipJoin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeNodeJoinResponse(w http.ResponseWriter, member *nodeMember, writerID, writerURL string, revision uint64) {
-	writeJSON(w, http.StatusOK, map[string]any{"node_id": member.NodeID, "name": member.Name,
+	s.membershipMu.Lock()
+	var pool *frpSpaceWebPool
+	if s.membership != nil && s.membership.FRPSpaceWebPool != nil {
+		copyPool := *s.membership.FRPSpaceWebPool
+		pool = &copyPool
+	}
+	s.membershipMu.Unlock()
+	response := map[string]any{"node_id": member.NodeID, "name": member.Name,
 		"state": member.State, "generation": member.Generation, "membership_revision": revision,
 		"writer_id": s.memberControlSourceID(writerID), "writer_url": writerURL,
-		"auth_generation": s.writerAuthGeneration()})
+		"auth_generation": s.writerAuthGeneration()}
+	if pool != nil {
+		response["frp_spaceweb_pool"] = pool
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) writerAuthGeneration() uint64 {
@@ -1747,10 +1778,11 @@ func (s *Server) membershipPullView(client *http.Client, writer string) {
 		return
 	}
 	var view struct {
-		Schema   uint64        `json:"schema"`
-		Revision uint64        `json:"revision"`
-		WriterID string        `json:"writer_id"`
-		Nodes    []*nodeMember `json:"nodes"`
+		Schema          uint64           `json:"schema"`
+		Revision        uint64           `json:"revision"`
+		WriterID        string           `json:"writer_id"`
+		FRPSpaceWebPool *frpSpaceWebPool `json:"frp_spaceweb_pool"`
+		Nodes           []*nodeMember    `json:"nodes"`
 	}
 	if json.Unmarshal(envelope.Membership, &view) != nil || view.Schema != nodeMembershipSchema || view.Nodes == nil {
 		log.Printf("membership view rejected writer=%s", writer)
@@ -1768,7 +1800,8 @@ func (s *Server) membershipPullView(client *http.Client, writer string) {
 		member.KeyHash = ""
 	}
 	accepted := &nodeMembershipView{Schema: nodeMembershipSchema, Revision: view.Revision,
-		SHA256: envelope.SHA256, FetchedAt: s.now(), WriterID: view.WriterID, Nodes: view.Nodes}
+		SHA256: envelope.SHA256, FetchedAt: s.now(), WriterID: view.WriterID,
+		FRPSpaceWebPool: view.FRPSpaceWebPool, Nodes: view.Nodes}
 	s.membershipMu.Lock()
 	s.membershipView = accepted
 	if err := os.MkdirAll(s.membershipDir(), 0o750); err == nil {

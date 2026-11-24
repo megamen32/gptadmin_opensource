@@ -283,6 +283,9 @@ func (s *Server) forwardOverNodeConn(w http.ResponseWriter, r *http.Request, tar
 	if token := instructionToken(r); token != "" {
 		frame.Headers[instructionContextHeader] = token
 	}
+	if s.addressedMemberIngress(r, target) {
+		frame.Headers[memberIngressHeader] = "1"
+	}
 	if endpoint == "/mcp" {
 		for _, name := range []string{"Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", instructionContextHeader} {
 			if value := r.Header.Get(name); value != "" {
@@ -580,6 +583,9 @@ func (s *Server) nodeConnLocalExecute(frame nodeConnFrame) (int, http.Header, []
 	}
 	if frame.Endpoint == "/mcp-relay/tools" || frame.Endpoint == "/mcp-relay/call" {
 		request.Header.Set(nodePeerHopHeader, "1")
+		if frame.Headers[memberIngressHeader] == "1" {
+			request.Header.Set(memberIngressHeader, "1")
+		}
 	}
 	if managed {
 		request.Header.Set(nodePeerHopHeader, "1")

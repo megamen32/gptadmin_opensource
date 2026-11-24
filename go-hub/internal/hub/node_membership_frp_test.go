@@ -83,6 +83,14 @@ func TestFRPRelayJoinRecoversPowerDNSFailure(t *testing.T) {
 	if json.Unmarshal(grantResponse.Body.Bytes(), &grant) != nil || grant.Grant == "" {
 		t.Fatal("missing grant")
 	}
+	// The approval belongs to the cluster. A different voter must be able to
+	// complete the first join without reissuing it or publishing on election.
+	previousLeader := leader
+	leader = voters[1]
+	authorityTestTransfer(t, ctx, previousLeader, leader)
+	if got := patches.Load(); got != 0 {
+		t.Fatalf("leadership change published DNS %d times before enrollment", got)
+	}
 	nodeID, nodeKey := strings.Repeat("ab", 16), strings.Repeat("cd", 32)
 	join := func(hub *Server, id, key string) *httptest.ResponseRecorder {
 		body, err := json.Marshal(map[string]any{

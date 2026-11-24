@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -388,6 +389,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			if s.pollFencedLocalShell(w, r) {
 				return
 			}
+			if s.quorumControlOnly() && s.quorumLocalDispatchRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if r.Header.Get("X-GPTAdmin-Quorum-Forwarded") != "" {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
 				return
@@ -455,6 +460,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "offline peer admission unavailable while writer is active", "executed": false})
 			return
 		}
+		if s.quorumControlOnly() && s.quorumLocalDispatchRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if err := s.materializeVerifiedQuorumAuthority(r.Context(), termBeforeVerification); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum authority state is not ready on this leader"})
 			return
@@ -482,4 +491,71 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Addressed shell work is admitted by the executor owner. The outer MCP
+// request may be code mode, so the nested call performs the exact target and
+// capability checks later in executeMCPTool. Other targets still encounter
+// their normal authority gate there.
+func (s *Server) quorumLocalDispatchRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost || r.Header.Get(nodePeerHopHeader) != "" || r.Body == nil {
+		return false
+	}
+	if r.URL.Path != "/mcp" && r.URL.Path != "/mcp-relay/call" && r.URL.Path != "/mcp-relay/call_mcp_tool" {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil || len(raw) == 0 {
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var envelope map[string]any
+	if json.Unmarshal(raw, &envelope) != nil {
+		return false
+	}
+	if r.URL.Path == "/mcp" {
+		if firstString(envelope, "method") != "tools/call" {
+			return false
+		}
+		params := mapValue(envelope["params"])
+		return firstString(params, "name") == "exec"
+	}
+	target := firstString(envelope, "target", "server_id", "agent_id")
+	tool := firstString(envelope, "tool", "tool_name", "name")
+	if tool != "shell_exec" || !strings.HasPrefix(target, "shell:") {
+		return false
+	}
+	if r.Header.Get(memberIngressHeader) == "1" {
+		return s.quorumMemberIngressAuthorized(r, target)
+	}
+	s.mu.Lock()
+	local := s.localExecutors[target] != nil
+	s.mu.Unlock()
+	return local
+}
+
+func (s *Server) addressedMemberIngress(r *http.Request, target string) bool {
+	return r != nil && s.quorumControlOnly() &&
+		r.Context().Value(localShellAdmissionKey{}) == target &&
+		!s.quorumAuthorityActiveWriter.Load()
+}
+
+func (s *Server) quorumMemberIngressAuthorized(r *http.Request, target string) bool {
+	if r == nil || r.Header.Get(nodePeerHopHeader) != "1" || r.Header.Get(memberIngressHeader) != "1" ||
+		s.quorumNode == nil || !s.quorumControlOnly() || !strings.HasPrefix(target, "shell:") {
+		return false
+	}
+	peerID := s.receiptPeerID(r)
+	if peerID == "" || peerID == s.quorumNode.Status().NodeID || !s.quorumNode.IsVoter(peerID) {
+		return false
+	}
+	s.mu.Lock()
+	local := s.localExecutors[target] != nil
+	owner, err := s.executorEnrollmentLocked(target)
+	s.mu.Unlock()
+	if !local || err != nil || owner == nil || !owner.voter || !owner.bound() ||
+		owner.NodeID != s.quorumNode.Status().NodeID || owner.State == nodeStateDraining {
+		return false
+	}
+	return true
 }

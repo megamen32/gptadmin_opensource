@@ -15,7 +15,8 @@ EXECUTABLES = ('bin/gptadmin-node', 'bin/gptadmin-mcp-bridge')
 COMMON_FILES = {*EXECUTABLES, 'cli.py', 'public/secret-input/index.html',
                 'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
                 'scripts/gptadmin_node_autoupdate.py'}
-LINUX_FILES = COMMON_FILES | {'bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service'}
+LINUX_FILES = COMMON_FILES | {'bin/shellmcp', 'systemd/gptadmin-proxy-route-relay02.service',
+                              'scripts/gptadmin_dns_sweb.py'}
 DARWIN_FILES = COMMON_FILES | {'scripts/gptadmin_node_macos_manage.py',
                               'scripts/gptadmin_node_macos_autoupdate.py'}
 FILES = LINUX_FILES

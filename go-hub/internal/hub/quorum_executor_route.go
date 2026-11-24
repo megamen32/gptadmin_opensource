@@ -36,12 +36,25 @@ var errExecutorUnavailable = errors.New("quorum executor is not available for ne
 func (s *Server) executorEnrollmentLocked(target string) (*executorEnrollment, error) {
 	s.membershipMu.Lock()
 	defer s.membershipMu.Unlock()
-	if s.membership == nil {
+	var members map[string]*nodeMember
+	memberView := false
+	if s.membership != nil {
+		members = s.membership.Nodes
+	} else if s.membershipView != nil {
+		memberView = true
+		members = make(map[string]*nodeMember, len(s.membershipView.Nodes))
+		for _, member := range s.membershipView.Nodes {
+			if member != nil {
+				members[member.NodeID] = member
+			}
+		}
+	}
+	if members == nil {
 		return nil, nil
 	}
 	var voter, ordinary *nodeMember
 	var named, disabledVoter bool
-	for id, m := range s.membership.Nodes {
+	for id, m := range members {
 		if m == nil || m.Name != target {
 			continue
 		}
@@ -117,7 +130,7 @@ func (s *Server) executorEnrollmentLocked(target string) (*executorEnrollment, e
 			}
 		}
 	}
-	if selected.voter && selected.KeyHash == "" && (!selected.bound() || selected.NodeID != selected.LocalID) {
+	if selected.voter && (!selected.bound() || (!memberView && selected.KeyHash == "" && selected.NodeID != selected.LocalID)) {
 		return nil, errExecutorConflict
 	}
 	return selected, nil
@@ -136,12 +149,13 @@ func (s *Server) quorumExecutorUsesLeaderQueue(ctx context.Context, target strin
 	owner, err := s.executorEnrollmentLocked(target)
 	local := s.localExecutors[target] != nil
 	_, routed := s.nodePeerRouteLocked(target)
+	connected := s.nodeConns.get(target) != nil
 	s.mu.Unlock()
 	if err != nil {
 		return false, err
 	}
 	if owner == nil {
-		if !local && (routed || s.nodeConns.get(target) != nil) {
+		if !local && (routed || connected) {
 			return false, errors.New("peer route has no enrolled quorum executor")
 		}
 		return false, nil // Standalone ShellMCP polls the admitting Hub's queue.
@@ -157,6 +171,13 @@ func (s *Server) quorumExecutorUsesLeaderQueue(ctx context.Context, target strin
 	}
 	if !owner.bound() || (!owner.voter && !owner.QuorumQueue) {
 		return false, errors.New("enrolled executor has not advertised a bound quorum queue")
+	}
+	addressed := ctx.Value(localShellAdmissionKey{}) == target
+	if addressed && !local && !routed && !connected {
+		return false, errors.New("addressed executor has no authenticated peer route")
+	}
+	if addressed && !local && (!s.quorumAuthorityActiveWriter.Load() || s.quorumNode.Status().VoterCount < quorumMinimumVoters) {
+		return false, nil
 	}
 	if !s.quorumAuthorityActiveWriter.Load() {
 		return false, errors.New("quorum authority is not ready")

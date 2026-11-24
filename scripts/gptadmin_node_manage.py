@@ -47,7 +47,8 @@ PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-relay02.service'
 REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE, PROXY_ROUTE_PACKAGE_FILE)
 FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
     'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
-    'scripts/gptadmin_node_autoupdate.py', 'public/secret-input/index.html'))
+    'scripts/gptadmin_dns_sweb.py', 'scripts/gptadmin_node_autoupdate.py',
+    'public/secret-input/index.html'))
 ADMIN_UI_INDEX = 'public/admin/index.html'
 ADMIN_UI_ASSET_RE = re.compile(r'public/admin/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)\Z')
 HELPER_INSTALL_DIR = Path('/usr/local/lib/gptadmin')
@@ -772,7 +773,8 @@ def refresh_installed_helpers(verified_root, destination=None):
     helpers stay root owned and not group/other writable.
     """
     destination = Path(destination) if destination is not None else HELPER_INSTALL_DIR
-    for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py', 'gptadmin_node_autoupdate.py'):
+    for name in ('gptadmin_node_manage.py', 'gptadmin_node_probe.py',
+                 'gptadmin_node_autoupdate.py', 'gptadmin_dns_sweb.py'):
         source = Path(verified_root) / 'scripts' / name
         if source.is_symlink() or not source.is_file() or source.stat().st_size > 2 * 1024**2:
             raise PreflightError('verified Node package lacks a bounded updater helper')
@@ -781,7 +783,8 @@ def refresh_installed_helpers(verified_root, destination=None):
             raise PreflightError('installed Node updater helper is not protected')
         data = source.read_text(encoding='utf-8')
         temp = target.with_name(target.name + '.new-' + str(os.getpid()))
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        mode = 0o755 if name == 'gptadmin_dns_sweb.py' else 0o644
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
                 stream.write(data)
@@ -1443,6 +1446,7 @@ Wants=network-online.target
 Type=simple
 User=root
 EnvironmentFile={layout.config_root}/%i/gptadmin.env
+Environment=CREDENTIALS_DIRECTORY={layout.config_root}/credentials
 ExecStart={layout.opt_root}/current/bin/gptadmin-node
 Restart=on-failure
 RestartSec=3
@@ -1604,8 +1608,46 @@ def drain_begin(origin: str, token: str) -> bool:
     return True
 
 
+LEGACY_FOLLOWER_DRAIN_REVISION = '90f89e96e6fac91dafc267a2b280086cb9c17fc8'
+
+
+def normalize_legacy_follower_drain(payload: object, current_manifest: dict | None) -> dict | None:
+    """Correct only build 1145's known synthetic follower count in one fenced snapshot.
+
+    This exact unified-node revision wires the local executor counters before
+    serving. Its empty begin reason can produce this fallback reason only when
+    NodeDrainStatus adds one synthetic unfinished execution after counting real
+    local work. Retain the original response as the compatibility receipt.
+    """
+    if (not isinstance(current_manifest, dict)
+            or current_manifest.get('schema') != PACKAGE_SCHEMA
+            or current_manifest.get('platform') != 'linux'
+            or current_manifest.get('build_version') != 1145
+            or current_manifest.get('git_commit') != LEGACY_FOLLOWER_DRAIN_REVISION):
+        return None
+    if (not isinstance(payload, dict) or payload.get('draining') is not True
+            or payload.get('ready_to_stop') is not False
+            or payload.get('reason') != 'quorum follower in-flight task verification unavailable'):
+        return None
+    expected = {'active_submissions': 0, 'active_callbacks': 0,
+                'unfinished_executions': 1, 'outbox_pending': 0}
+    counters = payload.get('counters')
+    if (not isinstance(counters, dict) or set(counters) != set(expected)
+            or any(type(counters[key]) is not int or counters[key] != value
+                   for key, value in expected.items())):
+        return None
+    return {
+        'normalized_ready_to_stop': True,
+        'normalization': 'build_1145_synthetic_follower_execution',
+        'git_commit': LEGACY_FOLLOWER_DRAIN_REVISION,
+        'build_version': 1145,
+        'raw_status': payload,
+    }
+
+
 def drain_wait_ready(origin: str, token: str, wait_secs: float,
-                     poll_interval: float = DRAIN_POLL_INTERVAL_SECS) -> dict:
+                     poll_interval: float = DRAIN_POLL_INTERVAL_SECS, *,
+                     current_manifest: dict | None = None) -> dict:
     """Poll drain status until ready_to_stop or timeout (caller must then cancel + abort)."""
     deadline = time.monotonic() + wait_secs
     while True:
@@ -1627,6 +1669,13 @@ def drain_wait_ready(origin: str, token: str, wait_secs: float,
             raise RuntimeFailure(f'drain status failed: HTTP {status}')
         if isinstance(payload, dict) and payload.get('ready_to_stop') is True:
             return payload
+        normalized = normalize_legacy_follower_drain(payload, current_manifest)
+        if normalized is not None:
+            # Emit before switching current so a later update failure still
+            # retains the original drain evidence in the manager's receipt.
+            print(json.dumps({'event': 'node_drain_legacy_normalized', **normalized},
+                             sort_keys=True), file=sys.stderr)
+            return normalized
         time.sleep(max(0.01, min(poll_interval, deadline - time.monotonic())))
     raise RuntimeFailure(f'drain did not reach ready_to_stop within {wait_secs:.0f}s')
 
@@ -1645,7 +1694,8 @@ def drain_cancel(origin: str, token: str) -> bool:
     return True
 
 
-def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drain: bool, budget: UpdateBudget) -> bool:
+def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drain: bool, budget: UpdateBudget, *,
+                         current_manifest: dict | None = None, receipt: dict | None = None) -> bool:
     """Enter a verified drain, cancelling it if an admission response is lost."""
     active = False
     try:
@@ -1653,9 +1703,11 @@ def prepare_update_drain(origin: str, token: str, wait_secs: float, require_drai
         if not active and require_drain:
             raise RuntimeFailure('automatic update requires the supported drain endpoint')
         if active:
-            disposition = drain_wait_ready(origin, token, wait_secs)
+            disposition = drain_wait_ready(origin, token, wait_secs, current_manifest=current_manifest)
             if disposition.get('skipped') and require_drain:
                 raise RuntimeFailure('drain readiness unavailable; automatic update refused')
+            if receipt is not None:
+                receipt.update(disposition)
         return active
     except Exception as error:
         budget.cleanup()
@@ -2810,8 +2862,13 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
     unit = layout.unit_instance(name)
     env_path = layout.env_file(name)
     previous_env_text = env_path.read_text() if requested_node_url is not None or requested_legacy_origins is not None else None
+    drain_receipt: dict = {}
+    # The compatibility correction is limited to the exact installed unified
+    # node revision pinned by the existing compare-and-swap contract.
+    drain_manifest = previous_manifest if expected_revision == LEGACY_FOLLOWER_DRAIN_REVISION else None
     drain_active = prepare_update_drain(origin, token, args.wait_secs,
-                                        getattr(args, 'require_drain', False), budget)
+                                        getattr(args, 'require_drain', False), budget,
+                                        current_manifest=drain_manifest, receipt=drain_receipt)
 
     final = None
     env_updated = False
@@ -2871,7 +2928,7 @@ def update_with_budget(args, layout: Layout, runner: Runner, budget: UpdateBudge
         'ok': True, 'command': 'update', 'name': name, 'unit': unit,
         'version_dir': final.name, 'previous_dir': current.name,
         'git_commit': new_commit, 'build_version': manifest.get('build_version'),
-        'node_public_url': requested_node_url, 'admin_ui': ui_receipt,
+        'node_public_url': requested_node_url, 'admin_ui': ui_receipt, 'drain': drain_receipt,
     }, sort_keys=True))
 
 
@@ -2955,6 +3012,11 @@ def cmd_grant_issue(args, layout: Layout, runner: Runner) -> None:
     body = {'name': membership_target(args.name), 'ttl_minutes': args.ttl_mins}
     if args.frp_relay_ipv4:
         body['frp_relay_ipv4'] = args.frp_relay_ipv4
+    if args.frp_spaceweb_pool:
+        if not args.frp_relay_ipv4:
+            raise UsageError('--frp-spaceweb-pool requires an approved --frp-relay-ipv4')
+        zone, name = args.frp_spaceweb_pool
+        body['frp_spaceweb_pool'] = {'zone': zone.lower().rstrip('.'), 'name': name.lower().rstrip('.')}
     try:
         status, payload = http_json('POST', url, token=token, body=body, timeout=JOIN_HTTP_TIMEOUT_SECS)
     except (OSError, urllib.error.URLError) as error:
@@ -3362,6 +3424,8 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument('--ttl-mins', type=int, default=30, metavar='MINUTES')
     issue.add_argument('--frp-relay-ipv4', metavar='ADDRESS',
                        help='approve this new relay IPv4 address for DNS publication at first join')
+    issue.add_argument('--frp-spaceweb-pool', nargs=2, metavar=('ZONE', 'FQDN'),
+                       help='set the cluster DNS pool with the first approved relay; subsequent grants inherit it')
     issue.add_argument('--writer-url', default=None, metavar='ORIGIN',
                        help='writer origin; default $GPTADMIN_WRITER_URL')
     issue.add_argument('--admin-token-env', default='GPTADMIN_ADMIN_BEARER', metavar='ENV',
