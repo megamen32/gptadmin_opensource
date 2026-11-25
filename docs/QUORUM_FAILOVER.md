@@ -88,6 +88,16 @@ offline former owner. An existing cluster that already uses replicated task
 storage must retain access to its previously acknowledged data when upgraded.
 Changing that cluster's storage policy is an explicit operator operation.
 
+### Snapshot scheduling
+
+The optional quorum configuration field `snapshot_interval` controls how often
+Raft checks whether its snapshot threshold has been reached. The value is a
+duration in nanoseconds, matching the existing deadline fields; zero or omission
+keeps the 30-second default. Explicit values must be between one second and one
+hour. The 1,024-entry threshold and 2,048 retained log entries are unchanged.
+The isolated CI fixture uses `1000000000` (one second) while still exercising the
+same authenticated writes, actual Raft snapshots and log compaction.
+
 ### Preserving the control source enrolled by ordinary members
 
 New `owner_local` clusters retain their original auth writer ID in the

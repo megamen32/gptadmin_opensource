@@ -21,9 +21,11 @@ def _minimal_build_repo(tmp_path: Path, *, include_shellmcp: bool = False) -> Pa
 
     repo = tmp_path / "release-build"
     (repo / "tools").mkdir(parents=True)
-    shutil.copy2(REPO_ROOT / "tools" / "build.sh", repo / "tools" / "build.sh")
-    shutil.copy2(REPO_ROOT / "tools" / "generate_sbom.py", repo / "tools" / "generate_sbom.py")
-    shutil.copy2(REPO_ROOT / "tools" / "verify_release_manifest.py", repo / "tools" / "verify_release_manifest.py")
+    # Exercise the real pinned companion path, including its release identity.
+    # The minimal checkout must carry every tool that the production builder uses.
+    for helper in ("build.sh", "generate_sbom.py", "verify_release_manifest.py",
+                   "fetch_grepmesh.py", "grepmesh-release.json"):
+        shutil.copy2(REPO_ROOT / "tools" / helper, repo / "tools" / helper)
     shutil.copy2(REPO_ROOT / "cli.py", repo / "cli.py")
     (repo / "scripts").mkdir()
     for helper in ("gptadmin_node_manage.py", "gptadmin_node_probe.py", "gptadmin_node_autoupdate.py"):
@@ -83,7 +85,7 @@ def test_tagged_build_keeps_version_and_generates_matching_metadata(tmp_path: Pa
     repo = _minimal_build_repo(tmp_path)
     completed = _run_tagged_build(repo, "v129")
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (repo / "VERSION").read_text(encoding="utf-8") == "129\n"
     build_info = (repo / "client" / "gptadmin_build_info.py").read_text(encoding="utf-8")
     assert "BUILD_VERSION = 129" in build_info
@@ -185,7 +187,7 @@ def test_non_tagged_build_retains_single_version_bump_policy(tmp_path: Path) -> 
     repo = _minimal_build_repo(tmp_path)
     completed = _run_developer_build(repo)
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (repo / "VERSION").read_text(encoding="utf-8") == "130\n"
     manifest = json.loads((repo / "build" / "manifest.json").read_text(encoding="utf-8"))
     sbom = json.loads((repo / "build" / "gptadmin-sbom.spdx.json").read_text(encoding="utf-8"))
@@ -222,7 +224,7 @@ def test_tagged_build_removes_stale_public_archive_before_manifest(tmp_path: Pat
     stale_archive.write_bytes(b"stale public v128 archive")
     completed = _run_tagged_build(repo, "v129")
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     assert not stale_archive.exists()
     manifest = json.loads((repo / "build" / "manifest.json").read_text(encoding="utf-8"))
     assert {artifact["path"] for artifact in manifest["artifacts"]} == {"build/gptadmin-cli.tar.gz"}
@@ -233,7 +235,7 @@ def test_tagged_shellmcp_artifact_reports_manifest_and_sbom_identity(tmp_path: P
 
     repo = _minimal_build_repo(tmp_path, include_shellmcp=True)
     completed = _run_tagged_build(repo, "v129", target="shellmcp")
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
     extracted = tmp_path / "artifact"
     with tarfile.open(repo / "build" / "gptadmin-shellmcp.tar.gz", "r:gz") as archive:

@@ -41,8 +41,7 @@ func startDiagnostics() (func() error, error) {
 	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("diagnostics socket parent must be a real directory")
 	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || int(sys.Uid) != os.Geteuid() || st.Mode().Perm()&0o077 != 0 {
+	if !diagnosticsOwnedByCurrentUser(st) || st.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("diagnostics socket parent must be owned by the Node user and private (mode 0700 or stricter)")
 	}
 	if err := removeStaleDiagnosticsSocket(path); err != nil {
@@ -95,8 +94,7 @@ func removeStaleDiagnosticsSocket(path string) error {
 	if st.Mode()&os.ModeSocket == 0 {
 		return errors.New("diagnostics socket path already exists and is not a socket")
 	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || int(sys.Uid) != os.Geteuid() || st.Mode().Perm() != 0o600 {
+	if !diagnosticsOwnedByCurrentUser(st) || st.Mode().Perm() != 0o600 {
 		return errors.New("existing diagnostics socket is not owned by the Node user with mode 0600")
 	}
 	conn, dialErr := net.DialTimeout("unix", path, 200*time.Millisecond)

@@ -230,36 +230,19 @@ jobs:
         load: true
         set: |
           *.context=.
-          *.cache-from=type=gha,scope=public-failover-${{ startsWith(matrix.suite, 'quorum-') && 'quorum' || 'base' }}-v1
-          *.cache-to=type=gha,scope=public-failover-${{ startsWith(matrix.suite, 'quorum-') && 'quorum' || 'base' }}-v1,mode=max
+          failover-e2e.cache-from=type=gha,scope=public-failover-base-v1
+          quorum-e2e.cache-from=type=gha,scope=public-failover-quorum-v1
           failover-e2e.tags=gptadmin-ci-failover:${{ github.sha }}
           quorum-e2e.tags=gptadmin-ci-quorum:${{ github.sha }}
-    - name: Run the complete assigned real-process scenario
+    - name: Expose scoped Docker cache runtime
+      if: matrix.suite == 'member-outage' || matrix.suite == 'quorum-storage'
+      continue-on-error: true
+      uses: ./.github/actions/cache-runtime
+    - name: Run real scenario alongside optional cache upload
       env:
         SUITE: ${{ matrix.suite }}
       run: |
-        set -euo pipefail
-        case "$SUITE" in
-          legacy)
-            docker run --rm --init "gptadmin-ci-failover:$GITHUB_SHA"
-            ;;
-          member-outage)
-            docker run --rm --init "gptadmin-ci-failover:$GITHUB_SHA" \
-              python3 /src/tests/e2e/node/member_outage_run.py /usr/local/bin/gptadmin-node \
-              --shell-binary /usr/local/bin/gptadmin-shellmcp
-            ;;
-          quorum-*)
-            # This suite checks process crashes and retained real Raft files in one container.
-            # A bounded tmpfs avoids Docker overlay fsync overhead without changing Node timers.
-            docker run --rm --init --network none --cap-add NET_ADMIN \
-              --tmpfs /tmp:rw,nosuid,nodev,exec,size=512m \
-              --add-host node0.test:127.0.0.1 --add-host node1.test:127.0.0.1 --add-host node2.test:127.0.0.1 \
-              "gptadmin-ci-quorum:$GITHUB_SHA" \
-              python3 -B /src/tests/e2e/node/quorum_failover_run.py /usr/local/bin/gptadmin-node /tmp \
-              --shell-binary /usr/local/bin/gptadmin-shellmcp --case "${SUITE#quorum-}"
-            ;;
-          *) echo "Unknown suite: $SUITE" >&2; exit 2 ;;
-        esac
+        bash tools/ci_failover.sh "$SUITE"
   installer-e2e-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -432,23 +415,29 @@ jobs:
         New-Item -ItemType Directory -Force build/windows | Out-Null
         Set-Location go-hub
         go test -run '^$' ./...
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         go build -o ../build/windows/gptadmin-hub.exe ./cmd/gptadmin-hub
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Compile every Go ShellMCP package for Windows
       shell: pwsh
       run: |
         Set-Location go-shellmcp
         go test -run '^$' ./...
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         go build -o ../build/windows/shellmcp.exe ./cmd/shellmcp-go
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Exercise Windows polling configuration contract
       shell: pwsh
       run: |
         Set-Location go-shellmcp
         go test ./internal/server -run '^(TestFromEnvUsesWindowsInstallerPollingContract|TestQueueTransportNeverNeedsLocalListener)$' -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Verify Windows updater task ownership and PowerShell parsing
       shell: pwsh
       run: |
         Set-Location go-shellmcp
         go test ./internal/update -run Windows -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   public-python:
     name: Public Python and CLI regressions (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest

@@ -84,6 +84,9 @@ type Config struct {
 	// NodeWriterConnectTo pins the writer's physical address while keeping
 	// the writer URL hostname for verified TLS/SNI.
 	NodeWriterConnectTo string
+	// NodeHeartbeatInterval controls member announcements only. Zero or values
+	// outside 1..30 seconds keep the production default of 30 seconds.
+	NodeHeartbeatInterval time.Duration
 	// NodePublicURL is the routable origin this node advertises in membership.
 	NodePublicURL string
 	AuthMode      string
@@ -201,6 +204,7 @@ func FromEnv() Config {
 		NodeIdentityFile:           env("GPTADMIN_NODE_IDENTITY", ""),
 		NodeSeedURL:                strings.TrimRight(env("GPTADMIN_NODE_SEED", ""), "/"),
 		NodeWriterConnectTo:        strings.TrimSpace(env("GPTADMIN_NODE_WRITER_CONNECT_TO", "")),
+		NodeHeartbeatInterval:      nodeMemberHeartbeatIntervalFromEnv(),
 		NodePublicURL:              normalizePublicURL(env("GPTADMIN_NODE_PUBLIC_URL", "")),
 		AuthMode:                   strings.ToLower(strings.TrimSpace(env("GPTADMIN_AUTH_MODE", "legacy"))),
 		ReaderOfflineSharedSigner:  truthyString(env("GPTADMIN_READER_OFFLINE_SHARED_SIGNER", "0")),

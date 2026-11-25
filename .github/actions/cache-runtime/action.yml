@@ -1,0 +1,5 @@
+name: Docker cache runtime
+description: Expose the current job's cache endpoint without logging its credential.
+runs:
+  using: node24
+  main: main.js

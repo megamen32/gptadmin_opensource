@@ -278,7 +278,8 @@ def main(services):
             SHELL_OUTBOX_DIR=str(directory / "spool/outbox"), SHELL_DEFAULT_CWD=str(directory),
             SHELL_DEFAULT_USER=pwd.getpwuid(os.getuid()).pw_name,
             SHELL_DEFAULT_HOME=str(directory), SHELLMCP_MCP_CONFIG=str(directory / "no-child.json"),
-            HUB_URL="http://127.0.0.1:1", SHELLMCP_SELF_REPAIR_DISABLE="1", NO_PROXY="*", SSL_CERT_FILE=str(ca_path))
+            HUB_URL="http://127.0.0.1:1", SHELLMCP_SELF_REPAIR_DISABLE="1", NO_PROXY="*", SSL_CERT_FILE=str(ca_path),
+            GPTADMIN_NODE_HEARTBEAT_INTERVAL_S="1")
         nodes.append({"dir": directory, "http": int(env["GPTADMIN_HUB_PORT"]), "raft": port(), "private": port(), "public": port(),
             "key": secrets.token_hex(32), "cert": crt, "cert_key": key, "env": env})
         if i == 3 and options.legacy_executor_binary:
@@ -363,7 +364,10 @@ def main(services):
             "node_key": n["key"], "bind_address": peers[i]["address"], "advertise": peers[i]["address"],
             "data_dir": str(n["dir"] / "raft"), "tls_cert_file": str(n["cert"]), "tls_key_file": str(n["cert_key"]),
             "tls_ca_file": str(ca_path), "state_key_file": str(state_key), "external_snapshot_max_bytes": 67108864,
-            "external_snapshot_free_reserve_bytes": 1048576, "peers": peers, "bootstrap": i == 0}
+            "external_snapshot_free_reserve_bytes": 1048576, "peers": peers, "bootstrap": i == 0,
+            # Exercise the real Raft snapshot path sooner, retaining its production
+            # 1024-entry threshold, 2048 trailing logs and the full control workload.
+            "snapshot_interval": 1000000000}
         if options.owner_local_receipt_probe:
             config["mode"] = "owner_local"
             n["env"]["GPTADMIN_RECEIPT_COPY_GENERATION"] = "isolated-receipt-fixture"

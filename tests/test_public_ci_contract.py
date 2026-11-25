@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shlex
+import sys
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +17,9 @@ def test_public_product_gate_requires_all_actual_product_jobs():
     gate = workflow['jobs']['ci-gate']
     expected = {'go-unit-tests', 'admin-ui-build', 'failover-e2e',
                 'installer-e2e-linux', 'candidate-client-contract', 'macos-release-packages', 'macos-build',
-                'windows-shellmcp', 'public-python'}
+                'windows-shellmcp', 'public-python', 'android-dns', 'node-artifact'}
     assert set(gate['needs']) == expected
+    assert set(gate['needs']) == set(workflow['jobs']) - {'ci-gate'}
     script = gate['steps'][0]['run']
     def admitted(results):
         env = dict(os.environ, RESULTS=json.dumps(results))
@@ -38,10 +41,16 @@ def test_public_checks_have_no_secret_input_or_private_checkout():
     workflow = yaml.safe_load(text)
     assert workflow['permissions'] == {'contents': 'read'}
     jobs = workflow['jobs']
-    runs = '\n'.join(step.get('run', '') for step in jobs['go-unit-tests']['steps'])
-    for module in ('go-hub', 'go-shellmcp', 'go-proxyrelay', 'bezhook'):
-        assert f'cd {module} && go test ./...' in runs
-    assert 'python3 tools/build_node.py --arch amd64' in runs
+    node = jobs['node-artifact']
+    assert node['strategy']['fail-fast'] is False
+    assert set(node['strategy']['matrix']['platform']) == {'linux', 'darwin'}
+    assert set(node['strategy']['matrix']['arch']) == {'amd64', 'arm64'}
+    build = next(step for step in node['steps'] if step.get('name') == 'Build manifest-pinned production Node package')
+    assert shlex.split(build['run']) == ['python3', 'tools/build_node.py', '--platform', '$PLATFORM', '--arch', '$ARCH']
+    assert build['env'] == {'PLATFORM': '${{ matrix.platform }}', 'ARCH': '${{ matrix.arch }}'}
+    artifact = next(step for step in node['steps'] if step.get('uses', '').startswith('actions/upload-artifact@'))
+    assert artifact['with']['name'] == 'gptadmin-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}'
+    assert artifact['with']['if-no-files-found'] == 'error'
     steps = jobs['admin-ui-build']['steps']
     ui = '\n'.join(step.get('run', '') for step in steps)
     for command in ('npm ci', 'npm test', 'npm run lint', 'npm run build'):
@@ -54,12 +63,51 @@ def test_public_checks_have_no_secret_input_or_private_checkout():
     assert "FRPC_TOKEN_DEFAULT = os.environ.get('GPTADMIN_FRP_TOKEN', '').strip()" in (ROOT / 'cli.py').read_text()
 
 
+def test_public_go_shards_wire_every_module_on_each_platform(tmp_path):
+    """Exercise shell argument wiring only; real Go execution is a separate CI gate."""
+    job = yaml.safe_load(WORKFLOW.read_text())['jobs']['go-unit-tests']
+    matrix = job['strategy']['matrix']
+    assert job['strategy']['fail-fast'] is False
+    assert set(matrix['os']) == {'ubuntu-latest', 'macos-latest'}
+    assert matrix['shard'] == list(range(len(matrix['shard']))) and matrix['shard']
+    step = next(step for step in job['steps'] if step.get('name') == 'Run every test in its deterministic shard')
+    assert step['env']['SHARD'] == '${{ matrix.shard }}'
+    capture = tmp_path / 'arguments.json'
+    shim_dir = tmp_path / 'bin'
+    shim_dir.mkdir()
+    shim = shim_dir / 'python3'
+    shim.write_text(f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
+                    'pathlib.Path(os.environ["CI_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))\n')
+    shim.chmod(0o755)
+    for runner, modules in (
+        ('Linux', ['go-hub', 'go-shellmcp', 'go-proxyrelay', 'bezhook']),
+        ('macOS', ['go-hub', 'go-shellmcp']),
+    ):
+        for index in matrix['shard']:
+            env = dict(os.environ, PATH=str(shim_dir) + os.pathsep + os.environ['PATH'],
+                       CI_CAPTURE=str(capture), RUNNER_OS=runner, SHARD=str(index),
+                       GITHUB_WORKSPACE=str(tmp_path))
+            subprocess.run(['bash', '-e', '-c', step['run']], cwd=tmp_path, env=env,
+                           check=True, capture_output=True, timeout=5)
+            expected = ['tools/ci_test_shards.py', 'go', '--index', str(index),
+                        '--count', str(len(matrix['shard']))]
+            expected += [argument for module in modules for argument in ('--module', module)]
+            assert json.loads(capture.read_text()) == expected
+
+
 def test_public_python_scope_flags_are_in_the_same_shell_command():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     script = workflow['jobs']['public-python']['steps'][-1]['run']
     commands = [line.strip() for line in script.splitlines()]
     assert not any(line.startswith(('--ignore', '--deselect')) for line in commands)
-    pytest_command = next(line for line in commands if line.startswith('uv run pytest '))
+    pytest_command = next(line for line in commands
+                          if line.startswith('uv run python tools/ci_test_shards.py pytest '))
+    arguments = shlex.split(pytest_command)
+    matrix = workflow['jobs']['public-python']['strategy']['matrix']
+    assert matrix['shard'] == list(range(len(matrix['shard']))) and matrix['shard']
+    assert arguments[arguments.index('--count') + 1] == str(len(matrix['shard']))
+    assert arguments[arguments.index('--index') + 1] == '$SHARD'
+    assert arguments[arguments.index('--') + 1] == 'tests/'
     assert '--ignore=tests/test_release_workflow_contract.py' in pytest_command
     assert '--deselect=tests/test_completion_matrix.py::test_completion_matrix_commands_execute' in pytest_command
 

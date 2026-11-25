@@ -23,6 +23,19 @@ writer's `live_connections`, so an operator can see where each route comes
 from. "Everyone knows everyone" (standalone) trades onboarding convenience for
 independence from the hub; pick per deployment, not per code path.
 
+## Member heartbeat interval
+
+`GPTADMIN_NODE_HEARTBEAT_INTERVAL_S` optionally sets how often an enrolled
+member announces its state and reconciles the authenticated membership view.
+It accepts integer seconds from 1 through 30. The default is 30 seconds;
+invalid values also use 30 seconds.
+
+A shorter interval can speed up enrollment and recovery on a controlled local
+network, at the cost of more membership requests. Isolated CI clusters use
+1 second. This setting does not change the writer's 30-second maintenance
+cadence, the 90-second membership lease, the five-minute full-sync cadence,
+or the checks on member credentials and the applied control snapshot.
+
 ## Static peer configuration
 
 `GPTADMIN_NODE_PEERS` maps an execution target to an operator-configured origin:

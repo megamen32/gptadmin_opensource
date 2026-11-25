@@ -117,7 +117,7 @@ func OpenWithExternalState(input Config, apply func(index, externalSequence uint
 	config.LocalID = raft.ServerID(c.NodeID)
 	config.Logger = hclog.NewNullLogger()
 	config.LogOutput = io.Discard
-	config.SnapshotInterval = 30 * time.Second
+	config.SnapshotInterval = c.SnapshotInterval
 	config.SnapshotThreshold = 1024
 	config.TrailingLogs = 2048
 	if err := raft.ValidateConfig(config); err != nil {

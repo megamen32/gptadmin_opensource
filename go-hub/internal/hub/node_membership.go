@@ -1468,10 +1468,28 @@ func (s *Server) memberWriterURL() string {
 	return s.cfg.NodeSeedURL
 }
 
+// nodeMemberHeartbeatIntervalFromEnv bounds seconds before converting to a
+// duration so an oversized environment integer cannot wrap into a fast timer.
+func nodeMemberHeartbeatIntervalFromEnv() time.Duration {
+	seconds := secondsEnv("GPTADMIN_NODE_HEARTBEAT_INTERVAL_S", int(nodeHeartbeatInterval/time.Second))
+	if seconds > int(nodeHeartbeatInterval/time.Second) {
+		return nodeHeartbeatInterval
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) memberHeartbeatInterval() time.Duration {
+	interval := s.cfg.NodeHeartbeatInterval
+	if interval < time.Second || interval > nodeHeartbeatInterval {
+		return nodeHeartbeatInterval
+	}
+	return interval
+}
+
 func (s *Server) membershipMemberLoop() {
 	defer s.membershipDone.Done()
 	client := newNodeMembershipClient(s.cfg.NodeWriterConnectTo)
-	heartbeat := time.NewTicker(nodeHeartbeatInterval)
+	heartbeat := time.NewTicker(s.memberHeartbeatInterval())
 	sync := time.NewTicker(nodeMembershipSyncEvery)
 	defer heartbeat.Stop()
 	defer sync.Stop()

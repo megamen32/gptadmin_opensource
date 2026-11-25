@@ -81,6 +81,7 @@ class Node(Executor):
                         GPTADMIN_ENV_FILE=str(self.directory / "no.env"),
                         GPTADMIN_HUB_HOST="127.0.0.1", GPTADMIN_HUB_PORT=str(port),
                         GPTADMIN_AUTH_MODE="reader" if reader else "writer",
+                        GPTADMIN_NODE_HEARTBEAT_INTERVAL_S="1",
                         GPTADMIN_NODE_PUBLIC_URL=self.origin if reader else public_url,
                         PUBLIC_ORIGIN=public_url, MCP_RESOURCE=public_url + "/mcp",
                         OAUTH_CLIENT_SECRET=signer, CTL_TOKEN=self.control, SHELL_TOKEN=secrets.token_urlsafe(32))

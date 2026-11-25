@@ -51,6 +51,9 @@ type Config struct {
 	RPCDeadline                      time.Duration `json:"rpc_deadline,omitempty"`
 	ApplyDeadline                    time.Duration `json:"apply_deadline,omitempty"`
 	BarrierDeadline                  time.Duration `json:"barrier_deadline,omitempty"`
+	// SnapshotInterval uses nanoseconds, like the deadline fields above.
+	// A zero value retains the production interval of 30 seconds.
+	SnapshotInterval time.Duration `json:"snapshot_interval,omitempty"`
 }
 
 var (
@@ -203,6 +206,12 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.BarrierDeadline <= 0 {
 		c.BarrierDeadline = 5 * time.Second
+	}
+	if c.SnapshotInterval == 0 {
+		c.SnapshotInterval = 30 * time.Second
+	}
+	if c.SnapshotInterval < time.Second || c.SnapshotInterval > time.Hour {
+		return Config{}, errors.New("quorum: snapshot_interval must be between one second and one hour")
 	}
 	return c, nil
 }

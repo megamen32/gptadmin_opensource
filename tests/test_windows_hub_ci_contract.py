@@ -28,8 +28,16 @@ def test_release_windows_package_builds_and_archives_the_go_hub():
     """The release archive must contain the Windows hub, not only ShellMCP."""
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'GOOS=windows GOARCH=amd64 go build "${GO_HUB_LDFLAGS[@]}"' in script
-    assert '"$ART_DIR/windows/gptadmin-hub.exe"' in script
+    hub_builder = script.split('build_hub_cross_platforms() {', 1)[1].split('\n}\n', 1)[0]
+    windows_builder = script.split('build_windows_shellmcp() {', 1)[1].split('\n}\n', 1)[0]
+    assert '[[ "${1:-}" == windows ]] && pairs=(windows_amd64)' in hub_builder
+    assert 'GOOS=$goos GOARCH=$goarch go build "${GO_HUB_LDFLAGS[@]}"' in hub_builder
+    assert '-o "../$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" ./cmd/gptadmin-hub' in hub_builder
+    assert 'build_hub_cross_platforms windows' in windows_builder
+    copied_hub = 'cp -f "$ART_DIR/gptadmin_hub/windows_amd64/gptadmin_hub" "$ART_DIR/windows/gptadmin-hub.exe"'
+    assert copied_hub in windows_builder
+    assert windows_builder.index('build_hub_cross_platforms windows') < windows_builder.index(copied_hub)
+    assert windows_builder.index(copied_hub) < windows_builder.index('zip -q -9 -r')
     assert 'zip -q -9 -r "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md' in script
     assert 'cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 public/install_win.ps1 "$ART_DIR/public/"' in script
 
