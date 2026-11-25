@@ -1,5 +1,9 @@
 """Local decision tests only; real provider acceptance is a separate canary."""
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -97,6 +101,16 @@ class DNSAppendTests(unittest.TestCase):
         with patch.object(adapter, 'public_relay_address', return_value=self.value):
             return adapter.execute({'action': 'append_a', 'name': self.name, 'value': self.value},
                                    'example.com', self.name, rpc or self.rpc, allow_append_a=enabled)
+
+    def test_argument_free_adapter_allows_only_pool_operations(self):
+        env = {'PATH': os.defpath, 'GPTADMIN_FRP_DNS_NAME': self.name,
+               'GPTADMIN_FRP_DNS_ZONE': 'example.com',
+               'GPTADMIN_FRP_DNS_CREDENTIALS_FILE': '/unused'}
+        result = subprocess.run([sys.executable, adapter.__file__], env=env, text=True,
+                                input=json.dumps({'action': 'compare_and_set', 'name': self.name}),
+                                capture_output=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'ValueError'})
 
     def test_lost_response_is_reconciled_and_existing_pool_is_preserved(self):
         before = [dict(row) for row in self.rows]

@@ -79,3 +79,27 @@ func TestFileTransferHiddenOnLegacyExecutors(t *testing.T) {
 		}
 	}
 }
+
+func TestFileTransferV3PublishesArchiveBoundary(t *testing.T) {
+	find := func(version int) map[string]any {
+		for _, tool := range fileToolsForAgent(Agent{AgentID: "file:test", Meta: map[string]any{"file_transfer_version": version}}) {
+			if tool["name"] == "file_transfer" {
+				return tool
+			}
+		}
+		return nil
+	}
+	legacy := find(2)
+	current := find(3)
+	if legacy == nil || current == nil {
+		t.Fatalf("missing legacy/current file transfer schemas: legacy=%#v current=%#v", legacy, current)
+	}
+	legacySize := mapValue(mapValue(legacy["inputSchema"])["properties"])["size"]
+	currentSize := mapValue(mapValue(current["inputSchema"])["properties"])["size"]
+	if int64FromAnyValue(mapValue(legacySize)["maximum"]) != legacyTransferFileLimit {
+		t.Fatalf("legacy size limit=%v want %d", legacySize, legacyTransferFileLimit)
+	}
+	if int64FromAnyValue(mapValue(currentSize)["maximum"]) != transferFileLimit {
+		t.Fatalf("v3 size limit=%v want %d", currentSize, transferFileLimit)
+	}
+}

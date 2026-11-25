@@ -68,6 +68,19 @@ func targetAgentMap(agents []Agent) map[string]Agent {
 	return out
 }
 
+func targetTitle(target string, agents map[string]Agent) string {
+	switch target {
+	case "hub":
+		return "GPTAdmin Hub"
+	case "control:hub":
+		return "Hub control"
+	}
+	if agent, ok := agents[target]; ok {
+		return agent.Name
+	}
+	return ""
+}
+
 func (s *Server) shortTarget(target string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,10 +191,8 @@ func (s *Server) compactTargetDescriptors(name string, value any) any {
 			if id := firstString(row, "target"); id != "" {
 				short := shortTarget(id)
 				row["target"] = short
-				if short != id {
-					if agent, ok := agents[id]; ok && agent.Name != "" {
-						row["target_title"] = agent.Name
-					}
+				if title := targetTitle(id, agents); title != "" {
+					row["target_title"] = title
 				}
 			}
 			if ref := mapValue(row["schema_ref"]); len(ref) > 0 {

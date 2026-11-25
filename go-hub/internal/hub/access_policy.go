@@ -443,7 +443,7 @@ var readActionTools = map[string]map[string]bool{
 // change a registration.
 var writeOnlyTools = map[string]bool{
 	"shell_exec": true, "mcp_call": true, "mcp_request": true,
-	"mcp_connection_close": true, "fleetExec": true, "fleet_exec": true,
+	"mcp_connection_close": true, "fleetExec": true, "fleet_exec": true, "fleet_transfer": true,
 	"code_exec": true,
 }
 

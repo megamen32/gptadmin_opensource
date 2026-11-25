@@ -451,7 +451,7 @@ func instructionAwareFacadeTools(tools []map[string]any) []map[string]any {
 		name := firstString(tool, "name")
 		// Header/_meta also work. This convenience field belongs only to our
 		// facades, not to any upstream child's strict argument schema.
-		if name != "discover" && name != "schema" && name != "execute" && name != "fleetExec" && name != "ro" {
+		if name != "discover" && name != "schema" && name != "execute" && name != "fleetExec" && name != "fleet_transfer" && name != "ro" {
 			continue
 		}
 		properties := mapValue(mapValue(tool["inputSchema"])["properties"])

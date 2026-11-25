@@ -27,6 +27,97 @@ type nodePeerRoute struct {
 	OutboundWS       bool   `json:"-"`
 }
 
+type remoteJobOwner struct {
+	Target   string
+	Endpoint string
+	Recorded time.Time
+}
+
+const remoteJobOwnerTTL = 30 * time.Minute
+
+func (s *Server) rememberRemoteJobOwner(receipt map[string]json.RawMessage) {
+	var jobID, target, endpoint string
+	if raw := receipt["job_id"]; raw != nil {
+		_ = json.Unmarshal(raw, &jobID)
+	}
+	if raw := receipt["owner_target"]; raw != nil {
+		_ = json.Unmarshal(raw, &target)
+	}
+	if raw := receipt["owner_endpoint"]; raw != nil {
+		_ = json.Unmarshal(raw, &endpoint)
+	}
+	if jobID == "" || !strings.HasPrefix(target, "shell:") || endpoint == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.remoteJobOwners == nil {
+		s.remoteJobOwners = map[string]remoteJobOwner{}
+	}
+	s.remoteJobOwners[jobID] = remoteJobOwner{Target: target, Endpoint: endpoint, Recorded: time.Now()}
+	s.mu.Unlock()
+}
+
+// forwardRememberedRemoteJob reads a receipt from the owner recorded when an
+// upstream call returned a background job. The endpoint is only a consistency
+// pin; the actual destination is always the enrolled node peer route.
+func (s *Server) forwardRememberedRemoteJob(w http.ResponseWriter, r *http.Request, jobID string, detail string, ack bool) bool {
+	s.mu.Lock()
+	owner, ok := s.remoteJobOwners[jobID]
+	route, routed := s.nodePeerRouteLocked(owner.Target)
+	if ok && time.Since(owner.Recorded) > remoteJobOwnerTTL {
+		delete(s.remoteJobOwners, jobID)
+		ok = false
+	}
+	s.mu.Unlock()
+	if !ok || !routed || route.URL != owner.Endpoint {
+		return false
+	}
+	path := route.URL + "/mcp-relay/job/" + url.PathEscape(jobID)
+	query := url.Values{}
+	if detail != "" {
+		query.Set("detail", detail)
+	}
+	if ack {
+		query.Set("ack", "true")
+	}
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, path, nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("Authorization", r.Header.Get("Authorization"))
+	request.Header.Set(nodePeerHopHeader, "1")
+	client := s.nodePeerClient
+	if route.ConnectTo != "" {
+		s.mu.Lock()
+		client = s.nodePeerPinnedClients[route]
+		if client == nil {
+			client = newPinnedNodePeerClient(s.cfg.DefaultTimeout+10*time.Second, route)
+			s.nodePeerPinnedClients[route] = client
+		}
+		s.mu.Unlock()
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	for _, name := range []string{"WWW-Authenticate", "MCP-Protocol-Version"} {
+		if value := response.Header.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, (64<<20)+1))
+	if err != nil || len(data) > 64<<20 {
+		return false
+	}
+	w.WriteHeader(response.StatusCode)
+	_, _ = w.Write(data)
+	return true
+}
+
 // One pool per logical origin and physical IP. The standard TLS transport
 // verifies the URL hostname, independent of this TCP-only address override.
 func newPinnedNodePeerClient(timeout time.Duration, route nodePeerRoute) *http.Client {
@@ -428,6 +519,7 @@ func (s *Server) forwardNodePeerRequest(w http.ResponseWriter, r *http.Request, 
 	}
 	receipt["owner_target"], _ = json.Marshal(target)
 	receipt["owner_endpoint"], _ = json.Marshal(origin)
+	s.rememberRemoteJobOwner(receipt)
 	if endpoint == "/mcp" && receipt["result"] != nil {
 		var result map[string]json.RawMessage
 		if json.Unmarshal(receipt["result"], &result) == nil && result != nil {

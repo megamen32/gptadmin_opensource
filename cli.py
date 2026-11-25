@@ -1061,23 +1061,41 @@ if IS_MACOS:
                 print(msg, file=sys.stderr)
         return ok
 
+    def _launchd_job_status(label: str) -> tuple[str, str]:
+        """Read the selected launchd domain, not the caller's implicit list."""
+        for domain in _launchd_domains():
+            target = _launchd_service_target(label, domain)
+            try:
+                result = _launchctl_capture(['launchctl', 'print', target])
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode != 0:
+                continue
+            # launchctl print includes nested activation states; only inspect
+            # job-level fields, never a nested endpoint's state or pid.
+            fields = []
+            for line in (result.stdout or '').splitlines():
+                match = re.match(r'^(\s+)(state|pid)\s*=\s*(.*?)\s*$', line)
+                if match:
+                    fields.append((len(match[1].expandtabs(8)), match[2], match[3]))
+            depth = min((field[0] for field in fields), default=0)
+            values = {key: value for indent, key, value in fields if indent == depth}
+            pid = values.get('pid', '0')
+            pid = pid if pid.isdigit() else '0'
+            state = values.get('state', 'unknown')
+            if state == 'running' or int(pid) > 0:
+                return 'running', pid
+            if state in ('waiting', 'not running', 'exited'):
+                return 'loaded (idle)', pid
+            return state, pid
+        return 'not loaded', '0'
+
     def svc_status_multi(labels_and_paths):
         for label, path in labels_and_paths:
             if not path.exists():
                 print(f'  {c_bold(label):<40} {c_red("● missing")}')
                 continue
-            r = _launchctl_capture(['launchctl', 'list', label])
-            out = r.stdout or ''
-            pid = '0'
-            status = 'not loaded' if r.returncode != 0 else 'unknown'
-            for line in out.splitlines():
-                stripped = line.strip()
-                if stripped.startswith('"PID"'):
-                    pid = stripped.split('=')[-1].strip().rstrip(';')
-                elif stripped.startswith('"state"'):
-                    status = stripped.split('=')[-1].strip().strip('"').rstrip(';')
-            if status == 'unknown' and pid not in ('', '0'):
-                status = 'running'
+            status, pid = _launchd_job_status(label)
             if status == 'running':
                 status_str = c_green('● running')
             elif status in ('exited',):
@@ -3818,7 +3836,14 @@ def cmd_config_shellmcp(args):
     env = env_read()
     if args.hub_url:
         ensure_https(args.hub_url)
+        old_hub = env.get('HUB_URL', '').rstrip('/')
         env['HUB_URL'] = args.hub_url.rstrip('/')
+        # Keep automatically derived update endpoints aligned with the Hub.
+        # Explicit custom manifest endpoints must survive reconfiguration.
+        manifest = env.get('SHELLMCP_UPDATE_MANIFEST_URL', '')
+        suffix = '/artifacts/shellmcp.json'
+        if not manifest or manifest == old_hub + suffix:
+            env['SHELLMCP_UPDATE_MANIFEST_URL'] = env['HUB_URL'] + suffix
     if not env.get('HUB_URL'):
         url = ask('Введите HUB_URL (публичный HTTPS адрес хаба, например, https://gptadmin.example.com)')
         ensure_https(url)
@@ -3883,10 +3908,12 @@ def _doctor_service_runtime(label: str) -> tuple[str, str]:
     """Probe one installed service without exposing service-manager output."""
     try:
         if IS_MACOS:
-            result = run(['launchctl', 'list', label], check=False, capture=True, timeout=3)
-            if result.returncode == 0:
-                return 'ok', 'launchd job is loaded'
-            return 'error', 'launchd job is not loaded'
+            state, pid = _launchd_job_status(label)
+            if state == 'not loaded':
+                return 'error', 'launchd job is not loaded'
+            if state == 'running':
+                return 'ok', f'launchd job is running (PID {pid})'
+            return 'warning', f'launchd job is {state}'
         if IS_WINDOWS:
             result = run(['schtasks', '/Query', '/TN', label, '/FO', 'LIST', '/NH'], check=False, capture=True, timeout=3)
             output = (result.stdout or '').lower()
@@ -4315,6 +4342,26 @@ def cmd_doctor(args):
     else:
         print_warn(f"{report['issues']} issue(s) found. Fix them before proceeding.")
 
+def _probe_hub_status(url: str, timeout: float = 4.0) -> tuple[str, int, str]:
+    """Non-mutating HTTPS health probe: no credentials and no queue lease."""
+    started = time.monotonic()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ('https', 'http') or not parts.hostname or parts.username or parts.password:
+            return 'invalid Hub URL', 0, ''
+        request = urllib.request.Request(url.rstrip('/') + '/healthz',
+                                         headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read(65536).decode('utf-8', 'replace'))
+            elapsed = round((time.monotonic() - started) * 1000)
+            if response.status == 200 and isinstance(payload, dict) and payload.get('ok') is True:
+                return 'reachable', elapsed, 'HTTP 200'
+            return 'unexpected health response', elapsed, f'HTTP {response.status}'
+    except urllib.error.HTTPError as exc:
+        return 'HTTP error', round((time.monotonic() - started) * 1000), f'HTTP {exc.code}'
+    except (OSError, ValueError, urllib.error.URLError):
+        return 'unreachable', round((time.monotonic() - started) * 1000), ''
+
 def cmd_status(_):
     units = installed_units()
     if not units:
@@ -4327,6 +4374,12 @@ def cmd_status(_):
     hub_url = env.get('HUB_URL', env.get('PUBLIC_ORIGIN', ''))
     if hub_url:
         print(f'  {c_dim("Hub URL:")} {c_cyan(hub_url)}')
+        state, latency, detail = _probe_hub_status(hub_url)
+        label = c_green('● ' + state) if state == 'reachable' else c_yellow('● ' + state)
+        print(f'  {c_dim("Hub health:")} {label}  {latency} ms {detail}')
+        if env.get('INSTALL_SHELLMCP') == 'true':
+            print(f'  {c_dim("Transport:")} {env.get("SHELLMCP_TRANSPORT", "polling")}')
+            print(f'  {c_dim("Agent enrollment:")} not measured by public health probe')
     tunnel = env.get('TUNNEL_MODE', '')
     if tunnel:
         print(f'  {c_dim("Tunnel:")}  {c_green(tunnel)}')

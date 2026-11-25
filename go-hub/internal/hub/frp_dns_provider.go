@@ -25,6 +25,8 @@ func frpDNSPublisherFromEnv(pool *frpSpaceWebPool) (frpDNSPublisher, error) {
 		return frpPowerDNSFromEnv()
 	case "spaceweb":
 		return frpSpaceWebFromEnv(nil)
+	case "exec":
+		return frpDNSExecFromEnv()
 	default:
 		return nil, errors.New("unknown FRP DNS provider")
 	}

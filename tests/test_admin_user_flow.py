@@ -23,6 +23,7 @@ class _AdminHandler(BaseHTTPRequestHandler):
     """Minimal admin surface that records the runner's exact request paths."""
 
     paths: ClassVar[list[str]] = []
+    overview_payload: ClassVar[Any] = {"ok": True}
 
     def _send(self, status: int, payload: Any, content_type: str = "text/html") -> None:
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -39,7 +40,7 @@ class _AdminHandler(BaseHTTPRequestHandler):
         elif self.path == "/admin/":
             self._send(200, b"GPTAdmin")
         elif self.path == "/admin/api/overview?limit=1":
-            self._send(200, {"ok": True}, "application/json")
+            self._send(200, type(self).overview_payload, "application/json")
         elif self.path == "/admin/api/access-profiles":
             self._send(200, {"profiles": []}, "application/json")
         else:
@@ -84,6 +85,28 @@ def test_admin_page_url_is_normalized_to_hub_origin() -> None:
         "/admin/api/overview?limit=1",
         "/admin/api/access-profiles",
     ]
+
+
+def test_admin_flow_accepts_large_overview_json() -> None:
+    """A valid overview larger than the old 256 KiB read cap must pass."""
+
+    _AdminHandler.paths = []
+    _AdminHandler.overview_payload = {"ok": True, "padding": "x" * 300_000}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AdminHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        summary = admin_user_flow.run_admin_user_flow(
+            f"http://127.0.0.1:{server.server_port}/admin/",
+            "test-password",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+        _AdminHandler.overview_payload = {"ok": True}
+
+    assert summary["status"] == "passed"
 
 
 @pytest.mark.parametrize(

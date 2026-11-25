@@ -32,7 +32,7 @@ The CPU counter is container-wide: the Hub, its local polling sidecar, and conta
 
 ## Reproduction and evidence
 
-[`evidence/resources/repro.md`](../.agents/tasks/20261107-gptadmin-fullcycle/evidence/resources/repro.md) records the Docker invocation, cgroup readback commands, bounded JS body, MCP schema/expand calls and cleanup. Key raw receipts are `manifest-1104.json`, `parallel-retry.json`, `schema.json`, `expand.json`, `catalog.json`, `before-parallel.txt`, `after-parallel.txt`, `after-expand.txt`, and `runtime.log`; [`metrics.json`](../.agents/tasks/20261107-gptadmin-fullcycle/evidence/resources/metrics.json) summarizes the numbers.
+The Docker invocation, cgroup readback commands, bounded JS body, MCP schema/expand calls and cleanup are retained in the closed task workspace and are not shipped in this repository. Key raw receipts are `manifest-1104.json`, `parallel-retry.json`, `schema.json`, `expand.json`, `catalog.json`, `before-parallel.txt`, `after-parallel.txt`, `after-expand.txt`, and `runtime.log`; `metrics.json` summarizes the numbers.
 
 Two setup details are preserved in `preflight.txt`: the first container start exited because the test omitted required `SHELL_TOKEN`; after adding a disposable value, the same binary started. The first `exec` request correctly returned `instructions_required` with `calls=0`; repeating with its returned context completed the four calls. That ephemeral context was removed from the stored receipt.
 
@@ -52,4 +52,4 @@ The largest real response measured here was the 19,247-byte tool catalog. The bu
 - Cgroup CPU вырос с 2,368,123 до 6,159,307 µs; два throttled periods, 20,480 µs throttled. CPU delta охватывает весь RSS-sampler интервал, Hub и polling sidecar, поэтому это контейнерное потребление за весь интервал, а не стоимость одних четырёх запросов.
 - Очистка: `docker stop -t 10` дошёл до SIGKILL (exit 137), но cgroup OOM-счётчики остались нулевыми; контейнер удалён, loopback port освобождён.
 
-Сырые конкурентные ответы и тайминги: `evidence/resources/concurrent-[1-4].json`, `concurrent-[1-4].time`, `concurrent-summary.json`, `concurrent-rss-samples.tsv`, `concurrent-rss-summary.txt`, `concurrent-before.txt`, `concurrent-after.txt`, `concurrent-runtime.log` и `concurrent-container-final-state.json`. Запуск воспроизводится тем же Docker способом из [`repro.md`](../.agents/tasks/20261107-gptadmin-fullcycle/evidence/resources/repro.md), заменив `-p 127.0.0.1:19011:19011` на `-p 127.0.0.1::19011`; порт читается из `docker inspect`.
+Сырые конкурентные ответы и тайминги сохранены в закрытом task workspace: `concurrent-[1-4].json`, `concurrent-[1-4].time`, `concurrent-summary.json`, `concurrent-rss-samples.tsv`, `concurrent-rss-summary.txt`, `concurrent-before.txt`, `concurrent-after.txt`, `concurrent-runtime.log` и `concurrent-container-final-state.json`. Запуск воспроизводится тем же Docker способом; динамический порт читается из `docker inspect`.

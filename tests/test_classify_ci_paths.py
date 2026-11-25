@@ -25,11 +25,14 @@ class ClassifierTests(unittest.TestCase):
             self.assertFalse(ci.classify(["scripts/github_ci_autofix.py", path]))
         self.assertFalse(ci.classify([]))
 
-    def test_auto_tag_uses_the_same_exact_operator_allowlist(self):
+    def test_auto_tag_waits_for_successful_build_before_tagging(self):
         text = (SOURCE.parents[1] / ".github/workflows/auto-tag.yml").read_text()
-        paths = set(re.findall(r"^      - '([^']+)'$", text, re.MULTILINE))
-        self.assertEqual(paths - {".github/**"}, ci.OPERATOR_PATHS)
-        self.assertIn(".github/**", paths)  # existing release policy, not product-CI exemption
+        self.assertNotIn("\n  push:", text)
+        self.assertIn("\n  workflow_run:", text)
+        self.assertIn('workflows: ["Build, Sync, Release"]', text)
+        self.assertIn("types: [completed]", text)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", text)
+        self.assertIn("github.event.workflow_run.head_branch == 'main'", text)
 
     def test_release_waits_for_installer_and_operator_checks(self):
         text = (SOURCE.parents[1] / ".github/workflows/build-and-sync.yml").read_text()

@@ -10,8 +10,9 @@ signing secret into Codex chat, `.mcp.json`, a skill, or a task file.
 
 The default endpoint is `https://mcp.bezrabotnyi.com/mcp`. This hostname is the
 canonical GPTAdmin OAuth resource and issuer for this installation. For another
-GPTAdmin installation, change only the URL in `.mcp.json` to that Hub's public
-HTTPS `/mcp` endpoint before connecting. The Hub must advertise the standard
+GPTAdmin installation, set the server URL to that Hub's public HTTPS `/mcp`
+endpoint before connecting. Codex reads `.mcp.json` and portable clients use
+`mcp.json`. The Hub must advertise the standard
 OAuth discovery endpoints:
 
 - `/.well-known/oauth-protected-resource`
@@ -33,6 +34,21 @@ verify `tools/list`, then run a read-only `search` before any write or command.
 `discover` and `schema` remain available for read-only compatibility. The public
 direct `execute(target, tool, args)` route is retired; use `search` plus
 `exec` instead.
+
+## Add a DNS provider to your own installation
+
+Use [gptadmin-dns-adapter](skills/gptadmin-dns-adapter/SKILL.md) to configure SpaceWeb or Cloudflare DNS-only, or to implement the two IPv4 pool operations for your provider. Give your assistant the provider name, your test hostname and the two ingress paths. It will use your own MCP URL to test reconnection after one ingress stops.
+
+The packaged plugin includes this skill. With another assistant, open the linked `SKILL.md` directly or copy its directory into that assistant's skill folder. Reading the standalone file requires no GPTAdmin plugin connection.
+
+For standalone Codex use, run this from the root of the matching GPTAdmin checkout:
+
+```sh
+mkdir -p ~/.agents/skills
+cp -R plugins/gptadmin/skills/gptadmin-dns-adapter ~/.agents/skills/
+```
+
+Ask Codex to use `$gptadmin-dns-adapter` with your provider and test hostname. See [the operator guide](../../docs/INGRESS_ADAPTERS.md) for examples and service configuration.
 
 ## Recovery and tunnel boundary
 

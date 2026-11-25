@@ -22,6 +22,7 @@ class AdminFlowError(RuntimeError):
 
 _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _LEGACY_NUMERIC_COMPONENT = re.compile(r"(?:0x[0-9A-Fa-f]+|[0-9]+)")
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 def _is_canonical_host(hostname: str) -> bool:
@@ -87,9 +88,15 @@ def _request(opener: urllib.request.OpenerDirector, base_url: str, path: str, fo
     )
     try:
         with opener.open(request, timeout=12) as response:
-            return response.status, response.read(262144)
+            body = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(body) > _MAX_RESPONSE_BYTES:
+                raise AdminFlowError(f"{path}: response exceeds {_MAX_RESPONSE_BYTES} bytes")
+            return response.status, body
     except urllib.error.HTTPError as error:
-        return error.code, error.read(262144)
+        body = error.read(_MAX_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_RESPONSE_BYTES:
+            raise AdminFlowError(f"{path}: error response exceeds {_MAX_RESPONSE_BYTES} bytes") from None
+        return error.code, body
     except urllib.error.URLError as error:
         raise AdminFlowError(f"{path}: transport failure ({type(error.reason).__name__})") from None
 

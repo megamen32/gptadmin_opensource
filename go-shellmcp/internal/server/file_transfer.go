@@ -21,8 +21,12 @@ import (
 	"github.com/megamen32/gptadmin/go-shellmcp/internal/fsacl"
 )
 
-const transferFileLimit = 16 << 20
-const transferChunkLimit = 32 << 10
+// Large-file transfer remains bounded, while allowing the signed desktop
+// archives used by the fleet to move through the authenticated Hub.
+const transferFileLimit = 256 << 20
+const transferChunkLimit = 1 << 20
+const transferFileLimitLabel = "256 MiB"
+const transferChunkLimitLabel = "1 MiB"
 const transferSlots = 4
 const transferListLimit = 1000
 const transferTTL = 15 * time.Minute
@@ -167,7 +171,7 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 			return nil, errors.New("file transfer capacity reached; abort unused transfers or wait for expiry")
 		}
 		if req.Size < 0 || req.Size > transferFileLimit {
-			return nil, errors.New("file size exceeds 16 MiB limit")
+			return nil, fmt.Errorf("file size exceeds %s limit", transferFileLimitLabel)
 		}
 		t := &binaryTransfer{path: req.Path, owner: owner, direction: "upload", size: req.Size, digest: req.SHA256}
 		if read {
@@ -177,7 +181,7 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 				return nil, e
 			}
 			if !before.Mode().IsRegular() || before.Size() > transferFileLimit {
-				return nil, errors.New("download requires a regular file of at most 16 MiB")
+				return nil, fmt.Errorf("download requires a regular file of at most %s", transferFileLimitLabel)
 			}
 			f, e := transferOpenRead(root, rel)
 			if e != nil {
@@ -276,7 +280,7 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 			return nil, errors.New("upload is already committed")
 		}
 		if len(req.Data) > base64.StdEncoding.EncodedLen(transferChunkLimit) {
-			return nil, errors.New("chunk exceeds 32 KiB")
+			return nil, fmt.Errorf("chunk exceeds %s", transferChunkLimitLabel)
 		}
 		data, e := base64.StdEncoding.Strict().DecodeString(req.Data)
 		if e != nil || len(data) == 0 || len(data) > transferChunkLimit || base64.StdEncoding.EncodeToString(data) != req.Data {
@@ -337,7 +341,7 @@ func (s *Server) mcpFileTransfer(ctx context.Context, args map[string]any) (map[
 			count = transferChunkLimit
 		}
 		if count < 1 || count > transferChunkLimit {
-			return nil, errors.New("max_bytes must be 1..32768")
+			return nil, fmt.Errorf("max_bytes must be 1..%d", transferChunkLimit)
 		}
 		end := req.Offset + int64(count)
 		if end > t.size {
@@ -413,7 +417,7 @@ func transferDestinationDigest(root *os.Root, rel string) (string, error) {
 		return "", e
 	}
 	if !before.Mode().IsRegular() || before.Size() > transferFileLimit {
-		return "", errors.New("upload_replace requires a regular destination of at most 16 MiB")
+		return "", fmt.Errorf("upload_replace requires a regular destination of at most %s", transferFileLimitLabel)
 	}
 	f, e := transferOpenRead(root, rel)
 	if e != nil {
@@ -459,7 +463,7 @@ func (s *Server) transferStat(policy *fsacl.Policy, req transferArgs) (map[strin
 		"size": info.Size(), "mtime": info.ModTime().UTC().Format(time.RFC3339Nano)}
 	if req.Hash && info.Mode().IsRegular() {
 		if info.Size() > transferFileLimit {
-			return nil, errors.New("stat hash requires a regular file of at most 16 MiB")
+			return nil, fmt.Errorf("stat hash requires a regular file of at most %s", transferFileLimitLabel)
 		}
 		digest, err := transferDestinationDigest(root, rel)
 		if err != nil {
@@ -546,7 +550,7 @@ func (s *Server) transferList(policy *fsacl.Policy, req transferArgs) (map[strin
 }
 
 func fileTransferToolDefinition() map[string]any {
-	return map[string]any{"name": "file_transfer", "description": "Private binary file exchange through existing authenticated MCP, without public URLs. Paths must stay in configured roots. 16 MiB per file, four transfers per node, 32 KiB chunks, 15-minute TTL. Upload begin declares size and SHA256; chunk retries are idempotent; commit atomically creates a NEW file (never overwrites). upload_replace instead atomically replaces an existing file at commit, and only while its digest still equals expected_sha256. Download begin snapshots and hashes the file. stat and list are stateless metadata reads within the same roots; stat can hash with hash=true. Resume after transport loss using transfer_id and offsets, not after node restart. Abort to release memory. Binary data is base64; do not print it into chat.",
+	return map[string]any{"name": "file_transfer", "description": "Private binary file exchange through existing authenticated MCP, without public URLs. Paths must stay in configured roots. 256 MiB per file, four transfers per node, 1 MiB chunks, 15-minute TTL. Upload begin declares size and SHA256; chunk retries are idempotent; commit atomically creates a NEW file (never overwrites). upload_replace instead atomically replaces an existing file at commit, and only while its digest still equals expected_sha256. Download begin snapshots and hashes the file. stat and list are stateless metadata reads within the same roots; stat can hash with hash=true. Resume after transport loss using transfer_id and offsets, not after node restart. Abort to release memory. Binary data is base64; do not print it into chat.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 			"action":          map[string]any{"type": "string", "enum": []string{"upload_begin", "upload_replace", "upload_chunk", "upload_status", "upload_commit", "upload_abort", "download_begin", "download_chunk", "download_abort", "stat", "list"}},
 			"path":            map[string]any{"type": "string"},

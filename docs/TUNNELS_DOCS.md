@@ -3,6 +3,8 @@
 The hub needs to be reachable from the internet (so your AI / MCP clients can
 connect). You don't need your own domain — GPT‑Админ supports two auto-tunnels.
 
+For a stable public URL with independent ingress paths and third-party DNS providers, see [Ingress adapters](./INGRESS_ADAPTERS.md).
+
 ## FRP (default)
 
 [FRP](https://github.com/fatedier/frp) is a fast reverse proxy. GPT‑Админ runs

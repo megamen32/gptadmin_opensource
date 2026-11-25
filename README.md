@@ -239,7 +239,6 @@ The default output focuses on the hub and ShellMCP endpoints. `--all` also inclu
 
 ## Optional capabilities
 
-If you later need a single-server relay or webhook ingress, use the dedicated docs:
-
 - [MCP Proxy Relay](./docs/MCP_PROXY_RELAY.md)
 - [Webhooks](./docs/WEBHOOKS.md)
+- [Self-hosted DNS and ingress adapters](./docs/INGRESS_ADAPTERS.md) and [the AI skill for adding your provider](./plugins/gptadmin/skills/gptadmin-dns-adapter/SKILL.md)

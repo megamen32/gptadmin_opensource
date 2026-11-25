@@ -202,6 +202,8 @@ production hostname or the entire primary machine was not performed here.
 
 ## Enrolling a public FRP relay
 
+For a stable public URL with independent ingress paths and third-party DNS providers, see [Ingress adapters](./INGRESS_ADAPTERS.md).
+
 An operator can add an IPv4 address to a first-time node grant with
 `gptadmin node grant issue --name NODE --frp-relay-ipv4 ADDRESS`. The new
 node uses its normal join command. The quorum leader commits the enrollment

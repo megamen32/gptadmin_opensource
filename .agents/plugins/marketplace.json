@@ -1,0 +1,20 @@
+{
+  "name": "gptadmin-local",
+  "interface": {
+    "displayName": "GPTAdmin Local"
+  },
+  "plugins": [
+    {
+      "name": "gptadmin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/gptadmin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

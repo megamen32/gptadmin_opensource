@@ -130,13 +130,20 @@ def execute(request, zone, name, rpc, *, allow_append_a=False):
 
 
 def main():
+    # The argument-free publisher gets its exact scope from the Node.
+    # Legacy callers still select individual actions using their own CLI options.
+    pool_name = os.environ.get('GPTADMIN_FRP_DNS_NAME') if len(sys.argv) == 1 else None
+    packaged_transport = '/usr/local/lib/gptadmin/swebmimic'
+    default_transport = (packaged_transport if pool_name and os.path.isfile(packaged_transport)
+                         else '/usr/local/bin/swebmimic')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--zone', default=os.environ.get('GPTADMIN_FRP_DNS_ZONE'))
-    parser.add_argument('--name', default=os.environ.get('GPTADMIN_FRP_DNS_SPACEWEB_NAME'),
+    parser.add_argument('--name', default=pool_name or os.environ.get('GPTADMIN_FRP_DNS_SPACEWEB_NAME'),
                         help='one allowed fully qualified hostname')
     parser.add_argument('--transport', default=os.environ.get('GPTADMIN_FRP_DNS_SPACEWEB_TRANSPORT')
-                        or '/usr/local/bin/swebmimic')
-    parser.add_argument('--creds', default=os.environ.get('GPTADMIN_FRP_DNS_SPACEWEB_CREDENTIALS_FILE'),
+                        or default_transport)
+    parser.add_argument('--creds', default=(os.environ.get('GPTADMIN_FRP_DNS_CREDENTIALS_FILE') if pool_name
+                                           else os.environ.get('GPTADMIN_FRP_DNS_SPACEWEB_CREDENTIALS_FILE')),
                         help='existing SpaceWeb credential file')
     parser.add_argument('--allow-append-a', action='store_true',
                         help='allow an additive write to the configured exact A pool')
@@ -150,6 +157,8 @@ def main():
     if len(raw) > 4096:
         raise ValueError('request_oversize')
     request = json.loads(raw)
+    if pool_name and (not isinstance(request, dict) or request.get('action') not in ('append_a', 'read_a_pool')):
+        raise ValueError('pool_action_required')
 
     def rpc(method, params):
         result = subprocess.run([args.transport, '-single-attempt', '-creds', args.creds,
@@ -164,7 +173,7 @@ def main():
         return response
 
     print(json.dumps(execute(request, args.zone.rstrip('.').lower(), args.name.rstrip('.').lower(), rpc,
-                             allow_append_a=args.allow_append_a)), flush=True)
+                             allow_append_a=args.allow_append_a or bool(pool_name))), flush=True)
 
 
 if __name__ == '__main__':

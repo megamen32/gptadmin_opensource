@@ -9,12 +9,12 @@ PLUGIN = ROOT / "plugins" / "gptadmin"
 def test_gptadmin_plugin_manifest_declares_oauth_mcp_and_workflow_skills():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "gptadmin"
-    assert manifest["version"] == "1.4.0"
+    assert manifest["version"] == "1.5.0"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert "OAuth" in manifest["interface"]["longDescription"]
     assert "password" in manifest["interface"]["longDescription"]
-    assert {"gptadmin-connect", "gptadmin-mcp-install", "gptadmin-workflow"} == {
+    assert {"gptadmin-connect", "gptadmin-mcp-install", "gptadmin-workflow", "gptadmin-dns-adapter"} == {
         path.name for path in (PLUGIN / "skills").iterdir() if path.is_dir()
     }
 
@@ -47,7 +47,7 @@ def test_portable_plugin_matches_native_version_and_fixed_layout():
     portable = json.loads((PLUGIN / 'plugin.json').read_text())
     native = json.loads((PLUGIN / '.codex-plugin' / 'plugin.json').read_text())
     assert portable['$schema'] == 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json'
-    assert portable['version'] == native['version'] == '1.4.0'
+    assert portable['version'] == native['version'] == '1.5.0'
     assert portable['name'] == 'gptadmin'
     assert set(portable) <= {'$schema', 'name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords', 'extensions'}
     config = json.loads((PLUGIN / 'mcp.json').read_text())

@@ -4,9 +4,10 @@ The file_transfer MCP MCP tool uses the existing authenticated GPTAdmin connecti
 No public download links, SSH keys, new tokens or expanded filesystem rights
 are created.
 
-Limits: 16 MiB per file, 32 KiB decoded per chunk, four retained transfers per
-Node and 15-minute absolute expiry. Chunks fit the 65,536-character exec input
-and 65,536-byte output budgets. Use max_output_bytes=65536 for full chunks.
+Limits: 256 MiB per file, 1 MiB decoded per chunk, four retained transfers per
+Node and 15-minute absolute expiry. Executors advertising
+`file_transfer_version=3` support this large-file boundary. Older executors
+retain the 16 MiB and 32 KiB contract.
 
 Upload: upload_begin(path,size,sha256), then contiguous upload_chunk calls
 (transfer_id,path,offset,data_base64, optional chunk sha256). upload_status
@@ -17,7 +18,8 @@ the destination directory owner, so the ordinary OS user can read the upload. Th
 retried while its handle is retained. upload_abort releases the handle only.
 
 Replace (file_transfer_version 2): upload_replace(path,size,sha256,expected_sha256)
-opens a replace-mode upload against an EXISTING regular file of at most 16 MiB.
+opens a replace-mode upload against an EXISTING regular file within the
+advertised file-size boundary.
 The begin fails unless the current destination digest equals expected_sha256.
 Chunks and status behave exactly like an upload. upload_commit re-reads and
 re-hashes the destination and aborts with "destination changed since
@@ -28,12 +30,14 @@ a sidecar file plus mv.
 
 Download: download_begin(path) creates a bounded snapshot and returns size,
 sha256 and expires_at. download_chunk accepts transfer_id,path,offset,max_bytes
-(up to 32768), returning data_base64, chunk_sha256, next_offset and eof.
+(up to the advertised chunk boundary), returning data_base64, chunk_sha256,
+next_offset and eof.
 Verify each chunk and the reconstructed full hash, then download_abort.
 
 Metadata (file_transfer_version 2): stat(path[,hash]) is a stateless read that
 returns name, size, mode, mtime, is_dir and is_regular within the same roots;
-hash=true additionally returns the SHA-256 of a regular file of at most 16 MiB.
+hash=true additionally returns the SHA-256 of a regular file within the
+advertised file-size boundary.
 list(path[,pattern]) enumerates one directory (sorted, at most 1000 entries,
 truncated=true when cut) and accepts a glob matched against entry names.
 Neither consumes a transfer slot. Read-only profiles may use stat and list.
@@ -60,6 +64,40 @@ version, not a large-build or persistent cross-restart transfer service.
 
 Verification: focused Node tests, Hub ACL/legacy tests and a real authenticated
 MCP exec -> Hub queue -> Node -> filesystem -> download integration test.
+
+## Fleet transfer
+
+The Hub-owned `fleet_transfer` tool composes the existing download and upload
+contracts for two explicit paired file targets. It never opens a direct LAN
+listener and never changes SSH keys, firewall or VPN state.
+
+Enable exact source/destination pairs in the Hub environment:
+
+```json
+GPTADMIN_FLEET_TRANSFER_ALLOWLIST='[{"source":"file:node-a","destination":"file:node-b"}]'
+```
+
+Use the existing authenticated MCP code path:
+
+```js
+return await mcp.call("hub", "fleet_transfer", {
+  source: "file:node-a",
+  destination: "file:node-b",
+  source_path: "/srv/source.bin",
+  destination_path: "/srv/destination.bin"
+});
+```
+
+The pair must be present exactly in the Hub allowlist and each file target
+must resolve through the existing enrolled-node identity and peer route. The
+destination is created atomically and must not already exist. The completed
+receipt binds both target IDs and paths to the byte count and SHA-256, and
+sets `verified=true` only after the destination commit receipt matches the
+source snapshot.
+
+Fleet transfer requires `file_transfer_version=3` on both peers. It uses the
+same bounded 256 MiB and 1 MiB chunk limits, so a signed desktop archive can
+move without a public URL or a direct node-to-node listener.
 
 Release safety: the lifecycle updater accepts --expected-revision with the full
 installed Git SHA. It checks before preflight and again under a cooperating

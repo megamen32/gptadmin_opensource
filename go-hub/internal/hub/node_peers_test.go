@@ -66,6 +66,35 @@ func TestNodePeersPreserveCallerAndOriginalBody(t *testing.T) {
 	}
 }
 
+func TestNodePeersRememberOwnerForRestJobRead(t *testing.T) {
+	var calls atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == "/mcp-relay/call" {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "running", "background": true, "job_id": "upstream-job"})
+			return
+		}
+		if r.URL.Path == "/mcp-relay/job/upstream-job" && r.Header.Get(nodePeerHopHeader) == "1" {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "job_id": "upstream-job", "response": map[string]any{"marker": "owner-receipt"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer peer.Close()
+	s := peerTestHub(t, "caller-token", map[string]string{"shell:nodeB": peer.URL})
+	call := peerTestCall(s, `{"target":"shell:nodeB","tool":"shell_exec","arguments":{"cmd":"true"},"background":true}`, "caller-token", "")
+	if call.Code != http.StatusOK || !strings.Contains(call.Body.String(), `"job_id":"upstream-job"`) {
+		t.Fatalf("upstream pending receipt missing: %d %s", call.Code, call.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, "/mcp-relay/job/upstream-job", nil)
+	read.Header.Set("Authorization", "Bearer caller-token")
+	got := httptest.NewRecorder()
+	s.Handler().ServeHTTP(got, read)
+	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "owner-receipt") || calls.Load() != 2 {
+		t.Fatalf("remembered owner receipt was not proxied: %d %s calls=%d", got.Code, got.Body.String(), calls.Load())
+	}
+}
+
 func TestNodePeersDestinationAuthorizesOriginalBearer(t *testing.T) {
 	b := peerTestHub(t, "different-owner-token", map[string]string{})
 	peer := httptest.NewServer(b.Handler())

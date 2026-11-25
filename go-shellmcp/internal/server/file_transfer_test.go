@@ -45,9 +45,13 @@ func TestFileTransferBinaryRoundtripResumeAndAtomicCreate(t *testing.T) {
 	path := filepath.Join(dir, "binary.dat")
 	data := bytes.Repeat([]byte{0, 1, 2, 255, 128, 13, 10}, 17000)
 	id := transferTestBegin(t, s, path, data)
-	transferTestChunk(t, s, path, id, 0, data[:transferChunkLimit])
-	got := transferTestChunk(t, s, path, id, 0, data[:transferChunkLimit])
-	if got["received"] != int64(transferChunkLimit) {
+	chunkSize := transferChunkLimit
+	if chunkSize > len(data)/2 {
+		chunkSize = len(data) / 2
+	}
+	transferTestChunk(t, s, path, id, 0, data[:chunkSize])
+	got := transferTestChunk(t, s, path, id, 0, data[:chunkSize])
+	if got["received"] != int64(chunkSize) {
 		t.Fatal(got)
 	}
 	if _, e := os.Stat(path); !os.IsNotExist(e) {
@@ -56,8 +60,8 @@ func TestFileTransferBinaryRoundtripResumeAndAtomicCreate(t *testing.T) {
 	if _, e := s.mcpFileTransfer(ctx, map[string]any{"action": "upload_commit", "path": path, "transfer_id": id}); e == nil {
 		t.Fatal("incomplete upload committed")
 	}
-	for offset := transferChunkLimit; offset < len(data); {
-		end := offset + transferChunkLimit
+	for offset := chunkSize; offset < len(data); {
+		end := offset + chunkSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -164,6 +168,27 @@ func TestFileTransferDigestMismatchAndEmptyFile(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestFileTransferAcceptsArchiveSizedUpload(t *testing.T) {
+	s, dir := transferTestServer(t)
+	path := filepath.Join(dir, "archive.zip")
+	size := int64(16<<20 + 1)
+	raw := transferTestCall(t, s, context.Background(), map[string]any{
+		"action": "upload_begin",
+		"path":   path,
+		"size":   size,
+		"sha256": transferDigest(nil),
+	})
+	if raw["size"] != size {
+		t.Fatalf("size=%v want %d", raw["size"], size)
+	}
+	transferTestCall(t, s, context.Background(), map[string]any{
+		"action":      "upload_abort",
+		"path":        path,
+		"transfer_id": raw["transfer_id"],
+	})
+}
+
 func TestFileTransferRootsSymlinksAndProfileIsolation(t *testing.T) {
 	s, dir := transferTestServer(t)
 	outside := t.TempDir()

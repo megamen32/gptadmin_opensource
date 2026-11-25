@@ -70,9 +70,11 @@ type Config struct {
 	// approval round-trip. Fleet Hubs never set this and keep the gate.
 	StandaloneAutoTrust bool
 	// NodePeersJSON maps explicit shell targets to independently reachable node origins.
-	NodePeersJSON  string
-	MeshCoreSocket string
-	MeshCoreHostID string
+	NodePeersJSON string
+	// FleetTransferAllowlistJSON contains exact file:<node> source/destination pairs.
+	FleetTransferAllowlistJSON string
+	MeshCoreSocket             string
+	MeshCoreHostID             string
 	// NodeIdentityFile pins this node's mesh identity; membership heartbeat
 	// and view replication activate only when it exists and parses.
 	NodeIdentityFile string
@@ -193,6 +195,7 @@ func FromEnv() Config {
 		RelayAgentToken:            env("MCP_RELAY_AGENT_TOKEN", env("GPTADMIN_MCP_RELAY_AGENT_TOKEN", "")),
 		ShellToken:                 env("SHELL_TOKEN", env("SHELLMCP_TOKEN", "")),
 		NodePeersJSON:              env("GPTADMIN_NODE_PEERS", ""),
+		FleetTransferAllowlistJSON: env("GPTADMIN_FLEET_TRANSFER_ALLOWLIST", ""),
 		MeshCoreSocket:             env("GPTADMIN_MESH_CORE_SOCKET", ""),
 		MeshCoreHostID:             env("GPTADMIN_MESH_CORE_HOST_ID", ""),
 		NodeIdentityFile:           env("GPTADMIN_NODE_IDENTITY", ""),
@@ -633,6 +636,9 @@ type Server struct {
 	localExecutorTokens           map[string]string
 	nodePeers                     map[string]nodePeerRoute
 	nodePeersErr                  error
+	remoteJobOwners               map[string]remoteJobOwner
+	fleetTransferAllowlist        map[string]struct{}
+	fleetTransferAllowlistErr     error
 	meshCore                      *meshroute.Verifier
 	meshCoreErr                   error
 	quorumNode                    *quorum.Node
@@ -813,6 +819,7 @@ func New(cfg Config) *Server {
 		relayEnrollments:  map[string]relayEnrollment{},
 		relayQueues:       map[string][]string{},
 		relayJobs:         map[string]*relayJob{},
+		remoteJobOwners:   map[string]remoteJobOwner{},
 		shellQueues:       map[string][]string{},
 		shellControls:     map[string][]shellControl{},
 		shellJobs:         map[string]*shellJob{},
@@ -848,6 +855,7 @@ func New(cfg Config) *Server {
 	s.toolSearches = map[string]*toolSearchCacheEntry{}
 	s.memoryBudget = &hubMemoryBudget{limit: hubManagedMemoryBudget}
 	s.nodePeers, s.nodePeersErr = parseNodePeers(cfg.NodePeersJSON)
+	s.fleetTransferAllowlist, s.fleetTransferAllowlistErr = parseFleetTransferAllowlist(cfg.FleetTransferAllowlistJSON)
 	s.meshCore, s.meshCoreErr = meshroute.New(cfg.MeshCoreSocket, cfg.MeshCoreHostID)
 	s.nodePeerClient = newNodePeerClient(cfg.DefaultTimeout + 10*time.Second)
 	s.nodeBearerAdmissionClient = newNodeBearerAdmissionClient(cfg.NodeWriterConnectTo)
@@ -1726,6 +1734,9 @@ func (s *Server) ServeContext(ctx context.Context, listener net.Listener) error 
 	}
 	if s.nodePeersErr != nil {
 		return s.nodePeersErr
+	}
+	if s.fleetTransferAllowlistErr != nil {
+		return s.fleetTransferAllowlistErr
 	}
 	if s.secretStoreErr != nil {
 		return fmt.Errorf("secret ingress store unavailable: %w", s.secretStoreErr)
@@ -6098,6 +6109,9 @@ func (s *Server) mcpRelayJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, result)
 		return
 	}
+	if s.forwardRememberedRemoteJob(w, r, jobID, outputDetail, ack) {
+		return
+	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"detail": "unknown job"})
 }
 
@@ -6258,6 +6272,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	}
 	if name == "search" {
 		return s.searchToolsForRequest(r, args), http.StatusOK
+	}
+	if name == fleetTransferToolName {
+		return s.fleetTransferForRequest(r, args)
 	}
 	if name == codeModeTool {
 		return s.callCodeModeTool(r, args)
@@ -6647,6 +6664,7 @@ func hubTools() []map[string]any {
 		{"name": "pending", "description": "List devices waiting for approval (server_id, name, OS, fingerprint). Approve one with approve_pending_server.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "approve_pending_server", "description": "Approve a device waiting for enrollment; server_id is the exact shell:<name> from pending. Only on the user's explicit request.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"server_id": map[string]any{"type": "string", "description": "Exact shell:<name> returned by pending"}}, "required": []string{"server_id"}, "additionalProperties": false}},
 		{"name": "fleetExec", "description": "Run one shell command across multiple ShellMCP targets; returns one parent task. Use approval_ids for per-target approvals.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"servers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cmd": map[string]any{"type": "string"}, "cwd": map[string]any{"type": []string{"string", "null"}}, "timeout": map[string]any{"type": []string{"integer", "null"}}, "approval_ids": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": idempotencyKeyMax}}, "required": []string{"cmd"}, "additionalProperties": false}},
+		fleetTransferToolDefinition(),
 		{"name": "status", "description": "Return Hub status", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "settings_schema", "description": "Describe the unified typed Hub settings registry", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 		{"name": "settings_get", "description": "Read persisted Hub settings", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
@@ -10975,6 +10993,9 @@ func (s *Server) appsSDKCall(name string, args map[string]any) any {
 	case "demo":
 		result, _ := s.callHubTool(name, args)
 		return result
+	case fleetTransferToolName:
+		result, _ := s.callHubTool(name, args)
+		return result
 	case "list_mcp_agents", "listMcpAgents":
 		s.mu.Lock()
 		agents := s.publicAgentsLocked(nil)
@@ -11064,6 +11085,10 @@ func (s *Server) appsSDKCallRawForRequest(r *http.Request, name string, args map
 		}
 	}
 	if name == "demo" || name == "pending" || name == "list_pending_servers" || name == "approve_pending_server" {
+		result, _ := s.callHubToolForRequest(r, name, args)
+		return result
+	}
+	if name == fleetTransferToolName {
 		result, _ := s.callHubToolForRequest(r, name, args)
 		return result
 	}
