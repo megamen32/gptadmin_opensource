@@ -26,8 +26,11 @@ dig() {
 # Advance Bash's elapsed-time counter deterministically instead of relying on
 # wall-clock scheduling around integer-second SECONDS boundaries.
 sleep() { SECONDS=$((SECONDS + PROBE_INTERVAL)); }
-export -f dig sleep
-bash "$1"
+# A new bash process with SECONDS unset makes it an ordinary variable,
+# so host scheduling cannot advance the fixture's synthetic clock.
+unset SECONDS
+SECONDS=0
+source "$1"
 '''
 
 
