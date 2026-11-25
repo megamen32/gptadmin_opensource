@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -190,22 +191,22 @@ func TestChecksumForAssetRejectsMissingOrMalformed(t *testing.T) {
 	}
 }
 
-func TestWindowsReplaceScriptRestartsCanonicalTaskBeforeDirectFallback(t *testing.T) {
+func TestWindowsReplaceScriptRestartsCanonicalTaskBeforeLauncherFallback(t *testing.T) {
 	script := windowsReplaceScript(123, "gptadmin-shellmcp", "gptadmin-shellmcp-self-repair", `C:\ProgramData\gptadmin\bin\shellmcp.exe`, `C:\Temp\shellmcp.new`, `C:\Windows\Temp\gptadmin-shellmcp-self-repair.ps1`, []string{"--flag", "value"})
-	for _, want := range []string{"Get-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Start-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Get-CimInstance Win32_Process", "if(-not $started){Start-Process"} {
+	for _, want := range []string{"Get-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Start-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Get-CimInstance Win32_Process", "Start-Process -FilePath $ownedAction.Execute"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("generated Windows replacement script missing %q: %s", want, script)
 		}
 	}
-	if strings.Index(script, "Start-ScheduledTask") > strings.Index(script, "if(-not $started){Start-Process") {
-		t.Fatalf("direct fallback appears before canonical task start: %s", script)
+	if strings.Index(script, "Start-ScheduledTask") > strings.Index(script, "Start-Process -FilePath $ownedAction.Execute") {
+		t.Fatalf("launcher fallback appears before canonical task start: %s", script)
 	}
 }
 
 func TestWindowsRepairUsesIndependentSystemTaskAndCanonicalRestart(t *testing.T) {
 	scriptPath := `C:\Windows\Temp\gptadmin-shellmcp-self-repair.ps1`
 	script := windowsReplaceScript(123, "gptadmin-shellmcp", "gptadmin-shellmcp-self-repair", `C:\ProgramData\gptadmin\bin\shellmcp.exe`, `C:\Windows\Temp\shellmcp.new`, scriptPath, []string{"--flag", "value"})
-	for _, want := range []string{"Wait-Process -Id 123", "Get-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Start-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Unregister-ScheduledTask -TaskName 'gptadmin-shellmcp-self-repair'", "if(-not $started){Start-Process"} {
+	for _, want := range []string{"Wait-Process -Id 123", "Get-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Start-ScheduledTask -TaskName 'gptadmin-shellmcp'", "Unregister-ScheduledTask -TaskName 'gptadmin-shellmcp-self-repair'", "Start-Process -FilePath $ownedAction.Execute"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("helper script missing %q: %s", want, script)
 		}
@@ -218,5 +219,110 @@ func TestWindowsRepairUsesIndependentSystemTaskAndCanonicalRestart(t *testing.T)
 	}
 	if WindowsSelfRepairExitCode == 0 {
 		t.Fatal("Windows self-repair exit code must be non-zero so Task Scheduler restart policy is a fallback")
+	}
+}
+
+func TestWindowsReplaceScriptKeepsGreenRestartInOwnedInstall(t *testing.T) {
+	script := windowsReplaceScript(123, "gptadmin-shellmcp-green", "gptadmin-shellmcp-green-self-repair", `C:\ProgramData\gptadmin-green\bin\shellmcp.exe`, `C:\Temp\shellmcp.new`, `C:\Temp\green-update.ps1`, nil)
+	if strings.Contains(script, "Start-Process -FilePath 'C:\\ProgramData\\gptadmin-green\\bin\\shellmcp.exe'") {
+		t.Fatal("bare binary fallback drops the Green installation environment")
+	}
+	if !strings.Contains(script, "run_shellmcp.ps1") {
+		t.Fatal("Green recovery must restart the install's own environment loader")
+	}
+	if strings.Contains(script, "-TaskName 'gptadmin-shellmcp'") {
+		t.Fatal("Green recovery must never target the Blue task")
+	}
+}
+
+func TestWindowsRepairTasksAreIsolatedAndValidated(t *testing.T) {
+	blueExe := "C:\\ProgramData\\gptadmin\\bin\\shellmcp.exe"
+	greenExe := "C:\\ProgramData\\gptadmin-green\\bin\\shellmcp.exe"
+	blue, blueHelper, err := windowsRepairTaskNames("", blueExe)
+	if err != nil || blue != "gptadmin-shellmcp" {
+		t.Fatalf("default install task=%q error=%v", blue, err)
+	}
+	green, greenHelper, err := windowsRepairTaskNames("gptadmin-shellmcp-green", greenExe)
+	if err != nil || green != "gptadmin-shellmcp-green" {
+		t.Fatalf("green install task=%q error=%v", green, err)
+	}
+	if blueHelper == greenHelper || !strings.HasPrefix(greenHelper, green+"-self-repair-") {
+		t.Fatalf("helper tasks must be install-scoped: blue=%q green=%q", blueHelper, greenHelper)
+	}
+	_, alternateHelper, err := windowsRepairTaskNames(green, blueExe)
+	if err != nil || alternateHelper == greenHelper {
+		t.Fatalf("helper task must distinguish paths even if task names are misconfigured: %q %v", alternateHelper, err)
+	}
+	_, sameHelper, err := windowsRepairTaskNames(green, strings.ToUpper(strings.ReplaceAll(greenExe, "\\", "/")))
+	if err != nil || sameHelper != greenHelper {
+		t.Fatalf("Windows path case/separators must not create a second helper: %q %v", sameHelper, err)
+	}
+	for _, name := range []string{"..", "folder\\another-task", "bad*name", "bad?name", "bad\nname", strings.Repeat("x", 181)} {
+		if _, _, err := windowsRepairTaskNames(name, greenExe); err == nil {
+			t.Errorf("unsafe task name %q was accepted", name)
+		}
+	}
+}
+
+func TestWindowsHelperRegistrationUsesLiteralFileQuotes(t *testing.T) {
+	script := windowsRegisterHelperScript("green-repair", "C:\\Windows\\Temp\\green helper.ps1")
+	if strings.ContainsRune(script, rune(96)) {
+		t.Fatal("single-quoted PowerShell action arguments must not contain literal backtick escapes")
+	}
+	if !strings.Contains(script, "-File \"C:\\Windows\\Temp\\green helper.ps1\"") {
+		t.Fatalf("helper file path must be quoted in the registered task arguments: %s", script)
+	}
+}
+
+// These are parser and ownership predicate unit tests. A temporary PowerShell
+// function supplies task metadata; live Task Scheduler behavior is tested by the
+// real install/update acceptance flow.
+func TestWindowsOwnedTaskRejectsAnotherInstallation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native PowerShell predicate unit test")
+	}
+	exe := "C:\\ProgramData\\gptadmin-green\\bin\\shellmcp.exe"
+	cases := []struct {
+		name, execute, args string
+		want                bool
+	}{
+		{"green launcher", "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"C:\\ProgramData\\gptadmin-green\\run_shellmcp.ps1\"", true},
+		{"blue launcher", "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"C:\\ProgramData\\gptadmin\\run_shellmcp.ps1\"", false},
+		{"legacy direct green", exe, "", true},
+		{"legacy direct blue", "C:\\ProgramData\\gptadmin\\bin\\shellmcp.exe", "", false},
+		{"green cmd launcher", "cmd.exe", "/c \"C:\\ProgramData\\gptadmin-green\\run_shellmcp.cmd\"", true},
+		{"blue cmd launcher", "cmd.exe", "/c \"C:\\ProgramData\\gptadmin\\run_shellmcp.cmd\"", false},
+		{"extra script args", "powershell.exe", "-File \"C:\\ProgramData\\gptadmin-green\\run_shellmcp.ps1\" -other", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script := "$ErrorActionPreference='Stop'; function Get-ScheduledTask { [pscustomobject]@{ Actions=@([pscustomobject]@{Execute=" + powershellQuote(tc.execute) + "; Arguments=" + powershellQuote(tc.args) + "}) } };\n" + windowsOwnedTaskScript("gptadmin-shellmcp-green", exe)
+			out, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("owned=%v want=%v: %v %s", err == nil, tc.want, err, out)
+			}
+		})
+	}
+}
+
+func TestWindowsGeneratedScriptsParse(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native PowerShell parser unit test")
+	}
+	dir := t.TempDir()
+	exe := "C:\\ProgramData\\gptadmin-green\\bin\\shellmcp.exe"
+	scripts := []string{
+		windowsReplaceScript(123, "gptadmin-shellmcp-green", "gptadmin-shellmcp-green-repair", exe, filepath.Join(dir, "new.exe"), filepath.Join(dir, "helper.ps1"), nil),
+		windowsOwnedTaskScript("gptadmin-shellmcp-green", exe) + windowsRegisterHelperScript("gptadmin-shellmcp-green-repair", filepath.Join(dir, "helper.ps1")),
+	}
+	for i, script := range scripts {
+		path := filepath.Join(dir, fmt.Sprintf("script-%d.ps1", i))
+		if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+			t.Fatal(err)
+		}
+		check := "$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile(" + powershellQuote(path) + ",[ref]$tokens,[ref]$errors) | Out-Null; if ($errors.Count) { $errors | Out-String | Write-Output; exit 1 }"
+		if out, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", check).CombinedOutput(); err != nil {
+			t.Fatalf("PowerShell parser rejected generated script %d: %v %s", i, err, out)
+		}
 	}
 }

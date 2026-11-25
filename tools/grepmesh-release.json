@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "repository": "megamen32/grepmesh",
+  "tag": "v0.2.2",
+  "version": "0.2.2",
+  "source_commit": "ae9cb11488389571aeb028bd7e951357803e9a51",
+  "release_workflow": "https://github.com/megamen32/grepmesh/actions/runs/38991648651",
+  "platforms": {
+    "linux_amd64": {
+      "name": "grepmesh-linux-x86_64.tar.gz",
+      "sha256": "7a5fe8957ddf8244eb3a804b5ceaa6290483d501af727db8bb1f670e40455e2c"
+    },
+    "darwin_arm64": {
+      "name": "grepmesh-macos-aarch64.tar.gz",
+      "sha256": "156bb87f951075fd825ecf91a5157bef4ce5bec8fde35c0968d47339d3a5cce9"
+    },
+    "darwin_amd64": {
+      "name": "grepmesh-macos-x86_64.tar.gz",
+      "sha256": "e9dbb86d43e21bb0a4272f653d028d07408477a96003767b9c7cda94e6368ddd"
+    },
+    "windows_amd64": {
+      "name": "grepmesh-windows-x86_64.zip",
+      "sha256": "747ef895a0eda7ad50e16036c90de3fbdd199e3558833eda5f2d314dbe82f19e"
+    }
+  }
+}

@@ -815,6 +815,20 @@ def _install_grepmesh_binary_from_pkg(tdp: Path) -> bool:
         if candidate.exists() and candidate.is_file() and _binary_looks_native(candidate):
             BIN_DIR.mkdir(parents=True, exist_ok=True)
             dst = BIN_DIR / 'grepmesh-mcp'
+            # Keep the independent release runtime together. Older GPTAdmin
+            # packages contain only the main executable and remain supported.
+            companion = candidate.parent / 'rg'
+            if companion.is_file():
+                _install_runtime_binary(companion, BIN_DIR / 'rg')
+                _macos_unquarantine_and_codesign(BIN_DIR / 'rg')
+            for directory, installed_name in (('lib', 'lib'), ('licenses', 'grepmesh-licenses')):
+                source = candidate.parent / directory
+                if source.is_dir():
+                    shutil.copytree(source, BIN_DIR / installed_name, dirs_exist_ok=True)
+            for name in ('onnxruntime-manifest.txt', 'grepmesh-release.json'):
+                source = candidate.parent / name
+                if source.is_file():
+                    shutil.copy2(source, BIN_DIR / name)
             _install_runtime_binary(candidate, dst)
             _macos_unquarantine_and_codesign(dst)
             return True
@@ -2996,6 +3010,9 @@ def _grepmesh_default_config(env: dict) -> dict:
         'roots': {'home': [str(home)]},
         'peers': [],
         'exclude_globs': exclude_globs,
+        # A dependency update must not enable media processing/model downloads.
+        # Operators can opt into the separately released GrepMesh OCR features.
+        'ocr': {'enabled': False},
         'limits': {'max_results': 64, 'context_lines': 2, 'max_response_bytes': 131072,
                    'peer_timeout_ms': 2000, 'overall_timeout_ms': 5000, 'max_file_bytes': 16777216},
     }
@@ -3060,6 +3077,13 @@ def _configure_builtin_grepmesh(env: dict, enabled: bool) -> bool:
     GREPMESH_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not GREPMESH_CONFIG_FILE.exists():
         _json_write(GREPMESH_CONFIG_FILE, _grepmesh_default_config(env))
+    elif existing is not None:
+        # The previously bundled 0.1 companion had no OCR. Preserve that
+        # behavior for our managed entries, retaining every explicit choice.
+        configured = _json_read(GREPMESH_CONFIG_FILE, None)
+        if isinstance(configured, dict) and 'ocr' not in configured:
+            configured['ocr'] = {'enabled': False}
+            _json_write(GREPMESH_CONFIG_FILE, configured)
     if not IS_USER_INSTALL and os.name != 'nt':
         # /etc/gptadmin also contains the secret 0600 gptadmin.env.  GrepMesh
         # runs as the configured operator, so give only that operator's primary

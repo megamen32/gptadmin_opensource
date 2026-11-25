@@ -74,7 +74,14 @@ class NodeReleaseTests(unittest.TestCase):
                          "event == 'push'", "head_branch == 'main'", "ref: ${{ github.event.workflow_run.head_sha }}",
                          '--source "$SOURCE_SHA"', 'contents: write', 'cancel-in-progress: false'):
             with self.subTest(contract=contract):self.assertIn(contract,text)
-        self.assertIn('python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64',text)
+        self.assertNotIn('python3 tools/build_node.py', text)
+        for artifact_contract in ('actions: read',
+                                  'pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}',
+                                  'run-id: ${{ github.event.workflow_run.id }}',
+                                  'verify_package(directory / name, arch, os.environ[\'SOURCE_SHA\'], platform)',
+                                  'exactly four packages and their checksums'):
+            with self.subTest(artifact_contract=artifact_contract):
+                self.assertIn(artifact_contract, text)
         self.assertLess(text.index('python3 tests/e2e/node/darwin_package.py'),
                         text.index('python3 tools/publish_node_release.py'))
 

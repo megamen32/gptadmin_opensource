@@ -114,3 +114,40 @@ def test_windows_zip_carries_admin_payload() -> None:
     assert "public/admin" in source
     assert "custom-gpt-instructions.md" in source
     assert "openapi.yaml" in source
+
+
+def test_windows_installer_scopes_pending_results_per_install() -> None:
+    source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    assert "$SpoolDir = Join-Path $InstallDir 'spool'" in source
+    assert "SHELL_SPOOL_DIR=$SpoolDir" in source
+    assert "SHELLMCP_SPOOL_DIR=$SpoolDir" in source
+    assert "SHELL_OUTBOX_DIR=$OutboxDir" in source
+    assert "SHELLMCP_OUTBOX_DIR=$OutboxDir" in source
+
+
+def test_windows_isolated_install_rejects_collisions_before_download() -> None:
+    source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    assert "[switch]$Isolated" in source
+    assert "function Assert-IsolatedTarget" in source
+    assert source.index("Assert-IsolatedTarget\nDownload-And-InstallArtifact") > source.index("function Assert-IsolatedTarget")
+    assert "Isolated install refuses an existing bin directory" in source
+    assert "Isolated install refuses an existing scheduled task" in source
+
+
+def test_windows_isolated_install_overrides_inherited_aliases_and_update_policy() -> None:
+    source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    for key in ("SHELL_TOKEN", "SHELL_PORT", "SHELL_HOST", "SHELL_URL", "QUEUE_URL", "SHELL_MODE", "SHELLMCP_MODE", "SHELLMCP_MCP_CONFIG", "SHELLMCP_LEGACY_MANIFEST_UPDATE"):
+        assert '"' + key + '=' in source
+    assert "[ValidateRange(0, 2147483647)]" in source
+    assert "[int]$LatestBuild = 0" in source
+    assert "[switch]$DisableSelfRepair" in source
+    assert "SHELLMCP_LATEST_BUILD=" in source
+    assert "SHELLMCP_SELF_REPAIR_DISABLE=" in source
+    assert "Set-Content -LiteralPath $McpConfigFile -Value '[]'" in source
+
+def test_windows_isolated_install_requires_package_and_defaults_repair_off() -> None:
+    source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    assert "'ShellmcpName', 'PackageUrl')" in source
+    assert "[string]::IsNullOrWhiteSpace($PackageUrl)" in source
+    assert "if (-not $InstallerArguments.ContainsKey('DisableSelfRepair')) { $DisableSelfRepair = $true }" in source
+    assert "build 1156 or newer" in source

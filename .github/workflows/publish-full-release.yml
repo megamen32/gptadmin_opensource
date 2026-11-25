@@ -53,28 +53,6 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
 
-      - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version: '1.27.2'
-          cache: false
-
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 22
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
-        with:
-          packages: platform-tools
-          log-accepted-android-sdk-licenses: false
-
-      - name: Install Android x64 compiler
-        run: |
-          sdkmanager --install 'ndk;27.0.12077973'
-          echo "ANDROID_X86_64_CC=${ANDROID_HOME}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
-
       - name: Verify public source, CI, Source-Commit and matching Node release
         run: |
           set -euo pipefail
@@ -92,6 +70,46 @@ jobs:
                              int(sys.argv[3]), int(sys.argv[4]), pathlib.Path('.tmp/full-release-node-evidence'))
           PY
 
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Set shared CI cache paths
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/gptadmin-go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/gptadmin-go-mod" >> "$GITHUB_ENV"
+
+      - name: Restore full matrix or tested Node compilation cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ runner.temp }}/gptadmin-go-build
+            ${{ runner.temp }}/gptadmin-go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-full-matrix-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-full-matrix-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-1.27.2-node-linux-amd64-${{ hashFiles('go-*/go.sum', 'go-hub/third_party/qjs/go.sum', 'bezhook/go.sum') }}-
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android x64 compiler
+        run: |
+          sdkmanager --install 'ndk;27.0.12077973'
+          echo "ANDROID_X86_64_CC=${ANDROID_HOME}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+
       - name: Build complete release from the verified public snapshot
         run: |
           set -euo pipefail
@@ -99,7 +117,7 @@ jobs:
           public_sha="$(git rev-parse HEAD)"
           # Only a local ephemeral tag; the publisher creates a remote tag after all checks.
           git tag -f "v$version" "$public_sha"
-          TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh
+          TAGGED_RELEASE=1 RELEASE_TAG="v$version" RELEASE_COMMIT="$public_sha" ./tools/build.sh release
           python3 tools/verify_release_manifest.py verify --root "$GITHUB_WORKSPACE" --manifest "$GITHUB_WORKSPACE/build/manifest.json"
           python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
 

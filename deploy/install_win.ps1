@@ -17,6 +17,15 @@ until that Hub's admin approves server "shell:<COMPUTERNAME>".
 No git checkout, no private repo, no local Go or Python runtime.
 Autostart uses built-in Windows Task Scheduler.
 
+For a fresh side-by-side remote agent, pass -Isolated -System with explicit
+-InstallDir, -HubUrl, -TaskName, -ShellmcpPort, -ShellmcpName and -PackageUrl.
+It generates separate credentials and state, refuses existing targets, and
+supports -NoStart. Self-repair is disabled by default in isolated mode. Enable
+it only after verifying the installed candidate is build 1156 or newer, with
+the task-isolated Windows updater; older public packages may target Blue.
+-LatestBuild pins the normal GitHub update target; -DisableSelfRepair stages
+the installation with automatic self-repair disabled.
+
 Usage:
   iwr -UseBasicParsing https://became.bezrabotnyi.com/install_win.ps1 | iex
   powershell -ExecutionPolicy Bypass -File .\install_win.ps1 -HubUrl https://became.bezrabotnyi.com -ShellmcpToken srv_secret
@@ -47,10 +56,15 @@ param(
     [switch]$User,
     [switch]$System,
     [switch]$Uninstall,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$Isolated,
+    [ValidateRange(0, 2147483647)]
+    [int]$LatestBuild = 0,
+    [switch]$DisableSelfRepair
 )
 
 $ErrorActionPreference = 'Stop'
+$InstallerArguments = $PSBoundParameters
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -80,6 +94,66 @@ function Get-OwnedProcess {
 
 $IsAdmin = Test-Admin
 $UserMode = $User -or ((-not $System) -and (-not $IsAdmin))
+
+# Isolated is an initial side-by-side installation, never an upgrade/uninstall.
+# Check supplied arguments before creating files, changing tasks or downloading.
+if ($Isolated) {
+    if (-not $System -or $User -or $Uninstall) {
+        throw 'Isolated install requires -System and cannot use -User or -Uninstall.'
+    }
+    foreach ($required in @('InstallDir', 'HubUrl', 'TaskName', 'ShellmcpPort', 'ShellmcpName', 'PackageUrl')) {
+        if (-not $InstallerArguments.ContainsKey($required)) {
+            throw "Isolated install requires an explicit -$required."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($PackageUrl)) {
+        throw 'Isolated install requires a nonempty -PackageUrl.'
+    }
+    if (-not $InstallerArguments.ContainsKey('DisableSelfRepair')) { $DisableSelfRepair = $true }
+    if ($InstallerArguments.ContainsKey('ShellmcpToken')) {
+        throw 'Isolated install generates a new local credential; do not supply -ShellmcpToken.'
+    }
+    try { $isolatedHub = [Uri]$HubUrl } catch { throw 'Isolated install requires an absolute remote Hub URL.' }
+    if (-not $isolatedHub.IsAbsoluteUri -or $isolatedHub.Scheme -notin @('http', 'https') -or $isolatedHub.IsLoopback) {
+        throw 'Isolated install requires an absolute remote Hub URL.'
+    }
+    if (-not $InstallDir -or -not [IO.Path]::IsPathRooted($InstallDir)) {
+        throw 'Isolated install requires an absolute installation directory.'
+    }
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $reservedDirs = @((Join-Path $env:ProgramData 'gptadmin'), (Join-Path $env:LOCALAPPDATA 'gptadmin'))
+    if ($env:GPTADMIN_DIR) { $reservedDirs += $env:GPTADMIN_DIR }
+    foreach ($reserved in $reservedDirs) {
+        $reservedPath = [IO.Path]::GetFullPath($reserved).TrimEnd('\')
+        if ($InstallDir.Equals($reservedPath, [StringComparison]::OrdinalIgnoreCase) -or
+            $InstallDir.StartsWith($reservedPath + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $reservedPath.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Isolated install directory must be separate from the existing/default installation.'
+        }
+    }
+    if (-not $TaskName -or $TaskName.Length -gt 180 -or $TaskName -match '[\\/:*?"<>|\x00-\x1f]' -or
+        $TaskName -in @('.', '..') -or $TaskName -eq 'gptadmin-shellmcp' -or $TaskName -eq $env:SHELLMCP_SERVICE_NAME -or $TaskName -eq $env:SHELLMCP_TASK_NAME) {
+        throw 'Isolated install requires a distinct non-default task name.'
+    }
+    if ($ShellmcpPort -lt 1 -or $ShellmcpPort -gt 65535 -or $ShellmcpPort -eq 25900) {
+        throw 'Isolated install requires a distinct non-default port in 1..65535.'
+    }
+    foreach ($oldPort in @($env:SHELL_PORT, $env:SHELLMCP_PORT)) {
+        if ($oldPort -and [string]$ShellmcpPort -eq [string]$oldPort) {
+            throw 'Isolated install port matches the inherited agent port.'
+        }
+    }
+    if (-not $ShellmcpName -or $ShellmcpName -eq $env:COMPUTERNAME -or
+        $ShellmcpName -eq $env:SHELL_NAME -or $ShellmcpName -eq $env:SHELLMCP_NAME) {
+        throw 'Isolated install requires a distinct agent name.'
+    }
+    $HubUrl = $HubUrl.TrimEnd('/')
+    $ShellmcpToken = ''
+    if (-not $InstallerArguments.ContainsKey('ShellmcpBind')) { $ShellmcpBind = '127.0.0.1' }
+    if (-not $InstallerArguments.ContainsKey('ShellmcpTransport')) { $ShellmcpTransport = 'polling' }
+    if (-not $InstallerArguments.ContainsKey('ShellmcpUrl')) { $ShellmcpUrl = "http://$env:COMPUTERNAME" + ':' + $ShellmcpPort }
+    if (-not $InstallerArguments.ContainsKey('HubPublicKey')) { $HubPublicKey = 'mEhYDiOc9ZxY54dXelDTsVD2Wjew3f6R0f2dVW2qKPQ' }
+}
 
 if (-not $PackageUrl) { $PackageUrl = 'https://became.bezrabotnyi.com/gptadmin-win.zip' }
 if (-not $InstallDir) {
@@ -114,7 +188,10 @@ $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $BinDir = Join-Path $InstallDir 'bin'
 $LogDir = Join-Path $InstallDir 'logs'
 $IdentityDir = Join-Path $InstallDir 'identity'
+$SpoolDir = Join-Path $InstallDir 'spool'
+$OutboxDir = Join-Path $SpoolDir 'outbox'
 $ConfigDir = Join-Path $InstallDir 'config'
+$McpConfigFile = Join-Path $ConfigDir 'mcp.json'
 $PublicDir = Join-Path $InstallDir 'public'
 $EnvFile = Join-Path $InstallDir 'shellmcp.env'
 $HubEnvFile = Join-Path $InstallDir 'hub.env'
@@ -132,6 +209,20 @@ $HubStartupScript = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Program
 function Require-Admin {
     if (-not $IsAdmin) {
         throw 'Run PowerShell as Administrator, or use -User for per-user install.'
+    }
+}
+
+function Assert-IsolatedTarget {
+    if (-not $Isolated) { return }
+    if (Test-Path -LiteralPath $BinDir) {
+        throw 'Isolated install refuses an existing bin directory.'
+    }
+    if (Test-Path -LiteralPath $CurrentExe) {
+        throw 'Isolated install refuses an existing executable.'
+    }
+    $existingTask = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -eq $TaskName })
+    if ($existingTask.Count -gt 0) {
+        throw 'Isolated install refuses an existing scheduled task.'
     }
 }
 
@@ -201,7 +292,7 @@ function Download-And-InstallArtifact {
 function Write-Config {
     Set-Content -Path $HubPublicKeyFile -Value $HubPublicKey -Encoding ASCII
     $queueEnabled = if ($ShellmcpTransport -eq 'polling') { '1' } else { '0' }
-    @(
+    $agentEnv = @(
         "SHELLMCP_TOKEN=$ShellmcpToken",
         "HUB_URL=$HubUrl",
         "SHELLMCP_PORT=$ShellmcpPort",
@@ -212,6 +303,10 @@ function Write-Config {
         "SHELL_NAME=$ShellmcpName",
         "SHELLMCP_IDENTITY_DIR=$IdentityDir",
         "SHELL_IDENTITY_DIR=$IdentityDir",
+        "SHELL_SPOOL_DIR=$SpoolDir",
+        "SHELLMCP_SPOOL_DIR=$SpoolDir",
+        "SHELL_OUTBOX_DIR=$OutboxDir",
+        "SHELLMCP_OUTBOX_DIR=$OutboxDir",
         "SHELLMCP_QUEUE=$queueEnabled",
         "HUB_PUBLIC_KEY_FILE=$HubPublicKeyFile",
         "SHELLMCP_SERVICE_NAME=$TaskName",
@@ -220,7 +315,35 @@ function Write-Config {
         "SHELLMCP_UPDATE_INTERVAL_S=3600",
         "SHELLMCP_UPDATE_MANIFEST_URL=$HubUrl/artifacts/shellmcp.json",
         "SHELLMCP_UPDATE_TOKEN=$ShellmcpToken"
-    ) | Set-Content -Path $EnvFile -Encoding ASCII
+    )
+    if ($Isolated) {
+        $mode = if ($queueEnabled -eq '1') { 'long_poll' } else { 'webhook' }
+        $agentEnv += @(
+            "SHELL_TOKEN=$ShellmcpToken",
+            "SHELL_PORT=$ShellmcpPort",
+            "SHELL_HOST=$ShellmcpBind",
+            "SHELL_URL=$ShellmcpUrl",
+            "SHELL_QUEUE=$queueEnabled",
+            "SHELL_MODE=$mode",
+            "SHELLMCP_MODE=$mode",
+            "QUEUE_URL=$HubUrl/queue",
+            "SHELLMCP_QUEUE_URL=$HubUrl/queue",
+            "HUB_PUBLIC_KEY=$HubPublicKey",
+            "SHELLMCP_MCP_CONFIG=$McpConfigFile",
+            "GPTADMIN_MCP_CONFIG=$McpConfigFile",
+            "GPTADMIN_MCP_AGENTS_DIR=$McpConfigFile",
+            "SHELLMCP_AUDIT_LOG=$LogDir\execution.jsonl",
+            "SHELLMCP_LEGACY_MANIFEST_UPDATE=0"
+        )
+        Set-Content -LiteralPath $McpConfigFile -Value '[]' -Encoding ASCII
+    }
+    if ($Isolated -or $InstallerArguments.ContainsKey('LatestBuild')) {
+        $agentEnv += "SHELLMCP_LATEST_BUILD=$(if ($LatestBuild -gt 0) { $LatestBuild } else { '' })"
+    }
+    if ($Isolated -or $InstallerArguments.ContainsKey('DisableSelfRepair')) {
+        $agentEnv += "SHELLMCP_SELF_REPAIR_DISABLE=$(if ($DisableSelfRepair) { '1' } else { '0' })"
+    }
+    $agentEnv | Set-Content -Path $EnvFile -Encoding ASCII
 
     @"
 @echo off
@@ -230,25 +353,15 @@ for /f "usebackq tokens=1,* delims==" %%A in ("$EnvFile") do set "%%A=%%B"
 
     @"
 `$ErrorActionPreference = 'Stop'
-`$env:SHELLMCP_TOKEN = '$ShellmcpToken'
-`$env:HUB_URL = '$HubUrl'
-`$env:SHELLMCP_PORT = '$ShellmcpPort'
-`$env:SHELLMCP_HOST = '$ShellmcpBind'
-`$env:SHELLMCP_TRANSPORT = '$ShellmcpTransport'
-`$env:SHELLMCP_URL = '$ShellmcpUrl'
-`$env:SHELLMCP_NAME = '$ShellmcpName'
-`$env:SHELL_NAME = '$ShellmcpName'
-`$env:SHELLMCP_IDENTITY_DIR = '$IdentityDir'
-`$env:SHELL_IDENTITY_DIR = '$IdentityDir'
-`$env:SHELLMCP_QUEUE = '$queueEnabled'
-`$env:HUB_PUBLIC_KEY_FILE = '$HubPublicKeyFile'
-`$env:SHELLMCP_SERVICE_NAME = '$TaskName'
-`$env:SHELLMCP_SERVICE_SCOPE = '$(if ($UserMode) { 'user' } else { 'system' })'
-`$env:SHELLMCP_AUTO_UPDATE = '$(if ($LocalHub) { '0' } else { '1' })'
-`$env:SHELLMCP_UPDATE_INTERVAL_S = '3600'
-`$env:SHELLMCP_UPDATE_MANIFEST_URL = '$HubUrl/artifacts/shellmcp.json'
-`$env:SHELLMCP_UPDATE_TOKEN = '$ShellmcpToken'
+Get-Content -LiteralPath '$EnvFile' | ForEach-Object {
+    `$parts = `$_ -split '=', 2
+    if (`$parts.Length -eq 2 -and `$parts[0]) {
+        if (`$parts[1].Length -eq 0) { Remove-Item -LiteralPath ("Env:" + `$parts[0]) -ErrorAction SilentlyContinue }
+        else { Set-Item -Path ("Env:" + `$parts[0]) -Value `$parts[1] }
+    }
+}
 & '$BatchScript'
+exit `$LASTEXITCODE
 "@ | Set-Content -Path $RunScript -Encoding UTF8
 
     if ($LocalHub) {
@@ -347,6 +460,7 @@ if ($Uninstall) {
     exit 0
 }
 
+Assert-IsolatedTarget
 Download-And-InstallArtifact
 Write-Config
 

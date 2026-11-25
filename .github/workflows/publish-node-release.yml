@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build-test-publish:
@@ -90,27 +91,37 @@ jobs:
           echo "published=$published" >> "$GITHUB_OUTPUT"
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Go
+      - name: Download exact Node packages tested by Public Product CI
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          go-version: '1.27.2'
-          cache: false
+          pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}
+          path: .tmp/node-packages
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
 
-      - name: Test unified Node components and updater
+      - name: Verify complete package set against the tested source
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          (cd go-hub && go test ./...)
-          (cd go-shellmcp && go test ./...)
-          PYTHONPATH=tests python3 -m unittest test_node_autoupdate test_node_macos_autoupdate test_node_release_publisher
-
-      - name: Build both verified Linux Node packages
-        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
-        run: python3 tools/build_node.py --arch amd64 --arch arm64
-
-      - name: Build verified Darwin Node packages
-        if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
-        run: python3 tools/build_node.py --platform darwin --arch amd64 --arch arm64
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from tools.publish_node_release import verify_package
+          directory = Path('.tmp/node-packages')
+          expected = set()
+          for platform in ('linux', 'darwin'):
+              for arch in ('amd64', 'arm64'):
+                  name = f'gptadmin-node-{platform}-{arch}.tar.gz'
+                  expected.update((name, name + '.sha256'))
+                  manifest = verify_package(directory / name, arch, os.environ['SOURCE_SHA'], platform)
+                  if manifest['build_version'] != int(Path('VERSION').read_text().strip()):
+                      raise SystemExit('CI package version differs from the tested source')
+          if {p.name for p in directory.iterdir()} != expected:
+              raise SystemExit('CI artifacts must contain exactly four packages and their checksums')
+          PY
 
       - name: Preflight the Darwin archives with the publisher and macOS installer
         if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
