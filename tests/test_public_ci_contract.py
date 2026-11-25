@@ -110,3 +110,31 @@ def test_haos_standby_release_runs_from_tested_public_source_and_uses_public_act
     dockerfile = (source_root / 'deploy/server01/gptadmin_hub_standby/Dockerfile.public').read_text()
     assert image_config['image'] == image_workflow['env']['IMAGE_NAME'] == 'ghcr.io/megamen32/gptadmin-haos-addons'
     assert 'org.opencontainers.image.source="https://github.com/megamen32/gptadmin-haos-addons"' in dockerfile
+
+
+def test_public_source_layout_allows_only_curated_marketplace(tmp_path):
+    import subprocess
+    import sys
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    script = workflow['jobs']['public-python']['steps'][-1]['run']
+    guard = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    def check():
+        return subprocess.run([sys.executable, '-c', guard], cwd=tmp_path,
+                              capture_output=True).returncode
+    assert check() == 0
+    marketplace = tmp_path / '.agents/plugins/marketplace.json'
+    marketplace.parent.mkdir(parents=True)
+    marketplace.write_text('{}')
+    assert check() == 0
+    unexpected = tmp_path / '.agents/internal.txt'
+    unexpected.write_text('private')
+    assert check() != 0
+    unexpected.unlink()
+    marketplace.unlink()
+    marketplace.symlink_to(tmp_path / 'missing.json')
+    assert check() != 0
+    marketplace.unlink()
+    marketplace.write_text('{}')
+    (tmp_path / 'private').mkdir()
+    assert check() != 0
