@@ -195,10 +195,37 @@ def test_public_workflows_run_macos_gate_then_auto_publish_node_and_manual_full_
     assert workflow['permissions']['contents'] == 'read'
     assert workflow['jobs']['publish']['if'] == "github.ref == 'refs/heads/main'"
     assert workflow['jobs']['publish']['permissions']['contents'] == 'write'
-    steps = workflow['jobs']['publish']['steps']
+    jobs = workflow['jobs']
+    assert jobs['preflight']['if'] == "github.ref == 'refs/heads/main'"
+    assert jobs['platform']['needs'] == 'preflight'
+    assert set(jobs['publish']['needs']) == {'preflight', 'platform'}
+    for name in ('preflight', 'platform'):
+        assert jobs[name].get('permissions', workflow['permissions'])['contents'] == 'read'
+    pairs = [entry['pair'] for entry in jobs['platform']['strategy']['matrix']['include']]
+    assert len(pairs) == len(set(pairs)) == 8
+    assert set(pairs) == {f'{platform}_{arch}' for platform in ('linux', 'darwin', 'windows', 'android')
+                         for arch in ('amd64', 'arm64')}
+    platform_steps = jobs['platform']['steps']
+    platform_commands = '\n'.join(step.get('run', '') for step in platform_steps)
+    assert 'release-platform --platform "$PAIR"' in platform_commands
+    assert 'TAGGED_RELEASE=1' in platform_commands and 'RELEASE_COMMIT="$public_sha"' in platform_commands
+    upload = next(step for step in platform_steps if step.get('uses', '').startswith('actions/upload-artifact@'))
+    assert '${{ matrix.pair }}' in upload['with']['name'] and '${{ github.sha }}' in upload['with']['name']
+    assert upload['with']['compression-level'] == 0 and upload['with']['if-no-files-found'] == 'error'
+    steps = jobs['publish']['steps']
     names = [step.get('name') for step in steps]
-    assert names.index('Verify public source, CI, Source-Commit and matching Node release') < names.index('Build complete release from the verified public snapshot')
-    assert names.index('Build complete release from the verified public snapshot') < names.index('Publish verified assets without changing latest')
+    verify = names.index('Verify public source, CI, Source-Commit and matching Node release')
+    collect = names.index('Assemble and verify all 16 exact-source release bundles')
+    lifecycle = names.index('Check the exact release Ubuntu package through its lifecycle')
+    publish = names.index('Publish verified assets without changing latest')
+    assert verify < collect < lifecycle < publish
+    download = next(step for step in steps if step.get('uses', '').startswith('actions/download-artifact@'))
+    assert download['with']['merge-multiple'] is False
+    collect_command = steps[collect]['run']
+    assert 'tools/merge_release_shards.py' in collect_command
+    assert 'tools/verify_release_manifest.py verify' in collect_command
+    assert 'tools/verify_macos_release.py' in collect_command
+    assert './tools/build.sh release' not in '\n'.join(step.get('run', '') for step in steps)
 
     node_workflow = yaml.safe_load((WORKFLOWS / 'publish-node-release.yml').read_text())
     node_trigger = node_workflow.get('on', node_workflow.get(True))

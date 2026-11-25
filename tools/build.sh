@@ -46,6 +46,8 @@ Targets:
   all        Build Linux hub+shellmcp, CLI, source payloads, platform bundles,
              component tarballs, Windows/Android shellmcp packages, and smoke-test Linux bins.
   release    Build only the 16 verified public release bundles (tagged release required)
+  release-platform --platform <goos_goarch>
+             Build one tagged platform: its full/client bundles and partial matrix
   cli        Package GPTAdmin CLI only: build/gptadmin-cli.tar.gz
   hub        Build/package GPTAdmin hub: build/gptadmin-hub.tar.gz
   node       Build portable Linux Node packages in .tmp/node-packages (see --help)
@@ -69,14 +71,28 @@ Env:
 EOF
 }
 
+# A platform shard is an explicit tagged target, never an ambient matrix override.
+RELEASE_BUILD_PAIR=""
+if [[ "${1:-}" == release-platform ]]; then
+  [[ "$#" == 3 && "${2:-}" == --platform ]] || {
+    echo "ERROR: use release-platform --platform <goos_goarch>" >&2; exit 2;
+  }
+  case "$3" in
+    linux_amd64|linux_arm64|darwin_amd64|darwin_arm64|windows_amd64|windows_arm64|android_amd64|android_arm64)
+      RELEASE_BUILD_PAIR="$3" ;;
+    *) echo "ERROR: unsupported release platform pair: $3" >&2; exit 2 ;;
+  esac
+  set -- release-platform
+fi
+
 TARGETS=("${@:-all}")
 for t in "${TARGETS[@]}"; do
   case "$t" in
     help|-h|--help) usage; exit 0 ;;
     clean) CLEAN=1 ;;
-    release)
+    release|release-platform)
       [[ "$TAGGED_RELEASE" == "1" && "${#TARGETS[@]}" == 1 ]] || {
-        echo "ERROR: release requires TAGGED_RELEASE=1 and a single target" >&2; exit 2;
+        echo "ERROR: $t requires TAGGED_RELEASE=1 and a single target" >&2; exit 2;
       }
       ;;
   esac
@@ -152,11 +168,12 @@ need(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing command: $1"; 
 
 step "Check tooling"
 need python3; need tar; need grep; need sed; need awk; need sha256sum
-want_any hub shellmcp all smoke release && need curl
-want_any windows android macos-client release && need go
+want_any hub shellmcp all smoke release release-platform && need curl
+want_any windows android macos-client release release-platform && need go
 want network-tunnel && need go
 want_any windows release && need zip
-want_any all hub platform release && need npm
+[[ "$RELEASE_BUILD_PAIR" == windows_* ]] && need zip
+want_any all hub platform release release-platform && need npm
 
 write_build_info() {
   GO_SHELLMCP_LDFLAGS=(-trimpath -buildvcs=false -ldflags "-s -w -X github.com/megamen32/gptadmin/go-shellmcp/internal/server.BuildVersion=$BUILD_VERSION -X github.com/megamen32/gptadmin/go-shellmcp/internal/server.GitCommit=$GIT_COMMIT")
@@ -283,7 +300,7 @@ if [[ " ${TARGETS[*]} " == *" macos-client "* && "$TAGGED_RELEASE" != "1" ]]; th
   echo "ERROR: macos-client requires an exact tagged release source; VERSION will not be bumped" >&2
   exit 2
 fi
-if want_any all release cli hub shellmcp macos-client platform windows android network-tunnel; then
+if want_any all release release-platform cli hub shellmcp macos-client platform windows android network-tunnel; then
   if [[ "$TAGGED_RELEASE" == "1" ]]; then
     build_tagged_release_version
   else
@@ -359,6 +376,7 @@ build_hub_cross_platforms() {
   local pairs=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64)
   [[ "${1:-}" == matrix ]] && pairs+=(windows_amd64 windows_arm64 android_amd64 android_arm64)
   [[ "${1:-}" == windows ]] && pairs=(windows_amd64)
+  [[ "${1:-}" == release-platform ]] && pairs=("$RELEASE_BUILD_PAIR")
   [[ "$GPTADMIN_BUILD_PLATFORMS" == native ]] && pairs=("$NATIVE_BUILD_PAIR")
   for pair in "${pairs[@]}"; do
     if [[ "$BUILT_HUB_PLATFORMS" == *" $pair "* ]]; then
@@ -577,6 +595,7 @@ build_go_shellmcp_cross_platforms() {
   [[ "${1:-}" == matrix ]] && pairs+=(windows_amd64 windows_arm64 android_amd64 android_arm64)
   [[ "${1:-}" == windows ]] && pairs=(windows_amd64)
   [[ "${1:-}" == android-arm64 ]] && pairs=(android_arm64)
+  [[ "${1:-}" == release-platform ]] && pairs=("$RELEASE_BUILD_PAIR")
   [[ "$GPTADMIN_BUILD_PLATFORMS" == native ]] && pairs=("$NATIVE_BUILD_PAIR")
   for pair in "${pairs[@]}"; do
     if [[ "$BUILT_SHELLMCP_PLATFORMS" == *" $pair "* ]]; then
@@ -754,7 +773,7 @@ write_user_release_matrix() {
       if [[ -f "$file" ]]; then sha256sum "$file"; fi
     done | sort -k2 > "$ART_DIR/gptadmin-checksums.txt"
   )
-  python3 - "$ART_DIR" "$BUILD_VERSION" "$GIT_COMMIT" <<'PY'
+  python3 - "$ART_DIR" "$BUILD_VERSION" "$GIT_COMMIT" "$RELEASE_BUILD_PAIR" <<'PY'
 import hashlib, json, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 build_version = int(sys.argv[2])
@@ -764,7 +783,10 @@ for path in sorted(root.glob("gptadmin-*-*-*.*")):
     match = re.fullmatch(r"gptadmin-(windows|macos|ubuntu|android)-(x64|arm64)-(full|client)\.(zip|tar\.gz)", path.name)
     if match:
         entries.append({"platform": match.group(1), "arch": match.group(2), "edition": match.group(3), "file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size})
-(root / "gptadmin-release-matrix.json").write_text(json.dumps({"schema": "gptadmin.release-matrix/v2", "build_version": build_version, "git_commit": git_commit, "artifacts": entries}, indent=2) + "\n")
+matrix = {"schema": "gptadmin.release-matrix/v2", "build_version": build_version, "git_commit": git_commit, "artifacts": entries}
+if sys.argv[4]:
+    matrix["build_platform"] = sys.argv[4]
+(root / "gptadmin-release-matrix.json").write_text(json.dumps(matrix, indent=2) + "\n")
 PY
 }
 
@@ -882,6 +904,29 @@ elif want release; then
   copy_admin_static_payloads
   build_user_release_matrix
   smoke_linux
+elif want release-platform; then
+  build_admin_ui
+  build_hub_cross_platforms release-platform
+  build_go_shellmcp_cross_platforms release-platform
+  if [[ "$RELEASE_BUILD_PAIR" == linux_amd64 ]]; then
+    build_hub_linux
+    build_grepmesh_native
+  fi
+  copy_admin_static_payloads
+  case "${RELEASE_BUILD_PAIR%%_*}" in
+    linux) release_platform=ubuntu ;;
+    darwin) release_platform=macos ;;
+    windows) release_platform=windows ;;
+    android) release_platform=android ;;
+  esac
+  case "${RELEASE_BUILD_PAIR##*_}" in
+    amd64) release_arch=x64 ;;
+    arm64) release_arch=arm64 ;;
+  esac
+  emit_release_bundle "$release_platform" "$release_arch" full
+  emit_release_bundle "$release_platform" "$release_arch" client
+  write_user_release_matrix
+  if [[ "$RELEASE_BUILD_PAIR" == linux_amd64 ]]; then smoke_linux; fi
 else
   want cli && build_cli
   if want shellmcp; then build_cli; copy_support_payloads; archive_component_shellmcp; fi
@@ -900,7 +945,7 @@ else
   want smoke && smoke_linux
 fi
 
-if want_any all release cli hub shellmcp macos-client platform windows android network-tunnel; then
+if want_any all release release-platform cli hub shellmcp macos-client platform windows android network-tunnel; then
   step "Generate and verify release provenance manifest"
   python3 tools/generate_sbom.py \
     --root "$REPO_DIR" \

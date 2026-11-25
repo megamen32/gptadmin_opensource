@@ -69,7 +69,7 @@ def test_public_go_shards_wire_every_module_on_each_platform(tmp_path):
     matrix = job['strategy']['matrix']
     assert job['strategy']['fail-fast'] is False
     assert set(matrix['os']) == {'ubuntu-latest', 'macos-latest'}
-    assert matrix['shard'] == list(range(len(matrix['shard']))) and matrix['shard']
+    assert matrix['shard'] == [0, 1, 2, 3]
     step = next(step for step in job['steps'] if step.get('name') == 'Run every test in its deterministic shard')
     assert step['env']['SHARD'] == '${{ matrix.shard }}'
     capture = tmp_path / 'arguments.json'
@@ -95,6 +95,42 @@ def test_public_go_shards_wire_every_module_on_each_platform(tmp_path):
             assert json.loads(capture.read_text()) == expected
 
 
+def test_macos_cross_compile_keeps_the_full_package_gate_in_the_smoke_job(tmp_path):
+    """Exercise the relocated shell command, retaining every Linux package build."""
+    jobs = yaml.safe_load(WORKFLOW.read_text())['jobs']
+    assert not any(step.get('name') == 'Cross-compile Linux artifacts from Mac'
+                   for step in jobs['go-unit-tests']['steps'])
+    job = jobs['macos-build']
+    assert job['runs-on'] == 'macos-latest'
+    assert job['needs'] == 'macos-release-packages'
+    assert any(step.get('uses', '').startswith('actions/setup-go@') for step in job['steps'])
+    step = next(step for step in job['steps']
+                if step.get('name') == 'Cross-compile Linux artifacts from Mac')
+    assert not step.get('continue-on-error', False)
+    capture = tmp_path / 'cross-arguments.json'
+    shim_dir = tmp_path / 'bin'
+    shim_dir.mkdir()
+    (tmp_path / 'go-hub').mkdir()
+    shim = shim_dir / 'go'
+    shim.write_text(f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
+                    'pathlib.Path(os.environ["CI_CAPTURE"]).write_text(json.dumps({'
+                    '"args": sys.argv[1:], "goos": os.environ.get("GOOS"), '
+                    '"goarch": os.environ.get("GOARCH")}))\n'
+                    'sys.exit(int(os.environ.get("CI_GO_STATUS", "0")))\n')
+    shim.chmod(0o755)
+    env = dict(os.environ, PATH=str(shim_dir) + os.pathsep + os.environ['PATH'],
+               CI_CAPTURE=str(capture), RUNNER_TEMP=str(tmp_path),
+               GITHUB_WORKSPACE=str(tmp_path))
+    subprocess.run(['bash', '-e', '-c', step['run']], cwd=tmp_path, env=env,
+                   check=True, capture_output=True, timeout=5)
+    actual = json.loads(capture.read_text())
+    assert actual['args'][0] == 'build' and actual['args'][-1] == './...'
+    assert actual['goos'] == 'linux' and actual['goarch'] == 'amd64'
+    failed = subprocess.run(['bash', '-e', '-c', step['run']], cwd=tmp_path,
+                            env=dict(env, CI_GO_STATUS='37'), capture_output=True, timeout=5)
+    assert failed.returncode == 37
+
+
 def test_public_python_scope_flags_are_in_the_same_shell_command():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     script = workflow['jobs']['public-python']['steps'][-1]['run']
@@ -104,7 +140,7 @@ def test_public_python_scope_flags_are_in_the_same_shell_command():
                           if line.startswith('uv run python tools/ci_test_shards.py pytest '))
     arguments = shlex.split(pytest_command)
     matrix = workflow['jobs']['public-python']['strategy']['matrix']
-    assert matrix['shard'] == list(range(len(matrix['shard']))) and matrix['shard']
+    assert matrix['shard'] == [0, 1]
     assert arguments[arguments.index('--count') + 1] == str(len(matrix['shard']))
     assert arguments[arguments.index('--index') + 1] == '$SHARD'
     assert arguments[arguments.index('--') + 1] == 'tests/'

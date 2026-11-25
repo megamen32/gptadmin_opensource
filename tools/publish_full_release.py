@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -163,13 +164,24 @@ def publish(directory: Path, source: str, private_source: str, version: int,
         + '\nmacOS binaries are not Apple Developer ID signed or notarized.'))
     if type(release.get('id')) is not int or release.get('tag_name') != tag or not release.get('draft'):
         raise ValueError('unexpected draft release response')
-    uploaded = {}
-    for path in assets:
+
+    def upload_asset(path: Path) -> dict:
         asset = json.loads(node.gh('api', f'https://uploads.github.com/repos/{repository}/releases/{release["id"]}/assets?name={path.name}',
             '--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', str(path)))
         if not node.asset_matches(asset, path):
             raise ValueError('GitHub uploaded asset digest mismatch')
-        uploaded[path.name] = asset
+        return asset
+
+    uploaded = {}
+    executor = ThreadPoolExecutor(max_workers=4)
+    try:
+        futures = {executor.submit(upload_asset, path): path for path in assets}
+        for future in as_completed(futures):
+            uploaded[futures[future].name] = future.result()
+    finally:
+        # Each upload is attempted once. On failure cancel queued work, settle
+        # in-flight calls, and leave the release as a draft for reconciliation.
+        executor.shutdown(wait=True, cancel_futures=True)
     # Recheck CI, Node and public main immediately before publishing the draft.
     verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
     node.verify_tag(repository, tag, source)
