@@ -23,16 +23,26 @@ def _workflow(name):
 
 def test_release_builds_overlap_ci_and_native_lifecycle_precedes_upload():
     ci = _workflow("public-ci.yml")
-    job = ci["jobs"]["release-platform"]
-    assert job["needs"] == "node-artifact"
-    assert job["permissions"] == {"contents": "read", "actions": "read"}
-    assert job["strategy"]["fail-fast"] is False
-    pairs = [entry["pair"] for entry in job["strategy"]["matrix"]["include"]]
+    names = ("release-platform-critical", "release-platform-android", "release-platform")
+    groups = [ci["jobs"][name] for name in names]
+    assert not groups[0].get("needs")
+    assert groups[1]["needs"] == "node-artifact"
+    assert groups[2]["needs"] == "release-platform-critical"
+    assert [entry["pair"] for entry in groups[0]["strategy"]["matrix"]["include"]] == ["linux_amd64"]
+    assert {entry["pair"] for entry in groups[1]["strategy"]["matrix"]["include"]} == {"android_amd64", "android_arm64"}
+    pairs = [entry["pair"] for job in groups for entry in job["strategy"]["matrix"]["include"]]
     assert len(pairs) == 8 and set(pairs) == set(release.CI_RELEASE_PAIRS)
-    assert "release-platform" in ci["jobs"]["ci-gate"]["needs"]
+    assert set(names) <= set(ci["jobs"]["ci-gate"]["needs"])
     assert set(ci["jobs"]["ci-gate"]["needs"]) == set(ci["jobs"]) - {"ci-gate"}
-    assert job["env"]["PUBLIC_SOURCE"] == "${{ github.sha }}"
-    assert "needs.preflight" not in json.dumps(job)
+    job = groups[0]
+    profile = {key: value for key, value in job.items() if key not in {"needs", "strategy"}}
+    for group in groups:
+        assert {key: value for key, value in group.items() if key not in {"needs", "strategy"}} == profile
+        assert group["permissions"] == {"contents": "read", "actions": "read"}
+        assert group["strategy"]["fail-fast"] is False
+        assert group["env"]["PUBLIC_SOURCE"] == "${{ github.sha }}"
+        assert group["name"] == "Release bundles (${{ matrix.pair }})"
+        assert "needs.preflight" not in json.dumps(group)
     steps = job["steps"]
     checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
     assert checkout["with"]["ref"] == "${{ github.sha }}"
@@ -50,8 +60,22 @@ def test_release_builds_overlap_ci_and_native_lifecycle_precedes_upload():
 
 
 def test_shared_go_cache_has_one_writer_per_os_and_keeps_all_shards():
-    job = _workflow("public-ci.yml")["jobs"]["go-unit-tests"]
-    assert job["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+    jobs = _workflow("public-ci.yml")["jobs"]
+    groups = [jobs[name] for name in ("go-unit-tests", "go-unit-tests-linux")]
+    assert not groups[0].get("needs")
+    assert groups[1]["needs"] == "macos-release-packages"
+    cases = [(os, shard) for group in groups
+             for os in group["strategy"]["matrix"]["os"]
+             for shard in group["strategy"]["matrix"]["shard"]]
+    assert len(cases) == 8
+    assert set(cases) == {(os, shard) for os in ("ubuntu-latest", "macos-latest") for shard in range(4)}
+    job = groups[0]
+    profile = {key: value for key, value in job.items() if key not in {"needs", "strategy"}}
+    for group in groups:
+        assert {key: value for key, value in group.items() if key not in {"needs", "strategy"}} == profile
+        assert group["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+        assert group["strategy"]["fail-fast"] is False
+        assert group["name"] == "Go source regressions (${{ matrix.os }}, shard ${{ matrix.shard }})"
     restore = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/cache/restore@"))
     save = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/cache/save@"))
     assert restore["uses"].split("@")[1] == save["uses"].split("@")[1]

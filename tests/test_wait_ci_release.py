@@ -264,11 +264,42 @@ def test_initial_ci_wave_leaves_capacity_for_early_publisher():
     jobs = yaml.safe_load((WORKFLOWS / "public-ci.yml").read_text())["jobs"]
     initial = {name: job for name, job in jobs.items() if not job.get("needs")}
     assert set(initial) == {"go-unit-tests", "node-artifact", "failover-e2e",
-                            "candidate-client-contract"}
+                            "candidate-client-contract", "macos-release-packages",
+                            "public-python", "release-platform-critical"}
     total = 0
     for job in initial.values():
         matrix = job.get("strategy", {}).get("matrix", {})
         total += len(matrix["include"]) if "include" in matrix else math.prod(len(values) for values in matrix.values())
     assert total == 19
     assert total + 1 <= 20
-    assert jobs["public-python"]["needs"] == ["node-artifact"]
+    assert jobs["go-unit-tests-linux"]["needs"] == "macos-release-packages"
+    assert jobs["macos-build"]["needs"] == "macos-release-packages"
+    assert jobs["release-platform-android"]["needs"] == "node-artifact"
+    assert jobs["windows-shellmcp"]["needs"] == ["node-artifact"]
+    assert jobs["release-platform"]["needs"] == "release-platform-critical"
+    for name in ("admin-ui-build", "installer-e2e-linux", "android-dns"):
+        assert jobs[name]["needs"] == ["macos-build"]
+    expanded_jobs = 0
+    for job in jobs.values():
+        matrix = job.get("strategy", {}).get("matrix", {})
+        expanded_jobs += len(matrix["include"]) if "include" in matrix else math.prod(len(values) for values in matrix.values())
+    assert expanded_jobs == 36
+
+    visiting, visited = set(), set()
+
+    def visit(name):
+        assert name in jobs
+        assert name not in visiting, f"CI dependency cycle through {name}"
+        if name in visited:
+            return
+        visiting.add(name)
+        needs = jobs[name].get("needs", [])
+        for dependency in [needs] if isinstance(needs, str) else needs:
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+
+    for name in jobs:
+        visit(name)
+    assert visited == set(jobs)
+    assert set(jobs["ci-gate"]["needs"]) == set(jobs) - {"ci-gate"}

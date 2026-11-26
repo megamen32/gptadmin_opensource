@@ -15,9 +15,10 @@ WORKFLOW = ROOT / '.github/workflows/public-ci.yml'
 def test_public_product_gate_requires_all_actual_product_jobs():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     gate = workflow['jobs']['ci-gate']
-    expected = {'go-unit-tests', 'admin-ui-build', 'failover-e2e',
+    expected = {'go-unit-tests', 'go-unit-tests-linux', 'admin-ui-build', 'failover-e2e',
                 'installer-e2e-linux', 'candidate-client-contract', 'macos-release-packages', 'macos-build',
-                'windows-shellmcp', 'public-python', 'android-dns', 'node-artifact', 'release-platform'}
+                'windows-shellmcp', 'public-python', 'android-dns', 'node-artifact',
+                'release-platform-critical', 'release-platform-android', 'release-platform'}
     assert set(gate['needs']) == expected
     assert set(gate['needs']) == set(workflow['jobs']) - {'ci-gate'}
     script = gate['steps'][0]['run']
@@ -65,13 +66,14 @@ def test_public_checks_have_no_secret_input_or_private_checkout():
 
 def test_public_go_shards_wire_every_module_on_each_platform(tmp_path):
     """Exercise shell argument wiring only; real Go execution is a separate CI gate."""
-    job = yaml.safe_load(WORKFLOW.read_text())['jobs']['go-unit-tests']
-    matrix = job['strategy']['matrix']
-    assert job['strategy']['fail-fast'] is False
-    assert set(matrix['os']) == {'ubuntu-latest', 'macos-latest'}
-    assert matrix['shard'] == [0, 1, 2, 3]
-    step = next(step for step in job['steps'] if step.get('name') == 'Run every test in its deterministic shard')
-    assert step['env']['SHARD'] == '${{ matrix.shard }}'
+    jobs = yaml.safe_load(WORKFLOW.read_text())['jobs']
+    groups = [jobs[name] for name in ('go-unit-tests', 'go-unit-tests-linux')]
+    cases = [(os, shard) for job in groups
+             for os in job['strategy']['matrix']['os']
+             for shard in job['strategy']['matrix']['shard']]
+    assert len(cases) == 8
+    assert set(cases) == {(os, shard) for os in ('ubuntu-latest', 'macos-latest') for shard in range(4)}
+    assert groups[0]['steps'] == groups[1]['steps']
     capture = tmp_path / 'arguments.json'
     shim_dir = tmp_path / 'bin'
     shim_dir.mkdir()
@@ -79,10 +81,17 @@ def test_public_go_shards_wire_every_module_on_each_platform(tmp_path):
     shim.write_text(f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
                     'pathlib.Path(os.environ["CI_CAPTURE"]).write_text(json.dumps(sys.argv[1:]))\n')
     shim.chmod(0o755)
-    for runner, modules in (
-        ('Linux', ['go-hub', 'go-shellmcp', 'go-proxyrelay', 'bezhook']),
-        ('macOS', ['go-hub', 'go-shellmcp']),
-    ):
+    for job in groups:
+        matrix = job['strategy']['matrix']
+        assert job['strategy']['fail-fast'] is False
+        assert matrix['shard'] == [0, 1, 2, 3]
+        assert len(matrix['os']) == 1
+        runner = {'ubuntu-latest': 'Linux', 'macos-latest': 'macOS'}[matrix['os'][0]]
+        modules = ['go-hub', 'go-shellmcp']
+        if runner == 'Linux':
+            modules += ['go-proxyrelay', 'bezhook']
+        step = next(step for step in job['steps'] if step.get('name') == 'Run every test in its deterministic shard')
+        assert step['env']['SHARD'] == '${{ matrix.shard }}'
         for index in matrix['shard']:
             env = dict(os.environ, PATH=str(shim_dir) + os.pathsep + os.environ['PATH'],
                        CI_CAPTURE=str(capture), RUNNER_OS=runner, SHARD=str(index),
@@ -99,7 +108,8 @@ def test_macos_cross_compile_keeps_the_full_package_gate_in_the_smoke_job(tmp_pa
     """Exercise the relocated shell command, retaining every Linux package build."""
     jobs = yaml.safe_load(WORKFLOW.read_text())['jobs']
     assert not any(step.get('name') == 'Cross-compile Linux artifacts from Mac'
-                   for step in jobs['go-unit-tests']['steps'])
+                   for name in ('go-unit-tests', 'go-unit-tests-linux')
+                   for step in jobs[name]['steps'])
     job = jobs['macos-build']
     assert job['runs-on'] == 'macos-latest'
     assert job['needs'] == 'macos-release-packages'
