@@ -81,6 +81,33 @@ def main():
                 time.sleep(.1)
             else:
                 raise RuntimeError('local executor did not register')
+            # Real MCP code-mode contract: use the emitted readAll argument object.
+            def mcp_call(name, arguments):
+                nonlocal instruction_context
+                for _ in range(2):
+                    args = dict(arguments)
+                    if instruction_context:
+                        args['context'] = instruction_context
+                    response = request('/mcp', {'jsonrpc': '2.0', 'id': 1,
+                        'method': 'tools/call', 'params': {'name': name, 'arguments': args}})
+                    assert 'error' not in response, response
+                    payload = response['result']['structuredContent']
+                    if payload.get('executed') is False and payload.get('context'):
+                        instruction_context = payload['context']
+                        continue
+                    return payload
+                raise AssertionError('MCP instruction context not accepted')
+            saved = mcp_call('exec', {'code': "return 'descriptor-marker'.repeat(1000);",
+                                      'max_output_bytes': 4096})
+            assert saved['status'] == 'completed' and saved['result']['saved'], saved
+            descriptor = saved['result']['read_all']
+            assert descriptor['call'] == 'mcp.content.readAll', descriptor
+            copy = mcp_call('exec', {'code':
+                "const r=await mcp.content.readAll(" + json.dumps(descriptor['args']) +
+                ");return {same:r.text==='descriptor-marker'.repeat(1000),bytes:r.bytes,complete:r.complete};"})
+            assert copy['status'] == 'completed' and copy['result']['same'] and copy['result']['complete'], copy
+            assert copy['result']['bytes'] == saved['result']['bytes'], copy
+            print(json.dumps({'advertised_readall': 'PASS', 'bytes': copy['result']['bytes']}))
             marker = secrets.token_hex(16)
             output = root / 'executed.txt'
             command = f'printf %s {shlex.quote(marker)} > {shlex.quote(str(output))} && cat {shlex.quote(str(output))}'

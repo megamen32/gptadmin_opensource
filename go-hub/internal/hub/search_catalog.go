@@ -287,7 +287,20 @@ func (i *toolSearchIndex) queryLocked(query, targetFilter string, limit int) ([]
 }
 
 func (i *toolSearchIndex) queryMatchLocked(match, query, targetFilter string, limit int) ([]map[string]any, error) {
-	rows, err := i.db.Query(`SELECT target,name,title,description,settings,bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0) FROM tool_search WHERE tool_search MATCH ? AND (?='' OR target=?) ORDER BY CASE WHEN lower(name)=lower(?) THEN 0 WHEN lower(title)=lower(?) THEN 1 ELSE 2 END, bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0), target, name LIMIT ?`, match, targetFilter, targetFilter, query, query, limit)
+	// Keep exact-name matches first, but give distinct capabilities a chance
+	// before repeating the same name on every host in a broad service query.
+	// The bounded catalog is materialized once; every hit retains its exact target.
+	rows, err := i.db.Query(`WITH hits AS MATERIALIZED (
+		SELECT target,name,title,description,settings,
+		bm25(tool_search,0.0,4.0,2.0,1.0,2.5,3.0) AS score,
+		CASE WHEN lower(name)=lower(?) THEN 0 WHEN lower(title)=lower(?) THEN 1 ELSE 2 END AS exact_rank
+		FROM tool_search WHERE tool_search MATCH ? AND (?='' OR target=?)
+	), diverse AS (
+		SELECT *, row_number() OVER (PARTITION BY lower(name) ORDER BY exact_rank,score,target,name) AS duplicate_rank
+		FROM hits
+	)
+	SELECT target,name,title,description,settings,score FROM diverse
+	ORDER BY exact_rank,duplicate_rank,score,target,name LIMIT ?`, query, query, match, targetFilter, targetFilter, limit)
 	if err != nil {
 		return nil, err
 	}

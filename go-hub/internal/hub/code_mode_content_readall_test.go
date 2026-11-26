@@ -61,3 +61,25 @@ func TestContentReadAllMarksPartialSource(t *testing.T) {
 		t.Fatalf("explicit partial read not marked: %d %#v", status, out)
 	}
 }
+
+// Exercise the exact object argument advertised by an oversized exec response,
+// rather than manually translating it to the positional API.
+func TestContentReadAllAcceptsAdvertisedDescriptor(t *testing.T) {
+	s, r := codeModeFixture(t)
+	defer s.Close()
+	saved, status := codeModeRun(t, s, r, map[string]any{"code": "return 'xyz'.repeat(4000);", "max_output_bytes": 4096})
+	if status != http.StatusOK {
+		t.Fatalf("save: %d %#v", status, saved)
+	}
+	descriptor := mapValue(mapValue(saved["result"])["read_all"])
+	args := mapValue(descriptor["args"])
+	if firstString(descriptor, "call") != "mcp.content.readAll" || firstString(args, "source") == "" {
+		t.Fatalf("missing readAll descriptor: %#v", descriptor)
+	}
+	code := fmt.Sprintf("const x=await mcp.content.readAll({source:%q,max_bytes:%d}); return {same:x.text==='xyz'.repeat(4000),bytes:x.bytes,complete:x.complete};", firstString(args, "source"), intFromAny(args["max_bytes"]))
+	out, status := codeModeRun(t, s, r, map[string]any{"code": code})
+	got := mapValue(out["result"])
+	if status != http.StatusOK || got["same"] != true || got["complete"] != true || intFromAny(got["bytes"]) != 12000 {
+		t.Fatalf("advertised readAll call failed: %d %#v", status, out)
+	}
+}
