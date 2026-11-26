@@ -1,12 +1,6 @@
 # ShellMCP
 
-> **Status (2026-11-09).** A standalone `shellmcp.service` is a legacy deployment
-> form. The supported form is one unified `gptadmin-node` per host — hub,
-> executor and child-MCP management in a single process (`go-hub/cmd/gptadmin-node`)
-> — while the Go runtime in `go-shellmcp/` lives on as the node's embedded
-> executor library. Migrate remaining standalone services per the fullcycle
-> plan; see [UNIFIED_NODE_ARCHITECTURE.md](UNIFIED_NODE_ARCHITECTURE.md) and
-> [NODE_PUBLIC_AUTOUPDATE.md](NODE_PUBLIC_AUTOUPDATE.md).
+> **Deployment roles (2026-11-26).** Standalone ShellMCP is the executor-only installation for a managed machine. A full Node embeds the same executor and owns its local lifecycle. A separate local Hub service plus a standalone ShellMCP service is the historical full layout. See [deployment and update acceptance](TOPOLOGY_ROADMAP.md) and [unified Node architecture](UNIFIED_NODE_ARCHITECTURE.md).
 
 ShellMCP is the agent that runs on each target machine. It registers with the
 hub, executes commands locally, and returns real output.
@@ -28,19 +22,15 @@ hub, executes commands locally, and returns real output.
 > **Note.** Legacy Python implementations (`client/shellmcp*.py`) have been
 > removed from the source tree. All installations now use the `shellmcp-go` binary.
 
-## Install on a target machine
+## Install a managed executor
 
-```bash
-# Linux / macOS (installs the Go binary in user-mode by default)
-curl -s https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/deploy/install.sh | bash
+Choose the executor-only option in interactive setup. With the Unix CLI installed, the explicit unattended form takes the HTTPS URL of the managing Hub.
+
+```sh
+gptadmin setup --user --silent --no-hub --shellmcp --hub-url https://hub.example
 ```
 
-The installer:
-- Auto-detects mode: no sudo → user-mode (`~/.local/share/gptadmin`),
-  with sudo → system-mode (`/opt/gptadmin`)
-- Registers a user service (`systemctl --user` on Linux, `LaunchAgents` on macOS)
-  - Prints the Hub URL and agent name; connection credentials stay managed by
-    the installer and service
+Pair the device through the authorized Hub connection. Verify its identity, run a permitted operation on that computer and read the result through the normal client. For a host that also accepts clients or routes requests, use the [unified Node package](NODE_PUBLIC_AUTOUPDATE.md).
 
 ### Safely update ShellMCP on macOS (Apple silicon or Intel)
 

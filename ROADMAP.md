@@ -2,6 +2,10 @@
 
 Priority order: top first.
 
+## Deployment roles and topology
+
+[Unified installation, managed executors, organizational hierarchy and acceptance criteria](docs/TOPOLOGY_ROADMAP.md)
+
 ## Unified Node and independent failover — selected 2026-09-09
 
 Status: active; architecture and limits in `docs/UNIFIED_NODE_ARCHITECTURE.md`.
