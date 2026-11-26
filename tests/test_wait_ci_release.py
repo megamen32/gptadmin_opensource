@@ -263,11 +263,12 @@ def test_in_progress_preparation_keeps_every_tag_and_publication_after_success_g
 def test_initial_ci_wave_leaves_capacity_for_early_publisher():
     jobs = yaml.safe_load((WORKFLOWS / "public-ci.yml").read_text())["jobs"]
     initial = {name: job for name, job in jobs.items() if not job.get("needs")}
-    assert set(initial) == {"go-unit-tests", "node-artifact", "failover-e2e"}
+    assert set(initial) == {"go-unit-tests", "node-artifact", "failover-e2e",
+                            "candidate-client-contract"}
     total = 0
     for job in initial.values():
-        matrix = job["strategy"]["matrix"]
+        matrix = job.get("strategy", {}).get("matrix", {})
         total += len(matrix["include"]) if "include" in matrix else math.prod(len(values) for values in matrix.values())
-    assert total == 18
+    assert total == 19
     assert total + 1 <= 20
     assert jobs["public-python"]["needs"] == ["node-artifact"]

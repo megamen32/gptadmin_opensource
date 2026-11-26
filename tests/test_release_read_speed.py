@@ -158,7 +158,7 @@ def _publication_fixture(tmp_path, monkeypatch, fault=None, fault_phase=0):
             return json.dumps(node_release).encode()
         if endpoint == 'graphql':
             return json.dumps({'data': {'repository': {'latestRelease': {'tagName': 'v1021'}}}}).encode()
-        if endpoint.endswith('/releases') and not mutation:
+        if endpoint.endswith('/releases?per_page=100') and not mutation:
             return (node_tag + '\n').encode()
         if endpoint.endswith('/git/refs'):
             state['tag'] = True

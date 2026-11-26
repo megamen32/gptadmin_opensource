@@ -198,12 +198,19 @@ def publish(directory: Path, source: str, private_source: str, version: int,
     ci_state = verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
     if ci_artifact_attempt is not None:
         verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt, _state=ci_state)
-    latest_before = latest_release_tag(repository)
     tag = f'v{version}'
-    if node.tag_commit(repository, tag, allow_missing=True) is not None:
+    # These reads all precede the first mutation. Keep complete pagination,
+    # but use the maximum page size as release history grows.
+    before = node.parallel_reads({
+        'latest': lambda: latest_release_tag(repository),
+        'tag': lambda: node.tag_commit(repository, tag, allow_missing=True),
+        'releases': lambda: node.gh('api', f'repos/{repository}/releases?per_page=100',
+                                    '--paginate', '--jq', '.[].tag_name').decode().splitlines(),
+    })
+    latest_before = before['latest']
+    if before['tag'] is not None:
         raise ValueError('full release tag already exists; reconcile it without replay')
-    existing = node.gh('api', f'repos/{repository}/releases', '--paginate', '--jq', '.[].tag_name').decode().splitlines()
-    if tag in existing:
+    if tag in before['releases']:
         raise ValueError('full release or draft already exists; reconcile it without replay')
     # Exact refs are created once. A failed/unknown mutation is never replayed.
     node.gh('api', f'repos/{repository}/git/refs', '--method', 'POST',
@@ -228,7 +235,8 @@ def publish(directory: Path, source: str, private_source: str, version: int,
     uploaded = {}
     executor = ThreadPoolExecutor(max_workers=4)
     try:
-        futures = {executor.submit(upload_asset, path): path for path in assets}
+        ordered = sorted(assets, key=lambda path: path.stat().st_size, reverse=True)
+        futures = {executor.submit(upload_asset, path): path for path in ordered}
         for future in as_completed(futures):
             uploaded[futures[future].name] = future.result()
     finally:

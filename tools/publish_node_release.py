@@ -287,7 +287,10 @@ def publish(directory, source, repository):
     if missing:
         executor = ThreadPoolExecutor(max_workers=4)
         try:
-            futures = {executor.submit(upload_asset, path): path for path in missing}
+            # Start the largest bounded uploads first so they do not trail
+            # behind small checksum files in the final worker wave.
+            ordered = sorted(missing, key=lambda path: path.stat().st_size, reverse=True)
+            futures = {executor.submit(upload_asset, path): path for path in ordered}
             for future in as_completed(futures):
                 present[futures[future].name] = future.result()
         finally:

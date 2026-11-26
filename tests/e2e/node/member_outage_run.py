@@ -322,17 +322,20 @@ async def run(binary, shell_binary, root):
     saved_ip = "127.0.0.2"
     reader_env = former.directory / "reader.env"
     reader_env.write_text(f'GPTADMIN_NODE_WRITER_CONNECT_TO="{saved_ip}"\n')
-    check_reader_route(origin, cert, reader_env, saved_ip, "ingress stopped")
-    # Reproduce the original failure: TCP connects, but no TLS handshake completes.
-    with socket.socket() as stalled:
-        stalled.bind(("127.0.0.1", client_port))
-        stalled.listen()
-        check_reader_route(origin, cert, reader_env, saved_ip, "TLS handshake stalled")
-
     with ExitStack() as stack:
         writer_process = stack.enter_context(running([binary], writer.directory, writer.env))
         current_writer_id = await wait_for("44 as the current writer", writer_process, writer.writer_id)
         assert current_writer_id != previous_writer_id, "writer identity did not change"
+        # The writer uses a distinct internal port. Its startup can overlap the
+        # negative public-ingress probes; HAProxy still starts only after both.
+        print("node44 ready; public HTTPS ingress remains stopped", flush=True)
+        check_reader_route(origin, cert, reader_env, saved_ip, "ingress stopped")
+        # Reproduce the original failure: TCP connects, but no TLS handshake completes.
+        with socket.socket() as stalled:
+            stalled.bind(("127.0.0.1", client_port))
+            stalled.listen()
+            check_reader_route(origin, cert, reader_env, saved_ip, "TLS handshake stalled")
+
         proxy = stack.enter_context(ingress)
 
         def https_ready():
