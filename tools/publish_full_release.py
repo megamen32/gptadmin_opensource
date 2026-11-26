@@ -18,6 +18,10 @@ except ImportError:
 
 
 REPOSITORY = 'megamen32/gptadmin_opensource'
+CI_RELEASE_PAIRS = tuple(f'{platform}_{arch}'
+                         for platform in ('linux', 'darwin', 'windows', 'android')
+                         for arch in ('amd64', 'arm64'))
+CI_RELEASE_LIFECYCLE = 'Check the exact release Ubuntu package through its lifecycle'
 
 
 def checked_assets(directory: Path, source: str, version: int) -> list[Path]:
@@ -114,6 +118,35 @@ def verify_ci_and_node(repository: str, source: str, private_source: str,
             raise ValueError('Node package version differs from full release')
 
 
+def verify_ci_release_artifacts(repository: str, source: str, ci_run: int, attempt: int) -> None:
+    """Require the exact CI attempt that built and exercised these release artifacts."""
+    if (repository != REPOSITORY or not re.fullmatch(r'[0-9a-f]{40}', source)
+            or type(attempt) is not int or attempt < 1):
+        raise ValueError('invalid CI release artifact identity')
+    run = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}'))
+    if (run.get('name') != 'Public Product CI' or run.get('head_sha') != source
+            or run.get('path') != '.github/workflows/public-ci.yml'
+            or run.get('event') != 'push' or run.get('head_branch') != 'main'
+            or run.get('status') != 'completed' or run.get('conclusion') != 'success'
+            or run.get('run_attempt') != attempt):
+        raise ValueError('release artifacts do not belong to the successful exact CI attempt')
+    jobs = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}/jobs?per_page=100'))['jobs']
+    verified = {}
+    for pair in CI_RELEASE_PAIRS:
+        name = f'Release bundles ({pair})'
+        matches = [job for job in jobs if job.get('name') == name]
+        if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                or matches[0].get('conclusion') != 'success'
+                or matches[0].get('run_id') != ci_run):
+            raise ValueError('CI did not pass exact release job: ' + name)
+        verified[pair] = matches[0]
+    lifecycle = [step for step in verified['linux_amd64'].get('steps', [])
+                 if step.get('name') == CI_RELEASE_LIFECYCLE]
+    if (len(lifecycle) != 1 or lifecycle[0].get('status') != 'completed'
+            or lifecycle[0].get('conclusion') != 'success'):
+        raise ValueError('CI did not exercise the exact release Ubuntu lifecycle')
+
+
 def latest_release_tag(repository: str) -> str | None:
     """Read the current stable latest release; API errors remain UNKNOWN/fatal."""
     try:
@@ -139,12 +172,14 @@ def latest_release_tag(repository: str) -> str | None:
 
 
 def publish(directory: Path, source: str, private_source: str, version: int,
-            ci_run: int, node_dir: Path) -> None:
+            ci_run: int, node_dir: Path, *, ci_artifact_attempt: int | None = None) -> None:
     if version < 1074:
         raise ValueError('full release build must be at least 1074')
     repository = REPOSITORY
     assets = checked_assets(directory, source, version)
     verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
+    if ci_artifact_attempt is not None:
+        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt)
     latest_before = latest_release_tag(repository)
     tag = f'v{version}'
     if node.tag_commit(repository, tag, allow_missing=True) is not None:
@@ -184,6 +219,8 @@ def publish(directory: Path, source: str, private_source: str, version: int,
         executor.shutdown(wait=True, cancel_futures=True)
     # Recheck CI, Node and public main immediately before publishing the draft.
     verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
+    if ci_artifact_attempt is not None:
+        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt)
     node.verify_tag(repository, tag, source)
     final = json.loads(node.gh('api', f'repos/{repository}/releases/{release["id"]}',
                                '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=false'))
@@ -208,9 +245,11 @@ def main() -> None:
     parser.add_argument('--private-source', required=True)
     parser.add_argument('--version', required=True, type=int)
     parser.add_argument('--ci-run', required=True, type=int)
+    parser.add_argument('--ci-artifact-attempt', type=int,
+                        help='Require release jobs and lifecycle from this exact CI attempt')
     args = parser.parse_args()
     publish(args.directory, args.source, args.private_source, args.version,
-            args.ci_run, args.node_directory)
+            args.ci_run, args.node_directory, ci_artifact_attempt=args.ci_artifact_attempt)
 
 
 if __name__ == '__main__':

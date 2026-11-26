@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Publish accepted public Node artifacts without changing the legacy latest release."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
@@ -222,19 +223,35 @@ def publish(directory, source, repository):
     present = {a['name']: a for a in release.get('assets', [])}
     if set(present) - {p.name for p in assets}:
         raise ValueError('unexpected asset in immutable Node release')
+    missing = []
+    # Reconcile all existing assets before starting any new upload.
     for path in assets:
         if path.name in present:
             if not asset_matches(present[path.name], path):
                 raise ValueError('existing Node release asset differs; never overwrite')
         else:
-            if not release.get('draft'):
-                raise ValueError('published Node release is incomplete; never mutate it')
-            uploaded = json.loads(gh('api', 'https://uploads.github.com/repos/' + repository
-                + '/releases/' + str(release['id']) + '/assets?name=' + path.name,
-                '--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', str(path)))
-            if not asset_matches(uploaded, path):
-                raise ValueError('uploaded Node asset digest differs')
-            present[path.name] = uploaded
+            missing.append(path)
+    if missing and not release.get('draft'):
+        raise ValueError('published Node release is incomplete; never mutate it')
+
+    def upload_asset(path):
+        uploaded = json.loads(gh('api', 'https://uploads.github.com/repos/' + repository
+            + '/releases/' + str(release['id']) + '/assets?name=' + path.name,
+            '--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', str(path)))
+        if not asset_matches(uploaded, path):
+            raise ValueError('uploaded Node asset digest differs')
+        return uploaded
+
+    if missing:
+        executor = ThreadPoolExecutor(max_workers=4)
+        try:
+            futures = {executor.submit(upload_asset, path): path for path in missing}
+            for future in as_completed(futures):
+                present[futures[future].name] = future.result()
+        finally:
+            # Attempt each upload once. On failure cancel queued work, settle
+            # in-flight calls, and leave the draft available for reconciliation.
+            executor.shutdown(wait=True, cancel_futures=True)
     if set(present) != {p.name for p in assets} or not all(asset_matches(present[p.name], p) for p in assets):
         raise ValueError('uploaded Node release digests differ')
     verify_tag(repository, tag, mirror_commit)

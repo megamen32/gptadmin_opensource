@@ -1,10 +1,13 @@
 """Fast units: archive integrity/publication logic; expected1/max15s, not release acceptance."""
+import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
 from pathlib import Path
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from tools import publish_node_release as release
@@ -76,7 +79,7 @@ class NodeReleaseTests(unittest.TestCase):
             with self.subTest(contract=contract):self.assertIn(contract,text)
         self.assertNotIn('python3 tools/build_node.py', text)
         for artifact_contract in ('actions: read',
-                                  'pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}',
+                                  'pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}',
                                   'run-id: ${{ github.event.workflow_run.id }}',
                                   'verify_package(directory / name, arch, os.environ[\'SOURCE_SHA\'], platform)',
                                   'exactly four packages and their checksums'):
@@ -301,6 +304,187 @@ class NodeReleaseTests(unittest.TestCase):
             with patch.object(release,'gh',side_effect=gh),contextlib.redirect_stdout(io.StringIO()):release.publish(d,SOURCE,release.REPOSITORY)
             self.assertIn('PATCH',calls[-1]);self.assertTrue(state['tag'])
 
+
+
+
+class ParallelNodePublicationTests(unittest.TestCase):
+    def packages(self, directory):
+        packages = [package(directory, arch, platform=platform)
+                    for platform in ('linux', 'darwin') for arch in ('amd64', 'arm64')]
+        return [asset for path in packages for asset in (path, path.with_name(path.name + '.sha256'))]
+
+    def asset(self, path):
+        return {'name': path.name, 'size': path.stat().st_size, 'digest': 'sha256:' + release.digest(path)}
+
+    def transport(self, existing, upload=None):
+        lock = threading.Lock()
+        def gh(*args):
+            endpoint = args[1]
+            if '/git/matching-refs/' in endpoint:
+                return json.dumps([{'ref': 'refs/tags/' + existing['tag_name'],
+                                    'object': {'type': 'commit', 'sha': MIRROR}}]).encode()
+            if endpoint.endswith('/git/commits/' + MIRROR):
+                return json.dumps({'sha': MIRROR, 'message': 'public source\n\nSource-Commit: ' + SOURCE_TRAILER}).encode()
+            if 'per_page=' in endpoint:
+                return json.dumps([existing]).encode()
+            if endpoint.startswith('https://uploads.github.com/'):
+                self.assertIn('POST', args)
+                path = Path(args[args.index('--input') + 1])
+                uploaded = upload(path)
+                with lock:
+                    existing['assets'].append(uploaded)
+                return json.dumps(uploaded).encode()
+            if endpoint.endswith('/releases/1'):
+                self.assertIn('PATCH', args)
+                self.assertIn('draft=false', args)
+                self.assertIn('make_latest=false', args)
+                self.assertEqual(len(existing['assets']), 8)
+                return json.dumps({**existing, 'draft': False}).encode()
+            raise AssertionError(endpoint)
+        return gh
+
+    def draft(self, assets=(), published=False):
+        return {'id': 1, 'tag_name': 'node-v123-' + SOURCE[:12],
+                'draft': not published, 'assets': list(assets)}
+
+    def test_uploads_overlap_with_at_most_four_in_flight_and_publish_after_all_finish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.packages(directory)
+            existing = self.draft()
+            lock = threading.Lock()
+            batch = threading.Barrier(4, timeout=3)
+            active = peak = 0
+            started = []
+            def upload(path):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                    started.append(path.name)
+                try:
+                    batch.wait()
+                    return self.asset(path)
+                finally:
+                    with lock:
+                        active -= 1
+            with patch.object(release, 'gh', side_effect=self.transport(existing, upload)) as gh, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                release.publish(directory, SOURCE, release.REPOSITORY)
+            self.assertEqual(peak, 4)
+            self.assertEqual(active, 0)
+            self.assertCountEqual(started, [path.name for path in paths])
+            self.assertIn('PATCH', gh.call_args_list[-1].args)
+
+    def test_every_existing_digest_is_checked_before_any_missing_asset_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.packages(directory)
+            existing = self.draft([{**self.asset(paths[-1]), 'digest': 'sha256:' + '0' * 64}])
+            upload = unittest.mock.Mock(side_effect=AssertionError('must validate existing assets first'))
+            with patch.object(release, 'gh', side_effect=self.transport(existing, upload)) as gh:
+                with self.assertRaisesRegex(ValueError, 'existing Node release asset differs'):
+                    release.publish(directory, SOURCE, release.REPOSITORY)
+            upload.assert_not_called()
+            self.assertFalse(any('--method' in call.args for call in gh.call_args_list))
+
+    def test_matching_draft_uploads_only_missing_assets_and_published_release_is_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.packages(directory)
+            existing = self.draft([self.asset(path) for path in paths[::2]])
+            uploaded = []
+            def upload(path):
+                uploaded.append(path.name)
+                return self.asset(path)
+            with patch.object(release, 'gh', side_effect=self.transport(existing, upload)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                release.publish(directory, SOURCE, release.REPOSITORY)
+            self.assertCountEqual(uploaded, [path.name for path in paths[1::2]])
+            existing['draft'] = False
+            with patch.object(release, 'gh', side_effect=self.transport(existing)) as gh, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                release.publish(directory, SOURCE, release.REPOSITORY)
+            self.assertFalse(any('--method' in call.args for call in gh.call_args_list))
+
+    def test_incomplete_published_release_rejects_all_uploads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.packages(directory)
+            existing = self.draft([self.asset(paths[-1])], published=True)
+            with patch.object(release, 'gh', side_effect=self.transport(existing)) as gh:
+                with self.assertRaisesRegex(ValueError, 'published Node release is incomplete'):
+                    release.publish(directory, SOURCE, release.REPOSITORY)
+            self.assertFalse(any('--method' in call.args for call in gh.call_args_list))
+
+    def test_failed_upload_cancels_pending_waits_for_running_and_never_retries_or_publishes(self):
+        for failure in ('transport', 'digest'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                self.packages(directory)
+                existing = self.draft()
+                first_batch = threading.Barrier(4, timeout=3)
+                finish_uploads = threading.Event()
+                shutdown_started = threading.Event()
+                pending_cancelled = threading.Event()
+                publication_finished = threading.Event()
+                lock = threading.Lock()
+                started = []
+                errors = []
+                pools = []
+
+                class ObservedPool(ThreadPoolExecutor):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, **kwargs)
+                        self.futures = []
+                        pools.append(self)
+
+                    def submit(self, *args, **kwargs):
+                        future = super().submit(*args, **kwargs)
+                        self.futures.append(future)
+                        future.add_done_callback(lambda result: pending_cancelled.set() if result.cancelled() else None)
+                        return future
+
+                    def shutdown(self, *args, **kwargs):
+                        shutdown_started.set()
+                        return super().shutdown(*args, **kwargs)
+
+                def upload(path):
+                    with lock:
+                        index = len(started)
+                        started.append(path.name)
+                    if index < 4:
+                        first_batch.wait()
+                    if index == 0:
+                        if failure == 'transport':
+                            raise RuntimeError('fixture upload failed')
+                        return {**self.asset(path), 'digest': 'sha256:' + '0' * 64}
+                    if not finish_uploads.wait(timeout=5):
+                        raise AssertionError('in-flight fixture was not released')
+                    return self.asset(path)
+
+                def publish():
+                    try:
+                        release.publish(directory, SOURCE, release.REPOSITORY)
+                    except Exception as error:
+                        errors.append(error)
+                    finally:
+                        publication_finished.set()
+
+                with patch.object(release, 'gh', side_effect=self.transport(existing, upload)) as gh, \
+                        patch.object(release, 'ThreadPoolExecutor', ObservedPool, create=True), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    publisher = threading.Thread(target=publish)
+                    publisher.start()
+                    try:
+                        self.assertTrue(shutdown_started.wait(timeout=3))
+                        self.assertTrue(pending_cancelled.wait(timeout=3))
+                        self.assertFalse(publication_finished.is_set())
+                    finally:
+                        finish_uploads.set()
+                        publisher.join(timeout=5)
+                    self.assertFalse(publisher.is_alive())
+                self.assertEqual(len(errors), 1)
+                self.assertRegex(str(errors[0]), 'fixture upload failed|uploaded Node asset digest differs')
+                self.assertEqual(len(started), len(set(started)))
+                self.assertTrue(any(future.cancelled() for future in pools[0].futures))
+                self.assertTrue(all(future.done() for future in pools[0].futures))
+                self.assertFalse(any('PATCH' in call.args for call in gh.call_args_list))
 
 
 if __name__=='__main__':unittest.main()

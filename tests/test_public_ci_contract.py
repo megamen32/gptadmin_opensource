@@ -17,7 +17,7 @@ def test_public_product_gate_requires_all_actual_product_jobs():
     gate = workflow['jobs']['ci-gate']
     expected = {'go-unit-tests', 'admin-ui-build', 'failover-e2e',
                 'installer-e2e-linux', 'candidate-client-contract', 'macos-release-packages', 'macos-build',
-                'windows-shellmcp', 'public-python', 'android-dns', 'node-artifact'}
+                'windows-shellmcp', 'public-python', 'android-dns', 'node-artifact', 'release-platform'}
     assert set(gate['needs']) == expected
     assert set(gate['needs']) == set(workflow['jobs']) - {'ci-gate'}
     script = gate['steps'][0]['run']
@@ -49,7 +49,7 @@ def test_public_checks_have_no_secret_input_or_private_checkout():
     assert shlex.split(build['run']) == ['python3', 'tools/build_node.py', '--platform', '$PLATFORM', '--arch', '$ARCH']
     assert build['env'] == {'PLATFORM': '${{ matrix.platform }}', 'ARCH': '${{ matrix.arch }}'}
     artifact = next(step for step in node['steps'] if step.get('uses', '').startswith('actions/upload-artifact@'))
-    assert artifact['with']['name'] == 'gptadmin-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}'
+    assert artifact['with']['name'] == 'gptadmin-node-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}'
     assert artifact['with']['if-no-files-found'] == 'error'
     steps = jobs['admin-ui-build']['steps']
     ui = '\n'.join(step.get('run', '') for step in steps)
