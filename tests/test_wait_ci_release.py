@@ -98,6 +98,69 @@ def test_artifact_pagination_does_not_confuse_unrelated_total_count_with_require
     assert any(path.endswith("&page=2") for path in api.calls)
 
 
+@pytest.mark.parametrize("empty_first_page", [True, False])
+def test_incomplete_active_listing_waits_for_a_fresh_complete_snapshot(empty_first_page):
+    api = API()
+    original_fetch, original_sleep = api.fetch, api.sleep
+    def fetch(path, timeout):
+        value = original_fetch(path, timeout)
+        if "/artifacts?" in path and not api.sleeps:
+            value["total_count"] = 13
+            if empty_first_page:
+                value["artifacts"] = []
+        return value
+    def sleep(seconds):
+        original_sleep(seconds)
+        for artifact in api.artifacts:
+            artifact["id"] += 1000
+    api.fetch, api.sleep = fetch, sleep
+    result = api.wait()
+    returned = set(result["node_ids"].split(",")) | set(result["full_ids"].split(","))
+    assert returned == {str(i) for i in range(1100, 1112)}
+    assert api.sleeps == [3]
+
+
+def test_incomplete_listing_after_success_still_fails_closed():
+    api = API()
+    api.run = ci_run("completed", "success")
+    original = api.fetch
+    def fetch(path, timeout):
+        value = original(path, timeout)
+        return {"total_count": 1, "artifacts": []} if "/artifacts?" in path else value
+    api.fetch = fetch
+    with pytest.raises(ValueError, match="incomplete artifact listing"):
+        api.wait()
+    assert api.sleeps == []
+
+
+def test_incomplete_active_listing_cannot_extend_the_deadline():
+    api = API()
+    original = api.fetch
+    def fetch(path, timeout):
+        value = original(path, timeout)
+        return {"total_count": 1, "artifacts": []} if "/artifacts?" in path else value
+    api.fetch = fetch
+    with pytest.raises(TimeoutError):
+        api.wait(timeout=6)
+    assert api.elapsed == 6
+    assert api.sleeps == [3, 3]
+
+
+def test_attempt_change_during_incomplete_listing_is_not_retried_as_a_new_attempt():
+    api = API()
+    original = api.fetch
+    def fetch(path, timeout):
+        value = original(path, timeout)
+        if "/artifacts?" in path:
+            api.run["run_attempt"] += 1
+            return {"total_count": 1, "artifacts": []}
+        return value
+    api.fetch = fetch
+    with pytest.raises(ValueError, match="attempt changed"):
+        api.wait()
+    assert api.sleeps == [3]
+
+
 @pytest.mark.parametrize("path,value", [
     ("id", 124), ("run_attempt", 3), ("head_sha", "b" * 40),
     ("head_branch", "topic"), ("event", "pull_request"),

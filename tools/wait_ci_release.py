@@ -202,10 +202,15 @@ def wait_for(identity: Identity, mode: str, *, fetch: Callable = github_get,
                 if len(artifacts) >= count:
                     break
                 if not items:
-                    raise ValueError("incomplete artifact listing")
+                    # While uploads are in flight, total_count can lead the
+                    # visible page. Retry from page one on the next bounded
+                    # poll; never export IDs from an incomplete listing.
+                    if run["status"] == "completed":
+                        raise ValueError("incomplete artifact listing")
+                    break
                 page += 1
             found = validate_artifacts(artifacts, identity, wall_clock())
-            if found is not None:
+            if found is not None and len(artifacts) >= count:
                 # The attempt can change while listing pages. Never export stale IDs.
                 validate_run(get(run_path), identity)
                 return found

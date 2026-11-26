@@ -46,8 +46,17 @@ func TestQueueExecutesGenericMCPToolAndPostsResult(t *testing.T) {
 	s := New(Config{Name: "queue-agent", HubURL: hubServer.URL, QueueEnabled: true, QueueTimeout: 1, IdentityDir: t.TempDir(), SpillDir: t.TempDir(), OutboxDir: t.TempDir(), AuditLog: auditPath})
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.queueLoop(ctx)
+	loopDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-loopDone
+		// Receiving the POST precedes the callback's durable acknowledgement.
+		s.StopCallbacks()
+	}()
+	go func() {
+		defer close(loopDone)
+		s.queueLoop(ctx)
+	}()
 	select {
 	case result := <-resultCh:
 		if result.ID != "generic-1" || result.TraceID != "trace-shell-789" || result.TraceParent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" || !strings.Contains(strings.ToLower(toJSON(result.Result)), "capability_registry") {

@@ -49,6 +49,11 @@ func newSecretTestServer(t *testing.T) *Server {
 		DefaultTimeout: time.Second,
 		PollMaxTimeout: time.Second,
 	})
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close secret test server: %v", err)
+		}
+	})
 	if s.secretStoreErr != nil {
 		t.Fatalf("secret store initialization failed: %v", s.secretStoreErr)
 	}

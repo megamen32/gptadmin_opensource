@@ -20,3 +20,7 @@ secrets
 **/.secrets
 **/secret
 **/secrets
+
+# Keep Go test-only edits out of runtime compilation cache keys.
+go-hub/**/*_test.go
+go-shellmcp/**/*_test.go
