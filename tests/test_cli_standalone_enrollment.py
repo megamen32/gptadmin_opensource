@@ -1,4 +1,5 @@
 from pathlib import Path
+import secrets
 from types import SimpleNamespace
 
 import pytest
@@ -6,25 +7,30 @@ import pytest
 import cli
 
 
-def test_standalone_enrollment_keeps_only_scoped_device_credential(monkeypatch, tmp_path: Path):
+@pytest.fixture
+def fleet_secrets():
+    return {name: secrets.token_urlsafe(24) for name in ("admin", "oauth", "control", "legacy")}
+
+
+def test_standalone_enrollment_keeps_only_scoped_device_credential(monkeypatch, tmp_path: Path, fleet_secrets):
     token_file = tmp_path / "mcp-relay.token"
     monkeypatch.setattr(cli, "MCP_TOKEN_FILE", token_file)
     env = {
-        "ADMIN_PASSWORD": "fleet-admin",
-        "OAUTH_CLIENT_SECRET": "fleet-oauth",
-        "CTL_TOKEN": "fleet-control",
-        "MCP_RELAY_ENROLLMENT_PASSWORD": "legacy-admin-password",
+        "ADMIN_PASSWORD": fleet_secrets["admin"],
+        "OAUTH_CLIENT_SECRET": fleet_secrets["oauth"],
+        "CTL_TOKEN": fleet_secrets["control"],
+        "MCP_RELAY_ENROLLMENT_PASSWORD": fleet_secrets["legacy"],
         "SHELLMCP_TOKEN": "device-token",
         "INSTALL_HUB": "false",
         "INSTALL_SHELLMCP": "true",
-        "INSTALL_ROLE": "executor",
+        "GPTADMIN_INSTALL_ROLE": "executor",
         "SHELLMCP_IDENTITY_DIR": str(tmp_path / "identity"),
     }
 
     cli._prepare_standalone_credentials(env, enrollment_token="scoped-device-grant")
     cli._persist_scoped_enrollment_token(env)
 
-    assert env["INSTALL_ROLE"] == "executor"
+    assert env["GPTADMIN_INSTALL_ROLE"] == "executor"
     assert env["SHELLMCP_TOKEN"] == "device-token"
     assert env["SHELLMCP_IDENTITY_DIR"] == str(tmp_path / "identity")
     assert "ADMIN_PASSWORD" not in env
@@ -36,31 +42,31 @@ def test_standalone_enrollment_keeps_only_scoped_device_credential(monkeypatch, 
     assert token_file.stat().st_mode & 0o077 == 0
 
 
-def test_standalone_enrollment_rejects_admin_password():
+def test_standalone_enrollment_rejects_admin_password(fleet_secrets):
     with pytest.raises(RuntimeError, match="scoped enrollment token"):
-        cli._prepare_standalone_credentials({}, admin_password="fleet-admin")
+        cli._prepare_standalone_credentials({}, admin_password=fleet_secrets["admin"])
 
 
-def test_scoped_token_matching_known_admin_secret_fails_closed():
+def test_scoped_token_matching_known_admin_secret_fails_closed(fleet_secrets):
     with pytest.raises(RuntimeError, match="fleet administrator credential"):
         cli._prepare_standalone_credentials(
-            {"ADMIN_PASSWORD": "fleet-admin"},
-            enrollment_token="fleet-admin",
+            {"ADMIN_PASSWORD": fleet_secrets["admin"]},
+            enrollment_token=fleet_secrets["admin"],
         )
 
 
 def test_legacy_admin_token_file_is_removed_but_unrelated_device_token_is_preserved(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, fleet_secrets
 ):
     token_file = tmp_path / "mcp-relay.token"
     monkeypatch.setattr(cli, "MCP_TOKEN_FILE", token_file)
 
-    token_file.write_text("fleet-admin\n")
-    cli._remove_known_legacy_standalone_token({"fleet-admin", "fleet-oauth"})
+    token_file.write_text(fleet_secrets["admin"] + "\n")
+    cli._remove_known_legacy_standalone_token({fleet_secrets["admin"], fleet_secrets["oauth"]})
     assert not token_file.exists()
 
     token_file.write_text("existing-device-token\n")
-    cli._remove_known_legacy_standalone_token({"fleet-admin", "fleet-oauth"})
+    cli._remove_known_legacy_standalone_token({fleet_secrets["admin"], fleet_secrets["oauth"]})
     assert token_file.read_text() == "existing-device-token\n"
 
 
@@ -76,19 +82,19 @@ def test_scoped_token_persistence_does_not_clobber_concurrent_device_token(
     assert token_file.read_text() == "first-device-token\n"
 
 
-def test_standalone_update_preserves_device_identity_and_role(monkeypatch, tmp_path: Path):
+def test_standalone_update_preserves_device_identity_and_role(monkeypatch, tmp_path: Path, fleet_secrets):
     env_file = tmp_path / "gptadmin.env"
     token_file = tmp_path / "mcp-relay.token"
     identity_dir = tmp_path / "identity"
     env_file.write_text(
         "\n".join([
-            "ADMIN_PASSWORD=fleet-admin",
-            "OAUTH_CLIENT_SECRET=fleet-oauth",
-            "CTL_TOKEN=fleet-control",
+            f"ADMIN_PASSWORD={fleet_secrets['admin']}",
+            f"OAUTH_CLIENT_SECRET={fleet_secrets['oauth']}",
+            f"CTL_TOKEN={fleet_secrets['control']}",
             "SHELLMCP_TOKEN=device-token",
             "INSTALL_HUB=false",
             "INSTALL_SHELLMCP=true",
-            "INSTALL_ROLE=executor",
+            "GPTADMIN_INSTALL_ROLE=executor",
             f"SHELLMCP_IDENTITY_DIR={identity_dir}",
         ]) + "\n"
     )
@@ -138,7 +144,7 @@ def test_standalone_update_preserves_device_identity_and_role(monkeypatch, tmp_p
     ))
 
     saved = cli.env_read()
-    assert saved["INSTALL_ROLE"] == "executor"
+    assert saved["GPTADMIN_INSTALL_ROLE"] == "executor"
     assert saved["SHELLMCP_IDENTITY_DIR"] == str(identity_dir)
     assert saved["SHELLMCP_TOKEN"] == "device-token"
     assert saved["INSTALL_HUB"] == "false"
