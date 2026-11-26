@@ -45,7 +45,7 @@ def publisher_fixture(monkeypatch, tmp_path: Path, *, upload_hook=None, reject_r
             state["calls"].append((endpoint, method, args))
         if endpoint.endswith("/git/refs") and method == "POST":
             return b"{}"
-        if endpoint.endswith("/releases") and method == "GET":
+        if endpoint.endswith("/releases?per_page=100") and method == "GET":
             return b""
         if endpoint.endswith("/releases") and method == "POST":
             assert "draft=true" in args and "make_latest=false" in args
