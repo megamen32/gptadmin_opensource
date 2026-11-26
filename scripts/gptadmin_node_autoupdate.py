@@ -379,6 +379,26 @@ def live_matches(manager, name, source):
     return status==200 and isinstance(version,dict) and version.get('git_commit')==source
 
 
+def confirm_live_matches(manager, name, source, deadline):
+    """Allow bounded readiness convergence after a successful native manager run.
+
+    A failed or mismatched read never proves the deployment. The existing
+    manager has already verified the new process; keep the hold until a fresh
+    matching version/readiness snapshot is observed within the original budget.
+    """
+    until = min(deadline, time.monotonic() + 10)
+    while True:
+        try:
+            if live_matches(manager, name, source):
+                return True
+        except (TimeoutError, ConnectionError, urllib.error.URLError):
+            pass
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.5, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='verify the public package without restarting a service')
@@ -503,14 +523,16 @@ def main():
                     record(STATE/'hold.json',{'complete':False,'source':source,
                         'verified_instances':results,'reason':'manager_update_failed_review_required','instance':name})
                     raise RuntimeError('native Node update failed; manager rollback/disposition retained')
-                if not live_matches(manager,name,source):
+                if not confirm_live_matches(manager,name,source,deadline):
                     raise RuntimeError('manager returned success but live source not verified; hold retained')
                 results.append(name)
                 # Preserve successful slices even if a later peer refuses.
                 record(STATE/'partial-update.json',{'source':source,'verified_instances':results,'complete':False})
                 clear_hold()
-            if not all(live_matches(manager,n,source) for n in names):
-                raise RuntimeError('one managed instance did not load accepted Node source')
+            if not all(confirm_live_matches(manager,n,source,deadline) for n in names):
+                record(STATE/'hold.json',{'complete':False,'source':source,
+                    'verified_instances':results,'reason':'manager_cleanup_unverified'})
+                raise RuntimeError('one managed instance did not load accepted Node source; hold retained')
             receipt={'updated':True,'tag':release['tag_name'],'source':manifest['git_commit'],'instances':results,'sha256':sha}
             try:
                 refresh_installed_helpers(root/'verify')

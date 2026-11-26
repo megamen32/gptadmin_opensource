@@ -1145,6 +1145,19 @@ class NodeAutoupdateTests(unittest.TestCase):
                     self.assertEqual(len(http.call_args_list), 2 if version_called else 1)
                     self.assertEqual(http.call_args_list[-1].args[1].endswith('/version'), version_called)
 
+    def test_post_update_readback_retries_transient_follower_not_ready(self):
+        with patch.object(update, 'live_matches', side_effect=[False, True]) as live, \
+                patch.object(update.time, 'sleep'):
+            self.assertTrue(update.confirm_live_matches(manager, 'one', '1' * 40,
+                                                        time.monotonic() + 10))
+            self.assertEqual(live.call_count, 2)
+
+    def test_post_update_readback_does_not_accept_unverified_source(self):
+        with patch.object(update, 'live_matches', return_value=False) as live:
+            self.assertFalse(update.confirm_live_matches(manager, 'one', '1' * 40,
+                                                         time.monotonic() - 1))
+            live.assert_called_once()
+
     def test_manager_rejects_duplicate_or_unbounded_member_count_before_extraction(self):
         for duplicate in (True,False):
             with self.subTest(duplicate=duplicate),tempfile.TemporaryDirectory() as d:
