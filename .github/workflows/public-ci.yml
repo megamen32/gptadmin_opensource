@@ -141,6 +141,7 @@ jobs:
         retention-days: 1
         compression-level: 0
   android-dns:
+    needs: [node-artifact]
     name: Android ARM64 system DNS resolver
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -175,6 +176,7 @@ jobs:
         go version -m "$RUNNER_TEMP/android-shellmcp" | grep -Fx $'\tbuild\tCGO_ENABLED=1'
         readelf --wide --dyn-syms "$RUNNER_TEMP/android-shellmcp" | grep -F 'getaddrinfo@LIBC'
   admin-ui-build:
+    needs: [node-artifact]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -256,6 +258,7 @@ jobs:
       run: |
         bash tools/ci_failover.sh "$SUITE"
   installer-e2e-linux:
+    needs: [node-artifact]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -264,6 +267,7 @@ jobs:
     - name: Run real Linux install e2e (served installer, systemd container)
       run: tests/e2e/install/run-install-e2e.sh
   candidate-client-contract:
+    needs: [node-artifact]
     name: Candidate client contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -313,6 +317,7 @@ jobs:
           --package build/gptadmin-hub.tar.gz \
           --local-origin
   macos-release-packages:
+    needs: [node-artifact]
     name: Verify both macOS ShellMCP release packages
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -421,6 +426,7 @@ jobs:
         GOOS=linux GOARCH=amd64 go build ./...
     name: Run exact macOS release package
   windows-shellmcp:
+    needs: [node-artifact]
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -476,6 +482,7 @@ jobs:
         go test ./internal/update -run Windows -count=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   public-python:
+    needs: [node-artifact]
     name: Public Python and CLI regressions (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 15

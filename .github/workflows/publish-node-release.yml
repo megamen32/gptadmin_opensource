@@ -3,7 +3,7 @@ name: Publish verified Node and full release
   workflow_run:
     workflows: ['Public Product CI']
     types:
-    - completed
+    - in_progress
 concurrency:
   group: gptadmin-public-full-release
   cancel-in-progress: false
@@ -13,9 +13,11 @@ permissions:
 jobs:
   build-test-publish:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.name == 'Public Product CI' &&
+      github.event.workflow_run.repository.id == github.repository_id &&
+      github.event.workflow_run.head_repository.id == github.repository_id &&
       github.event.workflow_run.repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -26,8 +28,9 @@ jobs:
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
       CI_RUN_ID: ${{ github.event.workflow_run.id }}
       CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      CI_REPOSITORY_ID: ${{ github.repository_id }}
     steps:
-    - name: Checkout the exact source that passed all public product gates
+    - name: Checkout the exact public source for read-only preparation
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         ref: ${{ github.event.workflow_run.head_sha }}
@@ -102,11 +105,19 @@ jobs:
         echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "published=$published" >> "$GITHUB_OUTPUT"
         echo "changed=$changed" >> "$GITHUB_OUTPUT"
+    - name: Wait for all immutable artifacts from the exact CI attempt
+      id: artifacts
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      run: |
+        python3 tools/wait_ci_release.py artifacts \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT" \
+          --github-output "$GITHUB_OUTPUT"
     - name: Download exact Node packages tested by Public Product CI
       if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
       uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}
+        artifact-ids: ${{ steps.artifacts.outputs.node_ids }}
         path: .tmp/node-packages
         merge-multiple: true
         run-id: ${{ github.event.workflow_run.id }}
@@ -151,16 +162,29 @@ jobs:
           args+=(--previous-installer "$prior")
         fi
         python3 tests/e2e/node/darwin_package.py .tmp/node-packages "$SOURCE_SHA" "${args[@]}"
-    - name: Download complete release shards from the same successful CI attempt
+    - name: Download complete release shards from the same exact CI attempt
       if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
       uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        pattern: gptadmin-full-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}
+        artifact-ids: ${{ steps.artifacts.outputs.full_ids }}
         path: .tmp/release-shards
         merge-multiple: false
         run-id: ${{ github.event.workflow_run.id }}
         github-token: ${{ github.token }}
-    - name: Verify all release artifacts and the exact CI lifecycle gate
+    - name: Require all product and lifecycle gates before creating any release tag
+      if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
+      run: |
+        set -euo pipefail
+        python3 tools/wait_ci_release.py success \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT"
+        python3 - "$SOURCE_SHA" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" <<'PY'
+        import sys
+        from tools.publish_full_release import verify_ci_release_artifacts
+        verify_ci_release_artifacts('megamen32/gptadmin_opensource', sys.argv[1],
+                                    int(sys.argv[2]), int(sys.argv[3]))
+        PY
+    - name: Verify all release artifacts after the exact CI lifecycle gate
       if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
       run: |
         set -euo pipefail
@@ -170,17 +194,17 @@ jobs:
         python3 tools/merge_release_shards.py --shards-dir .tmp/release-shards --output build --source "$SOURCE_SHA" --version "$version"
         python3 tools/verify_release_manifest.py verify --root "$GITHUB_WORKSPACE" --manifest "$GITHUB_WORKSPACE/build/manifest.json"
         python3 tools/verify_macos_release.py --build-dir build --minimum-build 1074
-        python3 - "$SOURCE_SHA" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" <<'PY'
-        import sys
-        from tools.publish_full_release import verify_ci_release_artifacts
-        verify_ci_release_artifacts('megamen32/gptadmin_opensource', sys.argv[1],
-                                    int(sys.argv[2]), int(sys.argv[3]))
-        PY
     - name: Publish immutable Node release for this public source commit
       if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
       env:
         SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-      run: python3 tools/publish_node_release.py --directory .tmp/node-packages --source "$SOURCE_SHA" --repository megamen32/gptadmin_opensource
+      run: |
+        set -euo pipefail
+        python3 tools/wait_ci_release.py success \
+          --repository "$GITHUB_REPOSITORY" --repository-id "$CI_REPOSITORY_ID" \
+          --source "$SOURCE_SHA" --run-id "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT" \
+          --timeout-seconds 30
+        python3 tools/publish_node_release.py --directory .tmp/node-packages --source "$SOURCE_SHA" --repository megamen32/gptadmin_opensource
     - name: Publish the verified full release without changing latest
       if: steps.current.outputs.current == 'true' && steps.scope.outputs.changed == 'true'
       env:

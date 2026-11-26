@@ -73,19 +73,24 @@ class NodeReleaseTests(unittest.TestCase):
         workflow=next((path for path in candidates if path.is_file()),None)
         self.assertIsNotNone(workflow)
         text=workflow.read_text()
-        for contract in ("workflows: ['Public Product CI']", "conclusion == 'success'",
+        for contract in ("workflows: ['Public Product CI']", "tools/wait_ci_release.py success",
                          "event == 'push'", "head_branch == 'main'", "ref: ${{ github.event.workflow_run.head_sha }}",
                          '--source "$SOURCE_SHA"', 'contents: write', 'cancel-in-progress: false'):
             with self.subTest(contract=contract):self.assertIn(contract,text)
         self.assertNotIn('python3 tools/build_node.py', text)
         for artifact_contract in ('actions: read',
-                                  'pattern: gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}',
+                                  'artifact-ids: ${{ steps.artifacts.outputs.node_ids }}',
+                                  '--attempt "$CI_RUN_ATTEMPT"',
                                   'run-id: ${{ github.event.workflow_run.id }}',
                                   'verify_package(directory / name, arch, os.environ[\'SOURCE_SHA\'], platform)',
                                   'exactly four packages and their checksums'):
             with self.subTest(artifact_contract=artifact_contract):
                 self.assertIn(artifact_contract, text)
         self.assertLess(text.index('python3 tests/e2e/node/darwin_package.py'),
+                        text.index('python3 tools/publish_node_release.py'))
+        self.assertLess(text.index('verify_ci_release_artifacts'),
+                        text.index('git tag -f'))
+        self.assertLess(text.index('git tag -f'),
                         text.index('python3 tools/publish_node_release.py'))
 
     def test_both_clean_archives_bind_same_exact_source(self):

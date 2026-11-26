@@ -151,7 +151,9 @@ def test_public_python_scope_flags_are_in_the_same_shell_command():
 def test_node_release_publishes_only_the_exact_commit_after_all_public_gates():
     workflow = (ROOT / '.github/workflows/publish-node-release.yml').read_text()
     assert "workflows: ['Public Product CI']" in workflow
-    assert "conclusion == 'success'" in workflow
+    assert "tools/wait_ci_release.py success" in workflow
+    assert workflow.index('verify_ci_release_artifacts') < workflow.index('git tag -f')
+    assert workflow.index('git tag -f') < workflow.index('python3 tools/publish_node_release.py')
     assert "event == 'push'" in workflow
     assert "head_branch == 'main'" in workflow
     assert 'ref: ${{ github.event.workflow_run.head_sha }}' in workflow

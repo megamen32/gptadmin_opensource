@@ -111,7 +111,6 @@ def test_full_release_requires_a_published_matching_node_release(monkeypatch, tm
 
 
 def test_source_commit_and_ci_must_bind_exact_public_snapshot(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(release.node, 'public_mirror_commit', lambda *args: SOURCE)
     _node_release_packages(tmp_path)
     node_assets = [path for archive in sorted(tmp_path.glob('gptadmin-node-*.tar.gz'))
                    for path in (archive, archive.with_name(archive.name + '.sha256'))]
@@ -124,7 +123,7 @@ def test_source_commit_and_ci_must_bind_exact_public_snapshot(monkeypatch, tmp_p
     def gh(*args):
         endpoint = args[1]
         if '/git/commits/' in endpoint:
-            value = {'message': 'sanitized\n\nSource-Commit: ' + state['private']}
+            value = {'sha': SOURCE, 'message': 'sanitized\n\nSource-Commit: ' + state['private']}
         elif '/git/ref/heads/main' in endpoint:
             value = {'object': {'sha': SOURCE}}
         elif endpoint.endswith('/actions/runs/123'):
@@ -231,9 +230,13 @@ def test_public_workflows_run_macos_gate_then_auto_publish_node_and_manual_full_
     node_trigger = node_workflow.get('on', node_workflow.get(True))
     assert set(node_trigger) == {'workflow_run'}
     assert node_trigger['workflow_run']['workflows'] == ['Public Product CI']
-    assert node_workflow['jobs']['build-test-publish']['if'].strip().startswith("github.event.workflow_run.conclusion == 'success'")
+    assert node_trigger['workflow_run']['types'] == ['in_progress']
+    assert "github.event.workflow_run.event == 'push'" in node_workflow['jobs']['build-test-publish']['if']
     node_steps = node_workflow['jobs']['build-test-publish']['steps']
-    assert any('exact source that passed' in step.get('name', '') for step in node_steps)
+    assert any('exact public source' in step.get('name', '') for step in node_steps)
+    gate = next(step for step in node_steps if 'before creating any release tag' in step.get('name', ''))
+    assert 'tools/wait_ci_release.py success' in gate['run']
+    assert 'verify_ci_release_artifacts' in gate['run']
 
 
 def test_latest_release_readback_fails_closed_and_returns_stable_tag(monkeypatch) -> None:

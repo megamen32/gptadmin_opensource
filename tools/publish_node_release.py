@@ -46,8 +46,14 @@ def verify_package(path, arch, source, platform='linux'):
     path = Path(path)
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PACKAGE:
         raise ValueError('invalid bounded Node package')
-    with tarfile.open(path, 'r:gz') as archive:
+    # Stream each payload once. Random reads through gzip repeatedly inflate
+    # earlier members and make the same integrity checks unnecessarily slow.
+    with tarfile.open(path, 'r|gz') as archive:
         members = {}
+        payloads = {}
+        headers = {}
+        manifest = None
+        index_bytes = None
         size = 0
         for member in archive:
             size += member.size
@@ -56,6 +62,25 @@ def verify_package(path, arch, source, platform='linux'):
                     or size > MAX_PAYLOAD or len(members) >= MAX_MEMBERS):
                 raise ValueError('invalid Node archive closure')
             members[member.name] = member
+            with archive.extractfile(member) as stream:
+                if member.name == 'manifest.json':
+                    if member.size > 65536:
+                        raise ValueError('incomplete Node archive closure')
+                    manifest = json.load(stream)
+                else:
+                    h = hashlib.sha256()
+                    index = [] if member.name == UI_INDEX else None
+                    first = True
+                    for block in iter(lambda: stream.read(1024**2), b''):
+                        h.update(block)
+                        if first and member.name in EXECUTABLES:
+                            headers[member.name] = block[:8]
+                        first = False
+                        if index is not None:
+                            index.append(block)
+                    payloads[member.name] = {'sha256': h.hexdigest(), 'size': member.size}
+                    if index is not None:
+                        index_bytes = b''.join(index)
         listed_members = set(members) - {'manifest.json'}
         required = LINUX_FILES if platform == 'linux' else DARWIN_FILES
         ui_members = listed_members - required
@@ -65,7 +90,6 @@ def verify_package(path, arch, source, platform='linux'):
                 or members.get('manifest.json') is None
                 or members['manifest.json'].size > 65536):
             raise ValueError('incomplete Node archive closure')
-        manifest = json.load(archive.extractfile(members['manifest.json']))
         if (manifest.get('schema') != 'gptadmin.node-package/v1'
                 or manifest.get('platform') != platform or manifest.get('arch') != arch
                 or manifest.get('git_commit') != source or manifest.get('source_dirty') is not False
@@ -73,23 +97,17 @@ def verify_package(path, arch, source, platform='linux'):
                 or type(manifest.get('build_version')) is not int or manifest['build_version'] < 1):
             raise ValueError('Node manifest does not bind accepted source')
         if platform == 'linux':
-            index_bytes = archive.extractfile(members[UI_INDEX]).read()
             for name in ui_members - {UI_INDEX}:
                 if name.rsplit('/', 1)[-1].encode() not in index_bytes:
                     raise ValueError('Node UI archive contains an unreferenced asset')
         for name in listed_members:
-            h = hashlib.sha256()
-            with archive.extractfile(members[name]) as stream:
-                for block in iter(lambda: stream.read(1024**2), b''):
-                    h.update(block)
-            if manifest['files'][name] != {'sha256': h.hexdigest(), 'size': members[name].size}:
+            if manifest['files'][name] != payloads[name]:
                 raise ValueError('Node payload differs from manifest')
         for name in EXECUTABLES:
             member = members[name]
             if not member.mode & 0o111:
                 raise ValueError(f'Node package file is not executable: {name}')
-            with archive.extractfile(member) as executable:
-                header = executable.read(8)
+            header = headers.get(name, b'')
             if platform == 'linux':
                 if not header.startswith(b'\x7fELF'):
                     raise ValueError(f'{name} is not an ELF executable')
@@ -117,6 +135,21 @@ def gh(*args):
     if result.returncode:
         raise RuntimeError('GitHub Node publication failed')
     return result.stdout
+
+
+def parallel_reads(readers):
+    """Finish bounded independent reads before the caller may mutate anything."""
+    results = {}
+    executor = ThreadPoolExecutor(max_workers=4)
+    try:
+        futures = {executor.submit(read): name for name, read in readers.items()}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    finally:
+        # A failed read remains fatal. Settle active reads and cancel queued
+        # work; no caller can move on to mutations after a partial preflight.
+        executor.shutdown(wait=True, cancel_futures=True)
+    return results
 
 
 def asset_matches(asset, path):
@@ -168,6 +201,15 @@ def public_mirror_commit(repository, source, commit=None):
     if commit != source:
         raise ValueError('public mirror commit differs from the exact tested source')
     response = json.loads(gh('api', 'repos/' + repository + '/git/commits/' + commit))
+    return verify_public_commit_response(source, commit, response)
+
+
+def verify_public_commit_response(source, commit, response):
+    """Validate one fetched commit without fetching that immutable object again."""
+    if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit):
+        raise ValueError('invalid public source mirror commit')
+    if commit != source:
+        raise ValueError('public mirror commit differs from the exact tested source')
     if response.get('sha') != commit or not isinstance(response.get('message'), str):
         raise ValueError('public source mirror commit response identity differs')
     lines = [line.strip() for line in response['message'].splitlines() if line.strip()]

@@ -74,32 +74,43 @@ def checked_assets(directory: Path, source: str, version: int) -> list[Path]:
 
 
 def verify_ci_and_node(repository: str, source: str, private_source: str,
-                       version: int, ci_run: int, node_dir: Path) -> None:
+                       version: int, ci_run: int, node_dir: Path) -> dict:
     if repository != REPOSITORY or not re.fullmatch(r'[0-9a-f]{40}', source):
         raise ValueError('invalid public source or repository')
     if not re.fullmatch(r'[0-9a-f]{40}', private_source):
         raise ValueError('invalid approved private Source-Commit')
-    node.public_mirror_commit(repository, source, source)
-    response = json.loads(node.gh('api', f'repos/{repository}/git/commits/{source}'))
+    tag = f'node-v{version}-{source[:12]}'
+    paths = {
+        'commit': f'git/commits/{source}',
+        'current': 'git/ref/heads/main',
+        'run': f'actions/runs/{ci_run}',
+        'jobs': f'actions/runs/{ci_run}/jobs?per_page=100',
+        'release': f'releases/tags/{tag}',
+    }
+    reads = {name: (lambda path=path: json.loads(node.gh('api', f'repos/{repository}/{path}')))
+             for name, path in paths.items()}
+    reads['tag_commit'] = lambda: node.tag_commit(repository, tag)
+    observed = node.parallel_reads(reads)
+    response = observed['commit']
+    node.verify_public_commit_response(source, source, response)
     lines = [line.strip() for line in response['message'].splitlines() if line.strip()]
     if not lines or lines[-1] != 'Source-Commit: ' + private_source:
         raise ValueError('sanitized snapshot does not bind the approved private Source-Commit')
-    current = json.loads(node.gh('api', f'repos/{repository}/git/ref/heads/main'))
+    current = observed['current']
     if current.get('object', {}).get('sha') != source:
         raise ValueError('tested public source is no longer main')
-    run = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}'))
+    run = observed['run']
     if (run.get('name') != 'Public Product CI' or run.get('head_sha') != source
             or run.get('event') != 'push' or run.get('head_branch') != 'main'
             or run.get('status') != 'completed' or run.get('conclusion') != 'success'):
         raise ValueError('public product CI did not pass for the exact source push')
-    jobs = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}/jobs?per_page=100'))['jobs']
+    jobs = observed['jobs']['jobs']
     for name in ('Public product CI gate', 'Verify both macOS ShellMCP release packages'):
         if not any(job.get('name') == name and job.get('conclusion') == 'success' for job in jobs):
             raise ValueError('public CI did not pass required job: ' + name)
-    tag = f'node-v{version}-{source[:12]}'
-    if node.tag_commit(repository, tag) != source:
+    if observed['tag_commit'] != source:
         raise ValueError('Node release tag does not bind the tested public source')
-    release = json.loads(node.gh('api', f'repos/{repository}/releases/tags/{tag}'))
+    release = observed['release']
     if release.get('draft') or release.get('prerelease') or release.get('tag_name') != tag:
         raise ValueError('matching Node release is not published')
     targets = [(platform, arch) for platform in ('linux', 'darwin')
@@ -116,21 +127,28 @@ def verify_ci_and_node(repository: str, source: str, private_source: str,
     for path, platform, arch in packages:
         if node.verify_package(path, arch, source, platform)['build_version'] != version:
             raise ValueError('Node package version differs from full release')
+    return {'run': run, 'jobs': jobs}
 
 
-def verify_ci_release_artifacts(repository: str, source: str, ci_run: int, attempt: int) -> None:
+def verify_ci_release_artifacts(repository: str, source: str, ci_run: int, attempt: int,
+                                *, _state: dict | None = None) -> None:
     """Require the exact CI attempt that built and exercised these release artifacts."""
     if (repository != REPOSITORY or not re.fullmatch(r'[0-9a-f]{40}', source)
             or type(attempt) is not int or attempt < 1):
         raise ValueError('invalid CI release artifact identity')
-    run = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}'))
+    if _state is None:
+        _state = node.parallel_reads({
+            'run': lambda: json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}')),
+            'jobs': lambda: json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}/jobs?per_page=100'))['jobs'],
+        })
+    run = _state['run']
     if (run.get('name') != 'Public Product CI' or run.get('head_sha') != source
             or run.get('path') != '.github/workflows/public-ci.yml'
             or run.get('event') != 'push' or run.get('head_branch') != 'main'
             or run.get('status') != 'completed' or run.get('conclusion') != 'success'
             or run.get('run_attempt') != attempt):
         raise ValueError('release artifacts do not belong to the successful exact CI attempt')
-    jobs = json.loads(node.gh('api', f'repos/{repository}/actions/runs/{ci_run}/jobs?per_page=100'))['jobs']
+    jobs = _state['jobs']
     verified = {}
     for pair in CI_RELEASE_PAIRS:
         name = f'Release bundles ({pair})'
@@ -177,9 +195,9 @@ def publish(directory: Path, source: str, private_source: str, version: int,
         raise ValueError('full release build must be at least 1074')
     repository = REPOSITORY
     assets = checked_assets(directory, source, version)
-    verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
+    ci_state = verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
     if ci_artifact_attempt is not None:
-        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt)
+        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt, _state=ci_state)
     latest_before = latest_release_tag(repository)
     tag = f'v{version}'
     if node.tag_commit(repository, tag, allow_missing=True) is not None:
@@ -218,9 +236,11 @@ def publish(directory: Path, source: str, private_source: str, version: int,
         # in-flight calls, and leave the release as a draft for reconciliation.
         executor.shutdown(wait=True, cancel_futures=True)
     # Recheck CI, Node and public main immediately before publishing the draft.
-    verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
+    # Each phase fetches fresh state. Only the CI reads within one phase are
+    # shared with the artifact gate; nothing is reused across the uploads.
+    ci_state = verify_ci_and_node(repository, source, private_source, version, ci_run, node_dir)
     if ci_artifact_attempt is not None:
-        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt)
+        verify_ci_release_artifacts(repository, source, ci_run, ci_artifact_attempt, _state=ci_state)
     node.verify_tag(repository, tag, source)
     final = json.loads(node.gh('api', f'repos/{repository}/releases/{release["id"]}',
                                '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=false'))

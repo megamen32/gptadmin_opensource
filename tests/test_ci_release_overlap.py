@@ -71,13 +71,13 @@ def test_one_publisher_consumes_exact_ci_attempt_then_publishes_node_and_full():
     manual = _workflow("publish-full-release.yml")
     assert workflow["concurrency"]["group"] == manual["concurrency"]["group"]
     job = workflow["jobs"]["build-test-publish"]
-    assert "workflow_run.conclusion == 'success'" in job["if"]
+    assert workflow["on"]["workflow_run"]["types"] == ["in_progress"]
     assert "workflow_run.event == 'push'" in job["if"]
     assert "workflow_run.head_branch == 'main'" in job["if"]
     assert job["env"]["CI_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
     steps = job["steps"]
     node_download = next(step for step in steps if step.get("name") == "Download exact Node packages tested by Public Product CI")
-    assert node_download["with"]["pattern"] == "gptadmin-node-*-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}"
+    assert node_download["with"]["artifact-ids"] == "${{ steps.artifacts.outputs.node_ids }}"
     node = next(step for step in steps if step.get("name") == "Publish immutable Node release for this public source commit")
     full = next(step for step in steps if step.get("name") == "Publish the verified full release without changing latest")
     assert steps.index(node) < steps.index(full)
@@ -85,11 +85,15 @@ def test_one_publisher_consumes_exact_ci_attempt_then_publishes_node_and_full():
     assert "steps.scope.outputs.changed == 'true'" in full["if"]
     assert full["env"]["PRIVATE_SOURCE"] == "${{ steps.scope.outputs.private_source }}"
     assert '--ci-artifact-attempt "$CI_RUN_ATTEMPT"' in full["run"]
-    download = next(step for step in steps if step.get("name") == "Download complete release shards from the same successful CI attempt")
+    download = next(step for step in steps if step.get("name") == "Download complete release shards from the same exact CI attempt")
     assert download["if"] == full["if"]
     assert download["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
     assert download["with"]["merge-multiple"] is False
-    assert download["with"]["pattern"] == "gptadmin-full-*-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}"
+    assert download["with"]["artifact-ids"] == "${{ steps.artifacts.outputs.full_ids }}"
+    gate = next(step for step in steps if "before creating any release tag" in step.get("name", ""))
+    assert steps.index(download) < steps.index(gate) < steps.index(node)
+    assert "tools/wait_ci_release.py success" in gate["run"]
+    assert "verify_ci_release_artifacts" in gate["run"]
     commands = "\n".join(step.get("run", "") for step in steps)
     assert "tools/build.sh" not in commands and "run-lifecycle.sh" not in commands
     assert "verify_ci_release_artifacts" in commands
