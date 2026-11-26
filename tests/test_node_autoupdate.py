@@ -1129,10 +1129,21 @@ class NodeAutoupdateTests(unittest.TestCase):
 
     def test_native_health_has_no_commit_version_is_authoritative(self):
         with patch.object(manager,'read_installed_env',return_value={}),patch.object(manager,'origin_from_env',return_value='http://unit.invalid'):
-            for commit,expected in [('1'*40,True),('2'*40,False)]:
-                with patch.object(manager,'http_json',side_effect=[(200,{'ok':True}),(200,{'git_commit':commit})]) as http:
+            cases = [
+                (200, {'ok': True}, '1' * 40, True, True),
+                (503, {'ok': False, 'role': 'follower', 'replica_ready': True,
+                       'baseline_ready': True, 'leader_id': 'leader', 'node_id': 'follower'},
+                 '1' * 40, True, True),
+                (503, {'ok': False, 'role': 'follower', 'replica_ready': False,
+                       'baseline_ready': True, 'leader_id': 'leader', 'node_id': 'follower'},
+                 '1' * 40, False, False),
+                (200, {'ok': True}, '2' * 40, False, True),
+            ]
+            for health_status,health,commit,expected,version_called in cases:
+                with patch.object(manager,'http_json',side_effect=[(health_status,health),(200,{'git_commit':commit})]) as http:
                     self.assertEqual(update.live_matches(manager,'one','1'*40),expected)
-                    self.assertTrue(http.call_args_list[-1].args[1].endswith('/version'))
+                    self.assertEqual(len(http.call_args_list), 2 if version_called else 1)
+                    self.assertEqual(http.call_args_list[-1].args[1].endswith('/version'), version_called)
 
     def test_manager_rejects_duplicate_or_unbounded_member_count_before_extraction(self):
         for duplicate in (True,False):

@@ -364,8 +364,16 @@ def select_release_with_fallback(arch, deadline):
 def live_matches(manager, name, source):
     env=manager.read_installed_env(manager.DEFAULT_LAYOUT,name)
     origin=manager.origin_from_env(env)
-    status,_=manager.http_json('GET',origin+'/healthz')
-    if not 200 <= status < 300:
+    status,health=manager.http_json('GET',origin+'/healthz')
+    follower_ready = (
+        status == 503 and isinstance(health, dict)
+        and health.get('role') == 'follower'
+        and health.get('replica_ready') is True
+        and health.get('baseline_ready') is True
+        and isinstance(health.get('leader_id'), str)
+        and health['leader_id'] != health.get('node_id')
+    )
+    if not (200 <= status < 300 or follower_ready):
         return False
     status,version=manager.http_json('GET',origin+'/version')
     return status==200 and isinstance(version,dict) and version.get('git_commit')==source
