@@ -400,3 +400,31 @@ func TestOwnerLocalModeRequiresLegacyEvidence(t *testing.T) {
 		t.Fatal("accepted unknown mode")
 	}
 }
+
+func TestLegacyControlSourceIntentCannotPinFromForeignLeader(t *testing.T) {
+	key := hashNodeSecret("historical-fixture")
+	s := &Server{cfg: Config{LegacyMemberControlSource: "historical"}, authLocalID: "current",
+		quorumPeers: []quorum.Peer{{ID: "raft-historical", NodeKeyHash: key}}}
+	state := &nodeMembershipState{WriterID: "current", Nodes: map[string]*nodeMember{
+		"current":         {NodeID: "current"},
+		"raft-historical": {NodeID: "raft-historical", LocalID: "historical", KeyHash: key},
+	}}
+	peer, err := s.legacyControlSourcePeer(state, "historical")
+	if err != nil || peer.ID != "raft-historical" {
+		t.Fatalf("verified historical voter: %v %v", peer, err)
+	}
+	if err := s.pinLegacyMemberControlSource(state, "current"); err != nil || state.ControlSourceID != "" {
+		t.Fatalf("foreign writer may coordinate but cannot commit: %v %q", err, state.ControlSourceID)
+	}
+	if err := s.pinLegacyMemberControlSource(state, "different"); err == nil {
+		t.Fatal("unbound prior authority accepted")
+	}
+	state.Nodes["raft-historical"].KeyHash = hashNodeSecret("wrong")
+	if err := s.pinLegacyMemberControlSource(state, "current"); err == nil {
+		t.Fatal("unverified voter accepted")
+	}
+	state.ControlSourceID = "already-pinned"
+	if err := s.pinLegacyMemberControlSource(state, "current"); err == nil {
+		t.Fatal("committed source overwritten")
+	}
+}

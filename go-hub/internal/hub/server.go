@@ -2276,7 +2276,7 @@ func (s *Server) requireCtl(next http.HandlerFunc) http.HandlerFunc {
 		} else {
 			s.authAudit("ctl_auth_denied", r, nodeBearerAuthDeniedAuditFields(err))
 			if nodeBearerUnavailable(err) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrolled writer bearer admission unavailable"})
+				writeNodeBearerUnavailable(w, err)
 				return
 			}
 		}
@@ -11924,7 +11924,8 @@ func (s *Server) mcpAuth(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		} else {
 			if nodeBearerUnavailable(err) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrolled writer bearer admission unavailable"})
+				s.authAudit("mcp_auth_denied", r, nodeBearerUnavailableAuditFields(err))
+				writeNodeBearerUnavailable(w, err)
 				return false
 			}
 			s.authAudit("mcp_auth_denied", r, map[string]any{"reason": err.Error(), "jwt_claims_unverified": decodeJWTClaimsUnverified(tok)})

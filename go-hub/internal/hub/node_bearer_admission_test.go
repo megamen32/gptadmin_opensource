@@ -163,6 +163,12 @@ func TestNodeBearerAdmissionBindsProofAndNeverRedirects(t *testing.T) {
 				t.Fatal("unbound proof admitted or misleading reauthentication", err)
 			}
 			wantReason := "proof_validation"
+			if kind == "writer" {
+				wantReason = "control_source_mismatch"
+			}
+			if kind == "generation" {
+				wantReason = "snapshot_generation_mismatch"
+			}
 			if kind == "redirect" || kind == "status" {
 				wantReason = "writer_status"
 			}
@@ -203,7 +209,7 @@ func TestNodeBearerAdmissionReleasesGateBeforeResponseAndBoundsAdmission(t *test
 	response := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "https://member.example/mcp", nil)
 	r.Header.Set("Authorization", "Bearer "+token)
-	if member.mcpAuth(response, r) || response.Code != http.StatusServiceUnavailable || response.Header().Get("WWW-Authenticate") != "" {
+	if member.mcpAuth(response, r) || response.Code != http.StatusTooManyRequests || response.Header().Get("WWW-Authenticate") != "" {
 		t.Fatal("busy writer falsely requests OAuth reconnect", response.Code)
 	}
 	for i := 0; i < cap(member.nodeBearerAdmissionSlots); i++ {
@@ -250,7 +256,7 @@ func TestNodeBearerAdmissionMatchesSanitizedControlSnapshot(t *testing.T) {
 	}
 }
 
-func TestCtlAuthReturns503WhenBearerAdmissionIsUnavailable(t *testing.T) {
+func TestCtlAuthDistinguishesUnavailableBearerTransport(t *testing.T) {
 	_, member, token, _ := bearerAdmissionNodes(t)
 	writerURL := member.nodeIdentity.WriterURL
 	member.nodeIdentity.WriterURL = "http://127.0.0.1:1"
@@ -263,8 +269,8 @@ func TestCtlAuthReturns503WhenBearerAdmissionIsUnavailable(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request(token))
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unavailable admission status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("unavailable admission status = %d, want %d", response.Code, http.StatusBadGateway)
 	}
 	if called {
 		t.Fatal("handler ran after unavailable bearer admission")
@@ -369,4 +375,32 @@ func TestNodeBearerAdmissionClassifiesTimeoutAndTransport(t *testing.T) {
 		_, err := member.verifyJWTForRequest(httptest.NewRequest("POST", "https://member.example/mcp", nil), token)
 		assertNodeBearerUnavailableReason(t, err, "timeout")
 	})
+}
+
+func TestNodeBearerUnavailableHTTPContract(t *testing.T) {
+	for _, tc := range []struct {
+		reason nodeBearerUnavailableReason
+		status int
+		code   string
+		retry  bool
+	}{
+		{nodeBearerReasonState, 503, "auth_snapshot_not_ready", true},
+		{nodeBearerReasonCapacity, 429, "auth_admission_capacity", true},
+		{nodeBearerReasonTimeout, 504, "auth_writer_timeout", true},
+		{nodeBearerReasonTransport, 502, "auth_writer_transport", true},
+		{nodeBearerReasonWriterStatus, 503, "auth_writer_not_ready", true},
+		{nodeBearerReasonProof, 502, "auth_proof_invalid", false},
+		{"control_source_mismatch", 409, "auth_control_source_mismatch", false},
+		{"snapshot_generation_mismatch", 409, "auth_snapshot_generation_mismatch", true},
+		{"SECRET_raw_value", 503, "auth_admission_unavailable", false},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeNodeBearerUnavailable(w, &nodeBearerAdmissionError{unavailable: true, reason: tc.reason})
+			var body map[string]any
+			if json.Unmarshal(w.Body.Bytes(), &body) != nil || w.Code != tc.status || body["code"] != tc.code || body["retryable"] != tc.retry || body["executed"] != false || strings.Contains(w.Body.String(), "SECRET_") || w.Header().Get("WWW-Authenticate") != "" {
+				t.Fatalf("wrong safe admission response: status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
 }

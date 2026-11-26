@@ -442,6 +442,10 @@ func (c *childSearchSchemaCache) startChildSearchRefresh(s *Server, r *http.Requ
 			}
 		} else {
 			failure = firstString(mapValue(response["error"]), "message")
+			if reason := firstString(mapValue(mapValue(response["error"])["diagnostic"]), "reason_code"); reason != "" && failure != "" {
+				// Diagnostics originate from the bounded, allowlisted schema reader.
+				failure += " [" + reason + "]"
+			}
 			if failure == "" {
 				failure = "child schema refresh did not complete"
 			}

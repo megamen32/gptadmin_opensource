@@ -119,7 +119,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 		}
 		if recorder.Code >= http.StatusBadRequest {
 			return fail("direct child schema owner unavailable", "remote_owner",
-				childSchemaRemoteHTTPReason(recorder.Code), recorder.Code)
+				childSchemaRemoteResponseReason(recorder.Code, recorder.Body.Bytes()), recorder.Code)
 		}
 		reply, parsed := childSchemaParseOwnerReply(recorder.Body.Bytes())
 		if !parsed {
@@ -275,4 +275,54 @@ func childSchemaParseOwnerReply(body []byte) (map[string]any, bool) {
 		return nil, false
 	}
 	return reply, true
+}
+
+// Propagate only our fixed reason vocabulary. Arbitrary upstream strings,
+// credentials and bodies must never enter public diagnostics or search.
+func childSchemaRemoteResponseReason(status int, body []byte) string {
+	reply, ok := childSchemaParseOwnerReply(body)
+	if ok {
+		code := firstString(reply, "code")
+		switch code {
+		case "auth_snapshot_not_ready", "auth_writer_not_ready", "auth_admission_unavailable":
+			if status == 503 {
+				return code
+			}
+		case "auth_admission_capacity":
+			if status == 429 {
+				return code
+			}
+		case "auth_writer_timeout":
+			if status == 504 {
+				return code
+			}
+		case "auth_writer_transport", "auth_proof_invalid":
+			if status == 502 {
+				return code
+			}
+		case "auth_control_source_mismatch", "auth_snapshot_generation_mismatch":
+			if status == 409 {
+				return code
+			}
+		case "quorum_leader_unavailable", "quorum_authority_not_ready", "quorum_replica_not_ready", "node_draining":
+			if status == 503 {
+				return code
+			}
+		case "quorum_leadership_changed":
+			if status == 409 {
+				return code
+			}
+		case "quorum_peer_route_missing", "quorum_delivery_unknown":
+			if status == 502 {
+				return code
+			}
+		}
+	}
+	if status == 429 {
+		return "owner_capacity"
+	}
+	if status == 409 {
+		return "owner_state_conflict"
+	}
+	return childSchemaRemoteHTTPReason(status)
 }

@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/url"
 	"strings"
+
+	"github.com/megamen32/gptadmin/go-hub/internal/hub/quorum"
 )
 
 type quorumAuthorityImage struct {
@@ -558,6 +560,30 @@ func (s *Server) materializeQuorumWebhooks(state persistedWebhookState) error {
 	return nil
 }
 
+// A configured historical source is a migration intent, not an authority
+// grant. Resolve only a unique, already enrolled voter whose credential hash
+// agrees with the committed membership. Local IDs may differ from Raft IDs.
+func (s *Server) legacyControlSourcePeer(state *nodeMembershipState, pin string) (quorum.Peer, error) {
+	var found quorum.Peer
+	if state == nil || pin == "" {
+		return found, errors.New("historical control source is not configured")
+	}
+	for _, peer := range s.quorumPeers {
+		member := state.Nodes[peer.ID]
+		if member == nil || member.NodeID != peer.ID || (member.NodeID != pin && member.LocalID != pin) || peer.NodeKeyHash == "" || peer.NodeKeyHash != member.KeyHash {
+			continue
+		}
+		if found.ID != "" {
+			return quorum.Peer{}, errors.New("historical control source matches multiple voter enrollments")
+		}
+		found = peer
+	}
+	if found.ID == "" {
+		return found, errors.New("historical control source has no verified voter enrollment")
+	}
+	return found, nil
+}
+
 // A legacy control baseline does not identify its original authority. Only an
 // operator-specified historical pin corroborated by the existing committed
 // auth and membership images may initialize it. Requiring that same writer
@@ -577,7 +603,18 @@ func (s *Server) pinLegacyMemberControlSource(state *nodeMembershipState, authWr
 		return nil
 	}
 	if s.authLocalID != pin {
-		return errors.New("legacy control source migration must run on its historical writer")
+		// All voters may carry the same explicit historical intent. Only its
+		// verified historical writer may actually commit the logical ID.
+		// A different leader may coordinate the native transfer, never pin.
+		_, err := s.legacyControlSourcePeer(state, pin)
+		if err != nil {
+			return err
+		}
+		previous := state.Nodes[state.WriterID]
+		if previous == nil || authWriter == "" || (previous.NodeID != authWriter && previous.LocalID != authWriter) {
+			return errors.New("prior committed auth and membership writers disagree")
+		}
+		return nil
 	}
 	localID := s.quorumNode.Status().NodeID
 	member := state.Nodes[localID]

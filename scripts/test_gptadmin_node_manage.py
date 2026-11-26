@@ -136,6 +136,38 @@ class TestPackageVerification(BaseTempCase):
             self.assertEqual(os.stat(dest / name).st_mode & 0o777, 0o755)
             mgr.verify_elf_binary(dest / name)
 
+    def test_public_route_variant_verifies_without_relaxing_package_closure(self):
+        private = make_package(self.tmp)
+        with tarfile.open(private, 'r:gz') as tar:
+            core = {
+                member.name: tar.extractfile(member).read()
+                for member in tar.getmembers()
+                if member.name not in ('manifest.json', mgr.PROXY_ROUTE_PACKAGE_FILE)
+            }
+        public_route = 'systemd/gptadmin-proxy-route-relay02.service'
+        public_unit = b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\n'
+        payload = dict(core, **{public_route: public_unit})
+        public = make_package(self.tmp, payload=payload, commit='a' * 40)
+        dest = self.tmp / 'public'
+        manifest = mgr.verify_and_extract(public, 'amd64', dest)
+        self.assertEqual(set(manifest['files']), set(payload))
+        self.assertEqual((dest / public_route).read_bytes(), public_unit)
+        cases = [
+            ('missing-core', {k: v for k, v in payload.items() if k != 'bin/shellmcp'}),
+            ('missing-route', core),
+            ('unexpected', dict(payload, **{'systemd/unapproved.service': b'no'})),
+            ('wrong-user', dict(payload, **{public_route: public_unit.replace(b'User=admin', b'User=root')})),
+        ]
+        if mgr.PROXY_ROUTE_PACKAGE_FILE != public_route:
+            cases.append(('both-routes', dict(payload, **{
+                mgr.PROXY_ROUTE_PACKAGE_FILE: b'[Unit]\n[Service]\nUser=admin\n'})))
+        for label, changed in cases:
+            with self.subTest(label=label):
+                bad = make_package(self.tmp, payload=changed, commit='b' * 40)
+                with self.assertRaises(mgr.PreflightError):
+                    mgr.verify_and_extract(bad, 'amd64', self.tmp / label)
+                self.assertFalse((self.tmp / label).exists())
+
     def test_tampered_digest_fails_before_extraction(self):
         def tamper(manifest):
             manifest['files']['cli.py']['sha256'] = '0' * 64

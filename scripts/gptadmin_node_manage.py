@@ -44,7 +44,7 @@ IDENTITY_SCHEMA = 'gptadmin.node-identity/v1'
 SHELLMCP_PACKAGE_FILE = 'bin/shellmcp'
 BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
 PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-relay02.service'
-REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE, PROXY_ROUTE_PACKAGE_FILE)
+REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE)
 FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
     'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
     'scripts/gptadmin_dns_sweb.py', 'scripts/gptadmin_node_autoupdate.py',
@@ -62,6 +62,12 @@ ExecStart=/opt/gptadmin-shellmcp/current/bin/shellmcp
 '''
 PROXY_ROUTE_SERVICE = 'gptadmin-proxy-route-relay02.service'
 PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=admin'
+# The public mirror renames the fixed route and service account.
+# Validate either exact distribution, never arbitrary systemd units.
+PROXY_ROUTE_PACKAGE_VARIANTS = {
+    PROXY_ROUTE_PACKAGE_FILE: PROXY_ROUTE_UNIT_TEXT_REQUIRED,
+    'systemd/gptadmin-proxy-route-relay02.service': 'User=admin',
+}
 DISK_FLOOR_BYTES = 500 * 1024 * 1024
 HEALTH_TIMEOUT_SECS = 30.0
 DRAIN_POLL_INTERVAL_SECS = 2.0
@@ -532,8 +538,9 @@ def verify_manifest_schema(manifest, expected_arch: str) -> dict:
     names = set(files)
     if any(not isinstance(name, str) for name in names):
         raise PreflightError('manifest package path is not a string')
-    ui_names = names - FIXED_PACKAGE_FILES
-    if (not FIXED_PACKAGE_FILES <= names or ADMIN_UI_INDEX not in ui_names
+    route_names = names & PROXY_ROUTE_PACKAGE_VARIANTS.keys()
+    ui_names = names - FIXED_PACKAGE_FILES - route_names
+    if (len(route_names) != 1 or not FIXED_PACKAGE_FILES <= names or ADMIN_UI_INDEX not in ui_names
             or len(ui_names) < 2
             or any(name != ADMIN_UI_INDEX and not ADMIN_UI_ASSET_RE.fullmatch(name)
                    for name in ui_names)):
@@ -598,19 +605,21 @@ def verify_and_extract(package: Path, expected_arch: str, dest: Path) -> dict:
                 raise PreflightError(f'package file {name} fails manifest digest/size verification')
         index = tar.extractfile(members[ADMIN_UI_INDEX]).read()
         for name in listed:
-            if name in FIXED_PACKAGE_FILES or name == ADMIN_UI_INDEX:
+            if name in FIXED_PACKAGE_FILES or name in PROXY_ROUTE_PACKAGE_VARIANTS or name == ADMIN_UI_INDEX:
                 continue
             if name.rsplit('/', 1)[-1].encode() not in index:
                 raise PreflightError('package contains an unreferenced admin UI asset')
-        if members[PROXY_ROUTE_PACKAGE_FILE].size > 256 * 1024:
+        route_name = next(name for name in PROXY_ROUTE_PACKAGE_VARIANTS if name in members)
+        if members[route_name].size > 256 * 1024:
             raise PreflightError('proxy route unit exceeds its package size limit')
         try:
-            unit_text = tar.extractfile(members[PROXY_ROUTE_PACKAGE_FILE]).read().decode('utf-8', 'strict')
+            unit_text = tar.extractfile(members[route_name]).read().decode('utf-8', 'strict')
         except UnicodeDecodeError:
             raise PreflightError('proxy route unit is not UTF-8 text') from None
+        required_user = PROXY_ROUTE_PACKAGE_VARIANTS[route_name]
         if '[Unit]' not in unit_text or '[Service]' not in unit_text or not re.search(
-                r'(?m)^User=admin\s*$', unit_text):
-            raise PreflightError('proxy route unit does not match the fixed admin service contract')
+                r'(?m)^' + re.escape(required_user) + r'\s*$', unit_text):
+            raise PreflightError('proxy route unit does not match the fixed distribution service contract')
         # Everything verified; materialize exactly the manifest tree.
         if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
             raise PreflightError('package extraction destination is not a regular directory')
@@ -2629,6 +2638,9 @@ def cmd_proxy_route_install(args, layout: Layout, runner: Runner) -> None:
     except (RuntimeFailure, PreflightError, OSError):
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    if PROXY_ROUTE_PACKAGE_FILE not in manifest['files']:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise PreflightError('package does not ship this distribution fixed proxy route unit')
     source = staging / PROXY_ROUTE_PACKAGE_FILE
     unit_text = source.read_text()
     target = layout.proxy_route_unit_path

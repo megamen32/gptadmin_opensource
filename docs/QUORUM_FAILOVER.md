@@ -112,9 +112,13 @@ all voters first. Verify the original source against the previously accepted
 reader auth snapshot and an independent enrollment record, including the
 voter's credential hash. The bootstrapper's Raft ID can differ from this
 source. Set `GPTADMIN_LEGACY_MEMBER_CONTROL_SOURCE_ID` on the historical
-writer alone, using its approved service environment. Use its normal rolling
-restart and transfer leadership to that voter. Keep the existing quorum
-configuration and data directories. During promotion the Hub verifies the
+writer using its approved service environment. The same explicitly verified
+historical ID may be configured on the other voters: while the source is
+unpinned, the current writer can use native Raft leadership transfer to the
+unique authenticated, ready historical voter. Only that historical writer
+can commit the ID. Once pinned, no migration transfer occurs. Roll out
+compatible binaries before applying this shared intent. Keep the existing
+quorum configuration and data directories. During promotion the Hub verifies the
 committed auth writer, membership writer, local identity and enrolled voter
 credential before committing the logical ID. A writer returning from another
 voter's term completes its ordinary promotion and rechecks the committed
@@ -262,3 +266,16 @@ the available state, the caller receives an unknown-outcome error and can
 look up the same request after quorum returns. Shared changes including
 OAuth registration continue to require an authority. Rights changes made
 elsewhere during disconnection become visible after synchronization.
+
+
+### Machine-readable admission failures
+
+HTTP 503 means unavailable readiness/quorum, not every error. Bearer admission
+also distinguishes 429 capacity, 504 timeout, 502 upstream transport or invalid
+proof, and 409 control-source or snapshot-generation conflicts. The response
+retains the existing error text and adds a stable `code`, `reason_code`,
+`stage`, `retryable` and `executed:false`. A genuine credential rejection still
+uses the ordinary authorization challenge. Source mismatch and proof-integrity
+failure never authorize a fallback. Quorum forwarding reports unknown delivery
+separately and never marks it safe to replay. Schema and Search propagate only
+allowlisted fixed diagnostic codes, not upstream bodies, credentials or claims.

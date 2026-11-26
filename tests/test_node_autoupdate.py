@@ -1442,3 +1442,85 @@ class NodeAutoupdateTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class TestNativeReconcileCompletedManager(unittest.TestCase):
+    def test_reconciles_only_a_verified_terminal_receipt(self):
+        source='1'*40
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            hold={'complete':False,'reason':'manager_completed_readback_pending',
+                  'source':source,'instance':'one','verified_instances':[],
+                  'manager_receipt':{'ok':True,'command':'update','name':'one','git_commit':source,'version_dir':'slot'}}
+            with patch.object(update,'STATE',root):
+                update.record(root/'hold.json',hold)
+                with patch.object(update,'verify_completed_manager_runtime',return_value=False):
+                    self.assertFalse(update.reconcile_completed_hold(manager,['one']))
+                    self.assertTrue((root/'hold.json').exists())
+                with patch.object(update,'verify_completed_manager_runtime',return_value=True):
+                    self.assertTrue(update.reconcile_completed_hold(manager,['one']))
+                self.assertFalse((root/'hold.json').exists())
+                data=json.loads((root/'recovered-update.json').read_text())
+                self.assertEqual(data['source'],source)
+                self.assertEqual(data['verified_instances'],['one'])
+
+    def test_unknown_or_foreign_hold_never_cleared(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            with patch.object(update,'STATE',root), patch.object(update,'verify_completed_manager_runtime') as verify:
+                for reason in ('manager_in_progress','manager_cleanup_unverified','manager_update_failed_review_required'):
+                    update.record(root/'hold.json',{'reason':reason,'source':'1'*40,'instance':'one'})
+                    self.assertFalse(update.reconcile_completed_hold(manager,['one']))
+                    self.assertTrue((root/'hold.json').exists())
+                update.record(root/'hold.json',{'reason':'manager_completed_readback_pending','source':'1'*40,'instance':'other'})
+                self.assertFalse(update.reconcile_completed_hold(manager,['one']))
+                verify.assert_not_called()
+
+    def test_success_receipt_binds_exact_instance_revision_and_kind(self):
+        src='2'*40
+        valid={'ok':True,'command':'update','name':'one','git_commit':src,'version_dir':'slot'}
+        self.assertEqual(update.completed_manager_receipt(json.dumps(valid).encode(),'one',src)['git_commit'],src)
+        for delta in ({'ok':False},{'name':'foreign'},{'git_commit':'3'*40},{'command':'rollback'},{'version_dir':'../foreign'}):
+            self.assertIsNone(update.completed_manager_receipt(json.dumps({**valid,**delta}).encode(),'one',src))
+        self.assertIsNone(update.completed_manager_receipt(b'unknown','one',src))
+        socket={'ok':True,'mode':'socket-primary','git_commit':src,'version_dir':'slot'}
+        self.assertIsNotNone(update.completed_manager_receipt(json.dumps(socket).encode(),'primary',src))
+        self.assertIsNone(update.completed_manager_receipt(json.dumps(socket).encode(),'one',src))
+
+    def test_native_timer_repairs_only_enabled_and_enrolled_state(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(update,'STATE',Path(d)):
+            for enabled,active,want in [('enabled','inactive',True),('enabled','failed',True),('enabled','active',False),('disabled','inactive',False),('masked','inactive',False)]:
+                with self.subTest(enabled=enabled,active=active):
+                    runner=SimpleNamespace(run=lambda args,**kw:SimpleNamespace(returncode=0 if (args[1]=='is-enabled' and enabled=='enabled') or (args[1]=='is-active' and active=='active') else 1,stdout=enabled+'\n' if args[1]=='is-enabled' else active+'\n'))
+                    with patch.object(manager,'Runner',return_value=runner),patch.object(manager,'active_node_names',return_value=['one']),patch.object(manager,'active_node_versions',return_value={'one':{}}),patch.object(manager,'systemctl') as control:
+                        update.reconcile_native_timer(manager,['one'])
+                        self.assertEqual(control.called,want)
+                        if want:
+                            control.assert_called_once_with(runner,'start','--no-block',manager.AUTOUPDATE_TIMER,timeout=5)
+
+    def test_native_timer_preserves_unknown_hold_and_foreign_enrollment(self):
+        with tempfile.TemporaryDirectory() as d,patch.object(update,'STATE',Path(d)),patch.object(manager,'systemctl') as control:
+            update.record(Path(d)/'hold.json',{'reason':'manager_in_progress'})
+            self.assertEqual(update.reconcile_native_timer(manager,['one'])['code'],'native_recovery_hold')
+            self.assertTrue((Path(d)/'hold.json').exists())
+            (Path(d)/'hold.json').unlink()
+            with patch.object(manager,'active_node_names',return_value=['foreign']):
+                self.assertEqual(update.reconcile_native_timer(manager,['one'])['code'],'native_enrollment_mismatch')
+            control.assert_not_called()
+
+    def test_legacy_hold_requires_protected_fresh_exact_success_and_live_proof(self):
+        src='3'*40
+        with tempfile.TemporaryDirectory() as d,patch.object(update,'STATE',Path(d)):
+            root=Path(d); hold=root/'hold.json'; log=root/'one-last-private.log'
+            update.record(hold,{'complete':False,'reason':'manager_in_progress','instance':'one','source':src,'verified_instances':[]})
+            update.record(log,{'ok':True,'command':'update','name':'one','git_commit':src,'version_dir':'slot'})
+            with patch.object(update,'verify_completed_manager_runtime',return_value=False):
+                self.assertFalse(update.reconcile_completed_hold(manager,['one']))
+            with patch.object(update,'verify_completed_manager_runtime',return_value=True):
+                self.assertTrue(update.reconcile_completed_hold(manager,['one']))
+            self.assertFalse(hold.exists())
+            update.record(hold,{'complete':False,'reason':'manager_in_progress','instance':'one','source':src,'verified_instances':[]})
+            log.chmod(0o644)
+            with patch.object(update,'verify_completed_manager_runtime') as verify:
+                self.assertFalse(update.reconcile_completed_hold(manager,['one']))
+                verify.assert_not_called()

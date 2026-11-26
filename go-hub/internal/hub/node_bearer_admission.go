@@ -34,6 +34,8 @@ const (
 	nodeBearerReasonTransport    nodeBearerUnavailableReason = "transport"
 	nodeBearerReasonWriterStatus nodeBearerUnavailableReason = "writer_status"
 	nodeBearerReasonProof        nodeBearerUnavailableReason = "proof_validation"
+	nodeBearerReasonSource       nodeBearerUnavailableReason = "control_source_mismatch"
+	nodeBearerReasonGeneration   nodeBearerUnavailableReason = "snapshot_generation_mismatch"
 )
 
 type nodeBearerAdmissionError struct {
@@ -64,7 +66,8 @@ func nodeBearerUnavailableReasonCode(err error) (string, bool) {
 	}
 	switch failure.reason {
 	case nodeBearerReasonState, nodeBearerReasonCapacity, nodeBearerReasonTimeout,
-		nodeBearerReasonTransport, nodeBearerReasonWriterStatus, nodeBearerReasonProof:
+		nodeBearerReasonTransport, nodeBearerReasonWriterStatus, nodeBearerReasonProof,
+		nodeBearerReasonSource, nodeBearerReasonGeneration:
 		return string(failure.reason), true
 	default:
 		return string(nodeBearerReasonUnspecified), true
@@ -126,7 +129,7 @@ func (s *Server) nodeBearerAdmissionHTTP(w http.ResponseWriter, r *http.Request)
 	case s.nodeBearerAdmissionSlots <- struct{}{}:
 		defer func() { <-s.nodeBearerAdmissionSlots }()
 	default:
-		writeJSON(w, 503, map[string]any{"detail": "bearer admission busy"})
+		writeNodeBearerUnavailable(w, &nodeBearerAdmissionError{unavailable: true, reason: nodeBearerReasonCapacity})
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, nodeBearerAdmissionLimit+1))
@@ -307,7 +310,16 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 		return nil, &nodeBearerAdmissionError{unavailable: true, offlineEligible: true, reason: nodeBearerReasonWriterStatus}
 	}
 	if response.StatusCode != 200 {
-		return nil, unavailable(nodeBearerReasonWriterStatus)
+		switch response.StatusCode {
+		case http.StatusTooManyRequests:
+			return nil, unavailable(nodeBearerReasonCapacity)
+		case http.StatusGatewayTimeout, http.StatusRequestTimeout:
+			return nil, unavailable(nodeBearerReasonTimeout)
+		case http.StatusBadGateway:
+			return nil, unavailable(nodeBearerReasonTransport)
+		default:
+			return nil, unavailable(nodeBearerReasonWriterStatus)
+		}
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, nodeBearerAdmissionLimit+1))
 	if err != nil || len(data) > nodeBearerAdmissionLimit {
@@ -316,7 +328,16 @@ func (s *Server) verifyNodeWriterBearer(r *http.Request, token string) (map[stri
 	var proof nodeBearerAdmission
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&proof) != nil || decoder.Decode(&struct{}{}) != io.EOF || proof.WriterID != identity.WriterID || proof.Generation != state.Generation || proof.AuthorityDigest != state.Digest || proof.TokenDigest != hashNodeSecret(token) || len(proof.Claims) == 0 {
+	if decoder.Decode(&proof) != nil || decoder.Decode(&struct{}{}) != io.EOF || proof.TokenDigest != hashNodeSecret(token) || len(proof.Claims) == 0 {
+		return nil, unavailable(nodeBearerReasonProof)
+	}
+	if proof.WriterID != identity.WriterID {
+		return nil, unavailable(nodeBearerReasonSource)
+	}
+	if proof.Generation != state.Generation {
+		return nil, unavailable(nodeBearerReasonGeneration)
+	}
+	if proof.AuthorityDigest != state.Digest {
 		return nil, unavailable(nodeBearerReasonProof)
 	}
 	return proof.Claims, nil
@@ -341,4 +362,34 @@ func (s *Server) readerOfflineAuthReady() bool {
 	}
 	bundle, err := s.readAuthSlot(state)
 	return err == nil && authSnapshotDigest(bundle) == state.Digest
+}
+
+// Keep HTTP transport semantics separate from the stable machine-readable
+// admission reason. None of these failures admits a request or asks for OAuth
+// reconnection; proof or control-source conflicts must never downgrade auth.
+func writeNodeBearerUnavailable(w http.ResponseWriter, err error) {
+	reason, _ := nodeBearerUnavailableReasonCode(err)
+	status, code, retry := http.StatusServiceUnavailable, "auth_admission_unavailable", false
+	switch nodeBearerUnavailableReason(reason) {
+	case nodeBearerReasonState:
+		code, retry = "auth_snapshot_not_ready", true
+	case nodeBearerReasonCapacity:
+		status, code, retry = http.StatusTooManyRequests, "auth_admission_capacity", true
+	case nodeBearerReasonTimeout:
+		status, code, retry = http.StatusGatewayTimeout, "auth_writer_timeout", true
+	case nodeBearerReasonTransport:
+		status, code, retry = http.StatusBadGateway, "auth_writer_transport", true
+	case nodeBearerReasonWriterStatus:
+		code, retry = "auth_writer_not_ready", true
+	case nodeBearerReasonProof:
+		status, code = http.StatusBadGateway, "auth_proof_invalid"
+	case nodeBearerReasonSource:
+		status, code = http.StatusConflict, "auth_control_source_mismatch"
+	case nodeBearerReasonGeneration:
+		status, code, retry = http.StatusConflict, "auth_snapshot_generation_mismatch", true
+	}
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "1")
+	}
+	writeJSON(w, status, map[string]any{"error": "enrolled writer bearer admission unavailable", "code": code, "reason_code": reason, "stage": "writer_bearer_admission", "retryable": retry, "executed": false})
 }

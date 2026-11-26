@@ -93,6 +93,8 @@ func run(ctx context.Context, listener net.Listener, activated bool, cfg hub.Con
 	errors := make(chan error, 2)
 	go func() { errors <- router.ServeContext(hubCtx, listener) }()
 	go func() { errors <- executor.ListenAndServeContext(shellCtx) }()
+	stopNativeReconcile := startNativeLifecycleReconcile(ctx)
+	defer stopNativeReconcile()
 	var first error
 	remaining := 2
 	select {

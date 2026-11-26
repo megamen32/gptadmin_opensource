@@ -399,9 +399,139 @@ def confirm_live_matches(manager, name, source, deadline):
         time.sleep(min(0.5, remaining))
 
 
+def completed_manager_receipt(raw, name, source):
+    """Keep only the bounded terminal proof emitted after the native manager succeeds."""
+    if not isinstance(raw, bytes) or len(raw)>2*1024**2:
+        return None
+    try:
+        result=json.loads(raw)
+    except (ValueError,UnicodeError):
+        return None
+    if not isinstance(result,dict) or result.get('ok') is not True or result.get('git_commit')!=source:
+        return None
+    if result.get('mode')=='socket-primary':
+        if name!='primary':
+            return None
+    elif result.get('command')!='update' or result.get('name')!=name:
+        return None
+    slot=result.get('version_dir')
+    if not isinstance(slot,str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,160}',slot):
+        return None
+    return {k:result[k] for k in ('ok','mode','command','name','git_commit','version_dir') if k in result}
+
+
+def verify_completed_manager_runtime(manager, name, source, receipt):
+    """Prove current native slot, executable, version and drain disposition; no writes."""
+    try:
+        current=manager.current_target(manager.DEFAULT_LAYOUT)
+        if current is None or current.name!=receipt['version_dir']:
+            return False
+        manifest=manager.manifest_summary(current)
+        if not manifest or manifest.get('git_commit')!=source:
+            return False
+        runner=manager.Runner()
+        unit=manager.DEFAULT_LAYOUT.unit_instance(name)
+        identity=manager.service_identity(runner,unit)
+        if not identity.get('active') or identity.get('executable')!=os.path.realpath(current/'bin/gptadmin-node'):
+            return False
+        if not live_matches(manager,name,source):
+            return False
+        env=manager.read_installed_env(manager.DEFAULT_LAYOUT,name)
+        origin=manager.origin_from_env(env)
+        token=manager.read_admin_token(manager.DEFAULT_LAYOUT,name,env)
+        if receipt.get('mode')=='socket-primary':
+            return manager.socket_activation_enabled(runner,origin,token)
+        status,drain=manager.http_json('POST',origin+manager.DRAIN_ENDPOINT,token=token,body={'action':'status'})
+        return status==200 and isinstance(drain,dict) and drain.get('draining') is False
+    except (OSError,ValueError,RuntimeError,KeyError,urllib.error.URLError):
+        return False
+
+
+def reconcile_completed_hold(manager, names):
+    """Recover only our durable successful-manager/readback-pending state.
+    Unknown, failed, foreign and legacy holds are never cleared by inference.
+    Called under the native updater lock; does not restart or replay a command.
+    """
+    path=STATE/'hold.json'
+    if not path.exists():
+        return True
+    try:
+        st=path.lstat()
+        if path.is_symlink() or st.st_uid!=os.geteuid() or st.st_mode & 0o077 or st.st_size>65536:
+            return False
+        hold=json.loads(path.read_text())
+        if not isinstance(hold,dict) or hold.get('reason') not in ('manager_completed_readback_pending','manager_in_progress'):
+            return False
+        name,source=hold.get('instance'),hold.get('source')
+        verified=hold.get('verified_instances',[])
+        if (name not in names or not isinstance(source,str) or not re.fullmatch(r'[0-9a-f]{40}',source)
+                or not isinstance(verified,list) or any(n not in names for n in verified)):
+            return False
+        if hold['reason']=='manager_in_progress':
+            # Legacy updater wrote stdout before its own live readback, but
+            # failed to persist the terminal phase. Require the protected
+            # exact success receipt newer than the hold; never replay a log.
+            log=STATE/(name+'-last-private.log')
+            logstat=log.lstat()
+            if (log.is_symlink() or logstat.st_uid!=os.geteuid() or logstat.st_mode & 0o077
+                    or logstat.st_mtime_ns<st.st_mtime_ns or logstat.st_size>2*1024**2):
+                return False
+            # Native manager stdout is one JSON object; legacy combined
+            # stderr may contain diagnostics. Only a single exact terminal
+            # success line, with no trailing failure, is eligible.
+            raw=log.read_bytes().strip()
+            receipt=completed_manager_receipt(raw,name,source)
+        else:
+            receipt=completed_manager_receipt(json.dumps(hold.get('manager_receipt')).encode(),name,source)
+        if receipt is None or not verify_completed_manager_runtime(manager,name,source,receipt):
+            return False
+        # Re-check every previously completed instance before retaining its evidence.
+        if any(not live_matches(manager,n,source) for n in verified):
+            return False
+        recovered={**hold,'reason':'verified_manager_readback_recovered',
+                   'verified_instances':list(dict.fromkeys(verified+[name])),
+                   'recovered':True}
+        record(STATE/'recovered-update.json',recovered)
+        record(STATE/'partial-update.json',recovered)
+        clear_hold()
+        print(json.dumps({'event':'native_update_reconciled','instance':name,'source':source}))
+        return True
+    except (OSError,ValueError,RuntimeError,urllib.error.URLError):
+        return False
+
+
+def reconcile_native_timer(manager,names):
+    """Repair only an explicitly enrolled, already enabled native timer.
+    Never unmask or enable a disabled unit, overwrite drop-ins, or start an update.
+    """
+    if (STATE/'hold.json').exists() and not reconcile_completed_hold(manager,names):
+        return {'ok':False,'code':'native_recovery_hold','retryable':False}
+    runner=manager.Runner()
+    if set(manager.active_node_names(runner))!=set(names):
+        return {'ok':False,'code':'native_enrollment_mismatch','retryable':False}
+    manager.active_node_versions(manager.DEFAULT_LAYOUT,names)
+    enabled=runner.run(['systemctl','is-enabled',manager.AUTOUPDATE_TIMER],timeout=5)
+    if enabled.returncode or enabled.stdout.strip()!='enabled':
+        return {'ok':False,'code':'native_timer_not_enabled','retryable':False}
+    active=runner.run(['systemctl','is-active',manager.AUTOUPDATE_TIMER],timeout=5)
+    if active.returncode==0 and active.stdout.strip()=='active':
+        return {'ok':True,'code':'native_timer_healthy','changed':False}
+    if active.stdout.strip() not in ('inactive','failed'):
+        return {'ok':False,'code':'native_timer_state_unknown','retryable':True}
+    # PID 1 owns scheduling; this does not execute the updater in the Node.
+    # An operator's disabled/masked state always wins over reconciliation.
+    manager.systemctl(runner,'start','--no-block',manager.AUTOUPDATE_TIMER,timeout=5)
+    check=runner.run(['systemctl','is-active',manager.AUTOUPDATE_TIMER],timeout=5)
+    return {'ok':check.returncode==0 and check.stdout.strip()=='active',
+            'code':'native_timer_started' if check.returncode==0 and check.stdout.strip()=='active' else 'native_timer_start_pending',
+            'changed':True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true', help='verify the public package without restarting a service')
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--check', action='store_true', help='verify the public package without restarting a service')
+    mode.add_argument('--reconcile-only', action='store_true', help='verify native recovery state and restore an enabled inactive timer without downloading or updating')
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ValueError('root is required for the existing native Node manager')
@@ -423,13 +553,23 @@ def main():
         spec = importlib.util.spec_from_file_location('node_manager', MANAGER)
         manager = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(manager)
-        if (STATE/'hold.json').exists() and 'primary' in names:
-            env = manager.read_installed_env(manager.DEFAULT_LAYOUT, 'primary')
-            token = manager.read_admin_token(manager.DEFAULT_LAYOUT, 'primary', env)
-            manager.reconcile_stale_artifacts(manager.DEFAULT_LAYOUT, manager.Runner(), env, token,
-                                              max_age_seconds=0)
+        if args.reconcile_only:
+            result=reconcile_native_timer(manager,names)
+            print(json.dumps(result,sort_keys=True))
+            return
+        # A package check is read-only. Reconcile completed readback evidence
+        # in the native update path, without replaying any unknown operation.
         if (STATE/'hold.json').exists():
-            raise RuntimeError('previous manager failure requires verified recovery before automatic retry')
+            if args.check:
+                raise RuntimeError('native recovery hold: package check cannot authorize a new timer')
+            if not reconcile_completed_hold(manager,names):
+                if 'primary' in names:
+                    env = manager.read_installed_env(manager.DEFAULT_LAYOUT, 'primary')
+                    token = manager.read_admin_token(manager.DEFAULT_LAYOUT, 'primary', env)
+                    manager.reconcile_stale_artifacts(manager.DEFAULT_LAYOUT, manager.Runner(), env, token,
+                                                      max_age_seconds=0)
+                if (STATE/'hold.json').exists():
+                    raise RuntimeError('previous manager failure requires verified recovery before automatic retry')
         # Shared code/current is changed only when all active instances have
         # been explicitly enrolled. No hidden update of another owner's node.
         units = subprocess.check_output(['systemctl','list-units','gptadmin-node@*.service',
@@ -523,8 +663,14 @@ def main():
                     record(STATE/'hold.json',{'complete':False,'source':source,
                         'verified_instances':results,'reason':'manager_update_failed_review_required','instance':name})
                     raise RuntimeError('native Node update failed; manager rollback/disposition retained')
+                terminal=completed_manager_receipt(result.stdout,name,source)
+                if terminal is None:
+                    raise RuntimeError('manager terminal receipt invalid; hold retained')
+                record(STATE/'hold.json',{'complete':False,'source':source,
+                    'verified_instances':results,'reason':'manager_completed_readback_pending',
+                    'instance':name,'manager_receipt':terminal})
                 if not confirm_live_matches(manager,name,source,deadline):
-                    raise RuntimeError('manager returned success but live source not verified; hold retained')
+                    raise RuntimeError('manager completed; live readback pending; next native run will reconcile')
                 results.append(name)
                 # Preserve successful slices even if a later peer refuses.
                 record(STATE/'partial-update.json',{'source':source,'verified_instances':results,'complete':False})

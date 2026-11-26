@@ -285,6 +285,10 @@ func quorumMemberPromotionReady(member nodeMember, peer quorum.Peer, now time.Ti
 }
 
 func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
+	return s.quorumPeerReadiness(peer, false)
+}
+
+func (s *Server) quorumPeerReadiness(peer quorum.Peer, requireCurrentReplica bool) bool {
 	endpoint := peer.HubURL
 	if s.quorumPrivateTLS != nil {
 		endpoint = peer.InternalHubURL
@@ -322,7 +326,13 @@ func (s *Server) quorumPeerReplicaReady(peer quorum.Peer) bool {
 	if json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&status) != nil {
 		return false
 	}
-	return status.NodeID == peer.ID && status.ClusterID == s.quorumClusterID && (status.ReplicaReady || status.BaselineReady)
+	if status.NodeID != peer.ID || status.ClusterID != s.quorumClusterID {
+		return false
+	}
+	if requireCurrentReplica {
+		return status.ReplicaReady && status.BaselineReady
+	}
+	return status.ReplicaReady || status.BaselineReady
 }
 
 func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
@@ -422,7 +432,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 				return
 			}
 			if r.Header.Get("X-GPTAdmin-Quorum-Forwarded") != "" {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leadership changed during request forwarding"})
+				writeJSON(w, http.StatusConflict, map[string]any{"detail": "quorum leadership changed during request forwarding", "code": "quorum_leadership_changed", "retryable": true, "executed": false})
 				return
 			}
 			forwardedExecutor, executorErr := s.localQuorumExecutorForForward(r)
@@ -433,7 +443,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			if forwardedExecutor != "" && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/queue/") {
 				release, admitted := s.beginNodeSubmission(forwardedExecutor, "__quorum_queue_poll")
 				if !admitted {
-					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": nodeDrainRetryDetail, "retryable": true})
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": nodeDrainRetryDetail, "code": "node_draining", "retryable": true, "executed": false})
 					return
 				}
 				defer release()
@@ -464,7 +474,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 					var transportErr error
 					transport, transportErr = s.quorumPrivateTLS.transport(leaderID)
 					if transportErr != nil {
-						writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum leader has no authenticated private route"})
+						writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "quorum leader has no authenticated private route", "code": "quorum_peer_route_missing", "retryable": false, "executed": false})
 						return
 					}
 				}
@@ -491,7 +501,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 					if watchDelivery && delivery.failedBeforeSend(r.Context(), err) && serveOffline() {
 						return
 					}
-					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "current quorum leader delivery was not confirmed", "outcome": "unknown"})
+					writeJSON(w, http.StatusBadGateway, map[string]any{"detail": "current quorum leader delivery was not confirmed", "code": "quorum_delivery_unknown", "outcome": "unknown", "retryable": false})
 				}
 				proxy.ServeHTTP(w, r)
 				return
@@ -499,7 +509,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			if leaderID == "" && serveOffline() {
 				return
 			}
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "this GPTAdmin node has no quorum-confirmed Hub leadership", "leader_id": leaderID})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "this GPTAdmin node has no quorum-confirmed Hub leadership", "code": "quorum_leader_unavailable", "leader_id": leaderID, "retryable": true, "executed": false})
 			return
 		}
 		if r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
@@ -511,7 +521,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			return
 		}
 		if err := s.materializeVerifiedQuorumAuthority(r.Context(), termBeforeVerification); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum authority state is not ready on this leader"})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum authority state is not ready on this leader", "code": "quorum_authority_not_ready", "retryable": true, "executed": false})
 			return
 		}
 		// Bootstrap must let enrolled voters renew their leases before the
@@ -529,7 +539,7 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			}
 		}
 		if err := s.taskQuorumReady(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum Hub state is not ready"})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "quorum Hub state is not ready", "code": "quorum_replica_not_ready", "retryable": true, "executed": false})
 			return
 		}
 		if s.quorumControlOnly() {

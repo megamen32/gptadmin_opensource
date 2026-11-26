@@ -1409,6 +1409,7 @@ func (s *Server) membershipWriterLoop() {
 				cancel()
 			}
 			s.membershipWriterTick()
+			s.maybeTransferLegacyControlSource()
 		}
 	}
 }
@@ -2015,4 +2016,42 @@ func doNodeJSON(client *http.Client, method, url, bearer string, body []byte, li
 		return nil, &nodeHTTPError{status: response.StatusCode, detail: strings.TrimSpace(string(detail))}
 	}
 	return io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+}
+
+// maybeTransferLegacyControlSource repairs an explicitly authorized legacy
+// migration without restarting voters or creating another election mechanism.
+// A settled source, missing quorum, active drain or unverified target does
+// not authorize a transfer. The historical leader retains the existing pin
+// checks and commits the source through ordinary Raft authority materialization.
+func (s *Server) maybeTransferLegacyControlSource() {
+	pin := s.cfg.LegacyMemberControlSource
+	node := s.quorumNode
+	if pin == "" || node == nil || !s.quorumControlOnly() || !node.Status().Leader || s.authLocalID == pin || s.NodeDrainStatus().Draining {
+		return
+	}
+	s.membershipMu.Lock()
+	if s.membership == nil || s.membership.ControlSourceID != "" {
+		s.membershipMu.Unlock()
+		return
+	}
+	peer, err := s.legacyControlSourcePeer(s.membership, pin)
+	ready := false
+	if err == nil {
+		member := s.membership.Nodes[peer.ID]
+		ready = member != nil && quorumMemberPromotionReady(*member, peer, s.now())
+	}
+	s.membershipMu.Unlock()
+	if err != nil {
+		log.Printf("control_source_migration code=historical_voter_unverified")
+		return
+	}
+	if !ready || !node.IsVoter(peer.ID) || s.taskQuorumReady() != nil || !s.quorumPeerReadiness(peer, true) {
+		log.Printf("control_source_migration code=historical_voter_not_ready")
+		return
+	}
+	if err := node.TransferLeadershipTo(peer.ID); err != nil {
+		log.Printf("control_source_migration code=leadership_transfer_failed")
+		return
+	}
+	log.Printf("control_source_migration code=leadership_transfer_accepted")
 }

@@ -154,3 +154,30 @@ Fast units: archive/auth/URL/tag and lifecycle failure logic; expected3/max25s,
 native service rollback. Real controller/package/service acceptance remains a
 separate gate. The first cloud run passed all9 product checks but publication
 failed draft-tag lookup404; preserve that failed receipt. No secrets printed.
+
+
+## Native lifecycle reconciliation
+
+The root-managed Linux Node can reconcile its own native timer, but only from
+its exact systemd service cgroup and with a root-owned, protected opt-in and
+installed helper. It invokes the existing updater in `--reconcile-only` mode;
+it never downloads a package, restarts the Node, or starts an updater process
+inside an MCP task. The native timer remains the sole update scheduler.
+An enabled but inactive timer is restored only after verifying exact enrolled
+instances and their running versions. Disabled/masked units and unknown holds
+are not overridden. An operator pause uses the existing `autoupdate disable`
+command. Logs expose fixed `native_lifecycle_reconcile code=...` categories.
+
+After a successful manager run the updater stores a terminal receipt before
+post-update readback. A subsequent native run reconciles that receipt only
+after matching the exact source, slot, physical executable, service readiness,
+and cleared drain (or inherited idle socket). An older in-progress hold can
+use the protected, newer exact successful manager receipt from its existing
+private log. The recovery writes a durable receipt before clearing the hold;
+unknown outcomes and failed rollbacks remain held. No command is replayed.
+
+The existing socket-primary controller is selected only for the verified
+inherited listener. An ordinary voting member uses native quorum-aware rolling
+updates; do not install a second competing listener or scheduler. A legacy
+primary without an inherited socket still requires its supported socket
+migration, not an implicit stop/start by the reconciler.
