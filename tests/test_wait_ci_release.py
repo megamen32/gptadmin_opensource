@@ -237,9 +237,9 @@ def test_github_transport_only_uses_explicit_get_with_a_process_timeout(monkeypa
     assert "shell" not in calls[0][1]
 
 
-def test_in_progress_preparation_keeps_every_tag_and_publication_after_success_gate():
+def test_early_preparation_keeps_every_tag_and_publication_after_success_gate():
     workflow = yaml.safe_load((WORKFLOWS / "publish-node-release.yml").read_text())
-    assert workflow["on"]["workflow_run"]["types"] == ["in_progress"]
+    assert workflow["on"]["workflow_run"]["types"] == ["requested", "completed"]
     job = workflow["jobs"]["build-test-publish"]
     for guard in ("event == 'push'", "head_branch == 'main'", "head_repository.id == github.repository_id",
                   "repository.id == github.repository_id", "name == 'Public Product CI'"):
@@ -278,7 +278,7 @@ def test_initial_ci_wave_leaves_capacity_for_early_publisher():
     assert jobs["windows-shellmcp"]["needs"] == ["node-artifact"]
     assert jobs["release-platform"]["needs"] == "release-platform-critical"
     for name in ("admin-ui-build", "installer-e2e-linux", "android-dns"):
-        assert jobs[name]["needs"] == ["macos-build"]
+        assert jobs[name]["needs"] == ["release-platform-critical"]
     expanded_jobs = 0
     for job in jobs.values():
         matrix = job.get("strategy", {}).get("matrix", {})

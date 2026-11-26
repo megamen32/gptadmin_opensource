@@ -204,7 +204,7 @@ jobs:
         retention-days: 1
         compression-level: 0
   android-dns:
-    needs: [macos-build]
+    needs: [release-platform-critical]
     name: Android ARM64 system DNS resolver
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -239,7 +239,7 @@ jobs:
         go version -m "$RUNNER_TEMP/android-shellmcp" | grep -Fx $'\tbuild\tCGO_ENABLED=1'
         readelf --wide --dyn-syms "$RUNNER_TEMP/android-shellmcp" | grep -F 'getaddrinfo@LIBC'
   admin-ui-build:
-    needs: [macos-build]
+    needs: [release-platform-critical]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -329,7 +329,7 @@ jobs:
       run: |
         bash tools/ci_failover.sh "$SUITE"
   installer-e2e-linux:
-    needs: [macos-build]
+    needs: [release-platform-critical]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -230,7 +230,7 @@ def test_public_workflows_run_macos_gate_then_auto_publish_node_and_manual_full_
     node_trigger = node_workflow.get('on', node_workflow.get(True))
     assert set(node_trigger) == {'workflow_run'}
     assert node_trigger['workflow_run']['workflows'] == ['Public Product CI']
-    assert node_trigger['workflow_run']['types'] == ['in_progress']
+    assert node_trigger['workflow_run']['types'] == ['requested', 'completed']
     assert "github.event.workflow_run.event == 'push'" in node_workflow['jobs']['build-test-publish']['if']
     node_steps = node_workflow['jobs']['build-test-publish']['steps']
     assert any('exact public source' in step.get('name', '') for step in node_steps)

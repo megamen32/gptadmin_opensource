@@ -3,22 +3,26 @@ name: Publish verified Node and full release
   workflow_run:
     workflows: ['Public Product CI']
     types:
-    - in_progress
-concurrency:
-  group: gptadmin-public-full-release
-  cancel-in-progress: false
+    - requested
+    - completed
 permissions:
   contents: write
   actions: read
 jobs:
   build-test-publish:
     if: >-
+      ((github.event.action == 'requested' && github.event.workflow_run.run_attempt == 1) ||
+      (github.event.action == 'completed' && github.event.workflow_run.run_attempt > 1 &&
+      github.event.workflow_run.conclusion == 'success')) &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.name == 'Public Product CI' &&
       github.event.workflow_run.repository.id == github.repository_id &&
       github.event.workflow_run.head_repository.id == github.repository_id &&
       github.event.workflow_run.repository.full_name == github.repository
+    concurrency:
+      group: gptadmin-public-full-release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -95,6 +99,22 @@ jobs:
         done <<< "$paths"
 
         if [[ "$published" == 'true' && "$source_changed" == 'true' ]]; then
+          if python3 - <<'PY'
+        import os
+        from pathlib import Path
+        from tools.wait_ci_release import Identity, verify_completed_release
+        identity = Identity(os.environ['GITHUB_REPOSITORY'], int(os.environ['CI_REPOSITORY_ID']),
+                            os.environ['SOURCE_SHA'], int(os.environ['CI_RUN_ID']),
+                            int(os.environ['CI_RUN_ATTEMPT']))
+        verify_completed_release(identity, int(Path('VERSION').read_text().strip()))
+        PY
+          then
+            echo "Version $version is already fully published for this exact source; skipping the repeated event."
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "Node package source changed after version $version was released; bump VERSION." >&2
           exit 1
         fi

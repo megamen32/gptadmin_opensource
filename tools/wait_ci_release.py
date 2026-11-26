@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -53,6 +54,52 @@ def github_get(path: str, timeout: float) -> dict:
     if not isinstance(value, dict):
         raise ValueError("GitHub returned a non-object response")
     return value
+
+
+def verify_completed_release(identity: Identity, version: int, *, fetch: Callable = github_get) -> None:
+    """Reconcile an exact already published pair using bounded GETs only."""
+    if type(version) is not int or version <= 0:
+        raise ValueError("version must be a positive integer")
+    node_tag = f"node-v{version}-{identity.source[:12]}"
+    full_tag = f"v{version}"
+    names = {
+        node_tag: {f"gptadmin-node-{pair}.tar.gz{suffix}"
+                   for pair in NODE_PAIRS for suffix in ("", ".sha256")},
+        full_tag: {f"gptadmin-{platform}-{arch}-{edition}.{extension}"
+                   for platform, extension in (("windows", "zip"), ("macos", "tar.gz"),
+                                               ("ubuntu", "tar.gz"), ("android", "tar.gz"))
+                   for arch in ("x64", "arm64") for edition in ("full", "client")}
+                  | {"gptadmin-checksums.txt", "gptadmin-release-matrix.json"},
+    }
+    prefix = f"repos/{identity.repository}/"
+    paths = [f"releases/tags/{tag}" for tag in names]
+    paths += [f"git/ref/tags/{tag}" for tag in names]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = dict(zip(paths, pool.map(lambda path: fetch(prefix + path, 30), paths)))
+    for tag, expected in names.items():
+        release = responses[f"releases/tags/{tag}"]
+        if (release.get("tag_name") != tag or release.get("target_commitish") != identity.source
+                or release.get("draft") is not False or release.get("prerelease") is not False
+                or not isinstance(release.get("published_at"), str) or not release["published_at"]):
+            raise ValueError("existing release is not published for this exact source")
+        ref = responses[f"git/ref/tags/{tag}"]
+        # Both publishers create lightweight immutable tags.
+        obj = ref.get("object") or {}
+        if (ref.get("ref") != f"refs/tags/{tag}" or obj.get("type") != "commit"
+                or obj.get("sha") != identity.source):
+            raise ValueError("existing release tag does not bind this exact source")
+        assets = release.get("assets")
+        if (not isinstance(assets, list) or len(assets) != len(expected)
+                or not all(isinstance(asset, dict) for asset in assets)
+                or {asset.get("name") for asset in assets} != expected):
+            raise ValueError("existing release asset set is incomplete or duplicated")
+        for asset in assets:
+            if (type(asset.get("id")) is not int or asset["id"] <= 0
+                    or type(asset.get("size")) is not int or asset["size"] <= 0
+                    or asset.get("state") != "uploaded"
+                    or not isinstance(asset.get("digest"), str)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", asset["digest"])):
+                raise ValueError("existing release asset metadata is incomplete")
 
 
 def validate_run(run: dict, identity: Identity) -> None:

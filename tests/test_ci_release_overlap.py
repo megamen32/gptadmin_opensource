@@ -1,8 +1,10 @@
 """Local CI graph and publication guards; hosted jobs provide runtime evidence."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -93,9 +95,11 @@ def test_shared_go_cache_has_one_writer_per_os_and_keeps_all_shards():
 def test_one_publisher_consumes_exact_ci_attempt_then_publishes_node_and_full():
     workflow = _workflow("publish-node-release.yml")
     manual = _workflow("publish-full-release.yml")
-    assert workflow["concurrency"]["group"] == manual["concurrency"]["group"]
     job = workflow["jobs"]["build-test-publish"]
-    assert workflow["on"]["workflow_run"]["types"] == ["in_progress"]
+    assert "concurrency" not in workflow
+    assert job["concurrency"] == manual["concurrency"]
+    assert job["concurrency"]["cancel-in-progress"] is False
+    assert workflow["on"]["workflow_run"]["types"] == ["requested", "completed"]
     assert "workflow_run.event == 'push'" in job["if"]
     assert "workflow_run.head_branch == 'main'" in job["if"]
     assert job["env"]["CI_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"
@@ -210,3 +214,153 @@ def test_old_ci_fast_path_fails_before_any_publication_mutation(monkeypatch, tmp
         release.publish(tmp_path, SOURCE, "b" * 40, 1157, RUN, tmp_path,
                         ci_artifact_attempt=ATTEMPT)
     assert all("--method" not in call for call in calls)
+
+
+@pytest.mark.parametrize("action,attempt,conclusion,expected", [
+    ("requested", 1, None, True),
+    ("requested", 2, None, False),
+    ("in_progress", 1, None, False),
+    ("in_progress", 2, None, False),
+    ("completed", 1, "success", False),
+    ("completed", 2, "success", True),
+    ("completed", 3, "success", True),
+    ("completed", 2, "failure", False),
+    ("completed", 2, "cancelled", False),
+])
+@pytest.mark.parametrize("foreign", [False, True])
+def test_publisher_event_gate_skips_repeated_stage_events_and_accepts_successful_retries(
+        action, attempt, conclusion, expected, foreign):
+    job = _workflow("publish-node-release.yml")["jobs"]["build-test-publish"]
+    repository = SimpleNamespace(id=123, full_name=release.REPOSITORY)
+    run = SimpleNamespace(run_attempt=attempt, conclusion=conclusion,
+                          event="pull_request" if foreign else "push", head_branch="main",
+                          name="Public Product CI", repository=repository, head_repository=repository)
+    github = SimpleNamespace(event=SimpleNamespace(action=action, workflow_run=run),
+                             repository_id=123, repository=release.REPOSITORY)
+    condition = job["if"].replace("&&", " and ").replace("||", " or ").replace("\n", " ")
+    assert eval(condition, {"__builtins__": {}}, {"github": github}) is (expected and not foreign)
+
+
+def _published_pair_api(version=1161):
+    node_tag = f"node-v{version}-{SOURCE[:12]}"
+    full_tag = f"v{version}"
+    node_names = {f"gptadmin-node-{platform}-{arch}.tar.gz{suffix}"
+                  for platform in ("linux", "darwin") for arch in ("amd64", "arm64")
+                  for suffix in ("", ".sha256")}
+    full_names = {f"gptadmin-{platform}-{arch}-{edition}.{extension}"
+                  for platform, extension in (("windows", "zip"), ("macos", "tar.gz"),
+                                              ("ubuntu", "tar.gz"), ("android", "tar.gz"))
+                  for arch in ("x64", "arm64") for edition in ("full", "client")}
+    full_names |= {"gptadmin-checksums.txt", "gptadmin-release-matrix.json"}
+    responses = {}
+    for tag, names in ((node_tag, node_names), (full_tag, full_names)):
+        prefix = f"repos/{release.REPOSITORY}/"
+        responses[prefix + "releases/tags/" + tag] = {
+            "tag_name": tag, "target_commitish": SOURCE, "draft": False, "prerelease": False,
+            "published_at": "2026-11-26T03:00:00Z",
+            "assets": [{"id": i, "name": name, "size": 123, "state": "uploaded",
+                        "digest": "sha256:" + "c" * 64}
+                       for i, name in enumerate(sorted(names), 1)]}
+        responses[prefix + "git/ref/tags/" + tag] = {
+            "ref": "refs/tags/" + tag, "object": {"type": "commit", "sha": SOURCE}}
+    return responses
+
+
+@pytest.mark.parametrize("tag", ["node-v1161-" + SOURCE[:12], "v1161"])
+@pytest.mark.parametrize("fault", [None, "source", "tag_source", "tag_name", "draft", "prerelease",
+                                  "unpublished", "missing_asset", "duplicate_asset", "digest",
+                                  "asset_state", "asset_size"])
+def test_exact_completed_release_skip_requires_both_complete_immutable_releases(tag, fault):
+    from tools.wait_ci_release import Identity, verify_completed_release
+    identity = Identity(release.REPOSITORY, 123, SOURCE, RUN, ATTEMPT)
+    responses = _published_pair_api()
+    prefix = f"repos/{release.REPOSITORY}/"
+    existing = responses[prefix + "releases/tags/" + tag]
+    ref = responses[prefix + "git/ref/tags/" + tag]
+    if fault == "source":
+        existing["target_commitish"] = "b" * 40
+    elif fault == "tag_source":
+        ref["object"]["sha"] = "b" * 40
+    elif fault == "tag_name":
+        ref["ref"] = "refs/tags/another"
+    elif fault in {"draft", "prerelease"}:
+        existing[fault] = True
+    elif fault == "unpublished":
+        existing["published_at"] = None
+    elif fault == "missing_asset":
+        existing["assets"].pop()
+    elif fault == "duplicate_asset":
+        existing["assets"][-1] = existing["assets"][0]
+    elif fault == "digest":
+        existing["assets"][0]["digest"] = None
+    elif fault == "asset_state":
+        existing["assets"][0]["state"] = "new"
+    elif fault == "asset_size":
+        existing["assets"][0]["size"] = 0
+    calls = []
+    def fetch(path, timeout):
+        assert timeout == 30
+        calls.append(path)
+        return responses[path]
+    if fault:
+        with pytest.raises(ValueError):
+            verify_completed_release(identity, 1161, fetch=fetch)
+    else:
+        verify_completed_release(identity, 1161, fetch=fetch)
+    assert len(calls) == 4 and set(calls) == set(responses)
+
+
+@pytest.mark.parametrize("fault", [None, "source", "missing_asset", "draft", "missing_full"])
+def test_actual_scope_script_skips_only_the_exact_complete_duplicate(tmp_path, fault):
+    script = next(step["run"] for step in
+                  _workflow("publish-node-release.yml")["jobs"]["build-test-publish"]["steps"]
+                  if step.get("id") == "scope")
+    responses = _published_pair_api()
+    full_key = f"repos/{release.REPOSITORY}/releases/tags/v1161"
+    if fault == "source":
+        responses[full_key]["target_commitish"] = "b" * 40
+    elif fault == "missing_asset":
+        responses[full_key]["assets"].pop()
+    elif fault == "draft":
+        responses[full_key]["draft"] = True
+    elif fault == "missing_full":
+        responses.pop(full_key)
+    (tmp_path / "api.json").write_text(json.dumps(responses))
+    (tmp_path / "VERSION").write_text("1161\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    git = bin_dir / "git"
+    git.write_text(f"#!{sys.executable}\nimport sys\n"
+                   "if sys.argv[1] == 'log': print('snapshot\\n\\nSource-Commit: ' + 'b' * 40)\n"
+                   "elif sys.argv[1] == 'diff-tree': print('VERSION')\n"
+                   "else: raise SystemExit(91)\n")
+    git.chmod(0o755)
+    gh = bin_dir / "gh"
+    gh.write_text(f"#!{sys.executable}\nimport json, pathlib, sys\n"
+                  "args=sys.argv[1:]\n"
+                  "with pathlib.Path('calls.jsonl').open('a') as f: f.write(json.dumps(args)+'\\n')\n"
+                  "if args[0] == 'api' and '--jq' in args:\n"
+                  f" print('node-v1161-{SOURCE[:12]}')\n"
+                  "elif args[:3] == ['api', '--method', 'GET']:\n"
+                  " data=json.loads(pathlib.Path('api.json').read_text())\n"
+                  " if args[3] not in data: raise SystemExit(22)\n"
+                  " print(json.dumps(data[args[3]]))\n"
+                  "else: raise SystemExit(92)\n")
+    gh.chmod(0o755)
+    output = tmp_path / "outputs"
+    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+               PYTHONPATH=str(ROOT), GITHUB_REPOSITORY=release.REPOSITORY, SOURCE_SHA=SOURCE,
+               CI_REPOSITORY_ID="123", CI_RUN_ID=str(RUN), CI_RUN_ATTEMPT=str(ATTEMPT),
+               GITHUB_OUTPUT=str(output))
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert (result.returncode == 0) is (fault is None), result.stderr
+    values = output.read_text()
+    if fault is None:
+        assert "changed=false\n" in values and "published=true\n" in values
+    else:
+        assert "bump VERSION" in result.stderr
+        assert "changed=false\n" not in values
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert len(calls) == 5
+    assert all("--jq" in args or args[:3] == ["api", "--method", "GET"] for args in calls)
