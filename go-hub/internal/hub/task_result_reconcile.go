@@ -275,7 +275,12 @@ func terminalReadDB(cfg Config) (*sql.DB, error) {
 	if err := regularAuthPath(path, false); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	uri, err := sqliteFileURI(path)
+	if err != nil {
+		return nil, err
+	}
+	uri.RawQuery = "mode=ro"
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
 	}

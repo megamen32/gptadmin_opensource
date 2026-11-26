@@ -195,6 +195,13 @@ jobs:
         ARCH: ${{ matrix.arch }}
       run: |
         python3 tools/build_node.py --platform "$PLATFORM" --arch "$ARCH"
+    - name: Exercise peer receipts and delegated executor access with the packaged binaries
+      if: matrix.platform == 'linux' && matrix.arch == 'amd64'
+      run: |
+        fixture="$(mktemp -d)"
+        tar -xzf .tmp/node-packages/gptadmin-node-linux-amd64.tar.gz -C "$fixture" bin/gptadmin-node bin/shellmcp
+        python3 tests/e2e/node/peer_run.py "$fixture/bin/gptadmin-node"
+        python3 tests/e2e/node/access_tree_run.py "$fixture/bin/gptadmin-node" "$fixture/bin/shellmcp"
     - name: Retain exact artifact for verified release publication
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -374,8 +381,10 @@ jobs:
       run: |
         chmod +x tools/build.sh
         ./tools/build.sh hub shellmcp
+        mkdir -p build/bin
+        (cd go-hub && CGO_ENABLED=0 go build -trimpath -o ../build/bin/gptadmin-node ./cmd/gptadmin-node)
         tar -C build -czf build/gptadmin-ci-full.tar.gz \
-          shellmcp grepmesh gptadmin_hub cli hub_source client public
+          bin/gptadmin-node shellmcp grepmesh gptadmin_hub cli hub_source client public
       env:
         GPTADMIN_BUILD_PLATFORMS: native
     - name: Clean-install lifecycle with real execution
@@ -528,6 +537,8 @@ jobs:
         Set-Location go-hub
         go test -run '^$' ./...
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        go build -o ../build/windows/gptadmin-node.exe ./cmd/gptadmin-node
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         go build -o ../build/windows/gptadmin-hub.exe ./cmd/gptadmin-hub
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Compile every Go ShellMCP package for Windows
@@ -538,6 +549,11 @@ jobs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         go build -o ../build/windows/shellmcp.exe ./cmd/shellmcp-go
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Install and exercise the unified Windows Node and executor
+      shell: pwsh
+      run: |
+        ./tests/e2e/install/windows_roles.ps1
+        ./tests/e2e/install/windows_release_resolution.ps1
     - name: Exercise Windows polling configuration contract
       shell: pwsh
       run: |

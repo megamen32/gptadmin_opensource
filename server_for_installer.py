@@ -119,6 +119,7 @@ def _artifact_manifest() -> dict:
         "gptadmin-hub.tar.gz": (BUILD_DIR / "gptadmin-hub.tar.gz", "/gptadmin-hub.tar.gz"),
         "gptadmin-shellmcp.tar.gz": (BUILD_DIR / "gptadmin-shellmcp.tar.gz", "/gptadmin-shellmcp.tar.gz"),
         "gptadmin-win.zip": (PUBLIC_DIR / "gptadmin-win.zip", "/gptadmin-win.zip"),
+        "gptadmin-windows-x64-client.zip": (PUBLIC_DIR / "gptadmin-windows-x64-client.zip", "/gptadmin-windows-x64-client.zip"),
     }
     artifacts = {}
     for name, (path, route) in candidates.items():
@@ -205,6 +206,12 @@ async def get_shellmcp():
 @app.api_route('/gptadmin-win.zip', methods=['GET', 'HEAD'])
 async def get_shellmcp_win():
     return _bin(PUBLIC_DIR / "gptadmin-win.zip", "gptadmin-win.zip", "application/zip")
+
+
+@app.api_route('/gptadmin-windows-x64-client.zip', methods=['GET', 'HEAD'])
+async def get_windows_client():
+    name = "gptadmin-windows-x64-client.zip"
+    return _bin(PUBLIC_DIR / name, name, "application/zip")
 
 
 @app.api_route('/frp-mirror/{filename}', methods=['GET', 'HEAD'])

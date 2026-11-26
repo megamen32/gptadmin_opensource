@@ -22,8 +22,15 @@ env_val() {
 	sudo grep -oP "(?<=^$1=).*" "$ENV_FILE" 2>/dev/null | head -1 | tr -d '"'
 }
 
-MAIN_ORIGIN="$(env_val MCP_ORIGIN)"
+MAIN_ORIGIN="$(env_val PUBLIC_ORIGIN)"
+if [ -z "$MAIN_ORIGIN" ]; then
+	MAIN_ORIGIN="$(env_val MCP_ORIGIN)"
+fi
 TENANT_ORIGIN="$(env_val TENANT_ORIGIN)"
+if [ -z "$MAIN_ORIGIN" ] && [ -z "$TENANT_ORIGIN" ]; then
+	echo "FAIL no public canary origin configured" >&2
+	exit 1
+fi
 BEARER="$(env_val GPTADMIN_CUSTOM_MCP_BEARER)"
 TARGET="${GPTADMIN_CANARY_TARGET:-shell:admin-node-100}"
 NATIVE_HELPER="${GPTADMIN_NATIVE_CANARY_HELPER:-/opt/gptadmin/bin/gptadmin-live-canary-native.py}"

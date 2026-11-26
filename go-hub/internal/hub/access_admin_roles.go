@@ -48,7 +48,22 @@ func (s *Server) clientHTTPPathAllowed(r *http.Request) bool {
 	}
 	tool := ""
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/admin/api/access-profiles"):
+	case r.URL.Path == "/admin/api/instruction-sets" || onePathSegmentAfter(r.URL.Path, "/admin/api/instruction-sets/"):
+		// Preserve existing unbound admin DELETE access; do not add DELETE to MCP.
+		if r.Method == http.MethodGet || r.Method == http.MethodPut {
+			action := "get"
+			if r.URL.Path == "/admin/api/instruction-sets" {
+				action = "list"
+			}
+			if r.Method == http.MethodPut {
+				action = "update"
+			}
+			return authorizeToolAction(r, "hub", "instruction_sets", map[string]any{"action": action}) == nil
+		}
+		if _, bound := AccessProfileFromRequest(r); bound {
+			return false
+		}
+	case strings.HasPrefix(r.URL.Path, "/admin/api/access-profiles"), strings.HasPrefix(r.URL.Path, "/admin/api/access-profile-trees/"):
 		tool = "access_profiles"
 	case strings.HasPrefix(r.URL.Path, "/admin/api/client"), strings.HasPrefix(r.URL.Path, "/admin/api/mcp/tokens/"), r.URL.Path == "/admin/api/mcp/issue-token", r.URL.Path == "/admin/api/bootstrap-links", strings.HasPrefix(r.URL.Path, "/admin/api/bootstrap-links/"):
 		tool = "access_clients"

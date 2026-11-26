@@ -253,7 +253,7 @@ func releaseAuthAdmission(r *http.Request) {
 // A one-shot release is shared by nested request contexts and the final defer.
 func (s *Server) authSnapshotGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.authContinuityEnabled() || strings.HasPrefix(r.URL.Path, "/queue/") || r.URL.Path == "/heartbeat" || r.URL.Path == "/healthz" || r.URL.Path == "/version" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/mcp-relay/poll/") {
+		if !s.authContinuityEnabled() || publicActionsSchemaRead(r) || strings.HasPrefix(r.URL.Path, "/queue/") || r.URL.Path == "/heartbeat" || r.URL.Path == "/healthz" || r.URL.Path == "/version" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/mcp-relay/poll/") {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -38,8 +38,12 @@ def test_release_windows_package_builds_and_archives_the_go_hub():
     assert copied_hub in windows_builder
     assert windows_builder.index('build_hub_cross_platforms windows') < windows_builder.index(copied_hub)
     assert windows_builder.index(copied_hub) < windows_builder.index('zip -q -9 -r')
-    assert 'zip -q -9 -r "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md' in script
-    assert 'cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 public/install_win.ps1 "$ART_DIR/public/"' in script
+    assert 'zip -q -9 -r "../gptadmin-win.zip" gptadmin-node.exe gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md' in script
+    assert 'emit_release_bundle windows x64 client' in windows_builder
+    public_payload = windows_builder.split('if [[ -d "$ART_DIR/public" ]]', 1)[1]
+    for asset in ("gptadmin-win.zip", "gptadmin-windows-x64-client.zip", "install_win.ps1"):
+        assert f"public/{asset}" in public_payload
+    assert '"$ART_DIR/public/"' in public_payload
 
 
 def test_all_archive_is_created_after_windows_payload_is_current():

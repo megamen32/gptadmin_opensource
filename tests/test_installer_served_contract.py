@@ -58,8 +58,8 @@ def test_served_windows_installer_self_contained_or_self_enrolling() -> None:
     served = _fetch("/install_win.ps1").decode("utf-8", "utf-8")
     assert "unregistered random credential" not in served
     assert "function New-RandomToken" in served
-    assert "$LocalHub = (-not $HubUrl) -or (Test-LoopbackUrl $HubUrl)" in served
-    assert "AdminPassword: $AdminPassword" in served
+    assert "[ValidateSet('node', 'executor')]" in served
+    assert "CredentialsFile: $CredentialsFile" in served
 
 
 def test_served_linux_agent_installer_self_enrolls() -> None:

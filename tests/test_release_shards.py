@@ -274,6 +274,8 @@ destination.chmod(0o755)
     compiler.chmod(0o755)
     script = """set -euo pipefail
 ART_DIR=build
+BUILD_VERSION=129
+GIT_COMMIT=test-source
 GPTADMIN_BUILD_PLATFORMS=default
 BUILT_HUB_PLATFORMS=" "
 BUILT_SHELLMCP_PLATFORMS=" "
@@ -293,7 +295,13 @@ step(){ :; }
     assert result.returncode == 0, result.stdout + result.stderr
     calls = [json.loads(line) for line in capture.read_text().splitlines()]
     expected = list(PAIRS) if pair == "matrix" else [pair]
-    assert len(calls) == 2 * len(expected)
-    for half in (calls[:len(expected)], calls[len(expected):]):
-        assert {f'{call["os"]}_{call["arch"]}' for call in half} == set(expected)
-        assert all(call["args"][:3] == ["build", "-trimpath", "-buildvcs=false"] for call in half)
+    commands = {
+        "./cmd/gptadmin-hub": set(expected),
+        "./cmd/shellmcp-go": set(expected),
+        "./cmd/gptadmin-node": {item for item in expected if item.startswith("windows_")},
+    }
+    assert len(calls) == sum(len(items) for items in commands.values())
+    for command, platforms in commands.items():
+        selected = [call for call in calls if call["args"][-1] == command]
+        assert {f'{call["os"]}_{call["arch"]}' for call in selected} == platforms
+    assert all(call["args"][:3] == ["build", "-trimpath", "-buildvcs=false"] for call in calls)

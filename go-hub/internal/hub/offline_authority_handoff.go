@@ -695,7 +695,10 @@ func handoffSQLiteSnapshot(source, destination string) error {
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("SQLite snapshot destination already exists")
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(source)}
+	u, err := sqliteFileURI(source)
+	if err != nil {
+		return err
+	}
 	q := url.Values{}
 	q.Set("mode", "ro")
 	q.Add("_pragma", "busy_timeout(10000)")

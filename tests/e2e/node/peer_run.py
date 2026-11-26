@@ -83,13 +83,11 @@ def run_canary(binary, protocol, legacy_probe=None):
         return payload
 
     def call(name, body, authenticated=True):
-        if protocol == 'mcp':
-            return mcp_tool(name, 'execute', body, authenticated)
-        return request(name, '/mcp-relay/call', body, authenticated)
+        return request(name, '/mcp-relay/call', {**body, 'detail': 'full'}, authenticated)
 
     def get_receipt(name, job_id, owner_target=None):
         if protocol == 'mcp':
-            arguments = {'id': job_id}
+            arguments = {'id': job_id, 'detail': 'full'}
             if owner_target:
                 arguments['owner_target'] = owner_target
             return mcp_tool(name, 'job', arguments)
@@ -202,8 +200,11 @@ def run_canary(binary, protocol, legacy_probe=None):
         if protocol == 'mcp':
             token = managed['access_token']
             assert token != owner_token
-            initialize('nodeA')
-            initialize('nodeB')
+        for name in nodes:
+            # The original caller must receive the current instructions from
+            # each independently authorizing endpoint before it can write.
+            initialize(name)
+        if protocol == 'mcp':
             tools = request('nodeA', '/mcp', {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/list'})['result']['tools']
             job_schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'job')
             assert 'owner_target' in job_schema['properties']

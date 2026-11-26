@@ -2,8 +2,8 @@
 
 ## One management contract
 
-The Hub exposes `access_profiles`, `access_clients`, and `operations` through
-`schema(target="hub")` and `execute(target="hub", ...)`. The tools call the same
+The Hub exposes `access_profiles`, `access_clients`, `instruction_sets`, and `operations` through
+`schema(target="hub")` and the `exec` facade. The tools call the same
 owner HTTP handlers as the web UI, forwarding the caller's existing verified
 credentials. They do not require shell commands or manufacture an owner session.
 
@@ -19,6 +19,20 @@ Examples of tool arguments:
 
 `access_profiles` supports list, get, create, update. Updates require the `etag`
 returned by get; creating an existing ID is rejected rather than overwritten.
+The `instruction_sets` tool supports list, get and update for the shared
+`default` and existing named instruction sets. Get returns the content and
+ETag; update requires that ETag and the full replacement content, reuses the
+quorum-backed admin handlers, and returns an operation receipt. Existing
+admin/owner authority and profile target/tool/action rules remain required.
+
+```js
+const set = await mcp.call("hub", "instruction_sets", {action: "get", id: "default"});
+return await mcp.call("hub", "instruction_sets", {
+  action: "update", id: "default", etag: set.etag,
+  content: set.content + "\n\nNew instruction."
+});
+```
+
 `access_clients` supports list, issue, bind, unbind, and revoke for an exact ID.
 These clients are named MCP/OAuth connections, not local OS accounts or a new
 human-login directory. Owner/admin-cookie or existing CTL authentication is
@@ -75,6 +89,57 @@ or by an unrelated caller.
 A new connection can be issued with `profile_id` in its original persisted
 record. It does not pass through a temporary unbound state. A delayed profile
 list response cannot erase a new profile draft the operator has begun editing.
+
+## Department scopes
+
+An operator can ask an agent to let a manager operate the devices of a department
+and its subdepartments. Use the existing `hub.access_profiles` tool on a trusted
+administrative connection. Select `schema` with `target=hub` and
+`tool=access_profiles` to discover its arguments. Create each role as a normal
+profile, initially with empty `allowed_targets` and the exact tools that role
+may use. Bind each department client to its profile at issuance.
+
+For example, pass this configuration to `access_profiles`:
+
+```json
+{
+  "action": "plan_tree",
+  "id": "company",
+  "groups": {
+    "company": {},
+    "engineering": {"parent": "company"},
+    "field": {"parent": "engineering", "targets": ["shell:field-worker"]},
+    "finance": {"parent": "company", "targets": ["shell:office-node"]}
+  }
+}
+```
+
+The preview lists the previous and proposed exact targets of every affected
+profile. Submit the same configuration with `action=apply_tree` and its
+`etag`. The Hub writes the profiles in one existing access-state transaction.
+The engineering client can use the field executor, finance can use the office
+node, and company covers both. Each role retains its own tools, filesystem
+limits and approval policy. A manager uses an ordinary profile-bound client
+credential. Changing the department configuration requires access administration.
+
+Use a complete group map when moving devices or entire branches. A previously
+included profile omitted from the map loses its allowed targets in the same
+transaction. An empty map releases the entire tree. Existing client bindings
+remain in place. A stale plan fails with HTTP 412; read the changed state and
+plan again. Each profile belongs to at most one tree. Device assignments accept
+concrete shell, file, control or child MCP targets. Inspect the source of an
+effective target list through the profile's `target_group` (root, parent and
+direct targets). This groups authorization at the Hub; network routes, peer
+trust and Raft membership are configured independently. When upgrading a
+replicated deployment, write tree-managed policies only through versions that
+preserve the target group fields.
+
+The same authenticated operations are available as POST (preview) and PUT
+(apply with `If-Match`) at `/admin/api/access-profile-trees/<root-profile-id>`.
+Run the isolated product scenario with
+`python3 tests/e2e/node/access_tree_run.py /path/to/gptadmin-node /path/to/shellmcp-go`.
+It checks the original credentials before and after a department transfer on
+a real unified Node and a separate ShellMCP.
 
 ## Durable access operations
 

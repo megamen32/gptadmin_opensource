@@ -5,6 +5,11 @@ set -euo pipefail
 RELEASES_URL=${RELEASES_URL:-https://github.com/megamen32/gptadmin_opensource/releases/latest/download}
 CLI_URL=${CLI_URL:-https://raw.githubusercontent.com/megamen32/gptadmin_opensource/main/cli.py}
 
+case "${GPTADMIN_INSTALL_ROLE:-}" in
+  ""|node|executor) ;;
+  *) echo "ERROR: GPTADMIN_INSTALL_ROLE must be node or executor" >&2; exit 2 ;;
+esac
+
 _os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$_os" in
   darwin) GPTADMIN_PLATFORM=macos ;;
@@ -71,7 +76,7 @@ if [ -z "$CONFIG_DIR" ]; then
 fi
 ENV_FILE="$CONFIG_DIR/gptadmin.env"
 EXISTING_INSTALL=0
-if [ -f "$ENV_FILE" ] || [ -x "$INSTALL_DIR/bin/gptadmin_hub" ] || [ -x "$INSTALL_DIR/bin/shellmcp" ]; then
+if [ -f "$ENV_FILE" ] || [ -x "$INSTALL_DIR/bin/gptadmin-node" ] || [ -x "$INSTALL_DIR/bin/gptadmin_hub" ] || [ -x "$INSTALL_DIR/bin/shellmcp" ]; then
   EXISTING_INSTALL=1
 fi
 
@@ -164,6 +169,7 @@ fi
 cat <<EOF
 \n✅ GPTAdmin CLI установлен: $CLI_PATH
 Режим установки: $INSTALL_MODE
+Настройка ролей: gptadmin setup --help
 Пакет: $PKG_ALL_URL
 Использование (примеры):
   gptadmin update           # обновить существующую установку

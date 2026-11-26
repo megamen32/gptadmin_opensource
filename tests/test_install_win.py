@@ -27,7 +27,7 @@ def test_windows_user_install_is_task_scheduler_independent() -> None:
     source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
     assert "if ($UserMode) {\n        Install-UserStartup -Batch $Batch -Startup $Startup\n        return 'startup'" in source
     assert "Per-user startup is deliberately Task-Scheduler-free" in source
-    assert "if ($UserMode) {\n        # User installs must not depend on Task Scheduler access" in source
+    assert "# User installs must not depend on Task Scheduler access" in source
 
 
 def test_windows_installer_accepts_exact_local_candidate_artifact() -> None:
@@ -42,10 +42,11 @@ def test_windows_installer_bootstraps_a_local_hub_by_default() -> None:
     source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
     assert "function New-RandomToken" in source
     assert "function Test-LoopbackUrl" in source
-    assert "$LocalHub = (-not $HubUrl) -or (Test-LoopbackUrl $HubUrl)" in source
+    assert "if ($HubUrl) { $Role = if (Test-LoopbackUrl $HubUrl) { 'node' } else { 'executor' } }" in source
+    assert "else { $Role = 'node' }" in source
     assert "if (-not $ShellmcpToken) { $ShellmcpToken = New-RandomToken }" in source
-    assert "$HubExe = Join-Path $BinDir 'gptadmin-hub.exe'" in source
-    assert 'gptadmin-hub.exe not found in package' in source
+    assert "@('gptadmin-node.exe')" in source
+    assert 'Package is missing the $runtimeName executable required by role $Role.' in source
     assert '"CTL_TOKEN=$CtlToken"' in source
     assert '"ADMIN_PASSWORD=$AdminPassword"' in source
     assert '"OAUTH_CLIENT_SECRET=$OAuthClientSecret"' in source
@@ -62,13 +63,14 @@ def test_windows_installer_bootstraps_a_local_hub_by_default() -> None:
     assert "AdminUrl: $HubUrl/admin" in source
     assert "AdminPassword: $AdminPassword" in source
     assert "CredentialsFile: $CredentialsFile" in source
-    assert "trusted automatically" in source
+    assert "a separate directory for role" in source
 
 
 def test_windows_installer_remote_agent_self_enrolls() -> None:
     """An explicit remote Hub keeps the no-secret agent enrollment path."""
 
     source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
+    assert 'gptadmin-windows-$Arch-$Edition.zip' in source
     assert "unregistered random credential" not in source
     assert "NextStep: the Hub lists this machine as pending server 'shell:$ShellmcpName'" in source
 
@@ -82,7 +84,7 @@ def test_windows_installer_rejects_multiline_or_html_credentials() -> None:
 
 def test_windows_installer_requires_real_process_after_start() -> None:
     source = (ROOT / "deploy" / "install_win.ps1").read_text(encoding="utf-8")
-    check = "ShellMCP did not remain running after install"
+    check = "$runtimeName did not remain running after install"
     assert check in source
     assert source.index("Start-Sleep -Seconds 3") < source.index(check)
     assert source.index(check) < source.index("Installed GPT Admin")

@@ -147,6 +147,20 @@ func ensureTaskDatabaseFile(path string) error {
 	return f.Close()
 }
 
+// SQLite interprets file://C:/... as a remote authority. Preserve the leading
+// slash in file:///C:/... and let net/url escape spaces and URL delimiters.
+func sqliteFileURI(path string) (url.URL, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return url.URL{}, err
+	}
+	path = filepath.ToSlash(absolute)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return url.URL{Scheme: "file", Path: path}, nil
+}
+
 func openTaskDatabase(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
@@ -154,11 +168,10 @@ func openTaskDatabase(path string) (*sql.DB, error) {
 	if err := ensureTaskDatabaseFile(path); err != nil {
 		return nil, err
 	}
-	absolute, err := filepath.Abs(path)
+	uri, err := sqliteFileURI(path)
 	if err != nil {
 		return nil, err
 	}
-	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(10000)")
 	q.Add("_pragma", "journal_mode(WAL)")
@@ -177,11 +190,10 @@ func openTaskDatabase(path string) (*sql.DB, error) {
 // Normal task polling owns a deferred, read-only WAL snapshot. It must not
 // compete with durable mutations for SQLite's single writer or rerun DDL.
 func openTaskReadDatabase(path string) (*sql.DB, error) {
-	absolute, err := filepath.Abs(path)
+	uri, err := sqliteFileURI(path)
 	if err != nil {
 		return nil, err
 	}
-	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
 	q := url.Values{}
 	q.Set("mode", "ro")
 	q.Add("_pragma", "busy_timeout(10000)")

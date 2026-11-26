@@ -23,8 +23,9 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import xml.etree.ElementTree as ET
 import pwd
-from functools import wraps
+from functools import lru_cache, wraps
 from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 # Bootstrap and `gptadmin node` stay on stock Python. Optional feature
@@ -374,6 +375,95 @@ _PERSISTENT_AUTH_KEYS = frozenset({
     'SHELLMCP_UPDATE_TOKEN',
 })
 
+_STANDALONE_HUB_AUTH_KEYS = frozenset({
+    'ADMIN_PASSWORD',
+    'OAUTH_CLIENT_SECRET',
+    'CTL_TOKEN',
+    'MCP_RELAY_ENROLLMENT_PASSWORD',
+})
+
+
+def _validate_scoped_enrollment_token(value: str) -> str:
+    token = str(value or '').strip()
+    if not token or any(char.isspace() for char in token):
+        raise RuntimeError('scoped enrollment token must be one non-whitespace line')
+    return token
+
+
+def _known_standalone_admin_credentials(env: dict, extra: str | None = None) -> set[str]:
+    known = {
+        str(env.get(key)).strip()
+        for key in _STANDALONE_HUB_AUTH_KEYS
+        if env.get(key)
+    }
+    if extra and str(extra).strip():
+        known.add(str(extra).strip())
+    return known
+
+
+def _remove_known_legacy_standalone_token(known: set[str]) -> None:
+    """Remove a legacy admin credential while preserving unrelated device tokens."""
+    if not known or not MCP_TOKEN_FILE.is_file():
+        return
+    try:
+        stored = MCP_TOKEN_FILE.read_text(encoding='utf-8')
+    except OSError:
+        return
+    if any(stored in {credential, credential + '\n'} for credential in known):
+        MCP_TOKEN_FILE.unlink(missing_ok=True)
+
+
+def _prepare_standalone_credentials(
+    env: dict,
+    *,
+    enrollment_token: str | None = None,
+    admin_password: str | None = None,
+) -> None:
+    """Keep standalone ShellMCP limited to its scoped device credential.
+
+    A standalone executor has no Hub policy authority. Its one-time enrollment
+    input is copied to the private device-token store by
+    ``_persist_scoped_enrollment_token`` and is removed from the service
+    environment. Fleet Hub credentials are never generated or retained.
+    """
+    known = _known_standalone_admin_credentials(env, admin_password)
+    candidate = enrollment_token if enrollment_token is not None else env.get('MCP_RELAY_AGENT_TOKEN')
+    if candidate and str(candidate).strip() in known:
+        raise RuntimeError('scoped enrollment token matches a fleet administrator credential')
+    if admin_password and str(admin_password).strip():
+        raise RuntimeError('standalone enrollment requires a scoped enrollment token, not an administrator password')
+    if enrollment_token is not None:
+        env['MCP_RELAY_AGENT_TOKEN'] = _validate_scoped_enrollment_token(enrollment_token)
+    for key in _STANDALONE_HUB_AUTH_KEYS:
+        env.pop(key, None)
+
+
+def _persist_scoped_enrollment_token(env: dict) -> None:
+    """Persist a scoped device token once, without retaining it in gptadmin.env."""
+    token = env.pop('MCP_RELAY_AGENT_TOKEN', '')
+    if not token or MCP_TOKEN_FILE.exists():
+        return
+    token = _validate_scoped_enrollment_token(token)
+    MCP_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f'.{MCP_TOKEN_FILE.name}.', dir=str(MCP_TOKEN_FILE.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(temporary_fd, 'w', encoding='utf-8') as stream:
+            temporary_fd = -1
+            stream.write(token + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, MCP_TOKEN_FILE)
+        except FileExistsError:
+            pass
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        temporary.unlink(missing_ok=True)
+
 
 def _capture_persistent_auth_material(env: dict) -> dict[str, str]:
     """Capture secrets and client JWTs that an in-place update must preserve."""
@@ -676,6 +766,60 @@ def _release_arch_tag() -> str:
     return arch
 
 
+def _read_release_metadata(url, limit):
+    request = urllib.request.Request(url, headers={'User-Agent': 'gptadmin-installer'})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Release metadata exceeds the installer limit')
+    return data
+
+
+@lru_cache(maxsize=1)
+def _published_full_release():
+    # GitHub's historical "latest" pointer is independent of the immutable full
+    # releases. The public feed also works on networks sharing a GitHub API limit.
+    repo = 'https://github.com/megamen32/gptadmin_opensource'
+    feed = _read_release_metadata(repo + '/releases.atom', 1024 * 1024)
+    if b'<!doctype' in feed.lower() or b'<!entity' in feed.lower():
+        raise ValueError('Unexpected release feed markup')
+    ns = '{http://www.w3.org/2005/Atom}'
+    root = ET.fromstring(feed)
+    if root.tag != ns + 'feed':
+        raise ValueError('Invalid public release feed')
+    versions = []
+    for entry in root.findall(ns + 'entry'):
+        match = re.fullmatch(r'tag:github[.]com,[0-9]+:Repository/[0-9]+/v([1-9][0-9]*)',
+                             entry.findtext(ns + 'id', ''))
+        if match and entry.findtext(ns + 'title') == 'GPTAdmin v' + match[1]:
+            versions.append(int(match[1]))
+    if not versions:
+        raise ValueError('No published full release was found')
+    version = max(versions)
+    matrix = json.loads(_read_release_metadata(f'{repo}/releases/download/v{version}/gptadmin-release-matrix.json',
+                                               4 * 1024 * 1024))
+    if matrix.get('schema') != 'gptadmin.release-matrix/v2' or matrix.get('build_version') != version:
+        raise ValueError('The release manifest does not match its version')
+    return version, {asset['file'] for asset in matrix['artifacts']}
+
+
+def _role_package_url(url):
+    base = 'https://github.com/megamen32/gptadmin_opensource/releases/'
+    prefix = base + 'latest/download/'
+    if not url.startswith(prefix):
+        return url
+    filename = url[len(prefix):]
+    version, assets = _published_full_release()
+    if filename not in assets:
+        raise ValueError(f'Public release v{version} has no {filename}')
+    return f'{base}download/v{version}/{filename}'
+
+
+def _verify_role_install_download(url, archive):
+    if re.fullmatch(r'https://github[.]com/megamen32/gptadmin_opensource/releases/download/v[1-9][0-9]*/[^/]+', url):
+        _verify_downloaded_artifact(archive, _remote_artifact_build_info(url), require_metadata=True)
+
+
 def platform_pkg_url_default(edition: str = 'full') -> str:
     if edition not in {'full', 'client'}:
         raise ValueError(f'unsupported release edition: {edition}')
@@ -896,6 +1040,15 @@ def install_component_from_pkg(pkg_tgz: Path, component: str):
         tdp = Path(td)
         extract_tgz(pkg_tgz, tdp)
         _copy_pkg_runtime_payloads(tdp)
+        if component == 'node':
+            src = tdp / 'bin' / 'gptadmin-node'
+            if not src.is_file() or not _binary_looks_native(src):
+                die('The full package has no native bin/gptadmin-node for this platform.')
+            dst = BIN_DIR / 'gptadmin-node'
+            _install_runtime_binary(src, dst)
+            _macos_unquarantine_and_codesign(dst)
+            _install_grepmesh_binary_from_pkg(tdp)
+            return
         if component == 'hub':
             _install_hub_binary_from_pkg(tdp)
             return
@@ -1145,7 +1298,7 @@ if IS_MACOS:
         if not install_hub:
             return
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        wrapper = _wrapper_script('hub', BIN_DIR / 'gptadmin_hub')
+        wrapper = _wrapper_script('hub', BIN_DIR / ('gptadmin-node' if env_read().get('GPTADMIN_INSTALL_ROLE') == 'node' else 'gptadmin_hub'))
         SERVICES_DIR.mkdir(parents=True, exist_ok=True)
         UNIT_PATH_HUB.write_text(_make_plist(SVC_HUB_LABEL, wrapper, LOG_DIR / 'hub.log'))
 
@@ -1600,8 +1753,11 @@ esac
     def write_hub_unit(install_hub: bool, _install_shellmcp: bool):
         if install_hub:
             UNIT_PATH_HUB.parent.mkdir(parents=True, exist_ok=True)
-            UNIT_PATH_HUB.write_text(render_unit_with_hardening(UNIT_HUB, process_hardening_for_env(env_read())))
-            if not IS_USER_INSTALL:
+            env = env_read()
+            node = env.get('GPTADMIN_INSTALL_ROLE') == 'node'
+            unit = UNIT_HUB.replace(f'ExecStart={BIN_DIR}/gptadmin_hub', f'ExecStart={BIN_DIR}/gptadmin-node') if node else UNIT_HUB
+            UNIT_PATH_HUB.write_text(render_unit_with_hardening(unit, process_hardening_for_env(env)))
+            if not IS_USER_INSTALL and not node:
                 UNIT_PATH_HUB_STANDBY.write_text(render_unit_with_hardening(UNIT_HUB_STANDBY, process_hardening_for_env(env_read())))
                 _write_handover_helper()
 
@@ -2482,6 +2638,33 @@ def maybe_autoapprove_local_shellmcp(env: dict, install_hub: bool, install_shell
         time.sleep(0.25)
     raise RuntimeError(f'local ShellMCP {target} was approved but did not become online')
 
+def selected_install_role(args, env):
+    requested = getattr(args, 'role', None) or os.environ.get('GPTADMIN_INSTALL_ROLE', '')
+    if requested and requested not in ('node', 'executor'):
+        die('GPTADMIN_INSTALL_ROLE must be node or executor')
+    saved = env.get('GPTADMIN_INSTALL_ROLE', '')
+    if saved and requested and saved != requested:
+        die('Changing an installed role requires an explicit migration')
+    if not saved and requested and ('INSTALL_HUB' in env or 'INSTALL_SHELLMCP' in env):
+        if not (requested == 'executor' and env.get('INSTALL_HUB') == 'false'
+                and env.get('INSTALL_SHELLMCP') == 'true'):
+            die('Existing component installation requires an explicit migration')
+    role = requested or saved
+    hub = bool(getattr(args, 'hub', False))
+    shell = bool(getattr(args, 'shellmcp', False))
+    no_hub = bool(getattr(args, 'no_hub', False))
+    no_shell = bool(getattr(args, 'no_shellmcp', False))
+    if (role == 'node' and (shell or no_hub)) or (role == 'executor' and (hub or no_shell)):
+        die('The selected component flags conflict with the installed or requested role')
+    if role:
+        return role
+    if 'INSTALL_HUB' in env or 'INSTALL_SHELLMCP' in env:
+        return ''
+    if shell or no_hub:
+        return 'executor' if not hub and not no_shell else ''
+    return '' if hub or no_shell else 'node'
+
+
 def setup_interactive(args):
     need_root()
     for c in REQUIRED_CMDS:
@@ -2491,13 +2674,20 @@ def setup_interactive(args):
     silent = bool(getattr(args, 'silent', False) or getattr(args, 'yes', False))
     print('=== GPTAdmin setup ===')
     print(f'Install mode: {INSTALL_SCOPE}  install_dir={INSTALL_DIR}  config_dir={ETC_DIR}')
-    if silent:
+    env = env_read()
+    role = selected_install_role(args, env)
+    if role:
+        install_hub = role == 'node'
+        install_shellmcp = role == 'executor'
+        env['GPTADMIN_INSTALL_ROLE'] = role
+    elif silent:
         wants_hub = bool(getattr(args, 'hub', False))
         wants_shell = bool(getattr(args, 'shellmcp', False))
         no_hub = bool(getattr(args, 'no_hub', False))
         no_shell = bool(getattr(args, 'no_shellmcp', False))
         if not wants_hub and not wants_shell:
-            wants_hub = wants_shell = True
+            wants_hub = env.get('INSTALL_HUB', 'true') == 'true'
+            wants_shell = env.get('INSTALL_SHELLMCP', 'true') == 'true'
         install_hub = wants_hub and not no_hub
         install_shellmcp = wants_shell and not no_shell
         if not install_hub and not install_shellmcp:
@@ -2512,8 +2702,7 @@ def setup_interactive(args):
         install_hub = ch in ('1', '2')
         install_shellmcp = ch in ('1', '3')
 
-    env = env_read()
-    install_grepmesh = _grepmesh_enabled_from_args(args, env, install_shellmcp)
+    install_grepmesh = _grepmesh_enabled_from_args(args, env, install_shellmcp or role == 'node')
     env['GREPMESH_ENABLE'] = 'true' if install_grepmesh else 'false'
 
     # The normal profile is intentionally frictionless. Stronger process
@@ -2525,8 +2714,13 @@ def setup_interactive(args):
     else:
         env.setdefault('GPTADMIN_SECURITY_MODE', 'normal')
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
-    env.setdefault('ADMIN_PASSWORD', gen_hex())
-    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    if install_hub:
+        env.setdefault('ADMIN_PASSWORD', gen_hex())
+        env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    if role == 'node':
+        ensure_shellmcp_default_user(env)
+        ensure_shellmcp_identity_env(env)
+        env.setdefault('SHELLMCP_SELF_REPAIR_DISABLE', '1')
     if install_shellmcp:
         env.setdefault('SHELLMCP_AUTO_UPDATE', '1')
         env.setdefault('SHELLMCP_SELF_REPAIR_DISABLE', '0')
@@ -2616,13 +2810,19 @@ def setup_interactive(args):
         relay_token = getattr(args, 'mcp_relay_token', None) or os.environ.get('GPTADMIN_MCP_RELAY_TOKEN')
         enrollment_password = getattr(args, 'admin_password', None) or os.environ.get('GPTADMIN_MCP_RELAY_ENROLLMENT_PASSWORD')
         if relay_token:
-            env['MCP_RELAY_AGENT_TOKEN'] = relay_token.strip()
+            _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env))
+            _prepare_standalone_credentials(env, enrollment_token=relay_token)
         elif enrollment_password:
-            env['MCP_RELAY_ENROLLMENT_PASSWORD'] = enrollment_password.strip()
+            _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env, enrollment_password))
+            _prepare_standalone_credentials(env, admin_password=enrollment_password)
         elif not silent:
-            enrollment_password = ask('Введите пароль администратора этого Hub (нужен однократно для безопасного подключения MCP relay; Enter — настроить позже)')
-            if enrollment_password:
-                env['MCP_RELAY_ENROLLMENT_PASSWORD'] = enrollment_password
+            enrollment_token = ask('Введите одноразовый scoped credential устройства/relay для enrollment (Enter — настроить позже)')
+            if enrollment_token:
+                _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env))
+                _prepare_standalone_credentials(env, enrollment_token=enrollment_token)
+        else:
+            _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env))
+            _prepare_standalone_credentials(env)
 
     normalize_bundled_shellmcp_hub_url(env, install_hub, install_shellmcp)
     if install_shellmcp:
@@ -2662,20 +2862,26 @@ def setup_interactive(args):
         env.setdefault('GPTADMIN_AUTO_UPDATE', 'true')
 
     env.setdefault('GPTADMIN_AUTO_UPDATE_INTERVAL_SEC', '21600')
-    enrollment_password = env.pop('MCP_RELAY_ENROLLMENT_PASSWORD', '')
-    if enrollment_password and not MCP_TOKEN_FILE.exists():
-        MCP_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        MCP_TOKEN_FILE.write_text(enrollment_password.strip() + '\n', encoding='utf-8')
-        os.chmod(MCP_TOKEN_FILE, 0o600)
+    if not install_hub:
+        _prepare_standalone_credentials(env)
+        _persist_scoped_enrollment_token(env)
     sync_oauth_origin_env(env)
     env_set_many(env)
-    env_remove_keys('MCP_RELAY_ENROLLMENT_PASSWORD')
+    if not install_hub:
+        env_remove_keys([*_STANDALONE_HUB_AUTH_KEYS, 'MCP_RELAY_AGENT_TOKEN'])
+    else:
+        env_remove_keys('MCP_RELAY_ENROLLMENT_PASSWORD')
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     CLI_PATH.parent.mkdir(parents=True, exist_ok=True)
     pkg_all   = args.pkg_all   or platform_pkg_url_default()
     pkg_hub   = args.pkg_hub   or platform_pkg_url_default('full')
     pkg_shellmcp = args.pkg_shellmcp or platform_pkg_url_default('client')
+
+    if role == 'node':
+        pkg_hub = _role_package_url(args.pkg_hub or args.pkg_all or pkg_hub)
+    elif role == 'executor':
+        pkg_shellmcp = _role_package_url(pkg_shellmcp)
 
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -2696,23 +2902,31 @@ def setup_interactive(args):
             pkg = tdp / 'hub.tgz'
             try:
                 download(pkg_hub, pkg)
+                if role:
+                    _verify_role_install_download(pkg_hub, pkg)
             except subprocess.CalledProcessError:
+                if role:
+                    raise
                 print('  Нет компонентного архива, беру общий...')
                 download(pkg_all, pkg)
-            install_component_from_pkg(pkg, 'hub')
+            install_component_from_pkg(pkg, 'node' if role == 'node' else 'hub')
         else:
             print('\n[Загрузка] ShellMCP agent...')
             pkg = tdp / 'shellmcp.tgz'
             try:
                 download(pkg_shellmcp, pkg)
+                if role:
+                    _verify_role_install_download(pkg_shellmcp, pkg)
             except subprocess.CalledProcessError:
+                if role:
+                    raise
                 print('  Нет компонентного архива, беру общий...')
                 download(pkg_all, pkg)
             install_component_from_pkg(pkg, 'shellmcp')
 
     write_hub_unit(install_hub, install_shellmcp)
     write_shellmcp_unit(install_hub, install_shellmcp)
-    grepmesh_ready = _configure_builtin_grepmesh(env, install_grepmesh) if install_shellmcp else False
+    grepmesh_ready = _configure_builtin_grepmesh(env, install_grepmesh) if install_shellmcp or role == 'node' else False
     write_grepmesh_unit(grepmesh_ready, env)
 
     if env.get('FRP_ENABLE', 'false') == 'true':
@@ -2727,7 +2941,7 @@ def setup_interactive(args):
     if install_hub:
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
         _require_local_hub_health(env)
-        if not IS_USER_INSTALL and UNIT_PATH_HUB_STANDBY.exists():
+        if role != 'node' and not IS_USER_INSTALL and UNIT_PATH_HUB_STANDBY.exists():
             svc_enable_start(svc_hub_standby_name(), UNIT_PATH_HUB_STANDBY)
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_frpc_enable_start_all(env)
@@ -2764,7 +2978,7 @@ def setup_interactive(args):
         maybe_import_and_install_mcp_from_desktop_clients()
     svc_autoupdate_enable_start(env_read())
     maybe_autoapprove_local_shellmcp(env, install_hub, install_shellmcp)
-    if install_hub and install_shellmcp:
+    if role == 'node' or (install_hub and install_shellmcp):
         verified = _require_real_local_shell_exec(env_read(), timeout_s=90)
         print(f"Local runtime execution verified: {verified['target']}")
     auto_configure_ai_mcp_clients(env_read(), install_hub)
@@ -5283,6 +5497,12 @@ def _local_unified_node_enabled():
 
 def _reject_legacy_update_for_unified_node():
     """Read-only fence before the legacy updater snapshots or changes anything."""
+    # Only the fresh full-package installer owns this binary and its service.
+    # Independently managed primary nodes keep their existing update transaction.
+    if env_read().get('GPTADMIN_INSTALL_ROLE') == 'node' and (BIN_DIR / 'gptadmin-node').is_file():
+        if (ENV_FILE.parent / 'nodes' / 'primary.env').exists():
+            die('This Node has a separate primary manager. Use its Node update command.')
+        return
     if _local_unified_node_enabled():
         die('legacy update is disabled for a unified node; use the unified node deployment path')
 
@@ -5638,7 +5858,9 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
         extracted = root / 'release'
         extracted.mkdir()
         extract_tgz(pkg_tgz, extracted)
-        candidate = next((path for path in _platform_hub_candidates(extracted) if path.is_file() and _binary_looks_native(path)), None)
+        is_node = env.get('GPTADMIN_INSTALL_ROLE') == 'node'
+        candidates = [extracted / 'bin' / 'gptadmin-node'] if is_node else _platform_hub_candidates(extracted)
+        candidate = next((path for path in candidates if path.is_file() and _binary_looks_native(path)), None)
         if candidate is None:
             raise RuntimeError('candidate gate: downloaded package contains no Hub binary for this platform')
         os.chmod(candidate, 0o755)
@@ -5668,6 +5890,19 @@ def _run_hub_candidate_pre_restart_gate(pkg_tgz: Path, env: dict) -> dict:
             'GPTADMIN_ENV_FILE': str(root / 'candidate.env'),
             'NO_PROXY': 'localhost,127.0.0.1', 'no_proxy': 'localhost,127.0.0.1',
         })
+        if is_node:
+            # The candidate's embedded executor owns a separate identity and queue.
+            child_env.update({
+                'SHELL_NAME': 'installer-candidate', 'SHELL_IDENTITY_DIR': str(root / 'shell'),
+                'SHELLMCP_IDENTITY_DIR': str(root / 'shell'), 'SHELL_SPOOL_DIR': str(root / 'spool'),
+                'SHELL_OUTBOX_DIR': str(root / 'spool/outbox'), 'SHELL_DEFAULT_CWD': str(root),
+                'SHELLMCP_MCP_CONFIG': str(root / 'empty-mcp.json'), 'GPTADMIN_ROOT': str(extracted),
+                'GPTADMIN_NODE_IDENTITY': str(root / 'node-identity.json'),
+                'GPTADMIN_QUORUM_CONFIG_FILE': '', 'GPTADMIN_NODE_SEED': '', 'GPTADMIN_NODE_PEERS': '',
+                'GPTADMIN_AUTH_MODE': '', 'GPTADMIN_AUTH_SOURCE_ID': '', 'GPTADMIN_NODE_PUBLIC_URL': '',
+                'GPTADMIN_AUDIT_LOG': str(root / 'candidate-audit.jsonl'),
+                'SHELLMCP_SELF_REPAIR_DISABLE': '1',
+            })
         process = subprocess.Popen(
             [str(candidate)], cwd=str(extracted), env=child_env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -5922,6 +6157,9 @@ def cmd_update(args):
     """
     need_root()
     env = env_read()
+    role = env.get('GPTADMIN_INSTALL_ROLE', '')
+    if role:
+        selected_install_role(args, env)
     saved_auth_material = _capture_persistent_auth_material(env)
     if not env and not any(p.exists() for p in (UNIT_PATH_HUB, UNIT_PATH_SHELLMCP, CLI_PATH, BIN_DIR / 'gptadmin_hub', BIN_DIR / 'shellmcp')):
         die('GPTAdmin installation was not found. Run: gptadmin setup')
@@ -5938,12 +6176,16 @@ def cmd_update(args):
         install_shellmcp = False
     if not install_hub and not install_shellmcp:
         die('No installed components detected. Use --hub and/or --shellmcp, or run: gptadmin setup')
-    install_grepmesh = _grepmesh_enabled_from_args(args, env, install_shellmcp)
+    install_grepmesh = _grepmesh_enabled_from_args(args, env, install_shellmcp or role == 'node')
     env['GREPMESH_ENABLE'] = 'true' if install_grepmesh else 'false'
 
     env.setdefault('SHELLMCP_TOKEN', gen_hex())
-    env.setdefault('ADMIN_PASSWORD', gen_hex())
-    env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    if install_hub:
+        env.setdefault('ADMIN_PASSWORD', gen_hex())
+        env.setdefault('OAUTH_CLIENT_SECRET', gen_hex(32))
+    else:
+        _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env))
+        _prepare_standalone_credentials(env)
     env.setdefault('GPTADMIN_SECURITY_MODE', 'normal')
     env['INSTALL_HUB'] = 'true' if install_hub else 'false'
     env['INSTALL_SHELLMCP'] = 'true' if install_shellmcp else 'false'
@@ -5968,10 +6210,17 @@ def cmd_update(args):
             env.setdefault('SHELLMCP_FILE_CHECKPOINT_ROOT', '/var/lib/gptadmin/file-checkpoints')
     sync_oauth_origin_env(env)
     env_set_many(env)
+    if not install_hub:
+        env_remove_keys([*_STANDALONE_HUB_AUTH_KEYS, 'MCP_RELAY_AGENT_TOKEN'])
 
     pkg_all = args.pkg_all or platform_pkg_url_default()
     pkg_hub = args.pkg_hub or platform_pkg_url_default('full')
     pkg_shellmcp = args.pkg_shellmcp or platform_pkg_url_default('client')
+
+    if role == 'node':
+        pkg_hub = _role_package_url(args.pkg_hub or args.pkg_all or pkg_hub)
+    elif role == 'executor':
+        pkg_shellmcp = _role_package_url(pkg_shellmcp)
 
     target_pkg = pkg_all if (install_hub and install_shellmcp) else (pkg_hub if install_hub else pkg_shellmcp)
     remote_info = _remote_artifact_build_info(target_pkg)
@@ -6016,15 +6265,19 @@ def cmd_update(args):
             try:
                 download_release(pkg_hub, pkg)
             except subprocess.CalledProcessError:
+                if role:
+                    raise
                 print('  Component package unavailable, using full package...')
                 download_release(pkg_all, pkg)
-            components = ('hub',)
+            components = ('node',) if role == 'node' else ('hub',)
         elif install_shellmcp:
             print('[Update] downloading shellmcp package...')
             pkg = tdp / 'shellmcp.tgz'
             try:
                 download_release(pkg_shellmcp, pkg)
             except subprocess.CalledProcessError:
+                if role:
+                    raise
                 print('  Component package unavailable, using full package...')
                 download_release(pkg_all, pkg)
             components = ('shellmcp',)
@@ -6050,14 +6303,20 @@ def cmd_update(args):
     # restart, then persist it atomically through env_set_many.
     env = env_read()
     _restore_persistent_auth_material(env, saved_auth_material)
+    if not install_hub:
+        _remove_known_legacy_standalone_token(_known_standalone_admin_credentials(env))
+        _prepare_standalone_credentials(env)
+        _persist_scoped_enrollment_token(env)
     env_set_many(env)
+    if not install_hub:
+        env_remove_keys([*_STANDALONE_HUB_AUTH_KEYS, 'MCP_RELAY_AGENT_TOKEN'])
 
     _write_installed_build_marker(remote_info, target_pkg)
     _cleanup_obsolete_runtime_files()
 
     write_hub_unit(install_hub, install_shellmcp)
     write_shellmcp_unit(install_hub, install_shellmcp)
-    grepmesh_ready = _configure_builtin_grepmesh(env, install_grepmesh) if install_shellmcp else False
+    grepmesh_ready = _configure_builtin_grepmesh(env, install_grepmesh) if install_shellmcp or role == 'node' else False
     write_grepmesh_unit(grepmesh_ready, env)
     if env.get('FRP_ENABLE', 'false') == 'true':
         frpc_bin = ensure_frpc_installed()
@@ -6072,7 +6331,7 @@ def cmd_update(args):
         svc_enable_start(svc_hub_name(), UNIT_PATH_HUB)
         if not wait_local_hub_health(env, timeout_s=90):
             raise RuntimeError('local Hub health check failed after update')
-        if not IS_USER_INSTALL and UNIT_PATH_HUB_STANDBY.exists():
+        if role != 'node' and not IS_USER_INSTALL and UNIT_PATH_HUB_STANDBY.exists():
             svc_enable_start(svc_hub_standby_name(), UNIT_PATH_HUB_STANDBY)
     if env.get('FRP_ENABLE', 'false') == 'true':
         svc_frpc_enable_start_all(env)
@@ -6096,6 +6355,8 @@ def cmd_update(args):
         if install_hub:
             verified = _require_real_local_shell_exec(env_read(), timeout_s=90)
             print(f"Post-update runtime execution verified: {verified['target']}")
+    if role == 'node':
+        _require_real_local_shell_exec(env_read(), timeout_s=90)
     if not getattr(args, 'auto', False):
         svc_autoupdate_enable_start(env_read())
     # A new desktop client should work after an ordinary update, without making
@@ -7938,6 +8199,7 @@ def main():
     ap_setup.add_argument('--pkg-hub')
     ap_setup.add_argument('--pkg-shellmcp')
     ap_setup.add_argument('--silent', '--yes', dest='silent', action='store_true', help='Non-interactive install; defaults to hub+shellmcp+FRP')
+    ap_setup.add_argument('--role', choices=('node', 'executor'), help='Install one unified Node or one managed ShellMCP executor')
     ap_setup.add_argument('--hub', action='store_true', help='Install hub component in non-interactive mode')
     ap_setup.add_argument('--shellmcp', '--shell', dest='shellmcp', action='store_true', help='Install ShellMCP/rootd component in non-interactive mode')
     ap_setup.add_argument('--no-hub', action='store_true', help='Do not install hub component')

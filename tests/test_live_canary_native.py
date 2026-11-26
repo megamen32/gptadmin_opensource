@@ -108,7 +108,8 @@ def test_fixed_target_endpoint_and_transport():
             NATIVE.endpoint_for(origin, "shell:test-host")
 
 
-def fake_canary_shell(tmp_path: Path, output: str, exit_code: int):
+def fake_canary_shell(tmp_path: Path, output: str, exit_code: int, *,
+                      public_origin: str = "", legacy_origin: str = "https://canary.example"):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "sudo").write_text('#!/bin/sh\nexec "$@"\n')
@@ -125,7 +126,8 @@ def fake_canary_shell(tmp_path: Path, output: str, exit_code: int):
         file.chmod(0o755)
     envfile = tmp_path / "gptadmin.env"
     envfile.write_text(
-        'MCP_ORIGIN=https://canary.example\n'
+        f'PUBLIC_ORIGIN={public_origin}\n'
+        f'MCP_ORIGIN={legacy_origin}\n'
         'TENANT_ORIGIN=\n'
         'GPTADMIN_CUSTOM_MCP_BEARER=dummy-bearer\n'
     )
@@ -162,3 +164,17 @@ def test_bash_canary_only_accepts_successful_fresh_marker(tmp_path):
     run = fake_canary_shell(tmp_path, "gptadmin-native-canary-" + "b" * 20, 0)
     assert run.returncode == 0, (run.stdout, run.stderr)
     assert "PASS native-execute" in run.stdout
+
+
+def test_bash_canary_uses_configured_public_origin(tmp_path):
+    run = fake_canary_shell(tmp_path, "gptadmin-native-canary-" + "c" * 20, 0,
+                            public_origin="https://canary.example", legacy_origin="https://old.example")
+    assert run.returncode == 0, (run.stdout, run.stderr)
+    assert "PASS native-execute https://canary.example" in run.stdout
+    assert "https://old.example" not in run.stdout
+
+
+def test_bash_canary_cannot_pass_without_a_public_origin(tmp_path):
+    run = fake_canary_shell(tmp_path, "", 0, legacy_origin="")
+    assert run.returncode != 0
+    assert "no public canary origin configured" in run.stderr

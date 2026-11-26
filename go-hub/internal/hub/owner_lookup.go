@@ -164,7 +164,14 @@ func (s *Server) lookupPeer(h ownerHint) (lookupPeer, bool) {
 				continue
 			}
 		}
-		if !add(lookupPeer{p.NodeID, target, p.URL, false}) {
+		// A URL-only static route has no identity pin. An explicit target
+		// chooses that configured route; the handle still pins the expected
+		// identity at the recipient and in the reply. Never probe by ID alone.
+		expectedID := p.NodeID
+		if expectedID == "" && h.OwnerTarget == target {
+			expectedID = h.OwnerID
+		}
+		if !add(lookupPeer{expectedID, target, p.URL, false}) {
 			return lookupPeer{}, false
 		}
 	}

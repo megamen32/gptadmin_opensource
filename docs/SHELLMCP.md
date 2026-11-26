@@ -24,10 +24,10 @@ hub, executes commands locally, and returns real output.
 
 ## Install a managed executor
 
-Choose the executor-only option in interactive setup. With the Unix CLI installed, the explicit unattended form takes the HTTPS URL of the managing Hub.
+A fresh full installation starts one unified Node. Choose the executor role to run only ShellMCP. The Unix installer accepts `GPTADMIN_INSTALL_ROLE=executor`; its CLI accepts the same role and the URL of the managing Hub. The Windows installer accepts `-Role executor`.
 
 ```sh
-gptadmin setup --user --silent --no-hub --shellmcp --hub-url https://hub.example
+gptadmin setup --user --silent --role executor --hub-url https://hub.example
 ```
 
 Pair the device through the authorized Hub connection. Verify its identity, run a permitted operation on that computer and read the result through the normal client. For a host that also accepts clients or routes requests, use the [unified Node package](NODE_PUBLIC_AUTOUPDATE.md).

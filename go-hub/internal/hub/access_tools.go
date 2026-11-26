@@ -27,11 +27,19 @@ func (s *Server) callAccessProfileTool(r *http.Request, args map[string]any) (ma
 		handler = s.adminAccessProfile
 		switch action {
 		case "get":
+		case "plan_tree", "apply_tree":
+			path = "/admin/api/access-profile-trees/" + url.PathEscape(id)
+			handler = s.adminAccessProfileTree
+			method = http.MethodPost
+			if action == "apply_tree" {
+				method = http.MethodPut
+			}
+			body = map[string]any{"groups": args["groups"]}
 		case "create", "update":
 			method = http.MethodPut
 			body = cloneMap(mapValue(args["profile"]))
 		default:
-			return map[string]any{"detail": "action must be list, get, create or update"}, 400
+			return map[string]any{"detail": "unknown access_profiles action"}, 400
 		}
 	}
 	data, err := json.Marshal(body)
@@ -92,5 +100,7 @@ func accessProfileTool() map[string]any {
 	list := map[string]any{"type": "array", "items": str}
 	toolRule := map[string]any{"type": "object", "properties": map[string]any{"target": str, "tool": str, "actions": map[string]any{"type": "array", "items": str}, "read_only": map[string]any{"type": "boolean"}}, "additionalProperties": false}
 	profile := map[string]any{"type": "object", "properties": map[string]any{"name": str, "access_mode": map[string]any{"type": "string", "enum": []string{"full", "readonly"}}, "approval_mode": map[string]any{"type": "string", "enum": []string{"unrestricted", "read_only", "ask_before_write", "bounded_autonomous"}}, "instruction_set_id": str, "allowed_targets": list, "allowed_tools": list, "tool_rules": map[string]any{"type": "array", "items": toolRule}, "read_roots": list, "write_roots": list, "workspace_refs": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, "additionalProperties": false}
-	return map[string]any{"name": "access_profiles", "description": "Owner API: list/get/create/update access profiles. Read before update and pass returned etag. Browser/CTL or explicitly delegated admin/owner authorization; no shell required.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "get", "create", "update"}}, "id": str, "etag": str, "profile": profile}, "required": []string{"action"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}}
+	group := map[string]any{"type": "object", "properties": map[string]any{"parent": str, "targets": list}, "additionalProperties": false}
+	groups := map[string]any{"type": "object", "additionalProperties": group, "description": "Map existing profile IDs to a parent profile and concrete targets. The root is id. Removing a group revokes its targets."}
+	return map[string]any{"name": "access_profiles", "description": "Owner API for access profiles. For nested departments, plan_tree with id and groups, then apply_tree with the same plan and etag. Each manager covers its descendants with its own tools. For edits pass the returned etag. Browser/CTL or explicitly delegated admin/owner authorization; no shell required.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list", "get", "create", "update", "plan_tree", "apply_tree"}}, "id": str, "etag": str, "profile": profile, "groups": groups}, "required": []string{"action"}, "additionalProperties": false}, "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}}
 }

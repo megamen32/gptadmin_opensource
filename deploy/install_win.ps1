@@ -2,12 +2,11 @@
 <#
 GPT Admin Windows installer.
 
-Default (no -HubUrl): installs a LOCAL GPT Admin Hub plus its ShellMCP
-agent on this computer. All credentials (SHELLMCP_TOKEN, CTL_TOKEN,
-ADMIN_PASSWORD, OAUTH_CLIENT_SECRET) are generated here and never leave
-this machine. After install, open the admin URL, sign in with the
-generated AdminPassword, and approve your own computer ("shell:<name>")
-in the pending list. MCP clients connect via the /connect page.
+Default (no -HubUrl): installs one GPTAdmin Node with an embedded executor.
+Use -Role node for a full local installation. Use -Role executor -HubUrl URL
+to run only ShellMCP against an existing Hub. Providing a remote -HubUrl
+continues to select executor mode. Repeat installs retain the existing role,
+device identity, and Hub credentials.
 
 Remote agent mode (explicit non-loopback -HubUrl): installs only the
 ShellMCP agent against an existing Hub. The agent generates its own
@@ -38,6 +37,8 @@ Env overrides:
 #>
 
 param(
+    [ValidateSet('node', 'executor')]
+    [string]$Role = $env:GPTADMIN_INSTALL_ROLE,
     [string]$PackageUrl = $env:PACKAGE_URL,
     [string]$InstallDir = $env:GPTADMIN_DIR,
     [string]$HubUrl = $env:HUB_URL,
@@ -90,6 +91,14 @@ function Get-OwnedProcess {
     return @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -eq [System.IO.Path]::GetFullPath($Path)) } catch { $false }
     })
+}
+
+function Stop-OwnedRuntime([string]$Name, [string]$Path) {
+    foreach ($owned in @(Get-OwnedProcess -Name $Name -Path $Path)) {
+        $owned.Kill()
+        if (-not $owned.WaitForExit(10000)) { throw "$Name did not stop at $Path." }
+        $owned.Dispose()
+    }
 }
 
 $IsAdmin = Test-Admin
@@ -155,16 +164,61 @@ if ($Isolated) {
     if (-not $InstallerArguments.ContainsKey('HubPublicKey')) { $HubPublicKey = 'mEhYDiOc9ZxY54dXelDTsVD2Wjew3f6R0f2dVW2qKPQ' }
 }
 
-if (-not $PackageUrl) { $PackageUrl = 'https://became.bezrabotnyi.com/gptadmin-win.zip' }
 if (-not $InstallDir) {
     if ($UserMode) { $InstallDir = Join-Path $env:LOCALAPPDATA 'gptadmin' }
     else { $InstallDir = Join-Path $env:ProgramData 'gptadmin' }
 }
 
-# A bare install (or an explicit loopback HubUrl) is a self-contained local
-# Hub; an explicit non-loopback HubUrl selects remote-agent mode.
-$LocalHub = (-not $HubUrl) -or (Test-LoopbackUrl $HubUrl)
-if ($LocalHub) { $HubUrl = "http://127.0.0.1:$HubPort" }
+function Read-InstallEnv {
+    param([string]$Path)
+    $values = @{}
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $Path) {
+            $kv = $line -split '=', 2
+            if ($kv.Length -eq 2) { $values[$kv[0]] = $kv[1] }
+        }
+    }
+    return $values
+}
+
+$previousNode = Read-InstallEnv (Join-Path $InstallDir 'node.env')
+$previousHub = Read-InstallEnv (Join-Path $InstallDir 'hub.env')
+$previousAgent = Read-InstallEnv (Join-Path $InstallDir 'shellmcp.env')
+$installedRole = if ($previousNode.Count -or $previousHub.Count) { 'node' }
+                 elseif ($previousAgent.Count) { 'executor' }
+if ($Isolated -and $installedRole) { throw 'Isolated install refuses an existing runtime configuration.' }
+if (-not $Role) {
+    if ($HubUrl) { $Role = if (Test-LoopbackUrl $HubUrl) { 'node' } else { 'executor' } }
+    elseif ($installedRole) { $Role = $installedRole }
+    else { $Role = 'node' }
+}
+$LocalHub = $Role -eq 'node'
+if ($installedRole -and $Role -ne $installedRole -and -not $Uninstall) {
+    throw "Installation directory already holds role '$installedRole'. Use a separate directory for role '$Role'."
+}
+if ($Isolated -and $LocalHub) { throw 'The -Isolated option installs an executor.' }
+if ($LocalHub) {
+    if ($HubUrl -and -not (Test-LoopbackUrl $HubUrl)) { throw 'A node starts its own Hub. Use -Role executor to connect to a remote Hub.' }
+    $saved = if ($previousNode.Count) { $previousNode } else { @{} + $previousAgent }
+    if (-not $previousNode.Count) { foreach ($key in $previousHub.Keys) { $saved[$key] = $previousHub[$key] } }
+    if (-not $InstallerArguments.ContainsKey('HubPort') -and -not $env:GPTADMIN_HUB_PORT -and $saved.GPTADMIN_HUB_PORT) { $HubPort = [int]$saved.GPTADMIN_HUB_PORT }
+    $HubUrl = "http://127.0.0.1:$HubPort"
+    if (-not $CtlToken) { $CtlToken = $saved.CTL_TOKEN }
+    if (-not $AdminPassword) { $AdminPassword = $saved.ADMIN_PASSWORD }
+    if (-not $OAuthClientSecret) { $OAuthClientSecret = $saved.OAUTH_CLIENT_SECRET }
+} else {
+    $saved = $previousAgent
+    if (-not $HubUrl) { $HubUrl = $saved.HUB_URL }
+    if (-not $HubUrl -and -not $Uninstall) { throw 'An executor needs -HubUrl pointing to its managing Hub.' }
+}
+if (-not $ShellmcpToken) { $ShellmcpToken = $saved.SHELLMCP_TOKEN }
+if (-not $InstallerArguments.ContainsKey('ShellmcpPort') -and -not $env:SHELLMCP_PORT -and $saved.SHELLMCP_PORT) { $ShellmcpPort = [int]$saved.SHELLMCP_PORT }
+if (-not $InstallerArguments.ContainsKey('ShellmcpTransport') -and -not $env:SHELLMCP_TRANSPORT -and $saved.SHELLMCP_TRANSPORT) { $ShellmcpTransport = $saved.SHELLMCP_TRANSPORT }
+if (-not $InstallerArguments.ContainsKey('ShellmcpBind') -and -not $env:SHELLMCP_BIND -and $saved.SHELLMCP_HOST) { $ShellmcpBind = $saved.SHELLMCP_HOST }
+if (-not $ShellmcpUrl) { $ShellmcpUrl = $saved.SHELLMCP_URL }
+if (-not $ShellmcpName) { $ShellmcpName = $saved.SHELLMCP_NAME }
+if (-not $ShellmcpName) { $ShellmcpName = $previousAgent.SHELLMCP_NAME }
+if (-not $TaskName -and ($previousNode.Count -or -not $LocalHub)) { $TaskName = $saved.SHELLMCP_SERVICE_NAME }
 
 $TokenProvided = [bool]$ShellmcpToken
 if (-not $ShellmcpToken) { $ShellmcpToken = New-RandomToken }
@@ -178,12 +232,13 @@ if ($LocalHub) {
 }
 if (-not $ShellmcpName) { $ShellmcpName = $env:COMPUTERNAME }
 if (-not $ShellmcpUrl) { $ShellmcpUrl = "http://$ShellmcpName`:$ShellmcpPort" }
+$runtimeName = if ($LocalHub) { 'gptadmin-node' } else { 'shellmcp' }
 if (-not $TaskName) {
-    if ($UserMode) { $TaskName = "gptadmin-shellmcp-$env:USERNAME" }
-    else { $TaskName = 'gptadmin-shellmcp' }
+    $TaskName = if ($LocalHub) { 'gptadmin-node' } else { 'gptadmin-shellmcp' }
+    if ($UserMode) { $TaskName += "-$env:USERNAME" }
 }
-$HubTaskName = $TaskName -replace '^gptadmin-shellmcp', 'gptadmin-hub'
 
+if ($TaskName -match '[\\/:*?"<>|\x00-\x1f]' -or $TaskName -in @('.', '..')) { throw 'Invalid Windows task name.' }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $BinDir = Join-Path $InstallDir 'bin'
 $LogDir = Join-Path $InstallDir 'logs'
@@ -193,18 +248,17 @@ $OutboxDir = Join-Path $SpoolDir 'outbox'
 $ConfigDir = Join-Path $InstallDir 'config'
 $McpConfigFile = Join-Path $ConfigDir 'mcp.json'
 $PublicDir = Join-Path $InstallDir 'public'
-$EnvFile = Join-Path $InstallDir 'shellmcp.env'
-$HubEnvFile = Join-Path $InstallDir 'hub.env'
-$RunScript = Join-Path $InstallDir 'run_shellmcp.ps1'
-$BatchScript = Join-Path $InstallDir 'run_shellmcp.cmd'
-$HubRunScript = Join-Path $InstallDir 'run_hub.ps1'
-$HubBatchScript = Join-Path $InstallDir 'run_hub.cmd'
+$runtimeBase = if ($LocalHub) { 'node' } else { 'shellmcp' }
+$EnvFile = Join-Path $InstallDir "$runtimeBase.env"
+$RunScript = Join-Path $InstallDir "run_$runtimeBase.ps1"
+$BatchScript = Join-Path $InstallDir "run_$runtimeBase.cmd"
 $CredentialsFile = Join-Path $InstallDir 'ADMIN-CREDENTIALS.txt'
 $HubPublicKeyFile = Join-Path $InstallDir 'hub_ed25519.pub'
-$CurrentExe = Join-Path $BinDir 'shellmcp.exe'
-$HubExe = Join-Path $BinDir 'gptadmin-hub.exe'
-$StartupScript = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\gptadmin-shellmcp.cmd'
-$HubStartupScript = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\gptadmin-hub.cmd'
+$CurrentExe = Join-Path $BinDir "$runtimeName.exe"
+$StartupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+$startupName = if ($LocalHub) { 'gptadmin-node' } else { 'gptadmin-shellmcp' }
+if ($TaskName -ne "$startupName-$env:USERNAME" -and $TaskName -ne $startupName) { $startupName = $TaskName }
+$StartupScript = Join-Path $StartupDir "$startupName.cmd"
 
 function Require-Admin {
     if (-not $IsAdmin) {
@@ -226,67 +280,160 @@ function Assert-IsolatedTarget {
     }
 }
 
+function Get-WindowsPackageArch {
+    # PROCESSOR_ARCHITEW6432 identifies the native OS when PowerShell runs under WOW64.
+    $arch = $env:PROCESSOR_ARCHITEW6432
+    if (-not $arch) {
+        try { $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
+        catch { $arch = $env:PROCESSOR_ARCHITECTURE }
+    }
+    switch ($arch) {
+        'X64' { return 'x64' }
+        'AMD64' { return 'x64' }
+        'ARM64' { return 'arm64' }
+        default { throw "Unsupported Windows OS architecture '$arch'." }
+    }
+}
+
+function Get-WindowsReleaseText([string]$Uri) {
+    $headers = @{ 'User-Agent' = 'GPTAdmin-Windows-Installer' }
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers $headers -TimeoutSec 30
+    if ($response.Content -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($response.Content) }
+    return [string]$response.Content
+}
+
+function Get-WindowsReleaseCandidates {
+    $repo = 'megamen32/gptadmin_opensource'
+    $candidates = @()
+    try {
+        for ($page = 1; ; $page++) {
+            $api = "https://api.github.com/repos/$repo/releases?per_page=100&page=$page"
+            $items = @(ConvertFrom-Json -InputObject (Get-WindowsReleaseText $api))
+            if ($items.Count -eq 1 -and $items[0] -is [array]) { $items = $items[0] }
+            foreach ($release in $items) {
+                if (!$release.draft -and !$release.prerelease -and $release.tag_name -cmatch '^v(0|[1-9][0-9]*)$') {
+                    $number = [long]$Matches[1]
+                    if (@($release.assets | Where-Object { $_.name -ceq 'gptadmin-release-matrix.json' }).Count) {
+                        $candidates += [pscustomobject]@{ Tag=$release.tag_name; Version=$number; FromFeed=$false }
+                    }
+                }
+            }
+            if ($items.Count -lt 100) { break }
+        }
+    } catch {
+        # The anonymous API has a low rate limit. The public release feed uses
+        # github.com without an API token. Trust only exact official release links.
+        $candidates = @()
+        $raw = Get-WindowsReleaseText "https://github.com/$repo/releases.atom"
+        $feed = New-Object System.Xml.XmlDocument
+        $feed.XmlResolver = $null
+        $feed.LoadXml($raw)
+        $namespaces = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
+        $namespaces.AddNamespace('a','http://www.w3.org/2005/Atom')
+        $pattern = '^https://github\.com/megamen32/gptadmin_opensource/releases/tag/(v(0|[1-9][0-9]*))$'
+        foreach ($link in $feed.SelectNodes('/a:feed/a:entry/a:link[@rel="alternate"]', $namespaces)) {
+            if ($link.GetAttribute('href') -cmatch $pattern) {
+                $candidates += [pscustomobject]@{ Tag=$Matches[1]; Version=[long]$Matches[2]; FromFeed=$true }
+            }
+        }
+    }
+    return @($candidates | Sort-Object -Property Version -Descending -Unique)
+}
+
+function Resolve-WindowsReleasePackage([string]$Edition, [string]$Arch) {
+    $origin = 'https://github.com/megamen32/gptadmin_opensource/releases'
+    $name = "gptadmin-windows-$Arch-$Edition.zip"
+    foreach ($release in @(Get-WindowsReleaseCandidates)) {
+        $download = "$origin/download/$($release.Tag)"
+        if ($release.FromFeed) {
+            # Drafts are private. Numeric prereleases can appear in the public feed.
+            $page = Get-WindowsReleaseText "$origin/tag/$($release.Tag)"
+            if ($page -match '>\s*Pre-release\s*<') { continue }
+        }
+        try {
+            $matrix = ConvertFrom-Json -InputObject (Get-WindowsReleaseText "$download/gptadmin-release-matrix.json")
+        } catch {
+            if ($release.FromFeed -and [int]$_.Exception.Response.StatusCode -eq 404) { continue }
+            throw
+        }
+        if ($matrix.schema -cne 'gptadmin.release-matrix/v2' -or [string]$matrix.build_version -cne [string]$release.Version) {
+            throw "Release matrix does not match $($release.Tag)."
+        }
+        $entries = @($matrix.artifacts | Where-Object {
+            $_.platform -ceq 'windows' -and $_.arch -ceq $Arch -and $_.edition -ceq $Edition
+        })
+        if ($entries.Count -ne 1 -or $entries[0].file -cne $name -or [string]$entries[0].sha256 -cnotmatch '^[0-9a-f]{64}$' -or [long]$entries[0].size -le 0) {
+            throw "Release $($release.Tag) must contain one verified $name."
+        }
+        return [pscustomobject]@{ Url="$download/$name"; Tag=$release.Tag; Size=[long]$entries[0].size; Sha256=$entries[0].sha256 }
+    }
+    throw 'No stable numeric GPTAdmin release with a release matrix is available.'
+}
+
+function Assert-WindowsPackage([string]$Path, $Expected) {
+    if ((Get-Item -LiteralPath $Path).Length -ne $Expected.Size -or
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ne $Expected.Sha256) {
+        throw "Windows package size or SHA-256 differs from release $($Expected.Tag)."
+    }
+}
+
 function Download-And-InstallArtifact {
-    New-Item -ItemType Directory -Force -Path $InstallDir,$BinDir,$LogDir,$IdentityDir,$ConfigDir | Out-Null
+    $expectedPackage = $null
+    if (-not $PackageUrl) {
+        $edition = if ($LocalHub) { 'full' } else { 'client' }
+        $expectedPackage = Resolve-WindowsReleasePackage $edition (Get-WindowsPackageArch)
+        $PackageUrl = $expectedPackage.Url
+    }
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('gptadmin-win-' + [System.Guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $archive = Join-Path $tmp 'gptadmin-win.zip'
 
-    if (Test-Path -LiteralPath $PackageUrl) {
-        Write-Host "Installing local package $PackageUrl"
-        Copy-Item -LiteralPath $PackageUrl -Destination $archive -Force
-    } else {
-        Write-Host "Downloading $PackageUrl"
-        Invoke-WebRequest -UseBasicParsing -Uri $PackageUrl -OutFile $archive
-    }
-    Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
+    try {
+        if (Test-Path -LiteralPath $PackageUrl -ErrorAction SilentlyContinue) {
+            Write-Host "Installing local package $PackageUrl"
+            Copy-Item -LiteralPath $PackageUrl -Destination $archive -Force
+        } else {
+            Write-Host "Downloading $PackageUrl"
+            Invoke-WebRequest -UseBasicParsing -Uri $PackageUrl -OutFile $archive
+        }
+        if ($expectedPackage) { Assert-WindowsPackage $archive $expectedPackage }
+        Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
 
-    $exe = Get-ChildItem -Path $tmp -Recurse -File -Include 'shellmcp.exe','shellmcp_win.exe' | Select-Object -First 1
-    if (-not $exe) { throw 'shellmcp executable not found in package. Expected shellmcp.exe or shellmcp_win.exe.' }
-    $hubExe = Get-ChildItem -Path $tmp -Recurse -File -Filter 'gptadmin-hub.exe' | Select-Object -First 1
+        $names = if ($LocalHub) { @('gptadmin-node.exe') } else { @('shellmcp.exe', 'shellmcp_win.exe') }
+        $exe = Get-ChildItem -LiteralPath $tmp -Recurse -File | Where-Object { $_.Name -in $names } | Select-Object -First 1
+        if (-not $exe) { throw "Package is missing the $runtimeName executable required by role $Role." }
 
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    if ($UserMode) {
-        # User installs must not depend on Task Scheduler access. Restricted
-        # SSH/UAC tokens can deny or stall ScheduledTasks cmdlets even for the
-        # same account. Stop only our own installed processes by path.
-        Get-OwnedProcess -Name 'shellmcp' -Path $CurrentExe | Stop-Process -Force -ErrorAction SilentlyContinue
-        if ($LocalHub -and $hubExe) { Get-OwnedProcess -Name 'gptadmin-hub' -Path $HubExe | Stop-Process -Force -ErrorAction SilentlyContinue }
-        Start-Sleep -Milliseconds 500
-    } else {
-        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
+        New-Item -ItemType Directory -Force -Path $InstallDir,$BinDir,$LogDir,$IdentityDir,$ConfigDir | Out-Null
+        if ($UserMode) {
+            # User installs must not depend on Task Scheduler access.
+            Stop-OwnedRuntime -Name $runtimeName -Path $CurrentExe
+        } else {
+            $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            if ($existing) {
+                if (-not ([string]$existing.Actions.Arguments).Contains(('"{0}"' -f $RunScript))) { throw "Task $TaskName belongs to another installation." }
+                Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                Stop-OwnedRuntime -Name $runtimeName -Path $CurrentExe
+            }
         }
-        if ($LocalHub -and $hubExe -and (Get-ScheduledTask -TaskName $HubTaskName -ErrorAction SilentlyContinue)) {
-            Stop-ScheduledTask -TaskName $HubTaskName -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-        }
-    }
-    if (Test-Path $CurrentExe) {
-        Copy-Item $CurrentExe (Join-Path $BinDir "shellmcp.exe.bak.$stamp") -Force
-    }
-    Copy-Item $exe.FullName $CurrentExe -Force
-    if ($LocalHub) {
-        if (-not $hubExe) { throw 'gptadmin-hub.exe not found in package; a bare install needs the local Hub binary.' }
-        if (Test-Path $HubExe) {
-            Copy-Item $HubExe (Join-Path $BinDir "gptadmin-hub.exe.bak.$stamp") -Force
-        }
-        Copy-Item $hubExe.FullName $HubExe -Force
-        # The admin UI and public payloads ride in the same archive.
-        foreach ($name in @('admin', 'openapi.yaml', 'custom-gpt-instructions.md')) {
-            $src = Get-ChildItem -Path $tmp -Recurse -Filter $name | Select-Object -First 1
-            if ($src) {
-                New-Item -ItemType Directory -Force -Path $PublicDir | Out-Null
-                if ($src.PSIsContainer) {
-                    Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $PublicDir $name) -Recurse -Force
-                } else {
-                    Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $PublicDir $name) -Force
+        if (Test-Path -LiteralPath $CurrentExe) { Copy-Item -LiteralPath $CurrentExe -Destination "$CurrentExe.bak" -Force }
+        Copy-Item -LiteralPath $exe.FullName -Destination $CurrentExe -Force
+        if ($LocalHub) {
+            # The admin UI and public payloads ride in the same archive.
+            foreach ($name in @('admin', 'openapi.yaml', 'custom-gpt-instructions.md')) {
+                $src = Get-ChildItem -Path $tmp -Recurse -Filter $name | Select-Object -First 1
+                if ($src) {
+                    New-Item -ItemType Directory -Force -Path $PublicDir | Out-Null
+                    if ($src.PSIsContainer) {
+                        Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $PublicDir $name) -Recurse -Force
+                    } else {
+                        Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $PublicDir $name) -Force
+                    }
                 }
             }
         }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Write-Config {
@@ -294,6 +441,7 @@ function Write-Config {
     $queueEnabled = if ($ShellmcpTransport -eq 'polling') { '1' } else { '0' }
     $agentEnv = @(
         "SHELLMCP_TOKEN=$ShellmcpToken",
+        "SHELL_TOKEN=$ShellmcpToken",
         "HUB_URL=$HubUrl",
         "SHELLMCP_PORT=$ShellmcpPort",
         "SHELLMCP_HOST=$ShellmcpBind",
@@ -311,7 +459,7 @@ function Write-Config {
         "HUB_PUBLIC_KEY_FILE=$HubPublicKeyFile",
         "SHELLMCP_SERVICE_NAME=$TaskName",
         "SHELLMCP_SERVICE_SCOPE=$(if ($UserMode) { 'user' } else { 'system' })",
-        "SHELLMCP_AUTO_UPDATE=$(if ($LocalHub) { '0' } else { '1' })",
+        "SHELLMCP_AUTO_UPDATE=$(if ($LocalHub) { '0' } elseif ($saved.ContainsKey('SHELLMCP_AUTO_UPDATE')) { $saved.SHELLMCP_AUTO_UPDATE } else { '1' })",
         "SHELLMCP_UPDATE_INTERVAL_S=3600",
         "SHELLMCP_UPDATE_MANIFEST_URL=$HubUrl/artifacts/shellmcp.json",
         "SHELLMCP_UPDATE_TOKEN=$ShellmcpToken"
@@ -343,33 +491,8 @@ function Write-Config {
     if ($Isolated -or $InstallerArguments.ContainsKey('DisableSelfRepair')) {
         $agentEnv += "SHELLMCP_SELF_REPAIR_DISABLE=$(if ($DisableSelfRepair) { '1' } else { '0' })"
     }
-    $agentEnv | Set-Content -Path $EnvFile -Encoding ASCII
-
-    @"
-@echo off
-for /f "usebackq tokens=1,* delims==" %%A in ("$EnvFile") do set "%%A=%%B"
-"$CurrentExe" >> "$LogDir\shellmcp.task.log" 2>&1
-"@ | Set-Content -Path $BatchScript -Encoding ASCII
-
-    @"
-`$ErrorActionPreference = 'Stop'
-Get-Content -LiteralPath '$EnvFile' | ForEach-Object {
-    `$parts = `$_ -split '=', 2
-    if (`$parts.Length -eq 2 -and `$parts[0]) {
-        if (`$parts[1].Length -eq 0) { Remove-Item -LiteralPath ("Env:" + `$parts[0]) -ErrorAction SilentlyContinue }
-        else { Set-Item -Path ("Env:" + `$parts[0]) -Value `$parts[1] }
-    }
-}
-& '$BatchScript'
-exit `$LASTEXITCODE
-"@ | Set-Content -Path $RunScript -Encoding UTF8
-
     if ($LocalHub) {
-        # Everything the standalone Hub needs: its own state dir, the admin
-        # UI payloads, loopback bind, and the credentials minted above. The
-        # agent's SHELLMCP_TOKEN doubles as the Hub's shell credential, so
-        # the local agent authenticates without any operator-issued secret.
-        @(
+        $agentEnv += @(
             "GPTADMIN_ROOT=$InstallDir",
             "GPTADMIN_CONFIG_DIR=$ConfigDir",
             "GPTADMIN_PUBLIC_DIR=$PublicDir",
@@ -377,34 +500,55 @@ exit `$LASTEXITCODE
             "GPTADMIN_HUB_PORT=$HubPort",
             "PUBLIC_ORIGIN=$HubUrl",
             "GPTADMIN_STANDALONE=1",
-            "SHELLMCP_TOKEN=$ShellmcpToken",
             "CTL_TOKEN=$CtlToken",
             "ADMIN_PASSWORD=$AdminPassword",
             "OAUTH_CLIENT_SECRET=$OAuthClientSecret"
-        ) | Set-Content -Path $HubEnvFile -Encoding ASCII
-
-        @"
-@echo off
-for /f "usebackq tokens=1,* delims==" %%A in ("$HubEnvFile") do set "%%A=%%B"
-"$HubExe" >> "$LogDir\gptadmin-hub.task.log" 2>&1
-"@ | Set-Content -Path $HubBatchScript -Encoding ASCII
-
-        @"
-`$ErrorActionPreference = 'Stop'
-Get-Content -LiteralPath '$HubEnvFile' | ForEach-Object {
-    `$parts = `$_ -split '=', 2
-    if (`$parts.Length -eq 2 -and `$parts[0]) { Set-Item -Path ("Env:" + `$parts[0]) -Value `$parts[1] }
-}
-& '$HubBatchScript'
-"@ | Set-Content -Path $HubRunScript -Encoding UTF8
-
-        @(
-            "GPT Admin local Hub",
-            "Admin URL:  $HubUrl/admin",
-            "Connect:    $HubUrl/connect",
-            "AdminPassword: $AdminPassword"
-        ) | Set-Content -Path $CredentialsFile -Encoding UTF8
+        )
+        @("GPTAdmin Node", "Admin URL: $HubUrl/admin", "Connect: $HubUrl/connect", "AdminPassword: $AdminPassword") |
+            Set-Content -Path $CredentialsFile -Encoding UTF8
     }
+    # Preserve explicit peer, profile and transport options set by the operator.
+    $merged = @{} + $saved
+    foreach ($line in $agentEnv) {
+        $kv = $line -split '=', 2
+        $merged[$kv[0]] = $kv[1]
+    }
+    if (-not $LocalHub) {
+        foreach ($key in @('ADMIN_PASSWORD', 'CTL_TOKEN', 'OAUTH_CLIENT_SECRET', 'MCP_RELAY_ENROLLMENT_PASSWORD', 'GPTADMIN_MCP_RELAY_ENROLLMENT_PASSWORD')) { $merged.Remove($key) }
+    }
+    $merged.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" } |
+        Set-Content -LiteralPath $EnvFile -Encoding UTF8
+
+    @"
+@echo off
+if /i "%~1"=="--runtime" goto runtime
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run_$runtimeBase.ps1"
+exit /b %errorlevel%
+:runtime
+"%~dp0bin\$runtimeName.exe" >> "%~dp0logs\$runtimeBase.task.log" 2>&1
+exit /b %errorlevel%
+"@ | Set-Content -Path $BatchScript -Encoding ASCII
+
+    @'
+$ErrorActionPreference = 'Stop'
+$base = ([IO.Path]::GetFileNameWithoutExtension($PSCommandPath)).Substring(4)
+Get-Content -LiteralPath (Join-Path $PSScriptRoot "$base.env") | ForEach-Object {
+    $parts = $_ -split '=', 2
+    if ($parts.Length -eq 2 -and $parts[0]) {
+        if ($parts[1].Length) { Set-Item -LiteralPath ("Env:" + $parts[0]) -Value $parts[1] }
+        else { Remove-Item -LiteralPath ("Env:" + $parts[0]) -ErrorAction SilentlyContinue }
+    }
+}
+if ($base -eq 'shellmcp') {
+    foreach ($key in @('ADMIN_PASSWORD', 'CTL_TOKEN', 'OAUTH_CLIENT_SECRET', 'MCP_RELAY_ENROLLMENT_PASSWORD', 'GPTADMIN_MCP_RELAY_ENROLLMENT_PASSWORD')) {
+        Remove-Item -LiteralPath ("Env:" + $key) -ErrorAction SilentlyContinue
+    }
+}
+# Windows PowerShell 5.1 treats native stderr as a terminating error under Stop.
+# Let cmd.exe append the two native streams, including normal startup diagnostics.
+& (Join-Path $PSScriptRoot "run_$base.cmd") '--runtime'
+exit $LASTEXITCODE
+'@ | Set-Content -Path $RunScript -Encoding UTF8
 }
 
 function Install-UserStartup {
@@ -418,6 +562,9 @@ function Install-UserStartup {
 
 function Install-Task {
     param([string]$Name, [string]$Run, [string]$Batch, [string]$Startup)
+    if ($UserMode -and (Test-Path -LiteralPath $Startup) -and -not (Get-Content -LiteralPath $Startup -Raw).Contains($Batch)) {
+        throw "Startup launcher $Startup belongs to another installation."
+    }
     # Per-user startup is deliberately Task-Scheduler-free. This works from
     # normal interactive shells and restricted SSH/UAC tokens alike. System
     # installs still use a real machine Scheduled Task.
@@ -444,19 +591,42 @@ function Wait-HubHealth {
     return $false
 }
 
+function Get-LegacyLaunchers {
+    if (-not $LocalHub -or -not $previousHub.Count) { return }
+    $oldShellName = $previousAgent.SHELLMCP_SERVICE_NAME
+    if (-not $oldShellName) { $oldShellName = 'gptadmin-shellmcp' + $(if ($UserMode) { "-$env:USERNAME" }) }
+    foreach ($base in @('shellmcp', 'hub')) {
+        $oldRun = Join-Path $InstallDir "run_$base.ps1"
+        $oldBatch = Join-Path $InstallDir "run_$base.cmd"
+        $oldTask = if ($base -eq 'hub') { $oldShellName -replace '^gptadmin-shellmcp','gptadmin-hub' } else { $oldShellName }
+        $oldStartup = Join-Path $StartupDir "gptadmin-$base.cmd"
+        if ($UserMode) {
+            if ((Test-Path -LiteralPath $oldStartup) -and (Get-Content -Raw -LiteralPath $oldStartup).Contains($oldBatch)) {
+                [pscustomobject]@{ Name=$oldTask; Path=$oldStartup; Batch=$oldBatch; User=$true }
+            }
+        } else {
+            $task = Get-ScheduledTask -TaskName $oldTask -ErrorAction SilentlyContinue
+            if ($task -and ([string]$task.Actions.Arguments).Contains(('"{0}"' -f $oldRun))) {
+                [pscustomobject]@{ Name=$oldTask; Path=$oldRun; User=$false }
+            }
+        }
+    }
+}
+
 if (-not $UserMode) { Require-Admin }
 
 if ($Uninstall) {
     if ($UserMode) {
-        Remove-Item $StartupScript,$HubStartupScript -Force -ErrorAction SilentlyContinue
-        Get-OwnedProcess -Name 'shellmcp' -Path $CurrentExe | Stop-Process -Force -ErrorAction SilentlyContinue
-        Get-OwnedProcess -Name 'gptadmin-hub' -Path $HubExe | Stop-Process -Force -ErrorAction SilentlyContinue
-        Write-Host "Removed per-user startup launchers"
+        if ((Test-Path -LiteralPath $StartupScript) -and (Get-Content -Raw -LiteralPath $StartupScript).Contains($BatchScript)) {
+            Remove-Item -LiteralPath $StartupScript -Force
+        }
     } else {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $HubTaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Host "Removed scheduled tasks: $TaskName, $HubTaskName"
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($task -and ([string]$task.Actions.Arguments).Contains(('"{0}"' -f $RunScript))) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        }
     }
+    Stop-OwnedRuntime -Name $runtimeName -Path $CurrentExe
     exit 0
 }
 
@@ -464,66 +634,55 @@ Assert-IsolatedTarget
 Download-And-InstallArtifact
 Write-Config
 
-if ($LocalHub) {
-    $HubBackend = Install-Task -Name $HubTaskName -Run $HubRunScript -Batch $HubBatchScript -Startup $HubStartupScript
-    if (-not $NoStart -and $HubBackend -eq 'task') { Start-ScheduledTask -TaskName $HubTaskName }
-    if (-not $NoStart -and $HubBackend -eq 'startup') {
-        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $HubRunScript)
-    }
-    if (-not $NoStart -and -not (Wait-HubHealth)) {
-        throw "Local GPT Admin Hub did not become healthy at $HubUrl/healthz. Check $LogDir\gptadmin-hub.task.log"
+$legacyLaunchers = @(Get-LegacyLaunchers)
+foreach ($old in $legacyLaunchers) {
+    if (-not $old.User) { Stop-ScheduledTask -TaskName $old.Name -ErrorAction Stop }
+}
+if ($legacyLaunchers.Count) {
+    foreach ($oldName in @('shellmcp', 'gptadmin-hub')) {
+        Stop-OwnedRuntime -Name $oldName -Path (Join-Path $BinDir "$oldName.exe")
     }
 }
-
-$LaunchBackend = Install-Task -Name $TaskName -Run $RunScript -Batch $BatchScript -Startup $StartupScript
-if (-not $NoStart -and $LaunchBackend -eq 'task') { Start-ScheduledTask -TaskName $TaskName }
-if (-not $NoStart -and $LaunchBackend -eq 'startup') {
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $RunScript)
-}
-Start-Sleep -Seconds 3
-if (-not $NoStart) {
-    $live = Get-OwnedProcess -Name 'shellmcp' -Path $CurrentExe
-    if ($live.Count -lt 1) {
-        throw "ShellMCP did not remain running after install. Check $LogDir\shellmcp.task.log"
-    }
-    if ($LocalHub) {
-        $hubLive = Get-OwnedProcess -Name 'gptadmin-hub' -Path $HubExe
-        if ($hubLive.Count -lt 1 -or -not (Wait-HubHealth)) {
-            throw "Local GPT Admin Hub did not remain running after install. Check $LogDir\gptadmin-hub.task.log"
+try {
+    $backend = Install-Task -Name $TaskName -Run $RunScript -Batch $BatchScript -Startup $StartupScript
+    if (-not $NoStart) {
+        if ($backend -eq 'task') { Start-ScheduledTask -TaskName $TaskName }
+        else { Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $RunScript)) }
+        if ($LocalHub -and -not (Wait-HubHealth)) { throw "GPTAdmin Node did not become healthy at $HubUrl/healthz." }
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not @(Get-OwnedProcess -Name $runtimeName -Path $CurrentExe).Count -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+        }
+        Start-Sleep -Seconds 3
+        if (@(Get-OwnedProcess -Name $runtimeName -Path $CurrentExe).Count -lt 1) {
+            throw "$runtimeName did not remain running after install. Check $LogDir\$runtimeBase.task.log"
         }
     }
+} catch {
+    if ($legacyLaunchers.Count) {
+        if ($UserMode) { Remove-Item -LiteralPath $StartupScript -Force -ErrorAction SilentlyContinue }
+        else { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue }
+        Stop-OwnedRuntime -Name $runtimeName -Path $CurrentExe
+        foreach ($old in $legacyLaunchers) {
+            if ($old.User) { Start-Process -FilePath $old.Batch -WindowStyle Hidden }
+            else { Start-ScheduledTask -TaskName $old.Name }
+        }
+    }
+    throw
 }
-
-Write-Host "Installed GPT Admin $(if ($LocalHub) { 'local Hub and ShellMCP' } else { 'ShellMCP (remote agent)' })"
-Write-Host "InstallMode: $(if ($UserMode) { 'user' } else { 'system' })"
-Write-Host "TaskName: $TaskName$(if ($LocalHub) { ", $HubTaskName" })"
+foreach ($old in $legacyLaunchers) {
+    if ($old.User) { Remove-Item -LiteralPath $old.Path -Force }
+    else { Unregister-ScheduledTask -TaskName $old.Name -Confirm:$false }
+}
+Write-Host "Installed GPT Admin role $Role"
+Write-Host "TaskName: $TaskName"
 Write-Host "InstallDir: $InstallDir"
-Write-Host "PackageUrl: $PackageUrl"
-Write-Host "Exe: $CurrentExe$(if ($LocalHub) { ", $HubExe" })"
+Write-Host "Exe: $CurrentExe"
 Write-Host "HubUrl: $HubUrl"
-Write-Host "Port: $ShellmcpPort"
-Write-Host "ShellmcpUrl: $ShellmcpUrl"
-Write-Host "Transport: $ShellmcpTransport"
-Write-Host "HubPublicKeyFile: $HubPublicKeyFile"
-Write-Host "CredentialSource: $(if ($TokenProvided) { 'provided' } else { 'generated locally' })"
 if ($LocalHub) {
-    Write-Host ""
     Write-Host "AdminUrl: $HubUrl/admin"
-    Write-Host "AdminPassword: $AdminPassword"
     Write-Host "CredentialsFile: $CredentialsFile"
-    Write-Host "Status: local Hub is running and your computer is connected to it"
-    Write-Host "          (agent 'shell:$ShellmcpName' is trusted automatically on a"
-    Write-Host "           single-computer install)."
     Write-Host "MCP clients: use the Connect page at $HubUrl/connect"
 } else {
     Write-Host "NextStep: the Hub lists this machine as pending server 'shell:$ShellmcpName'; ask the Hub admin to approve it."
-}
-if ($ShellmcpTransport -eq 'polling') {
-    Write-Host 'Polling mode: local HTTP listener is intentionally disabled.'
-} else {
-    try {
-        Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$ShellmcpPort/system/info" -Headers @{ Authorization = "Bearer $ShellmcpToken" } | ConvertTo-Json -Compress | Write-Host
-    } catch {
-        Write-Warning "Local shellmcp health check failed. Check $LogDir\shellmcp.task.log"
-    }
 }

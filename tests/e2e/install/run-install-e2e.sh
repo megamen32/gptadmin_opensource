@@ -10,7 +10,7 @@
 #   * /etc/gptadmin/gptadmin.env exists and carries a locally generated
 #     SHELLMCP_TOKEN (self-service credential, never operator-supplied)
 #   * the Hub systemd unit is active and /healthz answers ok:true
-#   * the ShellMCP unit is active with a live process
+#   * the published installation runs the executable matching its recorded role
 #
 # Usage: tests/e2e/install/run-install-e2e.sh [installer-url]
 # Requires: docker. Exits non-zero on the first failed real assertion.
@@ -33,8 +33,16 @@ for _ in $(seq 1 30); do
 done
 docker exec "$CID" systemctl is-system-running
 
-# The real installer, byte-for-byte as served publicly.
-docker exec \
+# The bootstrap script, its CLI and its packages must refer to one published
+# release. While this push is in CI, the next full release does not exist yet.
+release_env=()
+if [[ $# -eq 0 ]]; then
+  repo_root="$(cd "$HERE/../../.." && pwd)"
+  version="$(cd "$repo_root" && python3 -c 'import cli; print(cli._published_full_release()[0])')"
+  release_env=(-e "CLI_URL=https://raw.githubusercontent.com/megamen32/gptadmin_opensource/v$version/cli.py"
+               -e "RELEASES_URL=https://github.com/megamen32/gptadmin_opensource/releases/download/v$version")
+fi
+docker exec "${release_env[@]}" \
   -e GPTADMIN_INSTALL_SILENT=1 \
   -e GPTADMIN_SETUP_TUNNEL=none \
   -e GPTADMIN_SETUP_GREPMESH=0 \
@@ -61,14 +69,20 @@ docker exec "$CID" systemctl is-active gptadmin-hub
 docker exec "$CID" curl -fsS -m 3 http://127.0.0.1:9001/healthz | grep -q '"ok":true'
 echo HUB_HEALTHZ_OK
 
-for _ in $(seq 1 20); do
-  if docker exec "$CID" systemctl is-active shellmcp >/dev/null 2>&1; then
-    break
+# This smoke test follows the currently published release. The separate exact
+# candidate lifecycle always requires a unified process, including before release.
+docker exec "$CID" bash -ceu '
+  if grep -qx GPTADMIN_INSTALL_ROLE=node /etc/gptadmin/gptadmin.env; then
+    pid=$(systemctl show -p MainPID --value gptadmin-hub.service)
+    test "$(readlink "/proc/$pid/exe")" = /opt/gptadmin/bin/gptadmin-node
+    ! systemctl is-active --quiet shellmcp || exit 1
+    echo PUBLISHED_UNIFIED_NODE_OK
+  else
+    ! grep -q "^GPTADMIN_INSTALL_ROLE=" /etc/gptadmin/gptadmin.env || exit 1
+    systemctl is-active --quiet shellmcp
+    pgrep -f "/opt/gptadmin/bin/shellmcp" >/dev/null
+    echo PUBLISHED_LEGACY_INSTALLATION_OK
   fi
-  sleep 2
-done
-docker exec "$CID" systemctl is-active shellmcp
-docker exec "$CID" pgrep -f '/opt/gptadmin/bin/shellmcp' >/dev/null
-echo SHELLMCP_SERVICE_OK
+'
 
 echo "REAL_LINUX_INSTALL_E2E_PASS"

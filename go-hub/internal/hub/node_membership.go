@@ -553,6 +553,16 @@ func (s *Server) nodeMemberAuth(r *http.Request) *nodeMember {
 	return nil
 }
 
+func (s *Server) membershipModeLocked() string {
+	if s.membership != nil {
+		return "writer"
+	}
+	if s.nodeIdentity != nil {
+		return "member"
+	}
+	return "standalone"
+}
+
 // meshSummaryLocked renders the mesh view for read-only tool output. mode
 // names the topology this process runs: "writer" (central membership hub),
 // "member" (replicated view from the writer), or "standalone" (static peers
@@ -562,12 +572,7 @@ func (s *Server) nodeMemberAuth(r *http.Request) *nodeMember {
 // readiness visible.
 func (s *Server) meshSummaryLocked() map[string]any {
 	now := s.now()
-	mode := "standalone"
-	if s.membership != nil {
-		mode = "writer"
-	} else if s.nodeIdentity != nil {
-		mode = "member"
-	}
+	mode := s.membershipModeLocked()
 	summary := map[string]any{
 		"mode":             mode,
 		"enabled":          mode != "standalone",

@@ -140,6 +140,23 @@ func TestOwnerLookupMCP(t *testing.T) {
 	if got := readContent(other); firstString(mapValue(got["error"]), "code") != "not_found" {
 		t.Fatal("content principal was not protected")
 	}
+	// Public static-peer configs support a target and URL without a node_id.
+	entry.nodePeers["shell:owner-b"] = nodePeerRoute{URL: peer.URL}
+	before = reads.Load()
+	if code(get(client, id, nil)) != "owner_unavailable" || reads.Load() != before {
+		t.Fatal("ID alone must not search unpinned routes")
+	}
+	if got := get(client, id, hint); firstString(mapValue(got["result"]), "taskId") != id {
+		t.Fatalf("owner hint failed on URL-only route: %s", code(got))
+	}
+	foreignID, err := encodeOwnerHandle("task", "wrong-owner", "new-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := get(client, foreignID, hint); code(got) != "owner_unavailable" {
+		t.Fatal("unpinned route accepted a handle issued by a different owner")
+	}
+	entry.nodePeers["shell:owner-b"] = nodePeerRoute{NodeID: "hub-b", URL: peer.URL}
 	peer.Close()
 	offline := get(client, id, nil)
 	if code(offline) != "owner_unavailable" || mapValue(mapValue(offline["error"])["data"])["retryable"] != true {

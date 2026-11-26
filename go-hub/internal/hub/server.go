@@ -1917,6 +1917,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/mcp/tokens/", s.requireCtl(s.trackAccessOperation(s.adminMCPTokenAction)))
 	mux.HandleFunc("/admin/api/access-profiles", s.requireCtl(s.adminAccessProfiles))
 	mux.HandleFunc("/admin/api/access-profiles/", s.requireCtl(s.trackAccessOperation(s.adminAccessProfile)))
+	mux.HandleFunc("/admin/api/access-profile-trees/", s.requireCtl(s.trackAccessOperation(s.adminAccessProfileTree)))
 	mux.HandleFunc("/admin/api/client-bindings/", s.requireCtl(s.trackAccessOperation(s.adminClientBinding)))
 	mux.HandleFunc("/admin/api/mcp/resources/list", s.requireCtl(s.adminMCPResourcesList))
 	mux.HandleFunc("/admin/api/mcp/resources/read", s.requireCtl(s.adminMCPResourceRead))
@@ -2573,6 +2574,12 @@ func (s *Server) queueSelfEnrollToken(r *http.Request, agentID string, barePoll 
 		return ""
 	}
 	return token
+}
+
+// The public Actions document contains the installed schema and request origin.
+// It reads neither replicated policy nor client credentials.
+func publicActionsSchemaRead(r *http.Request) bool {
+	return r.URL.Path == "/actions/openapi.yaml" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
 }
 
 func (s *Server) actionsOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -6253,6 +6260,9 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 	if name == "access_profiles" {
 		return s.callAccessProfileTool(r, args)
 	}
+	if name == "instruction_sets" {
+		return s.callInstructionSetTool(r, args)
+	}
 	if name == "handover_status" {
 		return hubHandoverStatus(), http.StatusOK
 	}
@@ -6701,7 +6711,7 @@ func hubTools() []map[string]any {
 		},
 	}
 	tools = append(tools, expandToolDefinition(nil, nil))
-	return instructionAwareFacadeTools(append(append(append(tools, accessProfileTool()), accessClientTools()...), secretHubTools()...))
+	return instructionAwareFacadeTools(append(append(append(tools, accessProfileTool(), instructionSetTool()), accessClientTools()...), secretHubTools()...))
 }
 
 func shellTools() []map[string]any {

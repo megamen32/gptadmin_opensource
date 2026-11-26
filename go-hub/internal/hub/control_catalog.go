@@ -13,8 +13,8 @@ func controlCatalogToolDefinition() map[string]any {
 	return map[string]any{
 		"name":        "control_catalog",
 		"title":       "Control settings and capabilities",
-		"description": "Show the real configuration surfaces, current redacted values, schemas, and existing writers for this control target.",
-		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"section": map[string]any{"type": "string", "description": "Optional exact section id."}}, "additionalProperties": false},
+		"description": "Find GPTAdmin installation, setup and deployment topology guidance in section deployment. Inspect redacted settings, schemas, and their existing writers for this control target.",
+		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"section": map[string]any{"type": "string", "description": "Optional exact section id. Use deployment to choose an installation and membership topology."}}, "additionalProperties": false},
 		"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
 	}
 }
@@ -30,6 +30,7 @@ func (s *Server) controlCatalog(r *http.Request, target, section string) map[str
 	schema := hubSettingsSchema()
 	shellRuntime := s.shellRuntimeSettingsLocked()
 	failover := s.failover
+	membershipMode := s.membershipModeLocked()
 	var descriptors []any
 	if strings.HasPrefix(target, "control:") && target != "control:hub" {
 		if parent := s.agents["shell:"+strings.TrimPrefix(target, "control:")]; parent != nil {
@@ -191,14 +192,37 @@ func (s *Server) controlCatalog(r *http.Request, target, section string) map[str
 		delete(nodeSection, "values")
 	}
 
-	sections := []map[string]any{hubSection, nodeSection, webhooks, failoverSection, proxy}
+	// Guidance is public product metadata. Report live membership only for the
+	// selected Hub, using the same scope as the failover reader.
+	deployment := map[string]any{
+		"id": "deployment", "title": "Choose an installation and configure topology",
+		"writable": false,
+		"installations": []map[string]string{
+			{"intent": "Run tasks assigned to this computer", "component": "shellmcp", "setup": "Select GPTADMIN_INSTALL_ROLE=executor in the installer, or gptadmin setup --role executor --hub-url URL on Unix. On Windows use -Role executor. Approve the intended device fingerprint on its managing Hub.", "verify": "Discover the approved executor and run a permitted operation on that target."},
+			{"intent": "Accept clients and route requests to other computers", "component": "gptadmin-node", "setup": "A fresh full install selects the unified Node. Use GPTADMIN_INSTALL_ROLE=node or the Windows -Role node option to request it explicitly.", "verify": "Verify the running gptadmin-node process and its identity, then perform an authenticated request through the intended ingress."},
+		},
+		"topologies": map[string]string{
+			"standalone": "Configure explicit GPTADMIN_NODE_PEERS for direct routes. Each destination checks the caller's own credential.",
+			"writer":     "A membership writer manages enrollment and publishes the membership view.",
+			"member":     "Join the intended writer with a device-specific grant. Routes follow the membership view.",
+		},
+		"authorization": "Map each operator to an access profile with explicit targets and tools. Plan department changes with access_profiles plan_tree, review the target changes, then use apply_tree with its revision. Verify an allowed descendant and a sibling refusal as the operator.",
+		"access_tools":  allowedCatalogTools(r, "hub", "access_profiles", "access_clients"),
+		"references":    []string{"docs/NODE_PUBLIC_AUTOUPDATE.md", "docs/NODE_PEER_ROUTING.md", "docs/ACCESS_OPERATIONS.md"},
+	}
+	if target == "control:hub" && canFailoverRead {
+		deployment["values"] = map[string]any{"membership_mode": membershipMode}
+	}
+	sections := []map[string]any{hubSection, nodeSection, webhooks, failoverSection, proxy, deployment}
 	if section != "" {
+		available := make([]string, 0, len(sections))
 		for _, item := range sections {
+			available = append(available, firstString(item, "id"))
 			if item["id"] == section {
 				return map[string]any{"section": item, "catalog_version": 1}
 			}
 		}
-		return map[string]any{"error": "unknown control catalog section", "section": section, "available_sections": []string{"hub-shellmcp", "node-shellmcp", "webhooks", "failover", "network-proxy"}}
+		return map[string]any{"error": "unknown control catalog section", "section": section, "available_sections": available}
 	}
 	return map[string]any{"catalog_version": 1, "summary": "Actual settings and control capabilities. Mutations use the named existing writers and their normal authorization/validation.", "sections": sections}
 }

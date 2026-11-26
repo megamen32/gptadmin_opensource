@@ -104,3 +104,34 @@ def test_setup_stops_bundled_grepmesh_when_operator_provider_is_selected() -> No
     source = inspect.getsource(cli.setup_interactive)
     assert "elif UNIT_PATH_GREPMESH.exists():" in source
     assert "svc_disable_stop(svc_grepmesh_name(), UNIT_PATH_GREPMESH)" in source
+
+
+@pytest.mark.parametrize(('flags', 'existing', 'role'), [
+    ({}, {}, 'node'),
+    ({'role': 'executor'}, {}, 'executor'),
+    ({'no_hub': True}, {}, 'executor'),
+    ({'hub': True, 'shellmcp': True}, {}, ''),
+    ({}, {'INSTALL_HUB': 'true', 'INSTALL_SHELLMCP': 'true'}, ''),
+    ({}, {'GPTADMIN_INSTALL_ROLE': 'executor'}, 'executor'),
+])
+def test_fresh_role_and_legacy_component_selection(monkeypatch, flags, existing, role):
+    from argparse import Namespace
+    monkeypatch.delenv('GPTADMIN_INSTALL_ROLE', raising=False)
+    assert cli.selected_install_role(Namespace(**flags), existing) == role
+
+
+def test_persisted_role_cannot_be_changed_by_install_environment(monkeypatch):
+    from argparse import Namespace
+    monkeypatch.setenv('GPTADMIN_INSTALL_ROLE', 'node')
+    with pytest.raises(SystemExit):
+        cli.selected_install_role(Namespace(), {'GPTADMIN_INSTALL_ROLE': 'executor'})
+
+
+def test_unified_install_uses_versioned_full_release_and_preserves_local_override(monkeypatch):
+    name = 'gptadmin-ubuntu-x64-full.tar.gz'
+    monkeypatch.setattr(cli, '_published_full_release', lambda: (1234, {name}))
+    root = 'https://github.com/megamen32/gptadmin_opensource/releases/'
+    assert cli._role_package_url(root + 'latest/download/' + name) == root + 'download/v1234/' + name
+    assert cli._role_package_url('/work/' + name) == '/work/' + name
+    with pytest.raises(ValueError):
+        cli._role_package_url(root + 'latest/download/absent.tar.gz')

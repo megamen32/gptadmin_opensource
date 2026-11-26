@@ -354,6 +354,16 @@ save_fp() { echo "$2" > "$1"; }
 SHELLMCP_DIST="$ART_DIR/go-shellmcp/${NATIVE_BUILD_PAIR:-linux_amd64}/shellmcp-go"
 HUB_DIST="$ART_DIR/gptadmin_hub/dist/gptadmin_hub"
 
+build_unix_node() {
+  local goos="$1" goarch="$2" destination="$3" component flags="-s -w"
+  for component in go-hub/internal/hub go-shellmcp/internal/server; do
+    flags+=" -X github.com/megamen32/gptadmin/$component.BuildVersion=$BUILD_VERSION"
+    flags+=" -X github.com/megamen32/gptadmin/$component.GitCommit=$GIT_COMMIT"
+  done
+  (cd go-hub && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -buildvcs=false \
+    -ldflags "$flags" -o "$destination" ./cmd/gptadmin-node)
+}
+
 build_hub_linux() {
   step "Go build: gptadmin_hub Linux"
   local pair="${NATIVE_BUILD_PAIR:-linux_amd64}"
@@ -392,6 +402,15 @@ build_hub_cross_platforms() {
     else
       GOOS=$goos GOARCH=$goarch go build "${GO_HUB_LDFLAGS[@]}" \
         -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin_hub" ./cmd/gptadmin-hub
+    fi
+    if [[ "$goos" == windows ]]; then
+      local node_flags="-s -w" package
+      for package in go-hub/internal/hub go-shellmcp/internal/server; do
+        node_flags+=" -X github.com/megamen32/gptadmin/$package.BuildVersion=$BUILD_VERSION"
+        node_flags+=" -X github.com/megamen32/gptadmin/$package.GitCommit=$GIT_COMMIT"
+      done
+      GOOS="$goos" GOARCH="$goarch" go build -trimpath -buildvcs=false -ldflags "$node_flags" \
+        -o "../$ART_DIR/gptadmin_hub/$pair/gptadmin-node.exe" ./cmd/gptadmin-node
     fi
     BUILT_HUB_PLATFORMS+="$pair "
     echo "hub cross-build: $pair/gptadmin_hub"
@@ -621,18 +640,18 @@ build_go_shellmcp_cross_platforms() {
 }
 
 build_windows_shellmcp() {
-  step "Cross-build Windows hub and ShellMCP"
+  step "Cross-build Windows Node, hub, and ShellMCP"
   mkdir -p "$ART_DIR/windows" public
   build_hub_cross_platforms windows
   build_go_shellmcp_cross_platforms windows
+  cp -f "$ART_DIR/gptadmin_hub/windows_amd64/gptadmin-node.exe" "$ART_DIR/windows/gptadmin-node.exe"
   cp -f "$ART_DIR/gptadmin_hub/windows_amd64/gptadmin_hub" "$ART_DIR/windows/gptadmin-hub.exe"
   cp -f "$ART_DIR/go-shellmcp/windows_amd64/shellmcp-go" "$ART_DIR/windows/shellmcp.exe"
-  ls -lh "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe"
+  ls -lh "$ART_DIR/windows/gptadmin-node.exe" "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe"
   file "$ART_DIR/windows/gptadmin-hub.exe" "$ART_DIR/windows/shellmcp.exe" || true
   step "Archive: gptadmin-win.zip"
   rm -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
-  # A bare Windows install boots a LOCAL Hub: the archive must carry the
-  # admin UI and public payloads alongside the two binaries.
+  # A bare Windows install starts the unified Node with the local admin UI.
   local win_payload="$ART_DIR/windows-payload"
   rm -rf "$win_payload"
   mkdir -p "$win_payload"
@@ -640,13 +659,18 @@ build_windows_shellmcp() {
   cp -a public/admin "$win_payload/admin"
   cp -f public/openapi.yaml "$win_payload/openapi.yaml"
   cp -f public/custom-gpt-instructions.md "$win_payload/custom-gpt-instructions.md"
-  (cd "$win_payload" && zip -q -9 -r "../gptadmin-win.zip" gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md)
+  (cd "$win_payload" && zip -q -9 -r "../gptadmin-win.zip" gptadmin-node.exe gptadmin-hub.exe shellmcp.exe admin openapi.yaml custom-gpt-instructions.md)
   cp -f "$ART_DIR/gptadmin-win.zip" public/gptadmin-win.zip
   cp -f deploy/install_win.ps1 public/install_win.ps1
   unzip -l public/gptadmin-win.zip
   sha256sum public/gptadmin-win.zip > public/gptadmin-win.zip.sha256
+  emit_release_bundle windows x64 client
+  cp -f "$ART_DIR/gptadmin-windows-x64-client.zip" public/
+  sha256sum public/gptadmin-windows-x64-client.zip > public/gptadmin-windows-x64-client.zip.sha256
   if [[ -d "$ART_DIR/public" ]]; then
-    cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 public/install_win.ps1 "$ART_DIR/public/"
+    cp -f public/gptadmin-win.zip public/gptadmin-win.zip.sha256 \
+      public/gptadmin-windows-x64-client.zip public/gptadmin-windows-x64-client.zip.sha256 \
+      public/install_win.ps1 "$ART_DIR/public/"
   fi
   echo "built: public/gptadmin-win.zip"
 }
@@ -726,10 +750,18 @@ emit_release_bundle() {
   fi
   if [[ "$edition" == full ]]; then
     cp -f "$hub" "$tmp/bin/gptadmin-hub$suffix"
+    if [[ "$goos" == linux || "$goos" == darwin ]]; then
+      build_unix_node "$goos" "$goarch" "$tmp/bin/gptadmin-node"
+    elif [[ "$platform" == windows ]]; then
+      cp -f "$ART_DIR/gptadmin_hub/windows_$goarch/gptadmin-node.exe" "$tmp/bin/gptadmin-node.exe"
+    fi
     mkdir -p "$tmp/cli"
     cp -f cli.py "$tmp/cli/gptadmin.py"
     mkdir -p "$tmp/cli/scripts"
     cp -f scripts/gptadmin_node_manage.py scripts/gptadmin_node_probe.py scripts/gptadmin_node_autoupdate.py "$tmp/cli/scripts/"
+    if [[ "$goos" == darwin ]]; then
+      cp -f scripts/gptadmin_node_macos_manage.py scripts/gptadmin_node_macos_autoupdate.py "$tmp/cli/scripts/"
+    fi
     chmod 0755 "$tmp/cli/gptadmin.py"
     [[ -d "$ART_DIR/public" ]] || { echo "ERROR: missing public payload for $platform/$arch full release" >&2; exit 1; }
     cp -a "$ART_DIR/public" "$tmp/public"

@@ -95,15 +95,24 @@ docker exec "$name" env \
   GPTADMIN_AUTO_APPROVE_LOCAL_SHELLMCP=1 \
   bash /work/deploy/install.sh
 
-docker exec "$name" systemctl is-active --quiet gptadmin-hub.service
-docker exec "$name" systemctl is-active --quiet shellmcp.service
+check_unified_process() {
+  docker exec "$name" bash -ceu '
+    systemctl is-active --quiet gptadmin-hub.service
+    pid=$(systemctl show -p MainPID --value gptadmin-hub.service)
+    test "$(readlink "/proc/$pid/exe")" = /opt/gptadmin/bin/gptadmin-node
+    ! systemctl is-active --quiet shellmcp.service || exit 1
+    grep -qx GPTADMIN_INSTALL_ROLE=node /etc/gptadmin/gptadmin.env
+  '
+}
+
+check_unified_process
 docker exec "$name" systemctl is-active --quiet gptadmin-grepmesh-mcp.service
 docker exec "$name" test -s /etc/gptadmin/gptadmin.env
-docker exec "$name" test -x /opt/gptadmin/bin/gptadmin_hub
-docker exec "$name" test -x /opt/gptadmin/bin/shellmcp
+docker exec "$name" test -x /opt/gptadmin/bin/gptadmin-node
 docker exec "$name" test -x /opt/gptadmin/bin/grepmesh-mcp
 
 docker exec "$name" python3 /work/tests/e2e/systemd/runtime_acceptance.py
+identity_before=$(docker exec "$name" sha256sum /etc/gptadmin/shellmcp_identity.json | cut -d" " -f1)
 
 # Exercise the installed updater against the same candidate artifact. This is
 # deliberately after real execution: update must preserve a functioning install.
@@ -115,9 +124,9 @@ docker exec "$name" /usr/local/bin/gptadmin --system update --force \
     --pkg-hub "/work/${package#$repo/}" \
     --pkg-shellmcp "/work/${package#$repo/}"
 
-docker exec "$name" systemctl is-active --quiet gptadmin-hub.service
-docker exec "$name" systemctl is-active --quiet shellmcp.service
+check_unified_process
 docker exec "$name" systemctl is-active --quiet gptadmin-grepmesh-mcp.service
+test "$(docker exec "$name" sha256sum /etc/gptadmin/shellmcp_identity.json | cut -d" " -f1)" = "$identity_before"
 docker exec "$name" env GPTADMIN_ACCEPTANCE_MARKER=gptadmin-post-update python3 /work/tests/e2e/systemd/runtime_acceptance.py
 
 echo "ok: clean install + autoconfigure + real Custom GPT/MCP execution + update + real execution"

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -136,5 +137,31 @@ func TestControlCatalogRestrictedProfileDoesNotExposeHubOrOtherOwnerValues(t *te
 		if strings.Contains(encoded, forbidden) {
 			t.Errorf("restricted catalog contains %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestDeploymentCatalogGuidesSetupWithoutLeakingCurrentTopology(t *testing.T) {
+	s := New(Config{ConfigDir: t.TempDir()})
+	t.Cleanup(func() { s.Close() })
+	r := httptest.NewRequest("POST", "/mcp", nil)
+	section := mapValue(s.controlCatalog(r, "control:hub", "deployment")["section"])
+	if section["writable"] != false || section["values"] != nil {
+		t.Fatalf("unexpected deployment access: %#v", section)
+	}
+	roles, ok := section["installations"].([]map[string]string)
+	if !ok || len(roles) != 2 || roles[0]["component"] != "shellmcp" || roles[1]["component"] != "gptadmin-node" {
+		t.Fatalf("installation choices missing: %#v", roles)
+	}
+	s.mu.Lock()
+	s.oauthClients["catalog-owner"] = oauthClientMetadata{Role: "owner"}
+	s.mu.Unlock()
+	r = r.WithContext(context.WithValue(r.Context(), authClaimsContextKey{}, map[string]any{"client_id": "catalog-owner", "scope": "gptadmin.exec"}))
+	section = mapValue(s.controlCatalog(r, "control:hub", "deployment")["section"])
+	if got := firstString(mapValue(section["values"]), "membership_mode"); got != "standalone" {
+		t.Fatalf("current Hub mode = %q, want standalone", got)
+	}
+	section = mapValue(s.controlCatalog(r, "control:remote-host", "deployment")["section"])
+	if section["values"] != nil {
+		t.Fatalf("Hub mode attributed to remote host: %#v", section["values"])
 	}
 }

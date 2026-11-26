@@ -348,6 +348,10 @@ func (s *Server) withQuorumAdmission(next http.Handler) http.Handler {
 			s.requireCtl(s.nodeDrainHTTP)(w, r)
 			return
 		}
+		if publicActionsSchemaRead(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.quorumNode == nil {
 			if r.Header.Get(nodePeerHopHeader) == "1" && r.Header.Get("X-GPTAdmin-Offline-Owner") != "" {
 				if fallback := s.memberOfflineShellFallback(r, next); fallback != nil {

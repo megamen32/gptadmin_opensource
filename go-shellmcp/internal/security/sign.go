@@ -72,10 +72,17 @@ func LoadIdentity(dir, name string) (*Identity, error) {
 		priv = parsed
 	}
 
-	ident := Identity{Name: name, PrivateKey: priv}
+	stored := struct {
+		Identity
+		CreatedAt int64 `json:"created_at"`
+	}{Identity: Identity{Name: name, PrivateKey: priv}}
 	if b, err := os.ReadFile(identPath); err == nil {
-		_ = json.Unmarshal(b, &ident)
+		_ = json.Unmarshal(b, &stored)
 	}
+	if stored.CreatedAt == 0 {
+		stored.CreatedAt = time.Now().Unix()
+	}
+	ident := stored.Identity
 	if ident.Name == "" {
 		ident.Name = name
 	}
@@ -88,7 +95,7 @@ func LoadIdentity(dir, name string) (*Identity, error) {
 
 	_ = os.WriteFile(pubPath, []byte(ident.PublicKey+"\n"), 0o644)
 	identJSON, _ := json.MarshalIndent(map[string]any{
-		"created_at":  time.Now().Unix(),
+		"created_at":  stored.CreatedAt,
 		"fingerprint": ident.Fingerprint,
 		"name":        ident.Name,
 		"public_key":  ident.PublicKey,

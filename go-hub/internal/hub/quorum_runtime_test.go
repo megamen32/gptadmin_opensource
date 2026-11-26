@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -35,5 +37,30 @@ func TestQuorumMemberPromotionReadinessKeepsIdentityDomainsSeparate(t *testing.T
 	member.NodeID = "different-node"
 	if quorumMemberPromotionReady(member, peer, now) {
 		t.Fatal("membership for another node must not be promoted")
+	}
+}
+
+func TestPublicActionsSchemaWithoutLeader(t *testing.T) {
+	s := reviewWriter(t, t.TempDir())
+	t.Cleanup(func() { s.Close() })
+	cfg := reviewQuorumConfig(t, t.TempDir())
+	cfg.BootstrapperID = "n1"
+	cfg.Bootstrap = false
+	reviewOpenQuorum(t, s, cfg)
+	handler := s.Handler()
+	request := func(method, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "https://customer.example"+path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	if w := request(http.MethodGet, "/actions/openapi.yaml"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "https://customer.example") {
+		t.Fatalf("public specification unavailable on isolated Node: status=%d", w.Code)
+	}
+	if w := request(http.MethodHead, "/actions/openapi.yaml"); w.Code != http.StatusOK || w.Header().Get("Content-Length") == "" {
+		t.Fatalf("public specification metadata unavailable: %d", w.Code)
+	}
+	if w := request(http.MethodPost, "/actions/openapi.yaml"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("non-read request escaped quorum admission: %d", w.Code)
 	}
 }
