@@ -2884,3 +2884,20 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - Mac M1 update: installed state was build 1173 (`3df6c79e`). The `com.gptadmin.node.autoupdate` LaunchAgent had one transient GitHub API socket timeout, next scheduled run succeeded: `{"updated": true, "build_version": 1177, "git_commit": "589884f7...", "identity_preserved": true}`. Installed `state.json` and running PID 54427 both show build 1177 (`589884f7`).
 - Live consumer proof: two consecutive `run_js` → `mcp_call` → bezbrowser `browser_status` calls through the updated node returned 3 connected browsers in 626–1229 ms; earlier stability window also passed (3/3 success).
 - Residual: node-100 hub is intentionally follower (503 local, public leader 200); live leader on node-44 serves build 1176 and will pick up 1177 via its own timer/next maintenance window (not forced).
+
+
+## 2026-11-27 - Node mutex panic fix, release 1179 and Mac M1 update - completed
+
+- Objective (user): «fix gptadmin by tdd test. then deploy verify real mac m1 works», повторный симптом «node online, но выполнение команд возвращает внутреннюю ошибку».
+- Root cause: `pollShellQueue` (`go-hub/internal/hub/server.go`) разблокировал `s.mu` перед `proxyMemberRequest` и блокировал обратно после возврата. `httputil.ReverseProxy` штатно паникует `http.ErrAbortHandler` при разрыве клиента в длинном poll — deferred `s.mu.Unlock()` затем падал на незаблокированном мьютексе и весь процесс ноды падал (panic `sync: unlock of unlocked mutex` в `node.log` M1, 07:44 MSK).
+- TDD: RED `go-hub/internal/hub/poll_proxy_panic_test.go` — backend в `memberQuorumHubs` паникует `ErrAbortHandler`, тест добивается deadlock в `Close`, если мьютекс не восстановлен. GREEN после оборачивания unlock/proxy/lock в closure с `defer recover()` и повторным `Lock()`.
+- Focused verification: `TestPollShellQueueKeepsMutexLockedWhenProxyPanics`, `TestMemberExecutor`, `TestNodePeers`, `TestOwnerLocalAdmission`, `TestQuorumLocalDispatch`, `TestPollShellQueue`, `TestQueue`, `TestShell` — green; `go build ./...` и `go vet` чистые.
+- Merge: fix-коммит `a0395d38` влит в private `main` (`ec2973c0`), публичное зеркало `398be4e7`.
+- Release race fix: тег v1178 в зеркале был создан от более старого snapshot `124cca1a` из-за параллельного bump-коммита (`b1a8c214` в ветке `fix/observability-release-20261127`), полный релиз падал с `full release tag already exists; reconcile it without replay` (run 45990852299). Сделан чистый bump `VERSION` 1178→1179 (коммит `9cbe0515`), пуш в private main.
+- Release: mirror `9460aa81`, CI `Publish verified Node and full release` run 45993154559 — success; tag `v1179` опубликован со всеми артефактами (macOS arm64/x64, Linux, Windows, Android).
+- Mac M1 update: `launchctl kickstart gui/$(id -u)/com.gptadmin.node.autoupdate` → `{"updated": true, "build_version": 1179, "git_commit": "9460aa81…", "identity_preserved": true}`; `state.json` и PID 54337 (start 16:51:56) подтверждают установку. До этого M1 работал на build 1178 (`398be4e7`) — та же версия с mutex-фиксом, но из node-релиза.
+- Live consumer proof: серия живых вызовов через MCP `exec` → `shell_exec` → `call({target: 'shell:macbook-m1-node', tool: 'shell_exec'})` — 4/4 success до обновления (794–1016 ms), post-update probe success (17 ms), bezbrowser `browser_status` через `mcp_call` вернул 3 подключённых браузера, `pendingCommands: 0`; журнал `node.log` — no new panics.
+- Blue-green note: контроллер существует в main (`0017366f`, PR #51, socket blue-green) и используется автопдейтом как путь drain→switch→health→rollback; на macOS он держит один живой instance (не два параллельных), обновление M1 прошло через этот путь.
+- CPU limit: `embedding-ollama.service` и `embedding-ollama-cpu.service` оба `CPUQuotaPerSecUSec=30s` (30 ядер), активны, фактическая загрузка embedding-процессов 8–25 ядер (sampled over 2 s).
+- Residual: node-44 leader по-прежнему на build 1177 (`589884f7`, active) и подхватит 1179 своим таймером; отдельный пропуск не делался, чтобы не останавливать активный лидер.
+
