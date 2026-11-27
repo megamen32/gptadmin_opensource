@@ -45,3 +45,88 @@
 25 ноября 2026 года полный `go test ./...` дошёл до `go-hub/internal/node` и завершился на `TestSearchRowsCarryTargetTitle`. Тест получил строку результата поиска для `target: "hub"` без поля `target_title` и завершился сообщением `target "hub" has no target_title`. Изменение bounded-чтения истории операций этот путь не затрагивает.
 
 Для воспроизведения выполнить `go test ./internal/node -run TestSearchRowsCarryTargetTitle -count=1 -v`. Отдельный запуск также падает, поэтому это самостоятельный дефект каталога search.
+### 2026-11-20 — пароль HAOS в локальной инструкции GPTAdmin
+
+При обычном чтении установленного gptadmin-dev-workflow в журнал инструментов попадает пароль из примера доступа к HAOS. Место — раздел Identity of this environment в локальном SKILL.md. Проверка без вывода значения — поиск наличия аргумента пароля в примере SSH с выводом только результата да/нет. Обнаружено при проверке зарегистрированного Agent Herder на сервере 100. Актуальность учётных данных неизвестна.
+
+## Устаревший пин писателя у ридеров после смены авторитетного узла
+
+20 ноября 2026 года публичная нода `node-intel.t.became.bezrabotnyi.com` отдавала 503 на всех маршрутах внешнего монитора. Тело ответа — `{"detail":"auth source differs from enrolled writer"}`, то есть отказ приложения, а не туннеля. У ридера явный `GPTADMIN_AUTH_SOURCE_ID` в `node.env.json` остался на прежнем писателе после переноса авторитета 17 ноября, тогда как применённый auth-снимок пришёл уже от текущего писателя. Гейт читателя сравнивает эти два значения и закрывает все защищённые пути.
+
+Воспроизведение: на ридере сравнить `config/auth-continuity/state.json` (`writer_id`), `config/node-identity.json` (`writer_id`) и `node.env.json` (`GPTADMIN_AUTH_SOURCE_ID`). Расхождение первых двух с третьим означает 503. Актуальный писатель проверяется живым `/healthz` публичного Hub (`role`, `leader_id`).
+
+Место проверки: `go-hub/internal/hub/auth_snapshot.go`, функция `authSnapshotGate` (сравнение `state.WriterID` и `s.cfg.AuthSourceID`), и `initializeAuthContinuityLocked`, где явный источник авторитетнее идентификатора ноды.
+
+Наблюдение вне зоны ремонта: такой же устаревший явный пин найден в `gptadmin.env` ноды `admin-node-88` на node-88. Её публичный адрес сейчас не отвечает, поэтому подтверждённого пользовательского отказа по этому адресу нет. Автообновление пакета ноды на Intel Mac отдельно падает с `public release is older than installed Node` — проверять после любой публикации новой версии.
+
+## Молчаливый откат реестра дочерних MCP при старте хаба
+
+24 ноября 2026 года при восстановлении дочернего MCP `OmniRoute` на node-100 обнаружилось, что правка от 10 ноября была сделана не в том слое. `/etc/gptadmin/mcp-supervisor.json` — производный файл: он пересобирается из `/etc/gptadmin/mcp.json` функцией `_mcp_sync_go_supervisor_config()` (`cli.py:2884`, источник `MCP_CONFIG_FILE`, `cli.py:124`) при каждом старте хаба, а также командами `gptadmin mcp render|add|remove|install`. Правка только производного файла не переживает перезапуск: 24 ноября в 09:35:54 МСК перезапустился `gptadmin-hub` (`NRestarts=0`, PID 3370833), и через 54 с реестр снова содержал внешний адрес OmniRoute с секретом прямо в аргументах командной строки, а дочерний процесс упал — `health.process.state=stopped`, `protocol.state=unknown`, `tools_count=null`.
+
+Симптом у пользователя: `mcp_tools` по ссылке `OmniRoute` возвращает `{"error":"EOF"}`, публичный адрес дочернего MCP не отвечает. Воспроизведение: изменить `/etc/gptadmin/mcp-supervisor.json` вручную, выполнить `gptadmin mcp render` и сверить — файл перезаписывается исходным значением из `mcp.json`. Место проверки: `cli.py:2884`, `cli.py:2929`, а также `/etc/gptadmin/mcp-agents.d/*.json` — это выведенные из обращения дескрипторы релеев, нативный ShellMCP их больше не читает, но секреты в них оставались.
+
+Устойчивая правка от 24 ноября: запись `mcpServers.omniroute` в `/etc/gptadmin/mcp.json` переведена на локальный адрес `http://127.0.0.1:20128/api/mcp/stream` с `--header-file /etc/gptadmin/omniroute.headers` (режим `0640 root:admin`), секрет из аргументов командной строки убран. Проверено: `mcp_tools` — 110 инструментов, `schema_complete=true`; живой вызов `omniroute_get_health` отвечает; таргетированный поиск по каталогу отдаёт только этот дочерний MCP.
+
+## Ключ OmniRoute в резервных копиях конфигурации
+
+24 ноября 2026 года найдено одиннадцать файлов под `/etc/gptadmin`, содержащих открытый ключ OmniRoute: резервные копии реестра (`mcp-supervisor.json.bak.notify-allowlist.20261026T041148/041226/041440/041458/041531/041705`, `mcp-supervisor.json.bak.atv-singleton-20261025`, `mcp-supervisor.json.pre-s21-network-mcp`) и устаревший дескриптор `mcp-agents.d.bak.localhub.20260705_063757/omniroute.json`. Последний имел режим `0664` и был доступен на чтение любому пользователю хоста — режим ужесточен до `0600`. Остальные копии закрыты правами владельца (`0600` и `0640 root:admin`), их содержимое сохранено как есть: это исторические снимки, а сам ключ берётся из `OMNIROUTE_API_KEY` в `/home/admin/.omniroute/.env` и может быть восстановлен оттуда.
+
+Проверка без вывода значения: сравнить хеш содержимого `/etc/gptadmin/omniroute.headers` с хешем найденного значения в каждом файле и проверить биты чтения для группы и остальных. Отдельно к записи: `/etc/gptadmin/outbox.quarantine/1781835074409-result-ta<OPENAI_KEY>.json.quarantine.20260619_145514` (режим `0644`, 144 МБ) содержит открытый ключ другого сервиса, не OmniRoute; файл не менялся, так как к этому ремонту не относится.
+
+## Расхождение режимов при записи реестра дочерних MCP
+
+24 ноября 2026 года замечено, что запись реестра через `mcp_manage upsert` в хабе создаёт `/etc/gptadmin/mcp-supervisor.json` с режимом `0600`, тогда как `gptadmin mcp render` из CLI пишет тот же файл с режимом `0640`. После upsert режим возвращался к `0640` вручную, чтобы не отличаться от остальных файлов `/etc/gptadmin`. Само расхождение безвредно, но приводит к тому, что сравнение режимов двух путей записи даёт ложный вывод о ручной правке. Место проверки: запись реестра в нативном ShellMCP и `_json_write` в `cli.py`.
+
+## Память Hindsight: запись принимается, чтение не возвращается
+
+24 ноября 2026 года инструменты памяти Hindsight на этом репозитории принимают запись (`retain` — «Memory storage initiated»), но чтение (`recall`, поиск по страницам) падает с `Failed to generate batch embeddings` и ответом nginx `502 Bad Gateway` в теле ошибки. Сервис при этом жив: `GET https://hindsight.bezrabotnyi.com/health` — `200`, `status: healthy`, `database: connected`. Значит, отказ находится на стороне поставщика эмбеддингов за сервисом, а не в базе памяти, и чтение записанного невозможно до восстановления этого поставщика. Проверка без вывода значения: вызвать `recall` по любому запросу и сверить тело ошибки; отдельно сравнить `GET /health` и `GET /v1/default/banks` (401 — требуется токен из `/home/admin/.hindsight/coding-agent.json`).
+
+## Повторное закрытие 503 у ридеров при рестарте ноды во время смены лидера
+
+24 ноября 2026 года внешний монитор снова зафиксировал недоступность `node-intel.t.became.bezrabotnyi.com`: `http=503`, `curl_exit=0` в прогонах 06:42:42, 06:53:02 и 07:03:43 UTC (последний здоровый прогон — 06:32:23 UTC, 307). Тело ответа — `{"detail":"auth source differs from enrolled writer"}` (54 байта с переводом строки), то есть это снова гейт ридера, а не туннель или nginx.
+
+Отличие от случая 20 ноября: явный пин не устарел. Все три версии `node.env.json` за 24 ноября (до обновления 09:12, перед обновлением 09:43 и текущая) содержат один и тот же `GPTADMIN_AUTH_SOURCE_ID=bd0bf8c4-…`, равный `writer_id` применённого снимка и `leader_id` живого Hub. Совпадение восстановилось само после того, как нода пересоединилась и переписала `config/auth-continuity/state.json` (10:12, `generation=2288`).
+
+Проверенная последовательность: 09:35:08–09:36:26 mesh теряет лидерство («no quorum-confirmed Hub leadership», писатели отвечают 502/503), 09:43:23 нода перезапускается автообновлением (`autoupdate.log`: `{"ok": true, "build_version": 1151, "git_commit": "21900875…"}`), в окне 09:43–10:09 гейт закрыт, 10:09:26 нода перезапускается ещё раз, 10:09:31 в `node.log` — `node connection established writer=https://mcp.bezrabotnyi.com`, 10:12 снимок перезаписан и гейт открыт. Одновременно в том же прогоне монитора `node-mini.t.became.bezrabotnyi.com` тоже отдавал 503 и восстановился вместе с node-intel, то есть закрывались несколько ридеров сразу.
+
+Место проверки: `go-hub/internal/hub/auth_snapshot.go`, функция `authSnapshotGate` (сравнение `state.WriterID` и `s.cfg.AuthSourceID`), и `initializeAuthContinuityLocked`.
+
+Наблюдение, не устранённое здесь: гейт отвечает до ingress-логгера, поэтому в `node.log` ноды в окне отказа нет ни одной записи `ingress … status=503` для `path=/`, хотя внешний клиент получал 503. Пустой нода-лог не доказывает отсутствия отказа.
+
+Рекомендация к продукту (вне зоны ремонта этого инцидента): рестарт ридера не должен оставлять гейт закрытым до получения снимка от текущего лидера, а обновление пакета ноды — переживать потерю лидерства mesh без выставления пользователю 503.
+
+## Несовпадение имени в сертификате для www.became.bezrabotnyi.com
+
+24 ноября 2026 года внешний монитор отмечает `www.became.bezrabotnyi.com` как недоступный: `curl_exit=60`, `SSL: no alternative certificate subject name matches target host name 'www.became.bezrabotnyi.com'`. Сервер отдаёт сертификат `CN=44.bezrabotnyi.com` (SAN-лист на 21.10.2026 содержит `became.bezrabotnyi.com` и `became.bezrabotnyi.com`, но не `www.became.bezrabotnyi.com`), хотя vhost `www.became.bezrabotnyi.com` в nginx node-100 объявлен и использует отдельный `listen 127.0.0.1:8444 ssl` с сертификатом Let's Encrypt для `became.bezrabotnyi.com`.
+
+Воспроизведение: `openssl s_client -connect www.became.bezrabotnyi.com:443 -servername www.became.bezrabotnyi.com` показывает `subject=CN = 44.bezrabotnyi.com` и отсутствие `www.became.bezrabotnyi.com` в SAN; `curl -sS https://www.became.bezrabotnyi.com/` падает с кодом 60.
+
+Место проверки: сертификат `/etc/letsencrypt/live/t.became.bezrabotnyi.com/fullchain.pem` и его SAN-набор на ingress, выдающий сертификат для `44.bezrabotnyi.com`. Не устранено в этом инциденте: правка сертификатов вне зоны отказа node-intel.
+
+Уточнение к правилу проверки ридеров (24 ноября 2026): ридер, у которого в `node.env.json` нет явного `GPTADMIN_AUTH_SOURCE_ID`, не остаётся без источника — `initializeAuthContinuityLocked` (`go-hub/internal/hub/auth_snapshot.go`) подставляет писателя из `config/node-identity.json` (`writer_id`). Такой ридер следует за писателем сам, но всё равно попадает в отказ, если идентичность и применённый снимок обновляются в разное время: в окне аварии 24 ноября `node-mini.t.became.bezrabotnyi.com` отдавал внешним клиентам то же тело `auth source differs from enrolled writer` (54 байта), что и `node-intel`, и восстановился одновременно с ним. Поэтому проверять надо все три идентификатора у каждого ридера, а не только явный пин.
+
+### 2026-11-24 — повторный 503 у ридеров из-за снимка от фолловера (мигание, а не поломка)
+
+24 ноября 2026 года `node-intel.t.became.bezrabotnyi.com` снова уходил во внешний 503, но уже мигающими окнами: продюсер показал 307 в 08:11 UTC, затем 503 в пяти прогонах подряд (08:21, 08:31, 08:42, 08:52, 09:03) и снова 307 в 09:15 и 09:26. Ключ к картине — в журнале ноды в 11:19:30 локального: `node connection established writer=https://s88-node.t.became.bezrabotnyi.com`, а через две минуты пошли 503. `s88-node` при этом фолловер: `/healthz` отдаёт `node_id=250208ba8276dcc81fecad94e4839653`, `role=follower`, `hub_ready=false`, `ok=false`, при `leader_id=bd0bf8c4-…` у лидера на node-100.
+
+Механизм: ридер принимает `writer_id` и `writer_url` из ответа heartbeat того, к кому обратился (`go-hub/internal/hub/node_membership.go`, блок `heartbeatResponse.WriterURL`), и его список маршрутов `quorum_hubs` содержит всех членов кластера вместе с фолловерами. Ответ фолловера приводит к тому, что применённый auth-снимок несёт writer id не того писателя, что закреплён в `GPTADMIN_AUTH_SOURCE_ID`, и гейт читателя закрывается на все защищённые пути (`{"detail":"auth source differs from enrolled writer"}`, 54 байта). Перезапуск ноды лишь кратко поднимает площадку: на диске остаётся последний валидный снимок, а следующая синхронизация снова закрывает гейт.
+
+Место проверки: `go-hub/internal/hub/node_membership.go` (приём writer identity и ротация `quorum_hubs`), `go-hub/internal/hub/auth_snapshot.go` (гейт `authSnapshotGate`), `go-hub/internal/hub/member_executor_queue.go` (`memberWriterRoute`).
+
+Исправление пришло с релизом: в сборке 1152 (commit `17a114b8`) `membershipApplyControlSnapshot` отвергает снимок, чей writer id не совпадает с известным писателем ридера («A snapshot is authoritative only from the pinned writer identity»), и ридер сохраняет последний валидный снимок вместо ухода в 503. Нода на Intel обновилась автопоиском; после обновления в её журнале нет ни одного 503, а источник даёт два подряд здоровых прогона. Отдельного изменения кода в этом инциденте не потребовалось.
+
+Наблюдение для владельца релиза: ридер с явным пином остаётся строгим — после каждой смены авторитетного узла его нужно перепривязывать вручную, а перенос авторитета на новый writer id (`a5a875dd-…` в идентичности hub на node-100 против `bd0bf8c4-…` в пине ридера) оставляет площадку закрытой до перепривязки или до отказа от явного пина.
+
+Уточнение к релизной защите: проверка «снимок авторитетен только от закреплённого писателя» в сборке 1152 сравнивает writer id снимка с **идентичностью ридера** (`nodeIdentity.WriterID`, который сам обновляется из heartbeat-ответов), тогда как гейт читателя сравнивает применённый снимок с **явным пинoм** `GPTADMIN_AUTH_SOURCE_ID`. Поэтому релиз снимает вариант «снимок пришёл от фолловера» (ридер сохраняет последний валидный снимок и не уходит в 503), но не снимает вариант «авторитет переехал на новый writer id»: у ридера с явным пином гейт закроется до ручной перепривязки. В журнале ридера это видно прямо — строки `control snapshot writer mismatch got=<writer снимка> want=<известный писатель>` (24.11 06:07 локального: `got=bd0bf8c4…`, `want=a5a875dd…`; 22.11: `got=f300f838…`, `want=250208ba…`); таких отказов в журнале 512. Их появление — признак рассинхронизации авторитета, а не новая поломка площадки.
+
+### 2026-11-24 — нода на Intel Mac выгружена из launchd: публичная площадка отдаёт 502
+
+24 ноября 2026 года около 15:32 UTC публичная нода `node-intel.t.became.bezrabotnyi.com` начала отдавать внешним клиентам 502 (HTML-страница nginx), тогда как предыдущие эпизоды этого дня давали 503 с JSON-телом гейта. Разные коды — разные классы отказа: 502 означает отсутствие upstream, то есть за туннелем нет процесса.
+
+Картина: туннель и Mac были живы (на node-100 `127.0.0.1:19083` и `127.0.0.1:2223` слушал `sshd`, Mac отвечал по реверс-SSH, loopback-upstream сбрасывал соединение), но на Intel Mac процесс ноды не работал: `com.gptadmin.node` отсутствовал в `launchctl list`, `launchctl print gui/501/com.gptadmin.node` отвечал «service not found», порт 19001 не слушался. Последняя запись `node.log` — 18:34:48 локального (15:34:48 UTC), одновременно с правкой `com.gptadmin.node.plist` в 18:34 и падением одноразовой задачи `com.gptadmin.node.writer-route-reload-20251124` с exit status 5: задача выгрузила сервис и не смогла его поднять.
+
+Место проверки: `gptadmin_node_macos_manage.py status` — `{"installed": true, "build_version": 1152, "launchd_loaded": false, "identity_present": true}`, то есть пакет и идентичность целы, не загружен только launchd. Исправление: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gptadmin.node.plist` → `state = running`, порт 19001 слушается, статус менеджера `launchd_loaded: true`, генерация auth-снимка выросла (2292 → 2296), внешний монитор дал `http=307 healthy=true`.
+
+Наблюдение для владельца lifecycle: `gptadmin_node_macos_manage.py install` перегенерирует plist из `node.env.json` и тем самым отменил бы намерение оператора (в этом эпизоде plist содержал очищенный `GPTADMIN_NODE_WRITER_CONNECT_TO`, а `node.env.json` — прежний адрес). Поднимать выгруженный сервис нужно существующим plist через `launchctl bootstrap`, не через `install`. Отдельно: одноразовая задача, которая выгружает LaunchAgent и затем падает, оставляет ноду выгруженной и площадку на 502 до ручного подъёма — у таких задач должен быть откат, поднимающий сервис.
+
+Продуктовый разрыв, найденный при разборе этого эпизода: `gptadmin_node_macos_autoupdate.py` при совпадающей сборке завершает работу с `{"updated": false, "reason": "already_current"}` и не проверяет состояние launchd. Поэтому выгруженный LaunchAgent ноды автопоиском не восстанавливается: публичная площадка оставалась на 502 около 23 минут, пока сервис не подняли вручную через `launchctl bootstrap`. Место правки: `go-hub`-сборка `scripts/gptadmin_node_macos_autoupdate.py`, функция `update()` — до раннего выхода по `already_current` нужно проверять `launchd_loaded` (например, через `gptadmin_node_macos_manage.py status`) и поднимать сервис существующим plist. Отдельно: одноразовые задачи, выгружающие LaunchAgent, должны иметь откат, поднимающий сервис, иначе одна ошибка оставляет публичную ноду недоступной.
