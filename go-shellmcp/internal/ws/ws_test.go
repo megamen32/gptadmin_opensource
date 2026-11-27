@@ -20,9 +20,9 @@ import (
 	"time"
 )
 
-// ---------- helpers (test-only server-side frame codec) -------------------
+// ---------- helpers (test-only node-side frame codec) -------------------
 
-// serverCodec writes server-to-client frames (unmasked) and reads
+// serverCodec writes node-to-client frames (unmasked) and reads
 // client-to-server frames (masked, per RFC 6455). Used only by tests
 // to drive round-trips over a net.Conn pair.
 type serverCodec struct {
@@ -485,7 +485,7 @@ func TestFragmentedMessageRejected(t *testing.T) {
 
 func TestRunnerDispatchesExecAndWritesResult(t *testing.T) {
 	// We use a manual net.Conn pair so we don't have to mess with the
-	// httptest server-side handshake from inside Runner.
+	// httptest node-side handshake from inside Runner.
 	cli, srvSide := net.Pipe()
 	defer srvSide.Close()
 

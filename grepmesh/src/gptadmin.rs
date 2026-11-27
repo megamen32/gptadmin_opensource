@@ -152,8 +152,8 @@ mod tests {
     fn topology_response_excludes_local_and_preserves_peer_url() {
         let response: TopologyResponse = serde_json::from_value(json!({
             "nodes": [
-                {"host_id":"A","local_url":"http://127.0.0.1:9419/mcp","peer_url":"https://192.168.2.100:9419/mcp","generation":4},
-                {"host_id":"B","local_url":"http://127.0.0.1:9419/mcp","advertise_url":"https://192.168.2.88:9419/mcp","generation":5,"roots":["home"]}
+                {"host_id":"A","local_url":"http://127.0.0.1:9419/mcp","peer_url":"https://203.0.113.10:9419/mcp","generation":4},
+                {"host_id":"B","local_url":"http://127.0.0.1:9419/mcp","advertise_url":"https://203.0.113.10:9419/mcp","generation":5,"roots":["home"]}
             ]
         })).unwrap();
         let result = parse_topology_response(response, "A", 1_700_000_000_000, 30_000).unwrap();
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(result.peers[0].host_id, "B");
         assert_eq!(
             result.peers[0].routable_url,
-            "https://192.168.2.88:9419/mcp"
+            "https://203.0.113.10:9419/mcp"
         );
     }
 
@@ -170,7 +170,7 @@ mod tests {
         let response: TopologyResponse = serde_json::from_value(json!({
             "nodes": [{
                 "host_id": "B",
-                "endpoint": "https://192.168.2.88:9419/mcp",
+                "endpoint": "https://203.0.113.10:9419/mcp",
                 "generation": 5,
                 "capabilities": ["search_text"],
                 "roots": ["home"]
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(result.peers[0].local_url, result.peers[0].routable_url);
         assert_eq!(
             result.peers[0].routable_url,
-            "https://192.168.2.88:9419/mcp"
+            "https://203.0.113.10:9419/mcp"
         );
     }
 

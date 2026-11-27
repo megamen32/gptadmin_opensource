@@ -108,7 +108,7 @@
 		<span class="path-wrap">
 			<input
 				bind:value={path_input}
-				placeholder="/home/roomhacker/project/src/main.go"
+				placeholder="/home/admin/project/src/main.go"
 				spellcheck="false"
 				autocapitalize="off"
 				onkeydown={(e) => {

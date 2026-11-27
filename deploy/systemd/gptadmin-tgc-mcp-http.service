@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=roomhacker
-Group=roomhacker
-WorkingDirectory=/home/roomhacker/PycharmProjects/TelegramAuto
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/PycharmProjects/TelegramAuto
 EnvironmentFile=/etc/gptadmin/mcp-http/tgc-zcode100.env
 Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-ExecStart=/home/roomhacker/PycharmProjects/TelegramAuto/TGC/.venv-mcp/bin/python /home/roomhacker/gptadmin/tools/python_mcp_http.py --config /var/lib/gptadmin/mcp-http/tgc-zcode100/binding.json
+ExecStart=/home/admin/PycharmProjects/TelegramAuto/TGC/.venv-mcp/bin/python /home/admin/gptadmin/tools/python_mcp_http.py --config /var/lib/gptadmin/mcp-http/tgc-zcode100/binding.json
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

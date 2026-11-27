@@ -12,7 +12,7 @@
 
 ## OpenCode
 
-Локально подтверждены `opencode v2.2.4`, команда `run` и подключённый GPTAdmin MCP. Herder native inventory показал активный посторонний OpenCode на server-100; его не занимал. Каталог и локальный `opencode models` подтвердили явный route `omniroute/cx/gpt-6-luna`; native session inspection также подтвердил именно эту модель в изолированной сессии `ses_e49108bbfffeIzz2CkxMpUHo0m`. Model quotas не показывают OmniRoute usage, поэтому квота/авторизация этой модели ими не подтверждена.
+Локально подтверждены `opencode v2.2.4`, команда `run` и подключённый GPTAdmin MCP. Herder native inventory показал активный посторонний OpenCode на node-100; его не занимал. Каталог и локальный `opencode models` подтвердили явный route `omniroute/cx/gpt-6-luna`; native session inspection также подтвердил именно эту модель в изолированной сессии `ses_e49108bbfffeIzz2CkxMpUHo0m`. Model quotas не показывают OmniRoute usage, поэтому квота/авторизация этой модели ими не подтверждена.
 
 В той же изолированной OpenCode native session `ses_e49108bbfffeIzz2CkxMpUHo0m` Luna route завершила один harmless GPTAdmin exec вызов `hub.status`: `ok=true`, 12 серверов, 12 relay jobs, 21 shell jobs, 0 awaiting approvals. Итоговый native session inspection подтвердил `idle`, ту же модель `omniroute/cx/gpt-6-luna` и успешный результат. Точная запись tool receipt: `call_1a597cec85ca4607b0bac90195eb8bcc`. Native usage для model turn, вызвавшего exec: input 346, output 60, reasoning 177, cache read 38400; финальный ответный turn: input 268, output 114, reasoning 0, cache read 38656. Это нативные counters по двум отдельным turns; они не складывают cached input в обычный input.
 

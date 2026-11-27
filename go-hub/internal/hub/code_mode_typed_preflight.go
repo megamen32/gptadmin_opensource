@@ -7,7 +7,7 @@ import (
 	"github.com/fastschema/qjs"
 )
 
-// prepared schemas are trusted server-discovered MCP contracts, never
+// prepared schemas are trusted node-discovered MCP contracts, never
 // tool-defined content supplied back by the client to bypass validation.
 func (b *codeModeBridge) cachePreparedSchema(target, tool string, schema any) {
 	b.mu.Lock()

@@ -55,7 +55,7 @@ def main():
     binary = args.node_binary.resolve(strict=True)
     pty = args.pty_mcp_executable.absolute()
     pty.resolve(strict=True)
-    account = pwd.getpwnam('roomhacker')
+    account = pwd.getpwnam('admin')
     root = args.workdir.resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.chown(root, account.pw_uid, account.pw_gid)
@@ -90,7 +90,7 @@ def main():
     supervisor.chmod(0o600)
     os.chown(supervisor, account.pw_uid, account.pw_gid)
     env = {
-        'PATH': '/home/roomhacker/bin:/home/roomhacker/.bun/bin:/home/roomhacker/.npm-global/bin:/usr/local/bin:/usr/bin:/bin',
+        'PATH': '/home/admin/bin:/home/admin/.bun/bin:/home/admin/.npm-global/bin:/usr/local/bin:/usr/bin:/bin',
         'HOME': str(root / 'home'), 'LANG': 'C.UTF-8',
         'GPTADMIN_HUB_HOST': '127.0.0.1', 'GPTADMIN_HUB_PORT': str(port),
         'GPTADMIN_ROOT': str(root), 'GPTADMIN_CONFIG_DIR': str(root / 'config'),

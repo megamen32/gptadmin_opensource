@@ -12,17 +12,17 @@ const events = [
   {
     time: "2026-10-23T01:03:00+03:00",
     name: "cloudos_auth_denied",
-    fields: { host: "mcp.example", path: "/heartbeat", server_id: "server-a", client_id: "consumer-a", method: "POST", status: 403, detail: "first", trace_id: "trace-a" }
+    fields: { host: "mcp.example", path: "/heartbeat", server_id: "node-a", client_id: "consumer-a", method: "POST", status: 403, detail: "first", trace_id: "trace-a" }
   },
   {
     time: "2026-10-23T01:02:00+03:00",
     name: "cloudos_auth_denied",
-    fields: { host: "mcp.example", path: "/pair", server_id: "server-a", client_id: "consumer-a", method: "POST", status: 403 }
+    fields: { host: "mcp.example", path: "/pair", server_id: "node-a", client_id: "consumer-a", method: "POST", status: 403 }
   },
   {
     time: "2026-10-23T01:01:00+03:00",
     name: "cloudos_auth_denied",
-    fields: { host: "other.example", path: "/heartbeat", server_id: "server-b", client_id: "consumer-b", method: "POST", status: 403 }
+    fields: { host: "other.example", path: "/heartbeat", server_id: "node-b", client_id: "consumer-b", method: "POST", status: 403 }
   }
 ];
 
@@ -160,7 +160,7 @@ it("combines host, endpoint, server, and consumer filters against real event fie
   await user.type(screen.getByLabelText("Поиск"), "cloudos_auth_denied");
   await user.type(screen.getByLabelText("Хост MCP"), "mcp.example");
   await user.type(screen.getByLabelText("Endpoint"), "heartbeat");
-  await user.type(screen.getByLabelText("Сервер"), "server-a");
+  await user.type(screen.getByLabelText("Сервер"), "node-a");
   await user.type(screen.getByLabelText("Потребитель"), "consumer-a");
   await user.click(screen.getByRole("button", { name: "Найти" }));
 

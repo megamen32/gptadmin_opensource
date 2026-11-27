@@ -190,7 +190,7 @@ assert hashlib.sha256(pathlib.Path(config).read_bytes()).hexdigest()==csha
 assert hashlib.sha256(pathlib.Path(wrapper).read_bytes()).hexdigest()==wsha
 prior=subprocess.run(['systemctl','show',unit,'-p','LoadState','--value'],capture_output=True,text=True,check=True).stdout.strip()
 assert prior=='not-found','existing external launch must be reconciled'
-argv=['sudo','-n','systemd-run','--unit='+unit,'--uid=roomhacker','--property=Type=exec','--property=Restart=no','--property=KillMode=mixed','--property=TimeoutStopSec=20s','--working-directory='+str(pathlib.Path(path).parent),'/usr/bin/python3',wrapper,'--config',config,'--config-sha256',csha,'--fleet']
+argv=['sudo','-n','systemd-run','--unit='+unit,'--uid=admin','--property=Type=exec','--property=Restart=no','--property=KillMode=mixed','--property=TimeoutStopSec=20s','--working-directory='+str(pathlib.Path(path).parent),'/usr/bin/python3',wrapper,'--config',config,'--config-sha256',csha,'--fleet']
 r=subprocess.run(argv,capture_output=True,text=True,timeout=25);assert r.returncode==0,'external dispatch did not confirm'
 deadline=time.monotonic()+5
 while time.monotonic()<deadline:

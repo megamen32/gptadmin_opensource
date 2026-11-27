@@ -41,7 +41,7 @@ python3 scripts/gptadmin_socket_bootstrap.py migrate \
   --release-lease-owner-harness <harness> \
   --release-lease-owner-session <session> \
   --operation-id gptadmin-bootstrap:<candidate-sha> \
-  --public-origin https://gptadmin.bezrabotnyi.com
+  --public-origin https://became.bezrabotnyi.com
 ```
 
 The command refuses a dirty checkout, package mismatch, unknown nginx upstream, occupied bridge port, active canonical socket, foreign/incomplete receipt, or release lease mismatch.

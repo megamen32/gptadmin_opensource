@@ -3,8 +3,8 @@ set -u
 
 CONFIG_FILE="/etc/gptadmin/gptadmin.env"
 ADB_BIN="${ADB_BIN:-/usr/bin/adb}"
-ADB_USER="${ADB_USER:-roomhacker}"
-ADB_HOME="${ADB_HOME:-/home/roomhacker}"
+ADB_USER="${ADB_USER:-admin}"
+ADB_HOME="${ADB_HOME:-/home/admin}"
 BASE="/data/local/tmp/gptadmin"
 RUN="$BASE/run.sh"
 RUN_ONCE="$BASE/run-once.sh"
@@ -55,7 +55,7 @@ start_shellmcp() {
     fi
 }
 
-log "starting S21 ShellMCP polling maintainer on roomhacker-server-100"
+log "starting S21 ShellMCP polling maintainer on admin-node-100"
 adb_base start-server || { log "adb start-server failed"; exit 0; }
 if [[ "$SERIAL" == *:* ]]; then
     adb_base connect "$SERIAL" >/dev/null 2>&1 || true

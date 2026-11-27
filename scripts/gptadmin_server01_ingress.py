@@ -10,7 +10,7 @@ bearer. Repeat the server100 check with HAOS absent in the isolated rehearsal.
 Validate the private candidate on OpenWrt with haproxy -c -f /dev/stdin.
 After operator approval, the existing swap helper accepts this invocation on the
 gateway (the candidate and both reviewed digests are supplied by the operator):
-  sh gptadmin_haos_ingress_swap.sh --openwrt-became CANDIDATE BASE_SHA256 NEW_SHA256
+  sh gptadmin_haos_ingress_swap.sh --server01-became CANDIDATE BASE_SHA256 NEW_SHA256
 It saves /etc/gptadmin-wan-before.BASE_SHA256.cfg, checks the procd master and
 gracefully reloads just that master. Verify the three public names from WAN.
 For rollback pass the saved file, NEW_SHA256 and BASE_SHA256 to the same helper.
@@ -34,12 +34,12 @@ from urllib.parse import urlsplit
 from gptadmin_failover_proxy import IDENTIFIER
 from gptadmin_quorum_ingress import section, write_new
 
-HUB_NAMES = ("mcp.bezrabotnyi.com", "gptadminmcp.bezrabotnyi.com",
-             "u-f1102930.t.gptadmin.bezrabotnyi.com")
+HUB_NAMES = ("mcp.bezrabotnyi.com", "mcp-admin.example.com",
+             "your-subdomain.t.became.bezrabotnyi.com")
 ISSUER = "https://" + HUB_NAMES[0]
-SERVER100 = "192.168.2.100"
-VOTERS = {SERVER100, "192.168.2.5", "192.168.2.75"}
-TLS_TARGETS = {"haos": ("192.168.2.101", 8443), "server100": (SERVER100, 443)}
+SERVER100 = "192.0.2.2"
+VOTERS = {SERVER100, "192.0.2.3", "192.0.2.4"}
+TLS_TARGETS = {"haos": ("192.0.2.5", 8443), "server100": (SERVER100, 443)}
 CA = "/etc/ssl/certs/ca-certificates.crt"
 PREFIX = "gptadmin_wan_"
 DISCOVERY = "/.well-known/oauth-authorization-server"
@@ -76,7 +76,7 @@ class Enrollment:
                 or not all(isinstance(v, str) and IDENTIFIER.fullmatch(v)
                            for v in (info["cluster_id"], *ids.values()))):
             raise GatewayError("review the cluster and all three enrolled identities on server 100")
-        return cls(info["cluster_id"], ids[SERVER100], (ids["192.168.2.5"], ids["192.168.2.75"]))
+        return cls(info["cluster_id"], ids[SERVER100], (ids["192.0.2.3"], ids["192.0.2.4"]))
 
 
 def health_pattern(enrolled: Enrollment, route: str, follower: bool) -> str:
@@ -151,7 +151,7 @@ def render(base: str, enrolled: Enrollment, ca: str = CA) -> str:
     # This service is small and independently managed. Require its reviewed
     # semantics; a new wildcard ACL before our rules would shadow this change.
     if directives(front[0]) != [
-        ["bind", "192.168.2.1:19443"], ["tcp-request", "inspect-delay", "4s"],
+        ["bind", "192.0.2.1:19443"], ["tcp-request", "inspect-delay", "4s"],
         ["tcp-request", "content", "accept", "if", "{", "req.ssl_hello_type", "1", "}"],
         ["acl", "is_became", "req.ssl_sni", "-i", "became.bezrabotnyi.com"],
         ["use_backend", "public_became", "if", "is_became"], ["default_backend", "existing_haos_ingress"],

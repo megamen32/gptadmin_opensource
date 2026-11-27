@@ -449,7 +449,7 @@ class NodeAutoupdateTests(unittest.TestCase):
     def test_proxy_route_installer_installs_fixed_unit_but_never_starts_it(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);layout=manager.Layout(opt_root=root/'node',
-                proxy_route_unit_path=root/'etc/systemd/gptadmin-proxy-route-vusa.service',
+                proxy_route_unit_path=root/'etc/systemd/gptadmin-proxy-route-relay02.service',
                 proxy_route_state_file=root/'var/lib/gptadmin-node/proxy-route.json')
             archive=package(root);calls=[]
             class SystemdRunner:
@@ -463,7 +463,7 @@ class NodeAutoupdateTests(unittest.TestCase):
             with patch.object(manager,'require_root'),patch.object(manager,'host_arch',return_value='amd64'), \
                  patch.object(manager,'systemctl',side_effect=fake_systemctl):
                 manager.cmd_proxy_route_install(SimpleNamespace(package=str(archive)),layout,SystemdRunner())
-            self.assertIn('User=roomhacker',layout.proxy_route_unit_path.read_text())
+            self.assertIn('User=admin',layout.proxy_route_unit_path.read_text())
             self.assertEqual(calls,[('is-active',manager.PRIMARY_SERVICE),('daemon-reload',)])
             state=json.loads(layout.proxy_route_state_file.read_text())
             self.assertEqual(state['schema'],'gptadmin.proxy-route-package/v1')

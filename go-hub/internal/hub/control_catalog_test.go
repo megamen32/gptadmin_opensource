@@ -13,7 +13,7 @@ func TestControlCatalogDescribesActualWritersAndCurrentValues(t *testing.T) {
 	s.mu.Lock()
 	s.settings.Values["fleet_auto_update_enabled"] = false
 	s.settings.Values["shell_queue_retry_seconds"] = 17
-	s.failover = FailoverConfig{Enabled: true, CheckIntervalSec: 9, Nodes: []FailoverNode{{ServerID: "server-44", Enabled: true}}}
+	s.failover = FailoverConfig{Enabled: true, CheckIntervalSec: 9, Nodes: []FailoverNode{{ServerID: "node-44", Enabled: true}}}
 	s.webhookRoutes["route-a"] = WebhookRoute{ID: "route-a", Token: "DO_NOT_LEAK_TOKEN", Action: WebhookAction{Kind: "mcp", Target: "hub", Tool: "status"}}
 	s.agents["shell:catalog-host"] = &Agent{AgentID: "shell:catalog-host", Meta: map[string]any{"mcp_agents": []any{map[string]any{"ref": "agentherder", "enabled": true}}}}
 	s.mu.Unlock()

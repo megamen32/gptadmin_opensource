@@ -15,7 +15,7 @@ func TestParseFleetTransferAllowlistRequiresCanonicalDistinctPairs(t *testing.T)
 	}
 	for _, raw := range []string{
 		`[{"source":"shell:node-a","destination":"file:node-b"}]`,
-		`[{"source":"file:homeassistant","destination":"file:node-b"}]`,
+		`[{"source":"file:server01","destination":"file:node-b"}]`,
 		`[{"source":"file:node-a","destination":"file:node-a"}]`,
 		`[{"source":"file:node-a","destination":"file:node-b","extra":true}]`,
 	} {

@@ -49,7 +49,7 @@ def test_admin_ui_exposes_heartbeat_as_an_explicit_setting() -> None:
 def test_homeassistant_runtime_keeps_heartbeat_opt_in() -> None:
     """The add-on launcher must not override its false schema default."""
     root = cli.Path(__file__).resolve().parents[1]
-    run_script = (root / "deploy/homeassistant/gptadmin_shellmcp/run.sh").read_text()
+    run_script = (root / "deploy/server01/gptadmin_shellmcp/run.sh").read_text()
     assert 'SHELL_HEARTBEAT="$(opt heartbeat \'false\')"' in run_script
 
 

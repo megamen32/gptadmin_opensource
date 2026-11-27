@@ -32,7 +32,7 @@ class SourceRecoveryTests(unittest.TestCase):
                          'principal_id': 'worker', 'incident_role': 'executor'}})
         self.event = dict(schema='notify.event.v1', kind='incident', severity='notice',
             project='gptadmin-ci-autofix', recipient='fixture', title='CI', dedup_key=self.item['key'],
-            event_type='health.degraded', source_id='gptadmin-ci-autofix', host_id='roomhacker-server-100',
+            event_type='health.degraded', source_id='gptadmin-ci-autofix', host_id='admin-node-100',
             signal_type='github_ci', correlation_id=self.item['key'])
         self.incident = self.center.create_event('source', 'open', self.event)['incident_id']
         self.center.record_work_finished('executor', self.incident, 'finish',

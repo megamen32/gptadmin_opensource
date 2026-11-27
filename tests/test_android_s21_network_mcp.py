@@ -16,7 +16,7 @@ SERVICE = ROOT / "deploy" / "systemd" / "android-s21-network-mcp-tunnel.service"
 def test_tunnel_is_network_native_and_boot_persistent() -> None:
     unit = SERVICE.read_text(encoding="utf-8")
 
-    assert "User=roomhacker" in unit
+    assert "User=admin" in unit
     assert "127.0.0.1:18080:127.0.0.1:8080" in unit
     assert "-p 22220 127.0.0.1" in unit
     assert "ExitOnForwardFailure=yes" in unit

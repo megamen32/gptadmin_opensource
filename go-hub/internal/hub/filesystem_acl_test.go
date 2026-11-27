@@ -79,7 +79,7 @@ func TestGrepMeshReadCallCarriesTheExistingFilesystemACLQueueBinding(t *testing.
 		"ref": "GrepMesh", "name": "search",
 		"arguments": map[string]any{"query": "fixture marker", "roots": []any{"docs"}},
 	}
-	policy, err := filesystemACLForRequest(request, "shell:server-100", "mcp_call", args)
+	policy, err := filesystemACLForRequest(request, "shell:node-100", "mcp_call", args)
 	if err != nil || policy == nil {
 		t.Fatalf("filesystem ACL policy=%#v err=%v", policy, err)
 	}
@@ -91,7 +91,7 @@ func TestGrepMeshReadCallCarriesTheExistingFilesystemACLQueueBinding(t *testing.
 		{"ref": "OtherMCP", "name": "search"},
 		{"ref": "GrepMesh", "name": "find_duplicates"},
 	} {
-		if _, err := filesystemACLForRequest(request, "shell:server-100", "mcp_call", bad); err == nil {
+		if _, err := filesystemACLForRequest(request, "shell:node-100", "mcp_call", bad); err == nil {
 			t.Fatalf("filesystem-bound child call was not denied: %#v", bad)
 		}
 	}

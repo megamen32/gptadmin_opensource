@@ -32,7 +32,7 @@ rather than inventing a command-line equivalent.
 ### Literal command arguments
 
 ```javascript
-const r = await mcp.shell('shell:server-100', ['printf', '%s', `it's "quoted"; $HOME`]);
+const r = await mcp.shell('shell:node-100', ['printf', '%s', `it's "quoted"; $HOME`]);
 return r.stdout;
 ```
 
@@ -43,7 +43,7 @@ const source = String.raw`
 import json
 print(json.dumps({'name': "it's quoted", 'message': 'Привет 🌍'}, ensure_ascii=False))
 `;
-const r = await mcp.shell('shell:server-100', ['python3', '-'], {stdin: source});
+const r = await mcp.shell('shell:node-100', ['python3', '-'], {stdin: source});
 return {exit_code: r.exit_code, stdout: r.stdout, stderr: r.stderr};
 ```
 
@@ -53,7 +53,7 @@ return {exit_code: r.exit_code, stdout: r.stdout, stderr: r.stderr};
 const ruby = String.raw`
 puts({message: "it's working", total: 1 + 2}.inspect)
 `;
-const r = await mcp.shell('shell:server-44',
+const r = await mcp.shell('shell:node-44',
   ['docker', 'exec', '-i', 'web-container', 'bundle', 'exec', 'rails', 'runner', '-'],
   {stdin: ruby, timeout: 30});
 return r;
@@ -63,7 +63,7 @@ Use `-i` for Docker stdin. Confirm the container and Rails command support sourc
 
 ### Persistent scripts or source containing backticks
 
-Use `mcp.files.create('file:server-100', '/tmp/inspect.rb', source)` (or the `file_editor` MCP tool with `action: 'create'`) to write the exact source. Then use native argv to run the saved file. Prefer this approach when the source contains JavaScript template delimiters or exceeds the Code Mode source budget.
+Use `mcp.files.create('file:node-100', '/tmp/inspect.rb', source)` (or the `file_editor` MCP tool with `action: 'create'`) to write the exact source. Then use native argv to run the saved file. Prefer this approach when the source contains JavaScript template delimiters or exceeds the Code Mode source budget.
 
 ## Limits and reliability
 

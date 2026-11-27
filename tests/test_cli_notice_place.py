@@ -246,7 +246,7 @@ class NoticePlaceInstallTests(unittest.TestCase):
         plugin = self._home / '.codex' / 'plugins' / 'cache' / 'noticeplace-local' / 'noticeplace' / '0.1.0'
         _write_json(plugin / 'mcp.codex.json', {'mcpServers': {
             'noticeplace': {'command': '/opt/noticeplace/bin/ask-human-mcp', 'args': [],
-                            'env': {'ASK_HUMAN_ENV_FILE': '/home/roomhacker/.config/ask-human/env'}}}})
+                            'env': {'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'}}}})
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text('[plugins."noticeplace@noticeplace-local"]\nenabled = true\n')
         report = cli._notice_place_install_client('codex', True)
@@ -260,7 +260,7 @@ class NoticePlaceInstallTests(unittest.TestCase):
         plugin = self._home / '.zcode' / 'cli' / 'plugins' / 'cache' / 'noticeplace-local' / 'noticeplace' / '0.1.0'
         _write_json(plugin / 'mcp.codex.json', {'mcpServers': {
             'noticeplace': {'command': '/opt/noticeplace/bin/ask-human-mcp', 'args': [],
-                            'env': {'ASK_HUMAN_ENV_FILE': '/home/roomhacker/.config/ask-human/env'}}}})
+                            'env': {'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'}}}})
         _write_json(config, {'mcp': {'servers': {'AskHuman': {'url': 'https://notify.bezrabotnyi.com/mcp',
                                                               'enabled': False},
                                                 'peer': {'url': 'https://peer.example/mcp'}}},
@@ -280,7 +280,7 @@ class NoticePlaceInstallTests(unittest.TestCase):
         _write_json(first, {'mcp': {'noticeplace': {'type': 'local',
                                                     'command': ['/opt/noticeplace/bin/ask-human-mcp'],
                                                     'enabled': True,
-                                                    'environment': {'ASK_HUMAN_ENV_FILE': '/home/roomhacker/.config/ask-human/env'}}}})
+                                                    'environment': {'ASK_HUMAN_ENV_FILE': '/home/admin/.config/ask-human/env'}}}})
         _write_json(second, {'mcp': {'notify': {'type': 'local',
                                                  'command': ['/opt/noticeplace/bin/ask-human-mcp'],
                                                  'enabled': True}}})
@@ -326,7 +326,7 @@ class NoticePlaceInstallTests(unittest.TestCase):
         self.assertEqual('local', cli._notice_place_backend({'command': '/opt/noticeplace/mcp/notify_mcp.py'}))
         self.assertIsNone(cli._notice_place_backend({'url': 'https://msg.bezrabotnyi.com/mcp'}))
         self.assertIsNone(cli._notice_place_backend({'url': 'https://pswd.bezrabotnyi.com/mcp'}))
-        self.assertIsNone(cli._notice_place_backend({'command': '/home/roomhacker/.local/bin/agent-herder'}))
+        self.assertIsNone(cli._notice_place_backend({'command': '/home/admin/.local/bin/agent-herder'}))
         self.assertIsNone(cli._notice_place_backend(None))
 
     def test_host_without_the_notice_place_release_keeps_the_alias_until_the_point_is_proven(self):

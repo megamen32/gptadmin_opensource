@@ -27,7 +27,7 @@ def load(name, filename):
 api = load('guard_contract_under_test', 'gptadmin_authority_release_guard.py')
 wrapper = load('guarded_contract_under_test', 'gptadmin_authority_guarded.py')
 NODES = {'100', '44', '88', 'mac_mini', 'mac_intel', 'haos'}
-OWNER = {'hostId': 'roomhacker-server-100', 'harness': 'chatgpt',
+OWNER = {'hostId': 'admin-node-100', 'harness': 'chatgpt',
          'nativeSessionId': '/root/close_gptadmin'}
 
 

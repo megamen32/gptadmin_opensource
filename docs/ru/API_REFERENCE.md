@@ -75,7 +75,7 @@ first возвращает только `request_id`, `input_url`, `secret_ref`,
 | `POST` | `/admin/api/mcp/issue-token` | Выпустить MCP bearer по `client_id`, необязательным `profile_id`, `role`, `ttl_days` и `access_mode`. Режим: `full` или `readonly` (по умолчанию `full`); `ttl_days: 0` выбирает срок по умолчанию на сервере. Ответ один раз содержит секретный `access_token`. |
 | `POST` | `/admin/api/servers/resources` | Запросить текущий снимок ресурсов у точного узла `shell:<id>`. |
 | `GET` | `/admin/api/jobs?server_id=shell:<id>&limit=1` | Получить последнее сохранённое задание ровно этого shell-узла: фильтрация по точному ID выполняется до сортировки и лимита. История доступна и при отключённом узле. |
-| `GET` / `PUT` | `/admin/api/proxy-route` | Прочитать или сохранить фиксированный профиль proxy-route VUSA → server-44. |
+| `GET` / `PUT` | `/admin/api/proxy-route` | Прочитать или сохранить фиксированный профиль proxy-route VUSA → node-44. |
 | `POST` | `/admin/api/proxy-route/{enable,disable,reconcile,probe}` | Управлять этим фиксированным маршрутом или проверять его. |
 
 В инвентаре overview могут присутствовать сам Hub (`hub`), реальные дочерние
@@ -102,8 +102,8 @@ MCP (`real_mcp`), удалённые ShellMCP-узлы (`virtual_shell`), вну
 не означает, что узел недавно ответил или сейчас в сети.
 
 Профиль proxy-route ограничен исходным кодом: потребитель VUSA, DE HTTP выход
-через server-44, loopback listener `127.0.0.1:24836` и существующая ссылка на
-SSH-идентичность `ssh-config:vusa`. `GET` отдельно показывает сохранённый
+через node-44, loopback listener `127.0.0.1:24836` и существующая ссылка на
+SSH-идентичность `ssh-config:relay02`. `GET` отдельно показывает сохранённый
 профиль и состояние службы, listener и последней проверки. По умолчанию
 желаемое состояние — disabled; контракт API не утверждает, что маршрут включён
 или работает.
@@ -123,7 +123,7 @@ SSH-идентичность `ssh-config:vusa`. `GET` отдельно пока�
 ```json
 {
   "servers": [
-    { "name": "server-01", "url": "http://10.0.0.5:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```
@@ -134,7 +134,7 @@ SSH-идентичность `ssh-config:vusa`. `GET` отдельно пока�
 
 ```json
 {
-  "server": "server-01",
+  "server": "node-01",
   "cmd": "systemctl status nginx"
 }
 ```
@@ -158,7 +158,7 @@ SSH-идентичность `ssh-config:vusa`. `GET` отдельно пока�
 
 Перед редактированием создайте управляемую резервную копию файла.
 
-### `GET /system/info?server=server-01`
+### `GET /system/info?server=node-01`
 
 ЦП, ОЗУ, диск, время безотказной работы целевого агента.
 

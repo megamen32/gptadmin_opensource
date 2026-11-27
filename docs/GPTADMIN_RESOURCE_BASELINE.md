@@ -5,7 +5,7 @@
 
 ## Artifact and setup
 
-The tested package was the pre-existing `gptadmin-node-linux-amd64.tar.gz` from `/home/roomhacker/.codex/worktrees/e1a2/gptadmin/.tmp/node-packages`. Its SHA-256 is `cd69ea3fe30ad83ec16f96e46e596bbc1ab88b6188b0c4cd31e33310a8e9f394`; the embedded manifest says version **1104**, source commit `e791f763564db0bf6b2640949033c6d6cb2d751f`, and `source_dirty=false`.
+The tested package was the pre-existing `gptadmin-node-linux-amd64.tar.gz` from `/home/admin/.codex/worktrees/e1a2/gptadmin/.tmp/node-packages`. Its SHA-256 is `cd69ea3fe30ad83ec16f96e46e596bbc1ab88b6188b0c4cd31e33310a8e9f394`; the embedded manifest says version **1104**, source commit `e791f763564db0bf6b2640949033c6d6cb2d751f`, and `source_dirty=false`.
 
 The container was `gptadmin-systemd-acceptance:24.04`; it ran the extracted package binary with a disposable empty config, loopback-only published port `19011`, and test-only auth values. The mounted package was read-only. Applied cgroup readback was `memory.max=1073741824`, `memory.swap.max=0`, `cpu.max=200000 100000`. The earlier `GOMEMLIMIT` setting was not used as a substitute for the kernel memory cgroup.
 

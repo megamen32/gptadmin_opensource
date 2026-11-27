@@ -9,7 +9,7 @@ import (
 )
 
 func TestPTYServiceControlContract(t *testing.T) {
-	local := supervisor.Agent{Ref: "PtyMcp", Name: "pty-mcp", Transport: "stdio", Command: "/home/roomhacker/.npm-global/bin/pty-mcp"}
+	local := supervisor.Agent{Ref: "PtyMcp", Name: "pty-mcp", Transport: "stdio", Command: "/home/admin/.npm-global/bin/pty-mcp"}
 	remote := local
 	remote.Transport, remote.URL = "streamable-http", "https://remote.invalid/mcp"
 	fileChild := local

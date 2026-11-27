@@ -5,10 +5,10 @@ import ActivityScreen from "./ActivityScreen";
 
 const when = new Date(Date.now() - 20000).toISOString();
 const events = [
-  { time: when, name: "tool_policy_decision", fields: { client_id: "grepmesh", actor: "grepmesh", tool: "find_paths", target: "shell:server-44", policy_decision: "allow", status: 200, result_reference: "inline" } },
-  { time: when, name: "tool_policy_decision", fields: { client_id: "opencode", actor: "opencode", tool: "shell_exec", target: "shell:server-100", policy_decision: "allow", status: 200, trace_id: "trace-other", result_reference: "job-1" } },
+  { time: when, name: "tool_policy_decision", fields: { client_id: "grepmesh", actor: "grepmesh", tool: "find_paths", target: "shell:node-44", policy_decision: "allow", status: 200, result_reference: "inline" } },
+  { time: when, name: "tool_policy_decision", fields: { client_id: "opencode", actor: "opencode", tool: "shell_exec", target: "shell:node-100", policy_decision: "allow", status: 200, trace_id: "trace-other", result_reference: "job-1" } },
 ];
-const jobs = [{ job_id: "job-1", status: "completed", server_id: "shell:server-100", tool_name: "shell_exec", started_at: (Date.now() - 22000) / 1000, completed_at: (Date.now() - 19000) / 1000 }];
+const jobs = [{ job_id: "job-1", status: "completed", server_id: "shell:node-100", tool_name: "shell_exec", started_at: (Date.now() - 22000) / 1000, completed_at: (Date.now() - 19000) / 1000 }];
 
 function mockActivity() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -52,7 +52,7 @@ it("shows caller, target, recorded trace and real job details by clicking operat
   await user.click(screen.getByRole("button", { name: /shell_exec/ }));
   const detail = await screen.findByRole("complementary", { name: "Детали операции" });
   expect(within(detail).getAllByText("opencode").length).toBeGreaterThan(0);
-  expect(within(detail).getByText("shell:server-100")).toBeInTheDocument();
+  expect(within(detail).getByText("shell:node-100")).toBeInTheDocument();
   expect(within(detail).getByText("trace-other")).toBeInTheDocument();
   expect(await within(detail).findByText(/"stdout": "ok"/)).toBeInTheDocument();
   expect(within(detail).getByText("3.0 с")).toBeInTheDocument();
@@ -61,7 +61,7 @@ it("shows caller, target, recorded trace and real job details by clicking operat
 it("defaults to compact groups, reveals every grouped call and makes parallel layout opt-in", async () => {
   const crowded = Array.from({ length: 30 }, (_, index) => ({
     time: when, name: "tool_policy_decision",
-    fields: { client_id: "zai", tool: "tool_" + index, target: "server-100", status: 200 },
+    fields: { client_id: "zai", tool: "tool_" + index, target: "node-100", status: 200 },
   }));
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
     new Response(JSON.stringify(String(input).includes("/audit?")

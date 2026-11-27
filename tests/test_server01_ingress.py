@@ -7,7 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import gptadmin_openwrt_ingress as gateway
+import gptadmin_server01_ingress as gateway
 
 
 def gateway_base():
@@ -19,16 +19,16 @@ defaults
     timeout client 120s
     timeout server 120s
 frontend public_https_sni
-    bind 192.168.2.1:19443
+    bind 192.0.2.1:19443
     tcp-request inspect-delay 4s
     tcp-request content accept if { req.ssl_hello_type 1 }
     acl is_became req.ssl_sni -i became.bezrabotnyi.com
     use_backend public_became if is_became
     default_backend existing_haos_ingress
 backend public_became
-    server website100 192.168.2.100:443 check inter 3s fall 2 rise 2
+    server website100 192.0.2.2:443 check inter 3s fall 2 rise 2
 backend existing_haos_ingress
-    server haos_ingress 192.168.2.101:8443 check inter 3s fall 2 rise 2
+    server haos_ingress 192.0.2.5:8443 check inter 3s fall 2 rise 2
 """
 
 
@@ -38,7 +38,7 @@ MEMBERS = gateway.Enrollment("cluster.1", "n-100", ("n-44", "n-88"))
 @pytest.mark.parametrize("mode", [None, "owner_local", "replicated"])
 def test_enrollment_requires_direct_voter_addresses_and_owner_local(tmp_path, mode):
     peers = [{"id": n, "internal_hub_url": "https://" + ip + ":9500"}
-             for n, ip in zip(("n-100", "n-44", "n-88"), ("192.168.2.100", "192.168.2.5", "192.168.2.75"))]
+             for n, ip in zip(("n-100", "n-44", "n-88"), ("192.0.2.2", "192.0.2.3", "192.0.2.4"))]
     info = {"node_id": "n-100", "cluster_id": "cluster.1", "peers": peers}
     if mode is not None:
         info["mode"] = mode
@@ -49,8 +49,8 @@ def test_enrollment_requires_direct_voter_addresses_and_owner_local(tmp_path, mo
             gateway.Enrollment.read(path)
         return
     assert gateway.Enrollment.read(path) == MEMBERS
-    for invalid in ("https://192.168.2.101:8443", "https://mcp.bezrabotnyi.com",
-                    "http://192.168.2.5:9500", "https://192.168.2.100:9501"):
+    for invalid in ("https://192.0.2.5:8443", "https://mcp.bezrabotnyi.com",
+                    "http://192.0.2.3:9500", "https://192.0.2.2:9501"):
         peers[1]["internal_hub_url"] = invalid
         path.write_text(json.dumps(info))
         with pytest.raises(ValueError):
@@ -73,7 +73,7 @@ def test_original_routes_and_tls_policy():
     assert candidate.count("use_backend gptadmin_wan_closed if ") == len(gateway.HUB_NAMES)
     for unsafe in (candidate, base.replace("is_became req.ssl_sni", "is_became req.ssl_sni -m end"),
                    base.replace("default_backend", "use_backend new if from_lan\n    default_backend"),
-                   base.replace("192.168.2.101:8443", "192.168.2.1:19443")):
+                   base.replace("192.0.2.5:8443", "192.0.2.1:19443")):
         with pytest.raises(ValueError):
             gateway.render(unsafe, MEMBERS)
 
@@ -179,8 +179,8 @@ def test_tcp_gateway_health_and_single_post(tmp_path):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         text = gateway.render(gateway_base(), MEMBERS, str(cert))
-        for original, chosen in (("192.168.2.1:19443", port), ("192.168.2.101:8443", primary.server_port),
-                                 ("192.168.2.100:443", backup.server_port)):
+        for original, chosen in (("192.0.2.1:19443", port), ("192.0.2.5:8443", primary.server_port),
+                                 ("192.0.2.2:443", backup.server_port)):
             text = text.replace(original, f"127.0.0.1:{chosen}")
         path = tmp_path / "gateway.cfg"
         path.write_text(text.replace("inter 4s", "inter 150ms"))

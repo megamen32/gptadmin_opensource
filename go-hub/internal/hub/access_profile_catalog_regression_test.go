@@ -24,13 +24,13 @@ func TestBoundFullCatalogIncludesAllowedSearchAndExec(t *testing.T) {
 		ID:             "qa23-acl-write-20261023",
 		AccessMode:     accessModeFull,
 		ApprovalMode:   approvalModeUnrestricted,
-		AllowedTargets: []string{"hub", "file:server-44"},
+		AllowedTargets: []string{"hub", "file:node-44"},
 		AllowedTools:   []string{"exec", "search", "file_editor", "system_inspect"},
 		ReadRoots:      &readRoots,
 		WriteRoots:     &writeRoots,
 		ToolRules: []AccessToolRule{
-			{Target: "file:server-44", Tool: "file_editor", Actions: []string{"view", "create", "str_replace", "batch_edit", "delete"}},
-			{Target: "file:server-44", Tool: "system_inspect", Actions: []string{"read_file", "list_directory"}, ReadOnly: true},
+			{Target: "file:node-44", Tool: "file_editor", Actions: []string{"view", "create", "str_replace", "batch_edit", "delete"}},
+			{Target: "file:node-44", Tool: "system_inspect", Actions: []string{"read_file", "list_directory"}, ReadOnly: true},
 		},
 	}
 	r := requestWithAuthClaims(
@@ -125,7 +125,7 @@ func TestBoundFullCatalogDoesNotRelaxNestedTargetOrActionGates(t *testing.T) {
 	if err := authorizeFacadeCall(r, "exec", map[string]any{"code": "return 1;"}); err != nil {
 		t.Fatalf("profile-authorized exec facade was denied: %v", err)
 	}
-	if err := authorizeToolAction(r, "file:server-44", "file_editor", map[string]any{"action": "create", "path": "/tmp/qa23-write-profile/write-a/new.txt"}); err == nil || !strings.Contains(err.Error(), "access profile denies") {
+	if err := authorizeToolAction(r, "file:node-44", "file_editor", map[string]any{"action": "create", "path": "/tmp/qa23-write-profile/write-a/new.txt"}); err == nil || !strings.Contains(err.Error(), "access profile denies") {
 		t.Fatalf("nested call escaped the profile target boundary: %v", err)
 	}
 	if err := authorizeToolAction(r, "file:other", "file_editor", map[string]any{"action": "str_replace", "path": "/tmp/qa23-write-profile/write-a/new.txt"}); err == nil || !strings.Contains(err.Error(), "access profile denies this action") {

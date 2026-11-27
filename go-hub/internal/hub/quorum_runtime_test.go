@@ -18,7 +18,7 @@ func TestQuorumMemberPromotionReadinessKeepsIdentityDomainsSeparate(t *testing.T
 	}
 	peer := quorum.Peer{
 		ID: "member-node-id", NodeKeyHash: strings.Repeat("a", 64),
-		FailureDomain: "server-44", HubURL: "https://quorum44-node.example",
+		FailureDomain: "node-44", HubURL: "https://quorum44-node.example",
 	}
 	if !quorumMemberPromotionReady(member, peer, now) {
 		t.Fatal("ready enrolled membership must be eligible; its membership key and Raft transport key are distinct credentials")

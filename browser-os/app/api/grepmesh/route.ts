@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 const CONSOLE = 'http://127.0.0.1:9419';
 // MVP selected host set: wildcard "*" is intentionally never sent from here so
 // one unhealthy host cannot widen or stall the fan-out.
-const DEFAULT_HOSTS = ['server-100', 'server-88'];
+const DEFAULT_HOSTS = ['node-100', 'node-88'];
 // The mesh's own overall search timeout is 20s; poll until then plus margin.
 const POLL_DEADLINE_MS = 30_000;
 const SEARCH_TIMEOUT_MS = 10_000;

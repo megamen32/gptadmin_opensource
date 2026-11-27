@@ -73,7 +73,7 @@ Run: `python3 -m pytest tests/test_update_semantics.py -q`.
 
 - [ ] **Step 3: Apply the live repair only after code verification**
 
-On `server-88`, remove the stale legacy Go-primary override, restart `shellmcp.service`, and verify Hub status transitions to `online` and a harmless `tools/list` call succeeds. Do not print secrets.
+On `node-88`, remove the stale legacy Go-primary override, restart `shellmcp.service`, and verify Hub status transitions to `online` and a harmless `tools/list` call succeeds. Do not print secrets.
 
 ### Task 3: Make standalone installers idempotent
 

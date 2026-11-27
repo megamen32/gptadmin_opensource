@@ -398,8 +398,8 @@ PRIMARY_SOCKET = "gptadmin-hub.socket"
 PRIMARY_SOCKET_PATH = Path("/etc/systemd/system/gptadmin-hub.socket")
 PRIMARY_SOCKET_DROPIN = Path("/etc/systemd/system/gptadmin-hub.service.d/zzzzzz-primary-socket.conf")
 IPTABLES = "/usr/sbin/iptables"
-RELEASE_LEASE_STATE = Path("/home/roomhacker/.local/state/agent-herder/project-release-leases.json")
-DEFAULT_RELEASE_PROJECT = "/home/roomhacker/gptadmin/.git"
+RELEASE_LEASE_STATE = Path("/home/admin/.local/state/agent-herder/project-release-leases.json")
+DEFAULT_RELEASE_PROJECT = "/home/admin/gptadmin/.git"
 
 
 class BootstrapFailure(RuntimeError):
@@ -514,7 +514,7 @@ def validate_release_lease(args, *, minimum_remaining_seconds=0, now_ms=None):
     project path, owner, fence, expiresAt, tokenHash of the proof token, and
     the full deploymentTarget. A receipt id by itself is not a lease.
     """
-    expected_uid = pwd.getpwnam("roomhacker").pw_uid
+    expected_uid = pwd.getpwnam("admin").pw_uid
     info = secure_regular(RELEASE_LEASE_STATE, owner=expected_uid,
                           max_bytes=1024 * 1024, writable_mask=0o077)
     try:
@@ -2252,12 +2252,12 @@ def build_parser():
     migrate.add_argument("--release-lease-fence", type=int, required=True)
     migrate.add_argument("--release-lease-owner-harness", required=True)
     migrate.add_argument("--release-lease-owner-session", required=True)
-    migrate.add_argument("--release-lease-host", default="roomhacker-server-100")
+    migrate.add_argument("--release-lease-host", default="admin-node-100")
     migrate.add_argument("--release-lease-project", default=DEFAULT_RELEASE_PROJECT)
     migrate.add_argument("--release-lease-target-unit", default=PRIMARY_SERVICE)
     migrate.add_argument("--release-lease-fleet-dir", default="")
     migrate.add_argument("--operation-id", required=True)
-    migrate.add_argument("--public-origin", default="https://gptadmin.bezrabotnyi.com")
+    migrate.add_argument("--public-origin", default="https://became.bezrabotnyi.com")
     migrate.add_argument("--nginx-upstream", type=Path, default=DEFAULT_NGINX_UPSTREAM)
     migrate.add_argument("--quiet-wait", type=float, default=300)
     migrate.add_argument("--drain-wait", type=float, default=5)
@@ -2270,7 +2270,7 @@ def build_parser():
     recover.add_argument("--release-lease-fence", type=int, required=True)
     recover.add_argument("--release-lease-owner-harness", required=True)
     recover.add_argument("--release-lease-owner-session", required=True)
-    recover.add_argument("--release-lease-host", default="roomhacker-server-100")
+    recover.add_argument("--release-lease-host", default="admin-node-100")
     recover.add_argument("--release-lease-project", default=DEFAULT_RELEASE_PROJECT)
     recover.add_argument("--release-lease-target-unit", default=PRIMARY_SERVICE)
     recover.add_argument("--release-lease-fleet-dir", default="")

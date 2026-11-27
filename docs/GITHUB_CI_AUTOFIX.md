@@ -66,12 +66,12 @@ Trusted operator configuration, mode `0600`, belongs at
   "herder_mcp": "http://127.0.0.1:18787/mcp",
   "workflow_repositories": ["megamen32/gptadmin_opensource"],
   "repositories": {
-    "megamen32/gptadmin": "/home/roomhacker/gptadmin",
-    "megamen32/ServersAdministartion": "/home/roomhacker/ServersAdministartion"
+    "megamen32/gptadmin": "/home/admin/gptadmin",
+    "megamen32/ServersAdministartion": "/home/admin/ServersAdministartion"
   },
   "notice_project": "gptadmin-ci-autofix",
   "notice_recipient": "me",
-  "notice_token_file": "/home/roomhacker/.config/gptadmin/ci-autofix-notice.token"
+  "notice_token_file": "/home/admin/.config/gptadmin/ci-autofix-notice.token"
 }
 ```
 
@@ -127,7 +127,7 @@ reset the sweep or lose event dedup. `status.scan` exposes cursors/call counts
 and held-budget/rate conditions. No global Herder listing is added.
 
 Only the fixed loopback Herder endpoint and owner are supported. CWD mappings
-must point to existing directories below `/home/roomhacker`; unmapped repositories
+must point to existing directories below `/home/admin`; unmapped repositories
 start in the canonical infrastructure checkout to discover their source owner.
 No event supplies commands, target settings or raw CI logs. The worker receives
 a fixed Russian prompt authorizing scoped CI repair, review, real tests and
@@ -260,7 +260,7 @@ most six Linux product jobs (12 CPU / 48 GB / 84 GB across separate VMs) in one 
 The main concurrency group cancels obsolete validation. Go source regressions run before release and produce a manifest-pinned Node artifact.
 All Linux CI including release packaging uses isolated hosted VMs; the release
 packaging job has a 90-minute deadline, macOS/Windows jobs 30 minutes. No fleet
-cgroup or server-88 runner limits are changed. Operator
+cgroup or node-88 runner limits are changed. Operator
 changes require the always-run hosted controller/docs checks and aggregate CI
 gate. Workflow routing changes require full product CI. Auto-tag retains its
 existing workflow-only exclusion and adds only the exact operator paths; no

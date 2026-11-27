@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOMAIN="${GPTADMIN_DOMAIN:-gptadmin.bezrabotnyi.com}"
+DOMAIN="${GPTADMIN_DOMAIN:-became.bezrabotnyi.com}"
 SITE_DOMAIN="${GPTADMIN_SITE_DOMAIN:-became.bezrabotnyi.com}"
 CONF_DIR="/etc/nginx/sites-available"
 ENABLED_DIR="/etc/nginx/sites-enabled"
@@ -93,7 +93,7 @@ server {
     # Bootstrap links proxy exactly like the MCP/API location below, but their
     # secret-bearing URL must never reach the access/error logs. (The admission
     # pause snippet in the canonical vhost is include-per-location for the same
-    # reason: a server-level if/return would fire before location selection.)
+    # reason: a node-level if/return would fire before location selection.)
     location ^~ /bootstrap/ {
         access_log off;
         error_log /dev/null crit;

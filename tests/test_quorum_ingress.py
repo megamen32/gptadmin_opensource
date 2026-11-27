@@ -256,7 +256,7 @@ def test_haos_private_listener_selects_fixed_lan_by_sni():
             ingress.render(bad, pool, False, 19101, 19102, 9101, 19103)
 
 
-@pytest.mark.parametrize("router", [False, True], ids=["haos", "openwrt-became"])
+@pytest.mark.parametrize("router", [False, True], ids=["haos", "server01-became"])
 def test_guarded_reload_and_rollback_on_real_master(tmp_path, router):
     binary = (os.getenv("OPENWRT_HAPROXY_BIN") if router else None) or haproxy_binary()
     listen = free_port()
@@ -286,7 +286,7 @@ def test_guarded_reload_and_rollback_on_real_master(tmp_path, router):
     before = hashlib.sha256(live.read_bytes()).hexdigest()
     after = hashlib.sha256(candidate.read_bytes()).hexdigest()
     def swap(source, previous, selected):
-        mode = ["--openwrt-became"] if router else []
+        mode = ["--server01-became"] if router else []
         return subprocess.run(["sh", ROOT / "scripts/gptadmin_haos_ingress_swap.sh", *mode, source, previous, selected],
                               capture_output=True, timeout=20,
                               env={**os.environ, "GPTADMIN_EDGE_DIR": str(tmp_path), "GPTADMIN_EDGE_BIN": binary})

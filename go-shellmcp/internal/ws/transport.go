@@ -6,7 +6,7 @@
 //   - text (opcode 0x1) and binary (opcode 0x2) data frames
 //   - ping (0x9), pong (0xA) and close (0x8) control frames
 //   - client->server frames are masked (RFC 6455 section 5.3, mandatory)
-//   - server->client frames are NOT masked (browser/server-side enforcement)
+//   - node->client frames are NOT masked (browser/node-side enforcement)
 //   - no fragmentation: a single data message must fit in a single frame;
 //     multi-frame messages are rejected with an error
 //   - no compression (per-message-deflate, RFC 7692)
@@ -17,7 +17,7 @@
 // crypto/sha1, encoding/binary, encoding/base64) so go.mod stays clean.
 //
 // This package is intentionally a faithful port of the Python websocket
-// transport in /home/roomhacker/gptadmin/client/shellmcp.py around lines
+// transport in /home/admin/gptadmin/client/shellmcp.py around lines
 // 914-966 (websocket_loop). The Python hub expects:
 //
 //	-> {"type":"hello","payload":<Beat>}

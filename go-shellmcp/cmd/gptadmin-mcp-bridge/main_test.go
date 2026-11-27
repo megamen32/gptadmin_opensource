@@ -9,7 +9,7 @@ import (
 
 func TestLoadChildrenReadsEnabledStdioRegistry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	body := "{\"mcpServers\":{\n  \"pty\":{\"command\":\"python3\",\"args\":[\"child.py\"],\"env\":{\"CHILD\":\"1\"},\"user\":\"roomhacker\"},\n  \"disabled\":{\"command\":\"nope\",\"enabled\":false}\n}}"
+	body := "{\"mcpServers\":{\n  \"pty\":{\"command\":\"python3\",\"args\":[\"child.py\"],\"env\":{\"CHILD\":\"1\"},\"user\":\"admin\"},\n  \"disabled\":{\"command\":\"nope\",\"enabled\":false}\n}}"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +18,7 @@ func TestLoadChildrenReadsEnabledStdioRegistry(t *testing.T) {
 		t.Fatalf("loadChildren: %v", err)
 	}
 	child, ok := children["pty"]
-	if !ok || child.Command != "python3" || len(child.Args) != 1 || child.Env["CHILD"] != "1" || child.User != "roomhacker" {
+	if !ok || child.Command != "python3" || len(child.Args) != 1 || child.Env["CHILD"] != "1" || child.User != "admin" {
 		t.Fatalf("unexpected children: %#v", children)
 	}
 	if _, ok := children["disabled"]; ok {

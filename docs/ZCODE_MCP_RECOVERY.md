@@ -67,14 +67,14 @@ Focused integration uses an actual native ZCode session on88, one initial
 human input, a310-second sleep, then a harmless note action after natural idle
 expiry. RED uses the original HTTP definition; GREEN uses the transport.
 No manual continuation or tool retry is permitted in either fixture. Native
-history and the server-side note receipt are required, not an MCP catalogue or
+history and the node-side note receipt are required, not an MCP catalogue or
 HTTP200 alone. Current acceptance and retained failed setup attempts:
 `.agents/tasks/20261015-zcode-mcp-expiry.md` and
 `.planning/debug/zcode-mcp-expiry.md`.
 
 Actual15Oct acceptance: original HTTP native turn failed after333961ms idle;
 reviewed transport native turn recovered after327053ms, one initialization
-replacement event and one server-side note receipt, one user input and final
+replacement event and one node-side note receipt, one user input and final
 MCP_EXPIRY_RECOVERED. Main global agent-herder definition now uses that exact
 helper. Eight regressions pass both on44 and through repaired100 bounded
 runner (3.652s,44.45MB peak, no swap/OOM). Fixture credential copies and owned

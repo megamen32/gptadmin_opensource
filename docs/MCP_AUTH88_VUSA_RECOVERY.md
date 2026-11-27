@@ -6,17 +6,17 @@ Hub. Реплики уже имеют ту же generation/digest, что writer
 собственный enrolled node credential и pinned writer admission, затем сохраняет
 локальные проверки profile/target/tool. Signing key не копируется на readers.
 
-Второй runtime-дефект: PUBLIC_ORIGIN у roomhacker-server-88 был физическим
-LAN-адресом, а у server-88-unified отсутствовал. Управляемые токены из общей
+Второй runtime-дефект: PUBLIC_ORIGIN у admin-node-88 был физическим
+LAN-адресом, а у node-88-unified отсутствовал. Управляемые токены из общей
 реплики поэтому отвергались по issuer. Использовать существующий логический
 контракт writer (PUBLIC_ORIGIN/MCP_RESOURCE/его exact legacy aliases), а
 GPTADMIN_NODE_PUBLIC_URL задавать отдельно для собственного FRP endpoint узла.
 Не добавлять произвольные aliases, не ослаблять issuer/audience validation.
 
 Свежий реальный bearer-admission POST с88 через public DNS уходил в timeout5s,
-а тот же запрос через192.168.2.100 с прежним HTTPS hostname/SNI/CA дал200 и
+а тот же запрос через203.0.113.10 с прежним HTTPS hostname/SNI/CA дал200 и
 полный proof. Для обоих readers задаётся существующий supported TCP pin
-GPTADMIN_NODE_WRITER_CONNECT_TO=192.168.2.100. URL/сертификат/WriterID/NodeKey
+GPTADMIN_NODE_WRITER_CONNECT_TO=203.0.113.10. URL/сертификат/WriterID/NodeKey
 не меняются; прямой LAN не заменяет TLS или проверку криптографического proof.
 
 Первый auth-admission rollout использовал принятый cloud Node package

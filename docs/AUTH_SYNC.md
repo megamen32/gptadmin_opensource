@@ -138,8 +138,8 @@ The `u-f…` writer URL below deliberately selects the VUSA transport and is not
 the OAuth issuer/resource identity used by the shared ChatGPT/Codex connector.
 
 ```dotenv
-GPTADMIN_AUTH_SYNC_WRITER_URL=https://u-f1102930.t.gptadmin.bezrabotnyi.com
-GPTADMIN_AUTH_SYNC_WRITER_CONNECT_TO=95.165.165.65
+GPTADMIN_AUTH_SYNC_WRITER_URL=https://your-subdomain.t.became.bezrabotnyi.com
+GPTADMIN_AUTH_SYNC_WRITER_CONNECT_TO=203.0.113.10
 GPTADMIN_AUTH_SYNC_READER_URL=http://127.0.0.1:19002
 GPTADMIN_AUTH_SYNC_WRITER_TOKEN_ENV=CTL_TOKEN
 GPTADMIN_AUTH_SYNC_READER_TOKEN_ENV=CTL_TOKEN
@@ -177,8 +177,8 @@ Read status without credentials:
 ```sh
 python3 /opt/gptadmin/scripts/gptadmin_auth_sync.py check \
   --status-file /var/lib/gptadmin/nodes/canary/auth-sync/status.json --max-age 120 \
-  --writer-url https://u-f1102930.t.gptadmin.bezrabotnyi.com \
-  --writer-connect-to 95.165.165.65 --reader-url http://127.0.0.1:19002 \
+  --writer-url https://your-subdomain.t.became.bezrabotnyi.com \
+  --writer-connect-to 203.0.113.10 --reader-url http://127.0.0.1:19002 \
   --source-id bd0bf8c4-f7fe-4d1b-a82c-aa0862e11bd8 --allow-loopback-http
 ```
 

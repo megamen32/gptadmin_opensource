@@ -6,7 +6,7 @@ import BootstrapLinks from "./BootstrapLinks";
 import type { BootstrapLink } from "./api";
 
 const endpoint = "/admin/api/bootstrap-links";
-const profile = { id: "sandbox", name: "Песочница", access_mode: "full", allowed_targets: ["shell:server-100"], allowed_tools: [], workspace_refs: [], version: 1 };
+const profile = { id: "sandbox", name: "Песочница", access_mode: "full", allowed_targets: ["shell:node-100"], allowed_tools: [], workspace_refs: [], version: 1 };
 const link: BootstrapLink = {
   id: "grant-1", label: "Z.ai QA", profile_id: "sandbox", client_id: "bootstrap-1", token_id: "token-1",
   created_at: 1794106000, expires_at: 2100000000, revoked_at: 0, status: "active",

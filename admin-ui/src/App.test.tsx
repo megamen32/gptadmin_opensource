@@ -142,11 +142,11 @@ describe("Profiles / Instructions", () => {
       return new Response(JSON.stringify({
         profile: {
           schema: "gptadmin.proxy-route/v1",
-          id: "vusa-server44-de-http",
-          consumer: "vusa",
-          exit: "server-44-de-http",
+          id: "relay02-server44-de-http",
+          consumer: "relay02",
+          exit: "node-44-de-http",
           listener: { bind_address: "127.0.0.1", port: 24836 },
-          ssh_identity_ref: "ssh-config:vusa",
+          ssh_identity_ref: "ssh-config:relay02",
           desired_state: "disabled",
         },
         runtime: {
@@ -337,12 +337,12 @@ describe("Profiles", () => {
 
     await userEvent.type(screen.getByLabelText("Идентификатор профиля"), "qa23-folderwrite-fix-20261023");
     await userEvent.type(screen.getByLabelText("Название профиля"), "QA23 folder write save reproduction");
-    await userEvent.type(screen.getByLabelText("Разрешённые цели"), "file:roomhacker-server-100");
+    await userEvent.type(screen.getByLabelText("Разрешённые цели"), "file:admin-node-100");
     await userEvent.type(screen.getByLabelText("Разрешённые инструменты"), "file_editor");
-    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: machine id"), { target: { value: "roomhacker-server-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 1: machine id"), { target: { value: "admin-node-100" } });
     fireEvent.change(screen.getByLabelText("Рабочее пространство 1: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a" } });
     await userEvent.click(screen.getByRole("button", { name: "Добавить рабочее пространство" }));
-    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: machine id"), { target: { value: "roomhacker-server-100" } });
+    fireEvent.change(screen.getByLabelText("Рабочее пространство 2: machine id"), { target: { value: "admin-node-100" } });
     fireEvent.change(screen.getByLabelText("Рабочее пространство 2: путь"), { target: { value: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b" } });
     fireEvent.submit(screen.getByRole("button", { name: "Создать профиль" }).closest("form")!);
 
@@ -353,13 +353,13 @@ describe("Profiles", () => {
     const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
     expect(JSON.parse(String(putCall?.[1]?.body)).workspace_refs).toEqual([
       {
-        machine_id: "roomhacker-server-100",
+        machine_id: "admin-node-100",
         workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-a",
         startup_document: "AGENTS.md",
         shell_target: "",
       },
       {
-        machine_id: "roomhacker-server-100",
+        machine_id: "admin-node-100",
         workspace_path: ".tmp/admin-ux-20261023/qa23d/qa23-folderwrite-b",
         startup_document: "AGENTS.md",
         shell_target: "",
@@ -501,7 +501,7 @@ describe("Clients / Auth", () => {
 const webhookRouteFixture = {
   id: "repair-100",
   kind: "shell",
-  target: "shell:roomhacker-server-100",
+  target: "shell:admin-node-100",
   auth_mode: "hmac",
   callback_configured: false,
 };
@@ -533,7 +533,7 @@ describe("Вебхуки и агенты", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить маршруты");
     await userEvent.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByText("repair-100")).toBeInTheDocument();
-    expect(screen.getByText("shell:roomhacker-server-100")).toBeInTheDocument();
+    expect(screen.getByText("shell:admin-node-100")).toBeInTheDocument();
     expect(screen.queryByText("must-never-render")).not.toBeInTheDocument();
     expect(screen.queryByText("must-never-render-either")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/webhook-routes", expect.objectContaining({ credentials: "same-origin" }));
@@ -558,7 +558,7 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Короткое имя"), "repair-100");
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "write-only-secret");
     await userEvent.selectOptions(screen.getByLabelText("Что сделать"), "shell");
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:roomhacker-server-100");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:admin-node-100");
     await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
     await userEvent.type(screen.getByLabelText("Рабочий каталог"), "/opt/notify");
     await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
@@ -573,7 +573,7 @@ describe("Вебхуки и агенты", () => {
       signature_version: "v2",
       action: expect.objectContaining({
         kind: "shell",
-        target: "shell:roomhacker-server-100",
+        target: "shell:admin-node-100",
         command: "fixed-helper repair_100",
         cwd: "/opt/notify",
       }),
@@ -599,12 +599,12 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Короткое имя"), "ordered-100");
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "ordered-secret");
     await userEvent.clear(screen.getByLabelText("Где выполнить"));
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "mcp:shell:roomhacker-server-100:Notify");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "mcp:shell:admin-node-100:Notify");
     await userEvent.type(screen.getByLabelText("Инструмент"), "send_message");
     await userEvent.click(screen.getByRole("button", { name: "+ Добавить шаг" }));
     await userEvent.type(screen.getByLabelText("Пауза перед шагом, секунд"), "30");
     const targets = screen.getAllByLabelText("Где выполнить");
-    await userEvent.type(targets[1], "mcp:shell:roomhacker-server-100:AgentHerder");
+    await userEvent.type(targets[1], "mcp:shell:admin-node-100:AgentHerder");
     const tools = screen.getAllByLabelText("Инструмент");
     await userEvent.type(tools[1], "new_or_resume");
     await userEvent.click(screen.getByRole("button", { name: "Создать маршрут" }));
@@ -613,8 +613,8 @@ describe("Вебхуки и агенты", () => {
     expect(createdBody).toEqual(expect.objectContaining({
       id: "ordered-100",
       actions: [
-        expect.objectContaining({ target: "mcp:shell:roomhacker-server-100:Notify", tool: "send_message" }),
-        expect.objectContaining({ target: "mcp:shell:roomhacker-server-100:AgentHerder", tool: "new_or_resume", delay_seconds: 30 }),
+        expect.objectContaining({ target: "mcp:shell:admin-node-100:Notify", tool: "send_message" }),
+        expect.objectContaining({ target: "mcp:shell:admin-node-100:AgentHerder", tool: "new_or_resume", delay_seconds: 30 }),
       ],
     }));
   });
@@ -624,7 +624,7 @@ describe("Вебхуки и агенты", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const path = String(input);
       if (path === "/webhook-routes" && !init?.method) return webhookResponse({ routes: [webhookRouteFixture] });
-      if (path === "/webhook-routes/repair-100" && init?.method === "PUT") return webhookResponse({ ...webhookRouteFixture, target: "shell:roomhacker-server-100-v2" });
+      if (path === "/webhook-routes/repair-100" && init?.method === "PUT") return webhookResponse({ ...webhookRouteFixture, target: "shell:admin-node-100-v2" });
       if (path === "/webhook-routes/repair-100" && init?.method === "DELETE") return webhookResponse(null, 204);
       if (path === "/admin/api/webhook-jobs") return webhookResponse({ jobs: [], latest_by_route: {} });
       throw new Error(`Unexpected request: ${path} ${init?.method ?? "GET"}`);
@@ -635,7 +635,7 @@ describe("Вебхуки и агенты", () => {
     await userEvent.type(screen.getByLabelText("Секрет для входящего запроса"), "replacement-secret");
     await userEvent.type(screen.getByLabelText("Команда"), "fixed-helper repair_100");
     await userEvent.clear(screen.getByLabelText("Где выполнить"));
-    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:roomhacker-server-100-v2");
+    await userEvent.type(screen.getByLabelText("Где выполнить"), "shell:admin-node-100-v2");
     await userEvent.click(screen.getByRole("button", { name: "Заменить маршрут" }));
     expect(await screen.findByText("Маршрут заменён")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/webhook-routes/repair-100", expect.objectContaining({ method: "PUT" }));

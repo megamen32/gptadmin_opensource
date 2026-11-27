@@ -12,11 +12,11 @@ import scripts.gptadmin_frp_watchdog as watchdog
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_vpn2_default_endpoint_uses_current_control_port() -> None:
-    if "vpn2=" not in cli.FRPC_SERVER_ENDPOINTS_DEFAULT:
-        pytest.skip("sanitized public tree renames the vpn2 target")
-    assert "vpn2=vpn2.bezrabotnyi.com:27001" in cli.FRPC_SERVER_ENDPOINTS_DEFAULT
-    assert "vpn2=vpn2.bezrabotnyi.com:27000" not in cli.FRPC_SERVER_ENDPOINTS_DEFAULT
+def test_relay01_default_endpoint_uses_current_control_port() -> None:
+    if "relay01=" not in cli.FRPC_SERVER_ENDPOINTS_DEFAULT:
+        pytest.skip("sanitized public tree renames the relay01 target")
+    assert "relay01=relay01.bezrabotnyi.com:27001" in cli.FRPC_SERVER_ENDPOINTS_DEFAULT
+    assert "relay01=relay01.bezrabotnyi.com:27000" not in cli.FRPC_SERVER_ENDPOINTS_DEFAULT
 
 
 def test_frp_watchdog_templates_are_bounded_and_restart_existing_units() -> None:

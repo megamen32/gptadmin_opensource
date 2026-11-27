@@ -872,8 +872,8 @@ func New(cfg Config) *Server {
 		}
 	}
 	s.cloudOSRegistry.Register(&cloudos.Computer{
-		ID:           "server-100",
-		Name:         "server-100",
+		ID:           "node-100",
+		Name:         "node-100",
 		OS:           "linux",
 		Capabilities: []string{"status"},
 		Status:       "online",
@@ -4107,9 +4107,20 @@ func (s *Server) pollShellQueue(w http.ResponseWriter, r *http.Request, name str
 			return
 		}
 		if origin := s.memberQuorumHubs.Current(); origin != "" && s.localExecutors["shell:"+name] != nil && tokenMatches(r, s.localExecutorTokens["shell:"+name]) {
+			// proxyMemberRequest can panic ErrAbortHandler when the peer
+			// disconnects mid-poll. Release the mutex only around the proxy
+			// call and restore it even on panic, so the deferred unlock at
+			// the top of pollShellQueue never fires twice.
 			s.mu.Unlock()
-			s.proxyMemberRequest(w, r, origin, true)
-			s.mu.Lock()
+			func() {
+				defer func() {
+					if recover() != nil {
+						s.mu.Lock()
+					}
+				}()
+				s.proxyMemberRequest(w, r, origin, true)
+				s.mu.Lock()
+			}()
 			return
 		}
 		remaining := time.Until(deadline)
@@ -6500,7 +6511,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 
 func canonicalShellQueueName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "homeassistant", "home-assistant":
+	case "server01", "home-assistant":
 		return "haos"
 	default:
 		return strings.TrimSpace(name)
@@ -8756,7 +8767,7 @@ func oauthRedirectMatches(issued, requested string) bool {
 }
 
 // oauthRefreshToken rotates a durable OAuth refresh credential and returns a
-// short-lived access JWT. Refresh credentials are server-stored digests so a
+// short-lived access JWT. Refresh credentials are node-stored digests so a
 // Hub restart and OAuth signing-key change do not erase client authorization.
 func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	resource := strings.TrimRight(r.Form.Get("resource"), "/")
@@ -11510,18 +11521,18 @@ func (s *Server) appsSDKResourcesList() map[string]any {
 }
 
 func appsSDKWidgetMeta() map[string]any {
-	connectDomains := []string{"https://gptadmin.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}
-	resourceDomains := []string{"https://u-f1102930.t.gptadmin.bezrabotnyi.com", "https://gptadmin.bezrabotnyi.com", "https://persistent.oaistatic.com"}
+	connectDomains := []string{"https://became.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
+	resourceDomains := []string{"https://your-subdomain.t.became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://persistent.oaistatic.com"}
 	return map[string]any{
 		"ui": map[string]any{
-			"domain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+			"domain":        "https://your-subdomain.t.became.bezrabotnyi.com",
 			"prefersBorder": true,
 			"csp":           map[string]any{"connectDomains": connectDomains, "resourceDomains": resourceDomains},
 		},
 		"openai/widgetDescription":   "Interactive GPTAdmin dashboard for selecting MCP servers, listing tools, running calls, and polling jobs.",
 		"openai/widgetPrefersBorder": true,
-		"openai/widgetDomain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://gptadmin.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}},
+		"openai/widgetDomain":        "https://your-subdomain.t.became.bezrabotnyi.com",
+		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}},
 	}
 }
 

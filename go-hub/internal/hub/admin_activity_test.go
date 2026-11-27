@@ -16,12 +16,12 @@ func TestActivityAuditCanHideNoisyClientBeforePagination(t *testing.T) {
 	s.mu.Lock()
 	s.addAuditLocked("tool_policy_decision", map[string]any{
 		"client_id": "opencode", "actor": "opencode",
-		"tool": "shell_exec", "target": "shell:server-100", "result_reference": "job-1",
+		"tool": "shell_exec", "target": "shell:node-100", "result_reference": "job-1",
 	})
 	for i := 0; i < 550; i++ {
 		s.addAuditLocked("tool_policy_decision", map[string]any{
 			"client_id": "grepmesh", "actor": "grepmesh", "tool": "find_paths",
-			"target": "shell:server-44", "sequence": i,
+			"target": "shell:node-44", "sequence": i,
 		})
 	}
 	s.mu.Unlock()

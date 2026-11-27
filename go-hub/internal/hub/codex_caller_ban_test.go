@@ -41,12 +41,12 @@ func TestCodexCallerBanRefusalIsTypedAndCarriesTheCaller(t *testing.T) {
 	}`)
 
 	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
-	err := authorizeCodexCallerBan(r, "mcp:shell:roomhacker-server-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
+	err := authorizeCodexCallerBan(r, "mcp:shell:admin-node-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
 	var banErr *CodexCallerBanError
 	if !errors.As(err, &banErr) {
 		t.Fatalf("refusal is not a CodexCallerBanError: %#v", err)
 	}
-	if banErr.Caller != "chatgpt-connector" || banErr.Tool != "new_or_resume" || banErr.Target != "mcp:shell:roomhacker-server-100:AgentHerder" {
+	if banErr.Caller != "chatgpt-connector" || banErr.Tool != "new_or_resume" || banErr.Target != "mcp:shell:admin-node-100:AgentHerder" {
 		t.Fatalf("refusal lost its evidence: %#v", banErr)
 	}
 }
@@ -57,7 +57,7 @@ func TestCodexCallerBanIsOffWithoutRuleFile(t *testing.T) {
 	t.Cleanup(resetCodexCallerBanCache)
 
 	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
-	err := authorizeCodexCallerBan(r, "mcp:shell:roomhacker-server-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
+	err := authorizeCodexCallerBan(r, "mcp:shell:admin-node-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
 	if err != nil {
 		t.Fatalf("missing rule file denied a call: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestCodexCallerBanRefusesOnlyCodexStartsForTheNamedCaller(t *testing.T) {
 		"denied_harness": "codex"
 	}`)
 
-	target := "mcp:shell:roomhacker-server-100:AgentHerder"
+	target := "mcp:shell:admin-node-100:AgentHerder"
 
 	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
 	if err := authorizeCodexCallerBan(r, target, "new_or_resume", map[string]any{"harness": "codex"}); err == nil {
@@ -118,7 +118,7 @@ func TestCodexCallerBanMatchesUserAgentAndSkipsExcludedAgents(t *testing.T) {
 		"denied_harness": "codex"
 	}`)
 
-	target := "mcp:shell:server-44:AgentHerder"
+	target := "mcp:shell:node-44:AgentHerder"
 
 	chat := codexCallerBanRequest(t, "some-client", "openai-mcp/1.0.0")
 	if err := authorizeCodexCallerBan(chat, target, "new_or_resume", map[string]any{"harness": "codex"}); err == nil {
@@ -142,7 +142,7 @@ func TestCodexCallerBanDisabledFlagKeepsEveryCall(t *testing.T) {
 	}`)
 
 	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
-	if err := authorizeCodexCallerBan(r, "mcp:shell:roomhacker-server-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"}); err != nil {
+	if err := authorizeCodexCallerBan(r, "mcp:shell:admin-node-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"}); err != nil {
 		t.Fatalf("a disabled rule refused a call: %v", err)
 	}
 }
@@ -158,7 +158,7 @@ func TestAuthorizeToolActionAppliesTheCallerBan(t *testing.T) {
 	}`)
 
 	r := codexCallerBanRequest(t, "chatgpt-connector", "openai-mcp/1.0.0")
-	err := authorizeToolAction(r, "mcp:shell:roomhacker-server-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
+	err := authorizeToolAction(r, "mcp:shell:admin-node-100:AgentHerder", "new_or_resume", map[string]any{"harness": "codex"})
 	if err == nil {
 		t.Fatal("the tool action gate did not apply the caller ban")
 	}

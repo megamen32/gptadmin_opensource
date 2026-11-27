@@ -135,11 +135,11 @@ GrepMesh is provisioned as a companion capability by default when the package co
 ### S21 network device target
 
 The rooted S21 is exposed as the dedicated child target
-`mcp:shell:roomhacker-server-100:S21NetworkAgentDevice`. It uses Android Remote
+`mcp:shell:admin-node-100:S21NetworkAgentDevice`. It uses Android Remote
 Control MCP on phone loopback behind a persistent SSH forward; it does not use
 the ADB-backed Callstack `agent-device` Android provider.
 
-On server-100, install or reconcile the target with:
+On node-100, install or reconcile the target with:
 
 ```bash
 sudo ./deploy/android-s21-network-mcp.sh apply

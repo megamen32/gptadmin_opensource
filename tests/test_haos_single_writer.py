@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PATH = ROOT / "deploy/homeassistant/gptadmin_hub_standby/gptadmin_single_writer.py"
+PATH = ROOT / "deploy/server01/gptadmin_hub_standby/gptadmin_single_writer.py"
 spec = importlib.util.spec_from_file_location("gptadmin_single_writer", PATH)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

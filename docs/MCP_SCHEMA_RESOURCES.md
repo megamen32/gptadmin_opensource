@@ -98,7 +98,7 @@ results. Sanitized RED/GREEN results are in
 Release acceptance separately checks the clean package, an installed Node and a
 native MCP client's catalog and resource reads. The ChatGPT phone resource
 picker and attachment of a selected resource to a conversation require an
-observed client check; server-side publication alone is not that evidence.
+observed client check; node-side publication alone is not that evidence.
 The active fullcycle plan records delivery and client acceptance separately.
 
 Child resource/template federation, per-profile source selection and the wider

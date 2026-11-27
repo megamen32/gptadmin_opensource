@@ -10,9 +10,9 @@ function response(body: object) {
 }
 
 const SERVERS = [
-  { server_id: "shell:roomhacker-server-100", name: "Shell: roomhacker-server-100", status: "online", kind: "virtual_shell", last_seen: Date.now() / 1000, meta: {} },
-  { server_id: "file:roomhacker-server-100", name: "Files: roomhacker-server-100", status: "online", kind: "virtual_file", last_seen: Date.now() / 1000, meta: {} },
-  { server_id: "mcp:shell:roomhacker-server-100:grepmesh", name: "grepmesh on roomhacker-server-100", status: "failed", kind: "child_mcp", last_seen: 1000, meta: { child_ref: "grepmesh" } },
+  { server_id: "shell:admin-node-100", name: "Shell: admin-node-100", status: "online", kind: "virtual_shell", last_seen: Date.now() / 1000, meta: {} },
+  { server_id: "file:admin-node-100", name: "Files: admin-node-100", status: "online", kind: "virtual_file", last_seen: Date.now() / 1000, meta: {} },
+  { server_id: "mcp:shell:admin-node-100:grepmesh", name: "grepmesh on admin-node-100", status: "failed", kind: "child_mcp", last_seen: 1000, meta: { child_ref: "grepmesh" } },
 ];
 
 function stubOverview(servers: unknown[]) {
@@ -63,8 +63,8 @@ it("matches the friendly display name and keeps the result count aligned", async
 
 it("includes stale nodes in unavailable, while stale remains its own filter", async () => {
   stubOverview([
-    { server_id: "shell:roomhacker-server-100", name: "Shell: roomhacker-server-100", status: "stale", last_seen: 1789300000 },
-    { server_id: "file:roomhacker-server-100", name: "Files: roomhacker-server-100", status: "offline", last_seen: 1789300000 },
+    { server_id: "shell:admin-node-100", name: "Shell: admin-node-100", status: "stale", last_seen: 1789300000 },
+    { server_id: "file:admin-node-100", name: "Files: admin-node-100", status: "offline", last_seen: 1789300000 },
     { server_id: "hub", name: "GPTAdmin Hub", status: "online", last_seen: 1789300000 },
   ]);
   render(<AgentsScreen />);
@@ -95,11 +95,11 @@ it("shows a missing last response as never answered instead of the Unix epoch", 
 });
 
 it("shows stale-node resources as unavailable and links to that exact node's saved latest task", async () => {
-  const serverId = "shell:roomhacker-server-100";
+  const serverId = "shell:admin-node-100";
   const task = { job_id: "historical-task-7", server_id: serverId, status: "failed", tool_name: "system_inspect", created_at: 1780000000 };
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const path = String(input);
-    if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: serverId, name: "Shell: roomhacker-server-100", status: "stale", last_seen: 1780000000 }] });
+    if (path.startsWith("/admin/api/overview")) return response({ servers: [{ server_id: serverId, name: "Shell: admin-node-100", status: "stale", last_seen: 1780000000 }] });
     if (path === "/admin/api/servers/resources") return response({
       server_id: serverId,
       status: "unavailable",
@@ -111,7 +111,7 @@ it("shows stale-node resources as unavailable and links to that exact node's sav
       memory: { status: "unavailable", error: "node_not_online" },
       root_filesystem: { status: "unavailable", error: "node_not_online" },
     });
-    if (path === `/admin/api/jobs?server_id=shell%3Aroomhacker-server-100&limit=1`) return response({ count: 1, recent: [task] });
+    if (path === `/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1`) return response({ count: 1, recent: [task] });
     if (path === "/admin/api/agents/connect-info") return response({ detail: "not needed" });
     throw new Error(`Unexpected request ${path} ${init?.method ?? "GET"}`);
   });
@@ -124,12 +124,12 @@ it("shows stale-node resources as unavailable and links to that exact node's sav
   expect(screen.getByText(/снимок не выполнялся/)).toBeInTheDocument();
   expect(screen.getAllByText("Недоступно: node_not_online")).toHaveLength(3);
   expect(screen.queryByText(/ГиБ|%/)).toBeNull();
-  expect(taskLink).toHaveAttribute("href", "#jobs?server_id=shell%3Aroomhacker-server-100&job_id=historical-task-7");
+  expect(taskLink).toHaveAttribute("href", "#jobs?server_id=shell%3Aadmin-node-100&job_id=historical-task-7");
   expect(fetchMock).toHaveBeenCalledWith("/admin/api/servers/resources", expect.objectContaining({
     method: "POST",
     body: JSON.stringify({ server_id: serverId }),
   }));
-  expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Aroomhacker-server-100&limit=1", expect.anything());
+  expect(fetchMock).toHaveBeenCalledWith("/admin/api/jobs?server_id=shell%3Aadmin-node-100&limit=1", expect.anything());
 });
 
 it("polls an admitted resource job by its existing id and renders measured values", async () => {

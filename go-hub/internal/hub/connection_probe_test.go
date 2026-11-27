@@ -26,7 +26,7 @@ func managedProbeFixture(t *testing.T) *Server {
 }
 
 func managedProbeRequest(s *Server, owner, method, routingMethod string) *httptest.ResponseRecorder {
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "server-discover-probe-1", "method": method, "params": map[string]any{"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": mcpProtocolVersion}}})
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "node-discover-probe-1", "method": method, "params": map[string]any{"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": mcpProtocolVersion}}})
 	r := httptest.NewRequest(http.MethodPost, "/connection/private/mcp", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+owner)
 	r.Header.Set("MCP-Protocol-Version", mcpProtocolVersion)
@@ -49,7 +49,7 @@ func TestConnectionProbeReturnsLegacyVerdictWithoutSession(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != http.StatusOK || body.ID != "server-discover-probe-1" || body.Error.Code != -32601 || len(body.Result) != 0 || w.Header().Get("Mcp-Session-Id") != "" {
+	if w.Code != http.StatusOK || body.ID != "node-discover-probe-1" || body.Error.Code != -32601 || len(body.Result) != 0 || w.Header().Get("Mcp-Session-Id") != "" {
 		t.Fatalf("probe did not negotiate legacy initialization: status=%d body=%s", w.Code, w.Body.String())
 	}
 	if len(s.connectionSessions) != 0 || len(s.shellJobs) != 0 || len(s.relayJobs) != 0 {

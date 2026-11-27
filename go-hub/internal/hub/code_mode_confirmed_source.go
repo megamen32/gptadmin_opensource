@@ -12,7 +12,7 @@ import (
 // Indexing the tail would produce an index that looks complete but is not: the
 // markers near the end of the log would simply be missing, and the caller
 // would never learn that. The Hub already knows the complete output of one
-// executed operation, because it kept the server-side job record. That record
+// executed operation, because it kept the node-side job record. That record
 // advertises the confirmed resource gptadmin://task/<job>/stdout, and the
 // confirmed reader reads it back in bounded chunks with the size metadata that
 // proves the result is complete.
@@ -21,7 +21,7 @@ import (
 //
 //   - the original command is never re-run;
 //   - the spool path is never taken from the MCP text, only from the
-//     server-side job record;
+//     node-side job record;
 //   - a tail is never indexed as if it were the full log.
 
 // codeModeConfirmedReader reads one chunk of a confirmed output resource.
