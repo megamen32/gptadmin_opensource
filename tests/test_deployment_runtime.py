@@ -113,7 +113,7 @@ def test_remote_probe_returns_redacted_json_without_remote_output(monkeypatch) -
         )
 
     monkeypatch.setattr(deployment_runtime.subprocess, "run", fake_run)
-    report = deployment_runtime.run_remote_probe("192.0.2.10", 22104, "roomhacker", "hub")
+    report = deployment_runtime.run_remote_probe("192.0.2.10", 22104, "admin", "hub")
 
     assert report["status"] == "passed"
     assert "remote-token" not in json.dumps(report)

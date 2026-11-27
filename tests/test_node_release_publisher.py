@@ -24,7 +24,7 @@ def package(root, arch='amd64', platform='linux', **changes):
     blobs['bin/gptadmin-node'] = b'\x7fELF-node-fixture'
     if platform == 'linux':
         blobs['bin/shellmcp'] = b'\x7fELF-shellmcp-fixture'
-        blobs['systemd/gptadmin-proxy-route-vusa.service'] = b'[Unit]\nDescription=fixture\n[Service]\nUser=roomhacker\nExecStart=/usr/bin/ssh\n'
+        blobs['systemd/gptadmin-proxy-route-relay02.service'] = b'[Unit]\nDescription=fixture\n[Service]\nUser=admin\nExecStart=/usr/bin/ssh\n'
         ui_asset = 'public/admin/assets/index-a1b2c3.js'; ui_css = 'public/admin/assets/index-d4e5f6.css'
         blobs[ui_asset] = b'js-fixture'; blobs[ui_css] = b'css-fixture'
         blobs[release.UI_INDEX] = (f'<script src="/admin/assets/{ui_asset.rsplit("/", 1)[-1]}"></script>'
@@ -104,7 +104,7 @@ class NodeReleaseTests(unittest.TestCase):
                 self.assertEqual(release.verify_package(package(d,arch,platform='darwin'),arch,SOURCE,'darwin')['platform'],'darwin')
 
     def test_release_requires_fixed_components_in_archive_and_manifest(self):
-        cases = [('linux', 'bin/shellmcp'), ('linux', 'systemd/gptadmin-proxy-route-vusa.service')]
+        cases = [('linux', 'bin/shellmcp'), ('linux', 'systemd/gptadmin-proxy-route-relay02.service')]
         cases += [(platform, name) for platform in ('linux', 'darwin')
                   for name in ('bin/gptadmin-mcp-bridge', 'public/secret-input/index.html')]
         for platform, missing in cases:

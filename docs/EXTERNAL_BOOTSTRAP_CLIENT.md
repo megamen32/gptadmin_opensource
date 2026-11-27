@@ -48,11 +48,11 @@ python3 gptadmin.py --config /tmp/session/.gptadmin.json --timeout 90 discover
 
 ```sh
 python3 gptadmin.py search "find_paths"
-python3 gptadmin.py search shell_exec --target shell:roomhacker-server-100
-python3 gptadmin.py schema shell:roomhacker-server-100 shell_exec
-python3 gptadmin.py call shell:roomhacker-server-100 shell_exec --arguments @args.json
+python3 gptadmin.py search shell_exec --target shell:admin-node-100
+python3 gptadmin.py schema shell:admin-node-100 shell_exec
+python3 gptadmin.py call shell:admin-node-100 shell_exec --arguments @args.json
 python3 gptadmin.py exec --file operation.js
-python3 gptadmin.py job JOB_ID --owner-target shell:roomhacker-server-100
+python3 gptadmin.py job JOB_ID --owner-target shell:admin-node-100
 python3 gptadmin.py expand OPERATION_ID --path /result --offset 0 --limit 32768
 python3 gptadmin.py rpc server/discover
 ```
@@ -79,8 +79,8 @@ instruction context, передайте полученный receipt через 
 Передавайте программу и argv непосредственно, а текст через stdin:
 
 ```sh
-python3 gptadmin.py shell --cwd /home/roomhacker/gptadmin shell:roomhacker-server-100 -- git status --short
-python3 gptadmin.py shell --stdin script.py shell:roomhacker-server-100 -- python3 -
+python3 gptadmin.py shell --cwd /home/admin/gptadmin shell:admin-node-100 -- git status --short
+python3 gptadmin.py shell --stdin script.py shell:admin-node-100 -- python3 -
 ```
 
 Опции `shell` нужно ставить до `target`. Всё после target передаётся
@@ -92,8 +92,8 @@ python3 gptadmin.py shell --stdin script.py shell:roomhacker-server-100 -- pytho
 ## Двоичные файлы
 
 ```sh
-python3 gptadmin.py upload file:roomhacker-server-100 ./local.bin /allowed/root/new-file.bin
-python3 gptadmin.py download file:roomhacker-server-100 /allowed/root/file.bin ./download.bin
+python3 gptadmin.py upload file:admin-node-100 ./local.bin /allowed/root/new-file.bin
+python3 gptadmin.py download file:admin-node-100 /allowed/root/file.bin ./download.bin
 ```
 
 Используется штатный `file_transfer`, с теми же ACL и разрешёнными корнями.

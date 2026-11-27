@@ -28,7 +28,7 @@ HERDER = "http://127.0.0.1:18787/mcp"
 # operation id, then records what the receipt and the native readback state.
 PROJECT_LAUNCH_API = HERDER[:-len("/mcp")] + "/api/automation/project-launch"
 OWNER = "megamen32"
-FALLBACK = "/home/roomhacker/ServersAdministartion"
+FALLBACK = "/home/admin/ServersAdministartion"
 NATIVE_INDEX = Path.home() / ".codex/state_5.sqlite"
 # 24h Herder dedup keeps a repeated dispatch from opening a second native
 # session for the same durable event identity.
@@ -132,8 +132,8 @@ def config(path):
         if not re.fullmatch(r"megamen32/[A-Za-z0-9_.-]+", repo):
             raise ValueError("Invalid configured repository")
         root = Path(cwd).resolve(strict=True)
-        if not root.is_dir() or Path("/home/roomhacker") not in root.parents:
-            raise ValueError("Configured CWD must exist below /home/roomhacker")
+        if not root.is_dir() or Path("/home/admin") not in root.parents:
+            raise ValueError("Configured CWD must exist below /home/admin")
     seeds = value.get("workflow_repositories", [])
     if not isinstance(seeds, list) or any(not isinstance(repo, str) or not re.fullmatch(r"megamen32/[A-Za-z0-9_.-]+", repo) for repo in seeds):
         raise ValueError("workflow_repositories must be trusted owner repository names")
@@ -493,7 +493,7 @@ def queue_notice(db, row, state, reason):
             "body": f"Репозиторий {row['repo']}. {reason}. Проверка: {row['url']}",
             "dedup_key": "github-ci-autofix:" + row["key"],
             "event_type": "health.recovered" if recovered else "health.degraded",
-            "source_id": "gptadmin-ci-autofix", "host_id": "roomhacker-server-100",
+            "source_id": "gptadmin-ci-autofix", "host_id": "admin-node-100",
             "signal_type": "github_ci", "correlation_id": row["key"],
             "trace_refs": [row["url"]]}
     if recovered:

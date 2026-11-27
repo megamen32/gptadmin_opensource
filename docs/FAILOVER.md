@@ -94,9 +94,9 @@ primary x86-64 binary silently produces a non-working standby.
 
 If the home ISP blocks the independent FRP server, set `failover.proxy_url`
 to an HTTP CONNECT proxy running on HAOS (for example
-`http://192.168.2.101:3127`). The generated FRPC transport then reaches the
+`http://203.0.113.10:3127`). The generated FRPC transport then reaches the
 external FRPS through that proxy while preserving FRP TLS. The proxy and its
-outbound route must survive loss of server-100. Confirm a real FRPS login
+outbound route must survive loss of node-100. Confirm a real FRPS login
 and an authenticated MCP operation through the external server; a promotion
 decision alone does not establish reachable failover. Do not configure an
 endpoint unless its FRPS actually runs there.
@@ -165,7 +165,7 @@ The suite uses real Go hubs, watchdog and proxy processes. Its local ingress
 and FRP-client doubles isolate the repository-owned failover contract from the
 external FRP service. It does not replace the physical HAOS drill: that drill
 must verify `:9001`, `:9101`, one live `frpc` process per configured endpoint,
-the public health route after stopping `server-100`, and signed reclaim after
+the public health route after stopping `node-100`, and signed reclaim after
 the primary returns.
 
 ## Design rule

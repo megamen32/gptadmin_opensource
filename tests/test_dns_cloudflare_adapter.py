@@ -77,7 +77,7 @@ class AdapterTests(unittest.TestCase):
     def test_out_of_scope_and_invalid_inputs_do_not_reach_provider(self):
         rpc = Mock(side_effect=AssertionError('unexpected provider call'))
         for fields in ({'name': 'other.example.com'}, {'action': 'compare_and_set'},
-                       {'value': '10.0.0.1'}, {'value': 1234}, {'value': '224.0.0.1'}):
+                       {'value': '203.0.113.10'}, {'value': 1234}, {'value': '224.0.0.1'}):
             msg = {'action': 'append_a', 'name': NAME, 'value': '8.8.4.4', **fields}
             with self.subTest(fields=fields), self.assertRaises(adapter.AdapterError):
                 adapter.execute(msg, 'example.com', NAME, rpc)

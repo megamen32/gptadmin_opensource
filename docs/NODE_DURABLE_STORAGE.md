@@ -105,5 +105,5 @@ and `7671e9746dfb0bcc368efd0fe60c8b13` each produced one physical effect and
 three identical receipt reads. The primary public self-probe also passed.
 After maintenance the tunnel watchdog and canonical DNS watcher were restored;
 the latter retained its configuration binding, watching phase and zero failures,
-with authoritative canonical DNS still95.165.165.65. This verifies the deployed
+with authoritative canonical DNS still203.0.113.10. This verifies the deployed
 storage change; it is not a whole-machine outage or power-loss test.

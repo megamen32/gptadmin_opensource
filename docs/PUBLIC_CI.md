@@ -29,9 +29,9 @@ For manual recovery, publish committed source with the installed privacy policy,
 preserving the existing public history:
 
 ```sh
-python3 tools/publish_public_source.py prepare --receipt /home/roomhacker/gptadmin/.tmp/PUBLICATION/receipt.json
+python3 tools/publish_public_source.py prepare --receipt /home/admin/gptadmin/.tmp/PUBLICATION/receipt.json
 # Inspect source/public parent, excluded paths, scanner and payload receipts.
-python3 tools/publish_public_source.py push --receipt /home/roomhacker/gptadmin/.tmp/PUBLICATION/receipt.json --receipt-sha256 REVIEWED_PREPARE_DIGEST
+python3 tools/publish_public_source.py push --receipt /home/admin/gptadmin/.tmp/PUBLICATION/receipt.json --receipt-sha256 REVIEWED_PREPARE_DIGEST
 ```
 
 A pull request merged on GitHub skips the local pre-push hook. Fast-forward the

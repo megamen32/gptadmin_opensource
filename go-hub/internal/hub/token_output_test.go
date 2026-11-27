@@ -59,6 +59,80 @@ func TestTokenSchemaExactAndDisclosure(t *testing.T) {
 		}
 	}
 }
+
+func TestUnknownSchemaToolSuggestsSameTargetCatalog(t *testing.T) {
+	s := New(Config{})
+	s.agents["shell:test"] = &Agent{AgentID: "shell:test", Kind: "shell", Status: "online"}
+	for _, detail := range []string{"compact", "full"} {
+		out := mapValue(s.appsSDKCallForRequest(nil, "schema", map[string]any{"target": "shell:test", "tool": "mcp_list_tools", "detail": detail}))
+		if out["status"] != "failed" || !strings.Contains(firstString(out, "hint"), "schema") || !strings.Contains(firstString(out, "hint"), "shell:test") {
+			t.Fatalf("%s: missing scoped catalog guidance: %#v", detail, out)
+		}
+		if got := firstString(mapValue(mapValue(out["next_call"])["arguments"]), "target"); got != "shell:test" {
+			t.Fatalf("%s: wrong next target: %q", detail, got)
+		}
+	}
+	unavailable := map[string]any{"status": "failed", "error": "catalog unavailable"}
+	if got := compactSchema(unavailable, map[string]any{"target": "shell:test", "tool": "missing"}); !reflect.DeepEqual(got, unavailable) {
+		t.Fatalf("unavailable catalog changed to unknown tool: %#v", got)
+	}
+}
+
+func TestRawSchemaUnknownToolSuggestsSameTargetCatalog(t *testing.T) {
+	s := New(Config{})
+	s.agents["shell:test"] = &Agent{AgentID: "shell:test", Kind: "shell", Status: "online"}
+	out := mapValue(s.appsSDKSchemaForRequest(nil, map[string]any{"target": "shell:test", "tool": "missing"}))
+	if out["status"] != "failed" || !strings.Contains(firstString(out, "hint"), "shell:test") {
+		t.Fatalf("missing raw schema guidance: %#v", out)
+	}
+	if got := firstString(mapValue(mapValue(out["next_call"])["arguments"]), "target"); got != "shell:test" {
+		t.Fatalf("wrong raw schema next target: %q", got)
+	}
+	wrapped := mapValue(ensureSchemaToolGuidance(map[string]any{"status": "failed", "error": "unknown tool: missing"}, map[string]any{"target": "shell:test", "tool": "missing"}))
+	if wrapped["hint"] == nil || wrapped["next_call"] == nil {
+		t.Fatalf("missing transport schema guidance: %#v", wrapped)
+	}
+}
+
+func TestMCPToolCallUnknownSchemaToolKeepsGuidance(t *testing.T) {
+	s := New(Config{CtlToken: "fixture-owner"})
+	defer s.Close()
+	s.agents["shell:test"] = &Agent{AgentID: "shell:test", Kind: "shell", Status: "online"}
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema","arguments":{"target":"shell:test","tool":"missing"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer fixture-owner")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GPTAdmin-Result-Mode", "dual")
+	w := httptest.NewRecorder()
+	s.mcpEndpoint(w, req)
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	structured := mapValue(mapValue(response["result"])["structuredContent"])
+	if structured["status"] != "failed" || structured["hint"] == nil || structured["next_call"] == nil {
+		t.Fatalf("missing MCP schema guidance: %#v", response)
+	}
+}
+
+func TestMCPRelayToolsUnknownSchemaToolKeepsGuidance(t *testing.T) {
+	s := New(Config{CtlToken: "fixture-owner"})
+	defer s.Close()
+	s.agents["shell:test"] = &Agent{AgentID: "shell:test", Kind: "shell", Status: "online"}
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/tools", strings.NewReader(`{"target":"shell:test","tool":"missing"}`))
+	req.Header.Set("Authorization", "Bearer fixture-owner")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.mcpRelayTools(w, req)
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["status"] != "failed" || response["hint"] == nil || response["next_call"] == nil {
+		t.Fatalf("missing relay schema guidance: %#v", response)
+	}
+}
+
 func TestTokenDisclosureCallerAndLifetime(t *testing.T) {
 	s := New(Config{})
 	request := func(subject string) *http.Request {

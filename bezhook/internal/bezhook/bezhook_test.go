@@ -11,7 +11,7 @@ import (
 )
 
 func TestValidateSubdomain(t *testing.T) {
-	ok := []string{"myapp", "u-f1102930", "a", "abc-123", strings.Repeat("a", 63)}
+	ok := []string{"myapp", "your-subdomain", "a", "abc-123", strings.Repeat("a", 63)}
 	for _, s := range ok {
 		if err := ValidateSubdomain(s); err != nil {
 			t.Errorf("expected %q valid, got %v", s, err)
@@ -96,7 +96,7 @@ func TestFleetSettingsLayering(t *testing.T) {
 	if tok != DefaultToken || dom != DefaultDomain || tlsName != DefaultTLSServerName {
 		t.Fatalf("defaults not applied: %q %q %q", tok, dom, tlsName)
 	}
-	if len(gws) != 3 || gws[1].Addr != "vusa.bezrabotnyi.com" || gws[1].Port != 27000 {
+	if len(gws) != 3 || gws[1].Addr != "relay02.bezrabotnyi.com" || gws[1].Port != 27000 {
 		t.Fatalf("default endpoints wrong: %+v", gws)
 	}
 

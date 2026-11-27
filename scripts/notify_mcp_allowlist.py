@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Owner-scope: project the GPTAdmin Notify child MCP down to read-only tools.
 
-Run as root on roomhacker-server-100. Reads the ShellMCP supervisor registry
+Run as root on admin-node-100. Reads the ShellMCP supervisor registry
 and the hub control token from the RUNNING gptadmin-node process environment;
 no secret value is ever printed or written outside this host.
 
@@ -134,13 +134,13 @@ def main() -> int:
     os.chmod(backup, 0o600)
     print("backup:", backup)
 
-    structured(rpc(token, "schema", {"target": "mcp:shell:roomhacker-server-100:Notify", "detail": "full"}))
-    before = structured(rpc(token, "schema", {"target": "mcp:shell:roomhacker-server-100:Notify", "detail": "full"}))
+    structured(rpc(token, "schema", {"target": "mcp:shell:admin-node-100:Notify", "detail": "full"}))
+    before = structured(rpc(token, "schema", {"target": "mcp:shell:admin-node-100:Notify", "detail": "full"}))
     # Shell-target tools are written through the hub `exec` bridge (the direct
     # execute facade is retired). The only values embedded in the code are the
     # registry's own file paths; no credential exists in the definition.
     def shell(tool: str, args: dict) -> dict:
-        code = ("return await mcp.call('shell:roomhacker-server-100', "
+        code = ("return await mcp.call('shell:admin-node-100', "
                 + json.dumps(tool) + ", " + json.dumps(args) + ");")
         return structured(rpc(token, "exec", {"code": code}))
     # The upsert itself: identical definition + allowlist. The hub closes the
@@ -151,7 +151,7 @@ def main() -> int:
         raise SystemExit("upsert refused: " + json.dumps(upsert_response)[:300])
     print("upsert accepted")
     time.sleep(1)
-    after = structured(rpc(token, "schema", {"target": "mcp:shell:roomhacker-server-100:Notify", "detail": "full"}))
+    after = structured(rpc(token, "schema", {"target": "mcp:shell:admin-node-100:Notify", "detail": "full"}))
     tools = [t.get("name") for t in (after.get("response") or after).get("tools", [])]
     print("visible tools after change:", tools)
     if set(tools) - set(ALLOWLIST):

@@ -57,12 +57,12 @@ Go 实现 (`go-shellmcp/`) 是主要实现。 Python 客户端
 
 ## 数据流
 
-当你询问 AI“在 server-01 上重新启动 nginx”时：
+当你询问 AI“在 node-01 上重新启动 nginx”时：
 
 1. **AI**决定调用一个工具（MCP工具/OpenAI Action/注入的mcp块）
 2. **适配器** 将呼叫路由到集线器（`POST /mcp` 或 `/mcp-relay/call`）
-3. **Hub**查找`server-01`，找到其shellmcp代理，转发命令
-4. **shellmcp** 在 `server-01` 上运行 `systemctl restart nginx`，捕获输出
+3. **Hub**查找`node-01`，找到其shellmcp代理，转发命令
+4. **shellmcp** 在 `node-01` 上运行 `systemctl restart nginx`，捕获输出
 5. **shellmcp** 将 stdout/stderr 返回到集线器
 6. **Hub** 截断长输出（节省令牌），返回到适配器
 7. **Adapter**返回给AI，AI读取结果并返回报告

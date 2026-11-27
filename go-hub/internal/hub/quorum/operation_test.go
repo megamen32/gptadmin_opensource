@@ -18,7 +18,7 @@ func TestOperationReservationSurvivesSnapshotAndOwnerLoss(t *testing.T) {
 	state := newStateMachine("c", nil, ExternalSnapshotCallbacks{}, 0)
 	source := strings.Repeat("private command and output ", 100000)
 	cmd := operationCommand{Action: "claim", Key: operationKey("scoped key"), Now: 1000,
-		Operation: Operation{Owner: "server-44", Fingerprint: operationKey(source), Witness: operationKey("first local row")}}
+		Operation: Operation{Owner: "node-44", Fingerprint: operationKey(source), Witness: operationKey("first local row")}}
 	res := state.applyOperation(cmd)
 	if res.err != nil || !res.operation.Created {
 		t.Fatal(res)
@@ -48,10 +48,10 @@ func TestOperationReservationSurvivesSnapshotAndOwnerLoss(t *testing.T) {
 		t.Fatal("restored exact task owner was not preserved")
 	}
 	retry := cmd
-	retry.Action, retry.JobID, retry.Owner, retry.Witness = "claim", "", "server-88", operationKey("other row")
+	retry.Action, retry.JobID, retry.Owner, retry.Witness = "claim", "", "node-88", operationKey("other row")
 	retry.Now += int64(OperationRetention.Seconds()) + 10
 	res = other.applyOperation(retry)
-	if res.err != nil || res.operation.Created || res.operation.Operation.JobID != cmd.JobID || res.operation.Operation.Owner != "server-44" {
+	if res.err != nil || res.operation.Created || res.operation.Operation.JobID != cmd.JobID || res.operation.Operation.Owner != "node-44" {
 		t.Fatal(res)
 	}
 	retry.Fingerprint = operationKey("different arguments")

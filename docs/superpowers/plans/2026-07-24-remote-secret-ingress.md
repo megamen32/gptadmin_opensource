@@ -4,7 +4,7 @@
 
 **Goal:** Let an authorized remote MCP agent create a short-lived one-time secret-entry link, let the operator enter the value in a browser, and make the resulting secret usable by Hub-managed agents without returning the plaintext to the model or storing it in Git.
 
-**Architecture:** Add a secret-ingress subsystem to the existing Go Hub. The MCP tool creates a request bound to the caller identity, stores only a hash of the browser token, and returns a public one-time URL plus opaque `secret_ref`, file path, and environment-variable name. The browser POST consumes the token and stores the value encrypted at rest under the Hub config directory. Secret references are resolved server-side only when constructing an approved agent job; MCP responses, audit records, status pages, and job results never include the value.
+**Architecture:** Add a secret-ingress subsystem to the existing Go Hub. The MCP tool creates a request bound to the caller identity, stores only a hash of the browser token, and returns a public one-time URL plus opaque `secret_ref`, file path, and environment-variable name. The browser POST consumes the token and stores the value encrypted at rest under the Hub config directory. Secret references are resolved node-side only when constructing an approved agent job; MCP responses, audit records, status pages, and job results never include the value.
 
 **Tech Stack:** Go standard library (`crypto/aes`, `crypto/cipher`, `crypto/rand`, `crypto/sha256`, `encoding/json`, `net/http`), existing GPTAdmin Hub MCP JSON-RPC, existing admin/public static serving, Go `httptest`, and the repository's existing release/deploy path.
 
@@ -16,7 +16,7 @@
 - Secret records and the encryption key are created with mode `0600`; parent secret directories are mode `0700`.
 - A missing or invalid encryption key fails closed; the Hub must not silently fall back to plaintext files or environment variables.
 - Existing MCP auth, access profiles, and the `2.1` router exception remain unchanged; only the public Hub origin is used for generated links.
-- Preserve unrelated dirty changes in `/home/roomhacker/gptadmin` (`docs/BUGS.md` and `docs/WORKLOG.md` are already modified).
+- Preserve unrelated dirty changes in `/home/admin/gptadmin` (`docs/BUGS.md` and `docs/WORKLOG.md` are already modified).
 
 ---
 
@@ -65,7 +65,7 @@ func TestSecretStoreRejectsExpiredAndWrongOwnerRequests(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
 
 Expected: FAIL because `NewSecretStore`, `CreateRequest`, and the typed errors do not exist.
 
@@ -75,7 +75,7 @@ Implement AES-256-GCM records under `<storeDir>/<ref-id>.json`, a state file for
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretStore' -count=1`
 
 Expected: PASS with no secret value in test output.
 
@@ -122,9 +122,9 @@ func TestSecretIngressPageConsumesTokenWithoutReturningSecret(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
 
-Expected: FAIL because the route and server-owned secret store are not present.
+Expected: FAIL because the route and node-owned secret store are not present.
 
 - [ ] **Step 3: Implement the route and page**
 
@@ -132,7 +132,7 @@ Initialize the store in `New`, fail Hub startup when the key cannot be loaded, r
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestSecretIngress' -count=1`
 
 Expected: PASS; the response body and logs contain no submitted secret.
 
@@ -184,7 +184,7 @@ func TestMCPSecretStatusDoesNotReturnPlaintext(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
 
 Expected: FAIL because the tools are not advertised or dispatched.
 
@@ -194,7 +194,7 @@ Add exact JSON schemas with `additionalProperties: false`, use `PublicOrigin` to
 
 - [ ] **Step 4: Run the focused tests to verify GREEN**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestMCPSecret' -count=1`
 
 Expected: PASS; `tools/list`, `secret_request`, and `secret_status` work through the same remote MCP endpoint.
 
@@ -205,7 +205,7 @@ git add go-hub/internal/hub/server.go go-hub/internal/hub/server_test.go
 git commit -m "feat: expose secret ingress through Hub MCP"
 ```
 
-### Task 4: Resolve references server-side for agent jobs
+### Task 4: Resolve references node-side for agent jobs
 
 **Files:**
 - Modify: `go-hub/internal/hub/server.go:2015-2245, 3930-3965`
@@ -231,17 +231,17 @@ func TestShellExecResolvesSecretReferenceWithoutLeakingValue(t *testing.T) {
 
 - [ ] **Step 2: Run the focused tests to verify RED**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret' -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret' -count=1`
 
 Expected: FAIL because `secret_env` is currently ignored or rejected.
 
-- [ ] **Step 3: Implement server-side resolution and redaction**
+- [ ] **Step 3: Implement node-side resolution and redaction**
 
 Resolve references before `callShellTool`/relay enqueue, keep plaintext only in the in-memory job payload required by the target agent, add a redaction list to the job record, and apply it to synchronous responses, background job results, audit payloads, and error strings. Do not persist resolved values in JSON state files.
 
 - [ ] **Step 4: Run focused and package tests**
 
-Run: `cd /home/roomhacker/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret|TestAuditRedacts' -count=1 && go test ./internal/hub -count=1`
+Run: `cd /home/admin/gptadmin/go-hub && go test ./internal/hub -run 'TestShellExecResolvesSecret|TestAuditRedacts' -count=1 && go test ./internal/hub -count=1`
 
 Expected: PASS; existing relay, auth, and redaction tests remain green.
 
@@ -291,10 +291,10 @@ Include examples with fake names only, never real tokens, and explain that file 
 Run:
 
 ```bash
-cd /home/roomhacker/gptadmin/go-hub
+cd /home/admin/gptadmin/go-hub
 go test ./internal/hub -count=1
 go build ./cmd/gptadmin-hub
-cd /home/roomhacker/gptadmin
+cd /home/admin/gptadmin
 pytest -q tests/test_secret_ingress_contract.py tests/test_no_secrets.py
 git diff --check
 ```
@@ -317,7 +317,7 @@ git commit -m "docs: describe remote secret ingress workflow"
 
 Run the existing GPTAdmin release workflow for the current commit, record the commit SHA and artifact checksum, and do not copy a working tree directly over the server.
 
-- [ ] **Step 2: Deploy through the existing server-88 service path**
+- [ ] **Step 2: Deploy through the existing node-88 service path**
 
 Update the Hub on server 88 using its existing service/deploy mechanism, preserving its current `CTL_TOKEN`, `MCP_RELAY_AGENT_TOKEN`, `ADMIN_PASSWORD`, OAuth secrets, and router configuration. Only add the four `GPTADMIN_SECRET_*` settings if the deployment path does not already supply secure defaults.
 
@@ -333,6 +333,6 @@ Record the exact commit/artifact identity, public Hub URL, service state, health
 
 ## Self-review
 
-- One-time browser entry, TTL, ownership, encryption at rest, MCP metadata, server-side injection, redaction, documentation, and live server-88 verification each have an explicit task.
+- One-time browser entry, TTL, ownership, encryption at rest, MCP metadata, node-side injection, redaction, documentation, and live node-88 verification each have an explicit task.
 - No task introduces a plaintext fallback, generic secret reader, or router-wide exception.
 - The `secret_request`/`secret_status` names and `secret_env` argument are consistent across store, MCP, tests, docs, and live acceptance.

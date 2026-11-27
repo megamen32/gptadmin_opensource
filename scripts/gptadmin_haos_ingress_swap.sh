@@ -1,12 +1,12 @@
 #!/bin/sh
 # Swap one reviewed HAProxy file and gracefully reload its existing master. The caller owns the quorum and client preflights.
-# Usage: sh -s -- [--openwrt-became] CANDIDATE_PATH EXPECTED_LIVE_SHA256 CANDIDATE_SHA256
+# Usage: sh -s -- [--server01-became] CANDIDATE_PATH EXPECTED_LIVE_SHA256 CANDIDATE_SHA256
 set -eu
 umask 077
 
 fail() { echo "$1" >&2; exit 1; }
 router=0
-if [ "${1:-}" = --openwrt-became ]; then router=1; shift; fi
+if [ "${1:-}" = --server01-became ]; then router=1; shift; fi
 [ "$#" -eq 3 ] || fail "expected candidate path, live digest and candidate digest"
 candidate=$1
 before=$2

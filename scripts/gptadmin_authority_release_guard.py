@@ -68,7 +68,7 @@ def configuration(path, expected):
     checked(cfg['module'], cfg['module_sha256'])
     checked(cfg['wrapper'], cfg['wrapper_sha256'])
     if os.getuid() != 1000 or cfg['owner'] != {
-            'hostId': 'roomhacker-server-100', 'harness': 'chatgpt',
+            'hostId': 'admin-node-100', 'harness': 'chatgpt',
             'nativeSessionId': '/root/close_gptadmin'}:
         raise GuardRefused('wrong operator identity')
     return cfg

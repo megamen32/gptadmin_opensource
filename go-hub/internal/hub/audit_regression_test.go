@@ -54,10 +54,10 @@ func TestReadOnlyIdentityKeepsWritePathsClosed(t *testing.T) {
 	s, _ := codeModeFixture(t)
 	defer s.Close()
 	r := readOnlyAuditRequest()
-	if err := authorizeToolAction(r, "shell:roomhacker-server-100", "shell_exec", map[string]any{"cmd": "id"}); err == nil {
+	if err := authorizeToolAction(r, "shell:admin-node-100", "shell_exec", map[string]any{"cmd": "id"}); err == nil {
 		t.Fatal("read-only identity may run a shell command")
 	}
-	if err := authorizeToolAction(r, "file:roomhacker-server-100", "file_editor", map[string]any{"action": "create", "path": "/tmp/x"}); err == nil {
+	if err := authorizeToolAction(r, "file:admin-node-100", "file_editor", map[string]any{"action": "create", "path": "/tmp/x"}); err == nil {
 		t.Fatal("read-only identity may write a file")
 	}
 	if err := authorizeToolAction(r, "hub", codeModeTool, map[string]any{"code": "return 1;"}); err == nil {
@@ -69,10 +69,10 @@ func TestReadOnlyIdentityMayReadThroughMixedTools(t *testing.T) {
 	s, _ := codeModeFixture(t)
 	defer s.Close()
 	r := readOnlyAuditRequest()
-	if err := authorizeToolAction(r, "file:roomhacker-server-100", "file_editor", map[string]any{"action": "view", "path": "/tmp/x"}); err != nil {
+	if err := authorizeToolAction(r, "file:admin-node-100", "file_editor", map[string]any{"action": "view", "path": "/tmp/x"}); err != nil {
 		t.Fatalf("read-only identity cannot read a file: %v", err)
 	}
-	if err := authorizeToolAction(r, "file:roomhacker-server-100", "file_checkpoint", map[string]any{"action": "list"}); err != nil {
+	if err := authorizeToolAction(r, "file:admin-node-100", "file_checkpoint", map[string]any{"action": "list"}); err != nil {
 		t.Fatalf("read-only identity cannot list checkpoints: %v", err)
 	}
 }

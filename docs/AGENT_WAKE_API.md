@@ -33,7 +33,7 @@ producer / MCP / cron / service
   "target": {
     "harness": "opencode",
     "name": "secretary-excode",
-    "cwd": "/home/roomhacker/excode"
+    "cwd": "/home/admin/excode"
   },
   "subject": "New message in ИИ-Бенчмарки",
   "payload": {
@@ -49,7 +49,7 @@ Current target restrictions:
 
 - schema must equal `gptadmin.agent-wake.v1`;
 - harness is one of `opencode`, `codex`, `zcode`;
-- `cwd` must be absolute and resolve below `/home/roomhacker/`, including symlink resolution;
+- `cwd` must be absolute and resolve below `/home/admin/`, including symlink resolution;
 - target name <= 128 chars, subject <= 512 chars;
 - rendered wake message <= 32,000 UTF-8 bytes.
 
@@ -80,7 +80,7 @@ POST
 
 A repeated request with the same idempotency key and identical body returns the original `job_id` with `duplicate: true` and is not delivered twice. Reusing an idempotency key for different content is rejected.
 
-The live secret location on server-100 is documented operationally as `/etc/gptadmin/secrets/agent-wake-v1.env` (root-only). Do not copy the value into source control.
+The live secret location on node-100 is documented operationally as `/etc/gptadmin/secrets/agent-wake-v1.env` (root-only). Do not copy the value into source control.
 
 ## Response model
 

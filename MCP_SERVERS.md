@@ -25,7 +25,7 @@ prove that an integration works.
 
 Connect to your Hub using its supported OAuth/client connection. The managed
 public endpoint is `https://mcp.bezrabotnyi.com/mcp`; another installation uses
-its own stable HTTPS origin. Generated `u-f<ID>.t.gptadmin.bezrabotnyi.com`
+its own stable HTTPS origin. Generated `u-f<ID>.t.became.bezrabotnyi.com`
 addresses are legacy/fallback transport, not the identity for a new connector.
 
 The following examples use Hub tool-call notation, not shell commands. Replace
@@ -205,7 +205,7 @@ target and let the Hub manage connection metadata; do not invent internal
 
 ## Local CLI alternative (operator on the target host)
 
-For the existing server-100 checkout, [mcp-add](mcp-add) is a local installer
+For the existing node-100 checkout, [mcp-add](mcp-add) is a local installer
 helper. It does not choose a remote ShellMCP target. Prefer the Hub tools above
 for AI-driven onboarding; use this alternative only for authorized local setup.
 

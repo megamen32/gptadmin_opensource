@@ -96,7 +96,7 @@ func (s *Server) directChildSchemaForRequest(r *http.Request, candidate Agent) m
 		enumeration = schemaEnumerationMetadata(structured)
 	} else {
 		// Always address the physical owner. The public logical Browser ID is
-		// not an executable target on server-44.
+		// not an executable target on node-44.
 		body, err := json.Marshal(map[string]any{"target": "mcp:" + parentID + ":" + ref, "detail": "full"})
 		if err != nil {
 			return fail("child schema target invalid", "owner_lookup", "invalid_target", 0)

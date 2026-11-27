@@ -57,9 +57,9 @@ REQUESTS=120 WORKERS=20 ./scripts/stress-local.sh
 When `SHELL_DEFAULT_USER` is set and a request does not explicitly set `run_as_user`/`user`, shellmcp-go runs commands that do not mention `sudo` as that user:
 
 ```bash
-SHELL_DEFAULT_USER=roomhacker
-SHELL_DEFAULT_HOME=/home/roomhacker
-SHELL_DEFAULT_CWD=/home/roomhacker
+SHELL_DEFAULT_USER=admin
+SHELL_DEFAULT_HOME=/home/admin
+SHELL_DEFAULT_CWD=/home/admin
 ```
 
 Commands containing a `sudo` token stay in the service/root context, so privileged operations can still be requested explicitly with `sudo ...`.
@@ -186,7 +186,7 @@ values are expanded from the ShellMCP process environment at request time, so
 secrets do not need to be written into the registry.
 
 Streamable HTTP sessions reuse the negotiated protocol version and session ID,
-recover once from a server-side session reset, and send DELETE when closed.
+recover once from a node-side session reset, and send DELETE when closed.
 Legacy SSE uses its long-lived GET event stream and the endpoint it advertises
 for POST requests.
 

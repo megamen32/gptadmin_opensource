@@ -42,11 +42,11 @@ const profile: AccessProfile = {
 const proxyRoute = {
   profile: {
     schema: "gptadmin.proxy-route/v1",
-    id: "vusa-server44-de-http",
-    consumer: "vusa",
-    exit: "server-44-de-http",
+    id: "relay02-server44-de-http",
+    consumer: "relay02",
+    exit: "node-44-de-http",
     listener: { bind_address: "127.0.0.1", port: 24836 },
-    ssh_identity_ref: "ssh-config:vusa",
+    ssh_identity_ref: "ssh-config:relay02",
     desired_state: "disabled",
   },
   runtime: { profile_saved: false, service_state: "inactive", listener_state: "closed", last_probe: null },

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from deploy.homeassistant.gptadmin_hub_standby.gptadmin_failover_config import build_failover_config
+from deploy.server01.gptadmin_hub_standby.gptadmin_failover_config import build_failover_config
 from scripts import gptadmin_failover_watchdog as watchdog
 
 
@@ -117,6 +117,6 @@ def test_invalid_runtime_deadline_blocks_health_and_promotion(policy, monkeypatc
 
 def test_public_schema_exposes_optional_maintenance_deadline():
     from pathlib import Path
-    schema = (Path(__file__).resolve().parents[1] / "deploy/homeassistant/gptadmin_hub_standby/public_config.yaml").read_text()
+    schema = (Path(__file__).resolve().parents[1] / "deploy/server01/gptadmin_hub_standby/public_config.yaml").read_text()
     assert 'maintenance_until: ""' in schema
     assert "maintenance_until: str?" in schema

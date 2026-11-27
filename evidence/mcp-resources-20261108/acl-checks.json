@@ -14,7 +14,7 @@
         "-count=1",
         "-timeout=120s"
       ],
-      "cwd": "/home/roomhacker/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
       "source_base": "7d43d3bafe1409dcb5d8797a229b71bc80b106a7",
       "returncode": 1,
       "seconds": 9.088,
@@ -31,7 +31,7 @@
         "-count=1",
         "-timeout=120s"
       ],
-      "cwd": "/home/roomhacker/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
       "returncode": 0,
       "seconds": 9.088,
       "log": "evidence/mcp-resources-20261108/acl-green.txt"
@@ -47,7 +47,7 @@
         "-count=1",
         "-timeout=120s"
       ],
-      "cwd": "/home/roomhacker/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
+      "cwd": "/home/admin/gptadmin/.worktrees/resource-acl-worker-20261108/go-hub",
       "returncode": 0,
       "seconds": 1.969,
       "log": "evidence/mcp-resources-20261108/acl-related.txt"

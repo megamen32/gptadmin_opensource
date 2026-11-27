@@ -46,7 +46,7 @@ func filesystemACLTargetsExecutor(target, executor string) bool {
 func canonicalACLExecutorName(name string) string {
 	name = strings.TrimSpace(name)
 	switch strings.ToLower(name) {
-	case "homeassistant", "home-assistant":
+	case "server01", "home-assistant":
 		return "haos"
 	default:
 		return name

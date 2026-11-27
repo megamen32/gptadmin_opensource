@@ -334,7 +334,7 @@ func (s *Server) appsSDKCallForRequest(r *http.Request, name string, args map[st
 		rawArgs["detail"] = "full"
 	}
 	raw := s.appsSDKCallRawForRequest(r, name, rawArgs)
-	return s.presentTokenOutput(r, name, args, raw)
+	return ensureSchemaToolGuidance(s.presentTokenOutput(r, name, args, raw), args)
 }
 
 func (s *Server) presentTokenOutput(r *http.Request, name string, args map[string]any, raw any) (presented any) {
@@ -716,13 +716,69 @@ func compactSchema(raw, args map[string]any) map[string]any {
 		tools = append(tools, summary)
 	}
 	if tool != "" && len(tools) == 0 {
-		return map[string]any{"status": "failed", "error": "unknown tool: " + tool}
+		return unknownSchemaToolGuidance(tool, firstString(args, "target", "server_id", "agent_id"))
 	}
 	view["tools"] = tools
 
 	out["response"] = view
 	if tool == "" {
 		out["hint"] = "schema(target,tool) returns exact input schema; expand(operation_id) reads saved full result"
+	}
+	return out
+}
+
+func unknownSchemaToolGuidance(tool, target string) map[string]any {
+	hint := "Call schema with this target and omit tool to list accessible tools."
+	if target != "" {
+		hint = fmt.Sprintf("Call schema with target %q and omit tool to list accessible tools.", target)
+	}
+	guidance := map[string]any{
+		"status": "failed",
+		"error":  "unknown tool: " + tool,
+		"hint":   hint,
+	}
+	if target != "" {
+		guidance["next_call"] = map[string]any{"name": "schema", "arguments": map[string]any{"target": target}}
+	}
+	return guidance
+}
+
+func ensureSchemaToolGuidance(raw any, args map[string]any) any {
+	payload, ok := raw.(map[string]any)
+	if !ok || firstString(payload, "status") != "failed" || payload["hint"] != nil {
+		return raw
+	}
+	errorText := firstString(payload, "error")
+	const prefix = "unknown tool: "
+	if !strings.HasPrefix(errorText, prefix) {
+		return raw
+	}
+	return unknownSchemaToolGuidance(strings.TrimPrefix(errorText, prefix), firstString(args, "target", "server_id", "agent_id"))
+}
+
+func ensureMCPToolResultSchemaGuidance(raw any, args map[string]any) any {
+	envelope, ok := raw.(map[string]any)
+	if !ok {
+		return raw
+	}
+	structured, ok := envelope["structuredContent"]
+	if !ok {
+		return raw
+	}
+	guided := ensureSchemaToolGuidance(structured, args)
+	if reflect.DeepEqual(guided, structured) {
+		return raw
+	}
+	out := cloneMap(envelope)
+	out["structuredContent"] = guided
+	if blocks := outputRows(out["content"]); len(blocks) == 1 {
+		block := cloneMap(mapValue(blocks[0]))
+		if firstString(block, "type") == "text" {
+			if encoded, err := json.Marshal(guided); err == nil {
+				block["text"] = string(encoded)
+				out["content"] = []any{block}
+			}
+		}
 	}
 	return out
 }
@@ -796,7 +852,24 @@ func withProfileFilteredNativeFacades(r *http.Request, tools []map[string]any) [
 }
 
 func (s *Server) writeTokenSchema(w http.ResponseWriter, r *http.Request, args map[string]any, raw any) {
-	writeJSON(w, http.StatusOK, s.presentTokenOutput(r, "schema", args, raw))
+	if payload, ok := raw.(map[string]any); ok && firstString(args, "tool") != "" {
+		if compacted := compactSchema(payload, args); firstString(compacted, "status") == "failed" {
+			writeJSON(w, http.StatusOK, ensureSchemaToolGuidance(compacted, args))
+			return
+		}
+	}
+	raw = ensureSchemaToolGuidance(raw, args)
+	if guided := ensureSchemaToolGuidance(raw, args); !reflect.DeepEqual(guided, raw) {
+		writeJSON(w, http.StatusOK, guided)
+		return
+	}
+	presented := ensureSchemaToolGuidance(s.presentTokenOutput(r, "schema", args, raw), args)
+	if payload, ok := presented.(map[string]any); ok && firstString(payload, "status") == "failed" {
+		if errorText := firstString(payload, "error"); strings.HasPrefix(errorText, "unknown tool: ") {
+			presented = unknownSchemaToolGuidance(strings.TrimPrefix(errorText, "unknown tool: "), firstString(args, "target", "server_id", "agent_id"))
+		}
+	}
+	writeJSON(w, http.StatusOK, presented)
 }
 
 func (s *Server) mcpRelayExpand(w http.ResponseWriter, r *http.Request) {

@@ -30,8 +30,8 @@ SHELLMCP_MAIN = './cmd/shellmcp-go'
 BRIDGE_MAIN = './cmd/gptadmin-mcp-bridge'
 SHELLMCP_SOURCE = 'go-shellmcp'
 BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
-PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-vusa.service'
-PROXY_ROUTE_UNIT_PACKAGE_PATH = 'systemd/gptadmin-proxy-route-vusa.service'
+PROXY_ROUTE_UNIT_SOURCE = 'scripts/systemd/gptadmin-proxy-route-relay02.service'
+PROXY_ROUTE_UNIT_PACKAGE_PATH = 'systemd/gptadmin-proxy-route-relay02.service'
 SECRET_INPUT_PAGE = 'public/secret-input/index.html'
 
 
@@ -224,8 +224,8 @@ def build(arch: str, output: Path, commit: str, version: int, dirty: bool, platf
                 raise RuntimeError('proxy route systemd unit exceeds its package size limit')
             unit_text = proxy_unit.read_text()
             if '[Unit]' not in unit_text or '[Service]' not in unit_text or \
-                    not any(line.strip() == 'User=roomhacker' for line in unit_text.splitlines()):
-                raise RuntimeError('proxy route systemd unit does not match the fixed roomhacker service contract')
+                    not any(line.strip() == 'User=admin' for line in unit_text.splitlines()):
+                raise RuntimeError('proxy route systemd unit does not match the fixed admin service contract')
             files.update({'bin/shellmcp': shellmcp_binary,
                           PROXY_ROUTE_UNIT_PACKAGE_PATH: proxy_unit})
         payload = LINUX_PAYLOAD if platform == 'linux' else DARWIN_PAYLOAD

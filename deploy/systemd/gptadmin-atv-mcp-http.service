@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=roomhacker
-Group=roomhacker
-WorkingDirectory=/home/roomhacker/PycharmProjects/TelegramAuto
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/PycharmProjects/TelegramAuto
 EnvironmentFile=/etc/gptadmin/mcp-http/atv-zcode100.env
 Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-ExecStart=/home/roomhacker/PycharmProjects/TelegramAuto/ATV/.venv/bin/python /home/roomhacker/gptadmin/tools/python_mcp_http.py --config /var/lib/gptadmin/mcp-http/atv-zcode100/binding.json
+ExecStart=/home/admin/PycharmProjects/TelegramAuto/ATV/.venv/bin/python /home/admin/gptadmin/tools/python_mcp_http.py --config /var/lib/gptadmin/mcp-http/atv-zcode100/binding.json
 UMask=0077
 # The original ATV module uses sudo only to read its protected HA DB binding.
 # Preserve that existing user authority; never substitute/copy the DB credential.

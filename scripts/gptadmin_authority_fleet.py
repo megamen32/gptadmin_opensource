@@ -472,7 +472,7 @@ class Fleet:
                 if (gate.get('schema') != 'gptadmin.authority-launch-gate/v1'
                         or gate.get('operation_id') != self.m['operation_id']
                         or gate.get('manifest_sha256') != self.manifest_hash
-                        or gate.get('launcher_owner_target') != 'shell:roomhacker-server-100'):
+                        or gate.get('launcher_owner_target') != 'shell:admin-node-100'):
                     raise Refused('launch acceptance does not bind this reviewed operation')
                 task_id = gate.get('launcher_task_id', '')
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
@@ -489,7 +489,7 @@ class Fleet:
                            ' except (ValueError,TypeError): payload={}\n'
                            ' out.update(status=v.get("status"),returncode=z.get("returncode"),task_id=v.get("id"))\n'
                            ' out["terminal_verified"]=(r[0]=="shell" and r[1]>0 and v.get("id")==sys.argv[1] '
-                           'and v.get("server")=="roomhacker-server-100" and v.get("tool_name")=="shell_exec" '
+                           'and v.get("server")=="admin-node-100" and v.get("tool_name")=="shell_exec" '
                            'and v.get("status")=="completed" and z.get("returncode")==0 '
                            'and all(payload.get(k)==value for k,value in expected.items()))\n'
                            'print(json.dumps(out))')
@@ -581,7 +581,7 @@ def launch_external(manifest_path, manifest_hash):
         'm=json.loads(raw); unit=m["external_unit"]\n'
         'prior=subprocess.run(["systemctl","show",unit,"-p","LoadState","--value"],capture_output=True,text=True,check=True).stdout.strip()\n'
         'assert prior=="not-found","operation unit already exists; reconcile without repeating admission"\n'
-        'argv=["sudo","-n","systemd-run","--unit="+unit,"--uid=roomhacker","--property=Type=exec",'
+        'argv=["sudo","-n","systemd-run","--unit="+unit,"--uid=admin","--property=Type=exec",'
         '"--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20s",'
         '"--working-directory="+str(p.parent),"/usr/bin/python3",str(p.parent/"gptadmin_authority_fleet.py"),'
         '"--manifest",str(p),"--manifest-sha256",sys.argv[2]]\n'

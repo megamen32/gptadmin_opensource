@@ -46,7 +46,7 @@ GPTADMIN_ROOT=/var/lib/gptadmin/nodes/canary
 GPTADMIN_ENV_FILE=/etc/gptadmin/nodes/canary.env
 GPTADMIN_HUB_HOST=127.0.0.1
 GPTADMIN_HUB_PORT=19002
-SHELL_NAME=vusa-unified
+SHELL_NAME=relay02-unified
 SHELL_IDENTITY_DIR=/var/lib/gptadmin/nodes/canary
 SHELL_SPOOL_DIR=/var/lib/gptadmin/nodes/canary/spool
 SHELL_OUTBOX_DIR=/var/lib/gptadmin/nodes/canary/spool/outbox
@@ -89,8 +89,8 @@ OAuth identity общего ChatGPT/Codex connector, для которого и�
 
 ```sh
 python3 scripts/gptadmin_node_probe.py \
-  --url https://u-f1102930.t.gptadmin.bezrabotnyi.com \
-  --connect-to 185.240.120.152 --target shell:vusa-unified \
+  --url https://your-subdomain.t.became.bezrabotnyi.com \
+  --connect-to 185.240.120.152 --target shell:relay02-unified \
   --expect-commit 0672047
 ```
 

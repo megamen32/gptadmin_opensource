@@ -121,7 +121,7 @@ Description=GPTAdmin temporary socket sandbox writer
 {requires}
 [Service]
 Type=simple
-User=roomhacker
+User=admin
 {sockets}EnvironmentFile={env_path}
 ExecStart={binary}
 Restart=no
@@ -203,7 +203,7 @@ def prove_direct_start_inherits_one_listener():
         install(unit_dir / service,
                 "[Unit]\n"
                 f"Requires={sock}\nAfter={sock}\n"
-                "[Service]\nType=simple\nUser=roomhacker\n"
+                "[Service]\nType=simple\nUser=admin\n"
                 f"Sockets={sock}\n"
                 f"ExecStart=/usr/bin/python3 {program} {marker}\n"
                 "Restart=no\n")
@@ -258,7 +258,7 @@ def main():
     state = Path(f"/var/tmp/{names['runtime']}")
     unit_dir = Path("/run/systemd/system")
     paths = {key: unit_dir / names[key] for key in ("old", "green", "canonical", "bridge", "socket")}
-    user = pwd.getpwnam("roomhacker")
+    user = pwd.getpwnam("admin")
     errors = []
     try:
         state.mkdir(mode=0o755, parents=True, exist_ok=True)

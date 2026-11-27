@@ -39,7 +39,7 @@ On OpenWrt the public TLS entry point runs as `haproxy-became`. Its supervisor
 waits five seconds after an unexpected exit and keeps retrying for as long
 as the service is enabled. The usual procd retry limit can leave the public
 port closed even while all three voters are healthy. The init script belongs
-at `/etc/init.d/haproxy-became`. [OpenWrt service definition](../deploy/openwrt/haproxy-became)
+at `/etc/init.d/haproxy-became`. [OpenWrt service definition](../deploy/server01/haproxy-became)
 
 For planned maintenance, a service manager can drain its own voter through its
 loopback listener using that node's control credential. Draining a follower

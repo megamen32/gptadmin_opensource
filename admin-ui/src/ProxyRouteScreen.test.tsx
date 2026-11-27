@@ -8,11 +8,11 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const profile: ProxyRouteProfile = {
   schema: "gptadmin.proxy-route/v1",
-  id: "vusa-server44-de-http",
-  consumer: "vusa",
-  exit: "server-44-de-http",
+  id: "relay02-server44-de-http",
+  consumer: "relay02",
+  exit: "node-44-de-http",
   listener: { bind_address: "127.0.0.1", port: 24836 },
-  ssh_identity_ref: "ssh-config:vusa",
+  ssh_identity_ref: "ssh-config:relay02",
   desired_state: "enabled",
 };
 
@@ -28,7 +28,7 @@ const snapshot = (overrides: Partial<ProxyRouteState["runtime"]["last_probe"]> =
       direct_exit_ip: "203.0.113.10",
       proxy_exit_ip: "203.0.113.20",
       server44_path_verified: true,
-      server44_path_reason: "Established server-44 connection observed.",
+      server44_path_reason: "Established node-44 connection observed.",
       ...overrides,
     },
   },
@@ -46,7 +46,7 @@ it("shows live probe addresses, preserves unknown path verification, and exposes
 });
 
 it("renders long proxy diagnostics in the dedicated readable row", async () => {
-  const diagnostic = "Could not verify the established server-44 socket: timed out waiting for server-44 socket readback Direct VUSA request failed: VUSA readback failed: 185.240.120.152 Proxy request failed: VUSA readback failed: 212.192.31.128";
+  const diagnostic = "Could not verify the established node-44 socket: timed out waiting for node-44 socket readback Direct VUSA request failed: VUSA readback failed: 185.240.120.152 Proxy request failed: VUSA readback failed: 212.192.31.128";
   render(<ProxyRouteScreen load={vi.fn().mockResolvedValue(snapshot({ server44_path_verified: null, server44_path_reason: diagnostic }))} save={vi.fn()} action={vi.fn()} />);
 
   expect(await screen.findByText(diagnostic)).toBeInTheDocument();

@@ -259,16 +259,16 @@ def _service_run_succeeded(unit: dict[str, str]) -> bool:
 
 
 def run() -> dict[str, Any]:
-    source_notice = Path("/home/roomhacker/agents-projects/noticeplace/notification_center/health_workflow.py")
+    source_notice = Path("/home/admin/agents-projects/noticeplace/notification_center/health_workflow.py")
     live_notice = Path("/opt/noticeplace/notification_center/health_workflow.py")
-    source_herder = Path("/home/roomhacker/agents-projects/agent-herder/src/health-progress.ts")
-    live_herder = Path("/home/roomhacker/agents-projects/agent-herder/dist/index.js")
-    live_herder_server = Path("/home/roomhacker/agents-projects/agent-herder/dist/web/server.js")
-    live_herder_progress = Path("/home/roomhacker/agents-projects/agent-herder/dist/health-progress.js")
-    live_herder_remediation = Path("/home/roomhacker/agents-projects/agent-herder/dist/health-remediation.js")
-    source_health_monitor = Path("/home/roomhacker/ServersAdministartion/automation/health-incident-monitor/health_monitor.py")
-    source_fleet_adapter = Path("/home/roomhacker/ServersAdministartion/automation/health-incident-monitor/fleet_health_monitor.py")
-    source_fleet_config = Path("/home/roomhacker/ServersAdministartion/automation/health-incident-monitor/health-incident-fleet.json.example")
+    source_herder = Path("/home/admin/agents-projects/agent-herder/src/health-progress.ts")
+    live_herder = Path("/home/admin/agents-projects/agent-herder/dist/index.js")
+    live_herder_server = Path("/home/admin/agents-projects/agent-herder/dist/web/server.js")
+    live_herder_progress = Path("/home/admin/agents-projects/agent-herder/dist/health-progress.js")
+    live_herder_remediation = Path("/home/admin/agents-projects/agent-herder/dist/health-remediation.js")
+    source_health_monitor = Path("/home/admin/ServersAdministartion/automation/health-incident-monitor/health_monitor.py")
+    source_fleet_adapter = Path("/home/admin/ServersAdministartion/automation/health-incident-monitor/fleet_health_monitor.py")
+    source_fleet_config = Path("/home/admin/ServersAdministartion/automation/health-incident-monitor/health-incident-fleet.json.example")
     live_health_monitor = Path("/opt/health-incident-monitor/health_monitor.py")
     live_fleet_adapter = Path("/opt/health-incident-monitor/fleet_health_monitor.py")
     live_fleet_service = Path("/etc/systemd/system/health-incident-fleet.service")
@@ -307,7 +307,7 @@ def run() -> dict[str, Any]:
         ),
         "opencode_health": _authenticated_env_probe(
             "http://127.0.0.1:4095/global/health",
-            Path("/home/roomhacker/.config/openchamber/startup.env"),
+            Path("/home/admin/.config/openchamber/startup.env"),
             "OPENCODE_SERVER_PASSWORD",
             basic_user="opencode",
         ),
@@ -329,7 +329,7 @@ def run() -> dict[str, Any]:
         "local_config_file": local_config_path.exists(),
         "fleet_config_file": fleet_config_path.exists(),
         "local_config_readable": runtime_config_readable(local_config_path, "health-monitor"),
-        "fleet_config_readable": runtime_config_readable(fleet_config_path, "roomhacker"),
+        "fleet_config_readable": runtime_config_readable(fleet_config_path, "admin"),
         "local_env_file": Path("/etc/health-incident-monitor.env").is_file(),
         "fleet_env_file": Path("/etc/health-incident-monitor.env").is_file(),
         "local_env_file_safe": runtime_secret_file_safe(Path("/etc/health-incident-monitor.env")),

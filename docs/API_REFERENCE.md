@@ -75,7 +75,7 @@ acceptance are separate checks.
 | `POST` | `/admin/api/mcp/issue-token` | Issue an MCP bearer token from `client_id`, optional `profile_id`, `role`, `ttl_days`, and `access_mode`. `access_mode` is `full` or `readonly` (default `full`); `ttl_days: 0` selects the server default. The response includes the secret `access_token` once. |
 | `POST` | `/admin/api/servers/resources` | Request a live resource sample from one exact `shell:<id>` target. |
 | `GET` | `/admin/api/jobs?server_id=shell:<id>&limit=1` | Fetch newest task history for exactly that shell node; filtering happens before ordering and limit. It works while the node is offline. |
-| `GET` / `PUT` | `/admin/api/proxy-route` | Read or save the fixed VUSA-to-server-44 proxy-route profile. |
+| `GET` / `PUT` | `/admin/api/proxy-route` | Read or save the fixed VUSA-to-node-44 proxy-route profile. |
 | `POST` | `/admin/api/proxy-route/{enable,disable,reconcile,probe}` | Operate or probe that fixed route. |
 
 The overview inventory can include the Hub (`hub`), real child MCPs
@@ -102,8 +102,8 @@ preview for that target. It reports history stored by the Hub; reading it does
 not claim that the node answered recently or is currently online.
 
 The proxy-route profile is source-constrained to the VUSA consumer, the
-server-44 DE HTTP exit, loopback listener `127.0.0.1:24836`, and the existing
-`ssh-config:vusa` identity reference. `GET` reports saved profile and runtime
+node-44 DE HTTP exit, loopback listener `127.0.0.1:24836`, and the existing
+`ssh-config:relay02` identity reference. `GET` reports saved profile and runtime
 service/listener/probe state separately. The default desired state is disabled;
 the API contract does not imply that the route is enabled or live.
 
@@ -122,7 +122,7 @@ List registered shellmcp agents.
 ```json
 {
   "servers": [
-    { "name": "server-01", "url": "http://10.0.0.5:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
+    { "name": "node-01", "url": "http://203.0.113.10:25901", "alive": true, "last_seen": "2026-06-29T10:00:00Z" }
   ]
 }
 ```
@@ -133,7 +133,7 @@ Execute a shell command on a target agent.
 
 ```json
 {
-  "server": "server-01",
+  "server": "node-01",
   "cmd": "systemctl status nginx"
 }
 ```
@@ -157,7 +157,7 @@ Get the status of a background task.
 
 Create a managed backup of a file before editing.
 
-### `GET /system/info?server=server-01`
+### `GET /system/info?server=node-01`
 
 CPU, RAM, disk, uptime for a target agent.
 

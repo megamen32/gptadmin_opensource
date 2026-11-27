@@ -86,10 +86,10 @@ stdio-регистрация в ней не опрашивается, а пом�
 
 | Среда | Доказательство | Итог |
 |---|---|---|
-| OpenCode, roomhacker-server-100 | живая сессия: в каталоге 451 инструмент, пространство Notice Place ровно одно — `noticeplace`, 18 инструментов; отдельная чистая сессия вызвала `noticeplace_instructions` и получила ответ; повторно подтверждено 26.10 в живой сессии | 18 инструментов, одна точка |
-| Hermes, roomhacker-server-100 | `hermes mcp test noticeplace` → `Connected`, `Tools discovered: 18`, заголовок авторизации показан как `***`; повторно подтверждено 26.10 | 18 инструментов, одна точка |
-| ZCode, roomhacker-server-100 | headless-сессия `zcode --prompt` (sess_0625d2eb, 26.10): среди 11 подключённых MCP-серверов ровно один `noticeplace`; отдельных серверов Notify/AskHuman нет; вызов `noticeplace_instructions` вернул ответ | одна точка; зонд регистрации: 18 инструментов |
-| Fast-Agent, roomhacker-server-100 | one-shot сессия `fast-agent go` (2610260228-TtgwMV, 26.10): среди 8 подключённых MCP-серверов ровно один `noticeplace`; отдельных серверов Notify/Notice/AskHuman нет; вызов `noticeplace_instructions` вернул ответ | одна точка; зонд регистрации: 18 инструментов |
+| OpenCode, admin-node-100 | живая сессия: в каталоге 451 инструмент, пространство Notice Place ровно одно — `noticeplace`, 18 инструментов; отдельная чистая сессия вызвала `noticeplace_instructions` и получила ответ; повторно подтверждено 26.10 в живой сессии | 18 инструментов, одна точка |
+| Hermes, admin-node-100 | `hermes mcp test noticeplace` → `Connected`, `Tools discovered: 18`, заголовок авторизации показан как `***`; повторно подтверждено 26.10 | 18 инструментов, одна точка |
+| ZCode, admin-node-100 | headless-сессия `zcode --prompt` (sess_0625d2eb, 26.10): среди 11 подключённых MCP-серверов ровно один `noticeplace`; отдельных серверов Notify/AskHuman нет; вызов `noticeplace_instructions` вернул ответ | одна точка; зонд регистрации: 18 инструментов |
+| Fast-Agent, admin-node-100 | one-shot сессия `fast-agent go` (2610260228-TtgwMV, 26.10): среди 8 подключённых MCP-серверов ровно один `noticeplace`; отдельных серверов Notify/Notice/AskHuman нет; вызов `noticeplace_instructions` вернул ответ | одна точка; зонд регистрации: 18 инструментов |
 
 ### Уровень конфигурации + пробы точки
 
@@ -98,14 +98,14 @@ stdio-регистрация в ней не опрашивается, а пом�
 
 | Хост | Клиент | Состояние | Живая точка | Инструментов |
 |---|---|---|---|---|
-| roomhacker-server-100 | opencode | активные сессии | `noticeplace` | 18 |
-| roomhacker-server-100 | codex | активные сессии | `noticeplace` | 18 |
-| roomhacker-server-100 | hermes | настроен, harness-проверен | `noticeplace` | 18 |
-| roomhacker-server-100 | zcode | настроен | `noticeplace` | 18 |
-| roomhacker-server-100 | fast-agent | настроен | `noticeplace` | 18 |
-| server-44 | opencode | настроен | `noticeplace` | 18 |
-| server-44 | hermes | настроен | `noticeplace` | 18 |
-| server-44 | codex | настроен | `noticeplace` | 18 |
+| admin-node-100 | opencode | активные сессии | `noticeplace` | 18 |
+| admin-node-100 | codex | активные сессии | `noticeplace` | 18 |
+| admin-node-100 | hermes | настроен, harness-проверен | `noticeplace` | 18 |
+| admin-node-100 | zcode | настроен | `noticeplace` | 18 |
+| admin-node-100 | fast-agent | настроен | `noticeplace` | 18 |
+| node-44 | opencode | настроен | `noticeplace` | 18 |
+| node-44 | hermes | настроен | `noticeplace` | 18 |
+| node-44 | codex | настроен | `noticeplace` | 18 |
 | MacBook-Pro-User.local | opencode | настроен | `noticeplace` | 18 |
 | MacBook-Pro-User.local | hermes | настроен | `noticeplace` | 18 |
 | MacBook-Pro-User.local | zcode | настроен | `noticeplace` | 18 |
@@ -113,12 +113,12 @@ stdio-регистрация в ней не опрашивается, а пом�
 | MacBook-Pro-User.local | codex | настроен | `noticeplace` | 18 |
 
 Список активных сессий Agent Herder на 22:58Z (список частичный): 6 сессий
-OpenCode и 10 сессий Codex на roomhacker-server-100. Codex-сессии не
+OpenCode и 10 сессий Codex на admin-node-100. Codex-сессии не
 запускались — их эффективный набор инструментов не проверен.
 
 Отключённые алиасы (остаются в файлах, обратимы): `AskHuman` в opencode,
 codex, hermes, zcode на всех трёх хостах; `notify` в opencode на
-roomhacker-server-100. Ни одного локального stdio-процесса Notice Place на
+admin-node-100. Ни одного локального stdio-процесса Notice Place на
 хостах не осталось: MCP-поверхность установленного плагина отключена,
 регистрация ведётся только конфигом клиента.
 
@@ -129,18 +129,18 @@ roomhacker-server-100. Ни одного локального stdio-процес
 ## Что осталось за пределами проверенного
 
 * **mac-mini-2012.lan — UNKNOWN.** Notice Place не зарегистрирован ни в одной
-  среде (`/Users/roomhacker/.codex/config.toml`,
-  `/Users/roomhacker/.hermes/config.yaml`): алиасов нет, дублировать нечего.
+  среде (`/Users/admin/.codex/config.toml`,
+  `/Users/admin/.hermes/config.yaml`): алиасов нет, дублировать нечего.
   Каноническую точку создать нельзя — на хосте нет локального релиза Notice
   Place и нет bearer ни в одном конфиге клиента.
   Следующий шаг: владелец хоста переносит общий bearer Notification Center в
   конфиг клиента (или в переменную окружения клиента) — после этого
   `gptadmin notice-place install` на этом хосте создаёт каноническую точку.
-* **server-44: zcode, fast-agent — не установлены.** `~/.zcode/cli/config.json`
+* **node-44: zcode, fast-agent — не установлены.** `~/.zcode/cli/config.json`
   и `~/.fast-agent/fast-agent.yaml` на хосте отсутствуют.
 * **ZCode и Fast-Agent — harness-доказательство получено 26.10** (см. таблицу
-  выше). На roomhacker-server-100 обе среды показывают одну точку
-  `noticeplace` и вызывают её инструменты. На server-44 у этих сред конфиги
+  выше). На admin-node-100 обе среды показывают одну точку
+  `noticeplace` и вызывают её инструменты. На node-44 у этих сред конфиги
   по-прежнему отсутствуют (`~/.zcode/cli/config.json`,
   `~/.fast-agent/fast-agent.yaml`) — точка там не создаётся и дублировать
   нечего.
@@ -175,7 +175,7 @@ roomhacker-server-100. Ни одного локального stdio-процес
   что команда `notice-place` появится там только после обновления CLI; правка
   применялась тем же кодом.
 * **GPTAdmin-hub: дочерний ShellMCP-регистр `Notify` — граница сужена 26.10.**
-  Регистр (`mcp:shell:roomhacker-server-100:Notify`, stdio
+  Регистр (`mcp:shell:admin-node-100:Notify`, stdio
   `/usr/bin/python3 /opt/noticeplace/mcp/notify_mcp.py`) поднимает локальный
   stdio-сервер. По фактическому каталогу его инструменты **не входят** в
   список, видимый агенту (поиск по каталогу для `noticeplace` не даёт

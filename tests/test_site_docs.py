@@ -48,7 +48,7 @@ def test_site_docs_cover_live_action_and_oauth_contract():
 
 
 def test_site_docs_do_not_publish_owner_hub_url():
-    assert "u-f1102930.t.gptadmin.bezrabotnyi.com" not in _site_docs_text()
+    assert "your-subdomain.t.became.bezrabotnyi.com" not in _site_docs_text()
 
 
 def test_site_docs_mirror_root_source_and_public_tree():

@@ -32,36 +32,36 @@ OBSERVED = json.loads(r'''{
         ],
         "lease_expires": "2026-11-17T15:14:17.555036715Z",
         "local_id": "a5a875dd-f32d-4f7a-98d9-7069bd574f6e",
-        "name": "shell:server-44",
+        "name": "shell:node-44",
         "node_id": "764231b2ea705fd0544b0713aa6d8bd1",
         "snapshot_revision": 2097,
         "state": "ready"
       },
       {
         "endpoints": [
-          "https://s88-node.t.gptadmin.bezrabotnyi.com"
+          "https://s88-node.t.became.bezrabotnyi.com"
         ],
         "lease_expires": "2026-11-17T15:14:16.248179536Z",
         "local_id": "f300f838-1ba8-4cb9-bae0-e8b477763913",
-        "name": "shell:roomhacker-server-88",
+        "name": "shell:admin-node-88",
         "node_id": "250208ba8276dcc81fecad94e4839653",
         "snapshot_revision": 2097,
         "state": "ready"
       },
       {
         "endpoints": [
-          "https://s100-node.t.gptadmin.bezrabotnyi.com"
+          "https://s100-node.t.became.bezrabotnyi.com"
         ],
         "lease_expires": "2026-11-17T15:13:44.016816276Z",
         "local_id": "bd0bf8c4-f7fe-4d1b-a82c-aa0862e11bd8",
-        "name": "shell:roomhacker-server-100",
+        "name": "shell:admin-node-100",
         "node_id": "bd0bf8c4-f7fe-4d1b-a82c-aa0862e11bd8",
         "snapshot_revision": null,
         "state": "ready"
       },
       {
         "endpoints": [
-          "https://node-mini.t.gptadmin.bezrabotnyi.com"
+          "https://node-mini.t.became.bezrabotnyi.com"
         ],
         "lease_expires": "2026-11-17T15:14:04.680761653Z",
         "local_id": "go-shellmcp-6d5289a76f0d701c",
@@ -72,7 +72,7 @@ OBSERVED = json.loads(r'''{
       },
       {
         "endpoints": [
-          "https://node-intel.t.gptadmin.bezrabotnyi.com"
+          "https://node-intel.t.became.bezrabotnyi.com"
         ],
         "lease_expires": "2026-11-17T15:14:02.521880322Z",
         "local_id": "go-shellmcp-f2f7f271d22f1b46",
@@ -83,7 +83,7 @@ OBSERVED = json.loads(r'''{
       },
       {
         "endpoints": [
-          "http://192.168.2.101:9001"
+          "http://203.0.113.10:9001"
         ],
         "lease_expires": "2026-11-17T15:14:15.044580346Z",
         "local_id": "haos-4283a8b4-0ff8-4b6d-be6c-14117c07e852",

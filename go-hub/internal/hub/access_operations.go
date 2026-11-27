@@ -1,11 +1,8 @@
 package hub
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +10,8 @@ import (
 	"strconv"
 	"time"
 )
+
+const accessOperationHistoryEvents = 5000
 
 // Record intent before applying a management mutation and completion before
 // responding. Never include request bodies, responses or credentials. A crash
@@ -129,33 +128,23 @@ func (s *Server) adminOperations(w http.ResponseWriter, r *http.Request) {
 		current["updated_at"] = event.Time
 	}
 	path := s.auditStatePath()
+	truncated := false
 	if path != "" {
-		file, openErr := os.Open(path)
-		if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
+		info, statErr := os.Stat(path)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 			writeJSON(w, 503, map[string]any{"detail": "operation history unavailable"})
 			return
 		}
-		if file != nil {
-			defer file.Close()
-			reader := bufio.NewReader(file)
-			for {
-				line, readErr := reader.ReadBytes('\n')
-				if len(line) > 0 && bytes.HasSuffix(line, []byte{'\n'}) {
-					var event auditEvent
-					if err := json.Unmarshal(line, &event); err != nil {
-						writeJSON(w, 503, map[string]any{"detail": "invalid operation history record"})
-						return
-					}
-					add(event)
-				}
-				if readErr != nil {
-					if !errors.Is(readErr, io.EOF) {
-						writeJSON(w, 503, map[string]any{"detail": "operation history read failed"})
-						return
-					}
-					break
-				}
-			}
+		if info != nil {
+			truncated = info.Size() > auditHistoryReadBytes
+		}
+		history, readErr := readAuditTail(path, accessOperationHistoryEvents)
+		if readErr != nil {
+			writeJSON(w, 503, map[string]any{"detail": "operation history read failed"})
+			return
+		}
+		for _, event := range history {
+			add(event)
 		}
 	} else {
 		s.mu.Lock()
@@ -178,5 +167,5 @@ func (s *Server) adminOperations(w http.ResponseWriter, r *http.Request) {
 		end = total
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, 200, map[string]any{"operations": items[offset:end], "total": total, "offset": offset, "limit": limit})
+	writeJSON(w, 200, map[string]any{"operations": items[offset:end], "total": total, "offset": offset, "limit": limit, "truncated": truncated})
 }

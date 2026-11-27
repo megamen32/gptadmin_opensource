@@ -327,7 +327,7 @@ class ReleaseControllerBehaviorTests(unittest.TestCase):
             socket_activation_enabled=lambda *_: True)
         self.assertEqual(autoupdate.select_update_mode(manager, 'primary'),
                          'socket-primary')
-        self.assertEqual(autoupdate.select_update_mode(manager, 'server-44'),
+        self.assertEqual(autoupdate.select_update_mode(manager, 'node-44'),
                          'legacy-drain')
 
     def test_autoupdate_source_passes_expected_revision(self):

@@ -822,8 +822,8 @@ func TestAdminIssueMCPTokenUsesPublicOriginAndWorksForRelay(t *testing.T) {
 		CtlToken:                 "ctl",
 		AdminPassword:            "pw",
 		OAuthClientSecret:        "oauth-secret",
-		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		PublicOrigin:             "https://your-subdomain.t.became.bezrabotnyi.com",
+		MCPResource:              "https://your-subdomain.t.became.bezrabotnyi.com",
 		OAuthPermissiveRedirects: true,
 		OAuthPermissiveResources: true,
 		DefaultTimeout:           time.Second,
@@ -851,10 +851,10 @@ func TestAdminIssueMCPTokenUsesPublicOriginAndWorksForRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifyJWT err=%v", err)
 	}
-	if claims["iss"] != "https://u-f1102930.t.gptadmin.bezrabotnyi.com" {
+	if claims["iss"] != "https://your-subdomain.t.became.bezrabotnyi.com" {
 		t.Fatalf("iss=%v", claims["iss"])
 	}
-	if claims["aud"] != "https://u-f1102930.t.gptadmin.bezrabotnyi.com" {
+	if claims["aud"] != "https://your-subdomain.t.became.bezrabotnyi.com" {
 		t.Fatalf("aud=%v", claims["aud"])
 	}
 	if claims["client_id"] != "chatgpt" {
@@ -1148,22 +1148,22 @@ func TestGeneratedActionEndpointsAdvertiseOAuthWhenUnauthorized(t *testing.T) {
 		CtlToken:                 "test-secret-not-for-production",
 		AdminPassword:            "test-secret-not-for-production",
 		OAuthClientSecret:        "test-secret-not-for-production",
-		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		PublicOrigin:             "https://your-subdomain.t.became.bezrabotnyi.com",
+		MCPResource:              "https://your-subdomain.t.became.bezrabotnyi.com",
 		OAuthPermissiveRedirects: true,
 		OAuthPermissiveResources: true,
 		DefaultTimeout:           time.Second,
 		PollMaxTimeout:           time.Second,
 	})
 	req := httptest.NewRequest(http.MethodGet, "/mcp-relay/servers", nil)
-	req.Host = "u-f1102930.t.gptadmin.bezrabotnyi.com"
+	req.Host = "your-subdomain.t.became.bezrabotnyi.com"
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	got := w.Header().Get("WWW-Authenticate")
-	if !strings.Contains(got, `resource_metadata="https://u-f1102930.t.gptadmin.bezrabotnyi.com/.well-known/oauth-protected-resource"`) {
+	if !strings.Contains(got, `resource_metadata="https://your-subdomain.t.became.bezrabotnyi.com/.well-known/oauth-protected-resource"`) {
 		t.Fatalf("missing oauth resource metadata in WWW-Authenticate: %q", got)
 	}
 	if !strings.Contains(got, `scope="gptadmin.read gptadmin.exec"`) {
@@ -1389,8 +1389,8 @@ func TestAuthPagesUseApprovedAuthenticationLanguage(t *testing.T) {
 		CtlToken:                 "test-secret-not-for-production",
 		AdminPassword:            "test-secret-not-for-production",
 		OAuthClientSecret:        "test-secret-not-for-production",
-		PublicOrigin:             "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		MCPResource:              "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+		PublicOrigin:             "https://your-subdomain.t.became.bezrabotnyi.com",
+		MCPResource:              "https://your-subdomain.t.became.bezrabotnyi.com",
 		OAuthPermissiveRedirects: true,
 		OAuthPermissiveResources: true,
 		DefaultTimeout:           time.Second,
@@ -1417,7 +1417,7 @@ func TestAuthPagesUseApprovedAuthenticationLanguage(t *testing.T) {
 		}
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/authorize?client_id=chatgpt&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fcb&resource=https%3A%2F%2Fu-f1102930.t.gptadmin.bezrabotnyi.com&scope=gptadmin.read+gptadmin.exec&code_challenge="+pkceChallenge("verifier")+"&code_challenge_method=S256", nil)
+	req = httptest.NewRequest(http.MethodGet, "/authorize?client_id=chatgpt&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fcb&resource=https%3A%2F%2Fyour-subdomain.t.became.bezrabotnyi.com&scope=gptadmin.read+gptadmin.exec&code_challenge="+pkceChallenge("verifier")+"&code_challenge_method=S256", nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1648,7 +1648,7 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 	s := New(cfg)
 	h := s.Handler()
 
-	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://192.168.2.101:25900","args":["--header","Authorization: Bearer should-not-leak"],"api_key":"should-not-leak-key"}}`)
+	register := []byte(`{"agent_id":"shell:haos","name":"Shell: haos","kind":"virtual_shell","transport":"long_poll","capabilities":["shell"],"meta":{"base_url":"http://203.0.113.10:25900","args":["--header","Authorization: Bearer should-not-leak"],"api_key":"should-not-leak-key"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", bytes.NewReader(register))
 	req.Header.Set("Authorization", "Bearer relay")
 	w := httptest.NewRecorder()
@@ -1657,7 +1657,7 @@ func TestFailoverConfigAndStateEndpoints(t *testing.T) {
 		t.Fatalf("register status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	payload := []byte(`{"enabled":true,"fail_count_base":4,"nodes":[{"server_id":"shell:haos","rank":1,"enabled":true,"hub_url":"http://192.168.2.101:9001"},{"server_id":"shell:server-44","rank":2,"enabled":true}]}`)
+	payload := []byte(`{"enabled":true,"fail_count_base":4,"nodes":[{"server_id":"shell:haos","rank":1,"enabled":true,"hub_url":"http://203.0.113.10:9001"},{"server_id":"shell:node-44","rank":2,"enabled":true}]}`)
 	req = httptest.NewRequest(http.MethodPost, "/admin/api/failover", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w = httptest.NewRecorder()
@@ -1782,7 +1782,7 @@ func TestCompatibilityEndpoints(t *testing.T) {
 func TestActionsOpenAPIAdvertisesRequestHost(t *testing.T) {
 	s := New(Config{
 		CtlToken:       "ctl",
-		PublicOrigin:   "https://gptadmin.bezrabotnyi.com",
+		PublicOrigin:   "https://became.bezrabotnyi.com",
 		DefaultTimeout: time.Second,
 		PollMaxTimeout: time.Second,
 	})
@@ -1801,9 +1801,9 @@ func TestActionsOpenAPIAdvertisesRequestHost(t *testing.T) {
 	}
 
 	for host, wantURL := range map[string]string{
-		"u-f1102930.t.gptadmin.bezrabotnyi.com": "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		"gptadmin.bezrabotnyi.com":              "https://gptadmin.bezrabotnyi.com",
-		"127.0.0.1:9001":                        "https://gptadmin.bezrabotnyi.com",
+		"your-subdomain.t.became.bezrabotnyi.com": "https://your-subdomain.t.became.bezrabotnyi.com",
+		"became.bezrabotnyi.com":              "https://became.bezrabotnyi.com",
+		"127.0.0.1:9001":                        "https://became.bezrabotnyi.com",
 	} {
 		if body := fetch(host); !strings.Contains(body, `url: "`+wantURL+`"`) {
 			t.Fatalf("host %q: servers url %q not advertised in %s", host, wantURL, body)
@@ -1838,11 +1838,11 @@ func TestActionsInstructionsServesPublicPrompt(t *testing.T) {
 func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{AgentID: "shell:roomhacker-server-100", Name: "Shell: roomhacker-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:admin-node-100"] = &Agent{AgentID: "shell:admin-node-100", Name: "Shell: admin-node-100", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:roomhacker-server-100","tool_name":"shell_exec","cmd":"pwd"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-node-100","tool_name":"shell_exec","cmd":"pwd"}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -1856,7 +1856,7 @@ func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 	jobID := firstString(response, "job_id")
 	s.mu.Lock()
 	queued := s.shellJobs[jobID]
-	valid := queued != nil && queued.Server == "roomhacker-server-100" && queued.Cmd == "pwd"
+	valid := queued != nil && queued.Server == "admin-node-100" && queued.Cmd == "pwd"
 	s.mu.Unlock()
 	if !valid || response["status"] != "running" {
 		t.Fatalf("callMcpTool shell_exec did not queue the requested command: %s", w.Body.String())
@@ -1869,11 +1869,11 @@ func TestCallMcpToolAcceptsTopLevelShellArgs(t *testing.T) {
 func TestCallMcpToolAcceptsQueryJSONObjectFallback(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{AgentID: "shell:roomhacker-server-100", Name: "Shell: roomhacker-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:admin-node-100"] = &Agent{AgentID: "shell:admin-node-100", Name: "Shell: admin-node-100", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:roomhacker-server-100","tool_name":"shell_exec","query":"{\"cmd\":\"printf query-json-ok\"}"}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:admin-node-100","tool_name":"shell_exec","query":"{\"cmd\":\"printf query-json-ok\"}"}`))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -1897,11 +1897,11 @@ func TestCallMcpToolAcceptsQueryJSONObjectFallback(t *testing.T) {
 func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{AgentID: "shell:roomhacker-server-100", Name: "Shell: roomhacker-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:admin-node-100"] = &Agent{AgentID: "shell:admin-node-100", Name: "Shell: admin-node-100", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:roomhacker-server-100","tool_name":"shell_exec","args_json":"{\"cmd\":\"printf args-json-ok\"}"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", bytes.NewReader([]byte(`{"target":"shell:admin-node-100","tool_name":"shell_exec","args_json":"{\"cmd\":\"printf args-json-ok\"}"}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -1921,7 +1921,7 @@ func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
 		t.Fatalf("args_json did not decode into child arguments: %s", w.Body.String())
 	}
 
-	bad := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:roomhacker-server-100","tool_name":"shell_exec","args_json":"not-json"}`))
+	bad := httptest.NewRequest(http.MethodPost, "/mcp-relay/call", strings.NewReader(`{"target":"shell:admin-node-100","tool_name":"shell_exec","args_json":"not-json"}`))
 	bad.Header.Set("Authorization", "Bearer ctl")
 	badW := httptest.NewRecorder()
 	h.ServeHTTP(badW, bad)
@@ -1933,11 +1933,11 @@ func TestCallMcpToolAcceptsArgsJSON(t *testing.T) {
 func TestRelayShellExecForwardsExplicitRunAsUser(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{AgentID: "shell:roomhacker-server-100", Name: "Shell: roomhacker-server-100", Kind: "virtual_shell", Status: "online"}
+	s.agents["shell:admin-node-100"] = &Agent{AgentID: "shell:admin-node-100", Name: "Shell: admin-node-100", Kind: "virtual_shell", Status: "online"}
 	s.mu.Unlock()
 	h := s.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/shell_exec", bytes.NewReader([]byte(`{"target":"shell:roomhacker-server-100","cmd":"id -un","run_as_user":"root","background":true}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/shell_exec", bytes.NewReader([]byte(`{"target":"shell:admin-node-100","cmd":"id -un","run_as_user":"root","background":true}`)))
 	req.Header.Set("Authorization", "Bearer ctl")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -3248,7 +3248,7 @@ func TestHTTPServiceEndpointProxiesRegisteredLoopbackService(t *testing.T) {
 
 func TestHTTPServiceEndpointRejectsNonLoopback(t *testing.T) {
 	s := New(Config{RelayAgentToken: "relay"})
-	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"http://192.168.2.1:80","strip_prefix":true,"visibility":"public-capability"}]}}`
+	body := `{"agent_id":"demo","name":"Demo","meta":{"http_endpoints":[{"name":"files","local_url":"http://203.0.113.10:80","strip_prefix":true,"visibility":"public-capability"}]}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp-relay/register", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer relay")
 	w := httptest.NewRecorder()
@@ -3452,7 +3452,7 @@ func TestOldShellBuildDoesNotAdvertisePairedFileTarget(t *testing.T) {
 }
 
 func TestCanonicalShellQueueNameHomeAssistantAlias(t *testing.T) {
-	for _, alias := range []string{"homeassistant", "home-assistant", "haos"} {
+	for _, alias := range []string{"server01", "home-assistant", "haos"} {
 		if got := canonicalShellQueueName(alias); got != "haos" {
 			t.Fatalf("%s => %s", alias, got)
 		}

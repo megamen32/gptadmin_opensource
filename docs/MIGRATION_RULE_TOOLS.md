@@ -6,13 +6,13 @@
 verified through a real client and an independent recovery path exists.**
 
 This rule exists because of a concrete failure. A release retired the public
-direct tool execution (`execute`) while it kept the server-side handler. The
+direct tool execution (`execute`) while it kept the node-side handler. The
 handler was still there, but the tool was no longer in the catalog a client
 loads. ChatGPT refuses to call a tool that is not in the loaded catalog, even
 when the server would have handled it. The result was a release that looked
 complete on the server and was unusable from the client that mattered.
 
-The server-side test suite did not catch it either, because the tests were
+The node-side test suite did not catch it either, because the tests were
 written against the new behaviour. The product contract changed without the
 acceptance criteria changing with it.
 
@@ -20,7 +20,7 @@ acceptance criteria changing with it.
 
 1. **A real client has loaded the new contract.** The replacement must be
    present in the catalog that the actual client loads, and the client must
-   have called it successfully. A server-side handler, a `tools/list` answer or
+   have called it successfully. A node-side handler, a `tools/list` answer or
    a unit test is not a client.
 2. **An independent recovery path exists.** Rolling back must not depend on
    the component being replaced. The Node package manager keeps every installed

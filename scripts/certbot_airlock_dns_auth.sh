@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish the DNS-01 value through the authenticated SpaceWeb client on the
-# M1. Certbot invokes this as root; the existing server-100 reverse SSH bridge
+# M1. Certbot invokes this as root; the existing node-100 reverse SSH bridge
 # keeps the panel credentials on the machine where they are maintained.
 set -Eeuo pipefail
 
@@ -19,7 +19,7 @@ relative_name="${domain%"$suffix"}"
 record_name="_acme-challenge${relative_name:+.$relative_name}"
 
 call_spaceweb() {
-  sudo -n -u roomhacker env HOME=/home/roomhacker ssh \
+  sudo -n -u admin env HOME=/home/admin ssh \
     -o BatchMode=yes \
     -o ConnectTimeout=12 \
     -o StrictHostKeyChecking=yes \

@@ -53,7 +53,7 @@ Ask Codex to use `$gptadmin-dns-adapter` with your provider and test hostname. S
 ## Recovery and tunnel boundary
 
 If a client for this managed installation is connected to an old
-`u-f….t.gptadmin.bezrabotnyi.com` address, replace its MCP entry with the
+`u-f….t.became.bezrabotnyi.com` address, replace its MCP entry with the
 canonical `/mcp` URL above and run the browser OAuth reconnect flow. Request the reconnect scopes
 `gptadmin.read gptadmin.exec offline_access`; the password is entered only in
 the browser consent page.

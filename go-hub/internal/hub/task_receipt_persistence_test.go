@@ -13,7 +13,7 @@ func taskReceiptTestProfile(version int64) AccessProfile {
 		Version:        version,
 		AccessMode:     accessModeFull,
 		ApprovalMode:   approvalModeUnrestricted,
-		AllowedTargets: []string{"hub", "file:server-44"},
+		AllowedTargets: []string{"hub", "file:node-44"},
 		AllowedTools:   []string{"system_inspect"},
 	}
 }
@@ -51,17 +51,17 @@ func saveCompletedReceiptFixture(t *testing.T, dir string) (*Server, string, str
 	shellID := "shell-receipt-after-cache"
 	relayID := "relay-receipt-after-cache"
 	s.shellJobs[shellID] = &shellJob{
-		ID: shellID, OwnerID: ownerID, Server: "server-44", ToolName: "system_inspect",
+		ID: shellID, OwnerID: ownerID, Server: "node-44", ToolName: "system_inspect",
 		Caller: caller, CreatedAt: done - 1, StartedAt: done - 0.1, DoneAt: done,
 		Status: "completed", CachedAt: done, Result: map[string]any{"sentinel": "shell-safe-result"},
 		FilesystemACL: &filesystemACLPolicy{
 			Version: 1, ProfileID: profile.ID, ProfileVersion: profile.Version,
-			RootsDigest: "receipt-only-fixture", JobID: shellID, Target: "file:server-44",
+			RootsDigest: "receipt-only-fixture", JobID: shellID, Target: "file:node-44",
 			Tool: "system_inspect", ArgumentsSHA256: "receipt-only-fixture",
 		},
 	}
 	s.relayJobs[relayID] = &relayJob{
-		ID: relayID, OwnerID: ownerID, AgentID: "file:server-44", Method: "tools/call",
+		ID: relayID, OwnerID: ownerID, AgentID: "file:node-44", Method: "tools/call",
 		Caller: caller, CreatedAt: done - 1, StartedAt: done - 0.1, DoneAt: done,
 		Status: "completed", CachedAt: done, Result: map[string]any{"sentinel": "relay-safe-result"},
 	}
@@ -212,8 +212,8 @@ func TestLegacyPersistedTaskWithoutCallerRemainsFailClosed(t *testing.T) {
 	relayID := "legacy-relay-receipt-without-caller"
 	now := nowFloat()
 	writer.mu.Lock()
-	writer.shellJobs[id] = &shellJob{ID: id, Server: "server-44", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-result"}}
-	writer.relayJobs[relayID] = &relayJob{ID: relayID, AgentID: "file:server-44", Method: "tools/call", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-relay-result"}}
+	writer.shellJobs[id] = &shellJob{ID: id, Server: "node-44", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-result"}}
+	writer.relayJobs[relayID] = &relayJob{ID: relayID, AgentID: "file:node-44", Method: "tools/call", Status: "completed", CreatedAt: now - taskCacheSeconds - 10, DoneAt: now - taskCacheSeconds - 5, CachedAt: now - taskCacheSeconds - 5, Result: map[string]any{"sentinel": "legacy-relay-result"}}
 	if err := writer.saveTaskStateLocked(id, relayID); err != nil {
 		writer.mu.Unlock()
 		t.Fatal(err)

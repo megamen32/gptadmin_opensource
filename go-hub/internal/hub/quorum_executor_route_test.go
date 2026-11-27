@@ -11,8 +11,8 @@ import (
 
 // The caller supplies an elected three-voter cluster with its committed baseline.
 func testQuorumExecutorEnrollment(t *testing.T, s *Server) {
-	const local = "shell:server-44"
-	const remote = "shell:server-88"
+	const local = "shell:node-44"
+	const remote = "shell:node-88"
 	const aliasKey = "historical-node-fixture"
 	nodes := map[string]*nodeMember{}
 	add := func(id, target, state, localID, fingerprint string) *nodeMember {
@@ -109,7 +109,7 @@ func testQuorumExecutorEnrollment(t *testing.T, s *Server) {
 		defer delete(nodes, alias.NodeID)
 		alias.KeyHash = hashNodeSecret(aliasKey)
 		route(t, remote, true, false)
-		request := httptest.NewRequest(http.MethodPost, memberQueuePrefix+"server-88/result", strings.NewReader("{}"))
+		request := httptest.NewRequest(http.MethodPost, memberQueuePrefix+"node-88/result", strings.NewReader("{}"))
 		request.Header.Set("Authorization", "Bearer "+aliasKey)
 		response := httptest.NewRecorder()
 		s.memberExecutorQueue(response, request)

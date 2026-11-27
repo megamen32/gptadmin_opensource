@@ -53,7 +53,7 @@ To upgrade an existing profile without changing its policy:
    `allowed_tools`, `tool_rules`, `read_roots`, `write_roots`, and
    `workspace_refs` as present. PUT replaces the profile representation; do not
    omit existing policy fields. `target_identities`, `version`, and `updated_at`
-   are server-managed response fields, not writable policy inputs.
+   are node-managed response fields, not writable policy inputs.
 3. Read the profile back and inspect its `target_identities` and policy. The
    version and ETag advance even for an otherwise unchanged PUT. A `412` means
    the profile changed: GET the current version and reassess before retrying;
@@ -74,7 +74,7 @@ the profile does not already allow.
 
 ```json
 {
-  "target": "file:roomhacker-server-100",
+  "target": "file:admin-node-100",
   "tool": "file_editor",
   "actions": ["view"],
   "read_only": true

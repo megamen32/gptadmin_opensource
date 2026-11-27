@@ -73,7 +73,7 @@ The native host is a separate application that runs on the user's machine and pe
 
 | Setting | Location | Default |
 |---------|----------|---------|
-| Hub URL | Popup → ⚙ Settings | `https://gptadmin.bezrabotnyi.com` |
+| Hub URL | Popup → ⚙ Settings | `https://became.bezrabotnyi.com` |
 | Computer Name | Popup → Computer Name field | `My Computer` |
 | Native Host Path | `native-host-manifest.json` → `path` | `/usr/local/bin/gptadmin-cloudos-nativehost` |
 

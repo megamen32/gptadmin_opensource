@@ -872,8 +872,8 @@ func New(cfg Config) *Server {
 		}
 	}
 	s.cloudOSRegistry.Register(&cloudos.Computer{
-		ID:           "server-100",
-		Name:         "server-100",
+		ID:           "node-100",
+		Name:         "node-100",
 		OS:           "linux",
 		Capabilities: []string{"status"},
 		Status:       "online",
@@ -6488,7 +6488,7 @@ func (s *Server) callHubToolForRequest(r *http.Request, name string, args map[st
 
 func canonicalShellQueueName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "homeassistant", "home-assistant":
+	case "server01", "home-assistant":
 		return "haos"
 	default:
 		return strings.TrimSpace(name)
@@ -8744,7 +8744,7 @@ func oauthRedirectMatches(issued, requested string) bool {
 }
 
 // oauthRefreshToken rotates a durable OAuth refresh credential and returns a
-// short-lived access JWT. Refresh credentials are server-stored digests so a
+// short-lived access JWT. Refresh credentials are node-stored digests so a
 // Hub restart and OAuth signing-key change do not erase client authorization.
 func (s *Server) oauthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	resource := strings.TrimRight(r.Form.Get("resource"), "/")
@@ -10278,6 +10278,12 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 			} else {
 				structured = s.appsSDKCallForRequest(r, name, callArgs)
 			}
+			if name == "schema" {
+				structured = ensureSchemaToolGuidance(structured, callArgs)
+				if payload, ok := structured.(map[string]any); ok && firstString(payload, "status") == "failed" && strings.HasPrefix(firstString(payload, "error"), "unknown tool: ") && payload["hint"] == nil {
+					structured = s.appsSDKSchemaForRequest(r, callArgs)
+				}
+			}
 			if taskResult := s.mcpTaskResultFromPayload(structured, params); taskResult != nil {
 				result = taskResult
 			} else {
@@ -10286,6 +10292,9 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 				case "ui", "render_gptadmin_dashboard", "renderGptadminDashboard":
 				default:
 					result = nativeFacadeResult(r, result)
+				}
+				if name == "schema" {
+					result = ensureMCPToolResultSchemaGuidance(result, callArgs)
 				}
 			}
 			s.auditToolDecision(r, "hub", name, callArgs, "allow", "", map[string]any{}, http.StatusOK)
@@ -10340,6 +10349,9 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 	if rpcErr != nil {
 		resp["error"] = rpcErr
 	} else {
+		if method == "tools/call" && firstString(params, "name") == "schema" {
+			result = ensureMCPToolResultSchemaGuidance(result, mapValue(params["arguments"]))
+		}
 		if isMCP20260728Request(r, body) {
 			result = withMCPServerResultMeta(result, "gptadmin-go-hub", BuildVersion)
 		}
@@ -11215,6 +11227,20 @@ func (s *Server) appsSDKSchemaForRequest(r *http.Request, args map[string]any) a
 			response["tools"] = toolsForRequest(r, target, raw)
 		}
 	}
+	if tool := firstString(args, "tool"); tool != "" {
+		if response, ok := result["response"].(map[string]any); ok && response["tools"] != nil {
+			found := false
+			for _, row := range outputRows(response["tools"]) {
+				if firstString(mapValue(row), "name") == tool {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return unknownSchemaToolGuidance(tool, target)
+			}
+		}
+	}
 	return s.withSchemaContractMetadata(result)
 }
 
@@ -11472,18 +11498,18 @@ func (s *Server) appsSDKResourcesList() map[string]any {
 }
 
 func appsSDKWidgetMeta() map[string]any {
-	connectDomains := []string{"https://gptadmin.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}
-	resourceDomains := []string{"https://u-f1102930.t.gptadmin.bezrabotnyi.com", "https://gptadmin.bezrabotnyi.com", "https://persistent.oaistatic.com"}
+	connectDomains := []string{"https://became.bezrabotnyi.com", "https://mcp.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}
+	resourceDomains := []string{"https://your-subdomain.t.became.bezrabotnyi.com", "https://became.bezrabotnyi.com", "https://persistent.oaistatic.com"}
 	return map[string]any{
 		"ui": map[string]any{
-			"domain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
+			"domain":        "https://your-subdomain.t.became.bezrabotnyi.com",
 			"prefersBorder": true,
 			"csp":           map[string]any{"connectDomains": connectDomains, "resourceDomains": resourceDomains},
 		},
 		"openai/widgetDescription":   "Interactive GPTAdmin dashboard for selecting MCP servers, listing tools, running calls, and polling jobs.",
 		"openai/widgetPrefersBorder": true,
-		"openai/widgetDomain":        "https://u-f1102930.t.gptadmin.bezrabotnyi.com",
-		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://gptadmin.bezrabotnyi.com", "https://u-f1102930.t.gptadmin.bezrabotnyi.com"}},
+		"openai/widgetDomain":        "https://your-subdomain.t.became.bezrabotnyi.com",
+		"openai/widgetCSP":           map[string]any{"connect_domains": connectDomains, "resource_domains": resourceDomains, "redirect_domains": []string{"https://became.bezrabotnyi.com", "https://your-subdomain.t.became.bezrabotnyi.com"}},
 	}
 }
 

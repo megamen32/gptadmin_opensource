@@ -18,7 +18,7 @@ import (
 // reconstructed for replay.
 const quorumPendingShellNamespace = "queued-shell-input"
 
-// A server-page scan visits historical result payloads while the Hub mutex is held.
+// A node-page scan visits historical result payloads while the Hub mutex is held.
 // Seek the queued-status index first; the explicit kind set matches its partial
 // predicate. Sorting is then bounded by pending work, not completed history.
 const pendingShellRecoveryIndex = "INDEXED BY task_records_status"

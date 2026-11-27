@@ -7,7 +7,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "setup_nginx.sh"
 def test_canonical_gptadmin_nginx_keeps_web_and_api_separate():
     text = SCRIPT.read_text()
 
-    assert 'DOMAIN="${GPTADMIN_DOMAIN:-gptadmin.bezrabotnyi.com}"' in text
+    assert 'DOMAIN="${GPTADMIN_DOMAIN:-became.bezrabotnyi.com}"' in text
     assert 'SITE_DOMAIN="${GPTADMIN_SITE_DOMAIN:-became.bezrabotnyi.com}"' in text
     assert "proxy_pass http://gptadmin_hub_active;" in text
     assert "mcp(?:\\$|-relay/|-prompt/)" in text
@@ -20,7 +20,7 @@ def test_canonical_gptadmin_nginx_keeps_web_and_api_separate():
     assert "artifacts/" in text
     assert 'return 301 https://$SITE_DOMAIN\\$request_uri;' in text
 
-    # A server-level redirect would bypass all location routing and recreate
+    # A node-level redirect would bypass all location routing and recreate
     # the historical bug where /mcp and /actions/openapi.yaml went to became.
     assert "server_name $DOMAIN www.$DOMAIN;\n    return 301" not in text
 

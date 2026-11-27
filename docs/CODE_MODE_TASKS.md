@@ -9,7 +9,7 @@ privileged bearer, or new worker process is created.
 
 ```javascript
 const task = await mcp.tasks.start(
-  'shell:roomhacker-server-100', 'shell_exec',
+  'shell:admin-node-100', 'shell_exec',
   {cmd:'sleep 3; printf task-ready', timeout:10},
   {idempotency_key:'a-unique-key-for-this-business-operation'}
 );

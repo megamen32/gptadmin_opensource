@@ -15,7 +15,7 @@ func TestChildMCPToolsNativeAndWireShapes(t *testing.T) {
 		many[i] = map[string]any{"name": fmt.Sprintf("fixture_%02d", i), "inputSchema": map[string]any{"type": "object"}}
 	}
 	rawFor := func(tools any) map[string]any {
-		return map[string]any{"response": map[string]any{"structuredContent": map[string]any{"server": "server-44", "result": map[string]any{"structuredContent": map[string]any{"ref": "AgentHerder", "tools": tools}}}}}
+		return map[string]any{"response": map[string]any{"structuredContent": map[string]any{"server": "node-44", "result": map[string]any{"structuredContent": map[string]any{"ref": "AgentHerder", "tools": tools}}}}}
 	}
 	b, e := json.Marshal(rawFor(native))
 	if e != nil {

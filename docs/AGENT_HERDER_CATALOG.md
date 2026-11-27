@@ -1,6 +1,6 @@
 # Agent Herder in the GPTAdmin catalog
 
-The server-100 child `AgentHerder` connects to the existing Herder service at
+The node-100 child `AgentHerder` connects to the existing Herder service at
 `http://127.0.0.1:18787/mcp` using `streamable-http` and its authorized Bearer
 header. Do not launch `agent-herder/dist/index.js` as another stdio instance:
 that checkout can point at an obsolete release, and Herder owns a singleton.
@@ -16,8 +16,8 @@ never in this document, command-line arguments, logs or tool output.
 Verification uses ordinary GPTAdmin MCP operations:
 
 1. Search `fleet_node_info` with target
-   `mcp:shell:roomhacker-server-100:AgentHerder`.
-2. Call that tool with `{}` and verify `hostId=roomhacker-server-100`.
+   `mcp:shell:admin-node-100:AgentHerder`.
+2. Call that tool with `{}` and verify `hostId=admin-node-100`.
 3. Repeat search without an explicit target to check catalog discoverability.
 
 ## Last successful catalog

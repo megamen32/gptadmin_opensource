@@ -13,7 +13,7 @@ func TestAuditCallStoresShapeNotSensitiveInput(t *testing.T) {
 	s := New(Config{ConfigDir: t.TempDir()})
 	defer s.Close()
 	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	s.auditToolDecision(request, "shell:server-100", "shell_exec",
+	s.auditToolDecision(request, "shell:node-100", "shell_exec",
 		map[string]any{"cmd": "private-command-or-secret", "cwd": "/srv"}, "allow", "", nil, http.StatusOK)
 	s.mu.Lock()
 	event := s.audit[len(s.audit)-1]

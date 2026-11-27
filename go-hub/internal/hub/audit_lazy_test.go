@@ -84,3 +84,42 @@ func TestAuditMemoryReleasesDiscardedPrefix(t *testing.T) {
 		t.Fatal("discarded audit prefix still retains payload references")
 	}
 }
+
+func TestAccessOperationsReadsOnlyBoundedTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(8<<20, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 600; i++ {
+		if _, err := fmt.Fprintf(f, "{\"time\":\"2026-10-14T00:00:00Z\",\"name\":\"shell_result\",\"fields\":{\"index\":%d}}\n", i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := json.NewEncoder(f).Encode(auditEvent{
+		Time: "2026-10-14T00:00:01Z", Name: "access_operation",
+		Fields: map[string]any{"operation_id": "bounded-operation", "actor": "fixture", "action": "GET", "target": "/admin/api/operations", "status": "completed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"incomplete":`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{AuditStateFile: path})
+	defer s.Close()
+	w := httptest.NewRecorder()
+	s.adminOperations(w, httptest.NewRequest("GET", "/admin/api/operations", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "bounded-operation") || !strings.Contains(w.Body.String(), `"truncated":true`) {
+		t.Fatalf("did not read bounded operations tail: %d %.300s", w.Code, w.Body.String())
+	}
+}

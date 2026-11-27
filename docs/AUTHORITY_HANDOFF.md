@@ -45,18 +45,18 @@ Run the helper with the actual service's effective environment. `--config-dir` m
 ```sh
 authority-handoff export \
   --config-dir /etc/gptadmin \
-  --target shell:roomhacker-server-100 \
+  --target shell:admin-node-100 \
   --expect-writer SOURCE_WRITER_ID \
   --output /private/handoff/source-image
 
 authority-handoff prepare-writer \
-  --config-dir /etc/gptadmin-node/server-44 \
-  --target shell:server-44 \
+  --config-dir /etc/gptadmin-node/node-44 \
+  --target shell:node-44 \
   --expect-local-id TARGET_PHYSICAL_ID \
   --bundle /private/handoff/source-image \
   --bundle-sha256 REVIEWED_BUNDLE_SHA256 \
-  --source-peer-url https://s100-node.t.gptadmin.bezrabotnyi.com \
-  --environment-file /etc/gptadmin-node/server-44/node.env \
+  --source-peer-url https://s100-node.t.became.bezrabotnyi.com \
+  --environment-file /etc/gptadmin-node/node-44/node.env \
   --output /private/handoff/writer-stage
 ```
 
@@ -176,7 +176,7 @@ Before main publication can trigger a new release, capture the final pinned node
 
 ## Operation with the former writer offline
 
-After the transfer to server-44, clients keep the public MCP URL. The writer and other enrolled executors can accept new work while the former writer is offline. Jobs owned exclusively by the disconnected executor require that executor to return. This single-writer deployment still depends on server-44 and the ingress serving the public origin.
+After the transfer to node-44, clients keep the public MCP URL. The writer and other enrolled executors can accept new work while the former writer is offline. Jobs owned exclusively by the disconnected executor require that executor to return. This single-writer deployment still depends on node-44 and the ingress serving the public origin.
 
 On the former writer, the systemd reader repair job used to restore a fixed private address for the writer. The private HTTPS frontend and the canonical public URL can use different ports. The reader dials the port in its writer URL when it applies an IP pin. To follow the deployed public route, install `scripts/gptadmin_reader_route.sh` at `/usr/local/lib/gptadmin/gptadmin_reader_route.sh` and install `scripts/systemd/gptadmin-admission-autoheal-reader-route.conf` as a drop-in for the existing reader's `gptadmin-admission-autoheal.service`. Set `GPTADMIN_WRITER_ORIGIN` to the same HTTPS origin used by clients. The job passes the IPv4 address observed on a certificate-verified request to the existing repair command. If the probe fails, it keeps the saved reader route.
 

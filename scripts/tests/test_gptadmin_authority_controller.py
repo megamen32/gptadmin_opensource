@@ -311,7 +311,7 @@ class DurableControllerTests(unittest.TestCase):
         import gptadmin_authority_fleet as fleet
         gate = Path(self.temp.name) / 'approval.json'
         module.private_json(gate, {'schema': 'gptadmin.authority-launch-gate/v1', 'operation_id': 'reviewed',
-                                  'manifest_sha256': 'manifest', 'launcher_owner_target': 'shell:roomhacker-server-100',
+                                  'manifest_sha256': 'manifest', 'launcher_owner_target': 'shell:admin-node-100',
                                   'launcher_task_id': 'existing-task'}, True)
         runner = object.__new__(fleet.Fleet)
         runner.m = {'launch_gate_path': str(gate), 'operation_id': 'reviewed', 'external_unit': 'reviewed.service'}

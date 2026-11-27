@@ -21,9 +21,9 @@ import (
 const (
 	proxyRouteProfilePath         = "/var/lib/gptadmin/proxy-route/profile.json"
 	proxyRouteProbePath           = "/var/lib/gptadmin/proxy-route/last-probe.json"
-	proxyRouteUnit                = "gptadmin-proxy-route-vusa.service"
+	proxyRouteUnit                = "gptadmin-proxy-route-relay02.service"
 	proxyRoutePort                = 24836
-	proxyRouteExitAddress         = "192.168.2.5:3128"
+	proxyRouteExitAddress         = "203.0.113.10:3128"
 	proxyRouteProbeURL            = "https://api.ipify.org"
 	proxyRoutePathReadbackTimeout = 11 * time.Second
 )
@@ -87,21 +87,21 @@ var proxyRouteDefaultController = newProxyRouteController(proxyRouteProfilePath,
 func defaultProxyRouteProfile() proxyRouteProfile {
 	var profile proxyRouteProfile
 	profile.Schema = "gptadmin.proxy-route/v1"
-	profile.ID = "vusa-server44-de-http"
-	profile.Consumer = "vusa"
-	profile.Exit = "server-44-de-http"
+	profile.ID = "relay02-server44-de-http"
+	profile.Consumer = "relay02"
+	profile.Exit = "node-44-de-http"
 	profile.Listener.BindAddress = "127.0.0.1"
 	profile.Listener.Port = proxyRoutePort
-	profile.SSHIdentityRef = "ssh-config:vusa"
+	profile.SSHIdentityRef = "ssh-config:relay02"
 	profile.DesiredState = "disabled"
 	return profile
 }
 
 func validProxyRouteProfile(p proxyRouteProfile) bool {
 	return p.Schema == "gptadmin.proxy-route/v1" &&
-		p.ID == "vusa-server44-de-http" && p.Consumer == "vusa" &&
-		p.Exit == "server-44-de-http" && p.Listener.BindAddress == "127.0.0.1" &&
-		p.Listener.Port == proxyRoutePort && p.SSHIdentityRef == "ssh-config:vusa" &&
+		p.ID == "relay02-server44-de-http" && p.Consumer == "relay02" &&
+		p.Exit == "node-44-de-http" && p.Listener.BindAddress == "127.0.0.1" &&
+		p.Listener.Port == proxyRoutePort && p.SSHIdentityRef == "ssh-config:relay02" &&
 		(p.DesiredState == "enabled" || p.DesiredState == "disabled")
 }
 
@@ -179,7 +179,7 @@ func writeProxyRoutePrivate(path string, value any) error {
 
 func (c *proxyRouteController) saveProfile(profile proxyRouteProfile) error {
 	if !validProxyRouteProfile(profile) {
-		return errors.New("profile does not match the fixed VUSA to server-44 route")
+		return errors.New("profile does not match the fixed VUSA to node-44 route")
 	}
 	return writeProxyRoutePrivate(c.profilePath, profile)
 }
@@ -202,7 +202,7 @@ func (c *proxyRouteController) systemctl(ctx context.Context, args ...string) er
 }
 
 func (c *proxyRouteController) sshVUSA(ctx context.Context, remoteArgs ...string) ([]byte, error) {
-	args := []string{"-u", "roomhacker", "--", "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "vusa"}
+	args := []string{"-u", "admin", "--", "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "relay02"}
 	args = append(args, remoteArgs...)
 	out, err := c.command(ctx, "/usr/sbin/runuser", args...)
 	if err != nil {
@@ -516,7 +516,7 @@ func readProcStartTime(proc string) (string, error) {
 func observeProxyRoutePathBefore(ctx context.Context, deadline time.Time, observe func(context.Context) (bool, error)) (bool, error) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return false, errors.New("timed out waiting for server-44 socket readback")
+		return false, errors.New("timed out waiting for node-44 socket readback")
 	}
 	if remaining > 2*time.Second {
 		remaining = 2 * time.Second
@@ -525,7 +525,7 @@ func observeProxyRoutePathBefore(ctx context.Context, deadline time.Time, observ
 	defer cancel()
 	ok, err := observe(checkCtx)
 	if !time.Now().Before(deadline) {
-		return false, errors.New("timed out waiting for server-44 socket readback")
+		return false, errors.New("timed out waiting for node-44 socket readback")
 	}
 	return ok, err
 }
@@ -599,7 +599,7 @@ probeLoop:
 		case <-deadline.C:
 			pathReadbackDone = true
 			if !pathConfirmed && pathReadbackErr == nil {
-				pathReadbackErr = errors.New("timed out waiting for server-44 socket readback")
+				pathReadbackErr = errors.New("timed out waiting for node-44 socket readback")
 			}
 		case <-ticker.C:
 			if gotProxy || pathConfirmed || pathReadbackDone {
@@ -618,13 +618,13 @@ probeLoop:
 	}
 	if pathConfirmed {
 		result.Server44PathVerified = boolPtr(true)
-		appendProxyRouteReason(&result, "Established TCP connection to 192.168.2.5:3128 observed on server-100 during the VUSA proxy request.")
+		appendProxyRouteReason(&result, "Established TCP connection to 203.0.113.10:3128 observed on node-100 during the VUSA proxy request.")
 	} else if pathReadbackErr != nil {
 		result.Server44PathVerified = nil
-		appendProxyRouteReason(&result, "Could not verify the established server-44 socket: "+pathReadbackErr.Error())
+		appendProxyRouteReason(&result, "Could not verify the established node-44 socket: "+pathReadbackErr.Error())
 	} else {
 		result.Server44PathVerified = boolPtr(false)
-		appendProxyRouteReason(&result, "No established TCP connection to 192.168.2.5:3128 was observed during the VUSA proxy request.")
+		appendProxyRouteReason(&result, "No established TCP connection to 203.0.113.10:3128 was observed during the VUSA proxy request.")
 	}
 
 	if directErr != nil {
@@ -654,7 +654,7 @@ probeLoop:
 	}
 	if *result.DirectExitIP == *result.ProxyExitIP {
 		result.State = "fail"
-		appendProxyRouteReason(&result, "Direct and proxied egress IPs matched despite the established server-44 socket.")
+		appendProxyRouteReason(&result, "Direct and proxied egress IPs matched despite the established node-44 socket.")
 		return result
 	}
 	result.State = "pass"
@@ -717,7 +717,7 @@ func decodeProxyRouteProfile(w http.ResponseWriter, r *http.Request) (proxyRoute
 		return request.Profile, errors.New("request body must contain one JSON object")
 	}
 	if !validProxyRouteProfile(request.Profile) {
-		return request.Profile, errors.New("profile does not match the fixed VUSA to server-44 route")
+		return request.Profile, errors.New("profile does not match the fixed VUSA to node-44 route")
 	}
 	return request.Profile, nil
 }

@@ -43,7 +43,7 @@ PACKAGE_SCHEMA = 'gptadmin.node-package/v1'
 IDENTITY_SCHEMA = 'gptadmin.node-identity/v1'
 SHELLMCP_PACKAGE_FILE = 'bin/shellmcp'
 BRIDGE_PACKAGE_FILE = 'bin/gptadmin-mcp-bridge'
-PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-vusa.service'
+PROXY_ROUTE_PACKAGE_FILE = 'systemd/gptadmin-proxy-route-relay02.service'
 REQUIRED_PACKAGE_FILES = ('bin/gptadmin-node', SHELLMCP_PACKAGE_FILE, BRIDGE_PACKAGE_FILE)
 FIXED_PACKAGE_FILES = frozenset((*REQUIRED_PACKAGE_FILES, 'cli.py',
     'scripts/gptadmin_node_manage.py', 'scripts/gptadmin_node_probe.py',
@@ -60,8 +60,8 @@ SHELLMCP_PROXY_SERVICE_DROPIN_TEXT = '''[Service]
 ExecStart=
 ExecStart=/opt/gptadmin-shellmcp/current/bin/shellmcp
 '''
-PROXY_ROUTE_SERVICE = 'gptadmin-proxy-route-vusa.service'
-PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=roomhacker'
+PROXY_ROUTE_SERVICE = 'gptadmin-proxy-route-relay02.service'
+PROXY_ROUTE_UNIT_TEXT_REQUIRED = 'User=admin'
 # The public mirror renames the fixed route and service account.
 # Validate either exact distribution, never arbitrary systemd units.
 PROXY_ROUTE_PACKAGE_VARIANTS = {
@@ -280,7 +280,7 @@ class Layout:
                  shellmcp_env_file=SHELLMCP_ENV_FILE,
                  shellmcp_proc_root=Path('/proc'),
                  proxy_route_unit_path=Path('/etc/systemd/system') / PROXY_ROUTE_SERVICE,
-                 proxy_route_state_file=Path('/var/lib/gptadmin-node/proxy-route-vusa-package.json')):
+                 proxy_route_state_file=Path('/var/lib/gptadmin-node/proxy-route-relay02-package.json')):
         self.opt_root = Path(opt_root)
         self.state_root = Path(state_root)
         self.config_root = Path(config_root)

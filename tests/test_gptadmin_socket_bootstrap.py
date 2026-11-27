@@ -392,7 +392,7 @@ def test_explicit_recovery_rolls_back_incomplete_receipt(monkeypatch, tmp_path, 
 
 
 def test_recovery_refuses_foreign_release_lease():
-    owner = {"hostId": "roomhacker-server-100", "harness": "opencode", "nativeSessionId": "ses-a"}
+    owner = {"hostId": "admin-node-100", "harness": "opencode", "nativeSessionId": "ses-a"}
     receipt = {"release_lease": {
         "project": bootstrap.DEFAULT_RELEASE_PROJECT, "owner": owner, "fence": 7,
         "receipt_id": "lease-old", "deployment_target": {"unit": bootstrap.PRIMARY_SERVICE}}}
@@ -553,7 +553,7 @@ def test_send_once_preserves_bytes_and_does_not_replay_after_partial(tmp_path):
 def _lease_fixture(tmp_path, **overrides):
     project = overrides.get("project", bootstrap.DEFAULT_RELEASE_PROJECT)
     owner = overrides.get("owner", {
-        "hostId": "roomhacker-server-100", "harness": "opencode", "nativeSessionId": "ses-lease"})
+        "hostId": "admin-node-100", "harness": "opencode", "nativeSessionId": "ses-lease"})
     fence = overrides.get("fence", 7)
     token = overrides.get("token", "lease-token-value")
     expires_at = overrides.get("expires_at", int(time.time() * 1000) + 3_600_000)
@@ -625,8 +625,8 @@ def test_release_lease_accepts_live_v1_document_and_refuses_the_gates(
     (tmp_path / "owner").mkdir()
     wrong_owner, owner_state = _lease_fixture(
         tmp_path / "owner",
-        owner={"hostId": "roomhacker-server-100", "harness": "opencode", "nativeSessionId": "other"},
-        proof_owner={"hostId": "roomhacker-server-100", "harness": "opencode", "nativeSessionId": "ses-lease"})
+        owner={"hostId": "admin-node-100", "harness": "opencode", "nativeSessionId": "other"},
+        proof_owner={"hostId": "admin-node-100", "harness": "opencode", "nativeSessionId": "ses-lease"})
     monkeypatch.setattr(bootstrap, "RELEASE_LEASE_STATE", owner_state)
     with pytest.raises(bootstrap.BootstrapFailure, match="owner"):
         bootstrap.validate_release_lease(wrong_owner, minimum_remaining_seconds=0)
@@ -653,7 +653,7 @@ def test_release_lease_accepts_live_v1_document_and_refuses_the_gates(
 
 def test_renewed_recovery_lease_is_recorded_without_token(
         tmp_path, monkeypatch, local_release_lease_owner):
-    original_owner = {"hostId": "roomhacker-server-100", "harness": "opencode",
+    original_owner = {"hostId": "admin-node-100", "harness": "opencode",
                       "nativeSessionId": "ses-lease"}
     renewed, state = _lease_fixture(tmp_path, fence=8, token="renewed-lease-token", receipt_id="lease-new")
     monkeypatch.setattr(bootstrap, "RELEASE_LEASE_STATE", state)

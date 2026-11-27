@@ -57,12 +57,12 @@ See [Adapters](./ADAPTERS.md) for per-adapter setup.
 
 ## Data flow
 
-When you ask the AI "restart nginx on server-01":
+When you ask the AI "restart nginx on node-01":
 
 1. **AI** decides to call a tool (MCP tool / OpenAI Action / injected mcp block)
 2. **Adapter** routes the call to the hub (`POST /mcp` or `/mcp-relay/call`)
-3. **Hub** looks up `server-01`, finds its shellmcp agent, forwards the command
-4. **shellmcp** on `server-01` runs `systemctl restart nginx`, captures output
+3. **Hub** looks up `node-01`, finds its shellmcp agent, forwards the command
+4. **shellmcp** on `node-01` runs `systemctl restart nginx`, captures output
 5. **shellmcp** returns stdout/stderr to the hub
 6. **Hub** truncates long output (saves tokens), returns to the adapter
 7. **Adapter** returns to the AI, which reads the result and reports back

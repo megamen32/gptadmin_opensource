@@ -48,7 +48,7 @@ JSON-RPC 2.0 и Streamable HTTP. Установка дополнительных
 Перед выдачей ссылок задайте переменную окружения процесса Hub/Node:
 
 ```text
-GPTADMIN_BOOTSTRAP_LHC_PATH=/home/roomhacker/.codex/plugins/cache/megamen32-plugins/last-human-commit
+GPTADMIN_BOOTSTRAP_LHC_PATH=/home/admin/.codex/plugins/cache/megamen32-plugins/last-human-commit
 ```
 
 Рекомендуется абсолютный путь к **каталогу установленных версий** LHC.
@@ -58,7 +58,7 @@ GPTADMIN_BOOTSTRAP_LHC_PATH=/home/roomhacker/.codex/plugins/cache/megamen32-plug
 
 Для точной раскладки Codex `<CODEX_HOME>/plugins/cache/<market>/last-human-commit`
 второй источник — локальный checkout того же marketplace:
-`/home/roomhacker/.codex/.tmp/marketplaces/megamen32-plugins/plugins/last-human-commit`
+`/home/admin/.codex/.tmp/marketplaces/megamen32-plugins/plugins/last-human-commit`
 в конфигурации выше. Bootstrap при каждом запросе выбирает наибольшую полную
 доступную версию `major.minor.patch`, сравнивая числа. При равной версии
 используется runtime cache. Файл `AGENTS.md` в корне каталога версий

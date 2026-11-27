@@ -101,7 +101,7 @@ same script.
 ## Read-only executor (`ro`)
 
 `ro` runs the same short JavaScript in the same sandbox as `exec`, with the same
-budgets, under a hard server-side read-only ceiling. The ceiling is enforced per
+budgets, under a hard node-side read-only ceiling. The ceiling is enforced per
 operation before the operation reaches the executor — not by an annotation, not
 by the method name, not by parsing the script, and not by an instruction to the
 model.
@@ -188,7 +188,7 @@ full source of the already executed operation**:
 
 - the original command is never re-run;
 - the spool path is never taken from the MCP text — only from the Hub's own
-  server-side job record;
+  node-side job record;
 - the source must be a confirmed resource with an owner, an access check and a
   task-ownership check (`gptadmin://task/<job>/stdout`);
 - the output is read in bounded chunks and the completeness is proven from the

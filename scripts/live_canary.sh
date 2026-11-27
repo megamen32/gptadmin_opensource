@@ -32,7 +32,7 @@ if [ -z "$MAIN_ORIGIN" ] && [ -z "$TENANT_ORIGIN" ]; then
 	exit 1
 fi
 BEARER="$(env_val GPTADMIN_CUSTOM_MCP_BEARER)"
-TARGET="${GPTADMIN_CANARY_TARGET:-shell:roomhacker-server-100}"
+TARGET="${GPTADMIN_CANARY_TARGET:-shell:admin-node-100}"
 NATIVE_HELPER="${GPTADMIN_NATIVE_CANARY_HELPER:-/opt/gptadmin/bin/gptadmin-live-canary-native.py}"
 
 if [ -r "$NOTIFY_ENV_FILE" ]; then

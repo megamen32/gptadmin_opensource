@@ -11,13 +11,13 @@ import (
 
 func TestBrowserAliasRoutesToPhysicalRelayWithLogicalOwner(t *testing.T) {
 	dir := t.TempDir()
-	spec := `{"aliases":[{"owner":"shell:MacBook-Pro-User.local","ref":"Browser","name":"Browser — Mac M1","upstream":"shell:server-44","upstream_ref":"VibeBrowserMacM1","hide_backing":true}]}`
+	spec := `{"aliases":[{"owner":"shell:MacBook-Pro-User.local","ref":"Browser","name":"Browser — Mac M1","upstream":"shell:node-44","upstream_ref":"VibeBrowserMacM1","hide_backing":true}]}`
 	if err := os.WriteFile(filepath.Join(dir, "browser-mcp-aliases.json"), []byte(spec), 0600); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{cfg: Config{ConfigDir: dir}, agents: map[string]*Agent{
 		"shell:MacBook-Pro-User.local": {AgentID: "shell:MacBook-Pro-User.local", Status: "online", LastSeen: 1},
-		"shell:server-44": {AgentID: "shell:server-44", Status: "online", Meta: map[string]any{
+		"shell:node-44": {AgentID: "shell:node-44", Status: "online", Meta: map[string]any{
 			"mcp_agents": []any{map[string]any{"ref": "VibeBrowserMacM1", "enabled": true, "transport": "streamable-http", "health": map[string]any{"protocol": map[string]any{"state": "ready"}}}},
 		}},
 	}}
@@ -27,12 +27,12 @@ func TestBrowserAliasRoutesToPhysicalRelayWithLogicalOwner(t *testing.T) {
 	}
 	a := got[0]
 	if a.AgentID != "mcp:shell:MacBook-Pro-User.local:Browser" ||
-		firstString(a.Meta, "parent_server_id") != "shell:server-44" ||
+		firstString(a.Meta, "parent_server_id") != "shell:node-44" ||
 		firstString(a.Meta, "child_ref") != "VibeBrowserMacM1" ||
 		!isLogicalBrowserAgent(a) {
 		t.Fatalf("wrong alias route: %#v", a)
 	}
-	physical := childMCPAgents(*s.agents["shell:server-44"])
+	physical := childMCPAgents(*s.agents["shell:node-44"])
 	if len(physical) != 1 || !backingHiddenByBrowserAliases(physical[0], got) {
 		t.Fatal("physical descriptor was not hidden by verified alias")
 	}
@@ -43,8 +43,8 @@ func TestBrowserAliasRoutesToPhysicalRelayWithLogicalOwner(t *testing.T) {
 	// A versioned GPTAdmin Node advertises its child MCP registry separately
 	// from an old standalone ShellMCP heartbeat. Missing heartbeat metadata
 	// must not make a verified fixed route vanish from the logical catalog.
-	s.agents["shell:server-44"].Meta = map[string]any{"mcp_agents": []any{}}
-	s.agents["shell:server-44"].Status = "stale"
+	s.agents["shell:node-44"].Meta = map[string]any{"mcp_agents": []any{}}
+	s.agents["shell:node-44"].Status = "stale"
 	fallback := s.browserMCPAliasesLocked()
 	if len(fallback) != 1 || fallback[0].Status != "online" ||
 		fallback[0].Transport != "streamable-http" {
@@ -59,7 +59,7 @@ func TestLogicalBrowserRoutesThroughUpstreamNodePeer(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if firstString(body, "target") != "mcp:shell:server-44:VibeBrowserMacM1" {
+		if firstString(body, "target") != "mcp:shell:node-44:VibeBrowserMacM1" {
 			t.Errorf("target was not translated to the pinned upstream: %#v", body)
 		}
 		calls++
@@ -86,12 +86,12 @@ func TestLogicalBrowserRoutesThroughUpstreamNodePeer(t *testing.T) {
 		}
 	}))
 	defer peer.Close()
-	s := peerTestHub(t, "token", map[string]string{"shell:server-44": peer.URL})
+	s := peerTestHub(t, "token", map[string]string{"shell:node-44": peer.URL})
 	agent := Agent{
 		AgentID: "mcp:shell:MacBook-Pro-User.local:Browser",
 		Kind:    "child_mcp",
 		Meta: map[string]any{
-			"parent_server_id":        "shell:server-44",
+			"parent_server_id":        "shell:node-44",
 			"child_ref":               "VibeBrowserMacM1",
 			"logical_owner_server_id": "shell:MacBook-Pro-User.local",
 			"fixed_session":           true,

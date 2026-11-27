@@ -38,7 +38,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Persistent cellular-bound local proxy: LAN ingress from server-100 with all target sockets bound to the Android cellular network." />
+                android:value="Persistent cellular-bound local proxy: LAN ingress from node-100 with all target sockets bound to the Android cellular network." />
         </service>
     </application>
 </manifest>

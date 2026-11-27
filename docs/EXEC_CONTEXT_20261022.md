@@ -6,14 +6,14 @@ The public catalog is deliberately short: `search` finds the capability, `exec({
 
 The direct `execute(target,tool,args)` facade is no longer public: it invites one tool call per request instead of one script that batches the calls, and its name costs more tokens per call than `exec` and `ro`. A client that still calls it receives the explicit `execute_facade_retired` answer with the migration path; the code-only spelling `execute({code})` remains as the old transport alias, canonicalizes to `exec` before policy and audit, and a call that mixes `code` with direct routing arguments is refused before execution. The internal dispatcher stays: `ro`, `exec`, the relay and the agent routes use it.
 
-The read-only executor `ro` is bounded server-side per operation: it may compute, read permitted files and services, and search results the caller can already reach; it refuses arbitrary shell, file writes, configuration and MCP changes, restarts, external mutations, escalation through nested `exec`/`execute` and raw wrappers, and it never writes into the caller's stored sources. A refusal is sticky. Details: `docs/CODE_MODE.md` and `docs/MIGRATION_RULE_TOOLS.md`.
+The read-only executor `ro` is bounded node-side per operation: it may compute, read permitted files and services, and search results the caller can already reach; it refuses arbitrary shell, file writes, configuration and MCP changes, restarts, external mutations, escalation through nested `exec`/`execute` and raw wrappers, and it never writes into the caller's stored sources. A refusal is sticky. Details: `docs/CODE_MODE.md` and `docs/MIGRATION_RULE_TOOLS.md`.
 
 Inside a script, `call(target,tool,args,opts?)` and `search(query,opts?)` retain the authenticated caller's authorization, approvals, connection ownership, idempotency and audit. Registered independent root MCPs, ShellMCP child MCPs and safe Hub helpers are supported. Native applications visible only to a ChatGPT client are not automatically registered in this Hub. Recursion and retired direct-execution aliases are rejected. Execution is sequential, not a transaction. Failed or pending calls stop the chain, including nested MCP protocol errors. Completed-operation receipts survive later serialization/output errors; no automatic replay occurs.
 
 ## Files without shell boilerplate
 
 ```js
-const f = file('roomhacker-server-100');
+const f = file('admin-node-100');
 const r = await f.read('/path/to/file', {end_line:1000,max_bytes:262144});
 if (r.truncated || !r.text_exact) throw Error('Incomplete or legacy view');
 return {lines:r.line_count, bytes:r.bytes};

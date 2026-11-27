@@ -99,11 +99,11 @@ export type ProxyRouteAction = "enable" | "disable" | "reconcile" | "probe";
 
 export type ProxyRouteProfile = {
   schema: "gptadmin.proxy-route/v1";
-  id: "vusa-server44-de-http";
-  consumer: "vusa";
-  exit: "server-44-de-http";
+  id: "relay02-server44-de-http";
+  consumer: "relay02";
+  exit: "node-44-de-http";
   listener: { bind_address: "127.0.0.1"; port: 24836 };
-  ssh_identity_ref: "ssh-config:vusa";
+  ssh_identity_ref: "ssh-config:relay02";
   desired_state: "enabled" | "disabled";
 };
 
@@ -376,12 +376,12 @@ function parseProxyRouteState(body: unknown): ProxyRouteState {
   const listener = asRecord(profile.listener, "Hub вернул некорректный listener proxy-маршрута.");
   if (
     profile.schema !== "gptadmin.proxy-route/v1" ||
-    profile.id !== "vusa-server44-de-http" ||
-    profile.consumer !== "vusa" ||
-    profile.exit !== "server-44-de-http" ||
+    profile.id !== "relay02-server44-de-http" ||
+    profile.consumer !== "relay02" ||
+    profile.exit !== "node-44-de-http" ||
     listener.bind_address !== "127.0.0.1" ||
     listener.port !== 24836 ||
-    profile.ssh_identity_ref !== "ssh-config:vusa" ||
+    profile.ssh_identity_ref !== "ssh-config:relay02" ||
     (profile.desired_state !== "enabled" && profile.desired_state !== "disabled")
   ) {
     throw new ApiError(502, "Hub вернул proxy profile вне разрешённой конфигурации.");
@@ -419,11 +419,11 @@ function parseProxyRouteState(body: unknown): ProxyRouteState {
   return {
     profile: {
       schema: "gptadmin.proxy-route/v1",
-      id: "vusa-server44-de-http",
-      consumer: "vusa",
-      exit: "server-44-de-http",
+      id: "relay02-server44-de-http",
+      consumer: "relay02",
+      exit: "node-44-de-http",
       listener: { bind_address: "127.0.0.1", port: 24836 },
-      ssh_identity_ref: "ssh-config:vusa",
+      ssh_identity_ref: "ssh-config:relay02",
       desired_state: profile.desired_state,
     },
     runtime: {

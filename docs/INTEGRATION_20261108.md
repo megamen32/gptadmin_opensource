@@ -3,7 +3,7 @@
 Published source: 296e5087d2e8786044970162819d4fd8a230b4cc (1111).
 Full go-hub tests PASS: hub 316.894s, node 97.495s. Real isolated candidate
 bootstrap, shell/file and revocation canary PASS. Logs are retained under
-.tmp/integration1111-{go,canary}.log on server-100; these logs are not credentials.
+.tmp/integration1111-{go,canary}.log on node-100; these logs are not credentials.
 
 ToDo: existing upstream registered as shared operational child `Todo`.
 Public MCP project creation and card create/update/readback succeeded.

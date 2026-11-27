@@ -13,18 +13,18 @@ import (
 func TestResolveExposedAgentPrefersAssignedSlugOverSharedName(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{
-		AgentID: "shell:roomhacker-server-100", Name: "Shell: roomhacker-server-100",
+	s.agents["shell:admin-node-100"] = &Agent{
+		AgentID: "shell:admin-node-100", Name: "Shell: admin-node-100",
 		Kind: "virtual_shell", Status: "online",
 	}
 	s.agents["shell:mac-mini-2012.lan"] = &Agent{
 		AgentID: "shell:mac-mini-2012.lan", Name: "Shell: mac-mini-2012.lan",
 		Kind: "virtual_shell", Status: "stale",
 	}
-	s.agents["mcp:shell:roomhacker-server-100:GrepMesh"] = &Agent{
-		AgentID: "mcp:shell:roomhacker-server-100:GrepMesh", Name: "grepmesh", Kind: "child_mcp", Status: "online",
+	s.agents["mcp:shell:admin-node-100:GrepMesh"] = &Agent{
+		AgentID: "mcp:shell:admin-node-100:GrepMesh", Name: "grepmesh", Kind: "child_mcp", Status: "online",
 		Meta: map[string]any{
-			"parent_server_id": "shell:roomhacker-server-100", "child_ref": "GrepMesh",
+			"parent_server_id": "shell:admin-node-100", "child_ref": "GrepMesh",
 			"public_mcp_slug": "grepmesh",
 		},
 	}
@@ -42,7 +42,7 @@ func TestResolveExposedAgentPrefersAssignedSlugOverSharedName(t *testing.T) {
 		if !ok {
 			t.Fatalf("iteration %d: slug unresolved", i)
 		}
-		if got.AgentID != "mcp:shell:roomhacker-server-100:GrepMesh" {
+		if got.AgentID != "mcp:shell:admin-node-100:GrepMesh" {
 			t.Fatalf("iteration %d: bare slug routed to %s; the assigned owner must win deterministically", i, got.AgentID)
 		}
 	}
@@ -53,15 +53,15 @@ func TestResolveExposedAgentPrefersAssignedSlugOverSharedName(t *testing.T) {
 func TestResolveExposedAgentNameMatchPrefersLiveParent(t *testing.T) {
 	s := New(Config{CtlToken: "ctl", DefaultTimeout: time.Second, PollMaxTimeout: time.Second})
 	s.mu.Lock()
-	s.agents["shell:roomhacker-server-100"] = &Agent{
-		AgentID: "shell:roomhacker-server-100", Kind: "virtual_shell", Status: "online",
+	s.agents["shell:admin-node-100"] = &Agent{
+		AgentID: "shell:admin-node-100", Kind: "virtual_shell", Status: "online",
 	}
 	s.agents["shell:MacBook-Pro-User.local"] = &Agent{
 		AgentID: "shell:MacBook-Pro-User.local", Kind: "virtual_shell", Status: "stale",
 	}
-	s.agents["mcp:shell:roomhacker-server-100:GrepMesh"] = &Agent{
-		AgentID: "mcp:shell:roomhacker-server-100:GrepMesh", Name: "grepmesh", Kind: "child_mcp", Status: "online",
-		Meta: map[string]any{"parent_server_id": "shell:roomhacker-server-100", "child_ref": "GrepMesh"},
+	s.agents["mcp:shell:admin-node-100:GrepMesh"] = &Agent{
+		AgentID: "mcp:shell:admin-node-100:GrepMesh", Name: "grepmesh", Kind: "child_mcp", Status: "online",
+		Meta: map[string]any{"parent_server_id": "shell:admin-node-100", "child_ref": "GrepMesh"},
 	}
 	s.agents["mcp:shell:MacBook-Pro-User.local:mac-m1-GrepMesh"] = &Agent{
 		AgentID: "mcp:shell:MacBook-Pro-User.local:mac-m1-GrepMesh", Name: "grepmesh", Kind: "child_mcp", Status: "online",
@@ -71,7 +71,7 @@ func TestResolveExposedAgentNameMatchPrefersLiveParent(t *testing.T) {
 
 	for i := 0; i < 64; i++ {
 		got, ok := s.resolveExposedAgent("grepmesh")
-		if !ok || got.AgentID != "mcp:shell:roomhacker-server-100:GrepMesh" {
+		if !ok || got.AgentID != "mcp:shell:admin-node-100:GrepMesh" {
 			t.Fatalf("iteration %d: name match routed to %+v; a live parent must win", i, got.AgentID)
 		}
 	}

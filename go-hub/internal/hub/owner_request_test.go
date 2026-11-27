@@ -70,7 +70,7 @@ func TestOwnerLocalAdmissionReservesOnlyClientKeys(t *testing.T) {
 		t.Fatalf("retry: id=%q status=%d want %q", again, status, first)
 	}
 	stale := r.WithContext(context.WithValue(r.Context(), ownerAdmissionTermKey{}, term+1))
-	for _, target := range []string{"shell:standalone", "shell:homeassistant"} {
+	for _, target := range []string{"shell:standalone", "shell:server01"} {
 		result, status := s.executeMCPTool(stale, target, "shell_exec",
 			map[string]any{"argv": []any{"echo", "owner-local"}}, true, time.Second, "")
 		if status != http.StatusServiceUnavailable || firstString(result, "job_id") != "" || result["executed"] != false {

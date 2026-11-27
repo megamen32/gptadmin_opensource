@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=roomhacker
-Group=roomhacker
-WorkingDirectory=/home/roomhacker
+User=admin
+Group=admin
+WorkingDirectory=/home/admin
 Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/var/lib/gptadmin/mcp-http/touchpoint-zcode100/deps
-ExecStart=/home/roomhacker/.local/share/touchpoint-mcp/bin/python /home/roomhacker/gptadmin/tools/python_mcp_session_http.py --config /var/lib/gptadmin/mcp-http/touchpoint-zcode100/binding.json
+ExecStart=/home/admin/.local/share/touchpoint-mcp/bin/python /home/admin/gptadmin/tools/python_mcp_session_http.py --config /var/lib/gptadmin/mcp-http/touchpoint-zcode100/binding.json
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

@@ -23,7 +23,7 @@ def test_sanitizer_preserves_supervisor_api_key_and_redacts_hostname(tmp_path: P
     config = project / "config.yaml"
     private_host = "home" + "assistant.local"
     config.write_text(
-        f"homeassistant_api: true\nproxy_host: {private_host}\nprivate_marker: roomhacker-server-100\n",
+        f"homeassistant_api: true\nproxy_host: {private_host}\nprivate_marker: admin-node-100\n",
         encoding="utf-8",
     )
 
@@ -49,7 +49,7 @@ def test_public_mirror_replacement_preserves_api_identifier() -> None:
     rule = next(
         line
         for line in rules.read_text(encoding="utf-8").splitlines()
-        if line.startswith("regex:") and "homeassistant" in line
+        if line.startswith("regex:") and "server01" in line
     )
     pattern, replacement = rule.split("==>", 1)
     pattern = pattern.removeprefix("regex:").strip()
