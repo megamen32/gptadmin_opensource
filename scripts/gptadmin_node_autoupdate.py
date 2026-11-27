@@ -30,6 +30,7 @@ MAX_MANAGED_NODES = 8
 RELEASE_SELECTION_BUDGET_SECS = 90
 NODE_UPDATE_BUDGET_SECS = 275
 UPDATE_FINALIZATION_MARGIN_SECS = 30
+MAX_PUBLIC_NODE_RELEASES = 256
 
 
 def select_update_mode(manager, name, runner=None):
@@ -112,7 +113,7 @@ def get(url, maximum, deadline, destination=None):
 
 
 def select_release(releases, arch):
-    if arch not in ('amd64', 'arm64') or not isinstance(releases, list) or len(releases) > 100:
+    if arch not in ('amd64', 'arm64') or not isinstance(releases, list) or len(releases) > MAX_PUBLIC_NODE_RELEASES:
         raise ValueError('invalid public Node release index')
     candidates = []
     for entry in releases:
@@ -341,7 +342,7 @@ def latest_public_tag(deadline):
         entries.append((int(match[2]), published, match[1], match[3]))
     if not entries:
         return latest_public_tag_from_refs(deadline)
-    if len(entries) > 100:
+    if len(entries) > MAX_PUBLIC_NODE_RELEASES:
         raise ValueError('public Node release feed contains no bounded Node releases')
     version, _, tag, prefix = max(entries, key=lambda row: (row[0], row[1]))
     remaining = deadline - time.monotonic()
@@ -431,10 +432,37 @@ def get_release_index(deadline):
         return get(API, 2 * 1024**2, deadline)
 
 
-def select_release_with_fallback(arch, deadline):
+def release_from_immutable_tag(tag, source, version, arch, deadline):
+    if (not isinstance(tag, str)
+            or not re.fullmatch(r'node-v[1-9][0-9]*-[0-9a-f]{12}', tag)
+            or type(version) is not int or version < 1
+            or not re.fullmatch(r'[0-9a-f]{40}', str(source))):
+        raise ValueError('invalid immutable Node release fallback')
+    name = 'gptadmin-node-linux-' + arch + '.tar.gz'
+    url = 'https://github.com/' + REPOSITORY + '/releases/download/' + tag + '/' + name
+    checksum_url = url + '.sha256'
+    checksum = checksum_from_asset(get(checksum_url, 256, deadline), name)
+    return ({'tag_name': tag, 'build_version': version},
+            {'name': name, 'browser_download_url': url,
+             'digest': 'sha256:' + checksum, 'size': None}, source, True)
+
+
+def select_release_with_fallback(arch, deadline, minimum_version=None):
     try:
         releases = json.loads(get_release_index(deadline))
         release, asset, short = select_release(releases, arch)
+        tag_match = re.fullmatch(r'node-v([1-9][0-9]*)-([0-9a-f]{12})',
+                                 release['tag_name'])
+        version = int(tag_match[1])
+        # REST release indexes and Atom are eventually consistent. If their
+        # newest candidate is older than a live node, consult immutable refs
+        # before refusing the update. The refs path is bounded and verifies the
+        # public mirror provenance just like the normal path.
+        if minimum_version is not None and version < minimum_version:
+            tag, source, version = latest_public_tag_from_refs(deadline)
+            if version < minimum_version:
+                raise ValueError('public Node release is older than an active Node')
+            return release_from_immutable_tag(tag, source, version, arch, deadline)
         source = resolve_tag(release['tag_name'], deadline)
         if not source.startswith(short):
             raise ValueError('accepted Node tag differs from manifest source prefix')
@@ -447,13 +475,7 @@ def select_release_with_fallback(arch, deadline):
         if error.code != 403 or b'rate limit exceeded' not in body:
             raise
     tag, source, version = latest_public_tag(deadline)
-    name = 'gptadmin-node-linux-' + arch + '.tar.gz'
-    url = 'https://github.com/' + REPOSITORY + '/releases/download/' + tag + '/' + name
-    checksum_url = url + '.sha256'
-    checksum = checksum_from_asset(get(checksum_url, 256, deadline), name)
-    return ({'tag_name': tag, 'build_version': version},
-            {'name': name, 'browser_download_url': url,
-             'digest': 'sha256:' + checksum, 'size': None}, source, True)
+    return release_from_immutable_tag(tag, source, version, arch, deadline)
 
 
 def live_matches(manager, name, source):
@@ -684,11 +706,12 @@ def main():
         deadline = time.monotonic() + RELEASE_SELECTION_BUDGET_SECS + \
             NODE_UPDATE_BUDGET_SECS * len(names) + UPDATE_FINALIZATION_MARGIN_SECS
         arch = manager.host_arch()
-        release, asset, source, used_fallback = select_release_with_fallback(arch,deadline)
+        baseline_version, baseline_sources = freshness_baseline(config, live_versions)
+        release, asset, source, used_fallback = select_release_with_fallback(
+            arch, deadline, minimum_version=baseline_version)
         version = release.get('build_version')
         if version is None:
             version = int(release['tag_name'].split('-')[1][1:])
-        baseline_version, baseline_sources = freshness_baseline(config, live_versions)
         validate_release_freshness(version, source, baseline_version, baseline_sources)
         current = manager.current_target(manager.DEFAULT_LAYOUT)
         previous = manager.manifest_summary(current) if current else None

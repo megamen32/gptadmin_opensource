@@ -774,6 +774,56 @@ class NodeAutoupdateTests(unittest.TestCase):
         release,asset,source=update.select_release([index(tag_name='v999'),index(),index(tag_name='node-v124-'+'2'*12,draft=True)],'amd64')
         self.assertEqual(release['tag_name'],TAG);self.assertEqual(source,'1'*12)
 
+    def test_public_node_release_index_accepts_at_most_256_entries(self):
+        rows=[index() for _ in range(update.MAX_PUBLIC_NODE_RELEASES)]
+        release,asset,source=update.select_release(rows,'amd64')
+        self.assertEqual(release['tag_name'],TAG)
+        self.assertEqual(source,'1'*12)
+        with self.assertRaisesRegex(ValueError,'invalid public Node release index'):
+            update.select_release(rows+[index()],'amd64')
+
+    def test_stale_rest_node_candidate_rechecks_immutable_refs_before_refusing(self):
+        stale_tag='node-v1177-'+'a'*12
+        fresh_tag='node-v1178-'+'b'*12
+        stale=index()
+        stale['tag_name']=stale_tag
+        stale['assets'][0]['browser_download_url']=(
+            'https://github.com/'+update.REPOSITORY+'/releases/download/'+stale_tag+'/'
+            +'gptadmin-node-linux-amd64.tar.gz')
+        checksum=('c'*64+'  gptadmin-node-linux-amd64.tar.gz').encode()
+        with (
+            patch.object(update,'get_release_index',return_value=json.dumps([stale]).encode()),
+            patch.object(update,'latest_public_tag_from_refs',
+                         return_value=(fresh_tag,'b'*40,1178)),
+            patch.object(update,'get',return_value=checksum),
+            patch.object(update,'resolve_tag') as resolve,
+        ):
+            release,asset,source,used=update.select_release_with_fallback(
+                'amd64',time.monotonic()+5,minimum_version=1178)
+        resolve.assert_not_called()
+        self.assertTrue(used)
+        self.assertEqual(release['tag_name'],fresh_tag)
+        self.assertEqual(release['build_version'],1178)
+        self.assertEqual(source,'b'*40)
+
+    def test_stale_rest_node_candidate_stays_fail_closed_when_refs_are_stale(self):
+        stale_tag='node-v1177-'+'a'*12
+        stale=index()
+        stale['tag_name']=stale_tag
+        stale['assets'][0]['browser_download_url']=(
+            'https://github.com/'+update.REPOSITORY+'/releases/download/'+stale_tag+'/'
+            +'gptadmin-node-linux-amd64.tar.gz')
+        with (
+            patch.object(update,'get_release_index',return_value=json.dumps([stale]).encode()),
+            patch.object(update,'latest_public_tag_from_refs',
+                         return_value=(stale_tag,'a'*40,1177)),
+            patch.object(update,'resolve_tag') as resolve,
+        ):
+            with self.assertRaisesRegex(ValueError,'older than an active Node'):
+                update.select_release_with_fallback(
+                    'amd64',time.monotonic()+5,minimum_version=1178)
+        resolve.assert_not_called()
+
     def test_latest_node_release_cannot_regress_live_build_or_reuse_build_for_other_source(self):
         with self.assertRaisesRegex(ValueError,'older than an active Node'):
             update.validate_release_freshness(1023,'2'*40,1024,['1'*40],time.monotonic()+5)
