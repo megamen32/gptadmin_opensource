@@ -2901,3 +2901,14 @@ plan is [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 - CPU limit: `embedding-ollama.service` и `embedding-ollama-cpu.service` оба `CPUQuotaPerSecUSec=30s` (30 ядер), активны, фактическая загрузка embedding-процессов 8–25 ядер (sampled over 2 s).
 - Residual: node-44 leader по-прежнему на build 1177 (`589884f7`, active) и подхватит 1179 своим таймером; отдельный пропуск не делался, чтобы не останавливать активный лидер.
 
+
+
+## 2026-11-27 - Fleet rollout to 1180 and final live verification - completed
+
+- Context: while waiting for node-44 timer, fleet moved independently to 1180 (`61ce0778`, "release: publish updater fallback as 1180" `b0bb40e3`, PR #124 chain from `e69ead5e` "fix updater stale public release fallback"). Admission log on node-44: `{"builds":{"100":1180,"44":1180,"88":1180}, "verified": true}`; running PID 1135475 started 17:31:47.
+- Mac M1: installed state build 1180 (`61ce0778`), running PID 99380 started 17:44:46.
+- Final live proof (through `mcp_call` on `shell:macbook-m1-node`): `shell_exec` probe returned `live-probe-1180`; bezbrowser `browser_status` — 3/3 browsers connected, `pendingCommands: 0`.
+- Mutex panic count in `node.log`: 0 since fix; node.log had one panic before the fix, none after.
+- Release evidence: CI runs `45999248999` (Public CI) and `45999257976` (Publish) success on mirror `61ce0778`.
+- Server-44 admission fence 275, lease released, update completed without manual intervention.
+
